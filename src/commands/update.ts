@@ -15,8 +15,11 @@ import {
   isNewer,
   resolveTarget,
 } from '../lib/update-check';
+import { loadRawConfig } from '../lib/config';
 import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
+import { persistRouterProject } from './config';
+import { projectInstallAt } from '../router/install';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../router/mcp-processes';
 
 /**
@@ -286,6 +289,7 @@ export async function runUpdate(
     humanLines: [
       `Updated tenjin-cli ${current} -> ${latest}.`,
       ...refreshLines(refresh),
+      ...projectLines(refresh),
       ...(codex === 'refreshed' ? ['Refreshed the Codex plugin.'] : []),
       ...(codex === 'failed'
         ? ['Could not refresh the Codex plugin. Run `tenjin install --harness codex --refresh`.']
@@ -369,6 +373,10 @@ export interface RefreshOutcome {
   notices: string[];
   /** A refreshed profile still carries an earlier release's settings install. */
   settingsInstallPending: boolean;
+  /** Project installs (`install --project`) refreshed from their own directory. */
+  projects: string[];
+  /** Project installs whose refresh did not succeed, each with its reason and fix. */
+  projectsFailed: { project: string; reason: string; fix: string }[];
 }
 
 /**
@@ -444,32 +452,23 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
       failed: candidates.map((d) => ({ dataDir: d, reason, fix: fixFor(d) })),
       notices: [],
       settingsInstallPending: false,
+      projects: [],
+      projectsFailed: [],
     };
   }
 
   const failed = [...unrun];
   const notices: string[] = [];
   let settingsInstallPending = false;
+  const heard = (reported: Record<string, unknown> | null): void => {
+    for (const notice of noticesOf(reported)) if (!notices.includes(notice)) notices.push(notice);
+    const migration = reported?.migration as { state?: unknown } | undefined;
+    if (migration?.state === 'pending' || migration?.state === 'blocked') {
+      settingsInstallPending = true;
+    }
+  };
   for (const dataDir of profiles) {
-    // A BOUNDED COLLECTOR, not the manager's live echo. npm's chatter is minutes
-    // of progress a human wants to see; this child emits one envelope on a pipe,
-    // and painting that JSON into the human's stderr is noise. It is still kept,
-    // because the envelope is where the child says WHICH refusal this was.
-    let tail = '';
-    const outcome = await (deps.spawnImpl ?? spawnCapture)(
-      process.execPath,
-      [entry, 'install', '--refresh'],
-      {
-        cwd: homedir(),
-        timeoutMs: REFRESH_TIMEOUT_MS,
-        // TENJIN_DATA_DIR aims the child at this profile; the nudge opt-out is
-        // what keeps it from touching any other file in there (lib/update-check).
-        env: { TENJIN_DATA_DIR: dataDir, [NUDGE_OPT_OUT]: '1' },
-      },
-      (chunk) => {
-        tail = (tail + chunk).slice(-REFRESH_TAIL_LIMIT);
-      },
-    );
+    const { outcome, tail } = await refreshChild(entry, homedir(), dataDir, deps);
     // The child's exit code IS the verdict: `install --refresh` exits non-zero
     // when it refused or found nothing to converge, so a machine that never ran
     // `install` warns here instead of being told its hooks were refreshed. The
@@ -478,14 +477,73 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
       failed.push({ dataDir, reason: refreshReason(outcome, tail), fix: fixFor(dataDir) });
       continue;
     }
-    const reported = envelopeData(tail);
-    for (const notice of noticesOf(reported)) if (!notices.includes(notice)) notices.push(notice);
-    const migration = reported?.migration as { state?: unknown } | undefined;
-    if (migration?.state === 'pending' || migration?.state === 'blocked') {
-      settingsInstallPending = true;
-    }
+    heard(envelopeData(tail));
   }
-  return { profiles, failed, notices, settingsInstallPending };
+
+  // PROJECT INSTALLS, EACH FROM ITS OWN DIRECTORY. The child above runs from
+  // home, where a `--project` install (Claude Code's local scope) is not
+  // visible, so each one `install --project` recorded is refreshed where it
+  // lives, as `--project`, since the child cannot tell one at home from the
+  // user install. A directory that is gone, or that no longer holds one, is
+  // forgotten.
+  const projects: string[] = [];
+  const projectsFailed: RefreshOutcome['projectsFailed'] = [];
+  const recorded = profiles.includes(ctx.dataDir)
+    ? ((await loadRawConfig(ctx.dataDir).catch(() => null))?.install?.routerProjects ?? [])
+    : [];
+  for (const project of recorded) {
+    const forget = () => persistRouterProject(ctx.dataDir, project, false).catch(() => undefined);
+    if (!isExistingDir(project) || !(await projectInstallAt(project, home, process.env))) {
+      await forget();
+      continue;
+    }
+    const { outcome, tail } = await refreshChild(entry, project, ctx.dataDir, deps, ['--project']);
+    if (outcome.kind !== 'exit' || outcome.code !== 0) {
+      projectsFailed.push({
+        project,
+        reason: refreshReason(outcome, tail),
+        fix: `Run \`tenjin install --project\` in ${project}.`,
+      });
+      continue;
+    }
+    projects.push(project);
+    heard(envelopeData(tail));
+  }
+  return { profiles, failed, notices, settingsInstallPending, projects, projectsFailed };
+}
+
+/**
+ * One `install --refresh` child of the new build, from `cwd`, for `dataDir`:
+ * how it ended and the end of what it printed.
+ *
+ * A BOUNDED COLLECTOR, not the manager's live echo. npm's chatter is minutes
+ * of progress a human wants to see; this child emits one envelope on a pipe,
+ * and painting that JSON into the human's stderr is noise. It is still kept,
+ * because the envelope is where the child says WHICH refusal this was.
+ */
+async function refreshChild(
+  entry: string,
+  cwd: string,
+  dataDir: string,
+  deps: UpdateDeps,
+  flags: string[] = [],
+): Promise<{ outcome: SpawnResult; tail: string }> {
+  let tail = '';
+  const outcome = await (deps.spawnImpl ?? spawnCapture)(
+    process.execPath,
+    [entry, 'install', '--refresh', ...flags],
+    {
+      cwd,
+      timeoutMs: REFRESH_TIMEOUT_MS,
+      // TENJIN_DATA_DIR aims the child at this profile; the nudge opt-out is
+      // what keeps it from touching any other file in there (lib/update-check).
+      env: { TENJIN_DATA_DIR: dataDir, [NUDGE_OPT_OUT]: '1' },
+    },
+    (chunk) => {
+      tail = (tail + chunk).slice(-REFRESH_TAIL_LIMIT);
+    },
+  );
+  return { outcome, tail };
 }
 
 /** The `data` of the one success envelope the child printed, or null. */
@@ -666,6 +724,21 @@ function refreshLines(refresh: RefreshOutcome): string[] {
   lines.push(`Could not refresh the Claude Code plugin for ${refresh.failed.length}:`);
   lines.push(...refresh.failed.map((f) => `- ${f.dataDir}: ${f.reason} ${f.fix}`));
   return lines;
+}
+
+/** The project installs the refresh reached, and the ones it could not. */
+function projectLines(refresh: RefreshOutcome): string[] {
+  return [
+    ...(refresh.projects.length > 0
+      ? [`Refreshed the project install in ${refresh.projects.join(', ')}.`]
+      : []),
+    ...(refresh.projectsFailed.length > 0
+      ? [
+          `Could not refresh the project install in ${refresh.projectsFailed.length}:`,
+          ...refresh.projectsFailed.map((p) => `- ${p.project}: ${p.reason} ${p.fix}`),
+        ]
+      : []),
+  ];
 }
 
 /**

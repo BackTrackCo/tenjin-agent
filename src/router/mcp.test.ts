@@ -4,15 +4,25 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { testWalletProvider } from '../lib/read-test-utils';
+import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { runAliveHook, sessionServedByPlugin } from './alive';
 import { runHookCommand } from './hook-command';
 import { hookToolInput } from './hook-tool';
-import { buildRouterMcpServer, MAX_RESULT_SIZE_CHARS, MAX_RESULT_SIZE_KEY } from './mcp';
+import type { OfferSpec } from './decision';
+import {
+  buildRouterMcpServer,
+  MAX_RESULT_SIZE_CHARS,
+  MAX_RESULT_SIZE_KEY,
+  pollProgress,
+  promptsBeforeApprove,
+  REQUIRES_USER_INTERACTION_KEY,
+  waitsForJobs,
+} from './mcp';
 import { RoutingPayer } from './routing-payer';
+import { storeSpecs } from './specs';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -93,11 +103,13 @@ describe('the router MCP server', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const tools = await client.listTools();
+      // `approve` is Claude Code's alone (below): this client never sees it.
       expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
       // The harness reads its inline-result threshold from the listed tool.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
       });
+      expect(tools.tools[1]!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
@@ -176,6 +188,194 @@ describe('the router MCP server', () => {
  * entry's `input` as strings (objects as JSON text, absent fields empty), so
  * these calls send exactly that shape.
  */
+/**
+ * THE APPROVE TOOL IS CLAUDE CODE'S OWN PROMPT. Offered only to Claude Code
+ * from 2.1.214, which puts every call of a tool marked
+ * `requiresUserInteraction` to a person, so a call that arrives is the yes.
+ * Any other client never sees it, and a call over the limits there pays
+ * nothing and keeps nothing.
+ */
+describe('the approve tool', () => {
+  const PAY_TO = '0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689';
+  const SPEC: OfferSpec = {
+    id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d51',
+    capabilityId: 'aispace-hailuo-3-max',
+    provider: 'AiSpace (Hailuo 3 Max)',
+    output: 'media',
+    description: 'Video from a prompt.',
+    priceAtomic: '155000',
+    priceVaries: false,
+    maxAmountAtomic: '155000',
+    payTo: PAY_TO,
+    network: 'eip155:8453',
+    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    request: { method: 'POST', url: 'https://x402.aispace.bot/v', fields: {}, location: 'body' },
+    input: { type: 'object', properties: { prompt: { type: 'string' } } },
+    pinned: {},
+  };
+
+  /** The seller: a 402 at the spec's price, then the clip; every paid call kept. */
+  function seller() {
+    const paid: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://tenjin.sh')) return new Response(null, { status: 204 });
+      if (new Headers(init?.headers ?? {}).get('payment-signature') === null) {
+        const challenge = buildPaymentRequired({ amount: SPEC.priceAtomic, payTo: PAY_TO });
+        return new Response('{}', {
+          status: 402,
+          headers: { 'content-type': 'application/json', 'PAYMENT-REQUIRED': challenge.header },
+        });
+      }
+      paid.push(String(init?.body));
+      return new Response(new Uint8Array([0, 0, 0, 24]), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, paid };
+  }
+
+  async function connected(client: Client) {
+    await storeSpecs(dir, [SPEC]);
+    const { fetchImpl, paid } = seller();
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: {
+        cwd: dir,
+        authorizer: authorizer(),
+        provider: testWalletProvider(),
+        fetchImpl,
+        payDeps: {
+          fetchImpl,
+          readBalance: async () => 100_000_000n,
+          destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
+        },
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return {
+      paid,
+      tools: async () => (await client.listTools()).tools,
+      call: async (name: string, args: Record<string, unknown>) =>
+        client.callTool({ name, arguments: args }).catch((err: unknown) => ({ thrown: err })),
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+
+  it.each([
+    ['claude-code', '2.1.214', true],
+    ['claude-code', '2.1.301', true],
+    ['claude-code', '2.1.213', false],
+    ['some-host', '9.9.9', false],
+  ])('lists approve to %s %s: %s', async (name, version, offered) => {
+    const { tools, call, close } = await connected(new Client({ name, version }));
+    try {
+      const listed = (await tools()).find((tool) => tool.name === 'approve');
+      if (offered) {
+        // Claude Code puts every call of it to a person.
+        expect(listed?._meta).toMatchObject({ [REQUIRES_USER_INTERACTION_KEY]: true });
+      } else {
+        expect(listed).toBeUndefined();
+        const refused = (await call('approve', { quote: 'q_AAAAAAAAAAAA' })) as {
+          isError?: boolean;
+          thrown?: unknown;
+        };
+        expect(refused.isError === true || refused.thrown !== undefined).toBe(true);
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("runs the stored plan once Claude Code's prompt said yes", async () => {
+    const { call, paid, close } = await connected(
+      new Client({ name: 'claude-code', version: '2.1.214' }),
+    );
+    try {
+      const over = envelopeOf(
+        await call('request', { id: SPEC.id, input: { prompt: 'a plane' } }),
+      ) as { status: string; nextStep: string; quote: { id: string; total: string; what: string } };
+      expect(over.status).toBe('needs_approval');
+      expect(over.nextStep).toContain(`approve({quote: "${over.quote.id}"`);
+      expect(paid).toEqual([]);
+      const ran = envelopeOf(
+        await call('approve', {
+          quote: over.quote.id,
+          total: over.quote.total,
+          what: over.quote.what,
+        }),
+      );
+      expect(ran).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.155 USD'] });
+      expect(paid).toEqual([JSON.stringify({ prompt: 'a plane' })]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('refuses a call over the limits with no approve route on any other client', async () => {
+    const { call, paid, close } = await connected(new Client({ name: 'some-host', version: '1' }));
+    try {
+      const over = envelopeOf(await call('request', { id: SPEC.id, input: { prompt: 'a plane' } }));
+      expect(over).toMatchObject({
+        status: 'needs_approval',
+        nextStep: 'Tell the user what it would cost; nothing was paid.',
+      });
+      expect(over).not.toHaveProperty('quote');
+      expect(JSON.stringify(over)).not.toMatch(/approve/);
+      expect(paid).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('trusts the prompt only from a Claude Code that shows it on every call', () => {
+    for (const version of ['2.1.214', '2.1.301', '2.2.0', '3.0.0']) {
+      expect(promptsBeforeApprove({ name: 'claude-code', version })).toBe(true);
+    }
+    for (const version of ['2.1.213', '2.0.999', '1.9.0', 'beta']) {
+      expect(promptsBeforeApprove({ name: 'claude-code', version })).toBe(false);
+    }
+    expect(promptsBeforeApprove({ name: 'other-host', version: '9.9.9' })).toBe(false);
+    expect(promptsBeforeApprove(undefined)).toBe(false);
+  });
+});
+
+/** A LONG JOB IN ONE CALL: Claude Code from 2.1.212 backgrounds a call past
+ *  two minutes, and each poll is a progress notification on the call's own
+ *  token, which resets its idle timeout. */
+describe('a call that waits on a job', () => {
+  it('waits out the job only for a Claude Code that backgrounds long calls', () => {
+    expect(waitsForJobs({ name: 'claude-code', version: '2.1.212' })).toBe(true);
+    expect(waitsForJobs({ name: 'claude-code', version: '2.1.211' })).toBe(false);
+    expect(waitsForJobs({ name: 'other-host', version: '9.0.0' })).toBe(false);
+  });
+
+  it("sends each poll as progress on the call's token, and nothing without one", async () => {
+    const sent: unknown[] = [];
+    const sendNotification = async (notification: unknown) => {
+      sent.push(notification);
+    };
+    const { onPoll } = pollProgress({ _meta: { progressToken: 7 }, sendNotification });
+    await onPoll!();
+    await onPoll!();
+    expect(sent).toEqual([
+      expect.objectContaining({
+        method: 'notifications/progress',
+        params: expect.objectContaining({ progressToken: 7, progress: 1 }) as unknown,
+      }),
+      expect.objectContaining({
+        params: expect.objectContaining({ progressToken: 7, progress: 2 }) as unknown,
+      }),
+    ]);
+    expect(pollProgress({ sendNotification })).toEqual({});
+  });
+});
+
 describe('the hook tool', () => {
   /** The `input` Claude Code would send for `kind`, from one harness event. */
   function substituted(kind: Parameters<typeof hookToolInput>[0], event: Record<string, unknown>) {
@@ -599,11 +799,15 @@ describe('what the tool tells the model to send', () => {
     try {
       const tools = await client.listTools();
       const request = tools.tools.find((t) => t.name === 'request')!;
-      // ONE GENERIC SENTENCE, and no catalog here: the client is not a second
-      // source of what services exist, and the hook line names the one that
-      // fits the turn.
-      expect(request.description?.startsWith("Paid lookups through Tenjin's router")).toBe(true);
-      expect(request.description).toContain('a hook line names the service and how to call it');
+      // WHAT THE AGENT DOES, and no catalog or list of kinds here: the client is
+      // not a second source of what services exist, a list reads as all there
+      // is, and the hook line names the one that fits the turn.
+      expect(
+        request.description?.startsWith(
+          "When a hook line names a service from Tenjin's router, call it as the line says.",
+        ),
+      ).toBe(true);
+      expect(request.description).not.toContain('Paid lookups');
       for (const name of ['Exa', 'Firecrawl', 'CoinMarketCap', 'Wolfram', 'Hunter', 'Minerva']) {
         expect(request.description).not.toContain(name);
       }
@@ -630,6 +834,15 @@ describe('what the tool tells the model to send', () => {
       // A projected result says where the rest of the response went.
       expect(request.description).toContain('`fullResultPath`');
       expect(schema.properties.input?.type).toBe('object');
+      // Several takes of a media call, and a job resumed by its id.
+      const extra = request.inputSchema.properties as Record<
+        string,
+        { type?: string; minimum?: number; maximum?: number; description?: string }
+      >;
+      expect(extra.count).toMatchObject({ type: 'integer', minimum: 2, maximum: 5 });
+      expect(extra.count?.description).toContain('its own payment');
+      expect(extra.job).toMatchObject({ type: 'string' });
+      expect(extra.job?.description).toContain('nothing more is paid');
       // THE ONE DISCOVERY SENTENCE IS GENERIC TOO: it names no marketplace and
       // no seller, only when to ask.
       expect(request.description).toContain(

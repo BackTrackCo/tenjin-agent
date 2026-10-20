@@ -1,10 +1,23 @@
-import { runPay, type AdvertisedTerms, type PayDeps } from '../commands/pay';
+import {
+  runPay,
+  settlementTx,
+  type AdvertisedTerms,
+  type PaidLeg,
+  type PayDeps,
+} from '../commands/pay';
 import { CliError } from '../lib/errors';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
-import { assertResultSchema, canonicalHash, projectBody } from '../lib/request-schema';
+import {
+  assertResultSchema,
+  canonicalHash,
+  projectBody,
+  validateResultBody,
+} from '../lib/request-schema';
 import { resolveContextSettings } from '../lib/settings';
+import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
@@ -34,14 +47,26 @@ import {
   type DecisionContract,
   type DecisionDeps,
   type DecisionDiagnostics,
+  type DecisionRoute,
+  type Job,
   type OfferSpec,
 } from './decision';
-import { pickChoice, runChoiceSet, showChoices } from './choices';
-import { FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './choices';
+import {
+  approveCall,
+  oneCall,
+  planStop,
+  quotedCall,
+  quoteView,
+  walletBalance,
+  type PlanStop,
+  type QuotedCall,
+} from './plan';
+import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
 import { loadRawConfig } from '../lib/config';
-import { openLookupFooter, type LookupFooter } from './progress';
+import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
@@ -52,6 +77,7 @@ import {
   saveMedia,
   createUniqueFile,
   maskDeep,
+  updatePaidRecord,
   writeAll,
   type MediaTransport,
   type PaidRecord,
@@ -59,6 +85,26 @@ import {
 } from './paid';
 import { routerSettings } from './settings';
 import type { Harness } from './names';
+import {
+  answerState,
+  completeJob,
+  MAX_CALL_WAIT_MS,
+  pollTarget,
+  pollUntil,
+  sellerSaid,
+  type PollAnswer,
+  type PollDeps,
+  type PollTransport,
+} from './jobs';
+import {
+  endTake,
+  KEPT_RESULT_CHARS,
+  MAX_TAKES,
+  readTake,
+  readTakes,
+  writeTake,
+  type JobTake,
+} from './job-store';
 
 /**
  * The `request` tool: one free decision per lookup, then ONE payment, to the
@@ -85,14 +131,21 @@ import type { Harness } from './names';
  * each (`choices.ts`).
  *
  * WHAT IS CHECKED LOCALLY, BEFORE ANYTHING IS SIGNED: the input against the
- * spec's schema, the decision's arguments against the schema it carries, its success rule against the compiler, its
- * destination against the shared preflight inside `runPay`, and the amount
- * actually signed against `maxAutoSpend` and `sessionBudget` in `gateSpend`.
- * That last one is the whole money story: a hostile backend can name any
- * origin and spend at most one `maxAutoSpend` inside the daily budget.
+ * spec's schema, the decision's arguments against the schema it carries, its
+ * success rule against the compiler, its destination against the shared
+ * preflight inside `runPay`, and the call's SPEND PLAN: every payment it will
+ * make, at its quoted amount, whose total meets `maxAutoSpend` (the limit for
+ * the whole call), the day's `sessionBudget` and the balance at once
+ * (`lib/spend-plan.ts`). `runPay` signs a router payment only against a slot
+ * of an admitted plan, and `gateSpend` still meets each one. That is the
+ * whole money story: a hostile backend can name any origin and spend at most
+ * one `maxAutoSpend` per call inside the daily budget without the user's yes.
  *
  * `needs_approval` is a LOCAL outcome only. The server never sends it: it is
- * what a price over the cap or an exhausted budget looks like from here, and the fix is a command the user can run.
+ * what a plan over the limits looks like from here. Nothing is paid. Where the
+ * host offers `approve`, the plan is kept as a quote, and the user's yes to
+ * the host's own prompt on `approve({quote})` runs it exactly
+ * ({@link runApproveTool}).
  */
 
 export interface RequestToolArgs {
@@ -109,6 +162,13 @@ export interface RequestToolArgs {
    *  that option's own offer under its own id, or `all` for every option side
    *  by side, one payment each. Every cap still applies. */
   choice?: string;
+  /** Several takes of one media call, 2 to 5, each its own payment, where the
+   *  spec allows them. The whole set meets the spend policy before any is
+   *  signed. */
+  count?: number;
+  /** A job an earlier call left running, by the id its result named: polled
+   *  again, with nothing paid. */
+  job?: string;
 }
 
 /** The server's own cap on `input`, serialized. */
@@ -136,9 +196,38 @@ export interface RequestToolDeps {
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
   mediaTransport?: MediaTransport;
+  /** Test seam for a job's polls, pinned the same way in production. */
+  pollTransport?: PollTransport;
+  /** Clock seam for the wait between polls. */
+  sleep?: (ms: number) => Promise<void>;
+  /** When this tool call started: every job it runs waits from here. Set by
+   *  {@link runRequestTool}. */
+  startedAt?: number;
+  /** What this tool call may still write to the downloads directory, shared by
+   *  every take. Set by {@link runRequestTool}. */
+  downloads?: { leftBytes: number };
+  /** Told before each poll of a job this call waits on: the MCP server sends
+   *  it as a progress notification, which keeps a waiting host's timeout from
+   *  running out. */
+  onPoll?: () => Promise<void> | void;
+  /** The host puts every `approve` call to a person first (Claude Code's
+   *  `requiresUserInteraction`, `mcp.ts`), so a call over the limits is kept
+   *  as a quote for it. Without it, such a call is refused with nothing kept. */
+  approves?: boolean;
+  /** The host lets one call wait as long as a job's own `maxWaitS` (Claude
+   *  Code moves a long call into the background and delivers it when it
+   *  ends), so the call is not handed back `running` at
+   *  {@link MAX_CALL_WAIT_MS}. */
+  waitsForJobs?: boolean;
   /** The host that launched this server; absent is Claude Code. */
   harness?: Harness;
 }
+
+/** What one tool call may save to disk, across every take and file. */
+export const MAX_CALL_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
+/** Why a file this call had no room left for was not saved. */
+const CAP_REACHED = `not saved: this call already saved ${Math.round(MAX_CALL_DOWNLOAD_BYTES / 1_048_576)} MB, its cap`;
+const DOWNLOAD_FAILED = 'a file it links to failed to download';
 
 export interface RequestToolResult {
   isError: boolean;
@@ -150,18 +239,233 @@ export async function runRequestTool(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
+  // A ROUTING DEPOSIT IS SAID WHERE THE AGENT READS IT: once, in the result of
+  // the call that took it, beside whatever that call answered. A hook leg says
+  // it in its `systemMessage` instead.
+  const routes: DecisionRoute[] = [];
+  const { route } = deps;
+  const call: RequestToolDeps = {
+    ...deps,
+    startedAt: deps.startedAt ?? (deps.now ?? Date.now)(),
+    downloads: deps.downloads ?? { leftBytes: MAX_CALL_DOWNLOAD_BYTES },
+  };
+  const result = await requestTool(
+    args,
+    route === undefined
+      ? call
+      : {
+          ...call,
+          route: async (baseUrl) => {
+            const picked = await route(baseUrl);
+            if (picked !== null) routes.push(picked);
+            return picked;
+          },
+        },
+  );
+  const deposited = routes.reduce((sum, r) => sum + (r.deposited?.() ?? 0n), 0n);
+  return deposited > 0n
+    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
+    : result;
+}
+
+export interface ApproveToolArgs {
+  /** The quote a `needs_approval` result named. */
+  quote: string;
+  /** The quote's total and what it buys, which the host's prompt shows the
+   *  user; each must match the quote. */
+  total?: string;
+  what?: string;
+}
+
+/**
+ * `approve({quote, total, what})`: A QUOTE THE USER SAID YES TO, RUN EXACTLY.
+ * The quote is the plan a call over the automatic limits kept, with nothing
+ * paid: the call, its input, each payment and the total. Nothing about it
+ * changes here; the agent sends only its id and the numbers it was shown.
+ *
+ * THE YES IS THE HOST'S OWN PROMPT. The tool is offered only to a host that
+ * puts every call of it to a person before it reaches this process (Claude
+ * Code's `requiresUserInteraction`, `mcp.ts`), so a call here is that
+ * person's yes; nothing on disk counts as one. The prompt shows the call's
+ * arguments, so the total and what it buys must be there and must be the
+ * quote's. A yes runs the quote once, past `maxAutoSpend` and the day's
+ * budget, which a person just agreed to, never past the balance, and answers
+ * as `request` would have.
+ */
+export async function runApproveTool(
+  args: ApproveToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  const off = await routerOff(deps);
+  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  const { dataDir } = deps.ctx;
+  const now = deps.now ?? Date.now;
+  const fresh = 'Call request again with the same call for a fresh quote.';
+  const quote = await readQuote(dataDir, args.quote.trim());
+  const call = quote !== null ? quotedCall(quote) : null;
+  if (quote === null || call === null) {
+    return fail(
+      'needs_input',
+      'No quote is kept on this machine under that id, so nothing was paid.',
+      { nextStep: fresh },
+    );
+  }
+  const closed = quoteClosed(quote, now());
+  if (closed !== null) {
+    return fail(
+      'needs_input',
+      closed === 'used'
+        ? 'That quote already ran, and a quote pays once, so nothing more was paid.'
+        : 'That quote expired (a quote waits ten minutes for a yes), so nothing was paid.',
+      {
+        nextStep: closed === 'used' ? 'Its result is in the approve call that ran it.' : fresh,
+      },
+    );
+  }
+  // THE NUMBERS A PERSON IS SHOWN ARE THE QUOTE'S: an echo that differs is
+  // refused with the true ones, never run.
+  const total = BigInt(quote.totalAtomic);
+  const echoedTotal = args.total !== undefined ? usdAtomic(args.total) : undefined;
+  if (
+    (args.total !== undefined && echoedTotal !== total) ||
+    (args.what !== undefined && args.what.trim() !== quote.what)
+  ) {
+    return fail(
+      'needs_input',
+      `That quote is for ${quote.what}, $${toMoney(quote.totalAtomic).usd} in total, not what this call said, so nothing was paid.`,
+      { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
+    );
+  }
+  // The prompt showed this call's arguments: without the total and what they
+  // buy, nobody saw what they said yes to.
+  if (args.total === undefined || args.what === undefined) {
+    return fail(
+      'needs_input',
+      "Send the quote's total and what it buys with it, so the user sees them when asked; nothing was paid.",
+      { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
+    );
+  }
+  const call_: RequestToolDeps = {
+    ...deps,
+    startedAt: deps.startedAt ?? now(),
+    downloads: deps.downloads ?? { leftBytes: MAX_CALL_DOWNLOAD_BYTES },
+  };
+  const settings = await resolveContextSettings(deps.ctx);
+  const admitted = await admitQuote(dataDir, quote.id, {
+    balance: () => walletBalance(call_, settings.rpcUrl),
+    now,
+  });
+  if ('refused' in admitted) {
+    return fail(
+      'needs_input',
+      admitted.refused === 'used'
+        ? 'That quote already ran, and a quote pays once, so nothing more was paid.'
+        : 'That quote can no longer run, so nothing was paid.',
+      { nextStep: fresh },
+    );
+  }
+  if ('short' in admitted) {
+    const { balanceAtomic, totalAtomic } = admitted.short;
+    return fail(
+      'failed',
+      `${quote.sentence} The wallet holds $${toMoney(balanceAtomic.toString()).usd}, $${toMoney((totalAtomic - balanceAtomic).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
+      { nextStep: 'Tell the user. The quote waits for its ten minutes; nothing was paid.' },
+    );
+  }
+  const slots = admitted.admitted;
+  const reportDeps: ReportDeps = {
+    ctx: deps.ctx,
+    baseUrl: settings.baseUrl,
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  };
+  const footer = await openLookupFooter(dataDir, call.kind !== 'call' ? { id: call.id } : {});
+  await footer.routing();
+  switch (call.kind) {
+    case 'spec':
+      return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
+    case 'count':
+      return runCount(
+        call.id,
+        call.spec,
+        call.input,
+        call.count,
+        call_,
+        footer,
+        reportDeps,
+        settings,
+        slots,
+      );
+    case 'choices':
+      return runChoiceSet(call.id, call.kept, call.input, call_, footer, reportDeps, settings, {
+        specs: call.specs,
+        keys: call.keys,
+        slots,
+      });
+    case 'call':
+      return (await payAndDeliver(call.call, { slot: slots[0]! }, call_, footer)).result;
+  }
+}
+
+/** An echoed total in USD, `$0.775` or `0.775`, as atomic units; undefined
+ *  when it is not one. */
+function usdAtomic(text: string): bigint | undefined {
+  try {
+    return BigInt(
+      parseUsdToAtomic(
+        text
+          .trim()
+          .replace(/^\$/, '')
+          .replace(/\s*USD$/i, ''),
+      ),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+async function requestTool(
+  args: RequestToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
   // THE SAME SWITCH THE HOOKS OBEY, read first. The tool is pre-allowed, so
   // without this it would be a second path off the machine in a repository the
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
+  // its record, with nothing built and nothing paid.
+  if (args.job !== undefined && args.job.length > 0) {
+    if (args.input !== undefined || args.choice !== undefined || args.count !== undefined) {
+      return fail('needs_input', 'A job resumes on its own: send only its id, as `job`.', {
+        nextStep: `Call request({job: ${JSON.stringify(args.job)}}); nothing was sent or paid.`,
+      });
+    }
+    return resumeJob(args.job, deps);
+  }
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
   let id = offered;
   const { input } = args;
+  const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
+  // SEVERAL TAKES OF ONE CALL, refused here, before anything is read or sent,
+  // unless they can run: a whole number of takes, on an offer's filled input,
+  // never beside a choice.
+  const count = args.count !== undefined && args.count !== 1 ? args.count : undefined;
+  if (count !== undefined) {
+    const refusal =
+      !Number.isInteger(count) || count < 2 || count > MAX_TAKES
+        ? `count is a whole number of takes from 2 to ${MAX_TAKES}`
+        : choice !== undefined
+          ? 'count runs several takes of one service, so it does not go with a choice'
+          : input === undefined || offered === undefined
+            ? "count goes with the offer's id and its filled input"
+            : undefined;
+    if (refusal !== undefined) {
+      return fail('needs_input', `${refusal}; nothing was sent or paid.`);
+    }
+  }
   // A CHOICE NAMES AN OPTION OF THE SET KEPT FOR THE LINE'S ID, and from here
   // the call is that option's own offer, under its own id: its spec, its one
   // payment. `all` is every option, run below once the input is checked.
-  const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
   let set: KeptChoices | undefined;
   if (choice !== undefined) {
     const picked = await pickChoice(deps.ctx.dataDir, offered, choice);
@@ -175,6 +479,24 @@ export async function runRequestTool(
   // real inputs before it builds any.
   const spec = id !== undefined && set === undefined ? await readSpec(deps.ctx.dataDir, id) : null;
   if (spec !== null && input === undefined) return showSpec(id!, spec);
+  // Takes only where the spec says its service runs them, and no more of
+  // them than it allows: a count is several payments, and one service's
+  // files are what several takes are for.
+  if (
+    count !== undefined &&
+    spec !== null &&
+    (spec.takes === undefined || count > spec.takes.max)
+  ) {
+    return fail(
+      'needs_input',
+      spec.takes === undefined
+        ? `${spec.provider} does not run several takes of one call, so count was not used; nothing was sent or paid.`
+        : `${spec.provider} runs at most ${spec.takes.max} takes of one call; nothing was sent or paid.`,
+      {
+        nextStep: `Call request({id: ${JSON.stringify(id)}, input: {...}})${spec.takes === undefined ? ' without count' : ` with count up to ${spec.takes.max}`}.`,
+      },
+    );
+  }
   const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0 && input === undefined) {
     return fail(
@@ -259,6 +581,11 @@ export async function runRequestTool(
   // checked and sent here and paid straight to the provider, with no second
   // decision. The server hears only how it ended.
   if (spec !== null && input !== undefined) {
+    // SEVERAL TAKES: each its own claim and payment, after one spend check
+    // for them all (`choices.ts`).
+    if (count !== undefined) {
+      return runCount(id!, spec, input, count, deps, footer, decisionDeps, settings);
+    }
     return runSpec(id!, spec, input, deps, footer, decisionDeps);
   }
 
@@ -405,25 +732,20 @@ export async function runRequestTool(
   // still quote up to `maxAutoSpend`. `gateSpend` stays the money authority.
   // The request is the server's, sent verbatim: the only thing built here is
   // the decision about whether to send it.
-  return (
-    await payAndDeliver(
-      {
-        capabilityId: decision.capabilityId,
-        provider: decision.provider,
-        media: decision.category === 'discovered',
-        request: contract.request,
-        terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
-        requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
-        ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
-        ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
-        // What the ledger records as sent: the host's input, or its query.
-        sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
-        ...(note !== undefined ? { note } : {}),
-      },
-      deps,
-      footer,
-    )
-  ).result;
+  const call: ProviderCall = {
+    capabilityId: decision.capabilityId,
+    provider: decision.provider,
+    media: decision.category === 'discovered',
+    request: contract.request,
+    terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
+    requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
+    ...(contract.resultSchema !== undefined ? { resultSchema: contract.resultSchema } : {}),
+    ...(contract.arguments !== undefined ? { parameters: contract.arguments } : {}),
+    // What the ledger records as sent: the host's input, or its query.
+    sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
+    ...(note !== undefined ? { note } : {}),
+  };
+  return (await payAndDeliver(call, { alone: { kind: 'call', call } }, deps, footer)).result;
 }
 
 /** The answer to `request({id})` when the hook kept that offer's spec, or to
@@ -462,7 +784,18 @@ export function alreadyPaid(
   id: string,
   spec: OfferSpec,
   earlier: EarlierPayment,
+  /** A job that call left is still running, under this id. */
+  running?: string,
 ): RequestToolResult {
+  if (running !== undefined && earlier.state !== 'unrecorded') {
+    return fail(
+      'needs_input',
+      `This offer from ${spec.provider} was already paid for, and ${spec.provider} is still working on it, so nothing was paid this time.`,
+      {
+        nextStep: `Call request({job: ${JSON.stringify(running)}}) for its result; nothing more is paid.`,
+      },
+    );
+  }
   const reason =
     earlier.state === 'paid'
       ? `This offer from ${spec.provider} was already paid for at ${earlier.at} ($${toMoney(earlier.amountAtomic).usd}${earlier.txHash !== undefined ? `, tx ${earlier.txHash}` : ''}), so nothing was paid this time. Its result is in the earlier request result for this id, and the payment is in \`tenjin payments\`.`
@@ -485,7 +818,8 @@ export function alreadyPaid(
  * signed against the spend policy. Then the server is told how it ended.
  *
  * Three steps, which a choice set runs per option too: the checks, the claim,
- * and the payment.
+ * and the payment. The payment is a plan of one at its live price, or the
+ * one slot of a quote the user approved (`approved`).
  */
 async function runSpec(
   id: string,
@@ -494,6 +828,7 @@ async function runSpec(
   deps: RequestToolDeps,
   footer: LookupFooter,
   reportDeps: ReportDeps,
+  approved?: PlanSlot[],
 ): Promise<RequestToolResult> {
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
@@ -503,9 +838,17 @@ async function runSpec(
   const earlier = await claimSpecPayment(deps.ctx.dataDir, id);
   if (earlier !== null) {
     await footer.done('needs_input');
-    return alreadyPaid(id, spec, earlier);
+    return alreadyPaid(id, spec, earlier, await runningJob(deps.ctx.dataDir, id));
   }
-  return (await paySpec(checked.prepared, deps, footer, reportDeps)).result;
+  const admission: Admission =
+    approved !== undefined ? { slot: approved[0]! } : { alone: { kind: 'spec', id, spec, input } };
+  return (await paySpec(checked.prepared, admission, deps, footer, reportDeps)).result;
+}
+
+/** The job id to resume when a take of this offer is still running. */
+export async function runningJob(dataDir: string, id: string): Promise<string | undefined> {
+  const takes = await readTakes(dataDir, id).catch(() => []);
+  return takes.some((take) => take.state === 'running') ? id : undefined;
 }
 
 /** Where a spec call's outcome report goes. */
@@ -610,53 +953,79 @@ export async function prepareSpec(
   return { prepared: { id, spec, merged, sentInput, built } };
 }
 
+/** One take of several of the same call (`count`): its number, the claim it
+ *  holds, and whether this take reports the offer's outcome itself. */
+export interface TakeOf {
+  n: number;
+  claim: string;
+  report: boolean;
+}
+
 /**
  * PAY A CLAIMED SPEC'S CALL, settle its claim, and tell the server how it
- * ended. The caller holds the claim; this is where it is kept or dropped.
+ * ended. The caller holds the claim; this is where it is kept or dropped. A
+ * take of several pays under its own request key and claim, so the same-turn
+ * duplicate guard sees N different requests, not one request N times.
  */
 export async function paySpec(
   prepared: PreparedSpec,
+  admission: Admission,
   deps: RequestToolDeps,
   footer: LookupFooter,
   reportDeps: ReportDeps,
+  take?: TakeOf,
 ): Promise<Awaited<ReturnType<typeof payAndDeliver>>> {
   const { id, spec, merged, sentInput, built } = prepared;
   const startedAt = Date.now();
+  const suffix = take !== undefined ? `#${take.n}` : '';
   const paid = await payAndDeliver(
     {
       capabilityId: spec.capabilityId,
       provider: spec.provider,
       media: savesMedia(spec),
       request: built,
-      terms: {
-        source: spec.provider,
-        maxAmountAtomic: spec.maxAmountAtomic,
-        payTo: spec.payTo,
-        network: spec.network,
-        asset: spec.asset,
-      },
-      requestKey: `${spec.capabilityId}:${canonicalHash(merged)}`,
+      terms: specTerms(spec),
+      requestKey: `${spec.capabilityId}:${canonicalHash(merged)}${suffix}`,
       ...(spec.resultSchema !== undefined ? { resultSchema: spec.resultSchema } : {}),
-      ...(spec.outputSchema !== undefined ? { project: { id, schema: spec.outputSchema } } : {}),
+      ...(spec.outputSchema !== undefined
+        ? { project: { id: `${id}${suffix}`, schema: spec.outputSchema } }
+        : {}),
       parameters: sentInput,
       sent: JSON.stringify(sentInput),
       agentBuilt: true,
       priceVaries: spec.priceVaries,
+      ...(spec.job !== undefined
+        ? { job: { spec: spec.job, offerId: id, take: take?.n ?? 1, input: merged } }
+        : {}),
     },
+    admission,
     deps,
     footer,
   );
   const { outcome, left } = paid;
   // The claim survives anything that may have signed: only a call that
   // signed nothing frees the id for a fixed input.
-  await settleSpecPayment(deps.ctx.dataDir, id, left);
+  await settleSpecPayment(deps.ctx.dataDir, take?.claim ?? id, left);
   // A refusal before payment (the spend policy, the spec's terms, the
   // provider's own 4xx) arrives as `unpaid` or `needs_approval`, neither of
   // which the server counts as the offer taken; a call that ran, or may have
   // moved money, keeps its own status. Null is a failure this build cannot
   // place, which says nothing rather than guess.
-  if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
+  if (outcome !== null && (take === undefined || take.report)) {
+    reportOutcome(reportDeps, id, outcome, startedAt);
+  }
   return paid;
+}
+
+/** The deal a spec's call is held to: its price ceiling, payee, chain and token. */
+export function specTerms(spec: OfferSpec): AdvertisedTerms {
+  return {
+    source: spec.provider,
+    maxAmountAtomic: spec.maxAmountAtomic,
+    payTo: spec.payTo,
+    network: spec.network,
+    asset: spec.asset,
+  };
 }
 
 /**
@@ -671,7 +1040,7 @@ function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
 }
 
 /** One provider call to make and pay for, from a decision or a spec. */
-interface ProviderCall {
+export interface ProviderCall {
   capabilityId: string;
   provider: string;
   /** A media service: a paid result's links and inline files are saved
@@ -694,6 +1063,61 @@ interface ProviderCall {
   /** The spec's promised fields: the result is cut to them, and the whole
    *  body is saved under the offer's id. */
   project?: { id: string; schema: Record<string, unknown> };
+  /** The spec's job: how this call is finished when the seller answers
+   *  before its result is ready, and which take of which offer it is. */
+  job?: CallJob;
+}
+
+interface CallJob {
+  spec: Job;
+  offerId: string;
+  take: number;
+  /** The merged input, which a poll body's `$input` names. */
+  input: Record<string, unknown>;
+}
+
+/**
+ * WHERE A PAYMENT'S PLACE IN ITS CALL'S PLAN COMES FROM: a slot the plan
+ * already admitted (several payments, planned together, or a quote the user
+ * approved), or a plan of one admitted at the live price as it is signed,
+ * which over the limits is kept as the quote `alone` replays.
+ */
+export type Admission = { slot: PlanSlot } | { alone: QuotedCall };
+
+/** What a payment's plan of one is stopped with: `runPay` throws it, and the
+ *  caller answers with it. */
+const PLAN_STOP = 'planStop';
+
+/**
+ * A PLAN OF ONE, admitted at the price `runPay` is about to sign, before the
+ * wallet is opened: the same planner several payments meet, so one call is
+ * one rule. Over the limits, under the allowlist, or past the balance it is
+ * stopped, and the stop rides the throw back to {@link payAndDeliver}.
+ */
+function admitAlone(
+  call: ProviderCall,
+  quoted: QuotedCall,
+  deps: RequestToolDeps,
+): (amountAtomic: bigint) => Promise<PlanSlot> {
+  return async (amountAtomic) => {
+    const settings = await resolveContextSettings(deps.ctx);
+    const payments = [{ amountAtomic, creator: new URL(call.request.url).host }];
+    const admission = await admitPlan(payments, {
+      dataDir: deps.ctx.dataDir,
+      policy: settings.policy,
+      balance: () => walletBalance(deps, settings.rpcUrl),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
+    if ('admitted' in admission) return admission.admitted[0]!;
+    const stop = await planStop(
+      admission,
+      { ...oneCall(call.provider, amountAtomic), payments, call: quoted },
+      deps,
+    );
+    throw new CliError(stop.status === 'failed' ? 'REFUSED' : 'POLICY_REFUSED', stop.reason, {
+      details: { [PLAN_STOP]: stop },
+    });
+  };
 }
 
 /**
@@ -705,6 +1129,7 @@ interface ProviderCall {
  */
 async function payAndDeliver(
   call: ProviderCall,
+  admission: Admission,
   deps: RequestToolDeps,
   footer: LookupFooter,
 ): Promise<{
@@ -717,6 +1142,10 @@ async function payAndDeliver(
   const built = call.request;
   const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
   const signing = watchSigning(deps.payDeps?.authorizer ?? deps.authorizer);
+  // The answer that delivered, or a paid leg cut off after its headers came,
+  // and the payment it carried: what a job is started from.
+  let leg: PaidLeg | undefined;
+  const submittedAt = (deps.now ?? Date.now)();
   try {
     // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
     // executed destination, not the hint's suggestion, which is the whole point
@@ -730,9 +1159,20 @@ async function payAndDeliver(
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms: call.terms,
         execution: 'router',
+        admit:
+          'slot' in admission
+            ? async () => admission.slot
+            : admitAlone(call, admission.alone, deps),
         requestKey: call.requestKey,
         ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
         printBody: true,
+        ...(call.job !== undefined
+          ? {
+              onPaidLeg: (seen: PaidLeg) => {
+                leg = seen;
+              },
+            }
+          : {}),
       },
       deps.ctx,
       {
@@ -745,6 +1185,8 @@ async function payAndDeliver(
     const data = paid.data as {
       /** The provider's HTTP status on the call that delivered. */
       status?: number;
+      /** The body, parsed, when it was JSON. */
+      body?: unknown;
       bodyText?: string;
       /** A binary body's bytes and type, kept whole by the provider leg. */
       bodyBytes?: Uint8Array;
@@ -759,124 +1201,69 @@ async function payAndDeliver(
     };
     const providerAtomic = BigInt(data.amountPaid?.atomic ?? '0');
     const tx = data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {};
-    const httpStatus = typeof data.status === 'number' ? { httpStatus: data.status } : {};
-    // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
-    // result, so the result names where they are.
-    const binary =
-      data.bodyBytes !== undefined
-        ? await saveBinary(deps.ctx.dataDir, call.capabilityId, data.bodyBytes, {
-            contentType: data.contentType ?? '',
-            ...(deps.now !== undefined ? { now: deps.now } : {}),
-          })
-        : null;
-    // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
-    // links can expire, and the user paid for what is behind them. Only a
-    // media service (every discovered one, where generated images, audio and
-    // video come from) does this: a curated page read or search links whatever
-    // the page links, on hosts the page picked. Best effort only.
-    const media = providerAtomic > 0n && binary === null && call.media;
-    // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
-    // the same way, each replaced by a note naming its file: megabytes of
-    // base64 are no use to the agent as text. The rewritten body is the one
-    // cut, saved and handed back below; on any failure it is the body as it
-    // came.
-    const inline =
-      media && data.bodyText !== undefined
-        ? await saveInlineMedia(data.bodyText, async (bytes, contentType) => {
-            const saved = await saveBinary(deps.ctx.dataDir, call.capabilityId, bytes, {
-              contentType,
-              ...(deps.now !== undefined ? { now: deps.now } : {}),
-            });
-            return saved.savedTo ?? null;
-          })
-        : null;
-    const bodyText = inline?.bodyText ?? data.bodyText;
-    const linked = media
-      ? await saveMedia(
-          deps.ctx.dataDir,
-          call.capabilityId,
-          mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
-          {
-            ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
-            ...(deps.payDeps?.destination !== undefined
-              ? { destination: deps.payDeps.destination }
-              : {}),
-            ...(deps.now !== undefined ? { now: deps.now } : {}),
-          },
-        )
-      : [];
-    const savedFiles = [
-      ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
-      ...(inline?.savedFiles ?? []),
-      ...linked,
-    ];
-    const cut =
-      binary === null && call.project !== undefined && bodyText !== undefined
-        ? await projected(deps.ctx.dataDir, call.project, bodyText)
-        : null;
-    if (providerAtomic > 0n) {
-      await appendPaidRecord(
-        deps.ctx.dataDir,
-        paidRecord(call, built.url, call.sent, providerAtomic, {
-          ...(data.settlementTxHash !== undefined ? { txHash: data.settlementTxHash } : {}),
+    const left = () => ({ amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() });
+    // A 2xx THAT IS NOT THE RESULT YET: the job's own rules say so, or the
+    // seller never answers inline, or it is a 202. A file is a result unless it
+    // came with a 202. The submit's success rule is not the result's: a job's
+    // first answer is a receipt, and the rule runs on what the last poll says.
+    if (call.job !== undefined) {
+      const state =
+        data.bodyBytes !== undefined && data.status !== 202
+          ? 'done'
+          : answerState(call.job.spec, data.status ?? 200, data.body, { submit: true });
+      if (state !== 'done') {
+        const job = await startJob(call, call.job, deps, footer, {
+          state,
+          submittedAt,
+          status: data.status,
+          json: data.body,
+          text: data.bodyText ?? '',
+          ...(leg?.header !== undefined ? { header: leg.header } : {}),
+          providerAtomic,
+          ...tx,
           ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
-          savedFiles,
-          ...(deps.now !== undefined ? { now: deps.now } : {}),
-        }),
-      );
+        });
+        return { ...job, left: left() };
+      }
     }
-    const base = {
-      supplier: supplierOf(built.url),
-      ...parameters,
-      cost: costLines(providerAtomic),
-      ...(data.settlementTxHash !== undefined ? { settlementTxHash: data.settlementTxHash } : {}),
-      ...(call.note !== undefined ? { note: call.note } : {}),
-      result: binary ?? cut?.result ?? bodyText ?? '',
-      ...(cut !== null ? { fullResultPath: cut.fullResultPath } : {}),
-      ...(savedFiles.length > 0 ? { savedFiles } : {}),
-      providerContentUntrusted: true,
-    };
-    // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
-    // that the rule could not be run against, may be exactly the contract
-    // failure the rule exists to catch, and a caveat inside a `fulfilled`
-    // envelope does not reach code that branches on the status: a provider
-    // could pad a broken answer past the validation limit and have it read as
-    // a checked, paid result. The body still rides along (whole, or cut to
-    // the spec's fields with the whole saved), because the money moved and
-    // withholding the product would be a second loss on top of the first.
-    const shown = {
-      provider: built.url,
-      ...parameters,
-      price: `$${toMoney(providerAtomic.toString()).usd}`,
-    };
-    if (data.resultUnverified === true) {
-      await footer.done('unverified', shown);
-      return {
-        outcome: { status: 'unverified', ...httpStatus },
-        left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
-        result: {
-          isError: true,
-          summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
-          envelope: {
-            status: 'unverified',
-            ...base,
-            ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
-          },
-        },
-      };
-    }
-    await footer.done('fulfilled', shown);
-    return {
-      outcome: { status: 'fulfilled', ...httpStatus },
-      left: { amountAtomic: providerAtomic, ...tx, signed: signing.mayHaveSigned() },
-      result: {
-        isError: false,
-        summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
-        envelope: { status: 'fulfilled', ...base },
+    const delivered = await deliverResult(
+      call,
+      deps,
+      footer,
+      {
+        ...(data.status !== undefined ? { status: data.status } : {}),
+        ...(data.bodyText !== undefined ? { bodyText: data.bodyText } : {}),
+        ...(data.bodyBytes !== undefined ? { bodyBytes: data.bodyBytes } : {}),
+        ...(data.contentType !== undefined ? { contentType: data.contentType } : {}),
+        ...(data.resultUnverified === true ? { resultUnverified: true } : {}),
+        ...(data.resultCaveat !== undefined ? { resultCaveat: data.resultCaveat } : {}),
       },
-    };
+      {
+        providerAtomic,
+        ...tx,
+        ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
+        ledger: 'append',
+      },
+    );
+    return { result: delivered.result, outcome: delivered.outcome, left: left() };
   } catch (err) {
     const cli = err instanceof CliError ? err : undefined;
+    // THE PLAN WAS STOPPED before anything was signed: over the limits, its
+    // quote and the approve call; otherwise why, with nothing paid.
+    const stop = (cli?.details as Record<string, unknown> | undefined)?.[PLAN_STOP] as
+      PlanStop | undefined;
+    if (stop !== undefined) {
+      await footer.done(stop.status, { provider: built.url, ...parameters });
+      return {
+        left: { amountAtomic: 0n, signed: signing.mayHaveSigned() },
+        outcome: stop.outcome,
+        result: fail(stop.status, stop.reason, {
+          ...stop.extras,
+          request: { method: built.method, url: built.url },
+          ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
+        }),
+      };
+    }
     const status = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
     // A provider failure AFTER transmission carries the amount at risk on its
     // details. Reporting zero there told the model the call was free when the
@@ -889,6 +1276,9 @@ async function payAndDeliver(
       providerError?: string;
       /** The seller's reason for not settling, from its payment-response header. */
       settlementError?: string;
+      /** Where a long job's result will be, named by the seller before the paid
+       *  leg timed out. */
+      statusUrl?: string;
       authorization?: SignedAuthorization;
       /** The live 402's terms, on a REGISTRY_MISMATCH. */
       live?: { amount?: string };
@@ -897,6 +1287,37 @@ async function payAndDeliver(
     // refused, not an amount that left, so it is neither a cost nor a ledger
     // row: the PDL refusal sat in the ledger as $0.28 paid.
     const leftAtomic = status === 'needs_approval' ? 0n : BigInt(detail.amountAtomic ?? '0');
+    // THE PAID LEG CUT OFF WHILE THE SELLER WORKS, from a service whose spec
+    // says how its job is polled, with the status URL in the headers that did
+    // come: that job, still running, not a failure. With no usable status URL
+    // it stays the timeout it was.
+    const cutJob = call.job;
+    const cutHeader = leg?.header;
+    if (
+      cutJob !== undefined &&
+      cutHeader !== undefined &&
+      cli?.code === 'NETWORK_ERROR' &&
+      leftAtomic > 0n &&
+      !(
+        'problem' in
+        pollTarget(
+          cutJob.spec,
+          { url: built.url, json: undefined, header: cutHeader },
+          cutJob.input,
+        )
+      )
+    ) {
+      const job = await startJob(call, cutJob, deps, footer, {
+        state: 'running',
+        submittedAt,
+        json: undefined,
+        text: '',
+        header: cutHeader,
+        providerAtomic: leftAtomic,
+        ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+      });
+      return { ...job, left: { amountAtomic: leftAtomic, signed: true } };
+    }
     // AN INPUT THE AGENT BUILT, REFUSED BEFORE ANY PAYMENT: said as that, so
     // the next step is fixing the input, not checking the URL.
     const rejectedInput =
@@ -970,14 +1391,742 @@ async function payAndDeliver(
         // field it cannot see.
         request: { method: built.method, url: built.url },
         ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
+        // A LONG JOB STILL RUNNING: where its result will be, and that this
+        // call was paid, so a second one would pay again.
+        ...(typeof detail.statusUrl === 'string' ? { statusUrl: detail.statusUrl } : {}),
         ...(overCeiling
           ? { nextStep: 'Change the input and call again with the same id.' }
           : rejectedInput
             ? { nextStep: 'Fix the input and call again with the same id.' }
-            : {}),
+            : typeof detail.statusUrl === 'string'
+              ? {
+                  nextStep:
+                    'Check statusUrl for the result. Do not call request again for this: it would pay again.',
+                }
+              : {}),
       }),
     };
   }
+}
+
+/** What came back on the answer that delivered a result. */
+interface Delivered {
+  status?: number;
+  bodyText?: string;
+  bodyBytes?: Uint8Array;
+  contentType?: string;
+  /** The body missed its success rule, or the rule never ran. */
+  resultUnverified?: boolean;
+  resultCaveat?: string;
+}
+
+/** The money behind a delivered result, and where its ledger row goes. */
+interface DeliveredMoney {
+  providerAtomic: bigint;
+  txHash?: string;
+  authorization?: SignedAuthorization;
+  /** Append the call's row; finish the row a job wrote when it was paid,
+   *  found by its nonce; or leave the ledger alone. */
+  ledger: 'append' | { update: string } | 'none';
+}
+
+/** What delivering needs of a call: a provider call, or a job's record of one. */
+type DeliverCall = Pick<
+  ProviderCall,
+  'capabilityId' | 'provider' | 'media' | 'parameters' | 'sent' | 'note' | 'project'
+> & { request: { url: string } };
+
+/**
+ * DELIVER A PAID OR FREE RESULT: the binary or media saved, the ledger
+ * written, and the envelope the host reads. The same for a call that answered
+ * inline and a job's last poll.
+ */
+async function deliverResult(
+  call: DeliverCall,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+  got: Delivered,
+  money: DeliveredMoney,
+): Promise<{
+  result: RequestToolResult;
+  outcome: Omit<SpecOutcome, 'id' | 'ms'>;
+  savedFiles: string[];
+  /** Why a file the result carries was not saved: a job's take stays
+   *  resumable over it, since the seller still holds the result. */
+  unsaved?: string;
+}> {
+  const built = call.request;
+  const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
+  const { providerAtomic } = money;
+  const httpStatus = typeof got.status === 'number' ? { httpStatus: got.status } : {};
+  const budget = deps.downloads;
+  const now = deps.now !== undefined ? { now: deps.now } : {};
+  // A FILE IS SAVED, NOT INLINED: its bytes are no use as text in a tool
+  // result, so the result names where they are.
+  const binary =
+    got.bodyBytes !== undefined
+      ? await saveBinary(deps.ctx.dataDir, call.capabilityId, got.bodyBytes, {
+          contentType: got.contentType ?? '',
+          ...now,
+          ...(budget !== undefined ? { budget } : {}),
+        })
+      : null;
+  let unsaved = binary?.saveError;
+  // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
+  // links can expire, and the user paid for what is behind them. Only a
+  // media service (every discovered one, where generated images, audio and
+  // video come from) does this: a curated page read or search links whatever
+  // the page links, on hosts the page picked. Best effort only.
+  const media = providerAtomic > 0n && binary === null && call.media;
+  // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
+  // the same way, each replaced by a note naming its file: megabytes of
+  // base64 are no use to the agent as text. The rewritten body is the one
+  // cut, saved and handed back below; on any failure it is the body as it
+  // came.
+  const inline =
+    media && got.bodyText !== undefined
+      ? await saveInlineMedia(got.bodyText, async (bytes, contentType) => {
+          const saved = await saveBinary(deps.ctx.dataDir, call.capabilityId, bytes, {
+            contentType,
+            ...now,
+            ...(budget !== undefined ? { budget } : {}),
+          });
+          unsaved ??= saved.saveError;
+          return saved.savedTo ?? null;
+        })
+      : null;
+  const bodyText = inline?.bodyText ?? got.bodyText;
+  const linked = media
+    ? await saveLinked(
+        deps,
+        call.capabilityId,
+        mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
+      )
+    : { saved: [], capped: false, failed: false };
+  if (linked.capped) unsaved ??= CAP_REACHED;
+  if (linked.failed) unsaved ??= DOWNLOAD_FAILED;
+  const savedFiles = [
+    ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
+    ...(inline?.savedFiles ?? []),
+    ...linked.saved,
+  ];
+  const cut =
+    binary === null && call.project !== undefined && bodyText !== undefined
+      ? await projected(deps.ctx.dataDir, call.project, bodyText)
+      : null;
+  if (providerAtomic > 0n && money.ledger === 'append') {
+    await appendPaidRecord(
+      deps.ctx.dataDir,
+      paidRecord(call, built.url, call.sent, providerAtomic, {
+        ...(money.txHash !== undefined ? { txHash: money.txHash } : {}),
+        ...(money.authorization !== undefined ? { authorization: money.authorization } : {}),
+        savedFiles,
+        ...now,
+      }),
+    );
+  } else if (typeof money.ledger === 'object') {
+    await updatePaidRecord(deps.ctx.dataDir, money.ledger.update, {
+      savedFiles,
+      ...(money.txHash !== undefined ? { txHash: money.txHash } : {}),
+    });
+  }
+  const base = {
+    supplier: supplierOf(built.url),
+    ...parameters,
+    cost: costLines(providerAtomic),
+    ...(money.txHash !== undefined ? { settlementTxHash: money.txHash } : {}),
+    ...(call.note !== undefined ? { note: call.note } : {}),
+    result: binary ?? cut?.result ?? bodyText ?? '',
+    ...(cut !== null ? { fullResultPath: cut.fullResultPath } : {}),
+    ...(savedFiles.length > 0 ? { savedFiles } : {}),
+    providerContentUntrusted: true,
+  };
+  // UNVERIFIED IS NOT FULFILLED. A body that missed its success rule, or
+  // that the rule could not be run against, may be exactly the contract
+  // failure the rule exists to catch, and a caveat inside a `fulfilled`
+  // envelope does not reach code that branches on the status: a provider
+  // could pad a broken answer past the validation limit and have it read as
+  // a checked, paid result. The body still rides along (whole, or cut to
+  // the spec's fields with the whole saved), because the money moved and
+  // withholding the product would be a second loss on top of the first.
+  const shown = {
+    provider: built.url,
+    ...parameters,
+    price: `$${toMoney(providerAtomic.toString()).usd}`,
+  };
+  if (got.resultUnverified === true) {
+    await footer.done('unverified', shown);
+    return {
+      outcome: { status: 'unverified', ...httpStatus },
+      savedFiles,
+      ...(unsaved !== undefined ? { unsaved } : {}),
+      result: {
+        isError: true,
+        summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
+        envelope: {
+          status: 'unverified',
+          ...base,
+          ...(got.resultCaveat !== undefined ? { resultCaveat: got.resultCaveat } : {}),
+        },
+      },
+    };
+  }
+  await footer.done('fulfilled', shown);
+  return {
+    outcome: { status: 'fulfilled', ...httpStatus },
+    savedFiles,
+    ...(unsaved !== undefined ? { unsaved } : {}),
+    result: {
+      isError: false,
+      summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
+      envelope: { status: 'fulfilled', ...base },
+    },
+  };
+}
+
+/** The files a paid result links to, saved within what this call may still
+ *  write. Best effort, like every save after the money moved. */
+async function saveLinked(
+  deps: RequestToolDeps,
+  stem: string,
+  urls: string[],
+): Promise<{ saved: string[]; capped: boolean; failed: boolean }> {
+  return saveMedia(deps.ctx.dataDir, stem, urls, {
+    ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
+    ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+    ...(deps.downloads !== undefined ? { budget: deps.downloads } : {}),
+  });
+}
+
+/** What starting a job is handed: the submit's answer and its payment. */
+interface SubmitSeen {
+  state: 'running' | 'failed';
+  submittedAt: number;
+  status?: number;
+  json: unknown;
+  text: string;
+  header?: (name: string) => string | undefined;
+  providerAtomic: bigint;
+  /** The submit's settlement, when its payment-response header named it. */
+  txHash?: string;
+  authorization?: SignedAuthorization;
+}
+
+/** What a job's take answers, for the caller to hand back and report. */
+interface TakeEnding {
+  result: RequestToolResult;
+  outcome: Omit<SpecOutcome, 'id' | 'ms'>;
+}
+
+/**
+ * A PAID CALL THE SELLER ANSWERED BEFORE ITS RESULT WAS READY. The submit is
+ * on the ledger first, so a crash mid-poll loses no row. A seller that says
+ * the job failed is that failure. A status URL that is not the submit's host
+ * is never fetched: the money moved, so the call fails naming the URL as
+ * untrusted. Otherwise the take is recorded,
+ * 0600, before its first poll, and polled until it ends or this call's wait
+ * runs out, when it answers `running` with the id that resumes it.
+ */
+async function startJob(
+  call: ProviderCall,
+  job: CallJob,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+  submit: SubmitSeen,
+): Promise<TakeEnding> {
+  const now = deps.now ?? Date.now;
+  const built = call.request;
+  const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
+  const httpStatus = submit.status !== undefined ? { httpStatus: submit.status } : {};
+  const { providerAtomic } = submit;
+  if (providerAtomic > 0n) {
+    await appendPaidRecord(
+      deps.ctx.dataDir,
+      paidRecord(call, built.url, call.sent, providerAtomic, {
+        ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
+        ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
+        savedFiles: [],
+        now,
+      }),
+    );
+  }
+  const shown = {
+    provider: built.url,
+    ...parameters,
+    price: `$${toMoney(providerAtomic.toString()).usd}`,
+  };
+  const paidFailure = async (reason: string, extras: FailExtras = {}): Promise<TakeEnding> => {
+    await footer.done('failed', shown);
+    return {
+      outcome: { status: 'failed', ...httpStatus },
+      result: fail('failed', `${reason} ${paidNothing(providerAtomic, submit.txHash)}`, {
+        providerAtomic,
+        settlement: submit.txHash !== undefined ? 'settled' : 'unknown',
+        ...(submit.status !== undefined ? { providerStatus: submit.status } : {}),
+        request: { method: built.method, url: built.url },
+        ...parameters,
+        nextStep: failedNextStep(submit.txHash),
+        ...extras,
+      }),
+    };
+  };
+  if (submit.state === 'failed') {
+    const said = sellerSaid(submit.json, submit.text);
+    return paidFailure(
+      `${call.provider}: the seller says the job failed.`,
+      said.length > 0 ? { providerError: said } : {},
+    );
+  }
+  const target = pollTarget(
+    job.spec,
+    {
+      url: built.url,
+      json: submit.json,
+      ...(submit.header !== undefined ? { header: submit.header } : {}),
+    },
+    job.input,
+  );
+  if ('problem' in target) {
+    return paidFailure(
+      `${call.provider} took the payment and is still working, but ${target.problem}, so it was not polled.`,
+      target.named !== undefined ? { statusUrl: target.named } : {},
+    );
+  }
+  const take: JobTake = {
+    version: 1,
+    offerId: job.offerId,
+    take: job.take,
+    poll: target,
+    job: job.spec,
+    call: {
+      capabilityId: call.capabilityId,
+      provider: call.provider,
+      url: built.url,
+      media: call.media,
+      sent: recordedSent(call.sent),
+      terms: {
+        ...(call.terms.source !== undefined ? { source: call.terms.source } : {}),
+        maxAmountAtomic: call.terms.maxAmountAtomic ?? '0',
+        ...(call.terms.payTo !== undefined ? { payTo: call.terms.payTo } : {}),
+        ...(call.terms.network !== undefined ? { network: call.terms.network } : {}),
+        ...(call.terms.asset !== undefined ? { asset: call.terms.asset } : {}),
+      },
+      ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
+      ...(call.project !== undefined ? { outputSchema: call.project.schema } : {}),
+    },
+    submittedAt: new Date(submit.submittedAt).toISOString(),
+    expiresAt: new Date(submit.submittedAt + job.spec.keepH * 3_600_000).toISOString(),
+    amountAtomic: providerAtomic.toString(),
+    ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
+    ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
+    ...httpStatus,
+    state: 'running',
+    savedFiles: [],
+    // A status URL the agent may open itself: a plain GET.
+    ...(target.method === 'GET' ? { statusUrl: target.url } : {}),
+  };
+  const kept = await writeTake(deps.ctx.dataDir, take).then(
+    () => true,
+    () => false,
+  );
+  const deadline = Math.min(
+    deps.waitsForJobs === true
+      ? Number.POSITIVE_INFINITY
+      : (deps.startedAt ?? submit.submittedAt) + MAX_CALL_WAIT_MS,
+    submit.submittedAt + job.spec.maxWaitS * 1000,
+  );
+  const answer = await pollUntil(
+    take,
+    { deadline, firstWaitMs: job.spec.everyS * 1000 },
+    pollDeps(deps),
+  );
+  return finishTake(take, answer, deps, footer, { kept, parameters: call.parameters });
+}
+
+/**
+ * THAT A FAILED JOB WAS PAID AND BROUGHT NOTHING BACK, and what is known of
+ * the money: settled when the submit's payment-response named the
+ * transaction (AiSpace settles at submit, so a refused prompt is still a paid
+ * one), else unknown until the authorization expires.
+ */
+function paidNothing(amountAtomic: bigint, txHash: string | undefined): string {
+  const usd = `$${toMoney(amountAtomic.toString()).usd}`;
+  return txHash !== undefined
+    ? `It was paid (${usd}, settled in tx ${txHash}) and nothing came back.`
+    : `It was paid (${usd}) and nothing came back; whether that payment settles is unknown until its authorization expires.`;
+}
+
+/** What the agent does after a job failed: the money is already accounted. */
+function failedNextStep(txHash: string | undefined): string {
+  return txHash !== undefined
+    ? 'Tell the user it was paid and nothing came back; the payment is in `tenjin payments`. A new call pays again.'
+    : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
+}
+
+/** The poll's seams, and who is told of each poll. */
+function pollDeps(deps: RequestToolDeps): PollDeps {
+  return {
+    ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
+    ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+    ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    ...(deps.onPoll !== undefined ? { onPoll: deps.onPoll } : {}),
+  };
+}
+
+/** A take's call, rebuilt from its record for the delivery step. */
+function callOf(take: JobTake, parameters?: unknown): DeliverCall {
+  return {
+    capabilityId: take.call.capabilityId,
+    provider: take.call.provider,
+    media: take.call.media,
+    sent: take.call.sent,
+    request: { url: take.call.url },
+    ...(parameters !== undefined ? { parameters } : {}),
+    ...(take.call.outputSchema !== undefined
+      ? {
+          project: {
+            id: take.take > 1 ? `${take.offerId}#${take.take}` : take.offerId,
+            schema: take.call.outputSchema,
+          },
+        }
+      : {}),
+  };
+}
+
+/**
+ * HOW A TAKE ENDED THIS CALL, recorded and said. Done: the last answer is the
+ * result, checked against the success rule and saved like any paid result,
+ * its files written onto the payment's ledger row. Running: the id that
+ * resumes it. Failed or gone: the seller's reason, the money already counted.
+ * The record keeps every ending until it expires. The first ending recorded
+ * stands: a call whose take another call ended first answers with that ending.
+ */
+async function finishTake(
+  take: JobTake,
+  answer: PollAnswer,
+  deps: RequestToolDeps,
+  footer: LookupFooter,
+  opts: { kept: boolean; parameters?: unknown },
+): Promise<TakeEnding> {
+  const { dataDir } = deps.ctx;
+  const providerAtomic = BigInt(take.amountAtomic);
+  const call = callOf(take, opts.parameters);
+  const shown = {
+    provider: take.call.url,
+    price: `$${toMoney(providerAtomic.toString()).usd}`,
+  };
+  // Undefined when the ending could not be written: the take stays running.
+  const end = (ending: Partial<JobTake>) =>
+    endTake(dataDir, take.offerId, take.take, ending).catch(() => undefined);
+  // AN ENDING ANOTHER CALL RECORDED FIRST stands, and is this call's answer.
+  const lostTo = async (ended: JobTake): Promise<TakeEnding> => {
+    const result = endedResult(ended, { raced: true });
+    const status = result.envelope.status as 'fulfilled' | 'unverified' | 'failed';
+    await footer.done(status, shown);
+    return { result, outcome: { status } };
+  };
+  if (answer.state === 'done') {
+    const current = (await readTake(dataDir, take.offerId, take.take)) ?? take;
+    if (current.state !== 'running') return lostTo(current);
+    // The row the submit's payment is on.
+    const nonce = current.authorization?.nonce;
+    let caveat: string | undefined;
+    let unverified = false;
+    if (take.call.resultSchema !== undefined && answer.bytes === undefined) {
+      const check = validateResultBody(take.call.resultSchema, answer.text);
+      if (!check.valid || check.unvalidated === true) {
+        unverified = true;
+        caveat = check.reason ?? 'The result does not satisfy its success schema.';
+      }
+    }
+    const tx = settlementTx({ header: answer.header });
+    const delivered = await deliverResult(
+      call,
+      deps,
+      footer,
+      {
+        status: answer.status,
+        ...(answer.bytes !== undefined
+          ? { bodyBytes: answer.bytes, contentType: answer.contentType }
+          : { bodyText: answer.text }),
+        ...(unverified ? { resultUnverified: true } : {}),
+        ...(caveat !== undefined ? { resultCaveat: caveat } : {}),
+      },
+      {
+        providerAtomic,
+        ...(tx !== undefined ? { txHash: tx } : {}),
+        ledger: nonce !== undefined ? { update: nonce } : 'none',
+      },
+    );
+    // A RESULT NOT SAVED HERE IS NOT AN ENDING: the seller still holds it, so
+    // the take stays running, its copy is never freed, and a resume fetches
+    // it again with nothing more paid.
+    if (delivered.unsaved !== undefined) {
+      await footer.done('running', shown);
+      return {
+        outcome: { status: 'running', httpStatus: answer.status },
+        result: unsavedResult(take, call, opts.kept, delivered.unsaved),
+      };
+    }
+    const ended = await end({
+      state: 'done',
+      savedFiles: delivered.savedFiles.slice(0, 16),
+      result: keptResult(delivered.result.envelope.result),
+      ...(unverified ? { resultUnverified: true } : {}),
+      ...(caveat !== undefined ? { resultCaveat: caveat.slice(0, 1_000) } : {}),
+    });
+    if (ended?.won === false) return lostTo(ended.take);
+    // THE SELLER'S COPY IS FREED once ours is on disk, by the call that ended
+    // the take: never while the record still says running.
+    if (delivered.savedFiles.length > 0 && ended !== undefined) {
+      await completeJob({ ...current, submitUrl: take.call.url }, pollDeps(deps));
+    }
+    return {
+      result: withJob(delivered.result, take.offerId),
+      outcome: delivered.outcome,
+    };
+  }
+  if (answer.state === 'running') {
+    await footer.done('running', shown);
+    return {
+      outcome: {
+        status: 'running',
+        ...(take.httpStatus !== undefined ? { httpStatus: take.httpStatus } : {}),
+      },
+      result: runningResult(take, call, opts.kept, answer.reason),
+    };
+  }
+  const reason = `${
+    answer.state === 'expired'
+      ? `${take.call.provider} no longer has this job (HTTP ${answer.status}).`
+      : `${take.call.provider}: ${answer.reason}.`
+  } ${paidNothing(providerAtomic, take.txHash)}`;
+  const said = answer.state === 'failed' ? answer.said : undefined;
+  const ended = await end({
+    state: answer.state,
+    reason: reason.slice(0, 1_000),
+    ...(said !== undefined ? { said } : {}),
+  });
+  if (ended?.won === false) return lostTo(ended.take);
+  await footer.done('failed', shown);
+  return {
+    outcome: {
+      status: 'failed',
+      ...(answer.status !== undefined ? { httpStatus: answer.status } : {}),
+    },
+    result: withJob(failedResult(take, reason, answer.status, said, opts.parameters), take.offerId),
+  };
+}
+
+/** A take that failed, paid: the reason, the seller's own words beside it as
+ *  untrusted text, and what is known of the money. */
+function failedResult(
+  take: JobTake,
+  reason: string,
+  status: number | undefined,
+  said: string | undefined,
+  parameters?: unknown,
+): RequestToolResult {
+  return fail('failed', reason, {
+    providerAtomic: BigInt(take.amountAtomic),
+    settlement: take.txHash !== undefined ? 'settled' : 'unknown',
+    ...(status !== undefined ? { providerStatus: status } : {}),
+    ...(said !== undefined ? { providerError: said } : {}),
+    request: { method: take.poll.method, url: take.poll.url },
+    ...(parameters !== undefined ? { parameters } : {}),
+    nextStep: failedNextStep(take.txHash),
+  });
+}
+
+/** A take's result names its job, so a set's entries can be told apart. */
+function withJob(result: RequestToolResult, offerId: string): RequestToolResult {
+  return { ...result, envelope: { ...result.envelope, job: offerId } };
+}
+
+/** What a finished take keeps of the result it handed the agent. */
+function keptResult(result: unknown): string {
+  const text = typeof result === 'string' ? result : JSON.stringify(result ?? '');
+  return text.length <= KEPT_RESULT_CHARS ? text : `${text.slice(0, KEPT_RESULT_CHARS)}…`;
+}
+
+/** The answer for a take still running when this call's wait ran out. */
+function runningResult(
+  take: JobTake,
+  call: DeliverCall,
+  kept: boolean,
+  note?: string,
+): RequestToolResult {
+  const cost = costLines(BigInt(take.amountAtomic));
+  const supplier = supplierOf(take.call.url);
+  const nextStep = kept
+    ? `Call request({job: ${JSON.stringify(take.offerId)}}) in a minute or two; nothing more is paid.`
+    : `This machine could not keep the job, so it cannot be resumed here${take.statusUrl !== undefined ? '; check statusUrl for the result' : ''}. Do not call again for this: it would pay again.`;
+  return {
+    isError: false,
+    summary: `Still running at ${supplier} · ${cost.join(' · ')}. ${nextStep}`,
+    envelope: {
+      status: 'running',
+      job: take.offerId,
+      ...(take.statusUrl !== undefined ? { statusUrl: take.statusUrl } : {}),
+      supplier,
+      ...(call.parameters !== undefined ? { parameters: call.parameters } : {}),
+      cost,
+      ...(note !== undefined ? { note } : {}),
+      nextStep,
+      providerContentUntrusted: true,
+    },
+  };
+}
+
+/** A take the seller finished whose result this machine could not save: still
+ *  running, so a resume fetches it again, with nothing more paid. */
+function unsavedResult(
+  take: JobTake,
+  call: DeliverCall,
+  kept: boolean,
+  why: string,
+): RequestToolResult {
+  const running = runningResult(
+    take,
+    call,
+    kept,
+    `The seller finished it and the payment went through, but it could not be saved here (${why}).`,
+  );
+  const nextStep = kept
+    ? `Tell the user why it was not saved, then call request({job: ${JSON.stringify(take.offerId)}}) to fetch it again; nothing more is paid.`
+    : String(running.envelope.nextStep);
+  return {
+    ...running,
+    summary: `Paid; ${supplierOf(take.call.url)} finished it, but it could not be saved here (${why}). ${nextStep}`,
+    envelope: { ...running.envelope, nextStep },
+  };
+}
+
+/** A take that had already ended when its job was resumed, from its record;
+ *  `raced`, one another call ended while this one was polling it. */
+function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestToolResult {
+  const cost = costLines(BigInt(take.amountAtomic));
+  const supplier = supplierOf(take.call.url);
+  const how =
+    opts.raced === true
+      ? 'another call finished this job first; nothing more was paid'
+      : 'already finished; nothing was polled or paid';
+  if (take.state === 'done') {
+    // Unverified as it was delivered: see `deliverResult`.
+    const unverified = take.resultUnverified === true;
+    return {
+      isError: unverified,
+      summary: `${unverified ? 'Unverified result from' : 'Fulfilled by'} ${supplier} · ${cost.join(' · ')} (${how})`,
+      envelope: {
+        status: unverified ? 'unverified' : 'fulfilled',
+        job: take.offerId,
+        supplier,
+        cost,
+        result: take.result ?? '',
+        ...(take.savedFiles.length > 0 ? { savedFiles: take.savedFiles } : {}),
+        note:
+          opts.raced === true
+            ? 'Another call finished this job first; this is its result, and nothing more was paid.'
+            : 'This job had already finished; nothing was polled or paid.',
+        providerContentUntrusted: true,
+        ...(unverified && take.resultCaveat !== undefined
+          ? { resultCaveat: take.resultCaveat }
+          : {}),
+      },
+    };
+  }
+  return withJob(
+    failedResult(
+      take,
+      take.reason ??
+        `${take.call.provider}: the job ended without a result. ${paidNothing(BigInt(take.amountAtomic), take.txHash)}`,
+      undefined,
+      take.said,
+    ),
+    take.offerId,
+  );
+}
+
+/**
+ * `request({job})`: EVERY UNFINISHED TAKE OF A JOB, polled again from its
+ * record, side by side, for up to {@link MAX_CALL_WAIT_MS} (or, where the host
+ * waits for jobs, until the job's own `maxWaitS` from its submit, if that is
+ * later) and never past the take's own keep time. Nothing is built and
+ * nothing is paid. A take that already ended answers from its record. One
+ * take answers as itself; several as a set.
+ */
+async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<RequestToolResult> {
+  const { dataDir } = deps.ctx;
+  const takes = await readTakes(dataDir, offerId);
+  if (takes.length === 0) {
+    return fail(
+      'needs_input',
+      'No job is kept on this machine under that id (it never started here, or it ended and its keep time passed), so nothing was polled or paid.',
+      {
+        nextStep:
+          'Check `tenjin payments` for what was paid. For a new result, call request({query}); that pays again.',
+      },
+    );
+  }
+  const footer = await openLookupFooter(dataDir, { id: offerId });
+  await footer.routing();
+  const settings = await resolveContextSettings(deps.ctx);
+  const startedAt = deps.startedAt ?? (deps.now ?? Date.now)();
+  const started = Date.now();
+  const ended = await Promise.all(
+    takes.map(async (take) => {
+      if (take.state !== 'running') {
+        return { take, result: endedResult(take), outcome: null };
+      }
+      const waited = startedAt + MAX_CALL_WAIT_MS;
+      const deadline = Math.min(
+        deps.waitsForJobs === true
+          ? Math.max(waited, Date.parse(take.submittedAt) + take.job.maxWaitS * 1000)
+          : waited,
+        Date.parse(take.expiresAt),
+      );
+      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps));
+      const done = await finishTake(take, answer, deps, SILENT_FOOTER, { kept: true });
+      return { take, result: done.result, outcome: done.outcome };
+    }),
+  );
+  // The offer's own report, once, for a take that ended in this call: the
+  // server keeps the first report it got, and logs this one.
+  const changed = ended.find(({ outcome }) => outcome !== null && outcome.status !== 'running');
+  if (changed?.outcome) {
+    reportOutcome(
+      {
+        ctx: deps.ctx,
+        baseUrl: settings.baseUrl,
+        ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      },
+      offerId,
+      changed.outcome,
+      started,
+    );
+  }
+  if (ended.length === 1) {
+    const only = ended[0]!.result;
+    await footer.done(String(only.envelope.status));
+    return only;
+  }
+  const set = takesResult(
+    ended.map(({ take, result }) => ({
+      named: { take: take.take },
+      result,
+      // Paid when the job started: a resume pays nothing more of its own.
+      amountAtomic: BigInt(take.amountAtomic),
+    })),
+    {
+      head: `${ended.length} takes of ${takes[0]!.call.provider}`,
+      nextStep:
+        'Open each saved file, say which take fits the request best and why, and let the user pick.',
+    },
+  );
+  await footer.done(String(set.envelope.status));
+  return set;
 }
 
 /**
@@ -1168,9 +2317,16 @@ async function saveBinary(
   dataDir: string,
   capabilityId: string,
   bytes: Uint8Array,
-  opts: { contentType: string; now?: () => number },
+  opts: { contentType: string; now?: () => number; budget?: { leftBytes: number } },
 ): Promise<{ savedTo?: string; saveError?: string; contentType: string; bytes: number }> {
   const described = { contentType: opts.contentType, bytes: bytes.byteLength };
+  // ONE CALL WRITES AT MOST ITS SHARE: several takes of a video each bring a
+  // file home, and the disk is the user's. Taken before the write, given back
+  // when it fails.
+  if (opts.budget !== undefined && bytes.byteLength > opts.budget.leftBytes) {
+    return { saveError: CAP_REACHED, ...described };
+  }
+  if (opts.budget !== undefined) opts.budget.leftBytes -= bytes.byteLength;
   try {
     const file = await createUniqueFile(
       downloadsDir(dataDir),
@@ -1184,6 +2340,7 @@ async function saveBinary(
     }
     return { savedTo: file.path, ...described };
   } catch (err) {
+    if (opts.budget !== undefined) opts.budget.leftBytes += bytes.byteLength;
     return { saveError: err instanceof Error ? err.message : String(err), ...described };
   }
 }
@@ -1263,8 +2420,8 @@ export function costLines(providerAtomic: bigint): string[] {
 /**
  * ROUTINE CONTROL OUTCOMES, not failures of this tool. A routing decision was
  * delivered and it says the turn continues somewhere else: with the host's own
- * tools, with a question for the user, or with an approval the user gives. The
- * MCP error flag is for what went WRONG, and raising it on these three put a
+ * tools, with a question for the user, or with an approval the user gives.
+ * The MCP error flag is for what went WRONG, and raising it on these put a
  * red box in front of the user on the most ordinary answer the router has.
  */
 const ROUTINE: ReadonlySet<FailStatus> = new Set(['native', 'needs_input', 'needs_approval']);
@@ -1295,8 +2452,7 @@ const NEXT_STEP: Record<string, string> = {
   native: 'Continue with your own tools. Nothing was bought.',
   needs_input:
     'Ask the user for the missing detail, then call `request` again with it. Nothing was bought.',
-  needs_approval:
-    'Report the command above to the user; this build will not raise a spend limit on its own.',
+  needs_approval: 'Tell the user what it would cost; nothing was paid.',
 };
 
 /**
@@ -1314,7 +2470,7 @@ const NEXT_STEP_BY_REASON: Record<string, string> = {
     'The router could not classify this one and charged nothing. Continue with your own tools, or call `request` once more.',
 };
 
-interface FailExtras {
+export interface FailExtras {
   providerAtomic?: bigint;
   settlement?: string;
   /** Which rule failed, whether the body was JSON, its size and a bounded
@@ -1327,6 +2483,8 @@ interface FailExtras {
   /** Why the seller says it did not settle a signed payment, bounded and
    *  redacted. Provider content. */
   settlementError?: string;
+  /** Where a long job's result will be, as the seller named it. Provider content. */
+  statusUrl?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
   errorCode?: string;
   /** What stopped a non-execute decision, in the backend's own terms. */
@@ -1339,13 +2497,16 @@ interface FailExtras {
   parameters?: unknown;
   /** The provider request it went out as. */
   request?: { method: string; url: string };
+  /** A plan over the limits, kept for the user's yes: its id, what it buys
+   *  and its total. */
+  quote?: Record<string, unknown>;
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
 function summaryFor(status: FailStatus, reason: string): string {
   if (status === 'native') return `No paid lookup needed: ${reason}`;
   if (status === 'needs_input') return `More input needed: ${reason}`;
-  if (status === 'needs_approval') return `Blocked by spending policy: ${reason}`;
+  if (status === 'needs_approval') return `Needs the user's approval: ${reason}`;
   return `x402 request ${status}: ${reason}`;
 }
 
@@ -1373,6 +2534,7 @@ export function fail(
       status,
       reason,
       ...(extras.errorCode !== undefined ? { errorCode: extras.errorCode } : {}),
+      ...(extras.quote !== undefined ? { quote: extras.quote } : {}),
       // The status is the fact; the next step is what to do about it. The
       // BACKEND'S own next action wins when it sent one: it knows which field
       // is missing.
@@ -1395,6 +2557,7 @@ export function fail(
       ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
       ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
       ...(extras.settlementError !== undefined ? { settlementError: extras.settlementError } : {}),
+      ...(extras.statusUrl !== undefined ? { statusUrl: extras.statusUrl } : {}),
       ...(extras.request !== undefined ? { request: extras.request } : {}),
       ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),
       providerContentUntrusted: true,

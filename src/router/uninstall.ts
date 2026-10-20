@@ -4,7 +4,7 @@ import { persistRouterProject } from '../commands/config';
 import type { CommandContext, CommandResult } from '../context';
 import { removeAliveState } from './alive';
 import { findClaudeBinary, jsonList, jsonResult, runClaude, type ClaudeBinary } from './claude-cli';
-import { settingsInstallPaths } from './install';
+import { projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, removeLegacyInstall, type LegacyRemoval } from './legacy-install';
 import { MARKETPLACE_NAME, PLUGIN_ID } from './names';
 import { removePluginFolder, type FolderRemoval } from './plugin-folder';
@@ -67,13 +67,25 @@ export async function runRouterUninstall(
   // Forgotten, so a later `tenjin update` does not go looking for a project
   // this machine no longer wires.
   if (project) await persistRouterProject(ctx.dataDir, cwd, false).catch(() => undefined);
+  // A BARE UNINSTALL TOUCHES USER SCOPE ONLY: a project install here is left,
+  // and said to be, with the command that removes it.
+  const projectLeft = !project && (await projectInstallHere(cwd, home, env));
   const data = {
     plugin,
     settings: { path: paths.settingsPath, found: legacy.present, removed: settings },
     aliveRemoved: alive,
+    ...(projectLeft ? { projectInstallLeft: cwd } : {}),
     kept: ['wallet.json', 'spend.json', 'config.json'],
   };
-  return { data, humanLines: uninstallLines(plugin, paths.settingsPath, settings) };
+  const lines = uninstallLines(plugin, paths.settingsPath, settings);
+  if (projectLeft) {
+    lines.splice(
+      -1,
+      0,
+      'This project has its own Tenjin install, which this left in place; `tenjin uninstall --project` here removes it.',
+    );
+  }
+  return { data, humanLines: lines };
 }
 
 async function removePlugin(
