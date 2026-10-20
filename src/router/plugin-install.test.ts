@@ -910,22 +910,14 @@ describe('tenjin doctor', () => {
     }
   });
 
-  it('keeps the stamp, PATH and router server fixes inside the session', async () => {
+  it('keeps the stamp and router server fixes inside the session', async () => {
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
-    const c = await checks({
-      env: env({ CLAUDECODE: '1' }),
-      pathProbe: {
-        platform: 'win32',
-        env: { Path: 'C:\\Windows\\system32', CLAUDECODE: '1' },
-        savedPath: async () => ['C:\\Windows\\system32', 'C:\\Program Files\\nodejs\\'],
-        npmPrefix: async () => null,
-      },
-    });
+    const c = await checks({ env: env({ CLAUDECODE: '1' }) });
     expect(c['plugin']?.detail).toContain('no session has started it');
-    expect(c['PATH']?.status).toBe('warn');
+    expect(c['PATH']).toBeUndefined();
     expect(c['router server']?.status).toBe('fail');
-    for (const row of ['plugin', 'PATH', 'router server']) {
+    for (const row of ['plugin', 'router server']) {
       expect(c[row]?.fix, row).toMatch(/restart Claude Code/i);
       expect(c[row]?.fix, row).not.toMatch(OUT_OF_SESSION);
     }

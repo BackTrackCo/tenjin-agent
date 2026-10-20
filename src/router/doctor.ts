@@ -37,17 +37,11 @@ import {
 import { channelCredit } from './channel-credit';
 import { loadStep, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { commandForm, handlersIn } from './hook-form';
-import { readNpmPrefix, readSavedPath, stalePathCheck, type PathProbe } from './path-check';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
 import { PLUGIN_DIR } from './plugin-files';
-import {
-  folderState,
-  packageCliEntry,
-  readPluginListing,
-  type PluginScope,
-} from './plugin-registration';
+import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
@@ -96,10 +90,8 @@ export interface RouterDoctorDeps {
   /** When this build was installed; tests inject it. */
   installedAt?: InstalledAt;
   now?: () => number;
-  /** The platform the hook-form and PATH checks judge for. Tests inject `win32`. */
+  /** The platform the hook-form check judges for. Tests inject `win32`. */
   platform?: NodeJS.Platform;
-  /** The stale-PATH row's reads (the saved PATH, npm's prefix); tests inject them. */
-  pathProbe?: Partial<PathProbe>;
 }
 
 const NODE_FLOOR = 22;
@@ -135,15 +127,6 @@ export async function runRouterDoctor(
     platform,
   );
   if (form !== null) checks.push(form);
-  const stale = await stalePathCheck({
-    platform,
-    env,
-    savedPath: () => readSavedPath(platform, env),
-    npmPrefix: () => readNpmPrefix(platform),
-    cliEntry: packageCliEntry(),
-    ...deps.pathProbe,
-  });
-  if (stale !== null) checks.push(stale);
   if (plugin.registered && claude.binary !== null) {
     checks.push(await serverCheck(claude.binary, env, cwd));
   }
