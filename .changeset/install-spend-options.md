@@ -17,7 +17,7 @@ answers, each one install command the agent runs: `tenjin install --yes` or
 `tenjin install --max-auto-spend <usd> --session-budget <usd|none>`. There is
 no "no automatic spending" answer; `tenjin config set router.enabled false`
 turns the router off. The install an answer picks then asks whether to add
-$5 now, with the wallet's fund link (preset to $5) and address for later. On
+$5 now, with the wallet's address for later; it mints no link. On
 a yes the agent runs `tenjin wallet fund 5`, which now opens the fund page
 under an agent harness too. Each question is in `nextSteps` in `--json`, and
 only there.

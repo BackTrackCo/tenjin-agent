@@ -10,7 +10,6 @@ import {
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import { getUsdcBalance } from '../lib/usdc';
-import type { TenjinSigner } from '../lib/wallet/provider';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
 import { addressQrLines } from '../lib/qr';
@@ -91,6 +90,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
 
   const config = await loadRawConfig(ctx.dataDir);
   const settings = resolveSettings({ config, flags: {}, env: process.env });
+  const baseUrl = FUND_ORIGIN;
   const rpcUrl = settings.rpcUrl.value;
 
   // Waiting is an INTERACTIVE posture: a human is standing at the terminal with
@@ -103,10 +103,24 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // here only disables the wait, it never blocks funding.
   const startBalance = shouldWait ? await balanceOrUndefined(desc, rpcUrl) : undefined;
 
-  const { url } = await mintFundLink(ctx, signer, address, {
-    ...(preset !== undefined ? { presetAmount: preset } : {}),
+  const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: SESSION_CHAIN_ID });
+  const request: HttpRequestOptions = {
+    method: 'POST',
+    timeoutMs: ctx.flags.timeout,
+    headers: { [SIWX_HEADER]: siwxHeader },
+    jsonBody: {
+      address,
+      ...(preset !== undefined ? { presetAmount: preset } : {}),
+    },
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-  });
+  };
+  const res = await httpRequest(`${baseUrl}/api/fund/link`, request);
+  if (!res.ok) {
+    throw fetchFailureToCliError(res, {
+      fix: 'Check your network, then retry.',
+    });
+  }
+  const url = checkoutUrlFrom(res.status, res.json);
 
   // The link goes out on EVERY surface and before any waiting: it is single-use
   // with a ~5 minute expiry, and the stdout envelope that also carries it is
@@ -123,7 +137,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // question), so under a harness the page opens too.
   const willOpen =
     opts.open !== false && (ctx.io.isTTY || underAgentHarness(opts.env ?? process.env));
-  const hosted = isHostedCheckout(url);
+  const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
   emitWriteNotice(ctx.io, `Checkout for ${address}:`);
   emitWriteNotice(ctx.io, `  ${url}`);
   emitWriteNotice(
@@ -195,86 +209,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
             'Confirm arrival later with `tenjin wallet balance`.',
           ],
   };
-}
-
-/** A minted checkout link and when it stops working. */
-export interface FundLink {
-  url: string;
-  expiresAt: Date;
-}
-
-/**
- * Mint a checkout link for `address`, signed by that address's own key. A
- * signed read: nothing moves until the person pays on the page it opens.
- * `tenjin install` mints one too, with `purpose: 'install'`, for which the
- * server may issue a longer-lived token, so the person can add funds later
- * without typing a command.
- */
-export async function mintFundLink(
-  ctx: CommandContext,
-  signer: TenjinSigner,
-  address: string,
-  opts: { presetAmount?: number; purpose?: 'install'; fetchImpl?: typeof fetch } = {},
-): Promise<FundLink> {
-  const siwxHeader = await buildSiwxHeader(signer, {
-    baseUrl: FUND_ORIGIN,
-    chainId: SESSION_CHAIN_ID,
-  });
-  const request: HttpRequestOptions = {
-    method: 'POST',
-    timeoutMs: ctx.flags.timeout,
-    headers: { [SIWX_HEADER]: siwxHeader },
-    jsonBody: {
-      address: checksummed(address),
-      ...(opts.presetAmount !== undefined ? { presetAmount: opts.presetAmount } : {}),
-      ...(opts.purpose !== undefined ? { purpose: opts.purpose } : {}),
-    },
-    ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-  };
-  const res = await httpRequest(`${FUND_ORIGIN}/api/fund/link`, request);
-  if (!res.ok) {
-    throw fetchFailureToCliError(res, {
-      fix: 'Check your network, then retry.',
-    });
-  }
-  const url = checkoutUrlFrom(res.status, res.json);
-  return { url, expiresAt: fundLinkExpiry(url, Date.now(), res.json) };
-}
-
-/** A hosted Coinbase link lives about 5 minutes; a Tenjin /fund token 10. */
-const HOSTED_TTL_MS = 5 * 60_000;
-const PAGE_TTL_MS = 10 * 60_000;
-
-/** Is this a hosted Coinbase checkout, single-use and bound to this network? */
-export function isHostedCheckout(url: string): boolean {
-  return new URL(url).host === COINBASE_CHECKOUT_HOST;
-}
-
-/**
- * When a minted link stops working: the response's own `expiresAt` where the
- * server sends one, else the `exp` a Tenjin /fund link's token carries in its
- * fragment (read, not verified: the server verifies), else the known lifetime
- * from `now`.
- */
-export function fundLinkExpiry(url: string, now = Date.now(), body?: unknown): Date {
-  const sent =
-    typeof body === 'object' && body !== null
-      ? (body as { expiresAt?: unknown }).expiresAt
-      : undefined;
-  const sentMs =
-    typeof sent === 'string' ? Date.parse(sent) : typeof sent === 'number' ? sent : NaN;
-  if (Number.isFinite(sentMs) && sentMs > now) return new Date(sentMs);
-  if (isHostedCheckout(url)) return new Date(now + HOSTED_TTL_MS);
-  const payload = new URL(url).hash.slice(1).split('.')[0] ?? '';
-  try {
-    const exp = (
-      JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown }
-    ).exp;
-    if (typeof exp === 'number' && Number.isFinite(exp) && exp > now) return new Date(exp);
-  } catch {
-    // No readable token: the page's known lifetime.
-  }
-  return new Date(now + PAGE_TTL_MS);
 }
 
 /**

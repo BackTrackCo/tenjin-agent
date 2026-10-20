@@ -18,7 +18,7 @@ vi.mock('../lib/usdc', () => ({
 }));
 
 import { getUsdcBalance } from '../lib/usdc';
-import { fundLinkExpiry, mintFundLink, runFund } from './fund';
+import { runFund } from './fund';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
@@ -412,30 +412,6 @@ describe('runFund', () => {
       expect(openUrl).toHaveBeenCalledWith(PAGE);
       // Still no poll: the envelope carrying the link must not wait on it.
       expect(res.data).toMatchObject({ opened: true, pollStatus: 'skipped' });
-    });
-
-    it('mints the install link with purpose install, and takes the expiry the server sends', async () => {
-      const { provider, address } = fakeProvider();
-      const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
-      const { fetchImpl, calls } = stubFetch(200, { url: PAGE, expiresAt });
-      const link = await mintFundLink(makeCtx(), await provider.getSigner(), address, {
-        purpose: 'install',
-        fetchImpl,
-      });
-      expect(calls[0]!.body).toEqual({ address, purpose: 'install' });
-      expect(link).toEqual({ url: PAGE, expiresAt: new Date(expiresAt) });
-    });
-
-    it('reads the expiry from the token the link carries', () => {
-      const exp = Date.now() + 10 * 60_000;
-      const token = Buffer.from(JSON.stringify({ address: '0x1', exp })).toString('base64url');
-      expect(fundLinkExpiry(`${EXPECTED_FUND_ORIGIN}/fund#${token}.mac`).getTime()).toBe(exp);
-      // No readable token: the page's ten minutes; a hosted checkout: about five.
-      expect(fundLinkExpiry(PAGE, 0).getTime()).toBe(10 * 60_000);
-      expect(fundLinkExpiry(CHECKOUT, 0).getTime()).toBe(5 * 60_000);
-      // A server that names the expiry is taken at its word; a past one is not.
-      expect(fundLinkExpiry(PAGE, 0, { expiresAt: 3_600_000 }).getTime()).toBe(3_600_000);
-      expect(fundLinkExpiry(PAGE, 5, { expiresAt: 1 }).getTime()).toBe(5 + 10 * 60_000);
     });
 
     it('prints the whole link when the browser could not be opened', async () => {

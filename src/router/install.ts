@@ -56,8 +56,6 @@ import {
   type SpendOption,
 } from './spend-question';
 import { underAgentHarness } from '../lib/session';
-import type { FundLink } from '../commands/fund';
-import type { TenjinSigner } from '../lib/wallet/provider';
 
 /**
  * `tenjin install` for the router product: the wallet, the spend limits, and
@@ -159,14 +157,8 @@ export interface RouterInstallDeps extends WalletDeps {
   promptAmount?: (message: string, placeholder: string) => Promise<string | null>;
   /** The router reachability probe's transport; tests inject it. */
   fetchImpl?: typeof fetch;
-  /** Mints the wallet's fund link; production signs the request with the wallet key. */
-  fundLink?: (ctx: CommandContext, address: string) => Promise<FundLink>;
   /** The wallet's USDC balance in atomic units; production reads Base. */
   walletBalance?: (address: string, rpcUrl: string) => Promise<bigint>;
-  /** Unlocks the wallet's signer for the fund link, never with a prompt; production reads the OS store. */
-  unlockSigner?: (ctx: CommandContext) => Promise<TenjinSigner>;
-  /** How long the fund link waits for that unlock; {@link UNLOCK_TIMEOUT_MS} unless a test shortens it. */
-  unlockTimeoutMs?: number;
 }
 
 export type LimitsChoice = 'approve' | 'own';
@@ -482,7 +474,7 @@ export async function runRouterInstall(
     // The spend question comes first, because its answer picks the install
     // command. The funding question rides on the install that follows it.
     asksAgent && spendAsk === undefined
-      ? fundStep(ctx, wallet, effective.rpcUrl, deps)
+      ? fundStep(wallet, effective.rpcUrl, deps)
       : Promise.resolve(undefined),
   ]);
   const nextSteps: QuestionStep[] = [
@@ -642,7 +634,7 @@ function refreshNotices(
 
 /** The one rule for every step the agent relays from install. */
 export const SHOW_NOT_RUN =
-  'Show the person links and addresses, and never ask them to run a command.';
+  'Show the person addresses as written, and never ask them to run a command.';
 
 /**
  * An agent runs install with `--json` or in a shell with no terminal, so the
@@ -727,31 +719,23 @@ export interface QuestionStep {
   next: string;
 }
 
-/** The funding question, with what the person needs to add funds later. */
+/** The funding question, with the address the person needs to add funds later. */
 export interface FundStep extends QuestionStep {
   id: 'fund';
   address: string;
-  /** The wallet's fund page, or null when no link could be minted. */
-  url: string | null;
-  /** When `url` stops working, ISO 8601. */
-  expiresAt: string | null;
-  /** The link and the address, for the agent to show the person as written. */
+  /** The address, for the agent to show the person as written. */
   show: string;
-  /** Why no link was minted. */
-  reason?: string;
 }
 
 /**
  * THE QUESTION BEFORE THE ACTION. Under an agent harness, install opens no
  * browser and pays nothing: once the spend answer has picked the install, the
  * install hands the agent the funding question, so the page opens only after
- * an answer the person gave in the session. It mints the same signed link `tenjin wallet fund`
- * does (a read: nothing moves until the person pays on the page) for the
- * person to keep. A wallet that already holds USDC gets no question; a link
- * that cannot be minted leaves the address.
+ * an answer the person gave in the session. It mints no link: "Not now" shows
+ * the address, and a later yes runs `tenjin wallet fund`. A wallet that
+ * already holds USDC gets no question.
  */
 async function fundStep(
-  ctx: CommandContext,
   wallet: WalletOutcome,
   rpcUrl: string,
   deps: RouterInstallDeps,
@@ -768,19 +752,7 @@ async function fundStep(
           () => null,
         );
   if (funded === true) return undefined;
-  const mint = deps.fundLink ?? ((c: CommandContext, a: string) => mintInstallFundLink(c, a, deps));
-  const minted = await mint(ctx, address).then(
-    (link) => link,
-    (err: unknown) => ({ reason: err instanceof Error ? err.message : String(err) }),
-  );
-  const url = 'url' in minted ? minted.url : null;
-  const expires = 'url' in minted ? minted.expiresAt : null;
-  const { isHostedCheckout } = await import('../commands/fund');
-  const where = url !== null && isHostedCheckout(url) ? ' in a browser on this computer' : '';
-  const show =
-    url !== null && expires !== null
-      ? `To add funds, open this link${where} (valid ${validFor(expires.getTime() - Date.now())}): ${url} Or send USDC on Base to ${address}.`
-      : `To add funds, send USDC on Base to ${address}.`;
+  const show = `To add funds, send USDC on Base to ${address}.`;
   return {
     id: 'fund',
     question: FUND_QUESTION,
@@ -795,59 +767,8 @@ async function fundStep(
     ],
     next: `The install is done. Ask the person this question with your question tool. On "Yes, open the funding page", run \`${FUND_COMMAND}\` alone, in the same turn. On "Not now", run nothing and show the person this for later: ${show} Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
     address,
-    url,
-    expiresAt: expires?.toISOString() ?? null,
     show,
-    ...('reason' in minted ? { reason: minted.reason } : {}),
   };
-}
-
-/** "10 minutes", "1 hour": how long a link works, as the person reads it. */
-export function validFor(ms: number): string {
-  const minutes = Math.max(1, Math.round(ms / 60_000));
-  if (minutes % 60 === 0) {
-    const hours = minutes / 60;
-    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
-  }
-  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
-}
-
-/** How long install waits for the wallet to unlock before it hands over the address alone. */
-export const UNLOCK_TIMEOUT_MS = 3_000;
-/** The reason a link was not minted when the wallet did not unlock in time. */
-export const UNLOCK_TIMEOUT_REASON = `it needs an unlocked wallet; run \`${FUND_COMMAND}\` later`;
-
-/**
- * Never a passphrase prompt for a link, and never a wait without end: a locked
- * or stalled OS store would otherwise hold the whole install, so the agent got
- * neither the funding question nor the completion. A wallet that cannot unlock
- * in time gets the address alone.
- */
-async function mintInstallFundLink(
-  ctx: CommandContext,
-  address: string,
-  deps: RouterInstallDeps,
-): Promise<FundLink> {
-  const { mintFundLink } = await import('../commands/fund');
-  const unlock = deps.unlockSigner ?? defaultUnlockSigner;
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(UNLOCK_TIMEOUT_REASON)),
-      deps.unlockTimeoutMs ?? UNLOCK_TIMEOUT_MS,
-    );
-    timer.unref();
-  });
-  const signer = await Promise.race([unlock(ctx), timeout]).finally(() => clearTimeout(timer));
-  return mintFundLink(ctx, signer, address, {
-    presetAmount: Number(SUGGESTED_FUND_USD),
-    purpose: 'install',
-  });
-}
-
-async function defaultUnlockSigner(ctx: CommandContext): Promise<TenjinSigner> {
-  const { resolveWalletProvider } = await import('../lib/wallet');
-  return resolveWalletProvider({ ...ctx, io: { ...ctx.io, isTTY: false } }).getSigner();
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load viem. */
@@ -857,11 +778,8 @@ async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> 
 }
 
 /** The funding question, as the summary prints it. */
-function fundLines(ctx: CommandContext, fund: FundStep): string[] {
+function fundLines(fund: FundStep): string[] {
   return [
-    ...(fund.reason !== undefined
-      ? [paint(ctx.io, 'yellow', `! No fund link: ${fund.reason}`)]
-      : []),
     `  Ask the person: ${fund.question}`,
     `  Yes, open the funding page: ${FUND_COMMAND}`,
     `  Not now: run nothing, show them: ${fund.show}`,
@@ -1087,7 +1005,7 @@ function lines(
       : []),
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
-    ...(s.fund !== undefined ? fundLines(ctx, s.fund) : []),
+    ...(s.fund !== undefined ? fundLines(s.fund) : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),
     ...migrationLines(ctx, s.migration),
