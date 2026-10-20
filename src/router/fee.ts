@@ -24,11 +24,6 @@ export const ROUTING_FEE_ATOMIC = 3_000n;
  *  on the first paid call of a channel that cannot cover the next fee. */
 export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 /**
- * The smallest deposit worth signing: ten fees ($0.03). A per-call limit under
- * $0.25 sizes the deposit down to the limit while it still covers this many.
- */
-export const MIN_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
-/**
  * The top-up every "fund the wallet" hint names, in USD: the checkout's Apple
  * Pay and Google Pay minimum, which covers the routing deposit and a few
  * hundred lookups. `tenjin wallet fund` sends it to the checkout as a preset.
@@ -102,7 +97,7 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
   limit_below_deposit: {
-    reason: `the per-call spend limit is below the smallest routing deposit ($${usd(MIN_DEPOSIT_ATOMIC)})`,
+    reason: `the per-call spend limit is below the $${usd(CHANNEL_DEPOSIT_ATOMIC)} routing deposit`,
     fix: 'Run `tenjin doctor`.',
   },
   budget_reached: {

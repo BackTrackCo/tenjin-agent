@@ -11,7 +11,7 @@ import type { SpendPolicy } from '../lib/policy';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
-import { CHANNEL_DEPOSIT_ATOMIC, MIN_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
 import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
@@ -212,11 +212,9 @@ describe('RoutingPayer', () => {
 
   it('refuses a second deposit the day has no room for, and the call goes free', async () => {
     const router = new FakeRouter();
-    // A $0.03 deposit holds ten fees; the day has room for one deposit, not two.
-    const p = payer(router, {
-      policy_: { maxAutoSpendAtomic: MIN_DEPOSIT_ATOMIC, sessionBudgetAtomic: 50_000n },
-    });
-    for (let n = 0; n < 10; n += 1) {
+    // A $0.25 deposit holds 83 fees; the day has room for one deposit, not two.
+    const p = payer(router, { policy_: { sessionBudgetAtomic: 400_000n } });
+    for (let n = 0; n < Number(CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_ATOMIC); n += 1) {
       const paid = await routeOnce(p, router);
       expect(paid.status).toBe('decided');
       expect(unpaidWhy(paid)).toBeUndefined();
@@ -226,9 +224,9 @@ describe('RoutingPayer', () => {
     expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
     expect(router.paidRequests()).toBe(paidBefore);
     expect(router.deposits).toBe(1);
-    // The deposit counted once; the ten fees paid from it did not count again.
+    // The deposit counted once; the fees paid from it did not count again.
     expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe(
-      MIN_DEPOSIT_ATOMIC.toString(),
+      CHANNEL_DEPOSIT_ATOMIC.toString(),
     );
   });
 
@@ -299,20 +297,13 @@ describe('RoutingPayer', () => {
     });
   });
 
-  it('sizes the deposit down to a per-call limit under $0.25', async () => {
+  it('refuses the $0.25 deposit under a per-call limit an earlier release left lower', async () => {
     const router = new FakeRouter();
-    const p = payer(router, { policy_: { maxAutoSpendAtomic: 100_000n } });
-    expect((await routeOnce(p, router)).status).toBe('decided');
-    expect([...router.channels.values()][0]!.balance).toBe(100_000n);
-    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe('100000');
-  });
-
-  it('refuses a deposit a per-call limit cannot hold ten fees of, sending nothing paid', async () => {
-    const router = new FakeRouter();
-    const p = payer(router, { policy_: { maxAutoSpendAtomic: MIN_DEPOSIT_ATOMIC - 1n } });
+    const p = payer(router, { policy_: { maxAutoSpendAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n } });
     expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
     expect(router.paidRequests()).toBe(0);
-    expect(await readSpendSummary(dir, { now: () => clock })).toBeNull();
+    expect(router.deposits).toBe(0);
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic ?? '0').toBe('0');
   });
 
   it('refuses a deposit the daily budget cannot take, and reserves nothing', async () => {

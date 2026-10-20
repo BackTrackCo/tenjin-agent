@@ -27,7 +27,6 @@ import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
-  MIN_DEPOSIT_ATOMIC,
   payerDir,
   refusedWhy,
   ROUTE_PAID_PATH,
@@ -563,21 +562,16 @@ export class RoutingPayer {
 
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size, and the refusals. The SDK's ceiling ($0.25) comes down to a smaller
-   * per-call limit while that still covers {@link MIN_DEPOSIT_ATOMIC}; a wallet
-   * that cannot cover it, or a spend the authorizer denies (the daily budget,
-   * the creator allowlist), refuses the deposit and the call is not paid.
+   * size, and the refusals. The deposit is always the SDK's ceiling ($0.25); a
+   * wallet that cannot cover it, or a spend the authorizer denies (the per-call
+   * limit, the daily budget, the creator allowlist), refuses it and the call is
+   * not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
-    const ceiling = BigInt(ctx.maxDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString());
-    const amount = ceiling < policy.maxAutoSpendAtomic ? ceiling : policy.maxAutoSpendAtomic;
-    const floor = BigInt(ctx.minimumDepositAmount);
-    if (amount < (floor > MIN_DEPOSIT_ATOMIC ? floor : MIN_DEPOSIT_ATOMIC)) {
-      this.refuse('limit_below_deposit');
-    }
+    const amount = BigInt(ctx.maxDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString());
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
     const payer = this.channel!.payer;

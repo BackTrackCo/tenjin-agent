@@ -66,8 +66,8 @@ describe('routingFeeBlock', () => {
     ['a wallet tenjin mcp cannot unlock', { provider: verified('unverified') }, 'wallet_locked'],
     ['a wallet under the deposit', { fetchImpl: rpc(100_000n) }, 'wallet_low'],
     [
-      'a per-call limit under ten fees',
-      { policy: { ...POLICY, maxAutoSpendAtomic: 20_000n } },
+      'a per-call limit under the $0.25 deposit',
+      { policy: { ...POLICY, maxAutoSpendAtomic: 100_000n } },
       'limit_below_deposit',
     ],
     [
@@ -116,12 +116,13 @@ describe('routingFeeBlock', () => {
 });
 
 describe('routingFeeRow', () => {
-  it('raises a limit an earlier release left below the deposit to the $0.25 floor, and says why', () => {
+  it('raises a limit an earlier release left below the deposit to the $0.25 deposit', () => {
     const row = routingFeeRow('limit_below_deposit', 'tenjin.sh');
     expect(row.status).toBe('warn');
-    expect(row.fix).toContain('Raise it with `tenjin config set maxAutoSpend 0.25`.');
-    expect(row.fix).toContain('the routing deposit: below it, routing cannot pay');
-    expect(row.fix).toContain('`tenjin config set router.enabled false`');
+    expect(row.detail).toBe(
+      'the per-call spend limit is below the $0.25 routing deposit, so routing calls take the free path',
+    );
+    expect(row.fix).toBe('Raise it with `tenjin config set maxAutoSpend 0.25`.');
   });
 });
 

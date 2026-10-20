@@ -18,6 +18,7 @@ import {
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { readAliveStamp } from './alive';
+import { SUGGESTED_FUND_USD } from './fee';
 import {
   findClaudeBinary,
   readClaudeCode,
@@ -45,7 +46,6 @@ import {
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import {
-  limitsUsd,
   ROUTER_DEFAULTS,
   ROUTING_FEE_TERMS,
   shownLimits,
@@ -469,7 +469,7 @@ export async function runRouterInstall(
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
   const effective = await resolveContextSettings(ctx);
-  const approval = !canPrompt && !answered && unasked ? spendApproval(args) : undefined;
+  const spendAsk = !canPrompt && !answered && unasked ? spendStep(args) : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
   const asksAgent = !canPrompt && underAgentHarness(env);
@@ -481,12 +481,12 @@ export async function runRouterInstall(
     }),
     // The spend question comes first, because its answer picks the install
     // command. The funding question rides on the install that follows it.
-    asksAgent && approval === undefined
+    asksAgent && spendAsk === undefined
       ? fundStep(ctx, wallet, effective.rpcUrl, deps)
       : Promise.resolve(undefined),
   ]);
   const nextSteps: QuestionStep[] = [
-    ...(approval !== undefined ? [spendStep(approval)] : []),
+    ...(spendAsk !== undefined ? [spendAsk] : []),
     ...(fund !== undefined ? [fund] : []),
   ];
 
@@ -499,11 +499,7 @@ export async function runRouterInstall(
     // The check for this scope, said outright; a bare doctor in the project
     // also finds it from what the project holds.
     ...(project ? { doctor: 'tenjin doctor --project' } : {}),
-    spend: {
-      ...spend,
-      effective: effectiveLimits(effective.policy),
-      ...(approval !== undefined ? { approval } : {}),
-    },
+    spend: { ...spend, effective: effectiveLimits(effective.policy) },
     wallet,
     router: {
       status: router.status === 'ok' ? 'ok' : 'warn',
@@ -525,7 +521,7 @@ export async function runRouterInstall(
         ...(fund !== undefined ? { fund } : {}),
         asks: asksAgent && nextSteps.length > 0,
         policy: effective.policy,
-        ...(approval !== undefined ? { approval } : {}),
+        ...(spendAsk !== undefined ? { spendAsk } : {}),
         router,
       }),
       ...removedKeysLines,
@@ -644,25 +640,6 @@ function refreshNotices(
   return out;
 }
 
-/** The fix for a per-call limit an earlier release left below the $0.25 floor. */
-const RAISE_TO_FLOOR = `tenjin config set maxAutoSpend ${toMoney(MAX_AUTO_SPEND_FLOOR_ATOMIC.toString()).usd}`;
-
-/** The spend question an install that could not ask hands to its caller. */
-export interface SpendApproval {
-  /** For the agent to put to the person as written, with {@link options}. */
-  question: string;
-  /** The answers to offer, in order, each with the one command that applies it. */
-  options: SpendOption[];
-  /** The limits in effect until someone answers, in USD: the defaults. */
-  limits: { maxAutoSpend: string; sessionBudget: string };
-  /** The routing fee's terms, which either answer also approves. */
-  routingFee: string;
-  /** What the agent does with each answer. */
-  next: string;
-  /** The default's command: this install again with `--yes`, as the selector's "Use the defaults". */
-  approve: string;
-}
-
 /** The one rule for every step the agent relays from install. */
 export const SHOW_NOT_RUN =
   'Show the person links and addresses, and never ask them to run a command.';
@@ -674,16 +651,14 @@ export const SHOW_NOT_RUN =
  * shape as the `request` tool's `needs_input` step. A script or CI ignores
  * it, and the defaults hold.
  */
-function spendApproval(args: RouterInstallArgs): SpendApproval {
+function spendStep(args: RouterInstallArgs): QuestionStep {
   const options = spendOptions(installCommand(args));
   const [byDefault, custom] = options as [SpendOption, SpendOption];
   return {
+    id: 'spend',
     question: spendChoiceQuestion(),
     options,
-    limits: limitsUsd(ROUTER_DEFAULTS),
-    routingFee: ROUTING_FEE_TERMS,
     next: `In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
-    approve: byDefault.command,
   };
 }
 
@@ -729,10 +704,10 @@ function namedLimits(args: RouterInstallArgs): {
   return { limits, keys };
 }
 
-/** The funding question an agent's completed install hands over. */
-export const FUND_QUESTION = 'Do you want to add funds to your Tenjin wallet now?';
+/** The funding question an agent's completed install hands over: the checkout's $5 minimum. */
+export const FUND_QUESTION = `Do you want to add $${SUGGESTED_FUND_USD} to your Tenjin wallet now?`;
 /** Its yes: the agent runs this alone, in the turn the person answered. */
-export const FUND_COMMAND = 'tenjin wallet fund';
+export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
 
 /** One question install hands to the agent that ran it, with what each answer runs. */
 export interface QuestionStep {
@@ -764,15 +739,6 @@ export interface FundStep extends QuestionStep {
   show: string;
   /** Why no link was minted. */
   reason?: string;
-}
-
-function spendStep(approval: SpendApproval): QuestionStep {
-  return {
-    id: 'spend',
-    question: approval.question,
-    options: approval.options,
-    next: approval.next,
-  };
 }
 
 /**
@@ -849,7 +815,7 @@ export function validFor(ms: number): string {
 /** How long install waits for the wallet to unlock before it hands over the address alone. */
 export const UNLOCK_TIMEOUT_MS = 3_000;
 /** The reason a link was not minted when the wallet did not unlock in time. */
-export const UNLOCK_TIMEOUT_REASON = 'it needs an unlocked wallet; run `tenjin wallet fund` later';
+export const UNLOCK_TIMEOUT_REASON = `it needs an unlocked wallet; run \`${FUND_COMMAND}\` later`;
 
 /**
  * Never a passphrase prompt for a link, and never a wait without end: a locked
@@ -873,7 +839,10 @@ async function mintInstallFundLink(
     timer.unref();
   });
   const signer = await Promise.race([unlock(ctx), timeout]).finally(() => clearTimeout(timer));
-  return mintFundLink(ctx, signer, address, { purpose: 'install' });
+  return mintFundLink(ctx, signer, address, {
+    presetAmount: Number(SUGGESTED_FUND_USD),
+    purpose: 'install',
+  });
 }
 
 async function defaultUnlockSigner(ctx: CommandContext): Promise<TenjinSigner> {
@@ -1080,7 +1049,7 @@ function lines(
     fund?: FundStep;
     asks: boolean;
     policy: SpendPolicy;
-    approval?: SpendApproval;
+    spendAsk?: QuestionStep;
     router: RouterCheck;
   },
 ): string[] {
@@ -1091,16 +1060,10 @@ function lines(
     s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
   const spend = [
     `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
-    ...(s.policy.maxAutoSpendAtomic < MAX_AUTO_SPEND_FLOOR_ATOMIC
+    ...(s.spendAsk !== undefined
       ? [
-          warn(`The per-call limit is below the $0.25 minimum. ${MAX_AUTO_SPEND_FLOOR_WHY}`),
-          `  To raise it, run: ${RAISE_TO_FLOOR}`,
-        ]
-      : []),
-    ...(s.approval !== undefined
-      ? [
-          `  Ask the person in this session: ${s.approval.question}`,
-          ...s.approval.options.map(
+          `  Ask the person in this session: ${s.spendAsk.question}`,
+          ...s.spendAsk.options.map(
             (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
           ),
         ]

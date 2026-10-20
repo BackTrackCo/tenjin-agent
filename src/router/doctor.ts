@@ -2,7 +2,6 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import pkg from '../../package.json';
-import { MAX_AUTO_SPEND_FLOOR_ATOMIC, MAX_AUTO_SPEND_FLOOR_WHY } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
@@ -27,7 +26,7 @@ import {
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
-  MIN_DEPOSIT_ATOMIC,
+  refusedWhy,
   ROUTING_FEE_ATOMIC,
   SUGGESTED_FUND_USD,
   unpaid,
@@ -567,7 +566,7 @@ export function routingFeeRow(why: string | null, host: string): RouterCheck {
   }
   const fixes: Record<string, string> = {
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
-    limit_below_deposit: RAISE_TO_FLOOR,
+    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
     budget_reached:
       'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
@@ -610,24 +609,20 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   const spent = ledger === null ? 0n : spentOf(ledger);
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
-  const deposit =
-    policy.maxAutoSpendAtomic < CHANNEL_DEPOSIT_ATOMIC
-      ? policy.maxAutoSpendAtomic
-      : CHANNEL_DEPOSIT_ATOMIC;
-  if (deposit < MIN_DEPOSIT_ATOMIC) return 'limit_below_deposit';
+  // The deposit is always the full $0.25 and meets the whole policy, as the
+  // payer's: a per-call limit below it refuses it, mapped the payer's way.
   const evaluation = evaluateSpendPolicy(policy, {
     mode: 'automatic',
-    amountAtomic: deposit,
+    amountAtomic: CHANNEL_DEPOSIT_ATOMIC,
     creator: input.host,
     sessionSpentAtomic: spent,
   });
-  if (evaluation.reason === 'not_allowlisted') return 'not_allowlisted';
-  if (evaluation.reason === 'session_budget_exceeded') return 'budget_reached';
+  if (evaluation.decision !== 'allow') return refusedWhy(evaluation.reason);
   const balance = await readUsdcBalance(address, input.rpcUrl, {
     timeoutMs: input.timeoutMs,
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
   });
-  return balance !== null && balance < deposit ? 'wallet_low' : null;
+  return balance !== null && balance < CHANNEL_DEPOSIT_ATOMIC ? 'wallet_low' : null;
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */
@@ -642,14 +637,10 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
   };
 }
 
-/** The fix for a per-call limit a file holds below the $0.25 floor. */
-const RAISE_TO_FLOOR = `Raise it with \`tenjin config set maxAutoSpend ${toMoney(MAX_AUTO_SPEND_FLOOR_ATOMIC.toString()).usd}\`. ${MAX_AUTO_SPEND_FLOOR_WHY}`;
-
 /**
  * The two limits: the daily budget is the control, the per-call ceiling the
- * runaway guard. Nothing writes a per-call limit below the $0.25 floor any
- * more, but a file from an earlier release may hold one: a zero pays for
- * nothing and fails; anything else under it shrinks the routing deposit and warns.
+ * runaway guard. A per-call limit an earlier release left below $0.25 shows
+ * on the routing-fee row, which names the deposit it refuses.
  */
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
@@ -661,16 +652,13 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
-  if (maxAutoSpendAtomic < MAX_AUTO_SPEND_FLOOR_ATOMIC) {
-    const zero = maxAutoSpendAtomic === 0n;
+  if (maxAutoSpendAtomic === 0n) {
     return {
       name: 'spend',
-      status: zero ? 'fail' : 'warn',
-      required: zero,
-      detail: zero
-        ? 'maxAutoSpend is 0, so every lookup needs approval and none can pay'
-        : `maxAutoSpend is ${toMoney(maxAutoSpendAtomic.toString()).usd} USD, below the 0.25 USD minimum, so routing deposits are sized down to it`,
-      fix: RAISE_TO_FLOOR,
+      status: 'fail',
+      required: true,
+      detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
+      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
     };
   }
   const budget =

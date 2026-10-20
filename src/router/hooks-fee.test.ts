@@ -302,7 +302,7 @@ describe('the hook legs and the routing fee', () => {
     });
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     const notice = systemMessageOf(answer);
-    expect(notice).toContain('the per-call spend limit is below the smallest routing deposit');
+    expect(notice).toContain('the per-call spend limit is below the $0.25 routing deposit');
     expect(notice).toContain('Run `tenjin doctor`.');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
