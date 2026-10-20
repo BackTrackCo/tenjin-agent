@@ -389,7 +389,7 @@ async function pluginCheck(
           status: 'warn',
           required: false,
           detail: `${listing.id} ${pkg.version} is enabled, and no session has started it at this version${stamp !== null ? ` (last ${stamp.version}, at ${stamp.at})` : ''}`,
-          fix: 'Run `node --version` in a new terminal: Claude Code starts the plugin with that Node, and it must be 22 or newer.',
+          fix: "Claude Code starts the plugin with the Node on its own PATH; run `node --version` in this session's shell (it must be 22 or newer), then restart Claude Code after installing or updating Node.",
         },
       };
     }

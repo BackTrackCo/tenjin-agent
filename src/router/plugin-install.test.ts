@@ -746,7 +746,7 @@ describe('tenjin doctor', () => {
 
   describe('the session stamp, with a claude binary present', () => {
     const fix =
-      'Run `node --version` in a new terminal: Claude Code starts the plugin with that Node, and it must be 22 or newer.';
+      "Claude Code starts the plugin with the Node on its own PATH; run `node --version` in this session's shell (it must be 22 or newer), then restart Claude Code after installing or updating Node.";
 
     it('warns when no session has started the plugin, though `claude mcp get` connects', async () => {
       await fake.respond('list', listed('tenjin@tenjin', pkg.version));
@@ -898,12 +898,36 @@ describe('tenjin doctor', () => {
     expect(elsewhere['hook form']?.detail).toMatch(/^shell, in /);
   });
 
+  /** Leaving the session to run a command; restarting Claude Code is not that. */
+  const OUT_OF_SESSION = /terminal|by hand/i;
+
   it('never sends anyone out of the session to fix a check', async () => {
     await writeLegacy();
     await fake.respond('version', '2.1.100 (Claude Code)\n');
     const c = await checks();
     for (const check of Object.values(c)) {
-      expect(check.fix ?? '', check.name).not.toMatch(/terminal|restart Claude Code|by hand/i);
+      expect(check.fix ?? '', check.name).not.toMatch(OUT_OF_SESSION);
+    }
+  });
+
+  it('keeps the stamp, PATH and router server fixes inside the session', async () => {
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const c = await checks({
+      env: env({ CLAUDECODE: '1' }),
+      pathProbe: {
+        platform: 'win32',
+        env: { Path: 'C:\\Windows\\system32', CLAUDECODE: '1' },
+        savedPath: async () => ['C:\\Windows\\system32', 'C:\\Program Files\\nodejs\\'],
+        npmPrefix: async () => null,
+      },
+    });
+    expect(c['plugin']?.detail).toContain('no session has started it');
+    expect(c['PATH']?.status).toBe('warn');
+    expect(c['router server']?.status).toBe('fail');
+    for (const row of ['plugin', 'PATH', 'router server']) {
+      expect(c[row]?.fix, row).toMatch(/restart Claude Code/i);
+      expect(c[row]?.fix, row).not.toMatch(OUT_OF_SESSION);
     }
   });
 });
