@@ -36,6 +36,56 @@ function specPath(dataDir: string, id: string): string {
   return join(dataDir, SPECS_DIR, `${digest(id)}.json`);
 }
 
+function shownPath(dataDir: string, id: string): string {
+  return join(dataDir, SPECS_DIR, `${digest(id)}.shown.json`);
+}
+
+/** Past this many characters an input is a prompt, not the key of a lookup. */
+export const SHOWN_INPUT_MAX_CHARS = 80;
+
+/**
+ * WHICH INPUT A ROW MAY SHOW FOR A SERVICE, decided here so the mod reads a
+ * field name and nothing else (`progress/specs/<sha256(id)>.shown.json`). Only
+ * a lookup's identifying input: the field the catalog says takes a search's
+ * query or a fetch's URL (`holds`), else the service's first required string
+ * field (a company or person name, an expression). Never for a service the
+ * catalog marks as producing media (`output: "media"`: image, video, audio,
+ * music, speech), whose input is a prompt.
+ */
+export function shownInputField(spec: OfferSpec): string | null {
+  if (spec.output === 'media') return null;
+  const held = spec.holds?.WebSearch ?? spec.holds?.WebFetch;
+  if (held !== undefined) return held;
+  const properties = spec.input.properties;
+  if (properties === null || typeof properties !== 'object') return null;
+  const isString = (name: string) =>
+    (properties as Record<string, { type?: unknown }>)[name]?.type === 'string';
+  const required = Array.isArray(spec.input.required)
+    ? spec.input.required.filter((name): name is string => typeof name === 'string')
+    : [];
+  return required.find(isString) ?? Object.keys(properties).find(isString) ?? null;
+}
+
+/**
+ * The input a row shows for this call, or undefined: the field
+ * {@link shownInputField} names, when its value is a short single key. The
+ * mod applies the same cap to the value it reads.
+ */
+export function shownInput(spec: OfferSpec, input: Record<string, unknown>): string | undefined {
+  const field = shownInputField(spec);
+  if (field === null) return undefined;
+  const value = input[field];
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text.length > 0 && Array.from(text).length <= SHOWN_INPUT_MAX_CHARS ? text : undefined;
+}
+
+/** What `shownPath` holds: the field a row may show, or none. */
+interface ShownInput {
+  version: 1;
+  field: string | null;
+}
+
 /**
  * Store each spec under its id, and drop expired ones. Never throws. Ages are
  * file mtimes, so they are read against the real clock, never a caller's.
@@ -51,8 +101,13 @@ export async function storeSpecs(
         mode: 0o600,
         dirMode: 0o700,
       });
+      const shown: ShownInput = { version: 1, field: shownInputField(spec) };
+      await writeFileAtomic(shownPath(dataDir, spec.id), JSON.stringify(shown), {
+        mode: 0o600,
+        dirMode: 0o700,
+      });
     } catch {
-      // The tool falls back to the server for this id.
+      // The tool falls back to the server for this id; a row shows no input.
     }
   }
   await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());

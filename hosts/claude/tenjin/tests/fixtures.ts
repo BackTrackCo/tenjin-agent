@@ -54,7 +54,13 @@ export async function keepSpec(
   files: Map<string, string>,
   id: string,
   spec: Record<string, unknown>,
+  shownField: string | null = 'query',
 ): Promise<void> {
+  // The CLI's record of the one input a row may show (`specs.ts` `storeSpecs`).
+  files.set(
+    `${DATA}/progress/specs/${await sha256Hex(id)}.shown.json`,
+    JSON.stringify({ version: 1, field: shownField }),
+  );
   files.set(
     `${DATA}/progress/specs/${await sha256Hex(id)}.json`,
     JSON.stringify({

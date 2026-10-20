@@ -123,7 +123,7 @@ test('a held search is one row: struck, then the request call running and done, 
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007  ⎿  Running…');
+    expect(await rowText(ui)).toBe('⏺ Calling Exa search…  ⎿  "rust async runtimes"');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     await ui.unmount();
     // FROM ITS FIRST FRAME the request's own row takes no room.
@@ -220,12 +220,18 @@ test('a held search the model then ran natively draws nothing', async ($, on) =>
 
 test('a run with ours draws the engine count for the other calls, and each paid lookup as its row', async ($, on) => {
   const { files } = machine(on);
-  await keepSpec(files, OFFER, {
-    capabilityId: 'ideogram',
-    label: 'Ideogram V4',
-    priceAtomic: '30000',
-    maxAmountAtomic: '30000',
-  });
+  // An image service: the CLI keeps no input for its row to show.
+  await keepSpec(
+    files,
+    OFFER,
+    {
+      capabilityId: 'ideogram',
+      label: 'Ideogram V4',
+      priceAtomic: '30000',
+      maxAmountAtomic: '30000',
+    },
+    null,
+  );
   on('tool.call', { tool: TOOL }, async (_$, e) => {
     if (e.input === undefined) {
       const spec = JSON.stringify({ status: 'spec', cost: ['no charge'] });
@@ -271,7 +277,7 @@ test('a run with ours draws the engine count for the other calls, and each paid 
       call(TOOL, 'toolu_paid', paid),
     ]);
     expect((await shownLines(mixed)).join('')).toBe(
-      'Read 2 files (ctrl+o to expand)⏺Ideogram V4(a clean wide repository banner) · $0.03',
+      'Read 2 files (ctrl+o to expand)⏺Ideogram V4 · $0.03',
     );
     const [count] = await mixed.findAll({ type: 'Text', text: '2' });
     expect(count?.props).toMatchObject({ bold: true, dimColor: true });
@@ -522,8 +528,8 @@ test('a long input is cut to the row as the engine cuts a tool input, keeping th
     priceAtomic: '7000',
     maxAmountAtomic: '7000',
   });
-  const query =
-    'best local LLM for a 16 GB Mac that runs well in ollama, in October 2026, compared';
+  // Short enough to be shown (80 characters at most), too long for the row.
+  const query = 'best local LLM for a 16 GB Mac that runs well in ollama this autumn';
   on('tool.call', { tool: TOOL }, async () => {
     await recordPayment(files, OFFER, {
       capabilityId: 'exa-search',
@@ -538,14 +544,46 @@ test('a long input is cut to the row as the engine cuts a tool input, keeping th
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
-      viewport: { columns: 60, rows: 40 },
+      viewport: { columns: 40, rows: 40 },
       props: { ...toolRow('toolu_long', TOOL, { id: OFFER, input: { query } }), isRunning: false },
     });
     const line = await rowText(ui);
-    // 60 columns less 2 for the dot, 10 for the name, 2 for the parentheses
-    // and 9 for the tail leave 37 for the input, its last one the `…`.
-    expect(line).toBe(`⏺ Exa search(${query.slice(0, 36)}…) · $0.007`);
-    expect(Array.from(line).length).toBeLessThanOrEqual(60);
+    // 40 columns less 2 for the dot, 10 for the name, 2 for the parentheses
+    // and 9 for the tail leave 17, under the engine's floor of 20 for the
+    // input, its last one the `…`.
+    expect(line).toBe(`⏺ Exa search(${query.slice(0, 19)}…) · $0.007`);
+    await ui.unmount();
+  }
+});
+
+test('a long input is a prompt, not a key: the row shows none', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, {
+    label: 'Exa search',
+    priceAtomic: '7000',
+    maxAmountAtomic: '7000',
+  });
+  const question = 'x'.repeat(81);
+  on('tool.call', { tool: TOOL }, async () => {
+    await recordPayment(files, OFFER, {
+      capabilityId: 'exa-search',
+      amountAtomic: '7000',
+      txHash: '0x1',
+    });
+    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
+  });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_q', id: OFFER, input: { query: question } });
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: {
+        ...toolRow('toolu_q', TOOL, { id: OFFER, input: { query: question } }),
+        isRunning: false,
+      },
+    });
+    expect(await rowText(ui)).toBe('⏺ Exa search · $0.007');
     await ui.unmount();
   }
 });

@@ -52,18 +52,12 @@ test('a paid row is one line: the label, the query and the price, then the amoun
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    // The same row it will end with, the dot dim, and under it the engine's
-    // MCP progress line, which a built-in row does not show.
-    expect(await shownLines(ui)).toEqual([
-      '⏺',
-      'Exa search',
-      '(rust async runtimes)',
-      ' · $0.04',
-      '  ⎿  ',
-      'Running…',
-    ]);
+    // As Claude Code shows a running MCP call: `Calling <name>…`, the dot dim,
+    // and the call's query under it, quoted.
+    expect(await rowText(ui)).toBe('⏺ Calling Exa search…  ⎿  "rust async runtimes"');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
-    expect((await ui.findAll({ type: 'Text', text: 'Running…' }))[0]?.props.dimColor).toBe(true);
+    const [hint] = await ui.findAll({ type: 'Text', text: '"rust async runtimes"' });
+    expect(hint?.props.dimColor).toBe(true);
     await ui.unmount();
   }
   release();

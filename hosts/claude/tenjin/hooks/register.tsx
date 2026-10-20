@@ -19,9 +19,9 @@ import type { TenjinPaid, TenjinRow } from '../types';
  * the state.
  *
  * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
- * person would recognise (the query, the URL, else the first field, a field
- * whose name says secret masked), as the native WebSearch and WebFetch rows
- * show theirs. Never a description, a tool id, JSON or `x402`.
+ * CLI says identifies the lookup (`<sha256(id)>.shown.json`: a search's query,
+ * a URL, a name; none for a service that makes media, none past 80
+ * characters). Never a description, a tool id, JSON or `x402`.
  *
  * READ ONLY. Everything comes from files the CLI already writes under its data
  * dir, read through `$.fs` (the contract is `src/router/mod-state.ts`); the mod
@@ -60,8 +60,8 @@ const UNLABELLED = 'Tenjin lookup';
 const ROUTER = 'Tenjin';
 /** The server's label is up to 32 characters. */
 const LABEL_CHARS = 32;
-/** The status line's bound on what a call sends, applied to the one input shown. */
-const FIELD_CHARS = 180;
+/** Past this an input is a prompt, not a lookup's key (`SHOWN_INPUT_MAX_CHARS`). */
+const SHOWN_MAX_CHARS = 80;
 /** The spend ledger's rolling day (`DEFAULT_WINDOW_MS` in the CLI). */
 const SPEND_WINDOW_MS = 86_400_000;
 /** The CLI's default `sessionBudget`, $5.00. */
@@ -537,14 +537,7 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
   const id = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
   const input = asRecord(args.input);
   const dataDir = await tenjinDataDir($);
-  const argument =
-    input !== undefined
-      ? argumentOf(input)
-      : (argumentOf({ query: args.query }) ?? argumentOf({ browse: args.browse }));
-  const base = {
-    ...(argument !== undefined ? { argument } : {}),
-    ...(id !== undefined ? { offerId: id } : {}),
-  };
+  const base = { ...(id !== undefined ? { offerId: id } : {}) };
   if (input === undefined || id === undefined || dataDir === null) {
     return { row: { label: ROUTER, isPaid: false, ...base }, ids: [], dataDir };
   }
@@ -574,9 +567,43 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
     const picked = options.find((option) => option.key === choice);
     if (picked === undefined)
       return { row: { label: ROUTER, isPaid: false, ...base }, ids: [], dataDir };
-    return paidCall(await readSpec($, dataDir, picked.id), picked.id, base, dataDir);
+    const shown = await shownArgument($, dataDir, picked.id, input);
+    return paidCall(
+      await readSpec($, dataDir, picked.id),
+      picked.id,
+      { ...base, ...shown },
+      dataDir,
+    );
   }
-  return paidCall(await readSpec($, dataDir, id), id, base, dataDir);
+  const shown = await shownArgument($, dataDir, id, input);
+  return paidCall(await readSpec($, dataDir, id), id, { ...base, ...shown }, dataDir);
+}
+
+/**
+ * THE ONE INPUT A ROW SHOWS, as the CLI decided it for the service
+ * (`progress/specs/<sha256(id)>.shown.json`, version 1): the field it names,
+ * when the value is a short single key. No record, a null field (a service
+ * that makes media) or a long value: the row shows no input.
+ */
+async function shownArgument(
+  $: Dollar,
+  dataDir: string,
+  id: string,
+  input: Json,
+): Promise<{ argument?: string }> {
+  const kept = await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.shown.json`);
+  const field = kept?.version === 1 && typeof kept.field === 'string' ? kept.field : undefined;
+  // A field whose name says secret is never shown, whatever the CLI kept.
+  if (field !== undefined && SECRET_NAME.test(field)) return {};
+  const value = field !== undefined ? input[field] : undefined;
+  const argument = typeof value === 'string' ? shortKey(value) : undefined;
+  return argument !== undefined ? { argument } : {};
+}
+
+/** A value short enough to be the key of a lookup (the CLI's same cap), cleaned. */
+function shortKey(value: string): string | undefined {
+  const text = clean(value, SHOWN_MAX_CHARS + 1);
+  return text.length > 0 && Array.from(text).length <= SHOWN_MAX_CHARS ? text : undefined;
 }
 
 /** One spec's call: its label, its price, and its own payment record. */
@@ -803,41 +830,22 @@ function labelOf(spec: Json | null): string {
 }
 
 /**
- * THE ONE INPUT A ROW SHOWS, as the native rows show theirs: the query, the
- * URL, else the first field, a nested object followed to its first leaf and
- * a list joined. A field whose name says secret is masked whatever its value.
- * Control and format characters go and it is bounded to one line. The CLI's
- * own mask never runs in a mod (it needs Node), and it has nothing to do on a
- * call that is sent: the request tool refuses, before sending, any input the
- * mask would change.
- */
-function argumentOf(input: Json): string | undefined {
-  const key =
-    ['query', 'url'].find((name) => input[name] !== undefined) ??
-    Object.keys(input).find((name) => input[name] !== undefined);
-  if (key === undefined) return undefined;
-  const value = input[key];
-  const nested = asRecord(value);
-  if (nested !== undefined) return argumentOf(nested);
-  const text = clean(SECRET_NAME.test(key) ? '[redacted]' : shown(value), FIELD_CHARS);
-  return text.length > 0 ? text : undefined;
-}
-
-/**
  * A native call's own input as the engine's row shows it (Claude Code 2.1.304's
  * `renderToolUseMessage`): WebSearch quotes its query, WebFetch shows its URL.
  */
 function nativeArgument(input: Json | undefined): string | undefined {
   if (input === undefined) return undefined;
-  const query = argumentOf({ query: input.query });
-  return query !== undefined ? `"${query}"` : argumentOf({ url: input.url });
+  const query = typeof input.query === 'string' ? shortKey(input.query) : undefined;
+  if (query !== undefined) return `"${query}"`;
+  return typeof input.url === 'string' ? shortKey(input.url) : undefined;
 }
 
 /** The engine's response gutter and an MCP call's progress while it runs. */
 const GUTTER = '  ⎿  ';
 /** The engine's hint after a folded run's count (its default chord). */
 const EXPAND_HINT = '(ctrl+o to expand)';
-const RUNNING = 'Running…';
+/** The verb the engine's folded line gives a running MCP call. */
+const CALLING = 'Calling';
 /** A held row's tail names the offer it is struck for: `· Tenjin offered Exa search`. */
 const OFFERED = 'Tenjin offered';
 /** The names the engine draws its native rows under (each tool's `userFacingName`). */
@@ -854,8 +862,8 @@ interface RowShape {
   /** The dim text after the input: ` · $0.007`, ` · $0.42 · needs approval`. */
   tail?: string;
   isStruck?: boolean;
-  /** A request call, which shows the engine's MCP progress line while it runs. */
-  isCall?: boolean;
+  /** What goes under the row while it runs, as the engine puts an MCP call's query. */
+  hint?: string;
 }
 
 /**
@@ -871,9 +879,17 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
     (part): part is string => part !== undefined,
   );
   const state: RowState = isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done';
+  // While it runs, as Claude Code shows a running MCP call: its folded line
+  // reads `Calling <server>…` and the call's query goes under it, quoted.
+  if (isRunning) {
+    return {
+      state,
+      name: `${CALLING} ${row.label}…`,
+      ...(row.argument !== undefined ? { hint: row.argument } : {}),
+    };
+  }
   return {
     state,
-    isCall: true,
     name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
@@ -911,16 +927,18 @@ function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape, columns?: 
       </Box>
     </Box>
   );
-  if (!isRunning || shape.isCall !== true) return line;
-  // AN MCP CALL WHILE IT RUNS: the engine draws its progress under the row,
-  // `  ⎿  Running…` in dim text (2.1.304's MCP renderToolUseProgressMessage),
-  // which a built-in row does not. Gone once the call has ended.
+  if (shape.hint === undefined) return line;
+  // The query under the row, quoted and dim, as the engine shows an MCP
+  // call's (its ToolGroup's latestDisplayHint) while it runs.
+  const hint = /^".*"$/.test(shape.hint) ? shape.hint : `"${shape.hint}"`;
   return (
     <Box flexDirection="column">
       {line}
       <Box flexDirection="row">
         <Text dimColor>{GUTTER}</Text>
-        <Text dimColor>{RUNNING}</Text>
+        <Text dimColor wrap="truncate-end">
+          {hint}
+        </Text>
       </Box>
     </Box>
   );
@@ -1004,14 +1022,6 @@ async function heldFor(
     }
   }
   return false;
-}
-
-function shown(value: unknown): string {
-  if (Array.isArray(value)) {
-    const isFlat = value.every((one) => asRecord(one) === undefined && !Array.isArray(one));
-    return isFlat ? value.map(String).join(', ') : `${value.length} items`;
-  }
-  return String(value);
 }
 
 /** `sanitize` from the CLI's progress records: what reaches a terminal from

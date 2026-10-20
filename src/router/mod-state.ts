@@ -12,6 +12,7 @@ import { writeFileAtomic } from '../lib/atomic-json';
  * | File | Writer | Version field | What the mod reads |
  * | --- | --- | --- | --- |
  * | `progress/specs/<sha256(id)>.json` | `specs.ts` `storeSpecs` | the spec's own schema | `label`, `priceAtomic`, `maxAmountAtomic`, `priceVaries`, `capabilityId` |
+ * | `progress/specs/<sha256(id)>.shown.json` | `specs.ts` `storeSpecs` (`shownInputField`) | `version: 1` | `field`, the one input a row may show, or null |
  * | `progress/specs/<sha256(id)>.paid.json` | `specs.ts` `settleSpecPayment` | `state` | `state`, `at`, `amountAtomic`, `txHash` |
  * | `paid/ledger.jsonl` | `paid.ts` `appendPaidRecord` | `version: 1` | `ts`, `capabilityId`, `amountAtomic`, `txHash`, `settlement` |
  * | `spend.json` | `lib/wallet/spend.ts` | `schemaVersion: 2` | `windowStartMs`, `automaticCommittedAtomic`, `reservations` |
