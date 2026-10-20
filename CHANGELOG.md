@@ -1,5 +1,31 @@
 # tenjin-cli
 
+## 0.1.0-alpha.29
+
+### Patch Changes
+
+- dbec7e8: Paid jobs that finish later, and several takes of one call:
+
+  - A paid lookup whose seller answers before the result is ready (a queued video, a busy image render, a 202) is polled until it is done, for up to 5 minutes inside the call (in Claude Code, which moves a long call into the background, for as long as the seller says the job can take, with each poll reported as progress), and the file is saved as before. If it is still running then, the result says `running` with a `job` id, and `request({job})` checks it again later, from any session, paying nothing more. A 202 is never reported as a finished result.
+  - Polls go only to the seller's own host over HTTPS, and never carry a payment: a take costs its one payment, and a seller that asks for another to hand back the result gets nothing and the take fails.
+  - `request({id, input, count})` runs 2 to 5 takes of an image, video or audio call, each its own payment.
+  - One spend rule for every call: a call plans all its payments first, and their total is checked once against the per-call limit (`maxAutoSpend`, now the whole call's), the daily budget and the balance. A compare (`choice: "all"`) is planned at each option's live price.
+  - Over a limit, nothing is paid and the result says what it would cost ("5 takes of AiSpace (Hailuo 3 Max) cost $0.775 in total ($0.155 each)."). In Claude Code 2.1.214 or later, a new `approve` tool runs exactly that call once, and only through Claude Code's own permission prompt, which no mode or allow rule skips. Nobody is told to raise a limit.
+
+- 1247724: The Claude Code plugin now runs on Windows: every command it carries is exec form, `node` and its arguments started with no shell, so Git Bash and PowerShell no longer parse it. The `SessionStart` leg and the `router` MCP server run `node` with the package's own `dist/index.js` (found from `${CLAUDE_PLUGIN_ROOT}` in the shipped plugin, and written as an absolute path into the `skills/tenjin-router/` folder fallback), never the `tenjin` npm shim, which Windows cannot spawn without a shell. The two permission answers are fixed JSON that `node -e` prints. With a `claude` binary present, the `plugin` row now also reads the stamp a session's `SessionStart` leg writes, and warns when no session has started the plugin at this version, since `claude mcp get` runs with doctor's PATH, not Claude Code's. A Claude Code opened before Node was on its PATH writes no stamp, so that row names the cause: its fix is to start a new session and run doctor again, then to run `node --version` in the session and restart Claude Code. A `router server` failure says to restart Claude Code (quit it from the tray) or sign out and in.
+- dbec7e8: Small fixes across the CLI:
+
+  - The wallet address QR code scans on light editor themes: it is drawn from fixed 256-color black and white with the spec's four-module margin, and is skipped (the address still prints) on a terminal without 256 colors.
+  - `tenjin payments` lists the paid lookups this machine made: time, provider, service, amount, settlement and transaction. `payments reconcile` is unchanged.
+  - The routing deposit reads as prepaid credit, not spend. `tenjin status` shows lookups and routing credit apart (prepaid, what is left, about how many calls) and what counts toward the daily limit; `tenjin wallet balance` adds the credit left. The call that takes a deposit says so once. It still counts toward the daily limit.
+  - A paid job still running when its time runs out, whose seller sent a status URL (`X-Status-Url`), is reported as still running with that URL to check, settlement unknown, instead of as a failure.
+  - Every funding hint names the same amount, `tenjin wallet fund 5`, the checkout's Apple Pay and Google Pay minimum.
+  - The request tool's description opens with what to do (call the service a hook line names) instead of a list of lookups, which read as all the router sells, so an agent asked for an image or a sound no longer takes it as out of scope.
+  - A wallet too low to pay says how much USDC it is short.
+  - A `tenjin install --project` install is refreshed by `tenjin update`, from its own directory; `install --project` records it.
+  - A bare `tenjin doctor` in a project installed with `--project` checks that install, and the install names `tenjin doctor --project`.
+  - A bare `tenjin uninstall` in such a project says it left the project's install in place and names `tenjin uninstall --project`.
+
 ## 0.1.0-alpha.28
 
 ### Patch Changes
