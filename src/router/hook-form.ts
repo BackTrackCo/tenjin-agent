@@ -22,15 +22,6 @@ export function commandForm(handler: unknown): HookForm | null {
   return Array.isArray(handler.args) ? 'exec' : 'shell';
 }
 
-/** A command handler's argv: exec form as written, shell form split on whitespace. */
-export function commandArgv(handler: unknown): string[] | null {
-  if (!isPlainObject(handler) || typeof handler.command !== 'string') return null;
-  if (Array.isArray(handler.args)) {
-    return [handler.command, ...handler.args.filter((a): a is string => typeof a === 'string')];
-  }
-  return handler.command.trim().split(/\s+/);
-}
-
 /** Every handler in a hooks file (`{ hooks: { <Event>: [{ hooks: [...] }] } }`). */
 export function handlersIn(file: unknown): unknown[] {
   const events = isPlainObject(file) ? file.hooks : undefined;

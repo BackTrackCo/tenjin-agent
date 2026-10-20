@@ -1,25 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { commandArgv, commandForm, handlersIn, shellDependence } from './hook-form';
+import { commandForm, handlersIn, shellDependence } from './hook-form';
 
 describe('commandForm', () => {
   it('reads exec form from an args array and shell form from its absence', () => {
     expect(commandForm({ type: 'command', command: 'node', args: ['x.js'] })).toBe('exec');
     expect(commandForm({ type: 'command', command: 'tenjin hook alive' })).toBe('shell');
     expect(commandForm({ type: 'mcp_tool', server: 's', tool: 't' })).toBeNull();
-  });
-});
-
-describe('commandArgv', () => {
-  it('gives the argument vector of either form', () => {
-    expect(
-      commandArgv({ type: 'command', command: 'node', args: ['/a/index.js', 'hook'] }),
-    ).toEqual(['node', '/a/index.js', 'hook']);
-    expect(commandArgv({ type: 'command', command: ' tenjin hook  alive ' })).toEqual([
-      'tenjin',
-      'hook',
-      'alive',
-    ]);
-    expect(commandArgv({ type: 'http', url: 'http://x' })).toBeNull();
   });
 });
 

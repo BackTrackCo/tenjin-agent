@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { inspectHooksFile } from '../lib/harness-hooks';
 import { runClaude, type ClaudeBinary } from './claude-cli';
-import { commandArgv, commandForm } from './hook-form';
 import { LEGACY_HOOK_TOOL, LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL } from './names';
 import { classifyStatusLine, decomposeCommand, type StatusLineState } from './status-line-wiring';
 
@@ -17,8 +16,7 @@ import { classifyStatusLine, decomposeCommand, type StatusLineState } from './st
  *
  * EXACT SHAPES ONLY. A hook handler is Tenjin's when it is an `mcp_tool` call
  * to the `x402` server's `hook` tool, or a command that is exactly
- * `tenjin hook <leg>` (optionally with a path, in shell or exec form, or as
- * `node <tenjin-cli>/dist/index.js hook <leg>`). Any other command that merely
+ * `tenjin hook <leg>` (optionally with a path). Any other command that merely
  * contains `tenjin hook` is the user's, kept and reported. Removal is handler
  * by handler, so a group holding a foreign handler beside ours keeps it. The
  * rules are touched only when the `x402` server is Tenjin's or gone, and a
@@ -31,21 +29,7 @@ import { classifyStatusLine, decomposeCommand, type StatusLineState } from './st
  * unmigrated machine after that.
  */
 
-const TENJIN_BIN = /^(\S*[\\/])?tenjin(\.cmd)?$/i;
-const NODE_BIN = /^(\S*[\\/])?node(\.exe)?$/i;
-const CLI_ENTRY = /[\\/]tenjin-cli[\\/]dist[\\/]index\.js$/;
-
-/** `tenjin hook <leg>` and nothing more, however the CLI was started. */
-function isLegacyHookCommand(handler: unknown): boolean {
-  const argv = commandArgv(handler);
-  if (argv === null || argv.length === 0) return false;
-  const rest = TENJIN_BIN.test(argv[0]!)
-    ? argv.slice(1)
-    : NODE_BIN.test(argv[0]!) && CLI_ENTRY.test(argv[1] ?? '')
-      ? argv.slice(2)
-      : [];
-  return rest.length === 2 && rest[0] === 'hook' && /^[a-z]+$/.test(rest[1]!);
-}
+const LEGACY_COMMAND_RE = /^(\S*\/)?tenjin hook [a-z]+$/;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -57,7 +41,8 @@ export function ownsLegacyHandler(handler: unknown): boolean {
   if (handler.type === 'mcp_tool') {
     return handler.server === LEGACY_MCP_SERVER_NAME && handler.tool === 'hook';
   }
-  return isLegacyHookCommand(handler);
+  const command = handler.command;
+  return typeof command === 'string' && LEGACY_COMMAND_RE.test(command.trim());
 }
 
 /** A handler that mentions `tenjin hook` without being one of ours: reported, never removed. */
@@ -125,8 +110,6 @@ export interface LegacyInstall {
   mcp: McpEntryState;
   /** Commands that mention `tenjin hook` but are not ours, left in place. */
   lookalikes: string[];
-  /** Handlers of ours in shell form, which Windows runs under a shell that may not parse them. */
-  shellCommands: number;
   /** Set when the settings file could not be read; nothing is then known or removed. */
   unreadable?: string;
 }
@@ -146,7 +129,6 @@ export async function inspectLegacyInstall(
     statusLine: 'absent' as StatusLineState,
     mcp,
     lookalikes: [] as string[],
-    shellCommands: 0,
   };
   const found = await inspectHooksFile(settingsPath);
   if ('refusal' in found) {
@@ -162,9 +144,6 @@ export async function inspectLegacyInstall(
         .filter((c) => c !== null),
     ),
   );
-  const shellCommands = Object.values(found.hooks)
-    .flatMap((list) => list.flatMap(handlersOf))
-    .filter((h) => ownsLegacyHandler(h) && commandForm(h) === 'shell').length;
   const rulesOurs = mcp === 'ok' || (mcp === 'absent' && events.length > 0);
   const allowRule = rulesOurs && listOf(found.settings, 'allow').includes(LEGACY_REQUEST_TOOL);
   const denyRule = rulesOurs && listOf(found.settings, 'deny').includes(LEGACY_HOOK_TOOL);
@@ -178,7 +157,6 @@ export async function inspectLegacyInstall(
     denyRule,
     statusLine,
     lookalikes,
-    shellCommands,
   };
 }
 

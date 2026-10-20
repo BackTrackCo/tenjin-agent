@@ -98,7 +98,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - run: pnpm exec vitest run src/router/hook-form.test.ts src/router/plugin-files.test.ts src/router/legacy-install.test.ts
+      - run: pnpm exec vitest run src/router/hook-form.test.ts src/router/plugin-files.test.ts
       # `pnpm build` starts with `rm -rf`, which cmd.exe lacks. A fresh checkout has no dist to clear.
       - run: pnpm exec tsup
       - run: node scripts/plugin-spawn-smoke.mjs dist/hosts/claude

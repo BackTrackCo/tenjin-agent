@@ -105,7 +105,7 @@ Claude Code 2.1.287 or later is required. `tenjin install` and `tenjin doctor` r
    - One `SessionStart` command, `tenjin hook alive`, run as `node` with the package's own `dist/index.js`, which writes two small files under `~/.tenjin/alive/`: a marker for the session (a hash of its id) and a stamp saying the plugin has loaded on this machine. It prints nothing and sends nothing.
    - The `router` MCP server, `tenjin mcp --plugin`, run as `node` from your PATH with the package's own `dist/index.js`.
 
-   Every command the plugin carries is a Claude Code exec-form command: `node` and its arguments, started with no shell and never through the `tenjin` npm shim, so Windows runs the same files macOS and Linux run. The shipped plugin finds the entry three folders above `${CLAUDE_PLUGIN_ROOT}`, since Claude Code loads it in place from the package. The `skills/tenjin-router/` folder carries the absolute entry of the CLI that wrote it. `tenjin doctor` reports the form it finds, and on Windows warns about any Tenjin hook left in shell form.
+   Every command the plugin carries is a Claude Code exec-form command: `node` and its arguments, started with no shell and never through the `tenjin` npm shim, so Windows runs the same files macOS and Linux run. The shipped plugin finds the entry three folders above `${CLAUDE_PLUGIN_ROOT}`, since Claude Code loads it in place from the package. The `skills/tenjin-router/` folder carries the absolute entry of the CLI that wrote it.
 
 4. Nothing else. The status line is no longer set up: `tenjin status-line` still exists, and you can set it as your status line command yourself.
 

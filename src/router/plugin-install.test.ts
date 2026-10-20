@@ -746,7 +746,7 @@ describe('tenjin doctor', () => {
 
   describe('the session stamp, with a claude binary present', () => {
     const fix =
-      "Claude Code starts the plugin with the Node on its own PATH; run `node --version` in this session's shell (it must be 22 or newer), then restart Claude Code after installing or updating Node.";
+      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
 
     it('warns when no session has started the plugin, though `claude mcp get` connects', async () => {
       await fake.respond('list', listed('tenjin@tenjin', pkg.version));
@@ -842,60 +842,6 @@ describe('tenjin doctor', () => {
     expect(c['claude code']?.status).toBe('warn');
     expect(c['plugin']).toMatchObject({ status: 'warn' });
     expect(c['plugin']?.fix).toContain('/reload-plugins');
-  });
-
-  it('reads the hook form where Claude Code loads the plugin: exec, with no shell', async () => {
-    const stale = join(root, 'cache', 'tenjin');
-    await mkdir(join(stale, 'hooks'), { recursive: true });
-    const old = { type: 'command', command: 'tenjin hook alive' };
-    await writeFile(
-      join(stale, 'hooks', 'hooks.json'),
-      JSON.stringify({ hooks: { SessionStart: [{ hooks: [old] }] } }),
-    );
-    await mkdir(join(cfg, 'plugins'), { recursive: true });
-    await writeFile(
-      join(cfg, 'plugins', 'installed_plugins.json'),
-      JSON.stringify({ plugins: { 'tenjin@tenjin': [{ installPath: stale }] } }),
-    );
-    // A recorded install path alone is read.
-    expect((await checks({ platform: 'win32' }))['hook form']?.status).toBe('warn');
-    // A directory marketplace loads in place, so its folder wins over the cache copy.
-    await writeFile(
-      join(cfg, 'plugins', 'known_marketplaces.json'),
-      JSON.stringify({
-        tenjin: { source: { source: 'directory', path: hosts }, installLocation: hosts },
-      }),
-    );
-    expect((await checks({ platform: 'win32' }))['hook form']).toMatchObject({
-      status: 'ok',
-      detail: 'exec, 3 command hooks and no shell',
-    });
-  });
-
-  it('warns on Windows about a shell-form folder or settings install, naming each file', async () => {
-    const noClaude = env({ PATH: await emptyPath() });
-    await runRouterInstall({}, ctx(), deps({ env: noClaude }));
-    const hooksFile = join(cfg, 'skills', 'tenjin-router', 'hooks', 'hooks.json');
-    const old = { type: 'command', command: 'tenjin hook alive', timeout: 5 };
-    await writeFile(hooksFile, JSON.stringify({ hooks: { SessionStart: [{ hooks: [old] }] } }));
-    await writeFile(
-      join(cfg, 'settings.json'),
-      JSON.stringify({
-        hooks: {
-          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'tenjin hook prompt' }] }],
-        },
-      }),
-    );
-    const c = await checks({ env: noClaude, platform: 'win32' });
-    expect(c['hook form']?.status).toBe('warn');
-    expect(c['hook form']?.detail).toContain(hooksFile);
-    expect(c['hook form']?.detail).toContain(join(cfg, 'settings.json'));
-    expect(c['hook form']?.fix).toBe(
-      'Run `tenjin install`: it writes the plugin in exec form, and removes an earlier settings install once the plugin has loaded.',
-    );
-    const elsewhere = await checks({ env: noClaude, platform: 'darwin' });
-    expect(elsewhere['hook form']).toMatchObject({ status: 'ok' });
-    expect(elsewhere['hook form']?.detail).toMatch(/^shell, in /);
   });
 
   /** Leaving the session to run a command; restarting Claude Code is not that. */
