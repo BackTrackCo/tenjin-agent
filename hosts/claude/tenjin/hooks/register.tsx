@@ -158,23 +158,48 @@ export const register: Register = (on) => {
 
   on('tool.call', { tool: REQUEST_TOOL }, ($, e, next) => onRequest($, e, next));
 
-  // A RUN OF REQUEST CALLS folds into the engine's one count line, which says
-  // nothing of what ran: unfolded, each draws its own row through the hook
-  // below. So does a run whose other calls are native ones the CLI held, so
-  // the switch reads on its line. A run with any other call in it is the
-  // engine's.
+  // A RUN OF CALLS WITH OURS IN IT. The engine folds a run into one count
+  // line ("Read 2 files, called plugin:tenjin:router"), which would hide a
+  // paid lookup and name the router. A run without ours is the engine's.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
-    const { calls } = e.props;
-    let ours = calls.length > 0;
+    const { calls, isActive, isExpanded } = e.props;
+    // Unfolded (ctrl+o, --verbose), each call draws its own row through the
+    // ToolUse hook below.
+    if (isExpanded || !calls.some((c) => c.tool === REQUEST_TOOL)) return next(e);
+    const unfold = () => next({ ...e, props: { ...e.props, isExpanded: true } });
+    // A held call and the request that takes it up read as one switch row.
     for (const call of calls) {
-      if (!ours) break;
-      if (call.tool === REQUEST_TOOL) continue;
-      ours =
-        NATIVE_TOOLS.has(call.tool) &&
-        call.tool_use_id !== undefined &&
-        (await heldRow($, call.tool_use_id)) !== null;
+      if (!NATIVE_TOOLS.has(call.tool) || call.tool_use_id === undefined) continue;
+      if ((await heldRow($, call.tool_use_id)) !== null) return unfold();
     }
-    return next(ours ? { ...e, props: { ...e.props, isExpanded: true } } : e);
+    // A desktop host that predates `tool_use_id` on a group's calls: unfold,
+    // so nothing paid is hidden in the count.
+    if (calls.some((c) => c.tool === REQUEST_TOOL && c.tool_use_id === undefined)) return unfold();
+    // OUR CALLS NEVER HIDE IN THE COUNT, AND ARE NEVER COUNTED. The engine's
+    // line counts the other calls alone; each paid lookup draws its own row
+    // beneath it; a free one (a spec fetch, the router's own pick) draws
+    // nothing. The ctrl+o transcript still unfolds the whole run.
+    const rows = (
+      await Promise.all(
+        calls
+          .filter((c) => c.tool === REQUEST_TOOL)
+          .map((c) => requestShape($, { ...c, tool_use_id: c.tool_use_id as string })),
+      )
+    ).filter((shape): shape is RowShape => shape !== null);
+    const { Box, Text } = $.ui.resolve(e);
+    const line = countLine(
+      Box,
+      Text,
+      calls.filter((c) => c.tool !== REQUEST_TOOL),
+      isActive,
+    );
+    if (line === null && rows.length === 0) return <Box display="none" />;
+    return (
+      <Box flexDirection="column">
+        {line}
+        {rows.map((shape) => toolRow(Box, Text, shape, e.viewport?.columns))}
+      </Box>
+    );
   });
 
   // ONE LINE PER LOOKUP. A held native call is its name struck through, and
@@ -239,43 +264,9 @@ export const register: Register = (on) => {
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { Box, Text } = $.ui.resolve(e);
-    const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
-    // NOT STARTED YET. The engine draws a call's row before it runs, while its
-    // input is still streaming in and before it is in progress (`isRunning`
-    // false, no output): read then, the input names no offer yet and the row
-    // would say "Tenjin" for a frame. Nothing is drawn until the call's own
-    // tool.call has stored its row, or a result exists (a resumed transcript).
-    const hasOutput = e.props.output !== undefined;
-    if (stored === undefined && !hasOutput) return <Box display="none" />;
-    // A CALL THAT RUNS A HELD OFFER draws on the held row, decided from its own
-    // input on its first frame, before its tool.call has claimed the hold. A
-    // later call for the same offer (a spec fetch, a second run) is its own row.
-    const args = asRecord(e.props.input) ?? {};
-    const offerId = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
-    const runsOffer = asRecord(args.input) !== undefined || typeof args.query === 'string';
-    const isDone = stored === undefined || stored.outcome !== undefined;
-    if (
-      offerId !== undefined &&
-      (isDone
-        ? await heldFor($, offerId, e.props.tool_use_id, 'routed')
-        : stored.holdOf !== undefined ||
-          (runsOffer && (await heldFor($, offerId, e.props.tool_use_id, 'held'))))
-    ) {
-      return <Box display="none" />;
-    }
-    const row = stored ?? (await describeCall($, args)).row;
-    // A ROW WITH NO LABEL OF ITS OWN is not drawn: the router's own calls (a
-    // spec fetch, a query it picks for) and a spec the server sent unlabelled
-    // would read "Tenjin" or "Tenjin lookup".
-    if (row.label === ROUTER || row.label === UNLABELLED) return <Box display="none" />;
-    const outcome =
-      row.outcome ??
-      (!hasOutput
-        ? undefined
-        : e.props.isInterrupted
-          ? 'interrupted'
-          : refusalOf(statusOf(textOf(e.props.output)), e.props.isErrored));
-    return toolRow(Box, Text, callShape(row, outcome), e.viewport?.columns);
+    const shape = await requestShape($, e.props);
+    if (shape === null) return <Box display="none" />;
+    return toolRow(Box, Text, shape, e.viewport?.columns);
   });
 
   // The result block under our own row is the text the model read: the
@@ -334,6 +325,163 @@ export const register: Register = (on) => {
     return { ...done, text: done.text === e.answer ? line : `${done.text}\n${line}` };
   });
 };
+
+/** A request call as a row or a group hands it over. */
+interface RequestCall {
+  tool_use_id: string;
+  input: unknown;
+  output?: unknown;
+  isInterrupted: boolean;
+  isErrored: boolean;
+}
+
+/**
+ * A REQUEST CALL'S OWN ROW, or null where it draws nothing: before it has
+ * started, where a held row draws it, and where it has no label of its own.
+ */
+async function requestShape($: Dollar, call: RequestCall): Promise<RowShape | null> {
+  const { value: stored } = await $.state.get({ ...ROWS, id: call.tool_use_id });
+  // NOT STARTED YET. The engine draws a call's row before it runs, while its
+  // input is still streaming in and before it is in progress (`isRunning`
+  // false, no output): read then, the input names no offer yet and the row
+  // would say "Tenjin" for a frame. Nothing is drawn until the call's own
+  // tool.call has stored its row, or a result exists (a resumed transcript).
+  const hasOutput = call.output !== undefined;
+  if (stored === undefined && !hasOutput) return null;
+  // A CALL THAT RUNS A HELD OFFER draws on the held row, decided from its own
+  // input on its first frame, before its tool.call has claimed the hold. A
+  // later call for the same offer (a spec fetch, a second run) is its own row.
+  const args = asRecord(call.input) ?? {};
+  const offerId = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
+  const runsOffer = asRecord(args.input) !== undefined || typeof args.query === 'string';
+  const isDone = stored === undefined || stored.outcome !== undefined;
+  if (
+    offerId !== undefined &&
+    (isDone
+      ? await heldFor($, offerId, call.tool_use_id, 'routed')
+      : stored.holdOf !== undefined ||
+        (runsOffer && (await heldFor($, offerId, call.tool_use_id, 'held'))))
+  ) {
+    return null;
+  }
+  const row = stored ?? (await describeCall($, args)).row;
+  // A ROW WITH NO LABEL OF ITS OWN is not drawn: the router's own calls (a
+  // spec fetch, a query it picks for) and a spec the server sent unlabelled
+  // would read "Tenjin" or "Tenjin lookup".
+  if (row.label === ROUTER || row.label === UNLABELLED) return null;
+  const outcome =
+    row.outcome ??
+    (!hasOutput
+      ? undefined
+      : call.isInterrupted
+        ? 'interrupted'
+        : refusalOf(statusOf(textOf(call.output)), call.isErrored));
+  return callShape(row, outcome);
+}
+
+/**
+ * THE ENGINE'S COUNT LINE FOR A RUN OF CALLS, ours left out: its parts in the
+ * engine's order and words (Claude Code 2.1.304's ToolGroup: "searched for N
+ * patterns", "read N files", "listed N directories", "called <server> N
+ * times", "ran N agents", "called N tools", "ran N shell commands"), the
+ * first capitalised, the counts bold, the line dim once the run has ended,
+ * and the engine's "(ctrl+o to expand)". Null when nothing is left to count.
+ */
+function countLine(
+  Box: BoxElement,
+  Text: TextElement,
+  calls: readonly { tool: string }[],
+  isActive: boolean,
+) {
+  const count = (test: (tool: string) => boolean) => calls.filter((c) => test(c.tool)).length;
+  const isMcp = (tool: string) => tool.startsWith('mcp__');
+  const known = new Set(['Grep', 'Glob', 'Read', 'LS', 'Task', 'Agent', 'Bash']);
+  const servers = [...new Set(calls.filter((c) => isMcp(c.tool)).map((c) => mcpServer(c.tool)))];
+  const parts: { verb: string; count?: number; noun: string }[] = [];
+  const add = (n: number, done: string, doing: string, one: string, many: string) => {
+    if (n > 0) parts.push({ verb: isActive ? doing : done, count: n, noun: n === 1 ? one : many });
+  };
+  add(
+    count((t) => t === 'Grep' || t === 'Glob'),
+    'searched for',
+    'searching for',
+    'pattern',
+    'patterns',
+  );
+  add(
+    count((t) => t === 'Read'),
+    'read',
+    'reading',
+    'file',
+    'files',
+  );
+  add(
+    count((t) => t === 'LS'),
+    'listed',
+    'listing',
+    'directory',
+    'directories',
+  );
+  const mcp = count(isMcp);
+  if (mcp > 0) {
+    parts.push({
+      verb: `${isActive ? 'calling' : 'called'} ${servers.join(', ') || 'MCP'}`,
+      ...(mcp > 1 ? { count: mcp } : {}),
+      noun: mcp > 1 ? 'times' : '',
+    });
+  }
+  add(
+    count((t) => t === 'Task' || t === 'Agent'),
+    'ran',
+    'running',
+    'agent',
+    'agents',
+  );
+  add(
+    count((t) => !known.has(t) && !isMcp(t)),
+    'called',
+    'calling',
+    'tool',
+    'tools',
+  );
+  add(
+    count((t) => t === 'Bash'),
+    'ran',
+    'running',
+    'shell command',
+    'shell commands',
+  );
+  if (parts.length === 0) return null;
+  const pieces = parts.flatMap((part, at) => {
+    const verb = at === 0 ? `${part.verb[0]!.toUpperCase()}${part.verb.slice(1)}` : part.verb;
+    return [
+      ...(at > 0 ? [<Text dimColor={!isActive}>, </Text>] : []),
+      <Text dimColor={!isActive}>{part.count !== undefined ? `${verb} ` : verb}</Text>,
+      ...(part.count !== undefined
+        ? [
+            <Text dimColor={!isActive} bold>
+              {String(part.count)}
+            </Text>,
+            <Text dimColor={!isActive}>{` ${part.noun}`}</Text>,
+          ]
+        : []),
+    ];
+  });
+  return (
+    <Box flexDirection="row" marginTop={1}>
+      <Box minWidth={2}>{isActive ? <Text dimColor>{DOT}</Text> : <Text>{''}</Text>}</Box>
+      {pieces}
+      <Text dimColor={!isActive}>{isActive ? '… ' : ' '}</Text>
+      <Text dimColor>{EXPAND_HINT}</Text>
+    </Box>
+  );
+}
+
+/** An MCP tool's server as a count line names it: `mcp__<server>__<tool>`. */
+function mcpServer(tool: string): string {
+  const server = tool.split('__')[1] ?? '';
+  return server.startsWith('plugin_') ? `plugin:${server.slice(7).replace(/_/g, ':')}` : server;
+}
 
 /** A held native call's row, as the CLI writes it (`src/router/held.ts`). */
 interface Held {
@@ -687,6 +835,8 @@ function nativeArgument(input: Json | undefined): string | undefined {
 
 /** The engine's response gutter and an MCP call's progress while it runs. */
 const GUTTER = '  ⎿  ';
+/** The engine's hint after a folded run's count (its default chord). */
+const EXPAND_HINT = '(ctrl+o to expand)';
 const RUNNING = 'Running…';
 /** A held row's tail names the offer it is struck for: `· Tenjin offered Exa search`. */
 const OFFERED = 'Tenjin offered';

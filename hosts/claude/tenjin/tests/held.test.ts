@@ -218,7 +218,87 @@ test('a held search the model then ran natively draws nothing', async ($, on) =>
   }
 });
 
-test('a run of request calls and held native calls unfolds; any other run stays folded', async ($, on) => {
+test('a run with ours draws the engine count for the other calls, and each paid lookup as its row', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, {
+    capabilityId: 'ideogram',
+    label: 'Ideogram V4',
+    priceAtomic: '30000',
+    maxAmountAtomic: '30000',
+  });
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    if (e.input === undefined) {
+      const spec = JSON.stringify({ status: 'spec', cost: ['no charge'] });
+      return { result: spec, text: spec };
+    }
+    await recordPayment(files, OFFER, {
+      capabilityId: 'ideogram',
+      amountAtomic: '30000',
+      txHash: '0xc9fc',
+    });
+    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
+  });
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: [e.props.isExpanded ? 'rows' : 'engine count line'] });
+  });
+  const paid = { id: OFFER, input: { prompt: 'a clean wide repository banner' } };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', ...paid });
+  const call = (tool: string, id: string, input: unknown = { file_path: '/a' }) => ({
+    tool_use_id: id,
+    tool,
+    input,
+    isRunning: false,
+    isErrored: false,
+    isInterrupted: false,
+    output: 'ok',
+  });
+  const group = (surface: (typeof SURFACES)[number], calls: unknown[], isExpanded = false) =>
+    $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: { calls: calls as never, isActive: false, isExpanded },
+    });
+  for (const surface of SURFACES) {
+    // Reads, the free spec fetch and the paid call: the count names the reads
+    // alone, and the paid lookup draws beneath it.
+    const mixed = await group(surface, [
+      call('Read', 'r1'),
+      call('Read', 'r2'),
+      call(TOOL, 'toolu_spec', { id: OFFER }),
+      call(TOOL, 'toolu_paid', paid),
+    ]);
+    expect((await shownLines(mixed)).join('')).toBe(
+      'Read 2 files (ctrl+o to expand)⏺Ideogram V4(a clean wide repository banner) · $0.03',
+    );
+    const [count] = await mixed.findAll({ type: 'Text', text: '2' });
+    expect(count?.props).toMatchObject({ bold: true, dimColor: true });
+    expect((await shownLines(mixed)).join('')).not.toContain('plugin:tenjin:router');
+    await mixed.unmount();
+    // Only a free call of ours beside a read: the read's count, no mention of us.
+    const free = await group(surface, [
+      call('Read', 'r1'),
+      call(TOOL, 'toolu_spec', { id: OFFER }),
+    ]);
+    expect((await shownLines(free)).join('')).toBe('Read 1 file (ctrl+o to expand)');
+    await free.unmount();
+    // A free call of ours alone: nothing.
+    const alone = await group(surface, [call(TOOL, 'toolu_spec', { id: OFFER })]);
+    expect(await shownLines(alone)).toEqual([]);
+    await alone.unmount();
+    // A run without ours, and any unfolded run, are the engine's.
+    const theirs = await group(surface, [call('Read', 'r1'), call('Grep', 'g1')]);
+    expect(await shownLines(theirs)).toEqual(['engine count line']);
+    await theirs.unmount();
+    const open = await group(surface, [call('Read', 'r1'), call(TOOL, 'toolu_paid', paid)], true);
+    expect(await shownLines(open)).toEqual(['rows']);
+    await open.unmount();
+  }
+});
+
+test('a run of a held call and its request unfolds into the switch row', async ($, on) => {
   const { files } = machine(on);
   await holdRow(files, 'held_search');
   const seen: boolean[] = [];
@@ -236,23 +316,7 @@ test('a run of request calls and held native calls unfolds; any other run stays 
     isInterrupted: false,
   });
   for (const surface of SURFACES) {
-    const ours = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolGroup',
-      props: { calls: [call(TOOL, 'a'), call(TOOL, 'b')], isActive: false, isExpanded: false },
-    });
-    expect(await shownLines(ours)).toEqual(['rows']);
-    await ours.unmount();
-    const mixed = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolGroup',
-      props: { calls: [call(TOOL, 'a'), call('Read', 'c')], isActive: false, isExpanded: false },
-    });
-    expect(await shownLines(mixed)).toEqual(['count line']);
-    await mixed.unmount();
-    const switched = await $.ui.mount({
+    const ui = await $.ui.mount({
       plugin: 'tenjin',
       surface,
       component: 'ToolGroup',
@@ -262,25 +326,11 @@ test('a run of request calls and held native calls unfolds; any other run stays 
         isExpanded: false,
       },
     });
-    expect(await shownLines(switched)).toEqual(['rows']);
-    await switched.unmount();
-    // A search the CLI did not hold is the engine's, beside ours or not.
-    const free = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolGroup',
-      props: {
-        calls: [call('WebSearch', 'free_search'), call(TOOL, 'a')],
-        isActive: false,
-        isExpanded: false,
-      },
-    });
-    expect(await shownLines(free)).toEqual(['count line']);
-    await free.unmount();
+    expect(await shownLines(ui)).toEqual(['rows']);
+    await ui.unmount();
   }
-  expect(seen).toEqual([true, false, true, false, true, false, true, false]);
+  expect(seen).toEqual([true, true]);
 });
-
 test("a held call's result draws nothing, whatever became of it", async ($, on) => {
   const { files } = machine(on);
   on('ui.render', { component: 'ToolResult' }, ($, e) => {
