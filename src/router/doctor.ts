@@ -8,6 +8,7 @@ import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { spentOf } from '../lib/spend-ledger';
+import { isNewer } from '../lib/update-check';
 import { readUsdcBalance } from '../lib/usdc-balance';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
@@ -308,8 +309,8 @@ interface PluginContext {
 }
 
 /**
- * The plugin: listed and enabled at this CLI's version, or, with no binary to
- * ask, its folder and the `alive` stamp. A machine that still routes through a
+ * The plugin: listed and enabled at this CLI's version and stamped by a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -373,6 +374,22 @@ async function pluginCheck(
           required: false,
           detail: `${listing.id} is enabled at ${listing.version ?? 'an unknown version'}, and this CLI is ${pkg.version}`,
           fix: 'Run `tenjin install --refresh` to register this version.',
+        },
+      };
+    }
+    // Claude Code's own environment shows only in the `alive` stamp, which the
+    // plugin's SessionStart leg writes from a real session: doctor's PATH may
+    // find a Node that Claude Code's does not.
+    const stamp = await readAliveStamp(c.dataDir);
+    if (stamp === null || isNewer(pkg.version, stamp.version)) {
+      return {
+        registered: true,
+        check: {
+          name,
+          status: 'warn',
+          required: false,
+          detail: `${listing.id} ${pkg.version} is enabled, and no session has started it at this version${stamp !== null ? ` (last ${stamp.version}, at ${stamp.at})` : ''}`,
+          fix: 'Run `node --version` in a new terminal: Claude Code starts the plugin with that Node, and it must be 22 or newer.',
         },
       };
     }
@@ -521,9 +538,11 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
 
 /**
  * The plugin's `router` server, through `claude mcp get`, which starts it the
- * way a session would and reports whether it answered. It starts `node` from
- * the PATH Claude Code sees with this CLI's entry, so a `node` that is not on
- * that PATH shows up here as a server that fails to connect.
+ * way a session would and reports whether it answered. `claude mcp get` runs
+ * with doctor's own environment, so it starts `node` from doctor's PATH, not
+ * the PATH a running Claude Code started with: a connected server here does
+ * not prove a session can start it. The `plugin` row's `alive` stamp is the
+ * proof from a real session.
  */
 async function serverCheck(
   binary: ClaudeBinary,

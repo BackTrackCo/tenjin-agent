@@ -744,6 +744,40 @@ describe('tenjin doctor', () => {
     ).toEqual([]);
   });
 
+  describe('the session stamp, with a claude binary present', () => {
+    const fix =
+      'Run `node --version` in a new terminal: Claude Code starts the plugin with that Node, and it must be 22 or newer.';
+
+    it('warns when no session has started the plugin, though `claude mcp get` connects', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      const c = await checks();
+      expect(c['plugin']).toMatchObject({
+        status: 'warn',
+        detail: `tenjin@tenjin ${pkg.version} is enabled, and no session has started it at this version`,
+        fix,
+      });
+      expect(c['router server']).toMatchObject({ status: 'ok' });
+    });
+
+    it('warns when the last session started an older version', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      await runAliveHook({ session_id: 's' }, { dataDir: data, version: '0.0.1' });
+      const c = await checks();
+      expect(c['plugin']).toMatchObject({ status: 'warn', fix });
+      expect(c['plugin']?.detail).toContain('(last 0.0.1, at ');
+    });
+
+    it('passes when a session started this version', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
+      const c = await checks();
+      expect(c['plugin']).toMatchObject({
+        status: 'ok',
+        detail: `tenjin@tenjin ${pkg.version} enabled`,
+      });
+    });
+  });
+
   it('fails a machine with no plugin, with the install to run', async () => {
     const c = await checks();
     expect(c['plugin']).toMatchObject({ status: 'fail', fix: 'Run `tenjin install`.' });
