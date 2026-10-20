@@ -52,9 +52,18 @@ test('a paid row is one line: the label, the query and the price, then the amoun
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    // The same text it will end with; the engine's dot, dim, says it runs.
-    expect(await rowText(ui)).toBe('⏺ Exa search (Tenjin)(rust async runtimes) · $0.04');
+    // The same row it will end with, the dot dim, and under it the engine's
+    // MCP progress line, which a built-in row does not show.
+    expect(await shownLines(ui)).toEqual([
+      '⏺',
+      'Exa search',
+      '(rust async runtimes)',
+      ' · $0.04',
+      '  ⎿  ',
+      'Running…',
+    ]);
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
+    expect((await ui.findAll({ type: 'Text', text: 'Running…' }))[0]?.props.dimColor).toBe(true);
     await ui.unmount();
   }
   release();
@@ -71,7 +80,8 @@ test('a paid row is one line: the label, the query and the price, then the amoun
       props: { ...row, isRunning: false, output: resultText('fulfilled') },
     });
     const line = await rowText(ui);
-    expect(line).toBe('⏺ Exa search (Tenjin)(rust async runtimes) · $0.04');
+    expect(line).toBe('⏺ Exa search(rust async runtimes) · $0.04');
+    expect(line).not.toContain('Running');
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     expect([line, ...toasts].join('\n')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
@@ -103,7 +113,7 @@ test('a payment whose settlement is unknown reads as paid', async ($, on) => {
         output: resultText('fulfilled'),
       },
     });
-    expect(await rowText(ui)).toBe('⏺ Exa search (Tenjin)(rust async runtimes) · $0.04');
+    expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.04');
     await ui.unmount();
   }
 });
@@ -166,9 +176,7 @@ test('a refusal reads as its state beside the price, with no toast and nothing p
         output: refused,
       },
     });
-    expect(await rowText(ui)).toBe(
-      '⏺ Exa search (Tenjin)(rust async runtimes) · $0.42 · needs approval',
-    );
+    expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.42 · needs approval');
     await ui.unmount();
   }
   expect(toasts).toEqual([]);

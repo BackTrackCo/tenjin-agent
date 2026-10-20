@@ -6,9 +6,9 @@ import type { TenjinPaid, TenjinRow } from '../types';
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
  * permission answer it gives. ONE LINE PER LOOKUP, drawn as the engine draws
- * a tool row (its status dot, bold name, input in parentheses, a dim tail),
- * with `(Tenjin)` where the engine marks an MCP tool's name: the request
- * tool's row reads `⏺ Exa search (Tenjin)(best local LLM) · $0.007`. A
+ * a tool row (its status dot, bold name, input in parentheses, a dim tail):
+ * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`, and
+ * while it runs, `  ⎿  Running…` under it as the engine shows an MCP call. A
  * WebSearch or WebFetch call held for Tenjin reads as the engine's own row
  * struck through, `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa
  * search`, until the request call takes it up, then becomes that call's row
@@ -685,8 +685,9 @@ function nativeArgument(input: Json | undefined): string | undefined {
   return query !== undefined ? `"${query}"` : argumentOf({ url: input.url });
 }
 
-/** A request row's name marker, where the engine writes ` (MCP)`. */
-const MARKER = '(Tenjin)';
+/** The engine's response gutter and an MCP call's progress while it runs. */
+const GUTTER = '  ⎿  ';
+const RUNNING = 'Running…';
 /** A held row's tail names the offer it is struck for: `· Tenjin offered Exa search`. */
 const OFFERED = 'Tenjin offered';
 /** The names the engine draws its native rows under (each tool's `userFacingName`). */
@@ -703,6 +704,8 @@ interface RowShape {
   /** The dim text after the input: ` · $0.007`, ` · $0.42 · needs approval`. */
   tail?: string;
   isStruck?: boolean;
+  /** A request call, which shows the engine's MCP progress line while it runs. */
+  isCall?: boolean;
 }
 
 /**
@@ -720,9 +723,8 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
   const state: RowState = isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done';
   return {
     state,
-    // The engine marks an MCP tool's name with ` (MCP)`; ours carry Tenjin's
-    // name in the same place, so they read as service calls, not built-ins.
-    name: `${row.label} ${MARKER}`,
+    isCall: true,
+    name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
   };
@@ -737,7 +739,7 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
 function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape, columns?: number) {
   const isRunning = shape.state === 'running';
   const argument = shape.argument !== undefined ? fitArgument(shape, columns) : undefined;
-  return (
+  const line = (
     <Box flexDirection="row" marginTop={1}>
       <Box minWidth={2}>
         <Text
@@ -756,6 +758,19 @@ function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape, columns?: 
       <Box flexWrap="nowrap">
         <Text wrap="truncate-end">{argument !== undefined ? `(${argument})` : ''}</Text>
         <Text dimColor>{shape.tail ?? ''}</Text>
+      </Box>
+    </Box>
+  );
+  if (!isRunning || shape.isCall !== true) return line;
+  // AN MCP CALL WHILE IT RUNS: the engine draws its progress under the row,
+  // `  ⎿  Running…` in dim text (2.1.304's MCP renderToolUseProgressMessage),
+  // which a built-in row does not. Gone once the call has ended.
+  return (
+    <Box flexDirection="column">
+      {line}
+      <Box flexDirection="row">
+        <Text dimColor>{GUTTER}</Text>
+        <Text dimColor>{RUNNING}</Text>
       </Box>
     </Box>
   );

@@ -105,7 +105,7 @@ test('choice "all" totals every option it paid', async ($, on) => {
         output: resultText('fulfilled'),
       },
     });
-    expect(await rowText(ui)).toBe('⏺ 2 services (Tenjin)(a lighthouse at dusk) · $0.07');
+    expect(await rowText(ui)).toBe('⏺ 2 services(a lighthouse at dusk) · $0.07');
     await ui.unmount();
   }
 });

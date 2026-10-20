@@ -123,7 +123,7 @@ test('a held search is one row: struck, then the request call running and done, 
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ Exa search (Tenjin)("rust async runtimes") · $0.007');
+    expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007  ⎿  Running…');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     await ui.unmount();
     // FROM ITS FIRST FRAME the request's own row takes no room.
@@ -139,7 +139,7 @@ test('a held search is one row: struck, then the request call running and done, 
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
     const line = await rowText(ui);
-    expect(line).toBe('⏺ Exa search (Tenjin)("rust async runtimes") · $0.007');
+    expect(line).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(line).not.toMatch(MODEL_TEXT);
     expect(await ui.findAll({ type: 'Text', text: 'Web Search' })).toEqual([]);
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
@@ -152,7 +152,7 @@ test('a held search is one row: struck, then the request call running and done, 
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
   for (const surface of SURFACES) {
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('⏺ Exa search (Tenjin)("rust async runtimes") · $0.007');
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     await held.unmount();
     // A spec fetch, the router's own free call, is not drawn.
     const fetch = await mount(surface, done('toolu_spec', { id: OFFER }, spec));
@@ -401,15 +401,13 @@ test('a request refused before it ran the offer draws its own row; the paid retr
     );
     await held.unmount();
     const own = await mount(surface, done('toolu_big', big, refused, true));
-    expect(await rowText(own)).toBe(
-      '⏺ Exa search (Tenjin)(a very long input) · $0.007 · needs input',
-    );
+    expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
     await own.unmount();
   }
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_retry', ...retry });
   for (const surface of SURFACES) {
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('⏺ Exa search (Tenjin)("rust async runtimes") · $0.007');
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(await dotOf(held)).toEqual({ color: 'success', dimColor: undefined });
     await held.unmount();
     const paid = await mount(surface, done('toolu_retry', retry, resultText('fulfilled')));
@@ -417,9 +415,7 @@ test('a request refused before it ran the offer draws its own row; the paid retr
     await paid.unmount();
     // The refused attempt stays as the record of what happened.
     const own = await mount(surface, done('toolu_big', big, refused, true));
-    expect(await rowText(own)).toBe(
-      '⏺ Exa search (Tenjin)(a very long input) · $0.007 · needs input',
-    );
+    expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
     await own.unmount();
   }
 });
@@ -496,9 +492,9 @@ test('a long input is cut to the row as the engine cuts a tool input, keeping th
       props: { ...toolRow('toolu_long', TOOL, { id: OFFER, input: { query } }), isRunning: false },
     });
     const line = await rowText(ui);
-    // 60 columns less 2 for the dot, 19 for the name, 2 for the parentheses
-    // and 9 for the tail leave 28 for the input, its last one the `…`.
-    expect(line).toBe(`⏺ Exa search (Tenjin)(${query.slice(0, 27)}…) · $0.007`);
+    // 60 columns less 2 for the dot, 10 for the name, 2 for the parentheses
+    // and 9 for the tail leave 37 for the input, its last one the `…`.
+    expect(line).toBe(`⏺ Exa search(${query.slice(0, 36)}…) · $0.007`);
     expect(Array.from(line).length).toBeLessThanOrEqual(60);
     await ui.unmount();
   }
