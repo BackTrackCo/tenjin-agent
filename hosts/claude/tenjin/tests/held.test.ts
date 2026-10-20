@@ -119,7 +119,7 @@ test('a held search is one row: struck, then the request call running and done, 
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ Calling Exa search(rust async runtimes)… · $0.007');
+    expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.007');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     await ui.unmount();
     // FROM ITS FIRST FRAME the request's own row takes no room.

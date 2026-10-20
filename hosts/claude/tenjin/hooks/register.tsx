@@ -727,9 +727,9 @@ interface RowShape {
 }
 
 /**
- * A request call's row: `Calling Exa search(q)…` while it runs, then
- * `Exa search(q)` with the amount paid, and the state only when it is not a
- * plain success.
+ * A request call's row: `Exa search(q) · $0.007`, the same text while it runs
+ * and after (only the dot shows progress, as on a native row), the amount
+ * paid once it paid, and the state only when it is not a plain success.
  */
 function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
   const isRunning = outcome === undefined;
@@ -740,7 +740,7 @@ function callShape(row: TenjinRow, outcome: string | undefined): RowShape {
   );
   return {
     state: isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done',
-    name: isRunning ? `Calling ${row.label}` : row.label,
+    name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
   };
@@ -771,9 +771,7 @@ function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape) {
         </Text>
       </Box>
       <Box flexWrap="nowrap">
-        <Text wrap="truncate-end">
-          {`${shape.argument !== undefined ? `(${shape.argument})` : ''}${isRunning && shape.isStruck !== true ? '…' : ''}`}
-        </Text>
+        <Text wrap="truncate-end">{shape.argument !== undefined ? `(${shape.argument})` : ''}</Text>
         <Text dimColor>{shape.tail ?? ''}</Text>
       </Box>
     </Box>
