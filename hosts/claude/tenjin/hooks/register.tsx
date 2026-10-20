@@ -173,14 +173,23 @@ export const register: Register = (on) => {
     // held call (form A) as well, so what it bought opens there too.
     const expanded = expandedByEngine.has(tool_use_id);
     const drawn = await rowOf($, tool_use_id, e.props, expanded);
-    if (drawn === null) return <ui.Box display="none" />;
+    // A charged call this mod cannot name is the engine's row, never hidden.
+    if (drawn === null)
+      return (await unnamedCharge($, tool_use_id, e.props.output)) ? (
+        next(e)
+      ) : (
+        <ui.Box display="none" />
+      );
     return expanded ? next(e) : callRow(ui, drawn);
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const { Box } = $.ui.resolve(e);
-    if (e.props.tool === REQUEST_TOOL) return <Box display="none" />;
+    if (e.props.tool === REQUEST_TOOL) {
+      const unnamed = await unnamedCharge($, e.props.tool_use_id, e.props.output);
+      return unnamed ? next(e) : <Box display="none" />;
+    }
     if (!(e.props.tool in NATIVE_NAMES)) return next(e);
     const held = await heldOf($, e.props.tool_use_id, undefined);
     return held === null ? next(e) : <Box display="none" />;
@@ -200,7 +209,8 @@ async function describeCall($: Dollar, e: Json): Promise<TenjinRow | null> {
     dataDir === null
       ? null
       : await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.json`);
-  const label = labelOf(spec?.label);
+  // A Bazaar spec carries no label: the provider's own name stands in.
+  const label = labelOf(spec?.label) ?? labelOf(spec?.provider);
   if (spec === null || label === undefined) return null;
   const takes = typeof e.count === 'number' && e.count > 1 ? BigInt(e.count) : 1n;
   const each = atomicOf(spec.priceVaries === true ? spec.maxAmountAtomic : spec.priceAtomic);
@@ -228,7 +238,8 @@ function endOf(envelope: Json | undefined): Partial<TenjinRow> {
   const paid = paidOf(envelope.cost);
   const steps = Array.isArray(envelope.results) ? envelope.results.map(asRecord) : [];
   const label =
-    labelOf(envelope.label) ?? (steps.length > 0 ? `${steps.length} services` : undefined);
+    labelOf(envelope.label) ??
+    (steps.length > 0 ? `${steps.length} services` : labelOf(envelope.supplier));
   return {
     status,
     ...(label !== undefined ? { label } : {}),
@@ -404,6 +415,13 @@ function clean(value: string, limit: number): string {
     .trim();
   const chars = Array.from(text);
   return chars.length <= limit ? text : `${chars.slice(0, limit - 1).join('')}…`;
+}
+
+/** A call whose result says money left the wallet, and that nothing names. */
+async function unnamedCharge($: Dollar, id: string, output: unknown): Promise<boolean> {
+  const envelope = envelopeOf(textOf(output));
+  if (paidOf(envelope?.cost) === undefined || (await row($, id)) !== undefined) return false;
+  return endOf(envelope).label === undefined;
 }
 
 /** What the envelope's `cost` (`provider price 0.04 USD`) says left the wallet. */

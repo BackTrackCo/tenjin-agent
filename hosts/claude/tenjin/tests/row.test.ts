@@ -342,3 +342,46 @@ test('an empty job is not a poll: the paid call draws its row', async ($, on) =>
   expect(await rowText(ui)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
   await ui.unmount();
 });
+
+test('a paid lookup with no label still draws: the provider names it, else the engine row stays', async ($, on) => {
+  const { files } = machine(on);
+  // A Bazaar spec: no label, the provider's own name.
+  await keepSpec(files, OFFER, { provider: 'Exa', priceAtomic: '40000' });
+  const bare = (rest: Record<string, unknown>) =>
+    `summary${JSON.stringify({ status: 'fulfilled', cost: ['provider price 0.04 USD'], ...rest })}`;
+  const noLabel = bare({ supplier: 'api.exa.ai' });
+  const nothing = bare({});
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    const text = e.tool_use_id === 'toolu_bazaar' ? noLabel : nothing;
+    return { result: text, text };
+  });
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine row'] });
+  });
+  on('ui.render', { component: 'ToolResult' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine result'] });
+  });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_bazaar', id: OFFER, input: INPUT });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_unnamed', query: 'something' });
+  const mount = (component: 'ToolGroup' | 'ToolUse' | 'ToolResult', props: unknown) =>
+    $.ui.mount({ plugin: 'tenjin', surface: 'terminal', component, props: props as never });
+  const bazaar = toolRow('toolu_bazaar', TOOL, { id: OFFER, input: INPUT }, noLabel);
+  const named = await mount('ToolGroup', groupOf([bazaar]));
+  expect(await rowText(named)).toBe('Called Exa · $0.04 (ctrl+o to expand)');
+  await named.unmount();
+  // Nothing names it: the engine's own row and result, never hidden.
+  const unnamed = toolRow('toolu_unnamed', TOOL, { query: 'something' }, nothing);
+  const own = await mount('ToolUse', unnamed);
+  expect(await shownLines(own)).toEqual(['engine row']);
+  await own.unmount();
+  const result = await mount('ToolResult', {
+    tool_use_id: 'toolu_unnamed',
+    tool: TOOL,
+    output: nothing,
+    isErrored: false,
+  });
+  expect(await shownLines(result)).toEqual(['engine result']);
+  await result.unmount();
+});
