@@ -31,6 +31,7 @@ import {
   payerDir,
   refusedWhy,
   ROUTE_PAID_PATH,
+  ROUTING_DEPOSIT_KEY,
   ROUTING_FEE_ATOMIC,
 } from './fee';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
@@ -146,6 +147,8 @@ export interface RoutingPayerDeps {
   readContract?: ChainRead;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** The timer functions the payer arms; the globals unless a test injects its own. */
+  timers?: Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'>;
   warn?: (line: string) => void;
 }
 
@@ -225,15 +228,29 @@ export class RoutingPayer {
     if (await readRouterMemo(this.deps.dataDir, 'paid-path-absent', baseUrl, this.now())) {
       return null;
     }
+    const calls: Call[] = [];
     return {
       path: ROUTE_PAID_PATH,
       send: (url, options) => {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
-        return this.turn(() => this.noted(sent, () => this.pay(url, options, until)), until, sent);
+        return this.turn(
+          () => this.noted(sent, () => this.pay(url, options, until, calls)),
+          until,
+          sent,
+        );
       },
+      deposited: () =>
+        calls
+          .flatMap((call) => call.deposits)
+          .filter((d) => d.state === 'settled')
+          .reduce((sum, d) => sum + d.amountAtomic, 0n),
     };
+  }
+
+  private get timers(): Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'> {
+    return this.deps.timers ?? globalThis;
   }
 
   private now(): number {
@@ -257,13 +274,13 @@ export class RoutingPayer {
     const go = () => {
       if (gaveUp) return Promise.reject(new RouteSkipped('busy'));
       // Its turn came: from here its own budget, which a deposit lengthens, applies.
-      clearTimeout(timer);
+      this.timers.clearTimeout(timer);
       return run();
     };
     const next = this.queue.then(go, go);
     this.queue = next.catch(() => undefined).then(() => this.tail);
     const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
+      timer = this.timers.setTimeout(
         () => {
           gaveUp = true;
           // It never ran, so `noted` cannot say it: its one line is here.
@@ -273,7 +290,7 @@ export class RoutingPayer {
         Math.max(0, until - this.now()),
       );
     });
-    return Promise.race([next, deadline]).finally(() => clearTimeout(timer));
+    return Promise.race([next, deadline]).finally(() => this.timers.clearTimeout(timer));
   }
 
   /** One stderr line for a call the paid path did not answer; a detached
@@ -334,7 +351,7 @@ export class RoutingPayer {
       return new Promise<Response>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = () => {
-          clearTimeout(timer);
+          this.timers.clearTimeout(timer);
           caller?.removeEventListener('abort', onAbort);
         };
         const stop = (reason: unknown) => {
@@ -348,7 +365,7 @@ export class RoutingPayer {
         // The call's own budget, which a deposit lengthens while it runs.
         const check = () => {
           const left = call.until - this.now();
-          if (left > 0) timer = setTimeout(check, left);
+          if (left > 0) timer = this.timers.setTimeout(check, left);
           else {
             call.expired = true;
             stop(new DOMException('The routing call ran out of time.', 'TimeoutError'));
@@ -380,7 +397,7 @@ export class RoutingPayer {
     work: Promise<Response>,
     own: AbortController,
   ): Promise<void> {
-    const ceiling = setTimeout(() => own.abort(), DETACHED_CEILING_MS);
+    const ceiling = this.timers.setTimeout(() => own.abort(), DETACHED_CEILING_MS);
     ceiling.unref?.();
     try {
       const response = await work;
@@ -390,7 +407,7 @@ export class RoutingPayer {
     } catch {
       this.note(PAYMENT_FAILED, call, sent, own.signal.aborted ? 'late ceiling' : 'late network');
     } finally {
-      clearTimeout(ceiling);
+      this.timers.clearTimeout(ceiling);
     }
   }
 
@@ -399,7 +416,12 @@ export class RoutingPayer {
    * server's 402 becomes the stock wrapper's first answer, so asking before
    * the unlock adds no round trip.
    */
-  private async pay(url: string, options: HttpRequestOptions, until: number): Promise<HttpResult> {
+  private async pay(
+    url: string,
+    options: HttpRequestOptions,
+    until: number,
+    calls: Call[],
+  ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
       host: new URL(url).host,
@@ -408,6 +430,8 @@ export class RoutingPayer {
       answered: false,
       deposits: [],
     };
+    // The route's own record, which its `deposited` reads once the call ends.
+    calls.push(call);
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
@@ -573,7 +597,7 @@ export class RoutingPayer {
       authorizer,
       reservationId: auth.reservationId,
       amountAtomic: amount,
-      key: `routing-deposit:${auth.reservationId ?? randomUUID()}`,
+      key: `${ROUTING_DEPOSIT_KEY}${auth.reservationId ?? randomUUID()}`,
       state: 'signed',
     });
     return amount;

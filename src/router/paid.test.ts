@@ -15,7 +15,7 @@ import {
   writeAll,
   type MediaTransport,
 } from './paid';
-import { runPaymentsReconcile } from './payments';
+import { runPaymentsList, runPaymentsReconcile } from './payments';
 import { readSpendSummary } from '../lib/spend-ledger';
 import { createLocalSpendAuthorizer, releaseUnchargedExposure } from '../lib/wallet/spend';
 
@@ -143,7 +143,7 @@ describe('the media a paid result links to', () => {
           ? { status: 200, body: new Uint8Array(64) }
           : { status: 200, body: new Uint8Array([1, 2, 3]) },
     );
-    const saved = await saveMedia(
+    const { saved } = await saveMedia(
       dir,
       'cap',
       ['https://cdn.test/start.png', 'https://cdn.test/big.png'],
@@ -164,12 +164,38 @@ describe('the media a paid result links to', () => {
       status: 302,
       location: 'https://127.0.0.1/a.png',
     }));
-    const saved = await saveMedia(dir, 'cap', ['https://cdn.test/a.png'], {
+    const { saved } = await saveMedia(dir, 'cap', ['https://cdn.test/a.png'], {
       transport: t,
       destination: PUBLIC,
     });
     expect(saved).toEqual([]);
     expect(hops.map((h) => h.url)).toEqual(['https://cdn.test/a.png']);
+  });
+
+  /** A FAILURE A LATER TRY COULD GET PAST (the network, a 5xx, a 429) is
+   *  `failed`; a refusal of ours (a private address, the size cap) or a link
+   *  that is gone (a 404) is not. */
+  it('reports a download a later try could save as failed', async () => {
+    const save = (t: MediaTransport, opts: { maxBytes?: number } = {}) =>
+      saveMedia(dir, 'try', ['https://cdn.test/a.png'], {
+        transport: t,
+        destination: PUBLIC,
+        ...opts,
+      });
+    const down: MediaTransport = async () => {
+      throw new Error('socket hang up');
+    };
+    expect(await save(down)).toEqual({ saved: [], capped: false, failed: true });
+    for (const status of [503, 429]) {
+      expect(await save(transport(() => ({ status })).transport)).toMatchObject({ failed: true });
+    }
+    expect(await save(transport(() => ({ status: 404 })).transport)).toMatchObject({
+      failed: false,
+    });
+    const big = transport(() => ({ status: 200, body: new Uint8Array(64) })).transport;
+    expect(await save(big, { maxBytes: 16 })).toMatchObject({ failed: false });
+    const away = transport(() => ({ status: 302, location: 'https://127.0.0.1/a.png' }));
+    expect(await save(away.transport)).toMatchObject({ failed: false });
   });
 
   /** DNS REBINDING: the socket's lookup answers the validated address, not a
@@ -192,6 +218,52 @@ describe('the media a paid result links to', () => {
     expect(all).toEqual([[null, [{ address: '93.184.216.34', family: 4 }]]]);
   });
 
+  /** THE CALL'S CAP COUNTS WHAT WAS WRITTEN: a download still in flight holds
+   *  only its own bytes, so a file beside it is saved while the real total is
+   *  under the cap, and none is written past it. */
+  it("saves side by side up to the call's cap, and never past it", async () => {
+    const file = new Uint8Array(8);
+    // The first download answers once the second has started, or after a
+    // moment: side by side, the first must not hold the second's room.
+    let started = 0;
+    let bothIn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      bothIn = resolve;
+    });
+    const gated: MediaTransport = async () => {
+      started += 1;
+      if (started === 2) bothIn();
+      else await Promise.race([gate, new Promise((resolve) => setTimeout(resolve, 200))]);
+      return {
+        status: 200,
+        body: (async function* () {
+          yield file;
+        })(),
+        discard: () => undefined,
+      };
+    };
+    const budget = { leftBytes: 20 };
+    const both = await Promise.all(
+      ['https://cdn.test/a.png', 'https://cdn.test/b.png'].map((url) =>
+        saveMedia(dir, 'room', [url], { transport: gated, destination: PUBLIC, budget }),
+      ),
+    );
+    expect(both.map(({ saved, capped }) => [saved.length, capped])).toEqual([
+      [1, false],
+      [1, false],
+    ]);
+    expect(budget.leftBytes).toBe(4);
+    // 16 written of 20: a third 8-byte file would pass the cap, so it is not
+    // kept, its bytes go back, and the call says it ran out of room.
+    const third = await saveMedia(dir, 'room', ['https://cdn.test/c.png'], {
+      transport: gated,
+      destination: PUBLIC,
+      budget,
+    });
+    expect(third).toEqual({ saved: [], capped: true, failed: false });
+    expect(budget.leftBytes).toBe(4);
+  });
+
   /** Two lookups saving in the same millisecond each get their own file. */
   it('never gives two saves the same file', async () => {
     const { transport: t } = transport(() => ({ status: 200, body: new Uint8Array([9]) }));
@@ -204,7 +276,7 @@ describe('the media a paid result links to', () => {
         }),
       ),
     );
-    const paths = both.flat();
+    const paths = both.flatMap(({ saved }) => saved);
     expect(paths).toHaveLength(2);
     expect(new Set(paths).size).toBe(2);
     const a = await createUniqueFile(join(dir, 'x'), 'stem', 'bin');
@@ -542,5 +614,61 @@ describe('resolving a settlement left unknown', () => {
     );
     expect(result.data).toMatchObject({ checked: 4, settled: 1, notCharged: 3, unknown: 0 });
     expect(result.humanLines?.[0]).toBe('Checked 4: 1 charged, 3 not charged.');
+  });
+
+  it('is what a bare `tenjin payments` lists: newest first, the tx where it settled', async () => {
+    const tx = `0x${'a'.repeat(64)}`;
+    await ledger([
+      JSON.stringify(
+        record(1, { ts: '2027-01-15T09:30:00.000Z', settlement: 'settled', txHash: tx }),
+      ),
+      'not a record',
+      JSON.stringify(record(2, { ts: '2027-01-15T10:45:00.000Z', amountAtomic: '3000' })),
+    ]);
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    const result = await runPaymentsList({
+      flags: { json: false, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink, stderr: sink, isTTY: true },
+    });
+    expect(result.data).toEqual({
+      ledger: join(dir, 'paid', 'ledger.jsonl'),
+      total: 2,
+      payments: [
+        {
+          at: '2027-01-15T10:45:00.000Z',
+          provider: 'Seller',
+          service: 'cap-2',
+          amount: { atomic: '3000', usd: '0.003' },
+          settlement: 'unknown',
+        },
+        {
+          at: '2027-01-15T09:30:00.000Z',
+          provider: 'Seller',
+          service: 'cap-1',
+          amount: { atomic: '10000', usd: '0.01' },
+          settlement: 'settled',
+          txHash: tx,
+        },
+      ],
+    });
+    expect(result.humanLines).toEqual([
+      'TIME (UTC)        PROVIDER  SERVICE  AMOUNT  STATUS   TX',
+      '2027-01-15 10:45  Seller    cap-2    $0.003  unknown',
+      `2027-01-15 09:30  Seller    cap-1    $0.01   settled  ${tx}`,
+      `From ${join(dir, 'paid', 'ledger.jsonl')}.`,
+      '1 with settlement unknown: `tenjin payments reconcile` asks the chain once they expire.',
+    ]);
+  });
+
+  it('says so when this machine has paid for nothing', async () => {
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    const result = await runPaymentsList({
+      flags: { json: true, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink, stderr: sink, isTTY: false },
+    });
+    expect(result.data).toMatchObject({ total: 0, payments: [] });
+    expect(result.humanLines).toEqual(['No paid lookups on this machine yet.']);
   });
 });

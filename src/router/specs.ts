@@ -83,7 +83,10 @@ export interface KeptChoices {
   hint: string;
 }
 
-const KeptChoicesSchema = z.strictObject({ choices: ChoicesSchema, hint: z.string().max(2_000) });
+export const KeptChoicesSchema = z.strictObject({
+  choices: ChoicesSchema,
+  hint: z.string().max(2_000),
+});
 
 function choicesPath(dataDir: string, id: string): string {
   return join(dataDir, SPECS_DIR, `${digest(id)}.choices.json`);

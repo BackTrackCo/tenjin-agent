@@ -1,7 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -29,12 +28,13 @@ import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   MIN_DEPOSIT_ATOMIC,
-  payerDir,
   ROUTING_FEE_ATOMIC,
+  SUGGESTED_FUND_USD,
   unpaid,
   usd,
 } from './fee';
-import { loadStep, pluginProof, settingsInstallPaths } from './install';
+import { channelCredit } from './channel-credit';
+import { loadStep, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { commandForm, handlersIn } from './hook-form';
 import {
   launchCheck,
@@ -87,7 +87,8 @@ export type { RouterCheck };
 export interface RouterDoctorDeps {
   homeDir?: string;
   cwd?: string;
-  /** Check the project install, as `install --project` registered it. */
+  /** Check the project install, as `install --project` registered it. Absent,
+   *  a project install in `cwd` is found ({@link projectInstallHere}). */
   project?: boolean;
   env?: NodeJS.ProcessEnv;
   /** Finds the `claude` binary; tests inject one. */
@@ -117,7 +118,9 @@ export async function runRouterDoctor(
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   const cwd = deps.cwd ?? process.cwd();
-  const project = deps.project === true;
+  // WITHOUT THE FLAG, THE INSTALL THIS DIRECTORY HOLDS: a project install
+  // found here is the one a session here runs, so it is the one checked.
+  const project = deps.project ?? (await projectInstallHere(cwd, home, env));
   // From the directory doctor runs in, which is the one a session there would use.
   const router = await routerSettings(
     { cwd, dataDir: ctx.dataDir },
@@ -156,7 +159,7 @@ export async function runRouterDoctor(
   });
   if (stale !== null) checks.push(stale);
   if (plugin.registered && claude.binary !== null) {
-    checks.push(await serverCheck(claude.binary, env, cwd));
+    checks.push(await serverCheck(claude.binary, env, cwd, scope));
   }
   if (legacy.present || legacy.unreadable !== undefined) {
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
@@ -199,6 +202,7 @@ export async function runRouterDoctor(
     checks,
     dataDir: ctx.dataDir,
     baseUrl: settings.baseUrl,
+    scope,
     settingsPath: paths.settingsPath,
   };
   if (failure !== undefined) {
@@ -542,6 +546,7 @@ async function serverCheck(
   binary: ClaudeBinary,
   env: NodeJS.ProcessEnv,
   cwd: string,
+  scope: PluginScope,
 ): Promise<RouterCheck> {
   const name = 'router server';
   const run = await runClaude(binary, ['mcp', 'get', PLUGIN_SERVER], {
@@ -563,7 +568,7 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: 'Run `tenjin install` again: it renders the plugin with the absolute Node and CLI paths running it, then start a new session.',
+    fix: `Run \`tenjin install${scope === 'local' ? ' --project' : ''}\` again: it renders the plugin with the absolute Node and CLI paths running it, then start a new session.`,
   };
 }
 
@@ -709,7 +714,7 @@ export function routingFeeRow(
     };
   }
   const fixes: Record<string, string> = {
-    no_wallet: 'Run `tenjin wallet create`, then `tenjin wallet fund 0.25`.',
+    no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
     limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
     budget_reached:
       'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
@@ -771,21 +776,6 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
   });
   return balance !== null && balance < deposit ? 'wallet_low' : null;
-}
-
-/** What the wallet's routing channel still holds for fees, from the SDK's own files. */
-async function channelCredit(dataDir: string, address: string): Promise<bigint> {
-  const dir = payerDir(dataDir, address);
-  const storage = new FileClientChannelStorage({ directory: dir });
-  let best = 0n;
-  for (const name of await readdir(join(dir, 'client')).catch(() => [] as string[])) {
-    const id = /^(0x[0-9a-f]{64})\.json$/.exec(name)?.[1];
-    const channel = id === undefined ? undefined : await storage.get(id).catch(() => undefined);
-    if (channel === undefined) continue;
-    const credit = BigInt(channel.balance ?? '0') - BigInt(channel.chargedCumulativeAmount ?? '0');
-    if (credit > best) best = credit;
-  }
-  return best;
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */
@@ -863,7 +853,7 @@ async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
         status: 'fail',
         required: true,
         detail: 'no wallet on this machine, so nothing can pay',
-        fix: 'Run `tenjin wallet create`, then `tenjin wallet fund`.',
+        fix: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
       },
     ];
   }

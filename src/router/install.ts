@@ -249,28 +249,48 @@ export async function migrateSettingsInstall(
 }
 
 /**
- * `tenjin update` runs the refresh from home, where nothing proves scope. A
- * project install is taken when this directory, not being home, holds one:
- * the plugin enabled in its `settings.local.json`, its plugin folder, or a
- * settings install's entries.
+ * Is there a project install here? A refresh, a bare doctor and a bare
+ * uninstall are given no scope, and `tenjin update` runs its refresh from
+ * home, where nothing proves one. A project install is taken when this
+ * directory, not being home, holds one: the plugin enabled in its
+ * `settings.local.json`, its plugin folder, or a settings install's entries.
  */
-async function inferRefreshProject(
+export async function projectInstallHere(
   cwd: string,
   home: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  const [cwdPath, homePath] = await Promise.all([
-    realpath(cwd).catch(() => cwd),
-    realpath(home).catch(() => home),
-  ]);
-  if (cwdPath === homePath) return false;
-  const local = await readFile(join(cwd, '.claude', 'settings.local.json'), 'utf8')
+  if (await isHome(cwd, home)) return false;
+  return projectInstallAt(cwd, home, env);
+}
+
+/**
+ * Does `dir` still hold the project install `install --project` recorded
+ * there? Home included: a `--project` install at home is supported, and there
+ * its plugin folder and settings file are the user install's own, so only the
+ * plugin enabled in `.claude/settings.local.json` proves it.
+ */
+export async function projectInstallAt(
+  dir: string,
+  home: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const local = await readFile(join(dir, '.claude', 'settings.local.json'), 'utf8')
     .then((raw) => JSON.parse(raw) as { enabledPlugins?: Record<string, unknown> })
     .catch(() => null);
   if (local?.enabledPlugins?.[PLUGIN_ID] === true) return true;
-  if ((await folderState('local', env, home, cwd)).state === 'ours') return true;
-  const paths = settingsInstallPaths(true, env, home, cwd);
+  if (await isHome(dir, home)) return false;
+  if ((await folderState('local', env, home, dir)).state === 'ours') return true;
+  const paths = settingsInstallPaths(true, env, home, dir);
   return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).events.length > 0;
+}
+
+async function isHome(dir: string, home: string): Promise<boolean> {
+  const [dirPath, homePath] = await Promise.all([
+    realpath(dir).catch(() => dir),
+    realpath(home).catch(() => home),
+  ]);
+  return dirPath === homePath;
 }
 
 /** Is any install of ours here for a refresh to bring up to date? */
@@ -307,7 +327,7 @@ export async function runRouterInstall(
   const cwd = deps.cwd ?? process.cwd();
   // An explicit --project wins, including for a project rooted at home.
   const project =
-    args.project ?? (args.refresh === true && (await inferRefreshProject(cwd, home, env)));
+    args.project ?? (args.refresh === true && (await projectInstallHere(cwd, home, env)));
   const scope: PluginScope = project ? 'local' : 'user';
   const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
   const paths = settingsInstallPaths(project, env, home, cwd);
@@ -365,9 +385,11 @@ export async function runRouterInstall(
           ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
           ...(deps.launcher !== undefined ? { launcher: deps.launcher } : {}),
         });
-  // A project's marketplace points at the shared rendered folder, so uninstall
-  // must know this project before it removes that folder for another scope.
-  if (project && plugin.method === 'plugin') {
+  // A PROJECT INSTALL IS RECORDED, so `tenjin update`, which refreshes from
+  // home where this scope is not visible, refreshes it from here too, and
+  // uninstall knows this project points at the shared rendered folder before
+  // it removes that folder for another scope.
+  if (project && plugin.state !== 'failed') {
     await persistRouterProject(ctx.dataDir, cwd, true).catch(() => undefined);
   }
   const migration =
@@ -444,6 +466,9 @@ export async function runRouterInstall(
     claudeCode,
     migration,
     next: nextStep(plugin, claude, wallet, migration),
+    // The check for this scope, said outright; a bare doctor in the project
+    // also finds it from what the project holds.
+    ...(project ? { doctor: 'tenjin doctor --project' } : {}),
     spend: {
       ...spend,
       effective: effectiveLimits(effective.policy),
@@ -492,16 +517,18 @@ function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
  * can take in the session: never a command for the person to run elsewhere.
  */
 function registrationFix(plugin: PluginRegistration): string {
+  // A project install is retried, and checked, as one.
+  const flag = plugin.scope === 'local' ? ' --project' : '';
   if (plugin.id !== null && plugin.method === 'none') {
-    return `${plugin.id} keeps serving this machine at the version Claude Code has; run \`tenjin install\` again to retry.`;
+    return `${plugin.id} keeps serving this machine at the version Claude Code has; run \`tenjin install${flag}\` again to retry.`;
   }
   if (
     plugin.path !== undefined &&
     plugin.reason?.includes('not a folder this CLI wrote') === true
   ) {
-    return `Move ${plugin.path} aside, then run \`tenjin install\` again.`;
+    return `Move ${plugin.path} aside, then run \`tenjin install${flag}\` again.`;
   }
-  return 'Run `tenjin doctor` to see the cause, then run `tenjin install` again.';
+  return `Run \`tenjin doctor${flag}\` to see the cause, then run \`tenjin install${flag}\` again.`;
 }
 
 /** The one step after the install, for the agent to relay in the session. */
@@ -846,6 +873,9 @@ function lines(
       : s.plugin.state === 'deferred'
         ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
         : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
+    ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
+      ? ['  For this project only; check it with: tenjin doctor --project']
+      : []),
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...pluginLines(ctx, s.plugin),

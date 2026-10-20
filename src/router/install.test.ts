@@ -945,6 +945,45 @@ describe('daily limit readouts', () => {
   );
 });
 
+it('status shows the routing deposit as prepaid credit, apart from lookups, and counts both', async () => {
+  const now = Date.now();
+  await writeFile(
+    join(data, 'spend.json'),
+    JSON.stringify({
+      schemaVersion: 2,
+      windowStartMs: now,
+      committedAtomic: '300000',
+      automaticCommittedAtomic: '300000',
+      reservations: [],
+      exposures: [
+        { nonce: 'routing-deposit:r1', amountAtomic: '250000', atMs: now, mode: 'automatic' },
+        { nonce: `0x${'1'.repeat(64)}`, amountAtomic: '50000', atMs: now, mode: 'automatic' },
+      ],
+    }),
+  );
+  const { runRouterStatus } = await import('./status');
+  const result = await runRouterStatus(ctx(), { routingCredit: async () => 240_000n });
+  expect(result.data).toMatchObject({
+    window: {
+      committed: { atomic: '300000' },
+      lookups: { atomic: '50000' },
+      routingDeposits: { atomic: '250000' },
+      automaticExposure: { atomic: '300000' },
+    },
+    routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
+  });
+  expect(result.humanLines?.slice(0, 2)).toEqual([
+    'lookups 0.05 USD · routing credit 0.25 USD prepaid, 0.24 USD left (~80 calls)',
+    'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
+  ]);
+});
+
+it('status shows no routing credit before any deposit', async () => {
+  const { runRouterStatus } = await import('./status');
+  const result = await runRouterStatus(ctx(), { routingCredit: async () => 0n });
+  expect(result.humanLines?.[0]).toBe('lookups 0 USD');
+});
+
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {
   await writeFile(
     join(data, 'config.json'),

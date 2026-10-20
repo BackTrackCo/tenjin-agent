@@ -107,8 +107,14 @@ export function registerRouter(reg: Registration): void {
     });
 
   const payments = leaf(SETUP, 'payments', 'the paid lookups this machine made').description(
-    'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`.',
+    'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`. A bare `tenjin payments` lists the newest: when, who was paid, how much, whether it settled, and the transaction.',
   );
+  payments.action(async function (this: Command) {
+    await runCommand('payments', this, async (ctx) => {
+      const { runPaymentsList } = await import('../router/payments');
+      return runPaymentsList(ctx);
+    });
+  });
   addGlobalFlags(payments.command('reconcile'))
     .summary('resolve paid lookups whose settlement is unknown')
     .description(
