@@ -12,13 +12,17 @@ import type { TenjinPaid, TenjinRow } from '../types';
  *   draws like any other service call, as Claude Code draws an MCP call:
  *   `⏺ Calling Exa search… · $0.007` with the query under it while it runs,
  *   then the dim folded line `Called Exa search · $0.007 (ctrl+o to
- *   expand)`, which the ctrl+o transcript opens into the whole row.
+ *   expand)`, which the ctrl+o transcript opens into the whole row and what
+ *   came back.
  * - AN OFFER THAT REPLACED A NATIVE CALL draws where that built-in stood:
  *   `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search` while
  *   held, then in place `⏺ Exa search("best local LLM") · $0.007`, the dot
  *   alone showing it runs or has ended; the request's own row stays empty.
  *
- * The router's own free calls draw nothing. Beside them: a toast when a call
+ * A request the router sent back for a missing field (`needs_input`) draws
+ * nothing in either form: the model fixes it and its retry is the line. Any
+ * other refusal draws its row with the state. The router's own free calls
+ * draw nothing either. Beside them: a toast when a call
  * is paid, one spend line under a turn that paid, the first-run wallet toast,
  * and the prompt hint while the wallet is unfunded. The engine's own spinner
  * words stand; the row carries the state.
@@ -27,6 +31,14 @@ import type { TenjinPaid, TenjinRow } from '../types';
  * CLI says identifies the lookup (`<sha256(id)>.shown.json`: a search's query,
  * a URL, a name; none for a service that makes media, none past 80
  * characters). Never a description, a tool id, JSON or `x402`.
+ *
+ * EXPANDED (the ctrl+o transcript, `--verbose`), what came back goes under
+ * the row in the engine's `⎿` block, dim, at most eight lines: the files the
+ * CLI saved, by path, and the fields the spec says the call returns, `name:
+ * value`, each cut to one line, an array as its count and its first items by
+ * title, name or URL. Those fields are read from the request tool's envelope
+ * only where the CLI cut the result to them (`fullResultPath` beside it);
+ * the provider's whole body is never drawn. Folded, nothing is drawn under it.
  *
  * READ ONLY. Everything comes from files the CLI already writes under its data
  * dir, read through `$.fs` (the contract is `src/router/mod-state.ts`); the mod
@@ -126,9 +138,12 @@ async function onRequest<E extends { tool_use_id: string }>(
   $.ui.invalidate('ui.render');
   const ran = await next(e);
   const settled = await settleCall($, call, ran, startedAt);
-  await $.state.set(ref, { ...call.row, ...settled.row });
+  // Kept for the held row, which has no output of its own to read.
+  const detail = resultLines(ran.text);
+  const ended = { ...call.row, ...settled.row, ...(detail.length > 0 ? { detail } : {}) };
+  await $.state.set(ref, ended);
   if (holdOf !== undefined) {
-    await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, { ...call.row, ...settled.row });
+    await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, ended);
     $.ui.invalidate('ui.render');
   }
   // A toast, never a transcript line: the row already says it.
@@ -234,7 +249,8 @@ export const register: Register = (on) => {
       });
       // WHILE HELD, the call taking it up draws here as it runs. One that ended
       // without taking it (refused before it ran the offer) lets it go: the
-      // row is struck again and that call draws its own row.
+      // row is struck again, for the retry to take up. That call draws its own
+      // row with its state, except a `needs_input`, which draws nothing.
       if (held.outcome === 'held') {
         if (taker !== undefined && taker.outcome === undefined) {
           return toolRow(Box, Text, replacementShape(keep(taker), undefined), e.viewport?.columns);
@@ -265,7 +281,12 @@ export const register: Register = (on) => {
         ...(held.priceAtomic !== undefined ? { price: `$${usd(held.priceAtomic)}` } : {}),
         outcome: 'done',
       };
-      return toolRow(Box, Text, replacementShape(keep(row), row.outcome), e.viewport?.columns);
+      return toolRow(
+        Box,
+        Text,
+        replacementShape(keep(row), row.outcome, expandedOf(e.props)),
+        e.viewport?.columns,
+      );
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { Box, Text } = $.ui.resolve(e);
@@ -353,7 +374,8 @@ function expandedOf(props: object): boolean {
 
 /**
  * A REQUEST CALL'S OWN ROW, or null where it draws nothing: before it has
- * started, where a held row draws it, and where it has no label of its own.
+ * started, where a held row draws it, where it has no label of its own, and
+ * where the router sent it back for a missing field.
  */
 async function requestShape($: Dollar, call: RequestCall): Promise<RowShape | null> {
   const { value: stored } = await $.state.get({ ...ROWS, id: call.tool_use_id });
@@ -392,7 +414,10 @@ async function requestShape($: Dollar, call: RequestCall): Promise<RowShape | nu
       : call.isInterrupted
         ? 'interrupted'
         : refusalOf(statusOf(textOf(call.output)), call.isErrored));
-  return callShape(row, outcome, call.isExpanded === true);
+  // Nothing ran or was paid; the retry is the line, alone or in a run.
+  if (outcome === REFUSALS.needs_input) return null;
+  const detail = hasOutput ? resultLines(textOf(call.output)) : (row.detail ?? []);
+  return callShape({ ...row, detail }, outcome, call.isExpanded === true);
 }
 
 /**
@@ -858,6 +883,14 @@ function nativeArgument(input: Json | undefined): string | undefined {
 
 /** The engine's response gutter and an MCP call's progress while it runs. */
 const GUTTER = '  ⎿  ';
+/** The lines after the first in a `⎿` block, aligned under its text. */
+const INDENT = '     ';
+/** The most lines an expanded row draws under it. */
+const DETAIL_LINES = 8;
+/** An array's first items an expanded row names. */
+const DETAIL_ITEMS = 3;
+/** A detail line's own cap, before the row's width cuts it. */
+const DETAIL_CHARS = 200;
 /** The engine's hint after a folded run's count (its default chord). */
 const EXPAND_HINT = '(ctrl+o to expand)';
 /** The verb the engine's folded line gives a running MCP call. */
@@ -884,6 +917,8 @@ interface RowShape {
   hint?: string;
   /** An ended call drawn as the engine's folded line for it. */
   isFolded?: boolean;
+  /** What came back, under the expanded row: one dim line each. */
+  detail?: string[];
 }
 
 /**
@@ -919,7 +954,12 @@ function callShape(row: TenjinRow, outcome: string | undefined, isExpanded = fal
     name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...price,
+    ...detailOf(row),
   };
+}
+
+function detailOf(row: TenjinRow): Pick<RowShape, 'detail'> {
+  return row.detail !== undefined && row.detail.length > 0 ? { detail: row.detail } : {};
 }
 
 /**
@@ -927,9 +967,14 @@ function callShape(row: TenjinRow, outcome: string | undefined, isExpanded = fal
  * replaced a native call the agent was about to make), drawn where that
  * built-in stood, as a built-in row would be, `⏺ Exa search("query") · $0.007`, the
  * same text while it runs and after, the dot alone showing which. No
- * `Calling`, nothing under it, no fold: the pair reads as one switch.
+ * `Calling`, no fold: the pair reads as one switch. Expanded, what came back
+ * goes under it as under any lookup's row.
  */
-function replacementShape(row: TenjinRow, outcome: string | undefined): RowShape {
+function replacementShape(
+  row: TenjinRow,
+  outcome: string | undefined,
+  isExpanded = false,
+): RowShape {
   const isRunning = outcome === undefined;
   const paid = outcome?.startsWith('$') === true ? outcome.split(' · ')[0] : undefined;
   const isPlain = isRunning || paid !== undefined || outcome === 'done';
@@ -941,6 +986,7 @@ function replacementShape(row: TenjinRow, outcome: string | undefined): RowShape
     name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
+    ...(isExpanded && !isRunning ? detailOf(row) : {}),
   };
 }
 
@@ -988,19 +1034,25 @@ function toolRow(Box: BoxElement, Text: TextElement, shape: RowShape, columns?: 
       </Box>
     </Box>
   );
-  if (shape.hint === undefined) return line;
   // The query under the row, quoted and dim, as the engine shows an MCP
-  // call's (its ToolGroup's latestDisplayHint) while it runs.
-  const hint = /^".*"$/.test(shape.hint) ? shape.hint : `"${shape.hint}"`;
+  // call's (its ToolGroup's latestDisplayHint) while it runs; or, expanded
+  // once it ended, what came back, in the same `⎿` block.
+  const under =
+    shape.hint !== undefined
+      ? [/^".*"$/.test(shape.hint) ? shape.hint : `"${shape.hint}"`]
+      : (shape.detail ?? []);
+  if (under.length === 0) return line;
   return (
     <Box flexDirection="column">
       {line}
-      <Box flexDirection="row">
-        <Text dimColor>{GUTTER}</Text>
-        <Text dimColor wrap="truncate-end">
-          {hint}
-        </Text>
-      </Box>
+      {under.map((text, at) => (
+        <Box flexDirection="row">
+          <Text dimColor>{at === 0 ? GUTTER : INDENT}</Text>
+          <Text dimColor wrap="truncate-end">
+            {text}
+          </Text>
+        </Box>
+      ))}
     </Box>
   );
 }
@@ -1057,7 +1109,7 @@ async function openHold($: Dollar, offerId: string): Promise<string | undefined>
  * is still held for its offer, which it is taking up. Once it ended
  * (`routed`): the CLI names it as the call that took one up
  * (`routedToolUseId`); a call refused before it ran the offer took nothing
- * and draws its own row. Read from the CLI's index of the calls it held for
+ * and draws its own row (none for a `needs_input`). Read from the CLI's index of the calls it held for
  * an offer id (`src/router/held.ts`).
  */
 async function heldFor(
@@ -1094,6 +1146,68 @@ function clean(value: string, limit: number): string {
     .trim();
   const chars = Array.from(text);
   return chars.length <= limit ? text : `${chars.slice(0, limit - 1).join('')}…`;
+}
+
+/** WHAT CAME BACK, as the header's EXPANDED says: saved paths, then the cut fields. */
+function resultLines(text: string | undefined): string[] {
+  const envelope = envelopeOf(text);
+  if (envelope?.status !== 'fulfilled' && envelope?.status !== 'unverified') return [];
+  const steps = Array.isArray(envelope.results) ? envelope.results.map(asRecord) : [];
+  const saved = [envelope, ...steps].flatMap((one) =>
+    Array.isArray(one?.savedFiles) ? one.savedFiles : [],
+  );
+  const lines = saved
+    .filter((path): path is string => typeof path === 'string' && path.length > 0)
+    .map((path) => `saved: ${clean(path, DETAIL_CHARS)}`);
+  const cut = typeof envelope.fullResultPath === 'string' ? parseJson(envelope.result) : undefined;
+  return [...lines, ...(cut !== undefined ? fieldLines(cut.value) : [])].slice(0, DETAIL_LINES);
+}
+
+function fieldLines(value: unknown): string[] {
+  if (Array.isArray(value)) return arrayLines(undefined, value);
+  const record = asRecord(value);
+  if (record === undefined) {
+    const one = scalarOf(value);
+    return one !== undefined ? [one] : [];
+  }
+  return Object.entries(record).flatMap(([key, field]) => {
+    const name = clean(key, 40);
+    if (name.length === 0 || SECRET_NAME.test(name)) return [];
+    if (Array.isArray(field)) return arrayLines(name, field);
+    const nested = asRecord(field);
+    if (nested !== undefined) {
+      return Object.entries(nested).flatMap(([sub, inner]) => {
+        const one = SECRET_NAME.test(sub) ? undefined : scalarOf(inner);
+        return one !== undefined ? [`${name}.${clean(sub, 40)}: ${one}`] : [];
+      });
+    }
+    const one = scalarOf(field);
+    return one !== undefined ? [`${name}: ${one}`] : [];
+  });
+}
+
+/** `results: 10 items`, then the first few. */
+function arrayLines(name: string | undefined, items: unknown[]): string[] {
+  const count = `${items.length} ${items.length === 1 ? 'item' : 'items'}`;
+  const named = items.slice(0, DETAIL_ITEMS).flatMap((item) => {
+    const record = asRecord(item);
+    const pick =
+      record === undefined
+        ? scalarOf(item)
+        : [record.title, record.name, record.url, ...Object.values(record)]
+            .map(scalarOf)
+            .find((one) => one !== undefined);
+    return pick !== undefined ? [`  ${pick}`] : [];
+  });
+  return [name !== undefined ? `${name}: ${count}` : count, ...named];
+}
+
+function scalarOf(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+    return undefined;
+  }
+  const text = clean(String(value), DETAIL_CHARS);
+  return text.length > 0 ? text : undefined;
 }
 
 /**
@@ -1172,6 +1286,16 @@ async function readJson($: Dollar, path: string): Promise<Json | null> {
     return asRecord(JSON.parse(await $.fs.read(path))) ?? null;
   } catch {
     return null;
+  }
+}
+
+/** A JSON string's value, or undefined where it is not one. */
+function parseJson(text: unknown): { value: unknown } | undefined {
+  if (typeof text !== 'string') return undefined;
+  try {
+    return { value: JSON.parse(text) as unknown };
+  } catch {
+    return undefined;
   }
 }
 

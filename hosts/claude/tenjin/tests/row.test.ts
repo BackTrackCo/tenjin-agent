@@ -269,3 +269,62 @@ test('any other tool row is left to the engine', async ($, on) => {
     await result.unmount();
   }
 });
+
+test('a request sent back for a missing field draws nothing, alone or in a run of calls', async ($, on) => {
+  const { files, toasts } = machine(on);
+  await keepSpec(files, OFFER, EXA);
+  const refused = JSON.stringify({
+    status: 'needs_input',
+    reason: 'Missing required field: query',
+  });
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    if (e.tool_use_id === 'toolu_missing') return { result: refused, text: refused, isError: true };
+    await recordPayment(files, OFFER, {
+      capabilityId: 'exa-search',
+      amountAtomic: '40000',
+      txHash: '0xc9fc',
+    });
+    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
+  });
+  const missing = { id: OFFER, input: { q: 'rust async runtimes' } };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_missing', ...missing });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
+  const call = (id: string, tool: string, input: unknown, output: string, isErrored = false) => ({
+    ...toolRow(id, tool, input),
+    isRunning: false,
+    isErrored,
+    output,
+  });
+  const refusedRow = call('toolu_missing', TOOL, missing, refused, true);
+  for (const surface of SURFACES) {
+    // Alone, stored or read back from a resumed transcript: nothing, no room.
+    for (const props of [refusedRow, call('toolu_resumed', TOOL, missing, refused, true)]) {
+      const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
+      expect(await shownLines(ui)).toEqual([]);
+      expect((await ui.findAll({ type: 'Box' }))[0]?.props.display).toBe('none');
+      await ui.unmount();
+    }
+    // In a run: neither counted nor shown; the paid retry is the one row.
+    const mount = (calls: unknown[]) =>
+      $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'ToolGroup',
+        props: { calls: calls as never, isActive: false, isExpanded: false },
+      });
+    const mixed = await mount([
+      call('r1', 'Read', { file_path: '/a' }, 'ok'),
+      refusedRow,
+      call('toolu_paid', TOOL, { id: OFFER, input: INPUT }, resultText('fulfilled')),
+    ]);
+    expect((await shownLines(mixed)).join('')).toBe(
+      'Read 1 file (ctrl+o to expand)Called Exa search · $0.04 (ctrl+o to expand)',
+    );
+    await mixed.unmount();
+    const alone = await mount([refusedRow]);
+    expect(await shownLines(alone)).toEqual([]);
+    await alone.unmount();
+  }
+  // No toast for it, and the turn counts the paid call alone.
+  expect(toasts).toEqual(['Exa search · $0.04']);
+});

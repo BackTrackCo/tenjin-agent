@@ -416,8 +416,8 @@ test('a request row for a held offer draws nothing on its first frame, before an
   }
 });
 
-test('a request refused before it ran the offer draws its own row; the paid retry takes the hold', async ($, on) => {
-  const { files } = machine(on);
+test('a request sent back for a missing field draws nothing; its claim lapses and the paid retry draws once', async ($, on) => {
+  const { files, toasts, clock } = machine(on);
   await keepSpec(files, OFFER, {
     capabilityId: 'exa-search',
     label: 'Exa search',
@@ -426,12 +426,19 @@ test('a request refused before it ran the offer draws its own row; the paid retr
   });
   const refused = JSON.stringify({
     status: 'needs_input',
-    reason: 'The input is over 16384 bytes',
+    reason: 'Missing required field: query',
   });
-  // Beneath the mod: the first call is refused before the CLI marks anything;
-  // the retry runs the offer, is named on the held row, and pays.
+  let release = (): void => undefined;
+  const answering = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  // Beneath the mod: the first call is sent back before the CLI marks
+  // anything; the retry runs the offer, is named on the held row, and pays.
   on('tool.call', { tool: TOOL }, async (_$, e) => {
-    if (e.tool_use_id === 'toolu_big') return { result: refused, text: refused, isError: true };
+    if (e.tool_use_id === 'toolu_first') {
+      await answering;
+      return { result: refused, text: refused, isError: true };
+    }
     await holdRow(files, 'toolu_held', 'routed', e.tool_use_id);
     await recordPayment(files, OFFER, {
       capabilityId: 'exa-search',
@@ -449,22 +456,39 @@ test('a request refused before it ran the offer draws its own row; the paid retr
     isErrored,
     output,
   });
-  const big = { id: OFFER, input: { query: 'a very long input' } };
+  const first = { id: OFFER, input: { q: 'rust async runtimes' } };
   const retry = { id: OFFER, input: { query: 'rust async runtimes' } };
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_big', ...big });
+  // While the first attempt runs it holds the claim: the held row draws it.
+  const running = $.tool.call({ tool: TOOL, tool_use_id: 'toolu_first', ...first });
+  await clock.settle();
   for (const surface of SURFACES) {
-    // It took nothing: the held row is struck again, the refusal is its own row.
+    const held = await mount(surface, heldSearch('toolu_held'));
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
+    await held.unmount();
+  }
+  release();
+  await running;
+  for (const surface of SURFACES) {
+    // It took nothing: the claim lapsed and the held row is struck again.
     const held = await mount(surface, heldSearch('toolu_held'));
     expect(await rowText(held)).toBe(
       '⏺ Web Search("rust async runtimes") · Tenjin offered Exa search',
     );
     await held.unmount();
-    const own = await mount(surface, done('toolu_big', big, refused, true));
-    expect(await rowText(own)).toBe('Called Exa search · $0.007 · needs input (ctrl+o to expand)');
-    await own.unmount();
+    // The attempt itself draws nothing, folded or expanded.
+    for (const isExpanded of [false, true]) {
+      const own = await mount(surface, {
+        ...done('toolu_first', first, refused, true),
+        isExpanded,
+      });
+      expect(await shownLines(own)).toEqual([]);
+      expect((await own.findAll({ type: 'Box' }))[0]?.props.display).toBe('none');
+      await own.unmount();
+    }
   }
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_retry', ...retry });
   for (const surface of SURFACES) {
+    // The retry took the claim and is the one line.
     const held = await mount(surface, heldSearch('toolu_held'));
     expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(await dotOf(held)).toEqual({ color: 'success', dimColor: undefined });
@@ -472,11 +496,12 @@ test('a request refused before it ran the offer draws its own row; the paid retr
     const paid = await mount(surface, done('toolu_retry', retry, resultText('fulfilled')));
     expect(await shownLines(paid)).toEqual([]);
     await paid.unmount();
-    // The refused attempt stays as the record of what happened.
-    const own = await mount(surface, done('toolu_big', big, refused, true));
-    expect(await rowText(own)).toBe('Called Exa search · $0.007 · needs input (ctrl+o to expand)');
+    const own = await mount(surface, done('toolu_first', first, refused, true));
+    expect(await shownLines(own)).toEqual([]);
     await own.unmount();
   }
+  // Only the retry paid.
+  expect(toasts).toEqual(['Exa search · $0.007']);
 });
 
 test('a request row is not drawn before it runs, while its input may still be arriving', async ($, on) => {

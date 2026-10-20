@@ -21,6 +21,9 @@ export type TenjinRow = {
   holdOf?: string;
   /** How it ended (`$0.007 · settled`, `pending`, `needs approval`), once it has. */
   outcome?: string;
+  /** What came back, one `name: value` line each, for the expanded row: the
+   *  spec's fields and the files the CLI saved, never the provider's body. */
+  detail?: string[];
 };
 
 /** What one call of this turn paid, in atomic USDC. */
