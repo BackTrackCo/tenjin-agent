@@ -222,3 +222,43 @@ test('a paid replacement stays when the model then runs the same search natively
   expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
   await ui.unmount();
 });
+
+test("expanded by the engine, the lookup that replaced a held search is the engine's own row", async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, { label: 'Exa search', priceAtomic: '7000' });
+  holding(on, files);
+  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  const seen: unknown[] = [];
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    seen.push(e.props);
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine row'] });
+  });
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['rows'] });
+  });
+  await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_held', ...SEARCH });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_take', ...INPUT });
+  const take = toolRow('toolu_take', TOOL, INPUT, PAID);
+  const mount = (component: 'ToolGroup' | 'ToolUse', props: unknown) =>
+    $.ui.mount({ plugin: 'tenjin', surface: 'terminal', component, props: props as never });
+  // Folded: the request's own row stays empty; the held row is the line.
+  const own = await mount('ToolUse', take);
+  expect(await shownLines(own)).toEqual([]);
+  await own.unmount();
+  // ctrl+o: the engine expands the run, and draws the request with its result.
+  const run = await mount('ToolGroup', {
+    calls: [heldRow(), take],
+    isActive: false,
+    isExpanded: true,
+  });
+  await run.unmount();
+  const open = await mount('ToolUse', take);
+  expect(await shownLines(open)).toEqual(['engine row']);
+  expect(seen.at(-1)).toMatchObject({ input: INPUT, output: PAID });
+  await open.unmount();
+  const held = await mount('ToolUse', heldRow());
+  expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
+  await held.unmount();
+});

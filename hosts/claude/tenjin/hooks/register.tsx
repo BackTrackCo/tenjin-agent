@@ -168,12 +168,13 @@ export const register: Register = (on) => {
     }
     if (tool !== REQUEST_TOOL) return next(e);
     const ui = $.ui.resolve(e);
-    const drawn = await rowOf($, tool_use_id, e.props);
-    if (drawn === null) return <ui.Box display="none" />;
     // In a run the engine expanded, the engine draws its own expanded row,
-    // input and result, exactly as for any MCP call.
-    if (expandedByEngine.has(tool_use_id)) return next(e);
-    return callRow(ui, drawn);
+    // input and result, exactly as for any MCP call: a lookup that replaced a
+    // held call (form A) as well, so what it bought opens there too.
+    const expanded = expandedByEngine.has(tool_use_id);
+    const drawn = await rowOf($, tool_use_id, e.props, expanded);
+    if (drawn === null) return <ui.Box display="none" />;
+    return expanded ? next(e) : callRow(ui, drawn);
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
@@ -241,6 +242,7 @@ async function rowOf(
   $: Dollar,
   id: string,
   call: { input: unknown; output?: unknown; isInterrupted: boolean },
+  expanded = false,
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
   // A JOB POLL repeats the result and the cost of the call that started it.
@@ -255,7 +257,7 @@ async function rowOf(
   if (drawn.status !== undefined && PLAIN.has(drawn.status) && drawn.paid === undefined)
     return null;
   const offer = drawn.offerId;
-  if (offer !== undefined && (await link($, `hold:${offer}`)) !== undefined) {
+  if (!expanded && offer !== undefined && (await link($, `hold:${offer}`)) !== undefined) {
     if ((await link($, `take:${offer}`)) === id) return null;
   }
   return drawn;
