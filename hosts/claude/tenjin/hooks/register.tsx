@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code';
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
 
-import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
+import type { TenjinPaid, TenjinRow } from '../types';
 
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
@@ -10,10 +10,10 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
  * the request tool's row reads `⏺ Exa search(best local LLM) · $0.007`. A
  * WebSearch or WebFetch call held for Tenjin reads `⏺ ~~WebSearch~~(best
  * local LLM)` until the request call takes it up, then becomes that call's
- * row in place, with the request's own row empty. Beside it: the spinner while a lookup is routed
- * or paid, a toast when a call is paid, one spend line under a turn that
- * paid, the first-run wallet toast, and the prompt hint while the wallet is
- * unfunded.
+ * row in place, with the request's own row empty. Beside it: a toast when a
+ * call is paid, one spend line under a turn that paid, the first-run wallet
+ * toast, and the prompt hint while the wallet is unfunded. The engine's own
+ * spinner words stand; the row carries the state.
  *
  * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
  * person would recognise (the query, the URL, else the first field, a field
@@ -44,14 +44,10 @@ type RowState = 'running' | 'done' | 'error';
 const HELD_KEY = 'held:';
 /** The outcomes that mean the call did not run to an answer. */
 const ERRORS = new Set(['failed', 'interrupted', 'not run']);
-/** The spinner's word between a held call and the request call it leads to. */
-const ROUTING_WORD = 'Routing to Tenjin';
 
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
-const LIVE = { plugin: 'tenjin', key: 'live' } as const;
 const TURN = { plugin: 'tenjin', key: 'turn' } as const;
 const WELCOMED = { plugin: 'tenjin', key: 'welcomed' } as const;
-const live = atom(LIVE, []);
 const turn = atom(TURN, []);
 const welcomed = atom(WELCOMED, false);
 
@@ -95,8 +91,7 @@ const REFUSALS: Readonly<Record<string, string>> = {
 
 /**
  * OUR REQUEST CALL, ONE ROW IN STATE: what it is before it runs, how it ended
- * after. A paid call is live for the spinner while it runs; once it is paid, a
- * toast and one dim transcript line say so, and what it paid counts toward the
+ * after. Once it is paid, a toast says so, and what it paid counts toward the
  * turn's spend line.
  */
 async function onRequest<E extends { tool_use_id: string }>(
@@ -106,15 +101,6 @@ async function onRequest<E extends { tool_use_id: string }>(
 ): Promise<ToolCallResult> {
   const startedAt = await $.clock.now();
   const call = await describeCall($, e);
-  // The held call this one takes up stops being the spinner's newest entry,
-  // and its row, which the CLI now marks routed, redraws as the switch.
-  const takes = new Set([
-    ...call.ids,
-    ...(call.row.offerId !== undefined ? [call.row.offerId] : []),
-  ]);
-  await update($, live, (list) =>
-    list.filter((one) => one.heldOffer === undefined || !takes.has(one.heldOffer)),
-  );
   // TAKING UP A HOLD, FROM THE FIRST FRAME: a call that runs a held offer (an
   // input or a query with its id, not a spec fetch) is drawn on the held row
   // while it runs and after, and its own row draws nothing.
@@ -127,33 +113,23 @@ async function onRequest<E extends { tool_use_id: string }>(
   await $.state.set(ref, call.row);
   if (holdOf !== undefined) {
     await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, call.row);
+  }
+  // The row draws from this state, which it waits for (see the ToolUse hook).
+  $.ui.invalidate('ui.render');
+  const ran = await next(e);
+  const settled = await settleCall($, call, ran, startedAt);
+  await $.state.set(ref, { ...call.row, ...settled.row });
+  if (holdOf !== undefined) {
+    await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, { ...call.row, ...settled.row });
     $.ui.invalidate('ui.render');
   }
-  const running: TenjinLive | null =
-    call.row.isPaid && call.priceAtomic !== undefined
-      ? { toolUseId: e.tool_use_id, label: call.row.label, priceAtomic: call.priceAtomic }
-      : null;
-  if (running !== null) await update($, live, (list) => [...list, running]);
-  try {
-    const ran = await next(e);
-    const settled = await settleCall($, call, ran, startedAt);
-    await $.state.set(ref, { ...call.row, ...settled.row });
-    if (holdOf !== undefined) {
-      await $.state.set({ ...ROWS, id: `${HELD_KEY}${holdOf}` }, { ...call.row, ...settled.row });
-      $.ui.invalidate('ui.render');
-    }
-    // A toast, never a transcript line: the row already says it.
-    if (settled.paidAtomic !== undefined) {
-      const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
-      await update($, turn, (list) => [...list, paid]);
-      $.ui.toast(`${call.row.label} · $${usd(settled.paidAtomic)}`);
-    }
-    return ran;
-  } finally {
-    if (running !== null) {
-      await update($, live, (list) => list.filter((one) => one.toolUseId !== running.toolUseId));
-    }
+  // A toast, never a transcript line: the row already says it.
+  if (settled.paidAtomic !== undefined) {
+    const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
+    await update($, turn, (list) => [...list, paid]);
+    $.ui.toast(`${call.row.label} · $${usd(settled.paidAtomic)}`);
   }
+  return ran;
 }
 
 export const register: Register = (on) => {
@@ -176,20 +152,6 @@ export const register: Register = (on) => {
   }));
 
   on('tool.call', { tool: REQUEST_TOOL }, ($, e, next) => onRequest($, e, next));
-
-  // A NATIVE CALL THE CLI HELD FOR AN OFFER: its pre-call hook denied it and
-  // wrote the held row. Until the request call takes it up, the spinner says
-  // where the turn is going.
-  on('tool.call', { tool: 'WebSearch' }, async ($, e, next) => {
-    const ran = await next(e);
-    if (ran.deny !== undefined) await noteHeld($, e.tool_use_id);
-    return ran;
-  });
-  on('tool.call', { tool: 'WebFetch' }, async ($, e, next) => {
-    const ran = await next(e);
-    if (ran.deny !== undefined) await noteHeld($, e.tool_use_id);
-    return ran;
-  });
 
   // A RUN OF REQUEST CALLS folds into the engine's one count line, which says
   // nothing of what ran: unfolded, each draws its own row through the hook
@@ -235,8 +197,13 @@ export const register: Register = (on) => {
         ...ROWS,
         id: `${HELD_KEY}${e.props.tool_use_id}`,
       });
-      if (taker !== undefined) return toolRow(Box, Text, callShape(keep(taker), taker.outcome));
+      // WHILE HELD, the call taking it up draws here as it runs. One that ended
+      // without taking it (refused before it ran the offer) lets it go: the
+      // row is struck again and that call draws its own row.
       if (held.outcome === 'held') {
+        if (taker !== undefined && taker.outcome === undefined) {
+          return toolRow(Box, Text, callShape(keep(taker), undefined));
+        }
         return toolRow(Box, Text, {
           state: 'running',
           name: e.props.tool,
@@ -244,9 +211,10 @@ export const register: Register = (on) => {
           ...(asked !== undefined ? { argument: asked } : {}),
         });
       }
-      // ROUTED in another session's state (a resumed transcript): the call
-      // the CLI named, else the offer's own label and price. With no call
-      // named, that call's own row is the line and this one takes no room.
+      // ROUTED: the call the CLI names as the one that took it up, from this
+      // session's state, else (a resumed transcript) the offer's own label and
+      // price. With no call named, that call's own row is the line and this
+      // one takes no room.
       if (held.routedToolUseId === undefined) return <Box display="none" />;
       const { value: taken } = await $.state.get({ ...ROWS, id: held.routedToolUseId });
       const row: TenjinRow = taken ?? {
@@ -258,17 +226,28 @@ export const register: Register = (on) => {
       return toolRow(Box, Text, callShape(keep(row), row.outcome));
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
-    const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
-    const row = stored ?? (await describeCall($, { ...asRecord(e.props.input) })).row;
     const { Box, Text } = $.ui.resolve(e);
-    // The held call's row draws this call in its place; any other call for
-    // the same offer (a later spec fetch, a second run) is its own row.
+    const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
+    // NOT STARTED YET: its input may still be arriving and its label is not
+    // known, so nothing is drawn rather than a placeholder that would flash.
+    if (stored === undefined && e.props.isRunning) return <Box display="none" />;
+    // A CALL THAT RUNS A HELD OFFER draws on the held row, decided from its own
+    // input on its first frame, before its tool.call has claimed the hold. A
+    // later call for the same offer (a spec fetch, a second run) is its own row.
+    const args = asRecord(e.props.input) ?? {};
+    const offerId = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
+    const runsOffer = asRecord(args.input) !== undefined || typeof args.query === 'string';
+    const isDone = stored?.outcome !== undefined || !e.props.isRunning;
     if (
-      row.holdOf !== undefined ||
-      (row.offerId !== undefined && (await tookUpHold($, row.offerId, e.props.tool_use_id)))
+      offerId !== undefined &&
+      (isDone
+        ? await heldFor($, offerId, e.props.tool_use_id, 'routed')
+        : stored?.holdOf !== undefined ||
+          (runsOffer && (await heldFor($, offerId, e.props.tool_use_id, 'held'))))
     ) {
       return <Box display="none" />;
     }
+    const row = stored ?? (await describeCall($, args)).row;
     const outcome =
       row.outcome ??
       (e.props.isRunning
@@ -289,25 +268,6 @@ export const register: Register = (on) => {
     if (e.props.tool !== REQUEST_TOOL && !isHeld) return next(e);
     const { Box } = $.ui.resolve(e);
     return <Box display="none" />;
-  });
-
-  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    const newest = (await read($, live)).at(-1);
-    if (newest === undefined) return next(e);
-    if (newest.heldOffer !== undefined) {
-      return next({
-        ...e,
-        props: { ...e.props, word: ROUTING_WORD, suffix: `… · ${newest.label}` },
-      });
-    }
-    return next({
-      ...e,
-      props: {
-        ...e.props,
-        word: `Calling ${newest.label}`,
-        suffix: `… · $${usd(newest.priceAtomic)}`,
-      },
-    });
   });
 
   // The unfunded wallet, at the end of the prompt's hint line. The terminal
@@ -341,8 +301,6 @@ export const register: Register = (on) => {
   // the turn of the main loop that spawned it.
   on('turn.start', async ($, e, next) => {
     await $.state.set(TURN, []);
-    // A held call whose request never came is not still routing.
-    await update($, live, (list) => list.filter((one) => one.heldOffer === undefined));
     return next(e);
   });
 
@@ -356,19 +314,6 @@ export const register: Register = (on) => {
     return { ...done, text: done.text === e.answer ? line : `${done.text}\n${line}` };
   });
 };
-
-/** A native call the CLI held: the spinner's newest entry until its request runs. */
-async function noteHeld($: Dollar, toolUseId: string): Promise<void> {
-  const held = await heldRow($, toolUseId);
-  if (held?.outcome !== 'held') return;
-  const entry: TenjinLive = {
-    toolUseId,
-    label: held.label,
-    priceAtomic: held.priceAtomic ?? '0',
-    heldOffer: held.offerId,
-  };
-  await update($, live, (list) => [...list.filter((one) => one.toolUseId !== toolUseId), entry]);
-}
 
 /** A held native call's row, as the CLI writes it (`src/router/held.ts`). */
 interface Held {
@@ -783,11 +728,6 @@ type TextElement = ReturnType<Dollar['ui']['resolve']>['Text'];
 type BoxElement = ReturnType<Dollar['ui']['resolve']>['Box'];
 
 /**
- * This request call took up a call held for its offer: the held row names it
- * (`routedToolUseId`), so it draws there. Read from the CLI's index of the
- * calls it held for an offer id (`src/router/held.ts`).
- */
-/**
  * The held call a request for this offer takes up: the first one the CLI
  * holds for it that is still `held` and that no request call took up yet.
  */
@@ -803,13 +743,27 @@ async function openHold($: Dollar, offerId: string): Promise<string | undefined>
     if (typeof id !== 'string') continue;
     const held = await heldRow($, id);
     if (held?.outcome !== 'held' || held.offerId !== offerId) continue;
+    // A claim by a call that ended without taking it up has lapsed.
     const { value: taken } = await $.state.get({ ...ROWS, id: `${HELD_KEY}${id}` });
-    if (taken === undefined) return id;
+    if (taken === undefined || taken.outcome !== undefined) return id;
   }
   return undefined;
 }
 
-async function tookUpHold($: Dollar, offerId: string, toolUseId: string): Promise<boolean> {
+/**
+ * This request call draws on a held call's row. While it runs (`held`): one
+ * is still held for its offer, which it is taking up. Once it ended
+ * (`routed`): the CLI names it as the call that took one up
+ * (`routedToolUseId`); a call refused before it ran the offer took nothing
+ * and draws its own row. Read from the CLI's index of the calls it held for
+ * an offer id (`src/router/held.ts`).
+ */
+async function heldFor(
+  $: Dollar,
+  offerId: string,
+  toolUseId: string,
+  phase: 'held' | 'routed',
+): Promise<boolean> {
   const dataDir = await tenjinDataDir($);
   if (dataDir === null) return false;
   const index = await readJson(
@@ -820,7 +774,11 @@ async function tookUpHold($: Dollar, offerId: string, toolUseId: string): Promis
   for (const id of ids) {
     if (typeof id !== 'string') continue;
     const held = await heldRow($, id);
-    if (held?.outcome === 'routed' && held.routedToolUseId === toolUseId) return true;
+    if (held === null || held.offerId !== offerId) continue;
+    if (phase === 'held' && held.outcome === 'held') return true;
+    if (phase === 'routed' && held.outcome === 'routed' && held.routedToolUseId === toolUseId) {
+      return true;
+    }
   }
   return false;
 }

@@ -23,7 +23,6 @@ const SEARCH = { query: 'rust async runtimes' };
 const REASON =
   'Tenjin router (installed by the user): Exa search, $0.007: call ' +
   `mcp__plugin_tenjin_router__request({id: "${OFFER}", input: {...}}).`;
-const SPIN = { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' } as const;
 
 /** The row the CLI's pre-call hook writes for a native call it held (`src/router/held.ts`). */
 async function holdRow(
@@ -167,7 +166,7 @@ test('a row has one blank line above and none below, as the engine draws a tool 
   for (const surface of SURFACES) {
     for (const props of [
       heldSearch('toolu_held'),
-      toolRow('toolu_direct', TOOL, { id: OFFER, input: { query: 'q' } }),
+      { ...toolRow('toolu_direct', TOOL, { id: OFFER, input: { query: 'q' } }), isRunning: false },
     ]) {
       const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
       const [row] = await ui.findAll({ type: 'Box' });
@@ -332,25 +331,39 @@ test('a search the CLI did not hold, and an interrupted held one, are the engine
   }
 });
 
-test('the spinner says Routing to Tenjin between the hold and the request call', async ($, on) => {
-  const { files, clock } = machine(on);
+test('a request row for a held offer draws nothing on its first frame, before any claim', async ($, on) => {
+  const { files } = machine(on);
+  await holdRow(files, 'toolu_held');
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: toolRow('toolu_first', TOOL, { id: OFFER, input: { query: 'q' } }),
+    });
+    expect(await shownLines(ui)).toEqual([]);
+    expect((await ui.findAll({ type: 'Box' }))[0]?.props.display).toBe('none');
+    await ui.unmount();
+  }
+});
+
+test('a request refused before it ran the offer draws its own row; the paid retry takes the hold', async ($, on) => {
+  const { files } = machine(on);
   await keepSpec(files, OFFER, {
     capabilityId: 'exa-search',
     label: 'Exa search',
     priceAtomic: '7000',
     maxAmountAtomic: '7000',
   });
-  // Beneath the mod, the engine: the CLI's pre-call hook holds the search.
-  on('tool.call', { tool: 'WebSearch' }, async (_$, e) => {
-    await holdRow(files, e.tool_use_id);
-    return { deny: REASON };
+  const refused = JSON.stringify({
+    status: 'needs_input',
+    reason: 'The input is over 16384 bytes',
   });
-  let release = (): void => undefined;
-  const paying = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  on('tool.call', { tool: TOOL }, async () => {
-    await paying;
+  // Beneath the mod: the first call is refused before the CLI marks anything;
+  // the retry runs the offer, is named on the held row, and pays.
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    if (e.tool_use_id === 'toolu_big') return { result: refused, text: refused, isError: true };
+    await holdRow(files, 'toolu_held', 'routed', e.tool_use_id);
     await recordPayment(files, OFFER, {
       capabilityId: 'exa-search',
       amountAtomic: '7000',
@@ -358,35 +371,39 @@ test('the spinner says Routing to Tenjin between the hold and the request call',
     });
     return { result: resultText('fulfilled'), text: resultText('fulfilled') };
   });
-  on('ui.render', { component: 'Spinner' }, ($, e) => {
-    const { Text } = $.ui.resolve(e);
-    return Text({ children: [`${e.props.message ?? e.props.word}${e.props.suffix}`] });
+  await holdRow(files, 'toolu_held');
+  const mount = (surface: (typeof SURFACES)[number], props: Record<string, unknown>) =>
+    $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: props as never });
+  const done = (id: string, args: Record<string, unknown>, output: string, isErrored = false) => ({
+    ...toolRow(id, TOOL, args),
+    isRunning: false,
+    isErrored,
+    output,
   });
-  const spinner = async (): Promise<string[]> => {
-    const shown: string[] = [];
-    for (const surface of SURFACES) {
-      const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'Spinner', props: SPIN });
-      shown.push(...(await shownLines(ui)));
-      await ui.unmount();
-    }
-    return shown;
-  };
-
-  await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_held', ...SEARCH, mode: 'standard' });
-  expect(await spinner()).toEqual([
-    'Routing to Tenjin… · Exa search',
-    'Routing to Tenjin… · Exa search',
-  ]);
-
-  const running = $.tool.call({
-    tool: TOOL,
-    tool_use_id: 'toolu_request',
-    id: OFFER,
-    input: { query: 'rust async runtimes' },
-  });
-  await clock.settle();
-  expect(await spinner()).toEqual(['Calling Exa search… · $0.007', 'Calling Exa search… · $0.007']);
-  release();
-  await running;
-  expect(await spinner()).toEqual(['Sauteing…', 'Sauteing…']);
+  const big = { id: OFFER, input: { query: 'a very long input' } };
+  const retry = { id: OFFER, input: { query: 'rust async runtimes' } };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_big', ...big });
+  for (const surface of SURFACES) {
+    // It took nothing: the held row is struck again, the refusal is its own row.
+    const held = await mount(surface, heldSearch('toolu_held'));
+    expect(await rowText(held)).toBe('⏺ WebSearch(rust async runtimes)');
+    await held.unmount();
+    const own = await mount(surface, done('toolu_big', big, refused, true));
+    expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
+    await own.unmount();
+  }
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_retry', ...retry });
+  for (const surface of SURFACES) {
+    const held = await mount(surface, heldSearch('toolu_held'));
+    expect(await rowText(held)).toBe('⏺ Exa search(rust async runtimes) · $0.007');
+    expect(await dotOf(held)).toEqual({ color: 'success', dimColor: undefined });
+    await held.unmount();
+    const paid = await mount(surface, done('toolu_retry', retry, resultText('fulfilled')));
+    expect(await shownLines(paid)).toEqual([]);
+    await paid.unmount();
+    // The refused attempt stays as the record of what happened.
+    const own = await mount(surface, done('toolu_big', big, refused, true));
+    expect(await rowText(own)).toBe('⏺ Exa search(a very long input) · $0.007 · needs input');
+    await own.unmount();
+  }
 });

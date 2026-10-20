@@ -54,7 +54,7 @@ test('a picked option is named and priced as itself, and only its payment counts
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
-      props: toolRow('toolu_gpt', TOOL, args),
+      props: { ...toolRow('toolu_gpt', TOOL, args), isRunning: false },
     });
     expect(await rowText(ui)).toBe('⏺ GPT Image 2(a lighthouse at dusk) · $0.04');
     await ui.unmount();
@@ -84,7 +84,7 @@ test('choice "all" totals every option it paid', async ($, on) => {
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
-      props: toolRow('toolu_all', TOOL, args),
+      props: { ...toolRow('toolu_all', TOOL, args), isRunning: false },
     });
     expect(await rowText(ui)).toBe('⏺ 2 services(a lighthouse at dusk) · $0.07');
     await ui.unmount();

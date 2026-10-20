@@ -23,17 +23,6 @@ export type TenjinRow = {
   outcome?: string;
 };
 
-/**
- * A paid call in flight, for the spinner; or, with `heldOffer`, a native call
- * held for that offer id whose request call has not run yet.
- */
-export type TenjinLive = {
-  toolUseId: string;
-  label: string;
-  priceAtomic: string;
-  heldOffer?: string;
-};
-
 /** What one call of this turn paid, in atomic USDC. */
 export type TenjinPaid = { amountAtomic: string };
 
@@ -41,7 +30,6 @@ declare module 'claude-code' {
   interface PluginState {
     tenjin: {
       rows: StateFamily<TenjinRow>;
-      live: TenjinLive[];
       turn: TenjinPaid[];
       /** The first-run wallet toast showed in this session. */
       welcomed: boolean;

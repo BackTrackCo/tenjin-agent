@@ -25,9 +25,14 @@ const EXA = {
 };
 
 test('a paid row is one line: the label, the query and the price, then the amount paid', async ($, on) => {
-  const { files, toasts, logs } = machine(on);
+  const { files, toasts, logs, clock } = machine(on);
   await keepSpec(files, OFFER, EXA);
+  let release = (): void => undefined;
+  const paying = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   on('tool.call', { tool: TOOL }, async () => {
+    await paying;
     await recordPayment(files, OFFER, {
       capabilityId: 'exa-search',
       amountAtomic: '40000',
@@ -37,15 +42,23 @@ test('a paid row is one line: the label, the query and the price, then the amoun
   });
   const row = toolRow('toolu_paid', TOOL, { id: OFFER, input: INPUT });
 
+  // Before its tool.call starts the label is not known: nothing is drawn.
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
+    expect(await shownLines(ui)).toEqual([]);
+    await ui.unmount();
+  }
+  const running = $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
+  await clock.settle();
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
+    // The same text it will end with; the engine's dot, dim, says it runs.
     expect(await rowText(ui)).toBe('⏺ Exa search(rust async runtimes) · $0.04');
-    // The engine's dot: dim while the call runs.
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
     await ui.unmount();
   }
-
-  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
+  release();
+  await running;
   // The settle toast, and no transcript line: the row says it.
   expect(toasts).toEqual(['Exa search · $0.04']);
   expect(logs).toEqual([]);
@@ -108,7 +121,10 @@ test('a spec without a label is a Tenjin lookup, never its provider', async ($, 
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
-      props: toolRow('toolu_glim', TOOL, { id: OFFER, input: { query: 'from:tenjin' } }),
+      props: {
+        ...toolRow('toolu_glim', TOOL, { id: OFFER, input: { query: 'from:tenjin' } }),
+        isRunning: false,
+      },
     });
     expect(await rowText(ui)).toBe('⏺ Tenjin lookup(from:tenjin) · $0.005');
     await ui.unmount();
@@ -122,7 +138,7 @@ test('an id-less query is the router picking: Tenjin(query)', async ($, on) => {
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
-      props: toolRow('toolu_pick', TOOL, { query: 'latest BTC price' }),
+      props: { ...toolRow('toolu_pick', TOOL, { query: 'latest BTC price' }), isRunning: false },
     });
     expect(await rowText(ui)).toBe('⏺ Tenjin(latest BTC price)');
     await ui.unmount();
