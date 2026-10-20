@@ -136,6 +136,8 @@ export interface RouterInstallDeps extends WalletDeps {
   findClaude?: (env: NodeJS.ProcessEnv) => ClaudeBinary | null;
   /** The marketplace folder; production reads this package's `dist/hosts/claude`. */
   hostsDir?: string | null;
+  /** The CLI entry a plugin folder's commands run. Production reads this package's `dist/index.js`. */
+  cliEntry?: string;
   /** Whether a person can answer the spend-limit question (a TTY on stdout and
    *  stdin, no `--json`); injected in tests. */
   isInteractive?: boolean;
@@ -378,6 +380,7 @@ export async function runRouterInstall(
           home,
           cwd,
           ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
+          ...(deps.cliEntry !== undefined ? { cliEntry: deps.cliEntry } : {}),
         });
   // A PROJECT INSTALL IS RECORDED, so `tenjin update`, which refreshes from
   // home where this scope is not visible, refreshes it from here too.
