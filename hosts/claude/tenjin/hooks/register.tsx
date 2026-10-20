@@ -12,7 +12,8 @@ import type { TenjinPaid, TenjinRow } from '../types';
  * whole row, `⏺ Exa search(best local LLM) · $0.007`. A WebSearch or WebFetch
  * call held for Tenjin reads as the engine's own row struck through,
  * `⏺ ~~Web Search~~("best local LLM") · Tenjin offered Exa search`, until the
- * request call takes it up, then becomes that call's row in place, with the
+ * request call takes it up, then becomes, in place, that call drawn as a
+ * built-in row would be, `⏺ Exa search("best local LLM") · $0.007`, with the
  * request's own row empty. The router's own free calls draw nothing. Beside
  * it: a toast when a call is paid, one spend line under a turn that paid, the
  * first-run wallet toast, and the prompt hint while the wallet is unfunded.
@@ -232,7 +233,7 @@ export const register: Register = (on) => {
       // row is struck again and that call draws its own row.
       if (held.outcome === 'held') {
         if (taker !== undefined && taker.outcome === undefined) {
-          return toolRow(Box, Text, callShape(keep(taker), undefined), e.viewport?.columns);
+          return toolRow(Box, Text, replacementShape(keep(taker), undefined), e.viewport?.columns);
         }
         return toolRow(
           Box,
@@ -260,12 +261,7 @@ export const register: Register = (on) => {
         ...(held.priceAtomic !== undefined ? { price: `$${usd(held.priceAtomic)}` } : {}),
         outcome: 'done',
       };
-      return toolRow(
-        Box,
-        Text,
-        callShape(keep(row), row.outcome, expandedOf(e.props)),
-        e.viewport?.columns,
-      );
+      return toolRow(Box, Text, replacementShape(keep(row), row.outcome), e.viewport?.columns);
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { Box, Text } = $.ui.resolve(e);
@@ -919,6 +915,27 @@ function callShape(row: TenjinRow, outcome: string | undefined, isExpanded = fal
     name: row.label,
     ...(row.argument !== undefined ? { argument: row.argument } : {}),
     ...price,
+  };
+}
+
+/**
+ * A REPLACEMENT: the request call that took up a held search, drawn in its
+ * place as a built-in row would be, `⏺ Exa search("query") · $0.007`, the
+ * same text while it runs and after, the dot alone showing which. No
+ * `Calling`, nothing under it, no fold: the pair reads as one switch.
+ */
+function replacementShape(row: TenjinRow, outcome: string | undefined): RowShape {
+  const isRunning = outcome === undefined;
+  const paid = outcome?.startsWith('$') === true ? outcome.split(' · ')[0] : undefined;
+  const isPlain = isRunning || paid !== undefined || outcome === 'done';
+  const tail = [paid ?? row.price, isPlain ? undefined : outcome].filter(
+    (part): part is string => part !== undefined,
+  );
+  return {
+    state: isRunning ? 'running' : ERRORS.has(outcome) ? 'error' : 'done',
+    name: row.label,
+    ...(row.argument !== undefined ? { argument: row.argument } : {}),
+    ...(tail.length > 0 ? { tail: ` · ${tail.join(' · ')}` } : {}),
   };
 }
 

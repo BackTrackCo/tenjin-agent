@@ -123,8 +123,10 @@ test('a held search is one row: struck, then the request call running and done, 
   await clock.settle();
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(ui)).toBe('⏺ Calling Exa search… · $0.007  ⎿  "rust async runtimes"');
+    expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
+    // A replacement never reads `Calling`, and has nothing under it.
+    expect(await rowText(ui)).not.toMatch(/Calling|⎿/);
     await ui.unmount();
     // FROM ITS FIRST FRAME the request's own row takes no room.
     await hidden(await mount(surface, toolRow('toolu_request', TOOL, request)));
@@ -139,11 +141,11 @@ test('a held search is one row: struck, then the request call running and done, 
   for (const surface of SURFACES) {
     const ui = await mount(surface, heldSearch('toolu_held'));
     const line = await rowText(ui);
-    expect(line).toBe('Called Exa search · $0.007 (ctrl+o to expand)');
+    expect(line).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(line).not.toMatch(MODEL_TEXT);
     expect(await ui.findAll({ type: 'Text', text: 'Web Search' })).toEqual([]);
-    // Ended: the engine's folded line has no dot.
-    expect(await dotOf(ui)).toBeUndefined();
+    // A replacement ends as a built-in row would: the same text, the dot done.
+    expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     await ui.unmount();
     await hidden(await mount(surface, done('toolu_request', request, resultText('fulfilled'))));
   }
@@ -153,7 +155,7 @@ test('a held search is one row: struck, then the request call running and done, 
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
   for (const surface of SURFACES) {
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('Called Exa search · $0.007 (ctrl+o to expand)');
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     await held.unmount();
     // A spec fetch, the router's own free call, is not drawn.
     const fetch = await mount(surface, done('toolu_spec', { id: OFFER }, spec));
@@ -464,9 +466,8 @@ test('a request refused before it ran the offer draws its own row; the paid retr
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_retry', ...retry });
   for (const surface of SURFACES) {
     const held = await mount(surface, heldSearch('toolu_held'));
-    expect(await rowText(held)).toBe('Called Exa search · $0.007 (ctrl+o to expand)');
-    // Ended: the engine's folded line has no dot.
-    expect(await dotOf(held)).toBeUndefined();
+    expect(await rowText(held)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
+    expect(await dotOf(held)).toEqual({ color: 'success', dimColor: undefined });
     await held.unmount();
     const paid = await mount(surface, done('toolu_retry', retry, resultText('fulfilled')));
     expect(await shownLines(paid)).toEqual([]);
