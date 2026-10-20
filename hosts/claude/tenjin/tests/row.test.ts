@@ -95,14 +95,16 @@ test('a lookup alone: Calling with its query while it runs, then the dim folded 
     expect(await dotOf(ui)).toBeUndefined();
     expect((await shownLines(ui)).join('')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
-    // Standalone in the normal view: the one line, nothing beneath.
+    // ENDED, AS A STANDALONE ROW: once a one-call run ends the engine may draw
+    // the call as its own row. It keeps the folded line, never the bare row.
     const alone = await $.ui.mount({
       plugin: 'tenjin',
       surface,
       component: 'ToolUse',
       props: ended,
     });
-    expect(await rowText(alone)).toBe('⏺ Exa search(rust async runtimes) · $0.04');
+    expect(await rowText(alone)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
+    expect(await dotOf(alone)).toBeUndefined();
     await alone.unmount();
     // Expanded by the engine (ctrl+o): the whole row, what came back under it.
     await expandRun($, [ended]);
@@ -305,7 +307,7 @@ test('a run this mod unfolds draws the paid row with nothing beneath; the engine
     await ui.unmount();
   };
   await group(false);
-  expect(await paidRow()).toEqual(['⏺', 'Exa search', '(rust async runtimes)', ' · $0.04']);
+  expect(await paidRow()).toEqual(['Called Exa search · $0.04 (ctrl+o to expand)']);
   // ctrl+o after the fact: the engine delivers the same run expanded.
   await group(true);
   expect((await paidRow()).slice(4, 6)).toEqual(['  ⎿  ', 'answer: Tokio']);

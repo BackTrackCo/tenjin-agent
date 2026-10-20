@@ -23,13 +23,11 @@ import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME } from './names';
 import { chainReader, RoutingPayer } from './routing-payer';
 import {
-  paymentsOf,
   runApproveTool,
   runRequestTool,
   type RequestToolDeps,
   type RequestToolResult,
 } from './tool';
-import { turnSpendLine } from './turn-spend';
 
 /**
  * `tenjin mcp`: the local stdio server that carries the `request` tool.
@@ -212,9 +210,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     { name: MCP_SERVER_NAME, version: pkg.version },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
-  // WHAT THIS SESSION PAID SINCE ITS LAST TURN ENDED, one amount per payment,
-  // subagents' included: the `Stop` leg says it and starts over.
-  const paidThisTurn: bigint[] = [];
   server.registerTool(
     'request',
     {
@@ -344,7 +339,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
         },
       );
-      paidThisTurn.push(...paymentsOf(result.envelope, job !== undefined ? { job } : {}));
       return toolResult(result);
     },
   );
@@ -395,7 +389,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
         },
       );
-      paidThisTurn.push(...paymentsOf(result.envelope));
       return toolResult(result);
     },
   );
@@ -445,12 +438,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         if (event === null) return { content: [{ type: 'text', text: '' }] };
         response = await runHookKind(args.kind, event, {
           dataDir: ctx.dataDir,
-          stopLine: async () =>
-            turnSpendLine(
-              paidThisTurn.splice(0),
-              ctx.dataDir,
-              (await resolveContextSettings(ctx)).policy.sessionBudgetAtomic,
-            ),
           ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
           ...(opts.payer !== undefined ? { route: opts.payer.routeFor.bind(opts.payer) } : {}),
           ...opts.hookDeps,

@@ -526,9 +526,6 @@ function delegationOffer(hint: string): string {
 
 export interface HookDeps {
   dataDir: string;
-  /** The `Stop` leg's line: what this turn paid, said once. Only `tenjin mcp`
-   *  knows it; the command form has none, and says nothing. */
-  stopLine?: () => Promise<string | null>;
   /** Overrides the resolved base URL entirely; tests point it at a local stub. */
   baseUrl?: string;
   /** The environment the base URL precedence reads `TENJIN_BASE_URL` from. */

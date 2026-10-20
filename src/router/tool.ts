@@ -2546,39 +2546,6 @@ export function costLines(providerAtomic: bigint): string[] {
   return [`provider price ${toMoney(providerAtomic.toString()).usd} USD`];
 }
 
-/** What {@link costLines} said was paid, in atomic USDC; 0 for anything else. */
-export function costAtomicOf(cost: unknown): bigint {
-  const line = Array.isArray(cost) ? cost[0] : undefined;
-  const usd = typeof line === 'string' ? /^provider price (\d+(?:\.\d+)?) USD$/.exec(line) : null;
-  if (usd === null) return 0n;
-  const [whole = '0', fraction = ''] = usd[1]!.split('.');
-  return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0').slice(0, 6));
-}
-
-/**
- * THE PAYMENTS ONE RESULT MADE, one amount each: a single call's, or each
- * take or option of a set that paid in this call. A step an earlier call
- * already paid says 0 and is left out, a call that failed after its payment
- * left still counts what left, and a job poll counts nothing.
- */
-export function paymentsOf(
-  envelope: Record<string, unknown>,
-  args: Pick<RequestToolArgs, 'job'> = {},
-): bigint[] {
-  // A job poll pays nothing: its result repeats what the call that started
-  // the job paid, which that call already counted.
-  // The same test the request tool runs before it polls: a nonempty `job`.
-  if (args.job !== undefined && args.job.length > 0) return [];
-  const steps = Array.isArray(envelope.results) ? (envelope.results as unknown[]) : [envelope];
-  return steps
-    .map((step) =>
-      step !== null && typeof step === 'object'
-        ? costAtomicOf((step as { cost?: unknown }).cost)
-        : 0n,
-    )
-    .filter((amount) => amount > 0n);
-}
-
 /**
  * ROUTINE CONTROL OUTCOMES, not failures of this tool. A routing decision was
  * delivered and it says the turn continues somewhere else: with the host's own

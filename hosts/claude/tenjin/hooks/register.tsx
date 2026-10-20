@@ -275,13 +275,18 @@ function shapeOf(row: TenjinRow): Shape {
 }
 
 /** A request call's own row: `Calling X… · $p` with its input under it while it
- *  runs, then `X(input) · $p`, and when expanded what came back beneath. */
+ *  runs, then the folded `Called X · $p`, or, in an engine-expanded run,
+ *  `X(input) · $p` with what came back beneath. */
 function callRow(ui: Elements, row: TenjinRow, expanded: boolean) {
   const shape = shapeOf(row);
   if (shape.state === 'running') {
     const under = row.argument !== undefined ? [`"${row.argument}"`] : [];
     return block(ui, line(ui, { ...shape, name: `Calling ${row.label}…` }), under);
   }
+  // Ended and plain, as Claude Code leaves an ended MCP call wherever it is
+  // drawn (its one-call run, or the standalone row that run becomes): the dim
+  // folded line. A refusal or a charged failure keeps its dot and its state.
+  if (!expanded && row.status === 'fulfilled') return folded(ui, row);
   const argued = row.argument !== undefined ? { ...shape, argument: row.argument } : shape;
   return block(ui, line(ui, argued), expanded ? (row.detail ?? []) : []);
 }
