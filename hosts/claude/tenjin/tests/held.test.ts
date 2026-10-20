@@ -141,8 +141,9 @@ test('a held search the model then ran natively draws nothing', async ($, on) =>
   }
 });
 
-test('a run of request calls unfolds into its rows; a mixed run stays folded', async ($, on) => {
-  machine(on);
+test('a run of request calls and held native calls unfolds; any other run stays folded', async ($, on) => {
+  const { files } = machine(on);
+  await holdRow(files, 'held_search');
   const seen: boolean[] = [];
   on('ui.render', { component: 'ToolGroup' }, ($, e) => {
     seen.push(e.props.isExpanded);
@@ -174,8 +175,33 @@ test('a run of request calls unfolds into its rows; a mixed run stays folded', a
     });
     expect(await shownLines(mixed)).toEqual(['count line']);
     await mixed.unmount();
+    const switched = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: {
+        calls: [call('WebSearch', 'held_search'), call(TOOL, 'a')],
+        isActive: false,
+        isExpanded: false,
+      },
+    });
+    expect(await shownLines(switched)).toEqual(['rows']);
+    await switched.unmount();
+    // A search the CLI did not hold is the engine's, beside ours or not.
+    const free = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: {
+        calls: [call('WebSearch', 'free_search'), call(TOOL, 'a')],
+        isActive: false,
+        isExpanded: false,
+      },
+    });
+    expect(await shownLines(free)).toEqual(['count line']);
+    await free.unmount();
   }
-  expect(seen).toEqual([true, false, true, false]);
+  expect(seen).toEqual([true, false, true, false, true, false, true, false]);
 });
 
 test("a held call's result draws nothing, whatever became of it", async ($, on) => {

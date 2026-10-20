@@ -179,9 +179,20 @@ export const register: Register = (on) => {
 
   // A RUN OF REQUEST CALLS folds into the engine's one count line, which says
   // nothing of what ran: unfolded, each draws its own row through the hook
-  // below. A run with any other tool in it is the engine's.
-  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
-    const ours = e.props.calls.length > 0 && e.props.calls.every((c) => c.tool === REQUEST_TOOL);
+  // below. So does a run whose other calls are native ones the CLI held, so
+  // the switch reads on its line. A run with any other call in it is the
+  // engine's.
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    const { calls } = e.props;
+    let ours = calls.length > 0;
+    for (const call of calls) {
+      if (!ours) break;
+      if (call.tool === REQUEST_TOOL) continue;
+      ours =
+        NATIVE_TOOLS.has(call.tool) &&
+        call.tool_use_id !== undefined &&
+        (await heldRow($, call.tool_use_id)) !== null;
+    }
     return next(ours ? { ...e, props: { ...e.props, isExpanded: true } } : e);
   });
 
