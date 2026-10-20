@@ -107,9 +107,7 @@ test('a held search is struck with the offer named, then replaced in place by th
       props: heldRow(),
     });
     // Standalone and ended, it carries what came back, as a lookup row does.
-    expect(await rowText(ui)).toBe(
-      '⏺ Exa search("rust async runtimes") · $0.007  ⎿  answer: Tokio',
-    );
+    expect(await rowText(ui)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
     await ui.unmount();
     const own = await $.ui.mount({
@@ -155,9 +153,7 @@ test('a take that came back needs_input lets the hold go, for the retry to take'
     component: 'ToolUse',
     props: heldRow(),
   });
-  expect(await rowText(taken)).toBe(
-    '⏺ Exa search("rust async runtimes") · $0.007  ⎿  answer: Tokio',
-  );
+  expect(await rowText(taken)).toBe('⏺ Exa search("rust async runtimes") · $0.007');
   await taken.unmount();
 });
 

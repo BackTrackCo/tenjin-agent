@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing';
+import { expect, test, type TestBody } from 'claude-code/testing';
 
 import {
   MODEL_TEXT,
@@ -23,6 +23,17 @@ const PAID = envelope('fulfilled', {
   fullResultPath: '/home/test/.tenjin/downloads/exa.json',
 });
 
+/** The engine delivering a run expanded, as ctrl+o and --verbose do. */
+async function expandRun($: Parameters<TestBody>[0], calls: unknown[]): Promise<void> {
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: { calls: calls as never, isActive: false, isExpanded: true },
+  });
+  await ui.unmount();
+}
+
 /** A lookup alone, as the engine folds one MCP call into a group of one. */
 const groupOf = (calls: unknown[]) => ({
   calls: calls as never,
@@ -31,6 +42,10 @@ const groupOf = (calls: unknown[]) => ({
 });
 
 test('a lookup alone: Calling with its query while it runs, then the dim folded line', async ($, on) => {
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['rows'] });
+  });
   const { files, clock } = machine(on);
   await keepSpec(files, OFFER, EXA);
   let release = (): void => undefined;
@@ -80,7 +95,17 @@ test('a lookup alone: Calling with its query while it runs, then the dim folded 
     expect(await dotOf(ui)).toBeUndefined();
     expect((await shownLines(ui)).join('')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
-    // Expanded (ctrl+o): the whole row, what came back under it.
+    // Standalone in the normal view: the one line, nothing beneath.
+    const alone = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: ended,
+    });
+    expect(await rowText(alone)).toBe('⏺ Exa search(rust async runtimes) · $0.04');
+    await alone.unmount();
+    // Expanded by the engine (ctrl+o): the whole row, what came back under it.
+    await expandRun($, [ended]);
     const open = await $.ui.mount({
       plugin: 'tenjin',
       surface,
@@ -149,6 +174,10 @@ test('three takes show what the three paid, and the count of them while running'
 });
 
 test('a charged failure draws the error dot, the amount and the state, never a success', async ($, on) => {
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['rows'] });
+  });
   const { files } = machine(on);
   await keepSpec(files, OFFER, EXA);
   const failed = envelope('failed', {
@@ -168,6 +197,7 @@ test('a charged failure draws the error dot, the amount and the state, never a s
     expect(await rowText(folded)).toBe('⏺ Exa search(rust async runtimes) · $0.04 · failed');
     expect(await dotOf(folded)).toEqual({ color: 'error', dimColor: undefined });
     await folded.unmount();
+    await expandRun($, [row]);
     const open = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
     expect((await shownLines(open)).slice(-1)).toEqual([
       'The provider answered 500 after the payment was sent.',

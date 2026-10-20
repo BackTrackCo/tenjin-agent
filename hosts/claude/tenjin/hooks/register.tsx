@@ -15,8 +15,14 @@ import type { TenjinHeld, TenjinRow } from '../types';
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
  *
  * Free router calls and `needs_input` answers draw nothing; a charged failure
- * draws the error dot, the amount and the state, never a success. Expanded, the
- * row carries what came back, from the CLI-cut envelope.
+ * draws the error dot, the amount and the state, never a success.
+ *
+ * MINIMUM LINES: what came back (the CLI-cut fields, saved paths, a failure's
+ * reason) is drawn beneath a row only where the engine itself expanded the
+ * run it sits in (`ToolGroup.isExpanded` as received). No documented prop
+ * tells the normal view from the transcript for a standalone row, so ctrl+o
+ * shows the fields when the lookup sits in a run, and a standalone lookup
+ * shows its one line everywhere.
  *
  * READ ONLY: the spec file and the offer record (`src/router/mod-state.ts`),
  * and the request tool's own envelope. The mod writes nothing under the data
@@ -33,12 +39,12 @@ const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
 /**
- * Calls of a run this mod unfolded in the normal view, where their rows draw no
- * block. The module's own memory, not `$.state`: a drawing may not write state,
- * and this is a fact about the drawing alone. A reload forgets it, and a row
- * then draws its block until its run is drawn again.
+ * Calls of a run the ENGINE expanded (ctrl+o, --verbose): the only rows that
+ * draw a block beneath. The module's own memory, not `$.state`: a drawing may
+ * not write state, and this is a fact about the drawing alone. A reload
+ * forgets it, so a row draws one line until its run is expanded again.
  */
-const unfoldedByUs = new Set<string>();
+const expandedByEngine = new Set<string>();
 const DOT = '⏺';
 const GUTTER = '  ⎿  ';
 const INDENT = '     ';
@@ -105,17 +111,16 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { calls, isExpanded } = e.props;
     const ids = calls.flatMap((c) => (c.tool_use_id !== undefined ? [c.tool_use_id] : []));
-    // EXPANDED BY THE ENGINE (ctrl+o, --verbose): its rows draw what came back,
-    // including rows this hook unfolded earlier in the normal view.
+    // EXPANDED BY THE ENGINE (ctrl+o, --verbose): its rows draw what came back.
     if (isExpanded) {
-      if (ids.some((id) => unfoldedByUs.delete(id))) $.ui.invalidate('ui.render');
+      const fresh = ids.filter((id) => !expandedByEngine.has(id));
+      for (const id of fresh) expandedByEngine.add(id);
+      if (fresh.length > 0) $.ui.invalidate('ui.render');
       return next(e);
     }
-    // UNFOLDED BY US, in the normal view: its rows draw one line each, nothing beneath.
-    const unfold = () => {
-      for (const id of ids) unfoldedByUs.add(id);
-      return next({ ...e, props: { ...e.props, isExpanded: true } });
-    };
+    // Back in the normal view, and unfolded by us: one line per row, nothing beneath.
+    if (ids.filter((id) => expandedByEngine.delete(id)).length > 0) $.ui.invalidate('ui.render');
+    const unfold = () => next({ ...e, props: { ...e.props, isExpanded: true } });
     const ours = calls.filter((c) => c.tool === REQUEST_TOOL);
     const others = calls.filter((c) => c.tool !== REQUEST_TOOL);
     if (ours.length === 0) {
@@ -156,7 +161,7 @@ export const register: Register = (on) => {
       if (taker !== undefined && taker.status !== 'needs_input') {
         const shape = { ...shapeOf(taker), name: taker.label };
         const head = line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
-        const ended = taker.status !== undefined && !unfoldedByUs.has(tool_use_id);
+        const ended = taker.status !== undefined && expandedByEngine.has(tool_use_id);
         return block(ui, head, ended ? (taker.detail ?? []) : []);
       }
       const offered = held.label !== undefined ? { tail: ` · Tenjin offered ${held.label}` } : {};
@@ -168,7 +173,7 @@ export const register: Register = (on) => {
     const ui = $.ui.resolve(e);
     const drawn = await rowOf($, tool_use_id, e.props);
     if (drawn === null) return <ui.Box display="none" />;
-    return callRow(ui, drawn, !unfoldedByUs.has(tool_use_id));
+    return callRow(ui, drawn, expandedByEngine.has(tool_use_id));
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
