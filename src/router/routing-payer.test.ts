@@ -246,6 +246,24 @@ describe('RoutingPayer', () => {
     expect(router.paidRequests()).toBe(0);
   });
 
+  it('tells each route what its own call deposited, so the deposit is said once', async () => {
+    const router = new FakeRouter();
+    const p = payer(router);
+    const decideOn = async () => {
+      const route = (await p.routeFor(BASE))!;
+      await requestDecision(
+        'tool',
+        { query: 'q' },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs: 3_500, route },
+      );
+      return route.deposited?.();
+    };
+    expect(await decideOn()).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    // The next call pays a voucher from that deposit: nothing new to say.
+    expect(await decideOn()).toBe(0n);
+    expect(router.deposits).toBe(1);
+  });
+
   it('deposits inline on the first paid call, then pays vouchers from the channel', async () => {
     const router = new FakeRouter();
     const p = payer(router);

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import {
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
 import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
+import { PLUGIN_ID } from '../router/names';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -139,7 +140,14 @@ describe('runUpdate', () => {
       latest: '0.1.0-alpha.7',
       updateAvailable: true,
       updated: true,
-      refresh: { profiles: [dir], failed: [], notices: [], settingsInstallPending: false },
+      refresh: {
+        profiles: [dir],
+        failed: [],
+        notices: [],
+        settingsInstallPending: false,
+        projects: [],
+        projectsFailed: [],
+      },
       mcpServer: {
         name: 'mcp server',
         status: 'ok',
@@ -767,6 +775,17 @@ describe('runUpdate: the post-swap refresh', () => {
     return path;
   };
 
+  /** A project directory holding a `--project` install, as Claude Code's local
+   *  scope records it: the refresh forgets a recorded project that holds none. */
+  const projectDir = async (name: string): Promise<string> => {
+    const path = await profileDir(join(name, '.claude'));
+    await writeFile(
+      join(path, 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { [PLUGIN_ID]: true } }),
+    );
+    return join(dir, name);
+  };
+
   /** A spawn seam that answers per call, so the manager can succeed while the
    *  refresh fails — the case the whole warn path exists for. `outputs` is what
    *  each child writes to the merged pipe, indexed the same way. */
@@ -774,6 +793,7 @@ describe('runUpdate: the post-swap refresh', () => {
     const calls: {
       cmd: string;
       args: string[];
+      cwd: string;
       env?: Record<string, string>;
       timeoutMs: number;
     }[] = [];
@@ -781,6 +801,7 @@ describe('runUpdate: the post-swap refresh', () => {
       calls.push({
         cmd,
         args,
+        cwd: spawnOpts.cwd,
         timeoutMs: spawnOpts.timeoutMs,
         ...(spawnOpts.env !== undefined ? { env: spawnOpts.env } : {}),
       });
@@ -1114,6 +1135,140 @@ describe('runUpdate: the post-swap refresh', () => {
       refresh: { settingsInstallPending: true },
       mcpServer: { fix: expect.stringContaining('Start a new Claude Code session') },
     });
+  });
+
+  /**
+   * A `--project` INSTALL IS CLAUDE CODE'S LOCAL SCOPE, which the refresh from
+   * home cannot see. Each project `install --project` recorded is refreshed from
+   * its own directory, as `--project`; one that is gone is forgotten.
+   */
+  it('refreshes each recorded project install from its own directory', async () => {
+    const profile = await profileDir('.tenjin');
+    const kept = await projectDir('app');
+    const gone = join(dir, 'deleted-app');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [kept, gone] } }),
+    );
+    const said = (scope: string) =>
+      `${JSON.stringify(buildSuccessEnvelope('install', { refresh: true, scope }), null, 2)}\n`;
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const spawned = scriptedSpawn([], [undefined, said('user'), said('local')]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY }),
+    );
+    expect(spawned.refreshes().map((c) => c.cwd)).toEqual([homedir(), kept]);
+    expect(spawned.refreshes().map((c) => c.args)).toEqual([
+      [ENTRY, 'install', '--refresh'],
+      [ENTRY, 'install', '--refresh', '--project'],
+    ]);
+    for (const call of spawned.refreshes()) expect(call.env?.TENJIN_DATA_DIR).toBe(profile);
+    expect(result.data).toMatchObject({ refresh: { projects: [kept], projectsFailed: [] } });
+    expect(result.humanLines).toContain(`Refreshed the project install in ${kept}.`);
+    const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
+      install: { routerProjects: string[] };
+    };
+    expect(config.install.routerProjects).toEqual([kept]);
+  });
+
+  /**
+   * A `--project` INSTALL AT HOME shares the user install's plugin folder and
+   * settings file, so only its `settings.local.json` proves it. It is kept and
+   * refreshed from home as `--project`, never taken for the user install.
+   */
+  it('keeps and refreshes a recorded project install at home', async () => {
+    const profile = await profileDir('.tenjin');
+    const home = await projectDir('home');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [home] } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const spawned = scriptedSpawn([]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY, homeDir: home }),
+    );
+    expect(spawned.refreshes().at(-1)).toMatchObject({
+      cwd: home,
+      args: [ENTRY, 'install', '--refresh', '--project'],
+    });
+    expect(result.data).toMatchObject({ refresh: { projects: [home], projectsFailed: [] } });
+    const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
+      install: { routerProjects: string[] };
+    };
+    expect(config.install.routerProjects).toEqual([home]);
+  });
+
+  it('names the project and its own fix when a project refresh fails', async () => {
+    const profile = await profileDir('.tenjin');
+    const app = await projectDir('app');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [app] } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: scriptedSpawn([
+          { kind: 'exit', code: 0 },
+          { kind: 'exit', code: 0 },
+          { kind: 'timeout' },
+        ]).impl,
+        refreshCommand: ENTRY,
+      }),
+    );
+    expect(result.data).toMatchObject({
+      refresh: {
+        failed: [],
+        projects: [],
+        projectsFailed: [
+          {
+            project: app,
+            reason: 'It did not finish in 60s.',
+            fix: `Run \`tenjin install --project\` in ${app}.`,
+          },
+        ],
+      },
+    });
+    expect(result.humanLines?.join('\n')).toContain('Could not refresh the project install in 1:');
+  });
+
+  /**
+   * AN INSTALL REMOVED WITHOUT `uninstall --project` (a `git clean -fdx` took
+   * `.claude/settings.local.json`) leaves its record behind. Refreshed, it
+   * would fail as "nothing to refresh" on every update; it is forgotten
+   * instead, with no child spawned there.
+   */
+  it('forgets a recorded project that no longer holds an install', async () => {
+    const profile = await profileDir('.tenjin');
+    const cleaned = await profileDir('app');
+    await writeFile(
+      join(profile, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [cleaned] } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = profile;
+    const spawned = scriptedSpawn([]);
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ spawnImpl: spawned.impl, refreshCommand: ENTRY }),
+    );
+    expect(spawned.refreshes().map((c) => c.cwd)).toEqual([homedir()]);
+    expect(result.data).toMatchObject({ refresh: { projects: [], projectsFailed: [] } });
+    const config = JSON.parse(await readFile(join(profile, 'config.json'), 'utf8')) as {
+      install: { routerProjects: string[] };
+    };
+    expect(config.install.routerProjects).toEqual([]);
   });
 
   it('reports every profile as unrefreshed when there is no entry to re-exec', async () => {

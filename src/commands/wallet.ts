@@ -7,6 +7,8 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import { addressQrLines } from '../lib/qr';
+import { channelCredit } from '../router/channel-credit';
+import { SUGGESTED_FUND_USD } from '../router/fee';
 import {
   commitLocalWallet,
   createLocalWallet,
@@ -24,8 +26,7 @@ import { resolvePassphraseForCreate, type PassphraseSource } from '../lib/wallet
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
 
-const FUNDING_LINE =
-  'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.';
+const FUNDING_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`, or send USDC on Base.`;
 const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 const isWindows = process.platform === 'win32';
 
@@ -316,9 +317,17 @@ export async function runWalletBalance(
   }
 
   const balance = toMoney(atomic.toString());
+  // THE ROUTING CREDIT IS STILL THE USER'S: a deposit moved it off the wallet
+  // into the routing channel, where the next routing fees draw from it.
+  const credit = toMoney(
+    (await channelCredit(ctx.dataDir, desc.address).catch(() => 0n)).toString(),
+  );
   return {
-    data: { address: desc.address, balance },
-    humanLines: [`Balance: ${balance.usd} USDC on Base`],
+    data: { address: desc.address, balance, routingCredit: credit },
+    humanLines: [
+      `Balance: ${balance.usd} USDC on Base` +
+        (credit.atomic !== '0' ? ` (+${credit.usd} routing credit)` : ''),
+    ],
   };
 }
 
