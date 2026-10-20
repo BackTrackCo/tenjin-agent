@@ -8,6 +8,7 @@ import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { spentOf } from '../lib/spend-ledger';
+import { isNewer } from '../lib/update-check';
 import { readUsdcBalance } from '../lib/usdc-balance';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
@@ -90,6 +91,9 @@ export interface RouterDoctorDeps {
 }
 
 const NODE_FLOOR = 22;
+/** The stamp row's fix: a new session first, since a reload never stamps, then the Node it runs. */
+const STAMP_FIX =
+  "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
 
 export async function runRouterDoctor(
   ctx: CommandContext,
@@ -281,8 +285,8 @@ interface PluginContext {
 }
 
 /**
- * The plugin: listed and enabled at this CLI's version, or, with no binary to
- * ask, its folder and the `alive` stamp. A machine that still routes through a
+ * The plugin: listed and enabled at this CLI's version and stamped by a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -346,6 +350,22 @@ async function pluginCheck(
           required: false,
           detail: `${listing.id} is enabled at ${listing.version ?? 'an unknown version'}, and this CLI is ${pkg.version}`,
           fix: 'Run `tenjin install --refresh` to register this version.',
+        },
+      };
+    }
+    // Claude Code's own environment shows only in the `alive` stamp, which the
+    // plugin's SessionStart leg writes from a real session: doctor's PATH may
+    // find a Node that Claude Code's does not.
+    const stamp = await readAliveStamp(c.dataDir);
+    if (stamp === null || isNewer(pkg.version, stamp.version)) {
+      return {
+        registered: true,
+        check: {
+          name,
+          status: 'warn',
+          required: false,
+          detail: `${listing.id} ${pkg.version} is enabled, and no session has started it at this version${stamp !== null ? ` (last ${stamp.version}, at ${stamp.at})` : ''}`,
+          fix: STAMP_FIX,
         },
       };
     }
@@ -419,9 +439,11 @@ async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promis
 
 /**
  * The plugin's `router` server, through `claude mcp get`, which starts it the
- * way a session would and reports whether it answered. It starts `tenjin mcp`
- * from the PATH Claude Code sees, so a `tenjin` that is not on that PATH shows
- * up here as a server that fails to connect.
+ * way a session would and reports whether it answered. `claude mcp get` runs
+ * with doctor's own environment, so it starts `node` from doctor's PATH, not
+ * the PATH a running Claude Code started with: a connected server here does
+ * not prove a session can start it. The `plugin` row's `alive` stamp is the
+ * proof from a real session.
  */
 async function serverCheck(
   binary: ClaudeBinary,
@@ -448,7 +470,7 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: 'Run `tenjin --version` in this session: the plugin starts `tenjin mcp` from PATH, so it must print a version.',
+    fix: 'Restart Claude Code (quit it from the tray) or sign out and in: the plugin starts the CLI with `node` from the PATH Claude Code started with, so a Claude Code opened before Node was installed cannot find it.',
   };
 }
 

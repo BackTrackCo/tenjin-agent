@@ -81,6 +81,8 @@ export interface RegisterOptions {
   cwd: string;
   /** The marketplace folder; defaults to this package's `dist/hosts/claude`. */
   hostsDir?: string | null;
+  /** The CLI entry the folder fallback's commands run. Defaults to this package's `dist/index.js`. */
+  cliEntry?: string;
 }
 
 /** Where the folder fallback lives for this scope. */
@@ -147,7 +149,11 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
   }
   const written = await writePluginFolder(
     folder,
-    renderPluginFiles(opts.version, await packageMod(opts.hostsDir)),
+    renderPluginFiles(
+      opts.version,
+      opts.cliEntry ?? packageCliEntry(),
+      await packageMod(opts.hostsDir),
+    ),
   );
   if (written.state === 'written') {
     return {
@@ -337,6 +343,18 @@ export async function packageHostsDir(
 export async function packageMod(hostsDir?: string | null): Promise<ModSources | undefined> {
   const hosts = hostsDir === undefined ? await packageHostsDir() : hostsDir;
   return hosts === null ? undefined : readModSources(join(hosts, PLUGIN_DIR));
+}
+
+/**
+ * THIS PACKAGE'S CLI ENTRY, `dist/index.js` beside the running bundle, for a
+ * plugin folder outside the package. The version-free path under pnpm, as
+ * {@link packageHostsDir} uses, so an upgrade does not strand it.
+ */
+export function packageCliEntry(
+  moduleDir: string = dirname(fileURLToPath(import.meta.url)),
+): string {
+  const entry = join(moduleDir, 'index.js');
+  return versionFreeEntry(entry) ?? entry;
 }
 
 /** Doctor's and the migration's read: is the plugin installed and enabled? */

@@ -97,6 +97,7 @@ function deps(over: Record<string, unknown> = {}) {
     cwd: work,
     env: env(),
     hostsDir: hosts,
+    cliEntry: join(root, 'pkg', 'dist', 'index.js'),
     walletExists: async () => true,
     walletAddress: async () => ADDRESS,
     createWallet: vi.fn(async () => ADDRESS),
@@ -245,8 +246,17 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       state: 'written',
       path: folder,
     });
+    // Outside the package, so its commands carry the absolute entry install resolved.
     // The mod's files are copied from the package's own plugin folder.
-    const files = renderPluginFiles(pkg.version, mod);
+    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'), mod);
+    expect(JSON.parse(files['.mcp.json']!)).toEqual({
+      mcpServers: {
+        router: {
+          command: 'node',
+          args: [join(root, 'pkg', 'dist', 'index.js'), 'mcp', '--plugin'],
+        },
+      },
+    });
     for (const path of PLUGIN_FILES) {
       expect(await readFile(join(folder, path), 'utf8')).toBe(files[path]);
     }
@@ -801,6 +811,40 @@ describe('tenjin doctor', () => {
     ).toEqual([]);
   });
 
+  describe('the session stamp, with a claude binary present', () => {
+    const fix =
+      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
+
+    it('warns when no session has started the plugin, though `claude mcp get` connects', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      const c = await checks();
+      expect(c['plugin']).toMatchObject({
+        status: 'warn',
+        detail: `tenjin@tenjin ${pkg.version} is enabled, and no session has started it at this version`,
+        fix,
+      });
+      expect(c['router server']).toMatchObject({ status: 'ok' });
+    });
+
+    it('warns when the last session started an older version', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      await runAliveHook({ session_id: 's' }, { dataDir: data, version: '0.0.1' });
+      const c = await checks();
+      expect(c['plugin']).toMatchObject({ status: 'warn', fix });
+      expect(c['plugin']?.detail).toContain('(last 0.0.1, at ');
+    });
+
+    it('passes when a session started this version', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
+      const c = await checks();
+      expect(c['plugin']).toMatchObject({
+        status: 'ok',
+        detail: `tenjin@tenjin ${pkg.version} enabled`,
+      });
+    });
+  });
+
   it('fails a machine with no plugin, with the install to run', async () => {
     const c = await checks();
     expect(c['plugin']).toMatchObject({ status: 'fail', fix: 'Run `tenjin install`.' });
@@ -867,12 +911,40 @@ describe('tenjin doctor', () => {
     expect(c['plugin']?.fix).toContain('/reload-plugins');
   });
 
+  /** Leaving the session to run a command; restarting Claude Code is not that. */
+  const OUT_OF_SESSION = /terminal|by hand/i;
+
   it('never sends anyone out of the session to fix a check', async () => {
     await writeLegacy();
     await fake.respond('version', '2.1.100 (Claude Code)\n');
     const c = await checks();
     for (const check of Object.values(c)) {
-      expect(check.fix ?? '', check.name).not.toMatch(/terminal|restart Claude Code|by hand/i);
+      expect(check.fix ?? '', check.name).not.toMatch(OUT_OF_SESSION);
     }
+  });
+
+  it('keeps the stamp and router server fixes inside the session', async () => {
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const c = await checks({ env: env({ CLAUDECODE: '1' }) });
+    expect(c['plugin']?.detail).toContain('no session has started it');
+    expect(c['PATH']).toBeUndefined();
+    expect(c['router server']?.status).toBe('fail');
+    for (const row of ['plugin', 'router server']) {
+      expect(c[row]?.fix, row).toMatch(/restart Claude Code/i);
+      expect(c[row]?.fix, row).not.toMatch(OUT_OF_SESSION);
+    }
+  });
+});
+
+describe('packageCliEntry', () => {
+  it('is the bundle entry beside the running chunk, version-free under pnpm', async () => {
+    const { packageCliEntry } = await import('./plugin-registration');
+    expect(packageCliEntry(join(root, 'pkg', 'dist'))).toBe(join(root, 'pkg', 'dist', 'index.js'));
+    const modules = join(root, 'global', 'node_modules');
+    const pinned = join(modules, '.pnpm', 'tenjin-cli@1.0.0', 'node_modules', 'tenjin-cli', 'dist');
+    await mkdir(join(modules, 'tenjin-cli', 'dist'), { recursive: true });
+    await writeFile(join(modules, 'tenjin-cli', 'dist', 'index.js'), '');
+    expect(packageCliEntry(pinned)).toBe(join(modules, 'tenjin-cli', 'dist', 'index.js'));
   });
 });

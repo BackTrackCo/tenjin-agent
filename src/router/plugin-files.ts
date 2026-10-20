@@ -53,6 +53,27 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 export const ASK_MATCHER = 'AskUserQuestion';
 
 /**
+ * EVERY COMMAND RUNS `node` IN EXEC FORM, with no shell (see `hook-form.ts`).
+ * The shipped plugin loads in place from the package's `dist/hosts/claude/tenjin`,
+ * so the bundle's entry is three folders above `${CLAUDE_PLUGIN_ROOT}`, which
+ * Claude Code substitutes into each argument, and the checked-in template
+ * stays static. The folder fallback lives under the config dir instead, and
+ * `install` renders it with the absolute entry of the CLI that wrote it.
+ */
+export const PLUGIN_ROOT_ENTRY = '${CLAUDE_PLUGIN_ROOT}/../../../index.js';
+
+/** A process Claude Code spawns directly: a hook's `command` and `args`, or a stdio server's. */
+export interface ExecLaunch {
+  command: string;
+  args: string[];
+}
+
+/** The CLI run by `node` from its entry script, never through the `tenjin` shim. */
+export function cliLaunch(args: readonly string[], entry: string = PLUGIN_ROOT_ENTRY): ExecLaunch {
+  return { command: 'node', args: [entry, ...args] };
+}
+
+/**
  * The `alive` leg: the plugin's `SessionStart` entry, so it runs before any
  * other event of a session. It marks the session as one the plugin serves, so
  * a settings-install leg in the same session stays silent, and stamps the
@@ -60,7 +81,7 @@ export const ASK_MATCHER = 'AskUserQuestion';
  * command, not an `mcp_tool` call: a session's MCP servers may still be
  * connecting when `SessionStart` fires, and a command needs nothing running.
  */
-export const ALIVE_COMMAND = 'tenjin hook alive';
+export const ALIVE_ARGS = ['hook', 'alive'] as const;
 
 /** A PreToolUse answer, as a hook command's stdout carries it. */
 function permissionAnswer(decision: 'allow' | 'deny', reason: string): string {
@@ -73,6 +94,13 @@ function permissionAnswer(decision: 'allow' | 'deny', reason: string): string {
   });
 }
 
+/** A fixed answer `node -e` prints from its own argument: no shell, no CLI, no quoting. */
+export const PRINT_ARGUMENT = 'process.stdout.write(process.argv[1])';
+
+function printed(answer: string): ExecLaunch {
+  return { command: 'node', args: ['-e', PRINT_ARGUMENT, answer] };
+}
+
 /**
  * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL. Its event fields are plain
  * arguments, so the model calling it could forge a routing leg. This blocking
@@ -81,13 +109,13 @@ function permissionAnswer(decision: 'allow' | 'deny', reason: string): string {
  * in every mode, bypass included, while Claude Code's own `mcp_tool` hook calls
  * still run (lab, Claude Code 2.1.296). The tool stays in the model's list. The
  * tool's transcript check (`admitHookEvent`) stays for a machine with hooks off.
- *
- * Static text, so no process starts: a fixed answer needs no CLI.
  */
-export const DENY_HOOK_COMMAND = `echo '${permissionAnswer(
-  'deny',
-  `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
-)}'`;
+export const DENY_HOOK = printed(
+  permissionAnswer(
+    'deny',
+    `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
+  ),
+);
 
 /**
  * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, replacing the settings
@@ -96,7 +124,7 @@ export const DENY_HOOK_COMMAND = `echo '${permissionAnswer(
  * the tool. The tool still pays only within the local spend policy, and an
  * amount over it returns `needs_approval` with nothing paid.
  */
-export const ALLOW_HOOK_COMMAND = `echo '${permissionAnswer('allow', 'Tenjin lookup')}'`;
+export const ALLOW_HOOK = printed(permissionAnswer('allow', 'Tenjin lookup'));
 
 /** One routing leg: Claude Code calls the plugin server's `hook` tool. */
 function leg(kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS): unknown[] {
@@ -111,8 +139,8 @@ function leg(kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS): unknown[] {
   ];
 }
 
-function command(text: string): unknown[] {
-  return [{ type: 'command', command: text, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }];
+function command(launch: ExecLaunch): unknown[] {
+  return [{ type: 'command', ...launch, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }];
 }
 
 /**
@@ -145,15 +173,18 @@ export const MOD_MODULE = './register.tsx';
  * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
  * permission answers, and the mod's module when the folder carries it.
  */
-export function renderPluginHooks(withMod = false): {
+export function renderPluginHooks(
+  entry: string = PLUGIN_ROOT_ENTRY,
+  withMod = false,
+): {
   hooks: Record<string, unknown[]>;
   modules?: string[];
 } {
   const plan = [
-    { event: 'SessionStart', hooks: command(ALIVE_COMMAND) },
+    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry)) },
     ...routerHookPlan(),
-    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(DENY_HOOK_COMMAND) },
-    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(ALLOW_HOOK_COMMAND) },
+    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(DENY_HOOK) },
+    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(ALLOW_HOOK) },
   ];
   const hooks: Record<string, unknown[]> = {};
   for (const { event, hooks: handlers, ...rest } of plan) {
@@ -163,7 +194,8 @@ export function renderPluginHooks(withMod = false): {
 }
 
 /**
- * `.mcp.json`: the server Claude Code starts for the plugin, the CLI on PATH.
+ * `.mcp.json`: the server Claude Code starts for the plugin, the CLI's entry
+ * run by `node`, which Windows can spawn where it cannot spawn the shim.
  *
  * `--plugin` KEEPS IT FROM BEING SUPPRESSED. Claude Code drops a plugin's MCP
  * server whose command and arguments match a server the user configured, and
@@ -173,8 +205,10 @@ export function renderPluginHooks(withMod = false): {
  */
 export const PLUGIN_MCP_ARGS = ['mcp', '--plugin'] as const;
 
-export function renderPluginMcp(): { mcpServers: Record<string, unknown> } {
-  return { mcpServers: { [MCP_SERVER_NAME]: { command: 'tenjin', args: [...PLUGIN_MCP_ARGS] } } };
+export function renderPluginMcp(entry: string = PLUGIN_ROOT_ENTRY): {
+  mcpServers: Record<string, unknown>;
+} {
+  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, entry) } };
 }
 
 /** The key whose presence marks a plugin manifest as one this CLI wrote. */
@@ -254,23 +288,28 @@ export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
- * The plugin folder's files, by {@link PLUGIN_FILES} path. Without the mod's
- * sources the folder carries the legs and the server alone, and its hooks file
- * names no module.
+ * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
+ * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
+ * outside the package. Without the mod's sources the folder carries the legs
+ * and the server alone, and its hooks file names no module.
  */
-export function renderPluginFiles(version?: string, mod?: ModSources): Record<string, string> {
+export function renderPluginFiles(
+  version?: string,
+  entry?: string,
+  mod?: ModSources,
+): Record<string, string> {
   const withMod = mod !== undefined;
   return {
-    '.mcp.json': json(renderPluginMcp()),
+    '.mcp.json': json(renderPluginMcp(entry)),
     ...(mod ?? {}),
-    'hooks/hooks.json': json(renderPluginHooks(withMod)),
+    'hooks/hooks.json': json(renderPluginHooks(entry, withMod)),
     '.claude-plugin/plugin.json': json(renderPluginManifest(version, withMod)),
   };
 }
 
 /** The marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
 export function renderHostFiles(version?: string, mod?: ModSources): Record<string, string> {
-  const plugin = Object.entries(renderPluginFiles(version, mod)).map(
+  const plugin = Object.entries(renderPluginFiles(version, undefined, mod)).map(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );
   return {

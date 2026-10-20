@@ -16,6 +16,7 @@ describe('parsePs', () => {
     const out = [
       ' 9044 Wed Oct  7 16:34:07 2026     node /opt/homebrew/bin/tenjin mcp',
       ' 9100 Wed Oct  7 23:00:00 2026     /usr/bin/node /usr/lib/node_modules/tenjin-cli/dist/index.js mcp',
+      ' 9150 Wed Oct  7 23:00:00 2026     node /src/agent/dist/hosts/claude/tenjin/../../../index.js mcp --plugin',
       ' 9200 Wed Oct  7 23:00:00 2026     node /opt/homebrew/bin/tenjin doctor',
       ' 9300 Wed Oct  7 23:00:00 2026     tail -F tenjin mcp.log',
       '   42 Wed Oct  7 23:00:00 2026     node /opt/homebrew/bin/tenjin mcp',
@@ -24,6 +25,7 @@ describe('parsePs', () => {
     expect(parsePs(out, 42)).toEqual([
       { pid: 9044, startedAt: BEFORE },
       { pid: 9100, startedAt: AFTER },
+      { pid: 9150, startedAt: AFTER },
     ]);
   });
 });
