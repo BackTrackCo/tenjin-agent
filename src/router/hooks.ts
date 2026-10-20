@@ -20,7 +20,7 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
-import { markHeld } from './held';
+import { markHeld, markNative } from './held';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import { FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
@@ -1136,7 +1136,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     redirected: () =>
       redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
   });
-  if (routed.offer === null) return routed.outcome;
+  if (routed.offer === null) return ranNatively(routed.outcome, deps, target, event.toolUseId);
   if (routed.free === true) {
     const { pending } = event;
     const augmenting =
@@ -1152,13 +1152,18 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
         routed.baseUrl,
         deps,
       ));
-    return {
-      response: null,
-      action: 'execute',
-      id: routed.offer.id,
-      free: true,
-      ...(augmenting ? { augmenting: true as const } : {}),
-    };
+    return ranNatively(
+      {
+        response: null,
+        action: 'execute',
+        id: routed.offer.id,
+        free: true,
+        ...(augmenting ? { augmenting: true as const } : {}),
+      },
+      deps,
+      target,
+      event.toolUseId,
+    );
   }
   if (event.toolUseId !== undefined) {
     const terms = offeredTerms(routed.offer);
@@ -1167,11 +1172,31 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     await markHeld(
       deps.dataDir,
       event.toolUseId,
-      { ...terms, offerId: routed.offer.id },
+      { ...terms, offerId: routed.offer.id, target },
       deps.now?.(),
     );
   }
   return redirect(routed.offer);
+}
+
+/**
+ * A NATIVE CALL THAT RUNS, recorded and nothing more: when this search or URL
+ * was held moments ago, its held row reads `native`, so the mod stops drawing
+ * it struck and the engine's row for this call is the one line shown. The
+ * outcome passes through unchanged.
+ */
+async function ranNatively(
+  outcome: NativeHookOutcome,
+  deps: HookDeps,
+  target: string,
+  toolUseId: string | undefined,
+): Promise<NativeHookOutcome> {
+  const decision = (outcome.response as { hookSpecificOutput?: { permissionDecision?: unknown } })
+    ?.hookSpecificOutput?.permissionDecision;
+  if (toolUseId !== undefined && decision !== 'deny') {
+    await markNative(deps.dataDir, target, toolUseId, deps.now?.());
+  }
+  return outcome;
 }
 
 /** What the offer record keeps of a redirect: the offer's label, from its

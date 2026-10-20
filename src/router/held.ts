@@ -15,20 +15,32 @@ import { EXPIRY_MS, pruneProgress, sanitize } from './progress';
  * leaves the engine's own row, and nothing here is read by routing or payment.
  *
  * `outcome` is `held` until the request tool runs that offer's id, which
- * marks it `routed` ({@link markRouted}); a call never made leaves it `held`.
+ * marks it `routed` ({@link markRouted}), or until the same search or URL is
+ * let run natively, which marks it `native` ({@link markNative}); a call
+ * never made leaves it `held`. Recording only: neither mark changes what is
+ * held, allowed or offered.
  * Every string is user text: the offer's label and its price, never the
  * reason the model read, the search, the URL or the input.
  */
 export interface HeldRow {
   version: 1;
   at: number;
-  outcome: 'held' | 'routed';
+  outcome: 'held' | 'routed' | 'native';
   /** The offer's `label`, when the decision carried one. */
   label?: string;
   /** The provider's price, in atomic USDC. */
   priceAtomic?: string;
   /** The offer id the deny named, which the request tool's call carries back. */
   offerId: string;
+  /** The native call that ran in its place, once `native`. */
+  nativeToolUseId?: string;
+}
+
+/** The held call for one search or URL, so a native retry of it finds its row. */
+interface HeldTarget {
+  version: 1;
+  at: number;
+  toolUseId: string;
 }
 
 /** Which held calls named one offer id, so the request tool can find their rows. */
@@ -55,11 +67,16 @@ function heldIndexPath(dataDir: string, offerId: string): string {
   return join(dataDir, HELD_DIR, `${digest(offerId)}.offer.json`);
 }
 
+/** Keyed by a digest of the tool and its search or URL, never the text itself. */
+function heldTargetPath(dataDir: string, target: string): string {
+  return join(dataDir, HELD_DIR, `${digest(`target\n${target}`)}.target.json`);
+}
+
 /** Record a held native call. Best effort: a lost row is the engine's own row. */
 export async function markHeld(
   dataDir: string,
   toolUseId: string,
-  offer: { offerId: string; label?: string; priceAtomic: string },
+  offer: { offerId: string; label?: string; priceAtomic: string; target?: string },
   now = Date.now(),
 ): Promise<void> {
   await pruneProgress(join(dataDir, HELD_DIR), now, HELD_EXPIRY_MS);
@@ -79,6 +96,34 @@ export async function markHeld(
     at: now,
     toolUseIds: ids.slice(-MAX_HELD_PER_OFFER),
   } satisfies HeldIndex);
+  if (offer.target !== undefined) {
+    await write(heldTargetPath(dataDir, offer.target), {
+      version: 1,
+      at: now,
+      toolUseId,
+    } satisfies HeldTarget);
+  }
+}
+
+/**
+ * The same search or URL a call was held for in the last {@link EXPIRY_MS}
+ * was let run natively: the model went back to its own tool, and the held
+ * row reads `native`, so the mod draws the engine's row for the call that ran
+ * in its place. A row already `routed` is left as it is.
+ */
+export async function markNative(
+  dataDir: string,
+  target: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<void> {
+  const pointer = await readJson(heldTargetPath(dataDir, target));
+  if (pointer?.version !== 1 || typeof pointer.toolUseId !== 'string') return;
+  if (pointer.toolUseId === toolUseId) return;
+  const path = heldRowPath(dataDir, pointer.toolUseId);
+  const row = await readHeld(path);
+  if (row === null || row.outcome !== 'held' || now - row.at > EXPIRY_MS) return;
+  await write(path, { ...row, outcome: 'native', nativeToolUseId: toolUseId });
 }
 
 /**
@@ -106,7 +151,7 @@ export async function markRouted(
 export async function readHeld(path: string): Promise<HeldRow | null> {
   const row = await readJson(path);
   if (row === null || row.version !== 1 || typeof row.at !== 'number') return null;
-  if (row.outcome !== 'held' && row.outcome !== 'routed') return null;
+  if (row.outcome !== 'held' && row.outcome !== 'routed' && row.outcome !== 'native') return null;
   if (typeof row.offerId !== 'string') return null;
   return row as unknown as HeldRow;
 }
@@ -133,7 +178,7 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
   }
 }
 
-async function write(path: string, body: HeldRow | HeldIndex): Promise<boolean> {
+async function write(path: string, body: HeldRow | HeldIndex | HeldTarget): Promise<boolean> {
   try {
     await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
     return true;

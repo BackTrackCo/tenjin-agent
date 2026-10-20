@@ -8,7 +8,7 @@ import {
   machine,
   recordPayment,
   resultText,
-  shownLines,
+  rowText,
   toolRow,
 } from './fixtures';
 
@@ -56,7 +56,7 @@ test('a picked option is named and priced as itself, and only its payment counts
       component: 'ToolUse',
       props: toolRow('toolu_gpt', TOOL, args),
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Calling GPT Image 2…', 'for $0.04']);
+    expect(await rowText(ui)).toBe('Calling GPT Image 2(a lighthouse at dusk)… · $0.04');
     await ui.unmount();
   }
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_gpt', ...args });
@@ -86,7 +86,7 @@ test('choice "all" totals every option it paid', async ($, on) => {
       component: 'ToolUse',
       props: toolRow('toolu_all', TOOL, args),
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Calling 2 services…', 'for $0.07']);
+    expect(await rowText(ui)).toBe('Calling 2 services(a lighthouse at dusk)… · $0.07');
     await ui.unmount();
   }
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_all', ...args });
@@ -102,7 +102,7 @@ test('choice "all" totals every option it paid', async ($, on) => {
         output: resultText('fulfilled'),
       },
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['2 services', '$0.07 · settled']);
+    expect(await rowText(ui)).toBe('2 services(a lighthouse at dusk) · $0.07');
     await ui.unmount();
   }
 });

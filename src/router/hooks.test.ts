@@ -3046,13 +3046,17 @@ describe('a discovered service', () => {
       outcome: 'held',
       offerId: ID,
     });
-    // The next discovered offer is withheld while this one is undelivered.
-    const again = await runNativeHook(await preCall('sound effect generator api', 'WebSearch'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: router(DISCOVERED).fetchImpl,
-    });
+    // The same search again is let run: the one-block rule. Its held row
+    // reads native, so the mod shows the engine's row for this call instead.
+    const again = await runNativeHook(
+      await preCall('sound effect generator api', 'WebSearch', { tool_use_id: 'toolu_retry' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
     expect(again).toEqual({ response: null, alreadyRedirected: true });
+    expect(await readHeld(heldRowPath(dir, 'toolu_held'))).toMatchObject({
+      outcome: 'native',
+      nativeToolUseId: 'toolu_retry',
+    });
   });
 
   it('is offered after a native call that came back short', async () => {

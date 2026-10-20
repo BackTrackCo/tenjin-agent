@@ -69,7 +69,7 @@ test('a turn that paid twice ends with one spend line', async ($, on) => {
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_1', id: EXA, input: { query: 'rust' } });
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_2', id: GLIM, input: { query: 'tokio' } });
   const { text } = await $.turn.complete(ended('turn-1'));
-  expect(text).toBe('Tenjin: 2 paid lookups, $0.09 · today $0.31 of $5.00');
+  expect(text).toBe('2 paid lookups, $0.09 · today $0.31 of $5.00');
   expect(text).not.toMatch(MODEL_TEXT);
 });
 
@@ -78,7 +78,7 @@ test('a turn that paid nothing adds nothing, after one that did', async ($, on) 
   await $.turn.start({ text: 'which async runtime?', turnId: 'turn-1' });
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_1', id: EXA, input: { query: 'rust' } });
   expect((await $.turn.complete(ended('turn-1'))).text).toBe(
-    'Tenjin: 1 paid lookup, $0.04 · today $0.31 of $5.00',
+    '1 paid lookup, $0.04 · today $0.31 of $5.00',
   );
 
   await $.turn.start({ text: 'thanks', turnId: 'turn-2' });
@@ -101,5 +101,5 @@ test('a free browse right after a paid lookup pays and counts nothing', async ($
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_1', id: EXA, input: { query: 'rust' } });
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_2', browse: '' });
   const { text } = await $.turn.complete(ended('turn-1'));
-  expect(text).toBe('Tenjin: 1 paid lookup, $0.04 · today $0.31 of $5.00');
+  expect(text).toBe('1 paid lookup, $0.04 · today $0.31 of $5.00');
 });

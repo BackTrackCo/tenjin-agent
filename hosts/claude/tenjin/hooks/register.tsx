@@ -5,14 +5,19 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
 
 /**
  * THE TENJIN MOD: what the router does, shown to the person, and the one
- * permission answer it gives. Surfaces: the request tool's row, the spinner
- * while a paid call runs, a toast and one dim line when a call is paid, one
- * spend line under a turn that paid, the first-run wallet toast, and the
- * prompt hint while the wallet is unfunded, and a WebSearch or WebFetch call
- * held for Tenjin drawn calmly in place of the engine's red hook error. Each
- * says the label, the state and
- * the price, and nothing the model reads: never a description, URL, input
- * JSON, tool id or `x402`.
+ * permission answer it gives. ONE LINE PER LOOKUP: the request tool's row
+ * reads like a native tool's, `Exa search(best local LLM) · $0.007`, and a
+ * WebSearch or WebFetch call held for Tenjin reads as the switch on its own
+ * row, `~~WebSearch~~ → Exa search(best local LLM) · $0.007`, with the
+ * request's row then empty. Beside it: the spinner while a lookup is routed
+ * or paid, a toast when a call is paid, one spend line under a turn that
+ * paid, the first-run wallet toast, and the prompt hint while the wallet is
+ * unfunded.
+ *
+ * WHAT A ROW SHOWS: the label, the price, the state, and the one input the
+ * person would recognise (the query, the URL, else the first field, a field
+ * whose name says secret masked), as the native WebSearch and WebFetch rows
+ * show theirs. Never a description, a tool id, JSON or `x402`.
  *
  * READ ONLY. Everything comes from files the CLI already writes under its data
  * dir, read through `$.fs` (the contract is `src/router/mod-state.ts`); the mod
@@ -29,8 +34,10 @@ import type { TenjinLive, TenjinPaid, TenjinRow } from '../types';
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
 /** The native tools the CLI's pre-call hook can hold for an offer. */
 const NATIVE_TOOLS = new Set(['WebSearch', 'WebFetch']);
-/** A held native call's row, before and after the request call ran its offer. */
-const HELD_HEADER = 'Held for Tenjin';
+/** Between a held native call and the call that took its place. */
+const SWITCH = ' → ';
+/** The `rows` key a request row is also kept under, for its held call's row. */
+const OFFER_KEY = 'offer:';
 /** The spinner's word between a held call and the request call it leads to. */
 const ROUTING_WORD = 'Routing to Tenjin';
 
@@ -48,9 +55,8 @@ const UNLABELLED = 'Tenjin lookup';
 const ROUTER = 'Tenjin';
 /** The server's label is up to 32 characters. */
 const LABEL_CHARS = 32;
-/** The status line's bound on what a call sends, applied per field here. */
+/** The status line's bound on what a call sends, applied to the one input shown. */
 const FIELD_CHARS = 180;
-const MAX_FIELDS = 6;
 /** The spend ledger's rolling day (`DEFAULT_WINDOW_MS` in the CLI). */
 const SPEND_WINDOW_MS = 86_400_000;
 /** The CLI's default `sessionBudget`, $5.00. */
@@ -95,14 +101,20 @@ async function onRequest<E extends { tool_use_id: string }>(
   const startedAt = await $.clock.now();
   const call = await describeCall($, e);
   // The held call this one takes up stops being the spinner's newest entry,
-  // and its row, which the CLI now marks routed, redraws collapsed.
-  const offer = (e as { id?: unknown }).id;
-  const takes = new Set([...call.ids, ...(typeof offer === 'string' ? [offer] : [])]);
+  // and its row, which the CLI now marks routed, redraws as the switch.
+  const takes = new Set([
+    ...call.ids,
+    ...(call.row.offerId !== undefined ? [call.row.offerId] : []),
+  ]);
   await update($, live, (list) =>
     list.filter((one) => one.heldOffer === undefined || !takes.has(one.heldOffer)),
   );
   const ref = { ...ROWS, id: e.tool_use_id };
+  const offerId = call.row.offerId;
   await $.state.set(ref, call.row);
+  if (offerId !== undefined) {
+    await $.state.set({ ...ROWS, id: `${OFFER_KEY}${offerId}` }, call.row);
+  }
   const running: TenjinLive | null =
     call.row.isPaid && call.priceAtomic !== undefined
       ? { toolUseId: e.tool_use_id, label: call.row.label, priceAtomic: call.priceAtomic }
@@ -110,15 +122,17 @@ async function onRequest<E extends { tool_use_id: string }>(
   if (running !== null) await update($, live, (list) => [...list, running]);
   try {
     const ran = await next(e);
-    if (takes.size > 0) $.ui.invalidate('ui.render');
     const settled = await settleCall($, call, ran, startedAt);
     await $.state.set(ref, { ...call.row, ...settled.row });
+    if (offerId !== undefined) {
+      await $.state.set({ ...ROWS, id: `${OFFER_KEY}${offerId}` }, { ...call.row, ...settled.row });
+      $.ui.invalidate('ui.render');
+    }
+    // A toast, never a transcript line: the row already says it.
     if (settled.paidAtomic !== undefined) {
       const paid: TenjinPaid = { amountAtomic: settled.paidAtomic };
       await update($, turn, (list) => [...list, paid]);
-      const shown = `${call.row.label} · $${usd(settled.paidAtomic)}`;
-      $.ui.toast(shown);
-      $.ui.log(`Tenjin: ${shown} · ${settled.isSettled ? 'settled' : 'paid'}`);
+      $.ui.toast(`${call.row.label} · $${usd(settled.paidAtomic)}`);
     }
     return ran;
   } finally {
@@ -163,29 +177,61 @@ export const register: Register = (on) => {
     return ran;
   });
 
-  // ITS ROW: one calm line while held, nothing once the request call ran it
-  // (the request's own row then names the service and its price). Never the
-  // reason the model read, the search or the URL. Any other native row, an
-  // interrupted one included, is the engine's.
+  // A RUN OF REQUEST CALLS folds into the engine's one count line, which says
+  // nothing of what ran: unfolded, each draws its own row through the hook
+  // below. A run with any other tool in it is the engine's.
+  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
+    const ours = e.props.calls.length > 0 && e.props.calls.every((c) => c.tool === REQUEST_TOOL);
+    return next(ours ? { ...e, props: { ...e.props, isExpanded: true } } : e);
+  });
+
+  // ONE LINE PER LOOKUP. A held native call is its name struck through, and
+  // once the request call took it up, the switch to that call on the same
+  // line; the request's own row is then empty. Once the same search ran
+  // natively instead, it draws nothing. Any other native row, an interrupted
+  // one included, is the engine's.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     if (NATIVE_TOOLS.has(e.props.tool) && !e.props.isInterrupted) {
       const held = await heldRow($, e.props.tool_use_id);
       if (held === null) return next(e);
       const { Box, Text } = $.ui.resolve(e);
-      if (held.outcome === 'routed') return <Box />;
-      const price = held.priceAtomic !== undefined ? ` · $${usd(held.priceAtomic)}` : '';
-      return (
-        <Box flexDirection="column">
-          <Text bold>{HELD_HEADER}</Text>
-          <Box paddingLeft={2}>
-            <Text dimColor>{`${held.label}${price}`}</Text>
+      // The model went back to its own tool: the engine's row for the call
+      // that ran is the line, and this one draws nothing.
+      if (held.outcome === 'native') return <Box />;
+      const asked = nativeArgument(asRecord(e.props.input));
+      if (held.outcome === 'held') {
+        return (
+          <Box>
+            <Text strikethrough>{e.props.tool}</Text>
+            <Text wrap="truncate-end">{asked !== undefined ? `(${asked})` : ''}</Text>
           </Box>
+        );
+      }
+      const { value: taken } = await $.state.get({ ...ROWS, id: `${OFFER_KEY}${held.offerId}` });
+      const row: TenjinRow = taken ?? {
+        label: held.label,
+        isPaid: true,
+        ...(held.priceAtomic !== undefined ? { price: `$${usd(held.priceAtomic)}` } : {}),
+        ...(asked !== undefined ? { argument: asked } : {}),
+        outcome: 'done',
+      };
+      const same = row.argument === asked;
+      return (
+        <Box>
+          <Text strikethrough>{e.props.tool}</Text>
+          <Text wrap="truncate-end">
+            {`${!same && asked !== undefined ? `(${asked})` : ''}${SWITCH}`}
+          </Text>
+          {callLine(Text, row, row.outcome)}
         </Box>
       );
     }
     if (e.props.tool !== REQUEST_TOOL) return next(e);
     const { value: stored } = await $.state.get({ ...ROWS, id: e.props.tool_use_id });
     const row = stored ?? (await describeCall($, { ...asRecord(e.props.input) })).row;
+    const { Box, Text } = $.ui.resolve(e);
+    // Its held call's row already draws the switch to it.
+    if (row.offerId !== undefined && (await wasRouted($, row.offerId))) return <Box />;
     const outcome =
       row.outcome ??
       (e.props.isRunning
@@ -193,26 +239,7 @@ export const register: Register = (on) => {
         : e.props.isInterrupted
           ? 'interrupted'
           : refusalOf(statusOf(textOf(e.props.output)), e.props.isErrored));
-    const { Box, Text } = $.ui.resolve(e);
-    const header = outcome === undefined ? `Calling ${row.label}…` : row.label;
-    const first = outcome ?? row.price;
-    return (
-      <Box flexDirection="column">
-        <Text bold>{header}</Text>
-        {first !== undefined && (
-          <Box paddingLeft={2}>
-            <Text dimColor>{first}</Text>
-          </Box>
-        )}
-        {row.fields.map((field) => (
-          <Box paddingLeft={2}>
-            <Text dimColor wrap="truncate-end">
-              {field}
-            </Text>
-          </Box>
-        ))}
-      </Box>
-    );
+    return <Box>{callLine(Text, row, outcome)}</Box>;
   });
 
   // The result block under our own row is the text the model read: the
@@ -308,7 +335,7 @@ async function noteHeld($: Dollar, toolUseId: string): Promise<void> {
 
 /** A held native call's row, as the CLI writes it (`src/router/held.ts`). */
 interface Held {
-  outcome: 'held' | 'routed';
+  outcome: 'held' | 'routed' | 'native';
   label: string;
   priceAtomic?: string;
   offerId: string;
@@ -324,7 +351,7 @@ async function heldRow($: Dollar, toolUseId: string): Promise<Held | null> {
   if (dataDir === null) return null;
   const row = await readJson($, `${dataDir}/progress/held/${await sha256Hex(toolUseId)}.json`);
   if (row?.version !== 1 || typeof row.offerId !== 'string') return null;
-  if (row.outcome !== 'held' && row.outcome !== 'routed') return null;
+  if (row.outcome !== 'held' && row.outcome !== 'routed' && row.outcome !== 'native') return null;
   const priceAtomic = atomicOf(row.priceAtomic);
   return {
     outcome: row.outcome,
@@ -358,14 +385,16 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
   const id = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
   const input = asRecord(args.input);
   const dataDir = await tenjinDataDir($);
-  const fields =
+  const argument =
     input !== undefined
-      ? fieldLines(input)
-      : typeof args.query === 'string'
-        ? fieldLines({ query: args.query })
-        : [];
+      ? argumentOf(input)
+      : (argumentOf({ query: args.query }) ?? argumentOf({ browse: args.browse }));
+  const base = {
+    ...(argument !== undefined ? { argument } : {}),
+    ...(id !== undefined ? { offerId: id } : {}),
+  };
   if (input === undefined || id === undefined || dataDir === null) {
-    return { row: { label: ROUTER, isPaid: false, fields }, ids: [], dataDir };
+    return { row: { label: ROUTER, isPaid: false, ...base }, ids: [], dataDir };
   }
   const choice =
     typeof args.choice === 'string' && args.choice.length > 0 ? args.choice : undefined;
@@ -381,8 +410,8 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
         row: {
           label: `${options.length} services`,
           isPaid: true,
-          ...(total !== undefined ? { price: `for $${usd(total)}` } : {}),
-          fields,
+          ...(total !== undefined ? { price: `$${usd(total)}` } : {}),
+          ...base,
         },
         ids: options.map((option) => option.id),
         ...(total !== undefined ? { priceAtomic: total } : {}),
@@ -392,24 +421,29 @@ async function describeCall($: Dollar, args: Json): Promise<Call> {
     // The picked option runs as its own offer: its spec, its label, its payment.
     const picked = options.find((option) => option.key === choice);
     if (picked === undefined)
-      return { row: { label: ROUTER, isPaid: false, fields }, ids: [], dataDir };
-    return paidCall(await readSpec($, dataDir, picked.id), picked.id, fields, dataDir);
+      return { row: { label: ROUTER, isPaid: false, ...base }, ids: [], dataDir };
+    return paidCall(await readSpec($, dataDir, picked.id), picked.id, base, dataDir);
   }
-  return paidCall(await readSpec($, dataDir, id), id, fields, dataDir);
+  return paidCall(await readSpec($, dataDir, id), id, base, dataDir);
 }
 
 /** One spec's call: its label, its price, and its own payment record. */
-function paidCall(spec: Json | null, id: string, fields: string[], dataDir: string): Call {
+function paidCall(
+  spec: Json | null,
+  id: string,
+  base: Pick<TenjinRow, 'argument' | 'offerId'>,
+  dataDir: string,
+): Call {
   const priceAtomic = atomicOf(spec?.priceAtomic);
   const ceiling = atomicOf(spec?.maxAmountAtomic);
   const varies = spec?.priceVaries === true && ceiling !== undefined;
   const price = varies
-    ? `for up to $${usd(ceiling)}`
+    ? `up to $${usd(ceiling)}`
     : priceAtomic !== undefined
-      ? `for $${usd(priceAtomic)}`
+      ? `$${usd(priceAtomic)}`
       : undefined;
   return {
-    row: { label: labelOf(spec), isPaid: true, ...(price ? { price } : {}), fields },
+    row: { label: labelOf(spec), isPaid: true, ...(price ? { price } : {}), ...base },
     ids: [id],
     ...(priceAtomic !== undefined ? { priceAtomic } : {}),
     dataDir,
@@ -528,13 +562,14 @@ async function readLedger($: Dollar, dataDir: string): Promise<Json[]> {
 }
 
 /**
- * `Tenjin: 2 paid lookups, $0.09 · today $0.31 of $5.00`. Today is the spend
+ * `2 paid lookups, $0.09 · today $0.31 of $5.00`; the engine names the plugin
+ * before it. Today is the spend
  * ledger's rolling day, counted as the budget counts it: automatic spend
  * committed plus automatic reservations still open.
  */
 async function spendLine($: Dollar, paid: readonly TenjinPaid[], now: number): Promise<string> {
   const total = paid.reduce((sum, one) => sum + BigInt(one.amountAtomic), 0n);
-  const head = `Tenjin: ${paid.length} paid lookup${paid.length === 1 ? '' : 's'}, $${usd(total.toString())}`;
+  const head = `${paid.length} paid lookup${paid.length === 1 ? '' : 's'}, $${usd(total.toString())}`;
   const dataDir = await tenjinDataDir($);
   if (dataDir === null) return head;
   const spend = await readJson($, `${dataDir}/spend.json`);
@@ -616,29 +651,74 @@ function labelOf(spec: Json | null): string {
 }
 
 /**
- * The fields sent, one `name: value` line each. A nested object is flattened
- * to dotted names and a list joined, so no line carries JSON. Each line gets
- * the status line's treatment: control and format characters replaced, then
- * bounded. The CLI's own mask never runs in a mod (it needs Node), and it has
- * nothing to do on a call that is sent: the request tool refuses, before
- * sending, any input the mask would change.
+ * THE ONE INPUT A ROW SHOWS, as the native rows show theirs: the query, the
+ * URL, else the first field, a nested object followed to its first leaf and
+ * a list joined. A field whose name says secret is masked whatever its value.
+ * Control and format characters go and it is bounded to one line. The CLI's
+ * own mask never runs in a mod (it needs Node), and it has nothing to do on a
+ * call that is sent: the request tool refuses, before sending, any input the
+ * mask would change.
  */
-function fieldLines(input: Json): string[] {
-  const lines: string[] = [];
-  const walk = (name: string, value: unknown): void => {
-    const nested = asRecord(value);
-    if (nested !== undefined) {
-      for (const [key, inner] of Object.entries(nested)) walk(name ? `${name}.${key}` : key, inner);
-      return;
-    }
-    lines.push(
-      clean(`${name}: ${SECRET_NAME.test(name) ? '[redacted]' : shown(value)}`, FIELD_CHARS),
-    );
-  };
-  walk('', input);
-  return lines.length <= MAX_FIELDS
-    ? lines
-    : [...lines.slice(0, MAX_FIELDS - 1), `+${lines.length - MAX_FIELDS + 1} more fields`];
+function argumentOf(input: Json): string | undefined {
+  const key =
+    ['query', 'url'].find((name) => input[name] !== undefined) ??
+    Object.keys(input).find((name) => input[name] !== undefined);
+  if (key === undefined) return undefined;
+  const value = input[key];
+  const nested = asRecord(value);
+  if (nested !== undefined) return argumentOf(nested);
+  const text = clean(SECRET_NAME.test(key) ? '[redacted]' : shown(value), FIELD_CHARS);
+  return text.length > 0 ? text : undefined;
+}
+
+/** A native call's own input as its row shows it: the search, or the URL. */
+function nativeArgument(input: Json | undefined): string | undefined {
+  if (input === undefined) return undefined;
+  return argumentOf({ query: input.query }) ?? argumentOf({ url: input.url });
+}
+
+/**
+ * `Exa search(best local LLM) · $0.007`, the label bold as a tool's name:
+ * `Calling …` while it runs, the amount paid once it paid, and the state only
+ * when it is not a plain success.
+ */
+function callLine(Text: TextElement, row: TenjinRow, outcome: string | undefined) {
+  const isRunning = outcome === undefined;
+  const paid = outcome?.startsWith('$') === true ? outcome.split(' · ')[0] : undefined;
+  const isPlain = isRunning || paid !== undefined || outcome === 'done' || outcome === 'no charge';
+  const tail = [paid ?? row.price, isPlain ? undefined : outcome].filter(
+    (part): part is string => part !== undefined,
+  );
+  const argument = row.argument !== undefined ? `(${row.argument})` : '';
+  return [
+    <Text bold>{isRunning ? `Calling ${row.label}` : row.label}</Text>,
+    <Text wrap="truncate-end">{`${argument}${isRunning ? '…' : ''}`}</Text>,
+    <Text dimColor>{tail.length > 0 ? ` · ${tail.join(' · ')}` : ''}</Text>,
+  ];
+}
+
+/** The element `callLine` draws with, from the surface's own table. */
+type TextElement = ReturnType<Dollar['ui']['resolve']>['Text'];
+
+/**
+ * A held call was routed to this offer: its row draws the switch, so the
+ * request's own row stays empty. Read from the CLI's index of the calls it
+ * held for an offer id (`src/router/held.ts`).
+ */
+async function wasRouted($: Dollar, offerId: string): Promise<boolean> {
+  const dataDir = await tenjinDataDir($);
+  if (dataDir === null) return false;
+  const index = await readJson(
+    $,
+    `${dataDir}/progress/held/${await sha256Hex(offerId)}.offer.json`,
+  );
+  const ids = index?.version === 1 && Array.isArray(index.toolUseIds) ? index.toolUseIds : [];
+  for (const id of ids) {
+    if (typeof id !== 'string') continue;
+    const held = await heldRow($, id);
+    if (held?.outcome === 'routed' && held.offerId === offerId) return true;
+  }
+  return false;
 }
 
 function shown(value: unknown): string {

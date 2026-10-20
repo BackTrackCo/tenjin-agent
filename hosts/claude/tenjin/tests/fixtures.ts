@@ -147,6 +147,11 @@ export async function shownLines(ui: Pick<Mounted, 'findAll'>): Promise<string[]
   return (await ui.findAll({ type: 'Text' })).map((text) => text.text);
 }
 
+/** A one-line row as the person reads it: its pieces, joined. */
+export async function rowText(ui: Pick<Mounted, 'findAll'>): Promise<string> {
+  return (await shownLines(ui)).join('');
+}
+
 /** A tool row's props, as the engine hands them to `ui.render`. */
 export function toolRow(toolUseId: string, tool: string, input: unknown) {
   return {

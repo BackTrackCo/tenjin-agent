@@ -1,8 +1,9 @@
 /**
  * One request row as the mod draws it, written once by the `tool.call` hook so
- * the row still reads right after the CLI prunes the spec it came from. Every
- * string is user text: a label, a state and a price, never a description, URL,
- * input JSON or tool id.
+ * the row still reads right after the CLI prunes the spec it came from, and
+ * kept a second time under `offer:<offer id>` for the row of a native call
+ * held for that offer. Every string is user text: a label, a price, a state
+ * and the one input shown, never a description, JSON or tool id.
  */
 export type TenjinRow = {
   /** The spec's `label`, else `Tenjin lookup`; `Tenjin` for the router's own
@@ -10,10 +11,12 @@ export type TenjinRow = {
   label: string;
   /** A call that pays from a kept spec, as opposed to one of the router's own. */
   isPaid: boolean;
-  /** `for $0.007`, or `for up to $0.05` when the price varies by input. */
+  /** `$0.007`, or `up to $0.05` when the price varies by input. */
   price?: string;
-  /** The fields sent, one `name: value` line each, sanitized and bounded. */
-  fields: string[];
+  /** The one input shown: the query, the URL, else the first field, bounded. */
+  argument?: string;
+  /** The offer id the call carried, which a held native call names too. */
+  offerId?: string;
   /** How it ended (`$0.007 · settled`, `pending`, `needs approval`), once it has. */
   outcome?: string;
 };

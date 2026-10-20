@@ -9,6 +9,7 @@ import {
   machine,
   recordPayment,
   resultText,
+  rowText,
   shownLines,
   toolRow,
 } from './fixtures';
@@ -22,7 +23,7 @@ const EXA = {
   maxAmountAtomic: '40000',
 };
 
-test('a paid row names the label, the price and the fields, then how it ended', async ($, on) => {
+test('a paid row is one line: the label, the query and the price, then the amount paid', async ($, on) => {
   const { files, toasts, logs } = machine(on);
   await keepSpec(files, OFFER, EXA);
   on('tool.call', { tool: TOOL }, async () => {
@@ -37,19 +38,14 @@ test('a paid row names the label, the price and the fields, then how it ended', 
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: row });
-    expect(await shownLines(ui)).toEqual([
-      'Calling Exa search…',
-      'for $0.04',
-      'query: rust async runtimes',
-      'numResults: 5',
-    ]);
+    expect(await rowText(ui)).toBe('Calling Exa search(rust async runtimes)… · $0.04');
     await ui.unmount();
   }
 
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_paid', id: OFFER, input: INPUT });
-  // The settle toast and one dim transcript line, label and price only.
+  // The settle toast, and no transcript line: the row says it.
   expect(toasts).toEqual(['Exa search · $0.04']);
-  expect(logs).toEqual(['Tenjin: Exa search · $0.04 · settled']);
+  expect(logs).toEqual([]);
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({
@@ -58,14 +54,9 @@ test('a paid row names the label, the price and the fields, then how it ended', 
       component: 'ToolUse',
       props: { ...row, isRunning: false, output: resultText('fulfilled') },
     });
-    const lines = await shownLines(ui);
-    expect(lines).toEqual([
-      'Exa search',
-      '$0.04 · settled',
-      'query: rust async runtimes',
-      'numResults: 5',
-    ]);
-    expect([...lines, ...toasts, ...logs].join('\n')).not.toMatch(MODEL_TEXT);
+    const line = await rowText(ui);
+    expect(line).toBe('Exa search(rust async runtimes) · $0.04');
+    expect([line, ...toasts].join('\n')).not.toMatch(MODEL_TEXT);
     await ui.unmount();
   }
 });
@@ -83,7 +74,7 @@ test('a payment whose settlement is unknown reads as paid', async ($, on) => {
     return { result: resultText('fulfilled'), text: resultText('fulfilled') };
   });
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_unknown', id: OFFER, input: INPUT });
-  expect(logs).toEqual(['Tenjin: Exa search · $0.04 · paid']);
+  expect(logs).toEqual([]);
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({
       plugin: 'tenjin',
@@ -95,7 +86,7 @@ test('a payment whose settlement is unknown reads as paid', async ($, on) => {
         output: resultText('fulfilled'),
       },
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Exa search', '$0.04 · paid']);
+    expect(await rowText(ui)).toBe('Exa search(rust async runtimes) · $0.04');
     await ui.unmount();
   }
 });
@@ -115,7 +106,7 @@ test('a spec without a label is a Tenjin lookup, never its provider', async ($, 
       component: 'ToolUse',
       props: toolRow('toolu_glim', TOOL, { id: OFFER, input: { query: 'from:tenjin' } }),
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Calling Tenjin lookup…', 'for $0.005']);
+    expect(await rowText(ui)).toBe('Calling Tenjin lookup(from:tenjin)… · $0.005');
     await ui.unmount();
   }
 });
@@ -129,12 +120,12 @@ test('an id-less query is the router picking: Calling Tenjin…', async ($, on) 
       component: 'ToolUse',
       props: toolRow('toolu_pick', TOOL, { query: 'latest BTC price' }),
     });
-    expect(await shownLines(ui)).toEqual(['Calling Tenjin…', 'query: latest BTC price']);
+    expect(await rowText(ui)).toBe('Calling Tenjin(latest BTC price)…');
     await ui.unmount();
   }
 });
 
-test('a refusal reads as its state, with no price, no toast and nothing paid', async ($, on) => {
+test('a refusal reads as its state beside the price, with no toast and nothing paid', async ($, on) => {
   const { files, toasts } = machine(on);
   await keepSpec(files, OFFER, { ...EXA, priceAtomic: '420000', maxAmountAtomic: '420000' });
   const refused = JSON.stringify({
@@ -155,7 +146,7 @@ test('a refusal reads as its state, with no price, no toast and nothing paid', a
         output: refused,
       },
     });
-    expect((await shownLines(ui)).slice(0, 2)).toEqual(['Exa search', 'needs approval']);
+    expect(await rowText(ui)).toBe('Exa search(rust async runtimes) · $0.42 · needs approval');
     await ui.unmount();
   }
   expect(toasts).toEqual([]);

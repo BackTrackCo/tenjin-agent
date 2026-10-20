@@ -10,13 +10,14 @@ import {
   machine,
   recordPayment,
   resultText,
+  rowText,
   sha256Hex,
   shownLines,
   toolRow,
 } from './fixtures';
 
 const OFFER = 'b920ff14-5aed-4a50-8c25-240e871602f3';
-const SEARCH = { query: 'rust async runtimes https://example.test' };
+const SEARCH = { query: 'rust async runtimes' };
 /** The reason the model read on the deny: never drawn. */
 const REASON =
   'Tenjin router (installed by the user): Exa search, $0.007: call ' +
@@ -27,7 +28,7 @@ const SPIN = { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' 
 async function holdRow(
   files: Map<string, string>,
   toolUseId: string,
-  outcome: 'held' | 'routed' = 'held',
+  outcome: 'held' | 'routed' | 'native' = 'held',
 ): Promise<void> {
   files.set(
     `${DATA}/progress/held/${await sha256Hex(toolUseId)}.json`,
@@ -39,6 +40,11 @@ async function holdRow(
       priceAtomic: '7000',
       offerId: OFFER,
     }),
+  );
+  // The CLI's index of the calls it held for the offer.
+  files.set(
+    `${DATA}/progress/held/${await sha256Hex(OFFER)}.offer.json`,
+    JSON.stringify({ version: 1, at: NOW, toolUseIds: [toolUseId] }),
   );
 }
 
@@ -52,28 +58,68 @@ function heldSearch(toolUseId: string) {
   };
 }
 
-test('a held search draws one calm line, then nothing once routed', async ($, on) => {
+test('a held search is its name struck through, then the switch on the same line', async ($, on) => {
   const { files } = machine(on);
   on('ui.render', { component: 'ToolUse' }, ($, e) => {
     const { Text } = $.ui.resolve(e);
     return Text({ children: ['blocked by hook'] });
   });
-  await holdRow(files, 'toolu_held');
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({
-      plugin: 'tenjin',
-      surface,
-      component: 'ToolUse',
-      props: heldSearch('toolu_held'),
+  await keepSpec(files, OFFER, {
+    capabilityId: 'exa-search',
+    label: 'Exa search',
+    priceAtomic: '7000',
+    maxAmountAtomic: '7000',
+  });
+  on('tool.call', { tool: TOOL }, async () => {
+    await holdRow(files, 'toolu_held', 'routed');
+    await recordPayment(files, OFFER, {
+      capabilityId: 'exa-search',
+      amountAtomic: '7000',
+      txHash: '0xc9fc',
     });
-    const lines = await shownLines(ui);
-    expect(lines).toEqual(['Held for Tenjin', 'Exa search · $0.007']);
-    expect(lines.join('\n')).not.toContain('rust async runtimes');
-    expect(lines.join('\n')).not.toContain('Tenjin router');
-    expect(lines.join('\n')).not.toMatch(MODEL_TEXT);
+    return { result: resultText('fulfilled'), text: resultText('fulfilled') };
+  });
+  await holdRow(files, 'toolu_held');
+  const mount = (surface: (typeof SURFACES)[number], props: Record<string, unknown>) =>
+    $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: props as never });
+  for (const surface of SURFACES) {
+    const ui = await mount(surface, heldSearch('toolu_held'));
+    expect(await rowText(ui)).toBe('WebSearch(rust async runtimes)');
+    const struck = await ui.findAll({ type: 'Text', text: 'WebSearch' });
+    expect(struck[0]?.props.strikethrough).toBe(true);
+    expect(await rowText(ui)).not.toContain('Tenjin router');
     await ui.unmount();
   }
-  await holdRow(files, 'toolu_held', 'routed');
+  const request = { id: OFFER, input: { query: 'rust async runtimes' } };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_request', ...request });
+  for (const surface of SURFACES) {
+    const ui = await mount(surface, heldSearch('toolu_held'));
+    const line = await rowText(ui);
+    // One copy of the query when both calls searched the same text.
+    expect(line).toBe('WebSearch → Exa search(rust async runtimes) · $0.007');
+    expect(line).not.toMatch(MODEL_TEXT);
+    expect((await ui.findAll({ type: 'Text', text: 'WebSearch' }))[0]?.props.strikethrough).toBe(
+      true,
+    );
+    await ui.unmount();
+    // The request's own row is then empty: one line for the lookup.
+    const row = await mount(surface, {
+      ...toolRow('toolu_request', TOOL, request),
+      isRunning: false,
+      output: resultText('fulfilled'),
+    });
+    expect(await shownLines(row)).toEqual([]);
+    await row.unmount();
+  }
+});
+
+test('a held search the model then ran natively draws nothing', async ($, on) => {
+  const { files } = machine(on);
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine row'] });
+  });
+  await holdRow(files, 'toolu_held', 'native');
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({
       plugin: 'tenjin',
@@ -83,16 +129,62 @@ test('a held search draws one calm line, then nothing once routed', async ($, on
     });
     expect(await shownLines(ui)).toEqual([]);
     await ui.unmount();
+    // The call that ran natively has no held row: the engine draws it.
+    const ran = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: { ...toolRow('toolu_ran', 'WebSearch', SEARCH), isRunning: false },
+    });
+    expect(await shownLines(ran)).toEqual(['engine row']);
+    await ran.unmount();
   }
 });
 
-test("a held call's result draws nothing, held or routed", async ($, on) => {
+test('a run of request calls unfolds into its rows; a mixed run stays folded', async ($, on) => {
+  machine(on);
+  const seen: boolean[] = [];
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    seen.push(e.props.isExpanded);
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: [e.props.isExpanded ? 'rows' : 'count line'] });
+  });
+  const call = (tool: string, id: string) => ({
+    tool_use_id: id,
+    tool,
+    input: { query: 'q' },
+    isRunning: false,
+    isErrored: false,
+    isInterrupted: false,
+  });
+  for (const surface of SURFACES) {
+    const ours = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: { calls: [call(TOOL, 'a'), call(TOOL, 'b')], isActive: false, isExpanded: false },
+    });
+    expect(await shownLines(ours)).toEqual(['rows']);
+    await ours.unmount();
+    const mixed = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: { calls: [call(TOOL, 'a'), call('Read', 'c')], isActive: false, isExpanded: false },
+    });
+    expect(await shownLines(mixed)).toEqual(['count line']);
+    await mixed.unmount();
+  }
+  expect(seen).toEqual([true, false, true, false]);
+});
+
+test("a held call's result draws nothing, whatever became of it", async ($, on) => {
   const { files } = machine(on);
   on('ui.render', { component: 'ToolResult' }, ($, e) => {
     const { Text } = $.ui.resolve(e);
     return Text({ children: ['engine result'] });
   });
-  for (const outcome of ['held', 'routed'] as const) {
+  for (const outcome of ['held', 'routed', 'native'] as const) {
     await holdRow(files, 'toolu_fetch', outcome);
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({

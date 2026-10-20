@@ -19,7 +19,7 @@ import { writeFileAtomic } from '../lib/atomic-json';
  * | `wallet.json` | `lib/wallet/store.ts` | the keystore's own | `address` only |
  * | `config.json` | `lib/config.ts` | none (keys) | `maxAutoSpend`, `sessionBudget` |
  * | `wallet-created.json` | {@link writeWalletCreated} | `version: 1` | `address`, `at` |
- * | `progress/held/<sha256(tool_use_id)>.json` | `held.ts` `markHeld`, `markRouted` | `version: 1` | `outcome` (`held` or `routed`), `label`, `priceAtomic`, `offerId` |
+ * | `progress/held/<sha256(tool_use_id)>.json` | `held.ts` `markHeld`, `markRouted`, `markNative` | `version: 1` | `outcome` (`held`, `routed` or `native`), `label`, `priceAtomic`, `offerId` |
  *
  * `mod-state.test.ts` writes each through its CLI writer and pins the fields.
  */
