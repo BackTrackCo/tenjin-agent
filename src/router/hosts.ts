@@ -14,53 +14,81 @@ import { HARNESSES, type Harness } from './names';
  * overrides.
  */
 
-/** The record install writes in the Tenjin data dir: the hosts it set up. */
+/**
+ * The record install writes in the Tenjin data dir: the hosts the person
+ * chose, written before any host is set up, and the hosts whose setup
+ * finished. A chosen host that is not installed is one a re-run retries.
+ */
 export const HOSTS_FILE = 'installed-hosts.json';
 
 const LABEL: Record<Harness, string> = { claude: 'Claude Code', codex: 'Codex' };
 
-/** The hosts install recorded, or null on a machine set up before the record. */
-export async function readInstalledHosts(dataDir: string): Promise<Harness[] | null> {
-  let raw: string;
-  try {
-    raw = await readFile(join(dataDir, HOSTS_FILE), 'utf8');
-  } catch {
-    return null;
-  }
-  try {
-    const hosts = (JSON.parse(raw) as { hosts?: unknown }).hosts;
-    if (!Array.isArray(hosts)) return null;
-    return HARNESSES.filter((h) => hosts.includes(h));
-  } catch {
-    return null;
-  }
+export interface HostRecord {
+  chosen: Harness[];
+  installed: Harness[];
 }
 
-async function writeHosts(dataDir: string, hosts: readonly Harness[]): Promise<void> {
+const hostsIn = (v: unknown): Harness[] =>
+  Array.isArray(v) ? HARNESSES.filter((h) => v.includes(h)) : [];
+
+/** The record, or null on a machine set up before it (or with it unreadable). */
+export async function readHostRecord(dataDir: string): Promise<HostRecord | null> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(join(dataDir, HOSTS_FILE), 'utf8'));
+  } catch {
+    return null;
+  }
+  if (raw === null || typeof raw !== 'object') return null;
+  const row = raw as { chosen?: unknown; installed?: unknown };
+  if (!Array.isArray(row.chosen) && !Array.isArray(row.installed)) return null;
+  return { chosen: hostsIn(row.chosen), installed: hostsIn(row.installed) };
+}
+
+/** The hosts whose setup finished, or null with no record. */
+export async function readInstalledHosts(dataDir: string): Promise<Harness[] | null> {
+  return (await readHostRecord(dataDir))?.installed ?? null;
+}
+
+async function writeRecord(dataDir: string, record: HostRecord): Promise<void> {
   const path = join(dataDir, HOSTS_FILE);
-  if (hosts.length === 0) {
+  if (record.chosen.length === 0 && record.installed.length === 0) {
     await rm(path, { force: true });
     return;
   }
-  await writeFileAtomic(path, `${JSON.stringify({ hosts }, null, 2)}\n`, { mode: 0o600 });
+  await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
 }
 
+async function updateRecord(dataDir: string, change: (r: HostRecord) => HostRecord): Promise<void> {
+  const record = (await readHostRecord(dataDir)) ?? { chosen: [], installed: [] };
+  const next = change(record);
+  await writeRecord(dataDir, {
+    chosen: HARNESSES.filter((h) => next.chosen.includes(h)),
+    installed: HARNESSES.filter((h) => next.installed.includes(h)),
+  });
+}
+
+/** Before any host is set up: add these hosts to the person's choice. */
+export async function chooseHosts(dataDir: string, hosts: readonly Harness[]): Promise<void> {
+  if (hosts.length === 0) return;
+  await updateRecord(dataDir, (r) => ({ ...r, chosen: [...r.chosen, ...hosts] }));
+}
+
+/** A host whose setup finished. */
 export async function recordInstalledHost(dataDir: string, host: Harness): Promise<void> {
-  const hosts = (await readInstalledHosts(dataDir)) ?? [];
-  if (hosts.includes(host)) return;
-  await writeHosts(
-    dataDir,
-    HARNESSES.filter((h) => h === host || hosts.includes(h)),
-  );
+  await updateRecord(dataDir, (r) => ({
+    chosen: [...r.chosen, host],
+    installed: [...r.installed, host],
+  }));
 }
 
+/** A host uninstall removed: out of the choice and the installed set. */
 export async function forgetInstalledHost(dataDir: string, host: Harness): Promise<void> {
-  const hosts = await readInstalledHosts(dataDir);
-  if (hosts === null || !hosts.includes(host)) return;
-  await writeHosts(
-    dataDir,
-    hosts.filter((h) => h !== host),
-  );
+  if ((await readHostRecord(dataDir)) === null) return;
+  await updateRecord(dataDir, (r) => ({
+    chosen: r.chosen.filter((h) => h !== host),
+    installed: r.installed.filter((h) => h !== host),
+  }));
 }
 
 /**
@@ -153,7 +181,10 @@ export async function installHosts(
   const found = HARNESSES.filter((h) => h === agent || detected.includes(h));
   if (found.length === 0) return { hosts: ['claude'] };
   if (found.length === 1) return { hosts: found };
-  const recorded = ((await readInstalledHosts(ctx.dataDir)) ?? []).filter((h) => found.includes(h));
+  // The person's earlier choice, finished or not: a re-run retries each one.
+  const recorded = ((await readHostRecord(ctx.dataDir))?.chosen ?? []).filter((h) =>
+    found.includes(h),
+  );
   if (recorded.length > 0) return { hosts: recorded };
   if (args.yes === true) return { hosts: found };
   const interactive =
@@ -252,8 +283,41 @@ export async function recordedHosts(
 ): Promise<Harness[]> {
   if (args.harness !== undefined) return args.harness;
   if (args.project === true) return ['claude'];
-  const hosts = await readInstalledHosts(dataDir);
-  return hosts === null || hosts.length === 0 ? ['claude'] : hosts;
+  const record = await readHostRecord(dataDir);
+  const hosts = HARNESSES.filter(
+    (h) => record?.chosen.includes(h) === true || record?.installed.includes(h) === true,
+  );
+  return hosts.length === 0 ? ['claude'] : hosts;
+}
+
+/** Hosts the person chose whose setup did not finish. */
+async function unfinishedHosts(dataDir: string): Promise<Harness[]> {
+  const record = await readHostRecord(dataDir);
+  return record === null ? [] : record.chosen.filter((h) => !record.installed.includes(h));
+}
+
+/**
+ * Doctor over the hosts, where a chosen host whose setup did not finish
+ * fails with the fix to finish it, before its own checks.
+ */
+export async function doctorEach(
+  hosts: readonly Harness[],
+  dataDir: string,
+  run: (host: Harness) => Promise<CommandResult>,
+): Promise<CommandResult> {
+  const unfinished = await unfinishedHosts(dataDir);
+  return checkEach(hosts, async (host) => {
+    if (unfinished.includes(host)) {
+      throw new CliError(
+        'REFUSED',
+        `${LABEL[host]} was chosen at install, but its setup did not finish.`,
+        {
+          fix: 'Run `tenjin install` to finish it.',
+        },
+      );
+    }
+    return run(host);
+  });
 }
 
 /** One run per host, in order. One host keeps its own result shape. */
@@ -286,8 +350,20 @@ export async function uninstallEach(
   project: boolean,
   run: (host: Harness) => Promise<CommandResult>,
 ): Promise<CommandResult> {
+  const unfinished = await unfinishedHosts(dataDir);
   return runEach(hosts, async (host) => {
-    const out = await run(host);
+    let out: CommandResult;
+    try {
+      out = await run(host);
+    } catch (err) {
+      // A setup that never finished may have nothing to remove: clear the choice.
+      if (!unfinished.includes(host) || !(err instanceof CliError)) throw err;
+      if (!project) await forgetInstalledHost(dataDir, host);
+      return {
+        data: { host, cleared: true },
+        humanLines: [`${LABEL[host]}: its setup never finished; cleared it.`],
+      };
+    }
     if (!project && !pluginKept(out.data)) await forgetInstalledHost(dataDir, host);
     return out;
   });

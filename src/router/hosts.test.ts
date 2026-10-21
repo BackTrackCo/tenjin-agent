@@ -7,10 +7,13 @@ import { CliError } from '../lib/errors';
 import {
   agentHost,
   checkEach,
+  chooseHosts,
   detectHosts,
+  doctorEach,
   forgetInstalledHost,
   HOSTS_FILE,
   installHosts,
+  readHostRecord,
   readInstalledHosts,
   recordedHosts,
   recordInstalledHost,
@@ -193,13 +196,15 @@ describe('an agent install with both hosts found', () => {
     ran = [];
   });
   /** The install action's flow: choose, run each host, record it, merge the steps. */
-  async function install(args: { harness?: Harness[]; yes?: boolean }) {
+  async function install(args: { harness?: Harness[]; yes?: boolean }, fail?: Harness) {
     const { hosts, ask } = await installHosts(args, ctx(true), {
       env: { CODEX_SESSION_ID: 'a' },
       detect: both,
     });
+    await chooseHosts(dir, hosts);
     const out = await runEach(hosts, async (host) => {
       ran.push(host);
+      if (host === fail) throw new CliError('REFUSED', '`codex plugin add` failed.');
       await recordInstalledHost(dir, host);
       return {
         data: { host, nextSteps: [{ id: 'spend', question: host, options: [], next: '' }] },
@@ -226,6 +231,37 @@ describe('an agent install with both hosts found', () => {
     expect((out.data as { nextSteps: { id: string }[] }).nextSteps.map((s) => s.id)).toEqual([
       'spend',
     ]);
+  });
+
+  it('retries a chosen host whose setup failed, and doctor names it until then', async () => {
+    await expect(install({ harness: ['claude', 'codex'] }, 'codex')).rejects.toThrow(
+      'codex plugin add',
+    );
+    expect(await readHostRecord(dir)).toEqual({
+      chosen: ['claude', 'codex'],
+      installed: ['claude'],
+    });
+    const ok = async (h: Harness) => ({ data: { host: h }, humanLines: [`${h} ok`] });
+    const err = await doctorEach(await recordedHosts({}, dir), dir, ok).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      message: 'Codex: Codex was chosen at install, but its setup did not finish.',
+      fix: expect.stringContaining('Run `tenjin install` to finish it.'),
+    });
+    // A bare re-run, even with --yes, retries both chosen hosts.
+    ran = [];
+    await install({ yes: true });
+    expect(ran).toEqual(['claude', 'codex']);
+    expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
+    await expect(doctorEach(['claude', 'codex'], dir, ok)).resolves.toBeDefined();
+  });
+
+  it('clears a chosen host whose setup never finished when uninstall finds nothing', async () => {
+    await expect(install({ harness: ['codex'] }, 'codex')).rejects.toThrow();
+    const remove = async (): Promise<never> => {
+      throw new CliError('REFUSED', '`codex plugin remove` failed.');
+    };
+    await uninstallEach(await recordedHosts({}, dir), dir, false, remove);
+    expect(await readHostRecord(dir)).toBeNull();
   });
 
   it('records one under --harness codex, and both under --yes', async () => {

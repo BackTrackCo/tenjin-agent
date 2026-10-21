@@ -49,7 +49,7 @@ Learn more:
         if (harness?.includes('codex') === true && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
-        const { installHosts, recordInstalledHost, runEach, withSteps } =
+        const { chooseHosts, installHosts, recordInstalledHost, runEach, withSteps } =
           await import('../router/hosts');
         const { hosts, ask } = await installHosts(
           {
@@ -63,6 +63,8 @@ Learn more:
           },
           ctx,
         );
+        // The choice is saved before any setup, so a failed one is retried.
+        if (o.refresh !== true) await chooseHosts(ctx.dataDir, hosts);
         const out = await runEach(hosts, async (host) => {
           const one =
             host === 'codex'
@@ -134,12 +136,12 @@ Examples:
       await runCommand('doctor', this, async (ctx) => {
         const o = this.opts();
         const harness = o.harness as Harness[] | undefined;
-        const { checkEach, recordedHosts } = await import('../router/hosts');
+        const { doctorEach, recordedHosts } = await import('../router/hosts');
         const hosts = await recordedHosts(
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
           ctx.dataDir,
         );
-        return checkEach(hosts, async (host) =>
+        return doctorEach(hosts, ctx.dataDir, async (host) =>
           host === 'codex'
             ? (await import('../router/codex-install')).runCodexDoctor(codexArgs(o), ctx)
             : (await import('../router/doctor')).runRouterDoctor(
