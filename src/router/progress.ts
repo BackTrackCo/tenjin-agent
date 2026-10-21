@@ -43,8 +43,6 @@ const OFFER_PREFIX = 'offer-';
 const SESSION_FILE = 'session.json';
 /** A pre-call redirect, one file per agent and target in the session. */
 const REDIRECT_PREFIX = 'redirect-';
-/** Whether the host lets the request tool run, as its hook list last said. */
-const REQUEST_TOOL_FILE = 'request-tool.json';
 /** A search the pre-call hook is adding free docs to, keyed by its `tool_use_id`. */
 const AUGMENT_PREFIX = 'augment-';
 /** What the docs prefetch got, beside its marker. The provider's text sets its
@@ -234,36 +232,6 @@ export async function wasOffered(
   const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`);
   const stamp = await readStamp(path);
   return stamp !== null && now - stamp.at <= EXPIRY_MS;
-}
-
-/**
- * CAN THE REQUEST TOOL RUN HERE? Codex's prompt leg records its hook list's
- * answer, and the pre-call leg denies a search only on a fresh `true`: losing
- * the record lets the search run with the offer beside it, so it only ever
- * makes a hook say less.
- */
-export async function noteRequestTool(
-  dataDir: string,
-  sessionId: string,
-  runnable: boolean,
-  now = Date.now(),
-): Promise<void> {
-  const mark: Stamp & { runnable: boolean } = { version: 1, at: now, runnable };
-  await write(join(sessionDir(dataDir, sessionId), REQUEST_TOOL_FILE), mark);
-}
-
-/** The recorded answer and when it was taken, or null when absent, damaged or expired. */
-export async function requestToolNoted(
-  dataDir: string,
-  sessionId: string,
-  now = Date.now(),
-): Promise<{ runnable: boolean; at: number } | null> {
-  const row = await readJson(join(sessionDir(dataDir, sessionId), REQUEST_TOOL_FILE));
-  const stamp = stampOf(row);
-  if (stamp === null || typeof row?.runnable !== 'boolean' || now - stamp.at > EXPIRY_MS) {
-    return null;
-  }
-  return { runnable: row.runnable, at: stamp.at };
 }
 
 /**

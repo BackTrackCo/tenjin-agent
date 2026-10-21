@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -325,44 +325,21 @@ describe('Codex routing through the router', () => {
   });
   const webEvent = () => ({ ...native, cwd: dir, transcript_path: transcript });
 
-  it('denies a search only once the prompt leg recorded that Codex allows the request tool', async () => {
-    // No record yet: the search runs, with the offer beside it.
-    const before = await hookRun('native', webEvent());
-    expect(at(before, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
-    expect(String(at(before, 'hookSpecificOutput', 'additionalContext'))).toContain(
-      CODEX_REQUEST_TOOL,
-    );
-
-    const lists: string[] = [];
-    const codexHooks = async (cwd: string) => (lists.push(cwd), listed(...allRows()));
-    expect(await hookRun('prompt', promptEvent(), { codexHooks })).not.toBeNull();
-    expect(lists).toEqual([dir]);
-    const after = await hookRun('native', {
-      ...webEvent(),
-      tool_use_id: 'call-7',
-      tool_input: { search_query: [{ q: 'another search' }] },
-    });
-    expect(at(after, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
-    // The answer stands for the session: the next prompt does not ask again.
-    await hookRun('prompt', promptEvent(), { codexHooks });
-    expect(lists).toHaveLength(1);
-  });
-
-  it('lets the search run with the offer as context when the allow hook is off', async () => {
-    const off = async () => listed(row('a'), row('b'), row('c'), allowRow({ enabled: false }));
-    await hookRun('prompt', promptEvent(), { codexHooks: off });
+  it('always denies a routed search, with no prompt leg first and no record kept', async () => {
     const out = await hookRun('native', webEvent());
-    expect(at(out, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
-    expect(at(out, 'hookSpecificOutput', 'hookEventName')).toBe('PreToolUse');
-    expect(String(at(out, 'hookSpecificOutput', 'additionalContext'))).toContain(
+    expect(at(out, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    expect(String(at(out, 'hookSpecificOutput', 'permissionDecisionReason'))).toContain(
       `${CODEX_REQUEST_TOOL}({`,
     );
+    expect(await hookRun('prompt', promptEvent())).not.toBeNull();
+    expect(existsSync(join(sessionDir(dir, `codex:${session}`), 'request-tool.json'))).toBe(false);
   });
 
-  it('records nothing when the hook list cannot be read', async () => {
-    await hookRun('prompt', promptEvent(), { codexHooks: async () => null });
-    const out = await hookRun('native', webEvent());
-    expect(at(out, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
+  it('denies a search once, so a retry of it runs even where Codex refuses the tool', async () => {
+    const first = await hookRun('native', webEvent());
+    expect(at(first, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    const retry = await hookRun('native', { ...webEvent(), tool_use_id: 'call-retry' });
+    expect(at(retry, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
   });
 
   it('names the request tool by host', () => {

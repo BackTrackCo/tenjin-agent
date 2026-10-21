@@ -2,9 +2,13 @@ import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { withAppServer } from '../lib/codex-app-server';
+import { resolveCodex } from '../lib/codex-bin';
 import { MARKETPLACE_NAME, PLUGIN_ID } from './names';
-import { CODEX_ALLOW_HOOK_COMMAND, CODEX_HOOK_COUNT } from './plugin-files';
-import { noteRequestTool, requestToolNoted } from './progress';
+import {
+  CODEX_ALLOW_HOOK_COMMAND,
+  CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+  CODEX_HOOK_COUNT,
+} from './plugin-files';
 
 /**
  * WHAT CODEX SAYS ABOUT THE TENJIN PLUGIN, read through Codex's own app server
@@ -30,8 +34,14 @@ export function at(v: unknown, ...keys: string[]): unknown {
 }
 
 export async function codexVersion(): Promise<string | null> {
+  const codex = resolveCodex();
+  if (codex === null) return null;
   try {
-    const { stdout } = await exec('codex', ['--version'], { timeout: 2_000, maxBuffer: 16_384 });
+    const { stdout } = await exec(codex.cmd, [...codex.prefix, '--version'], {
+      timeout: 2_000,
+      maxBuffer: 16_384,
+      windowsHide: true,
+    });
     return /(?:codex-cli|codex)\s+(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/.exec(stdout)?.[1] ?? null;
   } catch {
     return null;
@@ -66,8 +76,10 @@ export interface CodexHookRows {
 
 function isAllowHook(hook: unknown): boolean {
   return (
-    at(hook, 'command') === CODEX_ALLOW_HOOK_COMMAND ||
-    String(at(hook, 'key')).includes(':permission_request:')
+    // On Windows, Codex lists the `commandWindows` form as the command.
+    [CODEX_ALLOW_HOOK_COMMAND, CODEX_ALLOW_HOOK_COMMAND_WINDOWS].includes(
+      String(at(hook, 'command')),
+    ) || String(at(hook, 'key')).includes(':permission_request:')
   );
 }
 
@@ -93,43 +105,4 @@ export function codexHookRows(list: unknown): CodexHookRows {
     state: ours.length === CODEX_HOOK_COUNT && ready ? 'trusted' : 'review',
     allowOff: ours.some(optedOut),
   };
-}
-
-/**
- * Does Codex let the request tool run without a prompt? Only with every Tenjin
- * hook trusted and the allow hook on. Null when the list could not be read.
- */
-export function requestAllowed(list: unknown): boolean | null {
-  const rows = codexHookRows(list);
-  return rows.state === 'unknown' ? null : rows.state === 'trusted' && !rows.allowOff;
-}
-
-/** How long a recorded answer stands before the prompt leg asks again. */
-const REQUEST_TOOL_REFRESH_MS = 5 * 60_000;
-/** The prompt leg's wait for the list, run beside its routing decision. */
-const REQUEST_TOOL_LIST_MS = 3_000;
-
-/**
- * THE PROMPT LEG ASKS, THE PRE-CALL LEG READS. Codex lists its hooks only
- * through an app server, so the prompt leg, which precedes every search of a
- * turn, asks once per session (again after {@link REQUEST_TOOL_REFRESH_MS})
- * beside its own decision and records the answer; the pre-call leg reads that
- * record and starts nothing. An unread list records nothing.
- */
-export async function refreshRequestTool(
-  dataDir: string,
-  session: string,
-  cwd: string,
-  list: (cwd: string, timeoutMs: number) => Promise<unknown> = listCodexHooks,
-  now = Date.now(),
-): Promise<void> {
-  const noted = await requestToolNoted(dataDir, session, now);
-  if (noted !== null && now - noted.at < REQUEST_TOOL_REFRESH_MS) return;
-  const allowed = requestAllowed(await list(cwd, REQUEST_TOOL_LIST_MS));
-  if (allowed !== null) await noteRequestTool(dataDir, session, allowed, now);
-}
-
-/** True only on a recorded yes: anything else lets the search run. */
-export async function requestRunnable(dataDir: string, session: string): Promise<boolean> {
-  return (await requestToolNoted(dataDir, session))?.runnable === true;
 }

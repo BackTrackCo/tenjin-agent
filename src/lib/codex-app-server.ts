@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { resolveCodex } from './codex-bin';
 import { codexHome } from './codex-home';
 function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -10,11 +11,14 @@ export async function withAppServer<T>(
   timeoutMs: number,
   fn: (request: (method: string, params: unknown) => Promise<unknown>) => Promise<T>,
 ): Promise<T | null> {
+  const codex = resolveCodex(env);
+  if (codex === null) return null;
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn('codex', ['app-server'], {
+    child = spawn(codex.cmd, [...codex.prefix, 'app-server'], {
       env: { ...env, CODEX_HOME: codexHome(home, env) },
       stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
     });
   } catch {
     return null;

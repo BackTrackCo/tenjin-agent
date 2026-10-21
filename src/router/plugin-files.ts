@@ -310,9 +310,17 @@ export function codexHookCommand(kind: (typeof CODEX_LEGS)[number]): string {
  * `approval_mode = "prompt"` for the tool; that user turns this one hook off in
  * `/hooks`. The wallet's spend limits still bound every payment.
  */
-export const CODEX_ALLOW_HOOK_COMMAND = `echo '${JSON.stringify({
+const CODEX_ALLOW_ANSWER = JSON.stringify({
   hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
-})}'`;
+});
+export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
+/**
+ * The same answer under Windows' `cmd.exe /C`, through Codex's `commandWindows`
+ * override: cmd's `echo` prints single quotes as written, and Codex then
+ * rejects the output as JSON. The answer holds none of cmd's special
+ * characters, so a bare `echo` prints it as is.
+ */
+export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
 
 /** Every hook the Codex plugin carries: the three legs and the allow answer. */
 export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 1;
@@ -336,6 +344,7 @@ export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
             {
               type: 'command',
               command: CODEX_ALLOW_HOOK_COMMAND,
+              commandWindows: CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
               timeout: LOCAL_HOOK_TIMEOUT_SECONDS,
             },
           ],

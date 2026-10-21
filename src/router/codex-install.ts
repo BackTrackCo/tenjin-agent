@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { persistRouterDefaults } from '../commands/config';
 import { versionFreeEntry } from '../commands/update';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
+import { resolveCodex } from '../lib/codex-bin';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { CommandContext, CommandResult } from '../context';
@@ -71,11 +72,15 @@ export interface CodexSetupDeps
 const RUN_TIMEOUT_MS = 30_000;
 
 function runCodex(args: string[]): Promise<CodexRun> {
+  const codex = resolveCodex();
+  if (codex === null) {
+    return Promise.resolve({ code: 127, stdout: '', stderr: 'codex was not found on PATH' });
+  }
   return new Promise((resolve) => {
     execFile(
-      'codex',
-      args,
-      { timeout: RUN_TIMEOUT_MS, maxBuffer: 4_000_000 },
+      codex.cmd,
+      [...codex.prefix, ...args],
+      { timeout: RUN_TIMEOUT_MS, maxBuffer: 4_000_000, windowsHide: true },
       (err, stdout, stderr) => {
         const code = err === null ? 0 : typeof err.code === 'number' ? err.code : 127;
         resolve({ code, stdout: String(stdout), stderr: String(stderr) });

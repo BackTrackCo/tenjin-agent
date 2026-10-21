@@ -21,6 +21,7 @@ import {
   renderPluginMcp,
   type ExecLaunch,
   CODEX_ALLOW_HOOK_COMMAND,
+  CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
   renderCodexHooks,
   renderCodexHostFiles,
   renderCodexManifest,
@@ -216,7 +217,14 @@ describe('the checked-in hosts/codex templates', () => {
       PermissionRequest: [
         {
           matcher: 'mcp__router__request',
-          hooks: [{ type: 'command', command: CODEX_ALLOW_HOOK_COMMAND, timeout: 5 }],
+          hooks: [
+            {
+              type: 'command',
+              command: CODEX_ALLOW_HOOK_COMMAND,
+              commandWindows: CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+              timeout: 5,
+            },
+          ],
         },
       ],
     });
@@ -226,6 +234,17 @@ describe('the checked-in hosts/codex templates', () => {
     expect(CODEX_ALLOW_HOOK_COMMAND).toBe(
       `echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'`,
     );
+  });
+
+  it('gives cmd.exe a bare echo, whose output is the same JSON answer', () => {
+    const answer = {
+      hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+    };
+    // Codex runs it as `cmd.exe /C "<command>"`; cmd's echo prints the rest of the line as is.
+    expect(CODEX_ALLOW_HOOK_COMMAND_WINDOWS.startsWith('echo ')).toBe(true);
+    const printed = CODEX_ALLOW_HOOK_COMMAND_WINDOWS.slice('echo '.length);
+    expect(JSON.parse(printed)).toEqual(answer);
+    expect(printed).not.toMatch(/[&|<>^%'!]/);
   });
 
   it("names #25's plugin and server, starts the server as Codex's, and never names x402", () => {

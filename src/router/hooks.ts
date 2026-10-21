@@ -538,9 +538,6 @@ export interface HookDeps {
   dataDir: string;
   /** The host whose event this is, Claude Code when absent. */
   harness?: Harness;
-  /** False when the host may refuse the request tool: a pre-call offer then
-   *  rides beside the call as context, and the call runs. */
-  requestRunnable?: boolean;
   /** Overrides the resolved base URL entirely; tests point it at a local stub. */
   baseUrl?: string;
   /** The environment the base URL precedence reads `TENJIN_BASE_URL` from. */
@@ -1157,19 +1154,6 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   }
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, session, event.toolUseId, deps.now?.());
-  }
-  if (deps.requestRunnable === false) {
-    // A deny would send the agent to a tool the host refuses.
-    return {
-      response: {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          additionalContext: attributed(routed.offer.hint, hostOf(deps)),
-        },
-      },
-      action: routed.offer.action,
-      id: routed.offer.id,
-    };
   }
   return redirect(routed.offer, hostOf(deps));
 }
