@@ -101,7 +101,7 @@ describe('runConfigList', () => {
   it('reports every key with default provenance on a fresh dir', async () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const d = data as Record<string, { value: unknown; source: string }>;
-    expect(d.maxAutoSpend).toEqual({ value: { atomic: '0', usd: '0' }, source: 'default' });
+    expect(d.maxAutoSpend).toEqual({ value: { atomic: '250000', usd: '0.25' }, source: 'default' });
     expect(d.sessionBudget).toEqual({ value: { atomic: '5000000', usd: '5' }, source: 'default' });
     expect(d.confirm).toBeUndefined();
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
@@ -275,11 +275,11 @@ describe('runConfigList', () => {
 
 describe('runConfigGet', () => {
   it('returns the single-key shape for a money key', async () => {
-    await runConfigSet({ key: 'maxAutoSpend', value: '0.25' }, makeCtx());
+    await runConfigSet({ key: 'maxAutoSpend', value: '1.25' }, makeCtx());
     const { data, humanLines } = await runConfigGet({ key: 'maxAutoSpend' }, makeCtx());
     expect(data).toEqual({
       key: 'maxAutoSpend',
-      value: { atomic: '250000', usd: '0.25' },
+      value: { atomic: '1250000', usd: '1.25' },
       source: 'file',
     });
     expect(humanLines).toHaveLength(1);
@@ -301,18 +301,29 @@ describe('runConfigGet', () => {
 
 describe('runConfigSet — spend keys', () => {
   it.each([
-    ['0.25', '250000'],
-    ['0', '0'],
+    ['1', '1000000'],
     ['5', '5000000'],
   ])('stores %s USD as %s atomic', async (input, atomic) => {
     const { data } = await runConfigSet({ key: 'maxAutoSpend', value: input }, makeCtx());
     expect(data).toEqual({
       key: 'maxAutoSpend',
-      value: { atomic, usd: input === '0' ? '0' : atomicToUsd(atomic) },
+      value: { atomic, usd: atomicToUsd(atomic) },
       source: 'file',
     });
     expect(await readRawFile()).toEqual({ maxAutoSpend: atomic });
   });
+
+  it.each(['0', '0.1', '0.249'])(
+    'refuses a per-call limit of %s USD, below the 0.25 USD floor, and says why',
+    async (low) => {
+      const err = await caught(() => runConfigSet({ key: 'maxAutoSpend', value: low }, makeCtx()));
+      expect(err.code).toBe('USAGE');
+      expect(err.message).toBe(`maxAutoSpend ${low} is below the 0.25 USD minimum.`);
+      expect(err.fix).toContain('the routing deposit: below it, routing cannot pay');
+      expect(err.fix).toContain('`tenjin config set router.enabled false`');
+      await expect(readFile(configFile(), 'utf8')).rejects.toThrow();
+    },
+  );
 
   it.each(['abc', '-1', '1.2345678', ''])('rejects %j as USAGE', async (bad) => {
     const err = await caught(() => runConfigSet({ key: 'sessionBudget', value: bad }, makeCtx()));
@@ -407,11 +418,11 @@ describe('runConfigSet — persistence', () => {
 
   it('merges into the file without clobbering other keys or writing defaults', async () => {
     await runConfigSet({ key: 'baseUrl', value: 'https://a.example' }, makeCtx());
-    await runConfigSet({ key: 'maxAutoSpend', value: '0.25' }, makeCtx());
+    await runConfigSet({ key: 'maxAutoSpend', value: '1.25' }, makeCtx());
     // Only the two set keys are on disk; defaults are never materialized.
     expect(await readRawFile()).toEqual({
       baseUrl: 'https://a.example',
-      maxAutoSpend: '250000',
+      maxAutoSpend: '1250000',
     });
   });
 
@@ -422,7 +433,7 @@ describe('runConfigSet — persistence', () => {
   });
 
   it('writes a file that parses cleanly through RawConfigSchema', async () => {
-    await runConfigSet({ key: 'maxAutoSpend', value: '0.25' }, makeCtx());
+    await runConfigSet({ key: 'maxAutoSpend', value: '1.25' }, makeCtx());
     const parsed = RawConfigSchema.safeParse(await readRawFile());
     expect(parsed.success).toBe(true);
   });
@@ -437,13 +448,13 @@ describe('runConfigSet — persistence', () => {
     // Without the lock, N concurrent read-merge-writes all read the same base and
     // the last writer wins, dropping the rest. The lock must land all N.
     await Promise.all([
-      runConfigSet({ key: 'maxAutoSpend', value: '0.25' }, makeCtx()),
+      runConfigSet({ key: 'maxAutoSpend', value: '1.25' }, makeCtx()),
       runConfigSet({ key: 'sessionBudget', value: '0.5' }, makeCtx()),
       runConfigSet({ key: 'baseUrl', value: 'https://a.example' }, makeCtx()),
       runConfigSet({ key: 'rpcUrl', value: 'https://b.example' }, makeCtx()),
     ]);
     expect(await readRawFile()).toEqual({
-      maxAutoSpend: '250000',
+      maxAutoSpend: '1250000',
       sessionBudget: '500000',
       baseUrl: 'https://a.example',
       rpcUrl: 'https://b.example',
@@ -454,7 +465,7 @@ describe('runConfigSet — persistence', () => {
 // Local mirror of lib/money's atomicToUsd expectation, used only to phrase the
 // spend-key table above without importing an extra symbol for one call site.
 function atomicToUsd(atomic: string): string {
-  return atomic === '250000' ? '0.25' : atomic === '5000000' ? '5' : '0';
+  return atomic === '1000000' ? '1' : atomic === '5000000' ? '5' : '0';
 }
 
 describe('evalCohort key', () => {

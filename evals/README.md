@@ -451,8 +451,8 @@ else reaches rather than to restate a rule an existing case already grades.
 
 Search cases only exercise free commands (`tenjin search`, `tenjin inspect`, `tenjin outcome`).
 Cases 1 and 5 permit a buy on explicit user approval, so nothing buys in practice only because
-an unattended loop has nobody to approve; leave `maxAutoSpend` at its `0` default and that
-holds. Publish cases run
+an unattended loop has nobody to approve; the temp data dir holds no wallet, so nothing can
+pay either way. Publish cases run
 under `publish.mode: review`, so `tenjin publish` exits 3 with a `needs_confirmation` payload
 and nothing goes live; never pass `--yes` in an eval run. Leave `evalCohort` off so eval traffic
 does not land in 90-day question retention.

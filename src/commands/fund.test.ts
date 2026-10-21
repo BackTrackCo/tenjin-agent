@@ -384,6 +384,7 @@ describe('runFund', () => {
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         wait: false,
         openUrl: piped,
+        env: {},
       });
       expect(piped).not.toHaveBeenCalled();
       expect(stderr.join('')).toContain(PAGE);
@@ -396,6 +397,21 @@ describe('runFund', () => {
         open: false,
       });
       expect(stderr.join('')).toContain(PAGE);
+    });
+
+    it('opens the page for an agent under a harness, whose shell has no terminal', async () => {
+      // An agent runs this only on the person's yes to install's funding question.
+      const { provider } = fakeProvider();
+      const openUrl = vi.fn(async () => true);
+      const res = await runFund(makeCtx({ isTTY: false }), {
+        provider,
+        fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+        openUrl,
+        env: { CLAUDECODE: '1' },
+      });
+      expect(openUrl).toHaveBeenCalledWith(PAGE);
+      // Still no poll: the envelope carrying the link must not wait on it.
+      expect(res.data).toMatchObject({ opened: true, pollStatus: 'skipped' });
     });
 
     it('prints the whole link when the browser could not be opened', async () => {
@@ -497,6 +513,7 @@ describe('runFund', () => {
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       wait: false,
       openUrl,
+      env: {},
     });
     await runFund(makeCtx({ isTTY: true }), {
       provider,
