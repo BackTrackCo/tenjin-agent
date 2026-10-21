@@ -60,11 +60,17 @@ export function parsePs(stdout: string, selfPid: number): McpProcess[] {
   return found;
 }
 
-/** `tenjin mcp`, however the bin was invoked: `node /path/bin/tenjin mcp`, `tenjin mcp`. */
+/**
+ * `tenjin mcp`, however the bin was invoked: `node /path/bin/tenjin mcp`,
+ * `tenjin mcp`, or the plugin's `node <plugin root>/../../../index.js mcp`.
+ */
 function isTenjinMcp(args: string): boolean {
   const tokens = args.trim().split(/\s+/);
   const bin = tokens.findIndex(
-    (t) => /(^|[/\\])tenjin(\.js|\.cmd)?$/.test(t) || /[/\\]tenjin-cli[/\\]/.test(t),
+    (t) =>
+      /(^|[/\\])tenjin(\.js|\.cmd)?$/.test(t) ||
+      /[/\\]tenjin-cli[/\\]/.test(t) ||
+      /[/\\]hosts[/\\]claude[/\\]tenjin[/\\]\.\.[/\\]\.\.[/\\]\.\.[/\\]index\.js$/.test(t),
   );
   return bin >= 0 && tokens[bin + 1] === 'mcp';
 }

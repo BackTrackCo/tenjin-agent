@@ -17,13 +17,20 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the default spend limits instead of asking')
+    .option('--yes', 'accept the defaults ($5 a day, $0.25 a call) instead of asking')
+    .option('--session-budget <usd|none>', 'your own daily limit, or none, instead of asking')
+    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
     .addHelpText(
       'after',
       `
 Examples:
   $ tenjin install
   $ tenjin install --project
+  $ tenjin install --max-auto-spend 0.50 --session-budget 10
+
+The daily limit is the control, the per-call limit the runaway guard, and the
+wallet balance the hard stop. To turn the router off instead:
+  $ tenjin config set router.enabled false
 
 Learn more:
   What the router may spend, and what leaves this machine:
@@ -40,6 +47,8 @@ Learn more:
             ...(o.refresh === true ? { refresh: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
+            ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
+            ...(typeof o.sessionBudget === 'string' ? { sessionBudget: o.sessionBudget } : {}),
           },
           ctx,
         );
@@ -197,9 +206,11 @@ Examples:
   // because it operates on the wallet and nothing else. Unlike `send`, this IS
   // also an MCP tool
   // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
-  // checkout page. The browser open and balance poll below are CLI-only, and
-  // both are off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
+  // checkout page. The browser open and balance poll below are CLI-only. The
+  // poll is off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
   // run takes it off stderr immediately rather than off a poll that outlives it.
+  // The open also runs under an agent harness, where the agent runs this on the
+  // person's yes to install's funding question.
   addGlobalFlags(wallet.command('fund [amountUsd]'))
     .summary('fund this wallet through a checkout link for your region')
     .description(

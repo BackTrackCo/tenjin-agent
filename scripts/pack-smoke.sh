@@ -141,6 +141,12 @@ if command -v claude >/dev/null 2>&1; then
   }
 fi
 echo "pack-smoke: packed Claude Code plugin tenjin@$EXPECTED_VERSION (ok)"
+# Every plugin command, spawned with no shell from the installed package, so the
+# `${CLAUDE_PLUGIN_ROOT}/../../../index.js` entry resolves in the published layout.
+node "$PKG_DIR/scripts/plugin-spawn-smoke.mjs" "$HOSTS" || {
+  echo "pack-smoke: FAIL: the packed plugin's commands did not start with no shell" >&2
+  exit 1
+}
 
 # 2) `tenjin config` exits 0 and prints a JSON envelope carrying schemaVersion.
 # JSON is validated by node (not jq — not guaranteed on a runner): a fixed script

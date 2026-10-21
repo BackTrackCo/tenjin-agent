@@ -45,7 +45,7 @@ In Claude Code or Claude Desktop, paste:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent installs it, asks you about spend limits in the session, and helps you fund the wallet. Then type `/reload-plugins`, or start a new session, and Tenjin is on (when upgrading from an earlier release, start a new session). It needs Claude Code 2.1.287 or newer.
+Your agent asks you about spend limits, installs it, then asks whether to add funds now; you never type a command. Then type `/reload-plugins`, or start a new session, and Tenjin is on (when upgrading from an earlier release, start a new session). It needs Claude Code 2.1.287 or newer.
 
 Or in a terminal (Node.js 22 or newer):
 
@@ -115,14 +115,16 @@ Tenjin pays for tools with [x402](https://www.x402.org), an open standard that b
 
 | Limit    | Default | Change it                             |
 | -------- | ------- | ------------------------------------- |
-| Per call | $0.25   | `tenjin config set maxAutoSpend 0.10` |
 | Per day  | $5      | `tenjin config set sessionBudget 2`   |
+| Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
-`tenjin install` asks you to approve these limits, or tells your agent to ask you when the agent runs it. A call that would pay more (all its payments together, such as five takes of a video) pays nothing on its own: your assistant tells you what it costs, and in Claude Code it asks you through Claude Code's own permission prompt and runs it once you say yes. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
+The daily budget is the control, the per-call limit is the runaway guard, and your wallet balance is the hard stop. Both defaults hold from the moment you install. `tenjin install` asks once, or tells your agent to ask you when the agent runs it: use the defaults, or set your own limits. The per-call limit cannot go below $0.25, the routing deposit. To turn the router off, run `tenjin config set router.enabled false`.
+
+A call that would pay more than the per-call limit (all its payments together, such as five takes of a video; today two video models at $0.42 and $0.45, hosting at $0.50 and research at $0.60 are priced above it) pays nothing on its own: your assistant tells you what it costs, and in Claude Code it asks you through Claude Code's own permission prompt and runs it once you say yes. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ### Routing fee
 
-Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25 (less when your per-call limit is lower). A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
+Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25. A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
 
 ### Funding
 
@@ -157,7 +159,7 @@ Every paid lookup is recorded on your machine, with the files and full results i
 <details>
 <summary>Spending limits: the fine print</summary>
 
-Limits are set only where no setting exists yet, so an update never overwrites yours. The daily budget is a rolling 24-hour window. Setting either limit to `0` blocks automatic payments; `tenjin config set sessionBudget none` removes the daily ceiling only.
+Limits are set only where no setting exists yet, so an update never overwrites yours. The daily budget is a rolling 24-hour window. Setting the daily limit to `0` blocks automatic payments; `tenjin config set sessionBudget none` removes the daily ceiling only.
 
 `tenjin pay <url>` pays any x402 endpoint you name. It ignores the automatic limits and always asks for your consent to the quoted price, interactively or with `--yes`. It is never used as a workaround when the router refuses. See the [safety model](./docs/safety-model.md).
 

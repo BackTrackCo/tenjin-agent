@@ -289,9 +289,8 @@ describe('the hook legs and the routing fee', () => {
     ]);
   });
 
-  it('puts the spend question and its one-step yes to a machine whose limits are unanswered', async () => {
-    // What an agent-run install leaves: no limit in the file, so the code default's zero holds.
-    await writeFile(join(dir, 'config.json'), '{}');
+  it('tells a machine an earlier release left at a zero per-call limit the reason, never a spend question', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
     const fake = new FakeRouter();
     fake.body = OFFER;
     const p = payer(fake, {
@@ -303,16 +302,9 @@ describe('the hook legs and the routing fee', () => {
     });
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     const notice = systemMessageOf(answer);
-    expect(notice).toContain('the spend limits are not answered');
-    // The user reads it, so it is put to them, not to an agent.
-    expect(notice).not.toContain('Ask the user');
-    expect(notice).toContain('without asking you each time, up to $0.25 a call and $5 a day.');
-    expect(notice).toContain(
-      'Using these limits or choosing your own also approves the routing fee.',
-    );
-    expect(notice).toContain('Routing costs $0.003 a call');
-    expect(notice).toContain('`tenjin config set maxAutoSpend 0.25`');
-    // Never a bare install, which would undo a --project or --no-wallet install.
+    expect(notice).toContain('the per-call spend limit is below the $0.25 routing deposit');
+    expect(notice).toContain('Run `tenjin doctor`.');
+    expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
     expect(fake.paidRequests()).toBe(0);
   });

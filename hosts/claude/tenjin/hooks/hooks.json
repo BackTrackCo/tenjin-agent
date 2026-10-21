@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "tenjin hook alive",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/../../../index.js", "hook", "alive"],
             "timeout": 5
           }
         ]
@@ -106,7 +107,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Only the Tenjin hooks call this tool. To make a lookup, call mcp__plugin_tenjin_router__request.\"}}'",
+            "command": "node",
+            "args": [
+              "-e",
+              "process.stdout.write(process.argv[1])",
+              "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Only the Tenjin hooks call this tool. To make a lookup, call mcp__plugin_tenjin_router__request.\"}}"
+            ],
             "timeout": 5
           }
         ]
@@ -116,7 +122,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"Tenjin lookup\"}}'",
+            "command": "node",
+            "args": [
+              "-e",
+              "process.stdout.write(process.argv[1])",
+              "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"Tenjin lookup\"}}"
+            ],
             "timeout": 5
           }
         ]

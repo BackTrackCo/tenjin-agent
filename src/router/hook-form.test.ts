@@ -1,0 +1,40 @@
+import { describe, expect, it } from 'vitest';
+import { commandForm, handlersIn, shellDependence } from './hook-form';
+
+describe('commandForm', () => {
+  it('reads exec form from an args array and shell form from its absence', () => {
+    expect(commandForm({ type: 'command', command: 'node', args: ['x.js'] })).toBe('exec');
+    expect(commandForm({ type: 'command', command: 'tenjin hook alive' })).toBe('shell');
+    expect(commandForm({ type: 'mcp_tool', server: 's', tool: 't' })).toBeNull();
+  });
+});
+
+describe('shellDependence', () => {
+  it('passes a node launch with an args array', () => {
+    expect(shellDependence({ command: 'node', args: ['/a/index.js', 'mcp'] })).toBeNull();
+  });
+
+  it.each([
+    [{ type: 'command', command: 'tenjin hook alive' }, /no args array/],
+    [{ type: 'command', command: `echo '{"a":1}'` }, /no args array/],
+    [{ command: 'node "/a b/index.js"', args: [] }, /shell syntax/],
+    [{ command: 'tenjin', args: ['mcp', '--plugin'] }, /npm shim/],
+    [{ command: 'C:\\npm\\tenjin.cmd', args: ['mcp'] }, /npm shim/],
+    [{ command: 'node', args: ['-e', 1] }, /non-string/],
+    [{ args: [] }, /no command/],
+  ])('refuses %j', (launch, why) => {
+    expect(shellDependence(launch)).toMatch(why);
+  });
+});
+
+describe('handlersIn', () => {
+  it('collects every handler under every event and skips malformed groups', () => {
+    const a = { type: 'command', command: 'node', args: [] };
+    const b = { type: 'mcp_tool', server: 's', tool: 't' };
+    expect(
+      handlersIn({ hooks: { SessionStart: [{ hooks: [a] }], PreToolUse: [{ hooks: [b] }, 7] } }),
+    ).toEqual([a, b]);
+    expect(handlersIn({ hooks: [] })).toEqual([]);
+    expect(handlersIn(null)).toEqual([]);
+  });
+});

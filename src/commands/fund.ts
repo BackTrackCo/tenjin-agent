@@ -15,6 +15,7 @@ import { emitNotice, emitWriteNotice } from '../lib/output';
 import { addressQrLines } from '../lib/qr';
 import { openInBrowser } from '../lib/open-url';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { underAgentHarness } from '../lib/session';
 import type { CommandContext, CommandResult } from '../context';
 
 /*
@@ -65,6 +66,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   amountUsd?: string;
   /** Skip the browser open (still prints the URL). */
   open?: boolean;
+  /** The environment the agent-harness check reads; defaults to the process's. */
+  env?: NodeJS.ProcessEnv;
   /** `--no-qr`: skip the QR block a TTY otherwise gets for sending USDC from a phone. */
   qr?: boolean;
   /** Poll the balance after issuing the link. Defaults to ON at a TTY, OFF otherwise. */
@@ -129,7 +132,11 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // A Tenjin /fund link carries a token in its fragment, and it prints whole on
   // every path: a user who copies it into another browser needs the token. It is
   // not worth hiding, since it can only fund this wallet and expires in ~10 minutes.
-  const willOpen = opts.open !== false && ctx.io.isTTY;
+  // An agent's shell has no terminal, but an agent runs this only on the
+  // person's yes to "open the funding page" (`tenjin install` hands it that
+  // question), so under a harness the page opens too.
+  const willOpen =
+    opts.open !== false && (ctx.io.isTTY || underAgentHarness(opts.env ?? process.env));
   const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
   emitWriteNotice(ctx.io, `Checkout for ${address}:`);
   emitWriteNotice(ctx.io, `  ${url}`);

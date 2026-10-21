@@ -2,12 +2,12 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import pkg from '../../package.json';
-import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { spentOf } from '../lib/spend-ledger';
+import { isNewer } from '../lib/update-check';
 import { readUsdcBalance } from '../lib/usdc-balance';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
@@ -27,7 +27,7 @@ import {
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
-  MIN_DEPOSIT_ATOMIC,
+  refusedWhy,
   ROUTING_FEE_ATOMIC,
   SUGGESTED_FUND_USD,
   unpaid,
@@ -42,13 +42,6 @@ import { folderState, readPluginListing, type PluginScope } from './plugin-regis
 import { probeRouter, type RouterCheck } from './reachability';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
-import {
-  ACCEPT_COMMAND,
-  OWN_LIMITS_COMMANDS,
-  shownLimits,
-  spendQuestion,
-  type RouterLimits,
-} from './spend-question';
 
 /**
  * `tenjin doctor` for the router product: the things that decide whether a
@@ -90,6 +83,9 @@ export interface RouterDoctorDeps {
 }
 
 const NODE_FLOOR = 22;
+/** The stamp row's fix: a new session first, since a reload never stamps, then the Node it runs. */
+const STAMP_FIX =
+  "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
 
 export async function runRouterDoctor(
   ctx: CommandContext,
@@ -124,14 +120,9 @@ export async function runRouterDoctor(
   }
   checks.push(routingCheck(router));
   checks.push((await readMcpServers(deps, { settingsInstallPending: legacy.present })).check);
-  const rawConfig = await loadRawConfig(ctx.dataDir);
-  const unanswered =
-    rawConfig.maxAutoSpend === undefined ? { limits: shownLimits(rawConfig) } : null;
-  checks.push(
-    spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic, unanswered),
-  );
+  checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
-  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl, unanswered));
+  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
   checks.push(...(await walletCheck(ctx)));
   const now = deps.now?.() ?? Date.now();
   const probe = await probeRouter(settings.baseUrl, {
@@ -281,8 +272,8 @@ interface PluginContext {
 }
 
 /**
- * The plugin: listed and enabled at this CLI's version, or, with no binary to
- * ask, its folder and the `alive` stamp. A machine that still routes through a
+ * The plugin: listed and enabled at this CLI's version and stamped by a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -346,6 +337,22 @@ async function pluginCheck(
           required: false,
           detail: `${listing.id} is enabled at ${listing.version ?? 'an unknown version'}, and this CLI is ${pkg.version}`,
           fix: 'Run `tenjin install --refresh` to register this version.',
+        },
+      };
+    }
+    // Claude Code's own environment shows only in the `alive` stamp, which the
+    // plugin's SessionStart leg writes from a real session: doctor's PATH may
+    // find a Node that Claude Code's does not.
+    const stamp = await readAliveStamp(c.dataDir);
+    if (stamp === null || isNewer(pkg.version, stamp.version)) {
+      return {
+        registered: true,
+        check: {
+          name,
+          status: 'warn',
+          required: false,
+          detail: `${listing.id} ${pkg.version} is enabled, and no session has started it at this version${stamp !== null ? ` (last ${stamp.version}, at ${stamp.at})` : ''}`,
+          fix: STAMP_FIX,
         },
       };
     }
@@ -419,9 +426,11 @@ async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promis
 
 /**
  * The plugin's `router` server, through `claude mcp get`, which starts it the
- * way a session would and reports whether it answered. It starts `tenjin mcp`
- * from the PATH Claude Code sees, so a `tenjin` that is not on that PATH shows
- * up here as a server that fails to connect.
+ * way a session would and reports whether it answered. `claude mcp get` runs
+ * with doctor's own environment, so it starts `node` from doctor's PATH, not
+ * the PATH a running Claude Code started with: a connected server here does
+ * not prove a session can start it. The `plugin` row's `alive` stamp is the
+ * proof from a real session.
  */
 async function serverCheck(
   binary: ClaudeBinary,
@@ -448,7 +457,7 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: 'Run `tenjin --version` in this session: the plugin starts `tenjin mcp` from PATH, so it must print a version.',
+    fix: 'Restart Claude Code (quit it from the tray) or sign out and in: the plugin starts the CLI with `node` from the PATH Claude Code started with, so a Claude Code opened before Node was installed cannot find it.',
   };
 }
 
@@ -541,7 +550,6 @@ async function routingFeeCheck(
   ctx: CommandContext,
   settings: ResolvedSettings,
   fetchImpl: typeof fetch | undefined,
-  unanswered: { limits: RouterLimits } | null,
 ): Promise<RouterCheck> {
   let host: string;
   try {
@@ -564,15 +572,11 @@ async function routingFeeCheck(
     provider: (await walletFileExists(ctx.dataDir)) ? resolveWalletProvider(ctx) : null,
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   }).catch(() => null);
-  return routingFeeRow(why, host, unanswered);
+  return routingFeeRow(why, host);
 }
 
 /** The routing-fee row for what {@link routingFeeBlock} found. */
-export function routingFeeRow(
-  why: string | null,
-  host: string,
-  unanswered: { limits: RouterLimits } | null,
-): RouterCheck {
+export function routingFeeRow(why: string | null, host: string): RouterCheck {
   const u = why === null ? null : unpaid(why);
   if (why === null || u === null) {
     return {
@@ -580,17 +584,6 @@ export function routingFeeRow(
       status: 'ok',
       required: false,
       detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
-    };
-  }
-  if (why === 'limit_below_deposit' && unanswered !== null) {
-    // The zero is the open spend question, not a limit anyone chose: the fix
-    // is the question itself, with the fee terms it approves.
-    return {
-      name: 'routing fee',
-      status: 'warn',
-      required: false,
-      detail: 'the spend limits are not answered yet, so routing calls take the free path',
-      fix: `Answer the spend question: ${spendQuestion(unanswered.limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
     };
   }
   const fixes: Record<string, string> = {
@@ -625,8 +618,8 @@ export interface RoutingFeeInput {
 export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | null> {
   const { provider, policy } = input;
   // The fee's per-payment checks first, before the wallet, as the payer runs
-  // them on every call: a channel with credit pays nothing they refuse, and
-  // unanswered limits are the question to name, not the passphrase.
+  // them on every call: a channel with credit pays nothing they refuse, and a
+  // limit below the deposit is the fix to name, not the passphrase.
   const refused = feeRefusal(policy, input.host);
   if (refused !== null) return refused;
   if (provider === null) return 'no_wallet';
@@ -638,24 +631,20 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   const spent = ledger === null ? 0n : spentOf(ledger);
   const { address } = await describeWallet(provider);
   if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
-  const deposit =
-    policy.maxAutoSpendAtomic < CHANNEL_DEPOSIT_ATOMIC
-      ? policy.maxAutoSpendAtomic
-      : CHANNEL_DEPOSIT_ATOMIC;
-  if (deposit < MIN_DEPOSIT_ATOMIC) return 'limit_below_deposit';
+  // The deposit is always the full $0.25 and meets the whole policy, as the
+  // payer's: a per-call limit below it refuses it, mapped the payer's way.
   const evaluation = evaluateSpendPolicy(policy, {
     mode: 'automatic',
-    amountAtomic: deposit,
+    amountAtomic: CHANNEL_DEPOSIT_ATOMIC,
     creator: input.host,
     sessionSpentAtomic: spent,
   });
-  if (evaluation.reason === 'not_allowlisted') return 'not_allowlisted';
-  if (evaluation.reason === 'session_budget_exceeded') return 'budget_reached';
+  if (evaluation.decision !== 'allow') return refusedWhy(evaluation.reason);
   const balance = await readUsdcBalance(address, input.rpcUrl, {
     timeoutMs: input.timeoutMs,
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
   });
-  return balance !== null && balance < deposit ? 'wallet_low' : null;
+  return balance !== null && balance < CHANNEL_DEPOSIT_ATOMIC ? 'wallet_low' : null;
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */
@@ -671,18 +660,11 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
 }
 
 /**
- * `unanswered` is set when the config file names no `maxAutoSpend`: the state
- * an install that could not ask leaves, the same as a cancel at its selector.
- * The code default's zero holds, and that is a question still open, not a
- * broken machine, so it warns with the question and its one-step yes, and the
- * checks after it (the router probe above all) still print. A 0 the user
- * wrote is their answer and stays a failure.
+ * The two limits: the daily budget is the control, the per-call ceiling the
+ * runaway guard. A per-call limit an earlier release left below $0.25 shows
+ * on the routing-fee row, which names the deposit it refuses.
  */
-function spendCheck(
-  maxAutoSpendAtomic: bigint,
-  sessionBudgetAtomic: bigint | null,
-  unanswered: { limits: RouterLimits } | null,
-): RouterCheck {
+function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
   if (sessionBudgetAtomic === 0n) {
     return {
       name: 'spend',
@@ -692,22 +674,13 @@ function spendCheck(
       fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
-  if (maxAutoSpendAtomic === 0n && unanswered !== null) {
-    return {
-      name: 'spend',
-      status: 'warn',
-      required: false,
-      detail: `the spend limits are not answered yet, so automatic payments are off and every lookup needs approval. Ask the user: ${spendQuestion(unanswered.limits)}`,
-      fix: `Answer the spend question: for a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, ${OWN_LIMITS_COMMANDS}.`,
-    };
-  }
   if (maxAutoSpendAtomic === 0n) {
     return {
       name: 'spend',
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: 'Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.',
+      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
     };
   }
   const budget =
