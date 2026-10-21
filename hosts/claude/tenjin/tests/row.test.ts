@@ -497,7 +497,8 @@ test('a long service name is shortened, never dropped: the model in a trailing g
 });
 
 test('a choice call is named as the line named the option, after a free spec check', async ($, on) => {
-  const { files } = machine(on);
+  const { files, clock } = machine(on);
+  const clockSettle = () => clock.settle();
   const line = '7b7223f8-699e-426b-ac14-9452e615f106';
   const other = '6bed572c-e392-4300-a0cc-7b7cee9fdb39';
   // A discovered option's spec: no label, a reseller's provider name.
@@ -535,26 +536,49 @@ test('a choice call is named as the line named the option, after a free spec che
     supplier: 'api.gondola-ai.com',
     cost: ['provider price 0.021254 USD'],
   })}`;
-  on('tool.call', { tool: TOOL }, async (_$, e) =>
-    e.tool_use_id === 'toolu_check' ? { result: spec, text: spec } : { result: paid, text: paid },
-  );
+  let release = (): void => undefined;
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    if (e.tool_use_id === 'toolu_check') return { result: spec, text: spec };
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { result: paid, text: paid };
+  });
   const input = { prompt: 'an editorial brand illustration' };
+  const mount = async (calls: unknown[]) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolGroup',
+      props: groupOf(calls),
+    });
+    const text = await rowText(ui);
+    await ui.unmount();
+    return text;
+  };
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_check', id: line, choice: 'gpt-image-2.5' });
-  await $.tool.call({
-    tool: TOOL,
-    tool_use_id: 'toolu_paid',
-    id: line,
-    choice: 'gpt-image-2.5',
-    input,
-  });
   const check = toolRow('toolu_check', TOOL, { id: line, choice: 'gpt-image-2.5' }, spec);
-  const call = toolRow('toolu_paid', TOOL, { id: line, choice: 'gpt-image-2.5', input }, paid);
-  const ui = await $.ui.mount({
-    plugin: 'tenjin',
-    surface: 'terminal',
-    component: 'ToolGroup',
-    props: groupOf([check, call]),
-  });
-  expect(await rowText(ui)).toBe('Called GPT Image 2.5 Sunburst · $0.021254 (ctrl+o to expand)');
-  await ui.unmount();
+  for (const [useId, picked, running, ended] of [
+    [
+      'toolu_paid',
+      'gpt-image-2.5',
+      '⏺ Calling GPT Image 2.5 Sunburst… · $0.035',
+      'Called GPT Image 2.5 Sunburst · $0.021254 (ctrl+o to expand)',
+    ],
+    [
+      'toolu_all',
+      'all',
+      '⏺ Calling 2 services… · $0.085',
+      'Called 2 services · $0.021254 (ctrl+o to expand)',
+    ],
+  ] as const) {
+    const args = { id: line, choice: picked, input };
+    const call = $.tool.call({ tool: TOOL, tool_use_id: useId, ...args });
+    await clockSettle();
+    // IN FLIGHT: the row is stored when the call starts, under the option's name.
+    expect(await mount([check, toolRow(useId, TOOL, args)])).toBe(running);
+    release();
+    await call;
+    expect(await mount([check, toolRow(useId, TOOL, args, paid)])).toBe(ended);
+  }
 });
