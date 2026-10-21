@@ -16,10 +16,19 @@ jobs:
       # Keep this metadata-only: never check out or execute PR code with this trigger.
       - name: Notify Discord
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_PR_WEBHOOK_URL: ${{ secrets.DISCORD_PR_WEBHOOK_URL }}
+          DISCORD_ISSUE_WEBHOOK_URL: ${{ secrets.DISCORD_ISSUE_WEBHOOK_URL }}
         run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request_target" ]; then
+            DISCORD_WEBHOOK_URL="$DISCORD_PR_WEBHOOK_URL"
+            DISCORD_SECRET_NAME=DISCORD_PR_WEBHOOK_URL
+          else
+            DISCORD_WEBHOOK_URL="$DISCORD_ISSUE_WEBHOOK_URL"
+            DISCORD_SECRET_NAME=DISCORD_ISSUE_WEBHOOK_URL
+          fi
+
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            echo "::error::Set the DISCORD_WEBHOOK_URL Actions secret before enabling notifications."
+            echo "::error::Set the ${DISCORD_SECRET_NAME} Actions secret before enabling notifications."
             exit 1
           fi
 
