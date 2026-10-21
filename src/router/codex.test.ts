@@ -9,7 +9,6 @@ import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
-  elicitationCanShow,
   runCodexDoctor,
   runCodexInstall,
   runCodexUninstall,
@@ -446,8 +445,8 @@ describe('Codex install, uninstall and doctor', () => {
     expect(data.spend.effective).toEqual({ maxAutoSpend: '0.25', sessionBudget: '5' });
     expect(data.nextSteps.map((s) => s.id)).toEqual(['spend']);
     expect(data.nextSteps[0]?.options.map((o) => o.command)).toEqual([
-      'tenjin install --harness codex --yes',
-      'tenjin install --harness codex --max-auto-spend <usd> --session-budget <usd|none>',
+      'tenjin install --yes',
+      'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
     ]);
     expect(out.data).not.toHaveProperty('approval');
   });
@@ -527,11 +526,11 @@ describe('Codex install, uninstall and doctor', () => {
     expect(ready.data).toMatchObject({
       hooks: 'trusted',
       ok: true,
-      elicitation: false,
       version: '0.157.1',
     });
+    expect(ready.data).not.toHaveProperty('elicitation');
     expect(ready.humanLines?.join('\n')).toContain('information only');
-    expect(elicitationCanShow({ approval_policy: 'on-request' })).toBe(true);
+    expect(ready.humanLines?.join('\n')).not.toContain('Pay once');
   });
 
   it('fails with the install step when absent and the /hooks step when untrusted', async () => {

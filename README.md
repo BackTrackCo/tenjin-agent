@@ -51,10 +51,11 @@ Or in a terminal (Node.js 22 or newer):
 
 ```bash
 npm i -g tenjin-cli
-tenjin install          # adds the Tenjin plugin to Claude Code and creates your wallet
-tenjin install --harness codex # sets up the Codex plugin
+tenjin install          # adds the Tenjin plugin to your agent and creates your wallet
 tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
+
+Using Codex? `tenjin install` sets it up too. Run by your agent, it sets up the agent it runs in. In a terminal, it sets up the agent you have, and asks which when you have both Claude Code and Codex. `tenjin doctor` and `tenjin uninstall` then cover each agent install set up. In Codex, Tenjin looks at your prompt and at each web search. One of its hooks lets Tenjin's lookup tool run without asking you first, even if you told Codex to ask; to be asked, turn that hook off in `/hooks` ([details](docs/agent-permissions.md#codex)).
 
 ## What it can do
 
@@ -98,7 +99,7 @@ flowchart LR
     B -- "nothing better" --> E["Agent carries on"]
 ```
 
-The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. In Codex it hooks in at your prompt and around a single web search, and one more hook lets the request tool run without a prompt, which also overrides your own `approval_mode = "prompt"` for it; to be asked first, turn that one hook off in `/hooks` ([details](docs/agent-permissions.md#codex)). At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
+The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
 
 When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through the Tenjin plugin's MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result.
 

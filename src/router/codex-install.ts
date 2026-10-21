@@ -31,7 +31,7 @@ import {
 import { shownLimits } from './spend-question';
 
 /**
- * `tenjin install|uninstall|doctor --harness codex`. Codex's own commands do
+ * `tenjin install|uninstall|doctor` for Codex. Codex's own commands do
  * every plugin write: `codex plugin marketplace add` and `codex plugin add`
  * copy the plugin from this package's `dist/hosts/codex`. The plugin's own
  * `PermissionRequest` hook allows the request tool, so install writes no Codex
@@ -92,18 +92,6 @@ export async function codexHostsDir(
   const stable = versionFreeEntry(catalog) ?? catalog;
   if ((await stat(stable).catch(() => null))?.isFile() !== true) return null;
   return dirname(dirname(dirname(stable)));
-}
-
-/**
- * Can Codex show an MCP elicitation, the Pay once ask? Not under
- * `approval_policy = "never"`, nor with the feature off: there a call over the
- * limit returns `needs_approval` with the command the user runs.
- */
-export function elicitationCanShow(config: unknown): boolean {
-  return (
-    at(config, 'approval_policy') !== 'never' &&
-    at(config, 'features', 'tool_call_mcp_elicitation') !== false
-  );
 }
 
 function failed(step: string, out: CodexRun): CliError {
@@ -180,10 +168,8 @@ export async function runCodexInstall(
 
   // Read back after the write, as the Claude install does.
   const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
-  const install = [
-    'tenjin install --harness codex',
-    ...(args.noWallet ? ['--no-wallet'] : []),
-  ].join(' ');
+  // Run again by the agent in Codex, a bare install finds Codex itself.
+  const install = ['tenjin install', ...(args.noWallet ? ['--no-wallet'] : [])].join(' ');
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
   const daily =
@@ -255,22 +241,18 @@ export async function runCodexDoctor(
     (deps.version ?? codexVersion)(),
   ]);
   const hooks = codexHookRows(list);
-  const read = config !== null && config !== undefined;
-  const elicitation = read ? elicitationCanShow(config) : null;
   // With its allow hook off, `approval_policy = "never"` refuses the tool.
   const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
   const ok = hooks.state === 'trusted' && !refused;
   const lines = [
     `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
     `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
-    `Pay once ask: ${elicitation === null ? 'unknown' : elicitation ? 'can show' : 'cannot show (approval_policy never); a call over the limit returns needs_approval'}`,
     `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
   ];
   const data = {
     plugin: CODEX_PLUGIN,
     hooks: hooks.state,
     allowOff: hooks.allowOff,
-    elicitation,
     version,
     ok,
   };
