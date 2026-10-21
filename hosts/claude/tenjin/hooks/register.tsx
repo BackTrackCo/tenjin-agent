@@ -400,8 +400,18 @@ function nativeArgument(input: unknown): string | undefined {
 
 function labelOf(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const label = clean(value, LABEL_CHARS + 1);
-  return label.length > 0 && Array.from(label).length <= LABEL_CHARS ? label : undefined;
+  // "Reseller (Model)" names the model the person asked for: the trailing
+  // group's contents. One still over the cap is cut with an ellipsis, never dropped.
+  const text = clean(value, value.length + 1);
+  const name = (/ \(([^()]+)\)$/.exec(text)?.[1] ?? text).trim();
+  const chars = Array.from(name);
+  if (chars.length === 0) return undefined;
+  return chars.length <= LABEL_CHARS
+    ? name
+    : `${chars
+        .slice(0, LABEL_CHARS - 1)
+        .join('')
+        .trimEnd()}…`;
 }
 
 function shortKey(value: string): string | undefined {

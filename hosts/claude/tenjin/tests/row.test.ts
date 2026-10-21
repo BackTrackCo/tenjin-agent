@@ -416,3 +416,45 @@ test('a standalone finished lookup that was never in a run shows no ctrl+o hint'
   expect(await rowText(after)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
   await after.unmount();
 });
+
+test('a long service name is shortened, never dropped: the model in a trailing group, else an ellipsis', async ($, on) => {
+  const { files } = machine(on);
+  const cases = [
+    [
+      'b920ff14-0000-4a50-8c25-240e871602f1',
+      'Gondola (OpenAI GPT Image 2.5 Sunburst)',
+      'OpenAI GPT Image 2.5 Sunburst',
+    ],
+    [
+      'b920ff14-0000-4a50-8c25-240e871602f2',
+      'A very long reseller name with no model at all',
+      'A very long reseller name with…',
+    ],
+    ['b920ff14-0000-4a50-8c25-240e871602f3', 'Exa', 'Exa'],
+  ] as const;
+  const paid = `summary${JSON.stringify({
+    status: 'fulfilled',
+    supplier: 'api.gondola-ai.com',
+    cost: ['provider price 0.030701 USD'],
+  })}`;
+  on('tool.call', { tool: TOOL }, async () => ({ result: paid, text: paid }));
+  for (const [id, provider, shown] of cases) {
+    // A discovered service's spec: no label, only its provider's name.
+    await keepSpec(files, id, { provider, priceAtomic: '30701' }, null);
+    await $.tool.call({
+      tool: TOOL,
+      tool_use_id: `toolu_${id}`,
+      id,
+      input: { prompt: 'a banner' },
+    });
+    const row = toolRow(`toolu_${id}`, TOOL, { id, input: { prompt: 'a banner' } }, paid);
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolGroup',
+      props: groupOf([row]),
+    });
+    expect(await rowText(ui)).toBe(`Called ${shown} · $0.030701 (ctrl+o to expand)`);
+    await ui.unmount();
+  }
+});
