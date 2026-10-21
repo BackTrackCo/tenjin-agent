@@ -15,7 +15,9 @@ import { OWNER_MARKER, PLUGIN_FILES } from './plugin-files';
  * only when it is a real directory (never followed through a link) whose
  * manifest names `tenjin` and carries the `tenjin-cli` marker. Inside it, only
  * the paths in {@link PLUGIN_FILES} are written or unlinked, so a user's own
- * `skills/` or `commands/` there survive every update and uninstall.
+ * `skills/` or `commands/` there survive every update and uninstall, and a
+ * listed path whose parent inside the folder is a link is never written or
+ * unlinked, so a linked `skills/tenjin-pay` keeps the user's file behind it.
  */
 
 export const FOLDER_NAME = 'tenjin-router';
@@ -45,6 +47,21 @@ export async function inspectPluginFolder(dir: string): Promise<FolderState> {
   }
 }
 
+/**
+ * The first parent of `path` inside `dir` that exists and is not a real
+ * directory, relative to `dir`, or null when every parent is real or absent.
+ */
+async function linkedParent(dir: string, path: string): Promise<string | null> {
+  const parents: string[] = [];
+  for (let d = dirname(path); d !== '.'; d = dirname(d)) parents.unshift(d);
+  for (const parent of parents) {
+    const entry = await lstat(join(dir, parent)).catch(() => null);
+    if (entry === null) return null;
+    if (entry.isSymbolicLink() || !entry.isDirectory()) return parent;
+  }
+  return null;
+}
+
 export interface FolderWrite {
   path: string;
   state: 'written' | 'refused';
@@ -67,6 +84,16 @@ export async function writePluginFolder(
       state: 'refused',
       reason: `${dir} exists and is not a folder this CLI wrote, so it was left as it is`,
     };
+  }
+  for (const path of PLUGIN_FILES) {
+    const linked = await linkedParent(dir, path);
+    if (linked !== null) {
+      return {
+        path: dir,
+        state: 'refused',
+        reason: `${join(dir, linked)} is a link or not a folder, so nothing in ${dir} was written`,
+      };
+    }
   }
   try {
     for (const path of PLUGIN_FILES) {
@@ -108,7 +135,9 @@ export async function removePluginFolder(dir: string): Promise<FolderRemoval> {
       reason: `${dir} is not a folder this CLI wrote, so nothing in it was removed`,
     };
   }
-  for (const path of PLUGIN_FILES) await rm(join(dir, path), { force: true });
+  for (const path of PLUGIN_FILES) {
+    if ((await linkedParent(dir, path)) === null) await rm(join(dir, path), { force: true });
+  }
   // Every ancestor of every file, deepest first: a nested skill directory
   // leaves its parent behind otherwise.
   const subdirs = [

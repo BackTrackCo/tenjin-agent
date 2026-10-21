@@ -1,0 +1,2 @@
+# The plugin templates ship byte for byte; a Windows checkout must not turn them CRLF.
+/hosts/** text eol=lf
