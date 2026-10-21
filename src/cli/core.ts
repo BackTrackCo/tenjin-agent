@@ -3,6 +3,7 @@ import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
 import { SETUP, WALLET, type Registration } from './registration';
+import { parseHostList } from './router';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -43,9 +44,9 @@ Learn more:
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
-        const harness = o.harness as Harness | undefined;
+        const harness = o.harness as Harness[] | undefined;
         // Nothing in the Codex plugin changes between builds, so nothing to refresh.
-        if (harness === 'codex' && o.refresh === true) {
+        if (harness?.includes('codex') === true && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
         const { installHosts, recordInstalledHost, runEach, withSteps } =
@@ -97,7 +98,7 @@ Learn more:
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
-        const harness = o.harness as Harness | undefined;
+        const harness = o.harness as Harness[] | undefined;
         const { recordedHosts, uninstallEach } = await import('../router/hosts');
         const hosts = await recordedHosts(
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
@@ -132,7 +133,7 @@ Examples:
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
         const o = this.opts();
-        const harness = o.harness as Harness | undefined;
+        const harness = o.harness as Harness[] | undefined;
         const { checkEach, recordedHosts } = await import('../router/hosts');
         const hosts = await recordedHosts(
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
@@ -364,11 +365,12 @@ Examples:
     });
 }
 
-/** `--harness`: one agent host, overriding the hosts these commands find or recorded. */
+/** `--harness`: the agent hosts, overriding the ones these commands find or recorded. */
 function hostOverride(): Option {
-  return new Option('--harness <host>', 'only this agent host, instead of the ones found').choices(
-    HARNESSES,
-  );
+  return new Option(
+    '--harness <hosts>',
+    `only these agent hosts, instead of the ones found: ${HARNESSES.join(', ')}, or ${HARNESSES.join(',')}`,
+  ).argParser(parseHostList);
 }
 
 /** The Codex setup's flags, from install's, uninstall's or doctor's. */

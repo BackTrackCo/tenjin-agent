@@ -113,7 +113,7 @@ export interface HostDeps {
 }
 
 export interface InstallHostArgs {
-  harness?: Harness;
+  harness?: Harness[];
   project?: boolean;
   refresh?: boolean;
   yes?: boolean;
@@ -132,7 +132,7 @@ export interface HostChoice {
 
 /**
  * THE HOSTS THIS INSTALL SETS UP. A refresh and a project install are Claude
- * Code's alone, and `--harness` names one host. Otherwise every host found is
+ * Code's alone, and `--harness` names the hosts. Otherwise every host found is
  * a candidate (the agent's own host counts as found). With one, install goes
  * there; with none, to Claude Code, whose setup needs no binary. With both, a
  * recorded choice from an earlier install stands, `--yes` takes both, and a
@@ -145,7 +145,7 @@ export async function installHosts(
   ctx: CommandContext,
   deps: HostDeps = {},
 ): Promise<HostChoice> {
-  if (args.harness !== undefined) return { hosts: [args.harness] };
+  if (args.harness !== undefined) return { hosts: args.harness };
   if (args.refresh === true || args.project === true) return { hosts: ['claude'] };
   const env = deps.env ?? process.env;
   const agent = agentHost(env);
@@ -186,7 +186,12 @@ export function hostsStep(args: InstallHostArgs = {}): QuestionStep {
       ...(args.sessionBudget !== undefined ? [`--session-budget ${args.sessionBudget}`] : []),
     ].join(' ');
   const options: QuestionStep['options'] = [
-    { id: 'both', label: 'Claude Code and Codex', recommended: true, command: install('--yes') },
+    {
+      id: 'both',
+      label: 'Claude Code and Codex',
+      recommended: true,
+      command: install('--harness claude,codex'),
+    },
     {
       id: 'claude',
       label: 'Claude Code only',
@@ -242,10 +247,10 @@ export function withSteps(
 
 /** The hosts doctor checks and uninstall removes: the record, else Claude Code. */
 export async function recordedHosts(
-  args: { harness?: Harness; project?: boolean },
+  args: { harness?: Harness[]; project?: boolean },
   dataDir: string,
 ): Promise<Harness[]> {
-  if (args.harness !== undefined) return [args.harness];
+  if (args.harness !== undefined) return args.harness;
   if (args.project === true) return ['claude'];
   const hosts = await readInstalledHosts(dataDir);
   return hosts === null || hosts.length === 0 ? ['claude'] : hosts;

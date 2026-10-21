@@ -18,6 +18,7 @@ import {
   uninstallEach,
   withSteps,
 } from './hosts';
+import { parseHostList } from '../cli/router';
 import type { Harness } from './names';
 
 let dir: string;
@@ -58,7 +59,7 @@ describe('the installed-hosts record', () => {
   it('checks or removes the recorded hosts, unless overridden or project-scoped', async () => {
     await recordInstalledHost(dir, 'codex');
     expect(await recordedHosts({}, dir)).toEqual(['codex']);
-    expect(await recordedHosts({ harness: 'claude' }, dir)).toEqual(['claude']);
+    expect(await recordedHosts({ harness: ['claude'] }, dir)).toEqual(['claude']);
     expect(await recordedHosts({ project: true }, dir)).toEqual(['claude']);
   });
 });
@@ -85,6 +86,21 @@ describe('uninstallEach', () => {
     expect(await readInstalledHosts(dir)).toEqual(['claude']);
     await uninstallEach(['claude'], dir, false, removed);
     expect(await readInstalledHosts(dir)).toBeNull();
+  });
+});
+
+describe('parseHostList', () => {
+  it('reads a comma list and the repeated flag, in a fixed order', () => {
+    expect(parseHostList('codex,claude')).toEqual(['claude', 'codex']);
+    expect(parseHostList('codex', parseHostList('claude'))).toEqual(['claude', 'codex']);
+    expect(parseHostList(' codex ')).toEqual(['codex']);
+  });
+
+  it('refuses an entry that is not a host, naming the valid ones', () => {
+    expect(() => parseHostList('claude,cursor')).toThrow(
+      '"cursor" is not a host; use claude, codex, or both as claude,codex.',
+    );
+    expect(() => parseHostList(',')).toThrow('No host given');
   });
 });
 
@@ -117,7 +133,7 @@ describe('installHosts', () => {
 
   it('takes the override, and keeps refresh and project installs on Claude Code', async () => {
     const deps = { env: { CODEX_SESSION_ID: 'abc' }, detect: both, ask: noQuestion };
-    expect(await installHosts({ harness: 'codex' }, ctx(), deps)).toEqual({ hosts: ['codex'] });
+    expect(await installHosts({ harness: ['codex'] }, ctx(), deps)).toEqual({ hosts: ['codex'] });
     expect(await installHosts({ refresh: true }, ctx(), deps)).toEqual({ hosts: ['claude'] });
     expect(await installHosts({ project: true }, ctx(), deps)).toEqual({ hosts: ['claude'] });
   });
@@ -143,7 +159,7 @@ describe('installHosts', () => {
     expect(out.hosts).toEqual([]);
     expect(out.ask?.id).toBe('hosts');
     expect(out.ask?.options.map((o) => [o.id, o.recommended, o.command])).toEqual([
-      ['both', true, 'tenjin install --yes --no-wallet'],
+      ['both', true, 'tenjin install --harness claude,codex --no-wallet'],
       ['claude', false, 'tenjin install --harness claude --no-wallet'],
       ['codex', false, 'tenjin install --harness codex --no-wallet'],
     ]);
@@ -177,7 +193,7 @@ describe('an agent install with both hosts found', () => {
     ran = [];
   });
   /** The install action's flow: choose, run each host, record it, merge the steps. */
-  async function install(args: { harness?: Harness; yes?: boolean }) {
+  async function install(args: { harness?: Harness[]; yes?: boolean }) {
     const { hosts, ask } = await installHosts(args, ctx(true), {
       env: { CODEX_SESSION_ID: 'a' },
       detect: both,
@@ -203,8 +219,17 @@ describe('an agent install with both hosts found', () => {
     expect(ran).toEqual([]);
   });
 
+  it('records both under --harness claude,codex, with the spend question still carried', async () => {
+    const out = await install({ harness: parseHostList('claude,codex') });
+    expect(ran).toEqual(['claude', 'codex']);
+    expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
+    expect((out.data as { nextSteps: { id: string }[] }).nextSteps.map((s) => s.id)).toEqual([
+      'spend',
+    ]);
+  });
+
   it('records one under --harness codex, and both under --yes', async () => {
-    await install({ harness: 'codex' });
+    await install({ harness: ['codex'] });
     expect(ran).toEqual(['codex']);
     expect(await readInstalledHosts(dir)).toEqual(['codex']);
     await rm(join(dir, HOSTS_FILE));
