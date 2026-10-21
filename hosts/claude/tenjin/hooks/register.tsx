@@ -20,9 +20,11 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * EXPANDED: where the engine itself expanded the run a lookup sits in (ctrl+o,
  * --verbose: `ToolGroup.isExpanded` as received), the row steps aside and the
  * engine draws its own expanded MCP row, input and result. Its title there is
- * the engine's: the tool's static title, without the service name or price. No
- * documented prop tells the normal view from the transcript for a standalone
- * row, so a standalone lookup shows its one line everywhere.
+ * the engine's: the tool's static title, without the service name or price.
+ * `(ctrl+o to expand)` is drawn only on a lookup that sits in a run, where
+ * ctrl+o makes the engine expand that run. No documented prop marks a
+ * standalone row (the fullscreen transcript) as expanded, so it shows its one
+ * line with no hint.
  *
  * READ ONLY: the spec file and the offer record (`src/router/mod-state.ts`),
  * and the request tool's own envelope. The mod writes nothing under the data
@@ -45,6 +47,8 @@ const LINKS = { plugin: 'tenjin', key: 'links' } as const;
  * forgets it, so a row draws one line until its run is expanded again.
  */
 const expandedByEngine = new Set<string>();
+/** Calls drawn in a run, which ctrl+o expands: the only rows that carry the hint. */
+const inRun = new Set<string>();
 const DOT = '⏺';
 const GUTTER = '  ⎿  ';
 const INDENT = '     ';
@@ -110,6 +114,7 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { calls, isExpanded } = e.props;
     const ids = calls.flatMap((c) => (c.tool_use_id !== undefined ? [c.tool_use_id] : []));
+    for (const id of ids) inRun.add(id);
     // EXPANDED BY THE ENGINE (ctrl+o, --verbose): our rows step aside there.
     if (isExpanded) {
       const fresh = ids.filter((id) => !expandedByEngine.has(id));
@@ -136,11 +141,7 @@ export const register: Register = (on) => {
     const ui = $.ui.resolve(e);
     const drawn = rows.filter((row): row is TenjinRow => row !== null);
     if (drawn.length === 0) return <ui.Box display="none" />;
-    return (
-      <ui.Box flexDirection="column">
-        {drawn.map((row) => (row.status === 'fulfilled' ? folded(ui, row) : callRow(ui, row)))}
-      </ui.Box>
-    );
+    return <ui.Box flexDirection="column">{drawn.map((row) => callRow(ui, row, true))}</ui.Box>;
   });
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
@@ -180,7 +181,7 @@ export const register: Register = (on) => {
       ) : (
         <ui.Box display="none" />
       );
-    return expanded ? next(e) : callRow(ui, drawn);
+    return expanded ? next(e) : callRow(ui, drawn, inRun.has(tool_use_id));
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
@@ -285,7 +286,7 @@ function shapeOf(row: TenjinRow): Shape {
 /** A request call's own row: `Calling X… · $p` with its input under it while it
  *  runs, then the folded `Called X · $p`; a refusal or a charged failure keeps
  *  its dot and its state. */
-function callRow(ui: Elements, row: TenjinRow) {
+function callRow(ui: Elements, row: TenjinRow, expandable: boolean) {
   const shape = shapeOf(row);
   if (shape.state === 'running') {
     const under = row.argument !== undefined ? [`"${row.argument}"`] : [];
@@ -293,16 +294,17 @@ function callRow(ui: Elements, row: TenjinRow) {
   }
   // Ended and plain, as Claude Code leaves an ended MCP call wherever it is
   // drawn (its one-call run, or the standalone row that run becomes).
-  if (row.status === 'fulfilled') return folded(ui, row);
+  if (row.status === 'fulfilled') return folded(ui, row, expandable);
   return line(ui, row.argument !== undefined ? { ...shape, argument: row.argument } : shape);
 }
 
 /** An ended lookup folded as the engine folds an ended MCP call: no dot, all dim. */
-function folded({ Box, Text }: Elements, row: TenjinRow) {
+function folded({ Box, Text }: Elements, row: TenjinRow, expandable: boolean) {
+  const hint = expandable ? ` ${EXPAND_HINT}` : '';
   return (
     <Box flexDirection="row" marginTop={1}>
       <Box minWidth={2} />
-      <Text dimColor>{`Called ${row.label}${shapeOf(row).tail ?? ''} ${EXPAND_HINT}`}</Text>
+      <Text dimColor>{`Called ${row.label}${shapeOf(row).tail ?? ''}${hint}`}</Text>
     </Box>
   );
 }

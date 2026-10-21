@@ -385,3 +385,34 @@ test('a paid lookup with no label still draws: the provider names it, else the e
   expect(await shownLines(result)).toEqual(['engine result']);
   await result.unmount();
 });
+
+test('a standalone finished lookup that was never in a run shows no ctrl+o hint', async ($, on) => {
+  const { files } = machine(on);
+  await keepSpec(files, OFFER, EXA);
+  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_alone', id: OFFER, input: INPUT });
+  // As the fullscreen transcript draws it: a ToolUse row, no run around it.
+  const alone = toolRow('toolu_alone', TOOL, { id: OFFER, input: INPUT }, PAID);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: alone });
+    expect(await rowText(ui)).toBe('Called Exa search · $0.04');
+    await ui.unmount();
+  }
+  // Drawn in its one-call run, it carries the hint there and after.
+  const run = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: groupOf([alone]),
+  });
+  expect(await rowText(run)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
+  await run.unmount();
+  const after = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: alone,
+  });
+  expect(await rowText(after)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
+  await after.unmount();
+});
