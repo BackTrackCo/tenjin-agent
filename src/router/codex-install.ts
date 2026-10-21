@@ -226,6 +226,13 @@ export async function runCodexUninstall(
   };
 }
 
+/** True only when Codex's hook list reads and holds no Tenjin hook: the plugin is gone. */
+export async function codexPluginAbsent(
+  list: () => Promise<unknown> = () => listCodexHooks(process.cwd(), 5_000),
+): Promise<boolean> {
+  return codexHookRows(await list()).state === 'absent';
+}
+
 const PLUGIN_LINE: Record<CodexHookRows['state'], string> = {
   trusted: 'installed, its hooks on and trusted',
   review: `installed, its hooks need review. ${TRUST_STEP}`,

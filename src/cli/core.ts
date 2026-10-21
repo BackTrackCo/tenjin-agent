@@ -106,13 +106,19 @@ Learn more:
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
           ctx.dataDir,
         );
-        return uninstallEach(hosts, ctx.dataDir, o.project === true, async (host) =>
-          host === 'codex'
-            ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
-            : (await import('../router/uninstall')).runRouterUninstall(
-                { ...(o.project === true ? { project: true } : {}) },
-                ctx,
-              ),
+        return uninstallEach(
+          hosts,
+          ctx.dataDir,
+          o.project === true,
+          async (host) =>
+            host === 'codex'
+              ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
+              : (await import('../router/uninstall')).runRouterUninstall(
+                  { ...(o.project === true ? { project: true } : {}) },
+                  ctx,
+                ),
+          async (host) =>
+            host === 'codex' && (await import('../router/codex-install')).codexPluginAbsent(),
         );
       });
     });

@@ -349,6 +349,8 @@ export async function uninstallEach(
   dataDir: string,
   project: boolean,
   run: (host: Harness) => Promise<CommandResult>,
+  /** A read of the host that confirms its plugin is gone; false when it cannot. */
+  confirmAbsent: (host: Harness) => Promise<boolean> = async () => false,
 ): Promise<CommandResult> {
   const unfinished = await unfinishedHosts(dataDir);
   return runEach(hosts, async (host) => {
@@ -356,12 +358,21 @@ export async function uninstallEach(
     try {
       out = await run(host);
     } catch (err) {
-      // A setup that never finished may have nothing to remove: clear the choice.
       if (!unfinished.includes(host) || !(err instanceof CliError)) throw err;
-      if (!project) await forgetInstalledHost(dataDir, host);
+      // A setup that never finished may have left nothing, or may have left the
+      // plugin: the record clears only once a read confirms it is gone.
+      if (await confirmAbsent(host).catch(() => false)) {
+        if (!project) await forgetInstalledHost(dataDir, host);
+        return {
+          data: { host, cleared: true },
+          humanLines: [`${LABEL[host]}: its setup never finished and nothing is left; cleared it.`],
+        };
+      }
       return {
-        data: { host, cleared: true },
-        humanLines: [`${LABEL[host]}: its setup never finished; cleared it.`],
+        data: { host, kept: true, error: err.message },
+        humanLines: [
+          `${LABEL[host]}: could not remove it (${err.message}); kept on the record, so \`tenjin uninstall\` can try again.`,
+        ],
       };
     }
     if (!project && !pluginKept(out.data)) await forgetInstalledHost(dataDir, host);

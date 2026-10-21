@@ -255,12 +255,27 @@ describe('an agent install with both hosts found', () => {
     await expect(doctorEach(['claude', 'codex'], dir, ok)).resolves.toBeDefined();
   });
 
-  it('clears a chosen host whose setup never finished when uninstall finds nothing', async () => {
+  const timedOut = async (): Promise<never> => {
+    throw new CliError('REFUSED', '`codex plugin remove` timed out.');
+  };
+
+  it('keeps an unfinished host whose removal fails while a read cannot confirm it gone', async () => {
     await expect(install({ harness: ['codex'] }, 'codex')).rejects.toThrow();
-    const remove = async (): Promise<never> => {
-      throw new CliError('REFUSED', '`codex plugin remove` failed.');
-    };
-    await uninstallEach(await recordedHosts({}, dir), dir, false, remove);
+    const out = await uninstallEach(await recordedHosts({}, dir), dir, false, timedOut);
+    expect(out.humanLines?.join('\n')).toContain('kept on the record');
+    expect(await readHostRecord(dir)).toEqual({ chosen: ['codex'], installed: [] });
+    const ok = async (h: Harness) => ({ data: { host: h } });
+    await expect(doctorEach(await recordedHosts({}, dir), dir, ok)).rejects.toThrow(
+      'its setup did not finish',
+    );
+  });
+
+  it('clears an unfinished host once a read confirms its plugin is gone', async () => {
+    await expect(install({ harness: ['codex'] }, 'codex')).rejects.toThrow();
+    const asked: Harness[] = [];
+    const absent = async (h: Harness) => (asked.push(h), true);
+    await uninstallEach(await recordedHosts({}, dir), dir, false, timedOut, absent);
+    expect(asked).toEqual(['codex']);
     expect(await readHostRecord(dir)).toBeNull();
   });
 
