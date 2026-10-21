@@ -31,7 +31,7 @@ Paste this into Claude Code or Claude Desktop:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent asks one question, "Use the defaults ($5 a day, $0.25 a call) or set your own limits", then installs the plugin and creates a wallet. If the wallet is empty, it asks whether to add $5 now. Type `/reload-plugins` or start a new session, and the router is on. It needs Claude Code 2.1.287 or newer.
+Your agent asks one question, "Use the defaults ($5 a day, $0.25 a call) or set your own limits", then installs the plugin and creates a wallet. If the wallet is empty, it asks whether to add $5 now. Type `/reload-plugins` or start a new session, and the router is on; when upgrading from an earlier release, start a new session. It needs Claude Code 2.1.287 or newer.
 
 From a terminal, with Node.js 22 or newer:
 
