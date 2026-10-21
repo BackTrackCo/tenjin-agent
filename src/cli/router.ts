@@ -1,28 +1,10 @@
-import { InvalidArgumentError, Option, type Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { HARNESSES, type Harness } from '../router/names';
 import { INTEGRATION, SETUP, type Registration } from './registration';
 
 /** `--harness`: the agent host this command serves. */
 export function harnessOption(): Option {
   return new Option('--harness <host>', 'the agent host').choices(HARNESSES).default('claude');
-}
-
-/**
- * `--harness` on install, uninstall and doctor: a comma-separated list of
- * hosts, also given as the flag repeated. Each entry must be a host.
- */
-export function parseHostList(value: string, previous: Harness[] = []): Harness[] {
-  const named = value
-    .split(',')
-    .map((v) => v.trim())
-    .filter((v) => v.length > 0);
-  const bad = named.find((v) => !(HARNESSES as readonly string[]).includes(v));
-  if (bad !== undefined || named.length === 0) {
-    throw new InvalidArgumentError(
-      `${bad === undefined ? 'No host given' : `"${bad}" is not a host`}; use ${HARNESSES.join(', ')}, or both as ${HARNESSES.join(',')}.`,
-    );
-  }
-  return HARNESSES.filter((h) => previous.includes(h) || named.includes(h));
 }
 
 /**

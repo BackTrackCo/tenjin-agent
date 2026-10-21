@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import type { CommandContext, CommandResult } from '../context';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
-import type { QuestionStep } from './install';
 import { HARNESSES, type Harness } from './names';
 
 /**
@@ -14,81 +13,53 @@ import { HARNESSES, type Harness } from './names';
  * overrides.
  */
 
-/**
- * The record install writes in the Tenjin data dir: the hosts the person
- * chose, written before any host is set up, and the hosts whose setup
- * finished. A chosen host that is not installed is one a re-run retries.
- */
+/** The record install writes in the Tenjin data dir: the hosts it set up. */
 export const HOSTS_FILE = 'installed-hosts.json';
 
 const LABEL: Record<Harness, string> = { claude: 'Claude Code', codex: 'Codex' };
 
-export interface HostRecord {
-  chosen: Harness[];
-  installed: Harness[];
-}
-
-const hostsIn = (v: unknown): Harness[] =>
-  Array.isArray(v) ? HARNESSES.filter((h) => v.includes(h)) : [];
-
-/** The record, or null on a machine set up before it (or with it unreadable). */
-export async function readHostRecord(dataDir: string): Promise<HostRecord | null> {
-  let raw: unknown;
+/** The hosts install recorded, or null on a machine set up before the record. */
+export async function readInstalledHosts(dataDir: string): Promise<Harness[] | null> {
+  let raw: string;
   try {
-    raw = JSON.parse(await readFile(join(dataDir, HOSTS_FILE), 'utf8'));
+    raw = await readFile(join(dataDir, HOSTS_FILE), 'utf8');
   } catch {
     return null;
   }
-  if (raw === null || typeof raw !== 'object') return null;
-  const row = raw as { chosen?: unknown; installed?: unknown };
-  if (!Array.isArray(row.chosen) && !Array.isArray(row.installed)) return null;
-  return { chosen: hostsIn(row.chosen), installed: hostsIn(row.installed) };
+  try {
+    const hosts = (JSON.parse(raw) as { hosts?: unknown }).hosts;
+    if (!Array.isArray(hosts)) return null;
+    return HARNESSES.filter((h) => hosts.includes(h));
+  } catch {
+    return null;
+  }
 }
 
-/** The hosts whose setup finished, or null with no record. */
-export async function readInstalledHosts(dataDir: string): Promise<Harness[] | null> {
-  return (await readHostRecord(dataDir))?.installed ?? null;
-}
-
-async function writeRecord(dataDir: string, record: HostRecord): Promise<void> {
+async function writeHosts(dataDir: string, hosts: readonly Harness[]): Promise<void> {
   const path = join(dataDir, HOSTS_FILE);
-  if (record.chosen.length === 0 && record.installed.length === 0) {
+  if (hosts.length === 0) {
     await rm(path, { force: true });
     return;
   }
-  await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  await writeFileAtomic(path, `${JSON.stringify({ hosts }, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function updateRecord(dataDir: string, change: (r: HostRecord) => HostRecord): Promise<void> {
-  const record = (await readHostRecord(dataDir)) ?? { chosen: [], installed: [] };
-  const next = change(record);
-  await writeRecord(dataDir, {
-    chosen: HARNESSES.filter((h) => next.chosen.includes(h)),
-    installed: HARNESSES.filter((h) => next.installed.includes(h)),
-  });
-}
-
-/** Before any host is set up: add these hosts to the person's choice. */
-export async function chooseHosts(dataDir: string, hosts: readonly Harness[]): Promise<void> {
-  if (hosts.length === 0) return;
-  await updateRecord(dataDir, (r) => ({ ...r, chosen: [...r.chosen, ...hosts] }));
-}
-
-/** A host whose setup finished. */
 export async function recordInstalledHost(dataDir: string, host: Harness): Promise<void> {
-  await updateRecord(dataDir, (r) => ({
-    chosen: [...r.chosen, host],
-    installed: [...r.installed, host],
-  }));
+  const hosts = (await readInstalledHosts(dataDir)) ?? [];
+  if (hosts.includes(host)) return;
+  await writeHosts(
+    dataDir,
+    HARNESSES.filter((h) => h === host || hosts.includes(h)),
+  );
 }
 
-/** A host uninstall removed: out of the choice and the installed set. */
 export async function forgetInstalledHost(dataDir: string, host: Harness): Promise<void> {
-  if ((await readHostRecord(dataDir)) === null) return;
-  await updateRecord(dataDir, (r) => ({
-    chosen: r.chosen.filter((h) => h !== host),
-    installed: r.installed.filter((h) => h !== host),
-  }));
+  const hosts = await readInstalledHosts(dataDir);
+  if (hosts === null || !hosts.includes(host)) return;
+  await writeHosts(
+    dataDir,
+    hosts.filter((h) => h !== host),
+  );
 }
 
 /**
@@ -141,183 +112,84 @@ export interface HostDeps {
 }
 
 export interface InstallHostArgs {
-  harness?: Harness[];
+  harness?: Harness;
   project?: boolean;
   refresh?: boolean;
   yes?: boolean;
-  /** Carried into the answer commands, so the re-run is this install. */
-  noWallet?: boolean;
-  maxAutoSpend?: string;
-  sessionBudget?: string;
-}
-
-/** The hosts this install sets up, and the question it hands over, if any. */
-export interface HostChoice {
-  hosts: Harness[];
-  /** Both hosts found and nobody answered: nothing is set up, and this asks. */
-  ask?: QuestionStep;
 }
 
 /**
- * THE HOSTS THIS INSTALL SETS UP. A refresh and a project install are Claude
- * Code's alone, and `--harness` names the hosts. Otherwise every host found is
- * a candidate (the agent's own host counts as found). With one, install goes
- * there; with none, to Claude Code, whose setup needs no binary. With both, a
- * recorded choice from an earlier install stands, `--yes` takes both, and a
- * person at a terminal is asked, both selected, before anything is written.
- * Anyone else, an agent included, gets no host set up and the question in
- * `nextSteps`, whose answers re-run the install with the choice.
+ * The hosts this install sets up. A refresh and a project install are Claude
+ * Code's alone; an agent's install goes to its own host; a terminal install
+ * goes to every host found, asking first when there are two and a person can
+ * answer. A machine with neither gets the Claude Code setup, which needs no
+ * `claude` binary.
  */
 export async function installHosts(
   args: InstallHostArgs,
   ctx: CommandContext,
   deps: HostDeps = {},
-): Promise<HostChoice> {
-  if (args.harness !== undefined) return { hosts: args.harness };
-  if (args.refresh === true || args.project === true) return { hosts: ['claude'] };
+): Promise<Harness[]> {
+  if (args.harness !== undefined) return [args.harness];
+  if (args.refresh === true || args.project === true) return ['claude'];
   const env = deps.env ?? process.env;
   const agent = agentHost(env);
-  const detected = await (deps.detect ?? detectHosts)(env);
-  const found = HARNESSES.filter((h) => h === agent || detected.includes(h));
-  if (found.length === 0) return { hosts: ['claude'] };
-  if (found.length === 1) return { hosts: found };
-  // The person's earlier choice, finished or not: a re-run retries each one.
-  const recorded = ((await readHostRecord(ctx.dataDir))?.chosen ?? []).filter((h) =>
-    found.includes(h),
-  );
-  if (recorded.length > 0) return { hosts: recorded };
-  if (args.yes === true) return { hosts: found };
+  if (agent !== undefined) return [agent];
+  const found = await (deps.detect ?? detectHosts)(env);
+  if (found.length === 0) return ['claude'];
+  if (found.length === 1 || args.yes === true) return found;
   const interactive =
-    agent === undefined &&
     ctx.flags.json !== true &&
     (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
-  if (!interactive) return { hosts: [], ask: hostsStep(args) };
+  if (!interactive) return found;
   const picked = await (deps.ask ?? askHosts)(found);
   if (picked === null || picked.length === 0) {
     throw new CliError('REFUSED', 'Install cancelled before anything was written.', {
       fix: 'Re-run `tenjin install` and pick at least one agent.',
     });
   }
-  return { hosts: HARNESSES.filter((h) => picked.includes(h)) };
-}
-
-const HOSTS_QUESTION = 'Tenjin found Claude Code and Codex here. Set it up for which?';
-
-/**
- * The hosts question for whoever ran the install. Nothing is set up yet, so
- * each answer re-runs this install with the choice.
- */
-export function hostsStep(args: InstallHostArgs = {}): QuestionStep {
-  const install = (choice: string) =>
-    [
-      'tenjin install',
-      choice,
-      ...(args.noWallet === true ? ['--no-wallet'] : []),
-      ...(args.maxAutoSpend !== undefined ? [`--max-auto-spend ${args.maxAutoSpend}`] : []),
-      ...(args.sessionBudget !== undefined ? [`--session-budget ${args.sessionBudget}`] : []),
-    ].join(' ');
-  const options: QuestionStep['options'] = [
-    {
-      id: 'both',
-      label: 'Claude Code and Codex',
-      recommended: true,
-      command: install('--harness claude,codex'),
-    },
-    {
-      id: 'claude',
-      label: 'Claude Code only',
-      recommended: false,
-      command: install('--harness claude'),
-    },
-    { id: 'codex', label: 'Codex only', recommended: false, command: install('--harness codex') },
-  ];
-  return {
-    id: 'hosts',
-    question: HOSTS_QUESTION,
-    options,
-    next: `In this session, ask the person this question with your question tool, offering these three options in order with the first marked recommended. Nothing is set up until the answer. Run the command of the option they pick: ${options.map((o) => `"${o.label}": \`${o.command}\``).join('; ')}. Run it alone, never joined with another command, and never ask the person to run a command.`,
-  };
+  return HARNESSES.filter((h) => picked.includes(h));
 }
 
 /**
- * One install result over the hosts, with the questions for whoever ran it in
- * one top-level `nextSteps`: the hosts question first, then each host's own,
- * once per id.
+ * Under an agent, the line naming the other host when its `--version` runs
+ * too: information for the person, never a question.
  */
-export function withSteps(
-  out: CommandResult,
-  hosts: readonly Harness[],
-  ask?: QuestionStep,
-): CommandResult {
-  const data = (out.data ?? {}) as Record<string, unknown>;
-  const own = (d: unknown): QuestionStep[] => {
-    const steps = (d as { nextSteps?: unknown } | null)?.nextSteps;
-    return Array.isArray(steps) ? (steps as QuestionStep[]) : [];
-  };
-  const steps = [
-    ...(ask !== undefined ? [ask] : []),
-    ...(hosts.length === 1 ? own(data) : hosts.flatMap((h) => own(data[h]))),
-  ].filter((step, i, all) => all.findIndex((s) => s.id === step.id) === i);
-  if (hosts.length === 1 && ask === undefined) return out;
+export async function otherHostNote(
+  args: InstallHostArgs,
+  deps: HostDeps = {},
+): Promise<string | undefined> {
+  if (args.harness !== undefined || args.refresh === true || args.project === true) {
+    return undefined;
+  }
+  const env = deps.env ?? process.env;
+  const agent = agentHost(env);
+  if (agent === undefined) return undefined;
+  const other: Harness = agent === 'claude' ? 'codex' : 'claude';
+  if (!(await (deps.detect ?? detectHosts)(env)).includes(other)) return undefined;
+  return `${LABEL[other]} is also installed on this machine. To add Tenjin there, run tenjin install from a ${LABEL[other]} session, or tenjin install --harness ${other}.`;
+}
+
+/** The install result with `note` in its `notices` and as its last line. */
+export function withNote(out: CommandResult, note: string | undefined): CommandResult {
+  if (note === undefined) return out;
+  const data = (out.data ?? {}) as { notices?: unknown };
+  const notices = Array.isArray(data.notices) ? (data.notices as string[]) : [];
   return {
-    data: { ...data, nextSteps: steps },
-    humanLines: [
-      ...(out.humanLines ?? []),
-      ...(ask !== undefined
-        ? [
-            'Nothing is set up until the person picks the agents.',
-            `Ask the person in this session: ${ask.question}`,
-            ...ask.options.map(
-              (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command ?? ''}`,
-            ),
-          ]
-        : []),
-    ],
+    data: { ...data, notices: [...notices, note] },
+    humanLines: [...(out.humanLines ?? []), note],
   };
 }
 
 /** The hosts doctor checks and uninstall removes: the record, else Claude Code. */
 export async function recordedHosts(
-  args: { harness?: Harness[]; project?: boolean },
+  args: { harness?: Harness; project?: boolean },
   dataDir: string,
 ): Promise<Harness[]> {
-  if (args.harness !== undefined) return args.harness;
+  if (args.harness !== undefined) return [args.harness];
   if (args.project === true) return ['claude'];
-  const record = await readHostRecord(dataDir);
-  const hosts = HARNESSES.filter(
-    (h) => record?.chosen.includes(h) === true || record?.installed.includes(h) === true,
-  );
-  return hosts.length === 0 ? ['claude'] : hosts;
-}
-
-/** Hosts the person chose whose setup did not finish. */
-async function unfinishedHosts(dataDir: string): Promise<Harness[]> {
-  const record = await readHostRecord(dataDir);
-  return record === null ? [] : record.chosen.filter((h) => !record.installed.includes(h));
-}
-
-/**
- * Doctor over the hosts, where a chosen host whose setup did not finish
- * fails with the fix to finish it, before its own checks.
- */
-export async function doctorEach(
-  hosts: readonly Harness[],
-  dataDir: string,
-  run: (host: Harness) => Promise<CommandResult>,
-): Promise<CommandResult> {
-  const unfinished = await unfinishedHosts(dataDir);
-  return checkEach(hosts, async (host) => {
-    if (unfinished.includes(host)) {
-      throw new CliError(
-        'REFUSED',
-        `${LABEL[host]} was chosen at install, but its setup did not finish.`,
-        {
-          fix: 'Run `tenjin install` to finish it.',
-        },
-      );
-    }
-    return run(host);
-  });
+  const hosts = await readInstalledHosts(dataDir);
+  return hosts === null || hosts.length === 0 ? ['claude'] : hosts;
 }
 
 /** One run per host, in order. One host keeps its own result shape. */
@@ -349,32 +221,9 @@ export async function uninstallEach(
   dataDir: string,
   project: boolean,
   run: (host: Harness) => Promise<CommandResult>,
-  /** A read of the host that confirms its plugin is gone; false when it cannot. */
-  confirmAbsent: (host: Harness) => Promise<boolean> = async () => false,
 ): Promise<CommandResult> {
-  const unfinished = await unfinishedHosts(dataDir);
   return runEach(hosts, async (host) => {
-    let out: CommandResult;
-    try {
-      out = await run(host);
-    } catch (err) {
-      if (!unfinished.includes(host) || !(err instanceof CliError)) throw err;
-      // A setup that never finished may have left nothing, or may have left the
-      // plugin: the record clears only once a read confirms it is gone.
-      if (await confirmAbsent(host).catch(() => false)) {
-        if (!project) await forgetInstalledHost(dataDir, host);
-        return {
-          data: { host, cleared: true },
-          humanLines: [`${LABEL[host]}: its setup never finished and nothing is left; cleared it.`],
-        };
-      }
-      return {
-        data: { host, kept: true, error: err.message },
-        humanLines: [
-          `${LABEL[host]}: could not remove it (${err.message}); kept on the record, so \`tenjin uninstall\` can try again.`,
-        ],
-      };
-    }
+    const out = await run(host);
     if (!project && !pluginKept(out.data)) await forgetInstalledHost(dataDir, host);
     return out;
   });

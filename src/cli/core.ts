@@ -3,7 +3,6 @@ import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
 import { SETUP, WALLET, type Registration } from './registration';
-import { parseHostList } from './router';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -15,7 +14,7 @@ export function registerCore(reg: Registration): void {
 
   leaf(SETUP, 'install', 'set up Tenjin for your agent and create a wallet')
     .description(
-      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. It sets up Claude Code or Codex, whichever this machine has, and asks which when it has both, both selected, before it writes anything; run by an agent, it hands the question over and the answer re-runs it. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
+      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. Run by an agent, it sets up the agent it runs in. In a terminal, it sets up Claude Code or Codex, whichever this machine has, and asks which when it has both. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
     )
     .addOption(hostOverride())
     .option('--project', 'register the plugin for this project only')
@@ -44,27 +43,21 @@ Learn more:
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
-        const harness = o.harness as Harness[] | undefined;
+        const harness = o.harness as Harness | undefined;
         // Nothing in the Codex plugin changes between builds, so nothing to refresh.
-        if (harness?.includes('codex') === true && o.refresh === true) {
+        if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
-        const { chooseHosts, installHosts, recordInstalledHost, runEach, withSteps } =
+        const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
           await import('../router/hosts');
-        const { hosts, ask } = await installHosts(
-          {
-            ...(harness !== undefined ? { harness } : {}),
-            ...(o.project === true ? { project: true } : {}),
-            ...(o.refresh === true ? { refresh: true } : {}),
-            ...(o.yes === true ? { yes: true } : {}),
-            ...(o.wallet === false ? { noWallet: true } : {}),
-            ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
-            ...(typeof o.sessionBudget === 'string' ? { sessionBudget: o.sessionBudget } : {}),
-          },
-          ctx,
-        );
-        // The choice is saved before any setup, so a failed one is retried.
-        if (o.refresh !== true) await chooseHosts(ctx.dataDir, hosts);
+        const hostArgs = {
+          ...(harness !== undefined ? { harness } : {}),
+          ...(o.project === true ? { project: true } : {}),
+          ...(o.refresh === true ? { refresh: true } : {}),
+          ...(o.yes === true ? { yes: true } : {}),
+        };
+        const hosts = await installHosts(hostArgs, ctx);
+        const note = otherHostNote(hostArgs).catch(() => undefined);
         const out = await runEach(hosts, async (host) => {
           const one =
             host === 'codex'
@@ -87,7 +80,7 @@ Learn more:
           if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
           return one;
         });
-        return withSteps(out, hosts, ask);
+        return withNote(out, await note);
       });
     });
 
@@ -100,25 +93,19 @@ Learn more:
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
-        const harness = o.harness as Harness[] | undefined;
+        const harness = o.harness as Harness | undefined;
         const { recordedHosts, uninstallEach } = await import('../router/hosts');
         const hosts = await recordedHosts(
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
           ctx.dataDir,
         );
-        return uninstallEach(
-          hosts,
-          ctx.dataDir,
-          o.project === true,
-          async (host) =>
-            host === 'codex'
-              ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
-              : (await import('../router/uninstall')).runRouterUninstall(
-                  { ...(o.project === true ? { project: true } : {}) },
-                  ctx,
-                ),
-          async (host) =>
-            host === 'codex' && (await import('../router/codex-install')).codexPluginAbsent(),
+        return uninstallEach(hosts, ctx.dataDir, o.project === true, async (host) =>
+          host === 'codex'
+            ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
+            : (await import('../router/uninstall')).runRouterUninstall(
+                { ...(o.project === true ? { project: true } : {}) },
+                ctx,
+              ),
         );
       });
     });
@@ -141,13 +128,13 @@ Examples:
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
         const o = this.opts();
-        const harness = o.harness as Harness[] | undefined;
-        const { doctorEach, recordedHosts } = await import('../router/hosts');
+        const harness = o.harness as Harness | undefined;
+        const { checkEach, recordedHosts } = await import('../router/hosts');
         const hosts = await recordedHosts(
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
           ctx.dataDir,
         );
-        return doctorEach(hosts, ctx.dataDir, async (host) =>
+        return checkEach(hosts, async (host) =>
           host === 'codex'
             ? (await import('../router/codex-install')).runCodexDoctor(codexArgs(o), ctx)
             : (await import('../router/doctor')).runRouterDoctor(
@@ -373,12 +360,11 @@ Examples:
     });
 }
 
-/** `--harness`: the agent hosts, overriding the ones these commands find or recorded. */
+/** `--harness`: one agent host, overriding the hosts these commands find or recorded. */
 function hostOverride(): Option {
-  return new Option(
-    '--harness <hosts>',
-    `only these agent hosts, instead of the ones found: ${HARNESSES.join(', ')}, or ${HARNESSES.join(',')}`,
-  ).argParser(parseHostList);
+  return new Option('--harness <host>', 'only this agent host, instead of the ones found').choices(
+    HARNESSES,
+  );
 }
 
 /** The Codex setup's flags, from install's, uninstall's or doctor's. */

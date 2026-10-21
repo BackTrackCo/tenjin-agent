@@ -9,7 +9,6 @@ import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
-  codexPluginAbsent,
   runCodexDoctor,
   runCodexInstall,
   runCodexUninstall,
@@ -458,12 +457,6 @@ describe('Codex install, uninstall and doctor', () => {
     const { steps, deps } = host();
     await expect(runCodexInstall({ project: true }, ctx(), deps)).rejects.toThrow('user only');
     expect(steps).toEqual([]);
-  });
-
-  it('confirms the plugin gone only on a hook list with no Tenjin row', async () => {
-    expect(await codexPluginAbsent(async () => listed())).toBe(true);
-    expect(await codexPluginAbsent(async () => listed(...allRows()))).toBe(false);
-    expect(await codexPluginAbsent(async () => null)).toBe(false);
   });
 
   it('removes the plugin and its marketplace, reading no config first', async () => {

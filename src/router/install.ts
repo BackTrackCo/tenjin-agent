@@ -713,7 +713,7 @@ export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
 
 /** One question install hands to the agent that ran it, with what each answer runs. */
 export interface QuestionStep {
-  id: 'spend' | 'fund' | 'hosts';
+  id: 'spend' | 'fund';
   /** For the agent to put to the person as written, with `options`. */
   question: string;
   options: {
