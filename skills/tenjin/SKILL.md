@@ -23,10 +23,14 @@ When a person asks you to "Install Tenjin from tenjin.sh", run these steps yours
 never ask them to open a terminal.
 
 1. Run `npm i -g tenjin-cli@latest` (Node.js 24 or newer).
-2. Run `tenjin install`. If it prints a question, ask the person and answer with
-   the command it gives you. If it prints a fix, run it.
-3. Run `tenjin wallet fund` and show the person the checkout link and wallet address.
-4. Ask the person to start a new Claude Code session, because hooks load at session start.
+2. Run `tenjin install` alone and follow its output. Before you run anything else,
+   ask the person each question it returns, in its order and wording, with the answers
+   it offers, using your question tool. Then run only what the chosen answer names,
+   each command on its own, never joined with another command; an answer that names
+   nothing runs nothing. Treat the output of each command you run the same way. If
+   the output asks no question, go on. If it prints a fix, run it. Never tell the
+   person to type a command. Show them links and addresses.
+3. Then tell the person to start a new Claude Code session so the plugin loads.
 
 ## Read more
 
