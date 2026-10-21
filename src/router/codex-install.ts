@@ -19,7 +19,15 @@ import {
   type CodexHookRows,
   WEB_VERIFIED_VERSION,
 } from './codex-host';
-import { approveLimits, spendApprovalFor, type RouterInstallDeps } from './install';
+import { resolveContextSettings } from '../lib/settings';
+import {
+  approveLimits,
+  effectiveLimits,
+  namedLimits,
+  spendStepFor,
+  type QuestionStep,
+  type RouterInstallDeps,
+} from './install';
 import { shownLimits } from './spend-question';
 
 /**
@@ -34,6 +42,10 @@ export interface CodexArgs {
   project?: boolean;
   yes?: boolean;
   noWallet?: boolean;
+  /** `--max-auto-spend`: the per-call limit, at least 0.25 USD. */
+  maxAutoSpend?: string;
+  /** `--session-budget`: the daily limit in USD, or none. */
+  sessionBudget?: string;
 }
 
 export interface CodexRun {
@@ -138,12 +150,23 @@ export async function runCodexInstall(
   const run = deps.run ?? runCodex;
   const hosts = deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir;
   const config = await loadRawConfig(ctx.dataDir);
+  const named = namedLimits(args);
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  // The one question comes before any write.
+  // The Claude install's spend model: `--yes` takes the defaults, the two
+  // amount flags set the person's own, and a terminal asks once, before any
+  // write, only when the file names neither limit. With no answer nothing is
+  // written, the defaults hold, and the question goes to whoever ran it.
+  const answered = args.yes === true || named.keys.length > 0;
+  const unasked = config.maxAutoSpend === undefined && config.sessionBudget === undefined;
   const limits =
-    args.yes === true ? shownLimits(config) : canPrompt ? await approveLimits(config, deps) : {};
-  const consented = args.yes === true || canPrompt;
+    named.keys.length > 0
+      ? { ...shownLimits(config), ...named.limits }
+      : args.yes === true
+        ? shownLimits(config)
+        : canPrompt && unasked
+          ? await approveLimits(deps)
+          : {};
 
   const { resolveWallet, walletValue } = await import('../commands/install-wallet');
   const wallet: WalletOutcome = await resolveWallet(
@@ -152,24 +175,41 @@ export async function runCodexInstall(
     args.noWallet === true ? 'flag' : undefined,
     false,
   );
-  const spend = await persistRouterDefaults(ctx.dataDir, false, limits);
+  const spend = await persistRouterDefaults(ctx.dataDir, false, limits, named.keys);
   await addPlugin(run, hosts);
 
-  const approve = ['tenjin install --harness codex', args.noWallet ? '--no-wallet' : '', '--yes']
-    .filter(Boolean)
-    .join(' ');
+  // Read back after the write, as the Claude install does.
+  const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
+  const install = [
+    'tenjin install --harness codex',
+    ...(args.noWallet ? ['--no-wallet'] : []),
+  ].join(' ');
+  const spendAsk: QuestionStep | undefined =
+    !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
+  const daily =
+    effective.sessionBudget === 'no daily ceiling'
+      ? 'no daily limit'
+      : `$${effective.sessionBudget} a day`;
   return {
     data: {
       plugin: CODEX_PLUGIN,
       wallet,
-      spend,
-      ...(consented ? {} : { approval: spendApprovalFor(config, approve) }),
+      spend: { ...spend, effective },
+      nextSteps: spendAsk !== undefined ? [spendAsk] : [],
       next: TRUST_STEP,
     },
     humanLines: [
       `Wallet: ${walletValue(wallet)}`,
       `Codex plugin: ${CODEX_PLUGIN} added from the package`,
-      ...(consented ? [] : [`Spend limits: not approved yet. Approve them with \`${approve}\``]),
+      `Automatic router: up to $${effective.maxAutoSpend} per call; daily limit ${daily}`,
+      ...(spendAsk !== undefined
+        ? [
+            `  Ask the person in this session: ${spendAsk.question}`,
+            ...spendAsk.options.map(
+              (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
+            ),
+          ]
+        : []),
       'Request tool: its plugin hook allows it, under your wallet spend limits. Turn that hook off in /hooks to be asked first.',
       TRUST_STEP,
     ],
