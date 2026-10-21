@@ -296,6 +296,7 @@ describe('routing outcomes that buy nothing', () => {
         body: {
           schemaVersion: 1,
           routerVersion: 'v',
+          routingFeeAtomic: '3000',
           decision: {
             action: 'native',
             reason:
@@ -376,7 +377,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+      "Tenjin moved $0.25 into prepaid routing credit; each routing call uses the router's small flat fee.",
     );
     deposited = 0n;
     const next = await runRequestTool(
@@ -384,6 +385,23 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(next.summary).not.toContain('routing credit');
+  });
+
+  it("names the fee the router's answer carries beside the deposit, never one it shipped with", async () => {
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
+      deposited: () => 250_000n,
+      fee: () => 4_000n,
+    });
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(result.summary.split('\n').at(-1)).toBe(
+      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.004.',
+    );
   });
 
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
@@ -1002,7 +1020,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'jobs', 'fee'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1992,7 +2010,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'jobs', 'fee'],
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -2078,7 +2096,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'jobs', 'fee'],
     });
   });
 });

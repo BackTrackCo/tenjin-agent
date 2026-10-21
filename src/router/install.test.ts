@@ -57,7 +57,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
+  'Routing adds a small flat fee to each call, at most $0.01, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 a day, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
@@ -975,10 +975,10 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
       routingDeposits: { atomic: '250000' },
       automaticExposure: { atomic: '300000' },
     },
-    routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
+    routingCredit: { remaining: { atomic: '240000' } },
   });
   expect(result.humanLines?.slice(0, 2)).toEqual([
-    'lookups 0.05 USD · routing credit 0.25 USD prepaid, 0.24 USD left (~80 calls)',
+    'lookups 0.05 USD · routing credit 0.25 USD prepaid, 0.24 USD left',
     'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
   ]);
 });

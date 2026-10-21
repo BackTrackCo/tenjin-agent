@@ -57,7 +57,7 @@ tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 
 ## What it can do
 
-The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Each routing call costs a flat [routing fee](#routing-fee) of $0.003, on top of the provider's price, paid from channel deposits of up to $0.25 that count against the spend limits you approve at install.
+The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Each routing call costs a small flat [routing fee](#routing-fee) that Tenjin's server sets, at most $0.01, on top of the provider's price, paid from channel deposits of up to $0.25 that count against the spend limits you approve at install.
 
 | Tool                                                           | What your agent gets                                                                      | Price per call |
 | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
@@ -124,7 +124,7 @@ A call that would pay more than the per-call limit (all its payments together, s
 
 ### Routing fee
 
-Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25. A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
+Each routing call costs a small flat fee, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25. Tenjin's server sets the fee and names it on each answer; `tenjin mcp` pays at most $0.01 a call and pays nothing to a router asking more. A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
 
 ### Funding
 

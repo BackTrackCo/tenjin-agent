@@ -14,7 +14,7 @@ import { readUsdcBalance } from '../lib/usdc-balance';
 import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
-import type { RouteFor } from './fee';
+import { ROUTING_FEE_MAX_ATOMIC, usd, type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitHookEvent } from './hook-session';
@@ -83,7 +83,7 @@ const INSTRUCTIONS =
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
-  'route is free, or a flat $0.003 routing fee; a wallet on ' +
+  `route is free, or a small flat routing fee of at most $${usd(ROUTING_FEE_MAX_ATOMIC)}; a wallet on ` +
   'THIS machine pays it and the provider under the local spend ' +
   "policy. A call whose total is over the per-call limit or today's budget pays " +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +

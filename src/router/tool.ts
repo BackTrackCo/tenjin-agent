@@ -62,7 +62,14 @@ import {
   type PlanStop,
   type QuotedCall,
 } from './plan';
-import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import {
+  depositSentence,
+  FEE_REQUIRED,
+  feeOf,
+  isFeeRequired,
+  unpaidSentence,
+  type RouteFor,
+} from './fee';
 import { clearRouterMemo } from './router-memo';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -258,8 +265,9 @@ export async function runRequestTool(
         },
   );
   const deposited = routes.reduce((sum, r) => sum + (r.deposited?.() ?? 0n), 0n);
+  const fee = routes.map((r) => r.fee?.()).find((f) => f !== undefined);
   return deposited > 0n
-    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
+    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited, fee)}` }
     : result;
 }
 
@@ -639,7 +647,8 @@ async function requestTool(
     await footer.done('native');
     return fail(
       'native',
-      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
+      unpaidSentence(fresh.freePath ?? FEE_REQUIRED, feeOf(fresh.decision)) ??
+        unpaidSentence(FEE_REQUIRED, feeOf(fresh.decision))!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

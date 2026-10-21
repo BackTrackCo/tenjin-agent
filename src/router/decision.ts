@@ -428,6 +428,12 @@ function envelope<T extends z.ZodTypeAny>(decision: T) {
      *  failure: the decision beside it ran anyway. */
     note: z.string().max(500).optional(),
     jev: z.object({ calls: z.number(), latencyMs: z.number() }).optional(),
+    /** The routing fee in atomic USDC, sent because `accepts` carries `fee`.
+     *  Shown, never trusted for payment: the payer holds its own ceiling. */
+    routingFeeAtomic: z
+      .string()
+      .regex(/^\d{1,18}$/)
+      .optional(),
   });
 }
 
@@ -455,9 +461,10 @@ export type CallKind = 'hook' | 'tool';
  * take: the decision schemas are strict. `jobs` asks for each spec's `job`,
  * for the services that never answer inline, and for `count` on a media
  * offer's line. `bazaar` widens discovery to the open Bazaar and is sent only
- * while `experimental.bazaar` is on.
+ * while `experimental.bazaar` is on. `fee` asks for `routingFeeAtomic` on each
+ * answer, the figure the copy shows; a server from before it ignores the token.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'jobs'];
+export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'jobs', 'fee'];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -549,6 +556,8 @@ export interface DecisionRoute {
   /** What this route's calls deposited into the routing channel and the
    *  router took, 0n for none: the caller says so once, where it is read. */
   deposited?: () => bigint;
+  /** The fee the router's answer named (`routingFeeAtomic`), if any. */
+  fee?: () => bigint | undefined;
 }
 
 /** The paid path gave this call no answer: the wallet locked, low or over

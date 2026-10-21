@@ -11,8 +11,8 @@ import type { SpendPolicy } from '../lib/policy';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
-import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
-import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
+import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_MAX_ATOMIC } from './fee';
+import { BASE, FakeRouter, FEE, payerDeps, TEST_POLICY } from './fee-test-utils';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
   chainReader,
@@ -22,6 +22,8 @@ import {
   ROUTING_SPEND_CAP,
   type RoutingPayerDeps,
 } from './routing-payer';
+
+const FEE_ATOMIC = BigInt(FEE);
 
 /**
  * The payer against a fake router that speaks the real x402 headers: the stock
@@ -214,7 +216,7 @@ describe('RoutingPayer', () => {
     const router = new FakeRouter();
     // A $0.25 deposit holds 83 fees; the day has room for one deposit, not two.
     const p = payer(router, { policy_: { sessionBudgetAtomic: 400_000n } });
-    for (let n = 0; n < Number(CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_ATOMIC); n += 1) {
+    for (let n = 0; n < Number(CHANNEL_DEPOSIT_ATOMIC / FEE_ATOMIC); n += 1) {
       const paid = await routeOnce(p, router);
       expect(paid.status).toBe('decided');
       expect(unpaidWhy(paid)).toBeUndefined();
@@ -238,10 +240,34 @@ describe('RoutingPayer', () => {
     expect(router.deposits).toBe(0);
   });
 
-  it('pays nothing to a 402 asking more than the approved fee', async () => {
+  it('pays nothing to a 402 asking more than the approved ceiling', async () => {
     const router = new FakeRouter({ amount: '30000' });
     expect(tookFreePath(await routeOnce(payer(router), router), router)).toBe('payment_failed');
     expect(router.paidRequests()).toBe(0);
+  });
+
+  it('pays the fee the server sets up to the ceiling, so it changes with no release', async () => {
+    for (const amount of ['5000', ROUTING_FEE_MAX_ATOMIC.toString()]) {
+      const router = new FakeRouter({ amount });
+      const p = payer(router);
+      expect((await routeOnce(p, router)).status).toBe('decided');
+      expect((await routeOnce(p, router)).status).toBe('decided');
+      expect(router.paidRequests()).toBe(2);
+      expect([...router.channels.values()][0]!.charged).toBe(2n * BigInt(amount));
+      await rm(payerDir(dir, wallet.address), { recursive: true, force: true });
+    }
+  });
+
+  it("tells each route the fee its router's answer named", async () => {
+    const router = new FakeRouter();
+    const route = (await payer(router).routeFor(BASE))!;
+    expect(route.fee?.()).toBeUndefined();
+    await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs: 3_500, route },
+    );
+    expect(route.fee?.()).toBe(FEE_ATOMIC);
   });
 
   it('tells each route what its own call deposited, so the deposit is said once', async () => {
@@ -288,7 +314,7 @@ describe('RoutingPayer', () => {
     }).get(files[0]!.replace('.json', ''));
     expect(stored).toMatchObject({
       balance: CHANNEL_DEPOSIT_ATOMIC.toString(),
-      chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
+      chargedCumulativeAmount: (2n * FEE_ATOMIC).toString(),
     });
     // The deposit is an automatic payment in the spend ledger; the fees are not.
     expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
@@ -386,7 +412,7 @@ describe('RoutingPayer', () => {
     // last voucher, and the retry was charged once.
     expect(router.settledFees).toBe(3);
     expect(router.deposits).toBe(1);
-    expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
+    expect([...router.channels.values()][0]!.charged).toBe(3n * FEE_ATOMIC);
   });
 
   it('retries a reset socket on the free path, on a fresh connection, unpaid', async () => {
@@ -447,7 +473,7 @@ describe('RoutingPayer', () => {
     router.delayMs = 0;
     expect((await routeOnce(payer(router), router)).status).toBe('decided');
     expect(router.settledFees).toBe(3);
-    expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
+    expect([...router.channels.values()][0]!.charged).toBe(3n * FEE_ATOMIC);
   });
 
   it('takes turns inside one process: parallel calls share one channel and never collide', async () => {
@@ -642,7 +668,7 @@ describe('RoutingPayer and the call budget', () => {
     expect(router.paidRequests()).toBe(2);
     expect(await storedChannel()).toMatchObject({
       balance: CHANNEL_DEPOSIT_ATOMIC.toString(),
-      chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
+      chargedCumulativeAmount: (2n * FEE_ATOMIC).toString(),
     });
     expect((await readSpendSummary(dir))?.reservations).toEqual([]);
     expect(warned.join('\n')).toMatch(

@@ -8,12 +8,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
-import { ROUTING_FEE_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
-import { FakeRouter, payerDeps } from './fee-test-utils';
+import { FakeRouter, FEE, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
+
+const FEE_ATOMIC = BigInt(FEE);
 
 /**
  * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
@@ -51,6 +52,7 @@ const FEE_REQUIRED_ANSWER = {
 const OFFER = {
   schemaVersion: 1,
   routerVersion: 'v',
+  routingFeeAtomic: '3000',
   decision: {
     action: 'execute',
     id: 'k3f9-abcd',
@@ -175,7 +177,7 @@ describe('the hook legs and the routing fee', () => {
       'POST /api/x402-router/route paid',
     ]);
     expect(fake.deposits).toBe(1);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * FEE_ATOMIC);
   });
 
   it('tells the user once, beside the offer, that the deposit became routing credit', async () => {
@@ -191,6 +193,15 @@ describe('the hook legs and the routing fee', () => {
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
+  });
+
+  it('names no fee figure when the answer carries none, as a server from before the field', async () => {
+    const fake = new FakeRouter();
+    fake.body = { ...OFFER, routingFeeAtomic: undefined };
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    expect(systemMessageOf(first)).toBe(
+      "Tenjin moved $0.25 into prepaid routing credit; each routing call uses the router's small flat fee.",
+    );
   });
 
   it("takes the free path, and says nothing, when another session's call holds the channel", async () => {
@@ -416,7 +427,7 @@ describe('the hook legs and the routing fee', () => {
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
     expect(fake.paidRequests()).toBe(2);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * FEE_ATOMIC);
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');

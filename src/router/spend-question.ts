@@ -1,6 +1,6 @@
 import { DEFAULT_MAX_AUTO_SPEND, DEFAULT_SESSION_BUDGET } from '../lib/config';
 import { toMoney } from '../lib/money';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_MAX_ATOMIC, usd } from './fee';
 
 /**
  * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: the defaults, or
@@ -42,7 +42,7 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 }
 
 /** The routing fee's terms, as the selector names them. */
-export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
+export const ROUTING_FEE_TERMS = `Routing adds a small flat fee to each call, at most $${usd(ROUTING_FEE_MAX_ATOMIC)}, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either answer also approves the routing fee.';

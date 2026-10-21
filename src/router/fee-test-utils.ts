@@ -9,7 +9,7 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
+import { ROUTE_PAID_PATH } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -23,15 +23,18 @@ import type { RoutingPayerDeps } from './routing-payer';
  */
 
 export const NETWORK = 'eip155:84532';
-export const FEE = ROUTING_FEE_ATOMIC.toString();
+/** The server's default routing fee (X402_ROUTER_FEE_ATOMIC), atomic USDC. */
+export const FEE = '3000';
 export const BASE = 'https://router.test';
 export const MISMATCH = 'invalid_batch_settlement_evm_cumulative_amount_mismatch';
 export const BUSY = 'invalid_batch_settlement_evm_channel_busy';
 
-/** A tool-form decision with nothing to buy. */
+/** A tool-form decision with nothing to buy, naming the fee as a server does
+ *  for a client that sends `accepts: ["fee"]`. */
 export const NATIVE = {
   schemaVersion: 1,
   routerVersion: 'test',
+  routingFeeAtomic: FEE,
   decision: {
     action: 'native',
     diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
@@ -60,6 +63,10 @@ export class FakeRouter {
   /** The body a settled paid call answers with. */
   body: unknown = NATIVE;
   readonly requirement: PaymentRequirements;
+  /** The fee each settled call charges: the requirement's amount. */
+  private get fee(): bigint {
+    return BigInt(this.requirement.amount);
+  }
 
   constructor(private readonly opts: { paid?: boolean; amount?: string } = {}) {
     this.requirement = {
@@ -95,7 +102,7 @@ export class FakeRouter {
     const channel = this.channels.get(id) ?? { balance: 0n, charged: 0n, pending: false };
     this.channels.set(id, channel);
     if (channel.pending) return this.error(url.toString(), BUSY);
-    if (BigInt(payload.voucher.maxClaimableAmount) !== channel.charged + ROUTING_FEE_ATOMIC) {
+    if (BigInt(payload.voucher.maxClaimableAmount) !== channel.charged + this.fee) {
       return this.corrective(url.toString(), id, channel);
     }
     channel.pending = true;
@@ -113,7 +120,7 @@ export class FakeRouter {
         maxClaimableAmount: payload.voucher.maxClaimableAmount,
         signature: payload.voucher.signature,
       };
-      channel.charged += ROUTING_FEE_ATOMIC;
+      channel.charged += this.fee;
       this.settledFees += 1;
     } finally {
       channel.pending = false;
@@ -127,7 +134,7 @@ export class FakeRouter {
         success: true,
         transaction: '0x',
         network: NETWORK,
-        extra: { chargedAmount: FEE, channelState: this.state(id, channel) },
+        extra: { chargedAmount: this.requirement.amount, channelState: this.state(id, channel) },
       }),
     });
   };

@@ -8,7 +8,7 @@ import type { DecisionRoute } from './decision';
 
 /**
  * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call on the paid
- * path pays $0.003 over x402 `batch-settlement`, and the stock SDK client in
+ * path pays the server's flat fee over x402 `batch-settlement`, and the stock SDK client in
  * `tenjin mcp` does all of it (`routing-payer.ts`). Everything else, `tenjin
  * hook` included, is the free path exactly as before this fee existed.
  *
@@ -18,8 +18,13 @@ import type { DecisionRoute } from './decision';
 
 export const ROUTE_PAID_PATH = '/api/x402-router/route';
 
-/** The flat fee per routing call, atomic USDC ($0.003). */
-export const ROUTING_FEE_ATOMIC = 3_000n;
+/**
+ * THE MOST ONE ROUTING CALL PAYS, atomic USDC ($0.01). The server sets the fee
+ * and can change it without a release, so the client pins no figure: the payer
+ * pays a `batch-settlement` quote up to this ceiling and nothing above it, and
+ * the copy shows the fee the server sends as `routingFeeAtomic`, or none.
+ */
+export const ROUTING_FEE_MAX_ATOMIC = 10_000n;
 /** The largest channel deposit, atomic USDC ($0.25), made inline by the SDK
  *  on the first paid call of a channel that cannot cover the next fee. */
 export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
@@ -47,15 +52,20 @@ export function refusedWhy(reason: PolicyReason): string {
 /**
  * THE DEPOSIT IS THE SPEND. It meets the whole policy once, the day's budget
  * included, when the SDK's `depositStrategy` reserves it. Each fee paid from
- * it then gets only the per-payment checks: the per-call limit, the creator
- * allowlist (the router's host) and an explicit zero daily limit. It is never
- * refused for the day's running total, which the deposit already consumed.
- * Null when those checks allow the fee.
+ * it then gets only the per-payment checks, at the ceiling, the most a fee can
+ * be: the per-call limit, the creator allowlist (the router's host) and an
+ * explicit zero daily limit. It is never refused for the day's running total,
+ * which the deposit already consumed. Null when those checks allow the fee.
  */
 export function feeRefusal(policy: SpendPolicy, host: string): string | null {
   const evaluation = evaluateSpendPolicy(
     { ...policy, sessionBudgetAtomic: policy.sessionBudgetAtomic === 0n ? 0n : null },
-    { mode: 'automatic', amountAtomic: ROUTING_FEE_ATOMIC, creator: host, sessionSpentAtomic: 0n },
+    {
+      mode: 'automatic',
+      amountAtomic: ROUTING_FEE_MAX_ATOMIC,
+      creator: host,
+      sessionSpentAtomic: 0n,
+    },
   );
   return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
 }
@@ -131,20 +141,30 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
   return UNPAID[why] ?? UNPAID['payment_failed']!;
 }
 
+/** The fee an answer carries as `routingFeeAtomic`, or undefined when it
+ *  carries none (a server from before the field, or the fee off). */
+export function feeOf(response: unknown): bigint | undefined {
+  const fee = (response as { routingFeeAtomic?: unknown } | null)?.routingFeeAtomic;
+  return typeof fee === 'string' && /^\d{1,18}$/.test(fee) ? BigInt(fee) : undefined;
+}
+
 /**
  * The one line said when a routing call's deposit went through: the money is
  * prepaid credit the next calls draw from, not a lookup it bought. It still
- * counts toward the daily limit ({@link feeRefusal}).
+ * counts toward the daily limit ({@link feeRefusal}). `fee` is what the
+ * server sent; without it the line names no figure.
  */
-export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin moved $${usd(amountAtomic)} into prepaid routing credit; each routing call uses $${usd(ROUTING_FEE_ATOMIC)}.`;
+export function depositSentence(amountAtomic: bigint, fee?: bigint): string {
+  const each = fee === undefined ? "the router's small flat fee" : `$${usd(fee)}`;
+  return `Tenjin moved $${usd(amountAtomic)} into prepaid routing credit; each routing call uses ${each}.`;
 }
 
 /** The one line the user sees, once per session, when a call was not paid. */
-export function unpaidSentence(why: string): string | null {
+export function unpaidSentence(why: string, fee?: bigint): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so calls take the free path until that is fixed. ${u.fix}`;
+  const its = fee === undefined ? 'its fee' : `its $${usd(fee)} fee`;
+  return `Tenjin routing could not pay ${its} (${u.reason}), so calls take the free path until that is fixed. ${u.fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;

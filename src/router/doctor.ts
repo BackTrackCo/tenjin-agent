@@ -28,7 +28,7 @@ import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   refusedWhy,
-  ROUTING_FEE_ATOMIC,
+  ROUTING_FEE_MAX_ATOMIC,
   SUGGESTED_FUND_USD,
   unpaid,
   usd,
@@ -583,7 +583,7 @@ export function routingFeeRow(why: string | null, host: string): RouterCheck {
       name: 'routing fee',
       status: 'ok',
       required: false,
-      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+      detail: `a small flat fee a call, at most $${usd(ROUTING_FEE_MAX_ATOMIC)}, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
     };
   }
   const fixes: Record<string, string> = {
@@ -630,7 +630,9 @@ export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | 
   const ledger = await readSpendSummary(input.dataDir);
   const spent = ledger === null ? 0n : spentOf(ledger);
   const { address } = await describeWallet(provider);
-  if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
+  // Credit that covers the largest fee needs no deposit; below it, the
+  // deposit's checks say whether the next call could still be paid.
+  if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_MAX_ATOMIC) return null;
   // The deposit is always the full $0.25 and meets the whole policy, as the
   // payer's: a per-call limit below it refuses it, mapped the payer's way.
   const evaluation = evaluateSpendPolicy(policy, {

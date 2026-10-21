@@ -11,6 +11,7 @@ import {
   parseForTests,
   type SpecOutcome,
 } from './decision';
+import { feeOf } from './fee';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
@@ -150,14 +151,16 @@ describe('the request bodies', () => {
   });
 
   /** THIS BUILD ADDS `jobs` to a released build's accepts: each spec's `job`,
-   *  the services that never answer inline, and `count` on a media line. */
-  it("sends this build's accepts, jobs beside catalog and spec", () => {
-    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'jobs']);
+   *  the services that never answer inline, and `count` on a media line; and
+   *  `fee`, for `routingFeeAtomic` on each answer. */
+  it("sends this build's accepts, jobs and fee beside catalog and spec", () => {
+    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'jobs', 'fee']);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
       'jobs',
+      'fee',
     ]);
-    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'jobs', 'bazaar']);
+    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'jobs', 'fee', 'bazaar']);
   });
 
   it('builds the query with no id that a spec answers, byte for byte', () => {
@@ -331,10 +334,18 @@ describe('every answer payload on disk', () => {
     ).toBe(false);
   });
 
-  it('carries no fee, no billing and no settlement anywhere', () => {
+  it('carries no billing and no settlement anywhere', () => {
     for (const name of readdirSync(dir).filter((file) => file.endsWith('.json'))) {
       expect(readFileSync(join(dir, name), 'utf8')).not.toMatch(/billing|settled|routerFee/i);
     }
+  });
+
+  it('reads the routing fee an answer names, and none from one that names none', () => {
+    const named = fixture('wire-hook-execute-fee.json');
+    expect(parseForTests('hook', named).success).toBe(true);
+    expect(feeOf(named)).toBe(3_000n);
+    expect(feeOf(fixture('wire-hook-execute.json'))).toBeUndefined();
+    expect(parseForTests('hook', { ...named, routingFeeAtomic: '$0.003' }).success).toBe(false);
   });
 
   /**

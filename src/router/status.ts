@@ -6,7 +6,7 @@ import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { channelCredit } from './channel-credit';
-import { ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
+import { ROUTING_DEPOSIT_KEY } from './fee';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -80,7 +80,6 @@ export async function runRouterStatus(
     },
     routingCredit: {
       remaining: toMoney(creditAtomic.toString()),
-      calls: Number(creditAtomic / ROUTING_FEE_ATOMIC),
     },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
@@ -99,7 +98,7 @@ export async function runRouterStatus(
   const credit = [
     ...(depositedAtomic > 0n ? [`${toMoney(depositedAtomic.toString()).usd} USD prepaid`] : []),
     ...(depositedAtomic > 0n || creditAtomic > 0n
-      ? [`${data.routingCredit.remaining.usd} USD left (~${data.routingCredit.calls} calls)`]
+      ? [`${data.routingCredit.remaining.usd} USD left`]
       : []),
   ];
   return {

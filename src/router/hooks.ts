@@ -24,6 +24,7 @@ import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
 import {
   depositSentence,
+  feeOf,
   FEE_REQUIRED,
   firstNoticeFor,
   isFeeRequired,
@@ -1513,7 +1514,8 @@ async function decide(
   // A DEPOSIT IS NEWS ONCE, when it is taken: it moved money into routing
   // credit, and the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
-  if (deposited > 0n) deps.notice?.(depositSentence(deposited));
+  const fee = outcome.status === 'decided' ? feeOf(outcome.decision) : undefined;
+  if (deposited > 0n) deps.notice?.(depositSentence(deposited, fee));
   const why =
     outcome.status === 'skipped'
       ? outcome.why
@@ -1526,7 +1528,7 @@ async function decide(
   // next call pays. It does not use up the session's one notice.
   const memoed = deps.route !== undefined && route === null;
   if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
-    await tellOnce(deps, sessionId, why, now);
+    await tellOnce(deps, sessionId, why, now, fee);
   }
   // The fee is on: a "no paid path" remembered from before stops holding the
   // machine's calls on the free path.
@@ -1566,8 +1568,14 @@ async function decide(
  * routing fee for a reason the user can fix: the reason and the fix, in the
  * hook's `systemMessage`. Never on every call, and never in place of routing.
  */
-async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
-  const sentence = unpaidSentence(why);
+async function tellOnce(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  now: number,
+  fee: bigint | undefined,
+) {
+  const sentence = unpaidSentence(why, fee);
   if (sentence === null || deps.notice === undefined) return;
   if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }

@@ -30,8 +30,9 @@ import {
   payerDir,
   refusedWhy,
   ROUTE_PAID_PATH,
+  feeOf,
   ROUTING_DEPOSIT_KEY,
-  ROUTING_FEE_ATOMIC,
+  ROUTING_FEE_MAX_ATOMIC,
 } from './fee';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
 
@@ -90,7 +91,7 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
  * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
  * two together are the largest deposit: $0.05 × 5 = $0.25
- * ({@link CHANNEL_DEPOSIT_ATOMIC}). The exact fee is the payment policy's to hold.
+ * ({@link CHANNEL_DEPOSIT_ATOMIC}). The fee's ceiling is the payment policy's to hold.
  */
 export const ROUTING_SPEND_CAP = '$0.05';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
@@ -192,13 +193,17 @@ interface Call {
 
 /**
  * THE PAYMENT POLICY, the guide's check of the requirement before signing:
- * `batch-settlement` in canonical USDC on Base, at exactly the $0.003 fee.
- * The server's `payTo` is not pinned: the client ships no treasury address, and
- * what the user approved is the fee, which this holds exactly.
+ * `batch-settlement` in canonical USDC on Base, at a fee no larger than
+ * {@link ROUTING_FEE_MAX_ATOMIC}. The server sets the fee, so its figure is
+ * not pinned, and neither is its `payTo`: the client ships no treasury
+ * address. What the user approved is the ceiling, which this holds.
  */
 const routingPolicy: PaymentPolicy = (version, requirements) =>
   canonicalUsdcOnly(version, requirements).filter(
-    (r) => r.scheme === 'batch-settlement' && r.amount === ROUTING_FEE_ATOMIC.toString(),
+    (r) =>
+      r.scheme === 'batch-settlement' &&
+      /^\d{1,18}$/.test(r.amount) &&
+      BigInt(r.amount) <= ROUTING_FEE_MAX_ATOMIC,
   );
 
 /**
@@ -245,6 +250,10 @@ export class RoutingPayer {
           .flatMap((call) => call.deposits)
           .filter((d) => d.state === 'settled')
           .reduce((sum, d) => sum + d.amountAtomic, 0n),
+      fee: () =>
+        calls
+          .map((call) => feeOf(call.result?.ok === true ? call.result.json : undefined))
+          .find((fee) => fee !== undefined),
     };
   }
 
