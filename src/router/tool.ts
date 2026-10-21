@@ -63,9 +63,7 @@ import {
   type QuotedCall,
 } from './plan';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
-import { unpaidNotice } from './spend-question';
 import { clearRouterMemo } from './router-memo';
-import { loadRawConfig } from '../lib/config';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
@@ -643,10 +641,9 @@ async function requestTool(
     // The fee is on: the next call asks for the paid path again.
     await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
     await footer.done('native');
-    const raw = await loadRawConfig(deps.ctx.dataDir).catch(() => ({}));
     return fail(
       'native',
-      unpaidNotice(fresh.freePath ?? FEE_REQUIRED, raw, 'agent') ?? unpaidSentence(FEE_REQUIRED)!,
+      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }

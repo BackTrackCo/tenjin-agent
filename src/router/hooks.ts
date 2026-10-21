@@ -22,8 +22,14 @@ import {
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import { depositSentence, FEE_REQUIRED, firstNoticeFor, isFeeRequired, type RouteFor } from './fee';
-import { unpaidNotice } from './spend-question';
+import {
+  depositSentence,
+  FEE_REQUIRED,
+  firstNoticeFor,
+  isFeeRequired,
+  unpaidSentence,
+  type RouteFor,
+} from './fee';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import {
@@ -1554,7 +1560,7 @@ async function decide(
   // next call pays. It does not use up the session's one notice.
   const memoed = deps.route !== undefined && route === null;
   if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
-    await tellOnce(deps, sessionId, why, now, config);
+    await tellOnce(deps, sessionId, why, now);
   }
   // The fee is on: a "no paid path" remembered from before stops holding the
   // machine's calls on the free path.
@@ -1594,14 +1600,8 @@ async function decide(
  * routing fee for a reason the user can fix: the reason and the fix, in the
  * hook's `systemMessage`. Never on every call, and never in place of routing.
  */
-async function tellOnce(
-  deps: HookDeps,
-  sessionId: string,
-  why: string,
-  now: number,
-  config: PartialConfig,
-) {
-  const sentence = unpaidNotice(why, config, 'user');
+async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
+  const sentence = unpaidSentence(why);
   if (sentence === null || deps.notice === undefined) return;
   if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
 }

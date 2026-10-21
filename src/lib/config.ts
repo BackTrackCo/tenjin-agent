@@ -441,9 +441,26 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
   'https://facilitator.payai.network',
 ];
 
+/**
+ * THE TWO SPEND LIMITS, IN EFFECT WHETHER OR NOT ANYONE ANSWERED. The daily
+ * budget ($5) is the control; the per-call ceiling ($0.25) is the runaway
+ * guard; the wallet balance is the hard stop. Install asks once, these or your
+ * own limits, and an install nobody answered still runs on these. A call
+ * priced above the ceiling is approved once, for that call.
+ */
+export const DEFAULT_MAX_AUTO_SPEND = '250000';
+export const DEFAULT_SESSION_BUDGET = '5000000';
+
+/** The lowest per-call ceiling anyone can set, atomic USDC ($0.25): the
+ *  routing deposit (`CHANNEL_DEPOSIT_ATOMIC`), below which routing cannot pay. */
+export const MAX_AUTO_SPEND_FLOOR_ATOMIC = 250_000n;
+/** Why: said by install, `config set` and doctor wherever the floor refuses. */
+export const MAX_AUTO_SPEND_FLOOR_WHY =
+  'The $0.25 minimum is the routing deposit: below it, routing cannot pay at all. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
+
 export const CONFIG_DEFAULTS: Config = {
-  maxAutoSpend: '0',
-  sessionBudget: '5000000',
+  maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,
+  sessionBudget: DEFAULT_SESSION_BUDGET,
   // A type placeholder only, never honored: Config requires every key (and
   // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
   // absent key resolves to SEND_MAX_UNSET and `tenjin wallet send` refuses until the
