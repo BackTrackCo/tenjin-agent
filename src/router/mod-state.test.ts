@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OfferSpec } from './decision';
 import { MOD_STATE_FILES } from './mod-state';
 import { markOffered, sessionDir } from './progress';
-import { storeSpecs } from './specs';
+import { storeChoices, storeSpecs } from './specs';
 
 /**
  * THE FILES THE MOD READS, written by the CLI's own writers, with the fields
@@ -77,7 +77,30 @@ describe('the state contract between the CLI and the mod', () => {
     expect(sessionDir(dir, 'sess-1')).toBe(join(dir, 'progress', sha256('sess-1')));
   });
 
-  it('names exactly these two files', () => {
-    expect(MOD_STATE_FILES).toEqual(['spec', 'offer']);
+  it("keeps a choice set beside the line's id, each option's key, label and own id", async () => {
+    const other = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d78';
+    await storeChoices(dir, ID, {
+      choices: {
+        group: 'image-frontier',
+        default: 'gpt-image-2.5',
+        input: ['prompt'],
+        options: [
+          { key: 'gpt-image-2.5', label: 'GPT Image 2.5 Sunburst', strength: 'text', id: ID },
+          { key: 'nano-banana-2.1', label: 'Nano Banana 2.1', strength: 'photo', id: other },
+        ],
+        all: { totalAtomic: '85000' },
+      },
+      hint: 'pick one',
+    } as never);
+    const kept = await json(`progress/specs/${sha256(ID)}.choices.json`);
+    expect((kept.choices as { options: unknown[] }).options[0]).toMatchObject({
+      key: 'gpt-image-2.5',
+      label: 'GPT Image 2.5 Sunburst',
+      id: ID,
+    });
+  });
+
+  it('names exactly these three files', () => {
+    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'offer']);
   });
 });

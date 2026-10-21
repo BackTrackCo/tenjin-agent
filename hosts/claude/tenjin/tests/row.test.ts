@@ -1,6 +1,8 @@
 import { expect, test, type TestBody } from 'claude-code/testing';
 
 import {
+  DATA,
+  sha256Hex,
   MODEL_TEXT,
   OFFER,
   SURFACES,
@@ -492,4 +494,67 @@ test('a long service name is shortened, never dropped: the model in a trailing g
     expect(await rowText(ui)).toBe(`Called ${shown} · $0.030701 (ctrl+o to expand)`);
     await ui.unmount();
   }
+});
+
+test('a choice call is named as the line named the option, after a free spec check', async ($, on) => {
+  const { files } = machine(on);
+  const line = '7b7223f8-699e-426b-ac14-9452e615f106';
+  const other = '6bed572c-e392-4300-a0cc-7b7cee9fdb39';
+  // A discovered option's spec: no label, a reseller's provider name.
+  await keepSpec(
+    files,
+    line,
+    { provider: 'Gondola (OpenAI GPT Image 2.5 Sunburst)', priceAtomic: '35000' },
+    null,
+  );
+  await keepSpec(
+    files,
+    other,
+    { provider: 'AiSpace (Venice) (Nano Banana 2.1)', priceAtomic: '50000' },
+    null,
+  );
+  files.set(
+    `${DATA}/progress/specs/${await sha256Hex(line)}.choices.json`,
+    JSON.stringify({
+      choices: {
+        group: 'image-frontier',
+        default: 'gpt-image-2.5',
+        input: ['prompt'],
+        options: [
+          { key: 'gpt-image-2.5', label: 'GPT Image 2.5 Sunburst', strength: 'text', id: line },
+          { key: 'nano-banana-2.1', label: 'Nano Banana 2.1', strength: 'photo', id: other },
+        ],
+        all: { totalAtomic: '85000' },
+      },
+      hint: 'pick one',
+    }),
+  );
+  const spec = `summary${JSON.stringify({ status: 'spec', id: line, cost: ['provider price 0 USD'] })}`;
+  const paid = `summary${JSON.stringify({
+    status: 'fulfilled',
+    supplier: 'api.gondola-ai.com',
+    cost: ['provider price 0.021254 USD'],
+  })}`;
+  on('tool.call', { tool: TOOL }, async (_$, e) =>
+    e.tool_use_id === 'toolu_check' ? { result: spec, text: spec } : { result: paid, text: paid },
+  );
+  const input = { prompt: 'an editorial brand illustration' };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_check', id: line, choice: 'gpt-image-2.5' });
+  await $.tool.call({
+    tool: TOOL,
+    tool_use_id: 'toolu_paid',
+    id: line,
+    choice: 'gpt-image-2.5',
+    input,
+  });
+  const check = toolRow('toolu_check', TOOL, { id: line, choice: 'gpt-image-2.5' }, spec);
+  const call = toolRow('toolu_paid', TOOL, { id: line, choice: 'gpt-image-2.5', input }, paid);
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: groupOf([check, call]),
+  });
+  expect(await rowText(ui)).toBe('Called GPT Image 2.5 Sunburst · $0.021254 (ctrl+o to expand)');
+  await ui.unmount();
 });

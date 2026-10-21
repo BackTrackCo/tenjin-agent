@@ -26,7 +26,7 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * standalone row (the fullscreen transcript) as expanded, so it shows its one
  * line with no hint.
  *
- * READ ONLY: the spec file and the offer record (`src/router/mod-state.ts`),
+ * READ ONLY: the spec file, the choice set and the offer record (`src/router/mod-state.ts`),
  * and the request tool's own envelope. The mod writes nothing under the data
  * dir and decides nothing about routing or payment.
  */
@@ -197,38 +197,55 @@ export const register: Register = (on) => {
   });
 };
 
-/** A paid call before it runs: `{id, input}` with a kept spec. Null for the
- *  router's own calls and a choice, which its envelope names once it ends. */
+/** A paid call before it runs: `{id, input}` with a kept spec, or `{id,
+ *  choice, input}` with the choice set kept beside the line's id. Null for the
+ *  router's own calls. */
 async function describeCall($: Dollar, e: Json): Promise<TenjinRow | null> {
   const id = typeof e.id === 'string' && e.id.length > 0 ? e.id : undefined;
   const input = asRecord(e.input);
-  if (id === undefined || input === undefined || (typeof e.choice === 'string' && e.choice)) {
-    return null;
-  }
   const dataDir = await tenjinDataDir($);
-  const spec =
-    dataDir === null
-      ? null
-      : await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.json`);
+  if (id === undefined || input === undefined || dataDir === null) return null;
+  const read = async (key: string) =>
+    readJson($, `${dataDir}/progress/specs/${await sha256Hex(key)}.json`);
+  const choice = typeof e.choice === 'string' && e.choice.length > 0 ? e.choice : undefined;
+  if (choice !== undefined) {
+    // A CHOICE runs the picked option under its own id, named as the line
+    // named it ("GPT Image 2.5 Sunburst"); `all` runs every option.
+    const kept = await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.choices.json`);
+    const options = (asRecord(kept?.choices)?.options as unknown[] | undefined) ?? [];
+    const picked = options.map(asRecord).filter((o) => o?.key === choice || choice === 'all');
+    const specs = await Promise.all(picked.map((o) => read(String(o?.id))));
+    const label = choice === 'all' ? `${picked.length} services` : labelOf(picked[0]?.label);
+    if (picked.length === 0 || label === undefined) return null;
+    return { label, offerId: id, ...priced(specs, 1n), ...shownOf(specs, input, choice) };
+  }
+  const spec = await read(id);
   // A Bazaar spec carries no label: the provider's own name stands in.
   const label = labelOf(spec?.label) ?? labelOf(spec?.provider);
   if (spec === null || label === undefined) return null;
   const takes = typeof e.count === 'number' && e.count > 1 ? BigInt(e.count) : 1n;
-  const each = atomicOf(spec.priceVaries === true ? spec.maxAmountAtomic : spec.priceAtomic);
-  const price =
-    each === undefined
-      ? undefined
-      : `${spec.priceVaries === true ? 'up to ' : ''}$${usd(BigInt(each) * takes)}`;
-  const field =
-    typeof spec.shown === 'string' && !SECRET_NAME.test(spec.shown) ? spec.shown : undefined;
-  const argument =
-    field !== undefined && typeof input[field] === 'string' ? shortKey(input[field]) : undefined;
-  return {
-    label,
-    offerId: id,
-    ...(price !== undefined ? { price } : {}),
-    ...(argument !== undefined ? { argument } : {}),
-  };
+  return { label, offerId: id, ...priced([spec], takes), ...shownOf([spec], input) };
+}
+
+/** What the specs cost together, `takes` times each: `$0.04`, or `up to $0.05`. */
+function priced(specs: (Json | null)[], takes: bigint): { price?: string } {
+  let total = 0n;
+  let varies = false;
+  for (const spec of specs) {
+    varies ||= spec?.priceVaries === true;
+    const each = atomicOf(spec?.priceVaries === true ? spec.maxAmountAtomic : spec?.priceAtomic);
+    if (each === undefined) return {};
+    total += BigInt(each) * takes;
+  }
+  return { price: `${varies ? 'up to ' : ''}$${usd(total)}` };
+}
+
+/** The one input the CLI marked shown for a single spec; none for `all`. */
+function shownOf(specs: (Json | null)[], input: Json, choice?: string): { argument?: string } {
+  const field = specs.length === 1 && choice !== 'all' ? specs[0]?.shown : undefined;
+  if (typeof field !== 'string' || SECRET_NAME.test(field)) return {};
+  const argument = typeof input[field] === 'string' ? shortKey(input[field]) : undefined;
+  return argument !== undefined ? { argument } : {};
 }
 
 /** How a call ended, from its envelope: the status, what left the wallet, and
