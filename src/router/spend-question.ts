@@ -1,27 +1,28 @@
+import { DEFAULT_MAX_AUTO_SPEND, DEFAULT_SESSION_BUDGET } from '../lib/config';
 import { toMoney } from '../lib/money';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, unpaidSentence, usd } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
 
 /**
- * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT. The selector in a
- * terminal, the question an install that could not ask hands to its agent,
- * doctor's warning and the routing notice all show the same limits, the same
- * routing-fee terms and the same one-step yes, so the agent can put to the
- * user exactly what the selector would have.
+ * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: the defaults, or
+ * your own limits. The selector in a terminal and the question an install
+ * that could not ask hands to its agent show the same words, so the agent puts
+ * to the person exactly what the selector would have. The defaults hold
+ * whether or not anyone answers.
  */
 
-/** Absent-only automatic router defaults, in atomic USDC. */
+/** The automatic router defaults, in atomic USDC: $0.25 a call, $5 a day. */
 export const ROUTER_DEFAULTS = {
-  maxAutoSpend: '250000',
-  sessionBudget: '5000000',
+  maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,
+  sessionBudget: DEFAULT_SESSION_BUDGET,
 } as const;
 
-/** The automatic limits a fresh install fills in, in atomic USDC; `sessionBudget` may be `none`. */
+/** The automatic limits install writes, in atomic USDC; `sessionBudget` may be `none`. */
 export interface RouterLimits {
   maxAutoSpend: string;
   sessionBudget: string;
 }
 
-/** What the question shows: the file's own value where it names one, else the default. */
+/** The file's own value where it names one, else the default. */
 export function shownLimits(config: {
   maxAutoSpend?: string | undefined;
   sessionBudget?: string | undefined;
@@ -32,7 +33,7 @@ export function shownLimits(config: {
   };
 }
 
-/** The limits in USD, as the question shows them. */
+/** The limits in USD. */
 export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; sessionBudget: string } {
   return {
     maxAutoSpend: toMoney(limits.maxAutoSpend).usd,
@@ -40,68 +41,50 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
   };
 }
 
-/** "up to $0.25 a call and $5 a day" */
-export function limitsPhrase(limits: RouterLimits): string {
-  const usdOf = limitsUsd(limits);
-  const daily =
-    usdOf.sessionBudget === 'none' ? 'with no daily limit' : `and $${usdOf.sessionBudget} a day`;
-  return `up to $${usdOf.maxAutoSpend} a call ${daily}`;
-}
-
 /** The routing fee's terms, as the selector names them. */
 export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that stay yours until spent; each deposit counts against these limits.`;
 
-/**
- * The yes to the limits shown, where the command install ran is not known
- * (doctor, the routing notice, the request tool): the per-call limit only.
- * The daily limit already defaults to the one shown. A bare `install --yes`
- * here would undo a `--project` or `--no-wallet` install; install's own
- * output names that command with its flags instead.
- */
-export const ACCEPT_COMMAND = `tenjin config set maxAutoSpend ${toMoney(ROUTER_DEFAULTS.maxAutoSpend).usd}`;
-
-/** The commands for limits of the user's own, each in backticks. */
-export const OWN_LIMITS_COMMANDS =
-  '`tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`';
-
 /** The selector's own line: either answer approves the fee. */
-export const FEE_APPROVAL =
-  'Using these limits or choosing your own also approves the routing fee.';
+export const FEE_APPROVAL = 'Either answer also approves the routing fee.';
 
-/** The question, for the agent to put to the user as written. */
-export function spendQuestion(limits: RouterLimits): string {
-  return `May Tenjin pay for tool calls without asking you each time, ${limitsPhrase(limits)}? ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
+const DEFAULTS_USD = limitsUsd(ROUTER_DEFAULTS);
+
+/** The question, for the agent to put to the person as written. */
+export const SPEND_QUESTION = `Use the defaults ($${DEFAULTS_USD.sessionBudget} a day, $${DEFAULTS_USD.maxAutoSpend} a call) or set your own limits.`;
+
+/** The question with the fee terms either answer approves. */
+export function spendChoiceQuestion(): string {
+  return `${SPEND_QUESTION} ${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`;
 }
 
-/** Who reads a notice: the user, in the hook's `systemMessage`, or the agent,
- *  in the request tool's answer. */
-export type NoticeReader = 'user' | 'agent';
-
-/**
- * The routing notice for a machine whose limits nobody has answered: the
- * question and the one-step yes, put to the user directly, or handed to the
- * agent to ask.
- */
-export function unansweredNotice(limits: RouterLimits, reader: NoticeReader): string {
-  const open = 'Tenjin pays for nothing on its own yet: the spend limits are not answered.';
-  if (reader === 'agent') {
-    return `${open} Ask the user: ${spendQuestion(limits)} For a yes, run \`${ACCEPT_COMMAND}\`; for other amounts, run ${OWN_LIMITS_COMMANDS}.`;
-  }
-  return `${open} It can pay for tool calls without asking you each time, ${limitsPhrase(limits)}. ${ROUTING_FEE_TERMS} ${FEE_APPROVAL} To use these limits, run \`${ACCEPT_COMMAND}\`; to choose your own, run ${OWN_LIMITS_COMMANDS}.`;
+/** One answer to {@link spendChoiceQuestion}, and the one command that applies it. */
+export interface SpendOption {
+  id: 'default' | 'custom';
+  label: string;
+  recommended: boolean;
+  /** What to ask the person after they pick this option, before running `command`. */
+  ask?: string[];
+  /** The command the agent runs alone for this answer. */
+  command: string;
 }
 
 /**
- * The routing notice for a call that was not paid: the limits question when
- * the per-call limit is the code default's zero because nobody has answered
- * it, else the reason and fix for `why`.
+ * The two answers, each applied by the agent with one command and never by
+ * the person: `install` is the install that was run (its `--project` and
+ * `--no-wallet` kept), so the answer leaves every other choice as it was.
  */
-export function unpaidNotice(
-  why: string,
-  config: { maxAutoSpend?: string | undefined; sessionBudget?: string | undefined },
-  reader: NoticeReader,
-): string | null {
-  if (why === 'limit_below_deposit' && config.maxAutoSpend === undefined) {
-    return unansweredNotice(shownLimits(config), reader);
-  }
-  return unpaidSentence(why);
+export function spendOptions(install: string): SpendOption[] {
+  return [
+    { id: 'default', label: 'Use the defaults', recommended: true, command: `${install} --yes` },
+    {
+      id: 'custom',
+      label: 'Set my own limits',
+      recommended: false,
+      ask: [
+        'The most Tenjin may pay in a day, in USD, or none for no daily limit',
+        'The most it may pay for one call, in USD, at least 0.25',
+      ],
+      command: `${install} --max-auto-spend <usd> --session-budget <usd|none>`,
+    },
+  ];
 }

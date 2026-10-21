@@ -59,13 +59,15 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 const FEE_TERMS =
   'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
 /** What a run that could not ask prints for the agent that ran it. */
+const QUESTION = `Use the defaults ($5 a day, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
-  '! Automatic payments are off until the user approves a spend limit',
-  `  Ask the user in this session: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
-  '  Yes: tenjin install --yes',
-  '  Other amounts: tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
-  '  No: run nothing, the router then pays for nothing on its own, and the question stays open until the user answers it',
+  '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+  `  Ask the person in this session: ${QUESTION}`,
+  '  Use the defaults (recommended): tenjin install --yes',
+  '  Set my own limits: tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
 ];
+/** What Claude Code exports to the commands its agent runs. */
+const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
 const RELOAD =
   'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
 
@@ -79,8 +81,16 @@ function deps(over: Record<string, unknown> = {}) {
     createWallet: vi.fn(async () => ADDRESS),
     walletAddress: async () => ADDRESS,
     listMcpProcesses: async () => [],
+    walletBalance: async () => 0n,
     ...over,
   };
+}
+
+/** The spend question install handed over, from `nextSteps`, its only place. */
+type SpendStep = { question: string; options: { command: string }[]; next: string };
+function spendStepOf(result: { data: unknown }): SpendStep | undefined {
+  const steps = (result.data as { nextSteps?: (SpendStep & { id: string })[] }).nextSteps;
+  return steps?.find((q) => q.id === 'spend');
 }
 
 /** The doctor's checks, from a pass or from the refusal that carries them. */
@@ -107,7 +117,7 @@ async function doctorChecks(over: Record<string, unknown> = {}): Promise<{
 }
 
 describe('tenjin install', () => {
-  it('with nobody to approve, writes no limit and keeps automatic spend at zero', async () => {
+  it('with nobody to answer, writes no limit and the $0.25 and $5 defaults hold', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ confirm: 'always' }));
     const result = await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
@@ -120,47 +130,72 @@ describe('tenjin install', () => {
         removed: ['confirm'],
         set: [],
         kept: [],
-        effective: { maxAutoSpend: '0', sessionBudget: '5' },
-        approval: {
-          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
-          limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
-          routingFee: FEE_TERMS,
-          approve: 'tenjin install --yes',
-          own: 'tenjin config set maxAutoSpend <usd> and tenjin config set sessionBudget <usd|none>',
-        },
+        effective: { maxAutoSpend: '0.25', sessionBudget: '5' },
       },
-    });
-    const { next } = (result.data as { spend: { approval: { next: string } } }).spend.approval;
-    expect(next).toMatch(
-      /^In this session, show the user these limits and ask this question before you change any limit\./,
-    );
-    expect(next).toContain(
-      'If they say yes, run the same install again with --yes: `tenjin install --yes`.',
-    );
-    expect(next).toContain('If they say no, run nothing');
-    expect(next).not.toMatch(/terminal/i);
-  });
-
-  it('asks about the daily limit the file already names', async () => {
-    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
-    const result = await runRouterInstall({}, ctx(), deps());
-    expect(result.data).toMatchObject({
-      spend: {
-        approval: {
-          question: `May Tenjin pay for tool calls without asking you each time, up to $0.25 a call with no daily limit? ${FEE_TERMS} Using these limits or choosing your own also approves the routing fee.`,
-          limits: { maxAutoSpend: '0.25', sessionBudget: 'none' },
+      nextSteps: [
+        {
+          id: 'spend',
+          question: QUESTION,
+          options: [
+            {
+              id: 'default',
+              label: 'Use the defaults',
+              recommended: true,
+              command: 'tenjin install --yes',
+            },
+            {
+              id: 'custom',
+              label: 'Set my own limits',
+              recommended: false,
+              ask: [
+                'The most Tenjin may pay in a day, in USD, or none for no daily limit',
+                'The most it may pay for one call, in USD, at least 0.25',
+              ],
+              command: 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
+            },
+          ],
         },
-      },
+      ],
     });
-  });
-
-  it('asks nothing of a user who already chose a zero per-call limit', async () => {
-    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
-    const result = await runRouterInstall({}, ctx(), deps());
+    // nextSteps is the only place the question appears.
     expect(result.data).not.toHaveProperty('spend.approval');
-    expect(result.humanLines).toContain(
-      '! Automatic payments are off: every paid lookup needs your approval',
+    const approval = spendStepOf(result)!;
+    expect(approval.options).toHaveLength(2);
+    expect(approval.next).toMatch(
+      /^In this session, ask the person this question with your question tool, offering these two options/,
     );
+    expect(approval.next).toContain('The defaults are already in effect.');
+    expect(approval.next).toContain('Use the defaults: run `tenjin install --yes`.');
+    expect(approval.next).toContain(
+      'then run `tenjin install --max-auto-spend <usd> --session-budget <usd|none>` with their amounts',
+    );
+    expect(approval.next).toContain('never joined with another command');
+    expect(approval.next).toContain('never ask them to run a command');
+    expect(approval.next).not.toMatch(/terminal|config set|wallet fund|no automatic/i);
+    // Outside an agent harness the spend question is the only step handed over.
+    expect((result.data as { nextSteps: { id: string }[] }).nextSteps.map((q) => q.id)).toEqual([
+      'spend',
+    ]);
+  });
+
+  it.each([{ sessionBudget: 'none' }, { maxAutoSpend: '2000000' }])(
+    'asks nothing again of a file that already names a limit: %j',
+    async (file) => {
+      await writeFile(join(data, 'config.json'), JSON.stringify(file));
+      const result = await runRouterInstall({}, ctx(), deps());
+      expect(spendStepOf(result)).toBeUndefined();
+      expect(await loadRawConfig(data)).toEqual(file);
+    },
+  );
+
+  it('keeps a per-call limit an earlier release left below $0.25, and asks nothing', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '100000' }));
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(spendStepOf(result)).toBeUndefined();
+    expect(result.humanLines).toContain(
+      '  Automatic router: up to $0.1 per call; daily limit $5 a day',
+    );
+    expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
   });
 
   it('still succeeds, with a warning, when TENJIN_BASE_URL is not a URL', async () => {
@@ -346,11 +381,10 @@ function amounts(answers: (string | null)[]) {
   });
 }
 
-const FEE_LINES =
-  '\nRouting costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.\nUsing these limits or choosing your own also approves the routing fee.';
+const SELECTOR = `Use the defaults ($5 a day, $0.25 a call) or set your own limits.\n${FEE_TERMS}\nEither answer also approves the routing fee.`;
 
-describe('install asks a person to approve the spend limits', () => {
-  it('"Use these limits" names the routing fee and writes the defaults it showed', async () => {
+describe('install asks a person the spend question once', () => {
+  it('"Use the defaults" names the routing fee and writes $0.25 a call and $5 a day', async () => {
     const promptLimits = vi.fn(async () => 'approve' as const);
     const promptAmount = amounts([]);
     const result = await runRouterInstall(
@@ -358,12 +392,9 @@ describe('install asks a person to approve the spend limits', () => {
       humanCtx(),
       deps({ isInteractive: true, promptLimits, promptAmount }),
     );
-    expect(promptLimits).toHaveBeenCalledWith(
-      `The router pays for tool calls without asking, up to:\n  $0.25 a call, $5 a day${FEE_LINES}`,
-    );
+    expect(promptLimits).toHaveBeenCalledWith(SELECTOR);
     expect(promptAmount).not.toHaveBeenCalled();
-    const config = await loadRawConfig(data);
-    expect(config).toMatchObject({
+    expect(await loadRawConfig(data)).toMatchObject({
       maxAutoSpend: '250000',
       sessionBudget: '5000000',
     });
@@ -372,22 +403,23 @@ describe('install asks a person to approve the spend limits', () => {
     );
   });
 
-  it('"Choose my own" writes the amounts typed, and the readout prints them', async () => {
+  it('"Set my own limits" asks the daily amount, then the per-call one, and writes both', async () => {
+    const promptAmount = amounts(['2', '0.5']);
     const result = await runRouterInstall(
       {},
       humanCtx(),
-      deps({
-        isInteractive: true,
-        promptLimits: async () => 'own' as const,
-        promptAmount: amounts(['0.10', '2']),
-      }),
+      deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
     );
+    expect(promptAmount.mock.calls.map(([message]) => message)).toEqual([
+      'Most it may pay in a day, in USD, or none',
+      'Most it may pay for one call, in USD, at least 0.25',
+    ]);
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '100000',
+      maxAutoSpend: '500000',
       sessionBudget: '2000000',
     });
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.1 per call; daily limit $2 a day',
+      '  Automatic router: up to $0.5 per call; daily limit $2 a day',
     );
   });
 
@@ -398,7 +430,7 @@ describe('install asks a person to approve the spend limits', () => {
       deps({
         isInteractive: true,
         promptLimits: async () => 'own' as const,
-        promptAmount: amounts(['0.25', 'none']),
+        promptAmount: amounts(['none', '0.25']),
       }),
     );
     expect(await loadRawConfig(data)).toMatchObject({
@@ -407,27 +439,30 @@ describe('install asks a person to approve the spend limits', () => {
     });
   });
 
-  it('refuses zero and a negative amount and asks again', async () => {
-    const promptAmount = amounts(['0', '-1', '0.5', '0', '3']);
+  it('refuses zero, a negative amount and a per-call limit under $0.25, and asks again', async () => {
+    const promptAmount = amounts(['0', '-1', '3', '0.1', '0', '0.3']);
     await runRouterInstall(
       {},
       humanCtx(),
       deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
     );
     const messages = promptAmount.mock.calls.map(([message]) => message);
-    expect(messages).toHaveLength(5);
-    expect(messages[1]).toMatch(/^The limit must be more than zero\. /);
+    expect(messages).toHaveLength(6);
+    expect(messages[1]).toMatch(
+      /^The limit must be more than zero; `tenjin config set router\.enabled false` turns the router off\. /,
+    );
     expect(messages[2]).toMatch(/^Invalid USD amount: "-1"\. /);
-    expect(messages[4]).toMatch(/^The limit must be more than zero\. /);
+    expect(messages[4]).toMatch(/^The per-call limit is at least \$0\.25\. /);
+    expect(messages[5]).toMatch(/^The per-call limit is at least \$0\.25\. /);
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '500000',
+      maxAutoSpend: '300000',
       sessionBudget: '3000000',
     });
   });
 
   it.each([
     ['at the selector', async () => null, amounts([])],
-    ['at an amount', async () => 'own' as const, amounts(['0.10', null])],
+    ['at the amount', async () => 'own' as const, amounts([null])],
   ])('a cancel %s writes nothing and exits non-zero', async (_at, promptLimits, promptAmount) => {
     const createWallet = vi.fn(async () => ADDRESS);
     const err = await runRouterInstall(
@@ -442,64 +477,40 @@ describe('install asks a person to approve the spend limits', () => {
     expect(createWallet).not.toHaveBeenCalled();
   });
 
-  it('does not ask when the file already names both limits', async () => {
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '10000', sessionBudget: 'none' }),
-    );
+  it.each([
+    { maxAutoSpend: '2000000', sessionBudget: 'none' },
+    { sessionBudget: 'none' },
+    { maxAutoSpend: '2000000' },
+  ])('does not ask when the file already names a limit: %j', async (file) => {
+    await writeFile(join(data, 'config.json'), JSON.stringify(file));
     const promptLimits = vi.fn(async () => 'approve' as const);
     await runRouterInstall({}, humanCtx(), deps({ isInteractive: true, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
-    const config = await loadRawConfig(data);
-    expect(config).toMatchObject({ maxAutoSpend: '10000', sessionBudget: 'none' });
-  });
-
-  it('shows a limit the file already names and asks only for the missing one', async () => {
-    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
-    const promptLimits = vi.fn(async () => 'own' as const);
-    const promptAmount = amounts(['0.05']);
-    await runRouterInstall(
-      {},
-      humanCtx(),
-      deps({ isInteractive: true, promptLimits, promptAmount }),
-    );
-    expect(promptLimits).toHaveBeenCalledWith(
-      `The router pays for tool calls without asking, up to:\n  $0.25 a call, no daily limit${FEE_LINES}`,
-    );
-    expect(promptAmount).toHaveBeenCalledTimes(1);
-    expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '50000',
-      sessionBudget: 'none',
-    });
+    expect(await loadRawConfig(data)).toEqual(file);
   });
 
   it.each([
     ['a non-interactive run', () => humanCtx(), false],
     ['--json', () => ctx(), true],
-  ])('%s asks nothing and writes no spend limit', async (_name, makeCtx, isInteractive) => {
-    const promptLimits = vi.fn(async () => 'own' as const);
-    const result = await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
-    expect(promptLimits).not.toHaveBeenCalled();
-    // The state a cancel at the selector leaves: both keys absent, no literal 0.
-    const config = await loadRawConfig(data);
-    expect(config).not.toHaveProperty('maxAutoSpend');
-    expect(config).not.toHaveProperty('sessionBudget');
-    expect(result.data).toMatchObject({ spend: { set: [], kept: [] } });
-    // An agent's shell has no terminal: the question goes to the agent instead.
-    expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
-    // The rest of the install completes as it would after a yes.
-    expect(result.data).toMatchObject({ plugin: { state: 'written' } });
-  });
+  ])(
+    '%s asks nothing, writes no limit, and the defaults hold',
+    async (_name, makeCtx, isInteractive) => {
+      const promptLimits = vi.fn(async () => 'own' as const);
+      const result = await runRouterInstall({}, makeCtx(), deps({ isInteractive, promptLimits }));
+      expect(promptLimits).not.toHaveBeenCalled();
+      const config = await loadRawConfig(data);
+      expect(config).not.toHaveProperty('maxAutoSpend');
+      expect(config).not.toHaveProperty('sessionBudget');
+      expect(result.data).toMatchObject({
+        spend: { set: [], kept: [], effective: { maxAutoSpend: '0.25', sessionBudget: '5' } },
+      });
+      // An agent's shell has no terminal: the question goes to the agent instead.
+      expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
+      expect(result.data).toMatchObject({ plugin: { state: 'written' } });
+    },
+  );
 
-  it('a non-interactive run keeps a per-call limit the file already names', async () => {
-    await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '100000' }));
-    const result = await runRouterInstall({}, ctx(), deps());
-    expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
-    expect(result.data).toMatchObject({ spend: { set: [], kept: ['maxAutoSpend'] } });
-    expect(result.data).not.toHaveProperty('spend.approval');
-  });
-
-  it('--yes writes the limits the question shows, as "Use these limits" does', async () => {
+  it('--yes writes the defaults, as "Use the defaults" does, and keeps a limit the file names', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
     const promptLimits = vi.fn(async () => 'own' as const);
     const result = await runRouterInstall(
@@ -512,15 +523,14 @@ describe('install asks a person to approve the spend limits', () => {
       maxAutoSpend: '250000',
       sessionBudget: 'none',
     });
-    expect(result.data).not.toHaveProperty('spend.approval');
+    expect(spendStepOf(result)).toBeUndefined();
   });
 
   it('hands the agent its own command with --yes, and that run keeps every install choice', async () => {
     // The agent-run install was told to make no wallet.
     const createWallet = vi.fn(async () => ADDRESS);
     const first = await runRouterInstall({ noWallet: true }, ctx(), deps({ createWallet }));
-    const { approve } = (first.data as { spend: { approval: { approve: string } } }).spend.approval;
-    expect(approve).toBe('tenjin install --no-wallet --yes');
+    expect(spendStepOf(first)?.options[0]?.command).toBe('tenjin install --no-wallet --yes');
     const manifest = join(folder(), '.claude-plugin', 'plugin.json');
     const before = await readFile(manifest, 'utf8');
     const result = await runRouterInstall(
@@ -535,7 +545,7 @@ describe('install asks a person to approve the spend limits', () => {
       sessionBudget: '5000000',
     });
     expect(result.data).toMatchObject({ spend: { set: ['maxAutoSpend', 'sessionBudget'] } });
-    expect(result.data).not.toHaveProperty('spend.approval');
+    expect(spendStepOf(result)).toBeUndefined();
   });
 
   it('--yes keeps a 0 the file names', async () => {
@@ -641,11 +651,23 @@ describe('the doctor this release registers', () => {
 
   it.each([
     [
-      'an agent-run install that left the limits unanswered',
+      'an agent-run install nobody answered: the $0.25 and $5 defaults',
       undefined,
-      { status: 'warn', required: false },
+      {
+        status: 'ok',
+        required: false,
+        detail: 'automatic approval up to 0.25 USD a call, 5 USD a day',
+      },
     ],
-    ['a 0 the user set', '0', { status: 'fail', required: true }],
+    [
+      'a 0 an earlier release let the user set',
+      '0',
+      {
+        status: 'fail',
+        required: true,
+        detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
+      },
+    ],
   ])('reports %s, and the router probe still runs', async (_name, maxAutoSpend, expected) => {
     const { runRouterDoctor } = await import('./doctor');
     await runRouterInstall({}, ctx(), deps());
@@ -672,20 +694,13 @@ describe('the doctor this release registers', () => {
     const spend = checks.find((c) => c.name === 'spend');
     expect(spend).toMatchObject(expected);
     if (maxAutoSpend === undefined) {
-      expect(spend?.detail).toContain(
-        `Ask the user: May Tenjin pay for tool calls without asking you each time, up to $0.25 a call and $5 a day? ${FEE_TERMS}`,
-      );
-      expect(spend?.fix).toBe(
-        'Answer the spend question: for a yes, run `tenjin config set maxAutoSpend 0.25`; for other amounts, `tenjin config set maxAutoSpend <usd>` and `tenjin config set sessionBudget <usd|none>`.',
-      );
-      // The open question is not the first required failure, so it never hides
-      // the network diagnosis.
-      expect(out instanceof CliError ? out.message : '').not.toContain('maxAutoSpend');
+      expect(spend?.fix).toBeUndefined();
+      expect(JSON.stringify(checks)).not.toMatch(/not answered|spend question/);
     } else {
-      expect((out as CliError).message).toContain('maxAutoSpend is 0');
-      // Install keeps a 0 it finds and never asks, so only `config set` changes it.
-      expect(spend?.fix).toBe('Set a per-call limit with `tenjin config set maxAutoSpend <usd>`.');
+      // Install keeps a limit it finds and never asks, so only `config set` changes it.
+      expect(spend?.fix).toBe('Raise it with `tenjin config set maxAutoSpend 0.25`.');
     }
+    if (maxAutoSpend === '0') expect((out as CliError).message).toContain('maxAutoSpend is 0');
     expect(checks.find((c) => c.name === 'router')?.status).toBe('fail');
   });
 
@@ -1000,4 +1015,226 @@ it('status warns about ignored retired keys and reports automatic exposure separ
     },
   });
   expect(result.humanLines?.join('\n')).toContain('manual pay always requires consent');
+});
+
+describe('install applies the spend answer an agent relays, in one command', () => {
+  it('--max-auto-spend and --session-budget write the amounts named, as "Set my own limits" does', async () => {
+    const promptLimits = vi.fn(async () => 'approve' as const);
+    const result = await runRouterInstall(
+      { maxAutoSpend: '0.40', sessionBudget: '2' },
+      ctx(),
+      deps({ isInteractive: false, promptLimits }),
+    );
+    expect(promptLimits).not.toHaveBeenCalled();
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '400000',
+      sessionBudget: '2000000',
+    });
+    expect(spendStepOf(result)).toBeUndefined();
+  });
+
+  it('takes none for the daily limit, and the default for a limit left out', async () => {
+    await runRouterInstall({ sessionBudget: 'none' }, ctx(), deps());
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '250000',
+      sessionBudget: 'none',
+    });
+  });
+
+  it('replaces a limit the file already names with the one named', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget: 'none' }));
+    const result = await runRouterInstall({ maxAutoSpend: '1', sessionBudget: '3' }, ctx(), deps());
+    expect(await loadRawConfig(data)).toMatchObject({
+      maxAutoSpend: '1000000',
+      sessionBudget: '3000000',
+    });
+    expect(result.data).toMatchObject({
+      spend: { set: ['maxAutoSpend', 'sessionBudget'], kept: [] },
+    });
+  });
+
+  it.each([
+    [{ maxAutoSpend: '0' }, 'The per-call limit is at least $0.25.'],
+    [{ maxAutoSpend: '0.24' }, 'The per-call limit is at least $0.25.'],
+    [{ maxAutoSpend: 'none' }, 'Invalid USD amount'],
+    [{ sessionBudget: '0' }, 'The limit must be more than zero'],
+    [{ sessionBudget: '-1' }, 'Invalid USD amount'],
+  ])('refuses %o before writing anything', async (args, message) => {
+    const err = await runRouterInstall(args, ctx(), deps()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).code).toBe('USAGE');
+    expect((err as CliError).message).toContain(message);
+    await expect(readFile(join(data, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('says why the per-call limit is at least $0.25', async () => {
+    const err = (await runRouterInstall({ maxAutoSpend: '0.1' }, ctx(), deps()).catch(
+      (e: unknown) => e,
+    )) as CliError;
+    expect(err.message).toBe('--max-auto-spend 0.1: The per-call limit is at least $0.25.');
+    expect(err.fix).toBe(
+      'Give 0.25 USD or more, for example `--max-auto-spend 0.5`. The $0.25 minimum is the routing deposit: below it, routing cannot pay at all. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.',
+    );
+  });
+
+  it('refuses a named limit on --refresh, which writes none', async () => {
+    const err = await runRouterInstall(
+      { refresh: true, maxAutoSpend: '0.25' },
+      ctx(),
+      deps(),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).message).toBe(
+      '--max-auto-spend sets a spend limit, and --refresh writes none.',
+    );
+  });
+
+  it('keeps --project and --no-wallet in the commands it hands over', async () => {
+    const cwd = join(home, 'project');
+    await mkdir(cwd, { recursive: true });
+    const result = await runRouterInstall({ project: true, noWallet: true }, ctx(), deps({ cwd }));
+    expect(spendStepOf(result)?.options.map((o) => o.command)).toEqual([
+      'tenjin install --project --no-wallet --yes',
+      'tenjin install --project --no-wallet --max-auto-spend <usd> --session-budget <usd|none>',
+    ]);
+  });
+});
+
+describe('install run by an agent asks each question where its answer is needed', () => {
+  type Step = {
+    id: string;
+    question: string;
+    options: { id: string; label: string; command: string | null }[];
+    next: string;
+    address?: string;
+    show?: string;
+  };
+  const stepsOf = (result: { data: unknown }) => (result.data as { nextSteps: Step[] }).nextSteps;
+
+  it('asks only the spend question first, with no funding question', async () => {
+    const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV }));
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
+    expect(stepsOf(result)[0]).toMatchObject({ question: QUESTION });
+    expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
+    expect(result.humanLines).not.toContain(
+      '  Ask the person: Do you want to add $5 to your Tenjin wallet now?',
+    );
+    const { next } = result.data as { next: string };
+    expect(next).toBe(
+      `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
+    );
+    expect(next).not.toContain('wallet fund');
+  });
+
+  it('the completed install asks the funding question, with the address and the command for each answer', async () => {
+    // No link is minted: nothing reaches the fund route, and no wallet unlock is needed.
+    const routes: string[] = [];
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      routes.push(String(input));
+      return new Response('{}', { status: 503 });
+    });
+    let result: Awaited<ReturnType<typeof runRouterInstall>>;
+    try {
+      result = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(routes.filter((r) => r.includes('/api/fund/'))).toEqual([]);
+    const steps = stepsOf(result);
+    expect(steps.map((q) => q.id)).toEqual(['fund']);
+    const fund = steps[0]!;
+    const show = `To add funds, send USDC on Base to ${ADDRESS}.`;
+    expect(fund).toMatchObject({
+      question: 'Do you want to add $5 to your Tenjin wallet now?',
+      options: [
+        { id: 'fund', label: 'Yes, open the funding page', command: 'tenjin wallet fund 5' },
+        { id: 'later', label: 'Not now', command: null },
+      ],
+      address: ADDRESS,
+      show,
+    });
+    expect(fund).not.toHaveProperty('url');
+    expect(fund.next).toContain('The install is done.');
+    expect(fund.next).toContain('Never run `tenjin wallet fund 5` without this yes.');
+    expect(fund.next).toContain('never ask them to run a command');
+    expect(result.humanLines).toEqual(
+      expect.arrayContaining([
+        '  Ask the person: Do you want to add $5 to your Tenjin wallet now?',
+        '  Yes, open the funding page: tenjin wallet fund 5',
+        `  Not now: run nothing, show them: ${show}`,
+      ]),
+    );
+    expect(result.humanLines!.at(-1)).toBe(
+      `Next: ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
+    );
+    expect((result.data as { next: string }).next).not.toContain('wallet fund');
+  });
+
+  it('the custom-limits install asks the funding question too', async () => {
+    const result = await runRouterInstall(
+      { maxAutoSpend: '0.50', sessionBudget: 'none' },
+      ctx(),
+      deps({ env: HARNESS_ENV }),
+    );
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
+  });
+
+  it('asks only the funding question when the limits were answered earlier', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV }));
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
+  });
+
+  it('asks nothing about funds for a wallet that already holds USDC', async () => {
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({
+        env: HARNESS_ENV,
+        walletExists: async () => true,
+        walletBalance: async () => 1_000_000n,
+      }),
+    );
+    expect(stepsOf(result)).toEqual([]);
+    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
+  });
+
+  it('asks about an existing wallet whose balance cannot be read', async () => {
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({
+        env: HARNESS_ENV,
+        walletExists: async () => true,
+        walletBalance: async () => {
+          throw new Error('rpc down');
+        },
+      }),
+    );
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
+  });
+
+  it('a person at a terminal gets what it always got: no questions handed over', async () => {
+    const result = await runRouterInstall(
+      {},
+      humanCtx(),
+      deps({
+        env: HARNESS_ENV,
+        isInteractive: true,
+        promptLimits: async () => 'approve' as const,
+      }),
+    );
+    expect(stepsOf(result)).toEqual([]);
+    expect(result.humanLines!.at(-1)).toBe(
+      `Next: fund the wallet with \`tenjin wallet fund\`, then ${RELOAD}`,
+    );
+  });
+
+  it('a script outside any harness gets the spend question and no funding question', async () => {
+    const result = await runRouterInstall({}, ctx(), deps());
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
+  });
 });
