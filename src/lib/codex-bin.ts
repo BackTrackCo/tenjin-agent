@@ -37,8 +37,9 @@ export function resolveCodex(
   for (const part of (env.PATH ?? '').split(win ? ';' : ':')) {
     if (part.length === 0) continue;
     for (const ext of exts) {
-      const candidate = join(part, `codex${ext}`);
-      if (!isFile(candidate)) continue;
+      // PATHEXT is upper case; Windows matches names in any case, so try both.
+      const candidate = [ext, ext.toLowerCase()].map((e) => join(part, `codex${e}`)).find(isFile);
+      if (candidate === undefined) continue;
       if (/^\.(cmd|bat)$/i.test(ext)) {
         const script = join(part, ...NPM_SCRIPT);
         if (isFile(script)) return { cmd: execPath, prefix: [script] };
