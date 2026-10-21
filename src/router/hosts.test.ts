@@ -15,6 +15,7 @@ import {
   recordedHosts,
   recordInstalledHost,
   runEach,
+  uninstallEach,
 } from './hosts';
 import type { Harness } from './names';
 
@@ -58,6 +59,31 @@ describe('the installed-hosts record', () => {
     expect(await recordedHosts({}, dir)).toEqual(['codex']);
     expect(await recordedHosts({ harness: 'claude' }, dir)).toEqual(['claude']);
     expect(await recordedHosts({ project: true }, dir)).toEqual(['claude']);
+  });
+});
+
+describe('uninstallEach', () => {
+  it('keeps a host recorded when its removal left the plugin in place', async () => {
+    await recordInstalledHost(dir, 'claude');
+    await recordInstalledHost(dir, 'codex');
+    const run = async (host: Harness) => ({
+      data:
+        host === 'claude'
+          ? { plugin: { plugin: 'kept', marketplace: 'kept', reason: 'claude failed' } }
+          : { removed: 'tenjin@tenjin', marketplace: 'tenjin' },
+    });
+    await uninstallEach(['claude', 'codex'], dir, false, run);
+    expect(await readInstalledHosts(dir)).toEqual(['claude']);
+    expect(await recordedHosts({}, dir)).toEqual(['claude']);
+  });
+
+  it('forgets a removed host, and nothing on a project uninstall', async () => {
+    await recordInstalledHost(dir, 'claude');
+    const removed = async () => ({ data: { plugin: { plugin: 'removed' } } });
+    await uninstallEach(['claude'], dir, true, removed);
+    expect(await readInstalledHosts(dir)).toEqual(['claude']);
+    await uninstallEach(['claude'], dir, false, removed);
+    expect(await readInstalledHosts(dir)).toBeNull();
   });
 });
 

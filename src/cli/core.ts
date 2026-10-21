@@ -93,22 +93,19 @@ Learn more:
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
         const harness = o.harness as Harness | undefined;
-        const { forgetInstalledHost, recordedHosts, runEach } = await import('../router/hosts');
+        const { recordedHosts, uninstallEach } = await import('../router/hosts');
         const hosts = await recordedHosts(
           { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
           ctx.dataDir,
         );
-        return runEach(hosts, async (host) => {
-          const out =
-            host === 'codex'
-              ? await (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
-              : await (
-                  await import('../router/uninstall')
-                ).runRouterUninstall({ ...(o.project === true ? { project: true } : {}) }, ctx);
-          // A project uninstall leaves the user-scope install, so its record stays.
-          if (o.project !== true) await forgetInstalledHost(ctx.dataDir, host);
-          return out;
-        });
+        return uninstallEach(hosts, ctx.dataDir, o.project === true, async (host) =>
+          host === 'codex'
+            ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
+            : (await import('../router/uninstall')).runRouterUninstall(
+                { ...(o.project === true ? { project: true } : {}) },
+                ctx,
+              ),
+        );
       });
     });
 

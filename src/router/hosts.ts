@@ -180,6 +180,36 @@ export async function runEach(
 }
 
 /**
+ * Uninstall over the hosts: a host leaves the record only once its removal
+ * left nothing behind. A Claude Code removal that reports the plugin `kept`,
+ * or a Codex removal that failed (it throws), keeps the host recorded so a
+ * later bare uninstall or doctor still finds it. A project uninstall leaves
+ * the user-scope install, so it forgets nothing.
+ */
+export async function uninstallEach(
+  hosts: readonly Harness[],
+  dataDir: string,
+  project: boolean,
+  run: (host: Harness) => Promise<CommandResult>,
+): Promise<CommandResult> {
+  return runEach(hosts, async (host) => {
+    const out = await run(host);
+    if (!project && !pluginKept(out.data)) await forgetInstalledHost(dataDir, host);
+    return out;
+  });
+}
+
+/** The Claude Code removal's `plugin.plugin: 'kept'`: the plugin is still there. */
+function pluginKept(data: unknown): boolean {
+  const plugin = (data as { plugin?: unknown } | null)?.plugin;
+  return (
+    plugin !== null &&
+    typeof plugin === 'object' &&
+    (plugin as { plugin?: unknown }).plugin === 'kept'
+  );
+}
+
+/**
  * Doctor over several hosts: every host is checked before any failure is
  * reported, and the failure names each host that failed.
  */
