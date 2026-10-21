@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { CommandContext, CommandResult } from '../context';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
+import type { QuestionStep } from './install';
 import { HARNESSES, type Harness } from './names';
 
 /**
@@ -118,37 +119,118 @@ export interface InstallHostArgs {
   yes?: boolean;
 }
 
+/** The hosts this install sets up, and the question it hands over, if any. */
+export interface HostChoice {
+  hosts: Harness[];
+  /** Both hosts found and nobody answered: both are set up, and this asks. */
+  ask?: QuestionStep;
+}
+
 /**
- * The hosts this install sets up. A refresh and a project install are Claude
- * Code's alone; an agent's install goes to its own host; a terminal install
- * goes to every host found, asking first when there are two and a person can
- * answer. A machine with neither gets the Claude Code setup, which needs no
- * `claude` binary.
+ * THE HOSTS THIS INSTALL SETS UP. A refresh and a project install are Claude
+ * Code's alone, and `--harness` names one host. Otherwise every host found is
+ * a candidate (the agent's own host counts as found). With one, install goes
+ * there; with none, to Claude Code, whose setup needs no binary. With both, a
+ * recorded choice from an earlier install stands, `--yes` takes both, and a
+ * person at a terminal is asked, both selected. Anyone else, an agent
+ * included, gets both set up and the question in `nextSteps`, as the spend
+ * question goes: the default holds until an answer changes it.
  */
 export async function installHosts(
   args: InstallHostArgs,
   ctx: CommandContext,
   deps: HostDeps = {},
-): Promise<Harness[]> {
-  if (args.harness !== undefined) return [args.harness];
-  if (args.refresh === true || args.project === true) return ['claude'];
+): Promise<HostChoice> {
+  if (args.harness !== undefined) return { hosts: [args.harness] };
+  if (args.refresh === true || args.project === true) return { hosts: ['claude'] };
   const env = deps.env ?? process.env;
   const agent = agentHost(env);
-  if (agent !== undefined) return [agent];
-  const found = await (deps.detect ?? detectHosts)(env);
-  if (found.length === 0) return ['claude'];
-  if (found.length === 1 || args.yes === true) return found;
+  const detected = await (deps.detect ?? detectHosts)(env);
+  const found = HARNESSES.filter((h) => h === agent || detected.includes(h));
+  if (found.length === 0) return { hosts: ['claude'] };
+  if (found.length === 1) return { hosts: found };
+  const recorded = ((await readInstalledHosts(ctx.dataDir)) ?? []).filter((h) => found.includes(h));
+  if (recorded.length > 0) return { hosts: recorded };
+  if (args.yes === true) return { hosts: found };
   const interactive =
+    agent === undefined &&
     ctx.flags.json !== true &&
     (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
-  if (!interactive) return found;
+  if (!interactive) return { hosts: found, ask: hostsStep() };
   const picked = await (deps.ask ?? askHosts)(found);
   if (picked === null || picked.length === 0) {
     throw new CliError('REFUSED', 'Install cancelled before anything was written.', {
       fix: 'Re-run `tenjin install` and pick at least one agent.',
     });
   }
-  return HARNESSES.filter((h) => picked.includes(h));
+  return { hosts: HARNESSES.filter((h) => picked.includes(h)) };
+}
+
+const HOSTS_QUESTION = 'Tenjin found Claude Code and Codex here. Set it up for which?';
+
+/**
+ * The hosts question for whoever ran the install. Both are already set up, so
+ * the default runs nothing, and keeping one host removes the other.
+ */
+export function hostsStep(): QuestionStep {
+  const options: QuestionStep['options'] = [
+    { id: 'both', label: 'Claude Code and Codex', recommended: true, command: null },
+    {
+      id: 'claude',
+      label: 'Claude Code only',
+      recommended: false,
+      command: 'tenjin uninstall --harness codex',
+    },
+    {
+      id: 'codex',
+      label: 'Codex only',
+      recommended: false,
+      command: 'tenjin uninstall --harness claude',
+    },
+  ];
+  return {
+    id: 'hosts',
+    question: HOSTS_QUESTION,
+    options,
+    next: `In this session, ask the person this question with your question tool, offering these three options in order with the first marked recommended. Both are already set up. On "Claude Code and Codex", run nothing. On "Claude Code only", run \`${options[1]!.command}\`; on "Codex only", run \`${options[2]!.command}\`. Run the command alone, never joined with another command, and never ask the person to run a command.`,
+  };
+}
+
+/**
+ * One install result over the hosts, with the questions for whoever ran it in
+ * one top-level `nextSteps`: the hosts question first, then each host's own,
+ * once per id.
+ */
+export function withSteps(
+  out: CommandResult,
+  hosts: readonly Harness[],
+  ask?: QuestionStep,
+): CommandResult {
+  const data = (out.data ?? {}) as Record<string, unknown>;
+  const own = (d: unknown): QuestionStep[] => {
+    const steps = (d as { nextSteps?: unknown } | null)?.nextSteps;
+    return Array.isArray(steps) ? (steps as QuestionStep[]) : [];
+  };
+  const steps = [
+    ...(ask !== undefined ? [ask] : []),
+    ...(hosts.length === 1 ? own(data) : hosts.flatMap((h) => own(data[h]))),
+  ].filter((step, i, all) => all.findIndex((s) => s.id === step.id) === i);
+  if (hosts.length === 1 && ask === undefined) return out;
+  return {
+    data: { ...data, nextSteps: steps },
+    humanLines: [
+      ...(out.humanLines ?? []),
+      ...(ask !== undefined
+        ? [
+            `Ask the person in this session: ${ask.question}`,
+            ...ask.options.map(
+              (o) =>
+                `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command ?? 'run nothing'}`,
+            ),
+          ]
+        : []),
+    ],
+  };
 }
 
 /** The hosts doctor checks and uninstall removes: the record, else Claude Code. */

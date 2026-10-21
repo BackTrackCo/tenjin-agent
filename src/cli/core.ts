@@ -14,7 +14,7 @@ export function registerCore(reg: Registration): void {
 
   leaf(SETUP, 'install', 'set up Tenjin for your agent and create a wallet')
     .description(
-      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. Run by an agent, it sets up the agent it runs in. In a terminal, it sets up Claude Code or Codex, whichever this machine has, and asks which when it has both. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
+      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. It sets up Claude Code or Codex, whichever this machine has, and asks which when it has both, both selected; run by an agent, both hold until the answer removes one. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
     )
     .addOption(hostOverride())
     .option('--project', 'register the plugin for this project only')
@@ -48,8 +48,9 @@ Learn more:
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
-        const { installHosts, recordInstalledHost, runEach } = await import('../router/hosts');
-        const hosts = await installHosts(
+        const { installHosts, recordInstalledHost, runEach, withSteps } =
+          await import('../router/hosts');
+        const { hosts, ask } = await installHosts(
           {
             ...(harness !== undefined ? { harness } : {}),
             ...(o.project === true ? { project: true } : {}),
@@ -58,8 +59,8 @@ Learn more:
           },
           ctx,
         );
-        return runEach(hosts, async (host) => {
-          const out =
+        const out = await runEach(hosts, async (host) => {
+          const one =
             host === 'codex'
               ? await (await import('../router/codex-install')).runCodexInstall(codexArgs(o), ctx)
               : await (
@@ -78,8 +79,9 @@ Learn more:
                   ctx,
                 );
           if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
-          return out;
+          return one;
         });
+        return withSteps(out, hosts, ask);
       });
     });
 

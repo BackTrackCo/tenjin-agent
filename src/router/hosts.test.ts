@@ -16,6 +16,7 @@ import {
   recordInstalledHost,
   runEach,
   uninstallEach,
+  withSteps,
 } from './hosts';
 import type { Harness } from './names';
 
@@ -98,33 +99,30 @@ describe('agentHost', () => {
 });
 
 describe('installHosts', () => {
-  const never = async (): Promise<Harness[]> => {
-    throw new Error('no detection expected');
+  const codexOnly = async (): Promise<Harness[]> => ['codex'];
+  const none = async (): Promise<Harness[]> => [];
+  const noQuestion = async (): Promise<Harness[]> => {
+    throw new Error('no question expected');
   };
 
-  it('installs into the agent host without detecting or asking', async () => {
-    const env = { CODEX_SESSION_ID: 'abc' };
-    expect(await installHosts({}, ctx(), { env, detect: never })).toEqual(['codex']);
+  it('installs into the one host found, with no question, agent or terminal', async () => {
+    expect(await installHosts({}, ctx(), { env: { CODEX_SESSION_ID: 'a' }, detect: none })).toEqual(
+      { hosts: ['codex'] },
+    );
+    expect(
+      await installHosts({}, ctx(), { env: {}, detect: codexOnly, isInteractive: true }),
+    ).toEqual({ hosts: ['codex'] });
+    expect(await installHosts({}, ctx(), { env: {}, detect: none })).toEqual({ hosts: ['claude'] });
   });
 
   it('takes the override, and keeps refresh and project installs on Claude Code', async () => {
-    const env = { CODEX_SESSION_ID: 'abc' };
-    expect(await installHosts({ harness: 'claude' }, ctx(), { env })).toEqual(['claude']);
-    expect(await installHosts({ refresh: true }, ctx(), { env })).toEqual(['claude']);
-    expect(await installHosts({ project: true }, ctx(), { env })).toEqual(['claude']);
+    const deps = { env: { CODEX_SESSION_ID: 'abc' }, detect: both, ask: noQuestion };
+    expect(await installHosts({ harness: 'codex' }, ctx(), deps)).toEqual({ hosts: ['codex'] });
+    expect(await installHosts({ refresh: true }, ctx(), deps)).toEqual({ hosts: ['claude'] });
+    expect(await installHosts({ project: true }, ctx(), deps)).toEqual({ hosts: ['claude'] });
   });
 
-  it('installs into the one host a terminal machine has, or Claude Code with neither', async () => {
-    const env = {};
-    const codex = async (): Promise<Harness[]> => ['codex'];
-    const none = async (): Promise<Harness[]> => [];
-    expect(await installHosts({}, ctx(), { env, detect: codex, isInteractive: true })).toEqual([
-      'codex',
-    ]);
-    expect(await installHosts({}, ctx(), { env, detect: none })).toEqual(['claude']);
-  });
-
-  it('asks which when both are found, with both selected', async () => {
+  it('asks a person at a terminal which, with both selected', async () => {
     const asked: (readonly Harness[])[] = [];
     const ask = async (found: readonly Harness[]): Promise<Harness[]> => {
       asked.push(found);
@@ -132,30 +130,75 @@ describe('installHosts', () => {
     };
     const out = await installHosts({}, ctx(), { env: {}, detect: both, ask, isInteractive: true });
     expect(asked).toEqual([['claude', 'codex']]);
-    expect(out).toEqual(['codex']);
+    expect(out).toEqual({ hosts: ['codex'] });
   });
 
-  it('takes both without asking under --yes, --json or no terminal', async () => {
-    const ask = async (): Promise<Harness[]> => {
-      throw new Error('no question expected');
-    };
-    const deps = { env: {}, detect: both, ask };
-    expect(await installHosts({ yes: true }, ctx(), { ...deps, isInteractive: true })).toEqual([
-      'claude',
-      'codex',
+  it('under an agent, sets up both and hands the question over in the same form', async () => {
+    const env = { CLAUDECODE: '1' };
+    const out = await installHosts({}, ctx(true), { env, detect: both, ask: noQuestion });
+    expect(out.hosts).toEqual(['claude', 'codex']);
+    expect(out.ask?.id).toBe('hosts');
+    expect(out.ask?.options.map((o) => [o.id, o.recommended, o.command])).toEqual([
+      ['both', true, null],
+      ['claude', false, 'tenjin uninstall --harness codex'],
+      ['codex', false, 'tenjin uninstall --harness claude'],
     ]);
-    expect(await installHosts({}, ctx(true), deps)).toEqual(['claude', 'codex']);
-    expect(await installHosts({}, ctx(), { ...deps, isInteractive: false })).toEqual([
-      'claude',
-      'codex',
-    ]);
+    // The same question for a script with no terminal.
+    expect(
+      (await installHosts({}, ctx(), { env: {}, detect: both, isInteractive: false })).ask?.id,
+    ).toBe('hosts');
   });
 
-  it('refuses when the question is cancelled', async () => {
+  it('takes both under --yes, and a recorded choice over --yes, asking nothing', async () => {
+    const deps = { env: { CLAUDECODE: '1' }, detect: both, ask: noQuestion };
+    expect(await installHosts({ yes: true }, ctx(), deps)).toEqual({
+      hosts: ['claude', 'codex'],
+    });
+    await recordInstalledHost(dir, 'codex');
+    expect(await installHosts({ yes: true }, ctx(), deps)).toEqual({ hosts: ['codex'] });
+    expect(await installHosts({}, ctx(true), deps)).toEqual({ hosts: ['codex'] });
+  });
+
+  it('refuses when the terminal question is cancelled', async () => {
     const ask = async (): Promise<null> => null;
     await expect(
       installHosts({}, ctx(), { env: {}, detect: both, ask, isInteractive: true }),
     ).rejects.toThrow('Install cancelled');
+  });
+});
+
+describe('an agent install with both hosts found', () => {
+  /** The install action's flow: choose, run each host, record it, merge the steps. */
+  async function install(args: { harness?: Harness; yes?: boolean }) {
+    const { hosts, ask } = await installHosts(args, ctx(true), {
+      env: { CODEX_SESSION_ID: 'a' },
+      detect: both,
+    });
+    const out = await runEach(hosts, async (host) => {
+      await recordInstalledHost(dir, host);
+      return {
+        data: { host, nextSteps: [{ id: 'spend', question: host, options: [], next: '' }] },
+      };
+    });
+    return withSteps(out, hosts, ask);
+  }
+
+  it('records both when nobody answers, and carries the hosts question first', async () => {
+    const out = await install({});
+    expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
+    const steps = (out.data as { nextSteps: { id: string; question: string }[] }).nextSteps;
+    expect(steps.map((s) => s.id)).toEqual(['hosts', 'spend']);
+  });
+
+  it('records one under --harness codex, and both under --yes', async () => {
+    await install({ harness: 'codex' });
+    expect(await readInstalledHosts(dir)).toEqual(['codex']);
+    await rm(join(dir, HOSTS_FILE));
+    const out = await install({ yes: true });
+    expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
+    expect((out.data as { nextSteps: { id: string }[] }).nextSteps.map((s) => s.id)).toEqual([
+      'spend',
+    ]);
   });
 });
 
