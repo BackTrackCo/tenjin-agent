@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h3 align="center">The tool router for coding agents. Tenjin picks the right tool when your agent needs one, and one wallet pays for every call.</h3>
+<h3 align="center">The Tenjin router picks the right tool when your coding agent needs one, and one wallet pays for every call.</h3>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
@@ -14,179 +14,94 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#what-it-can-do">Tools</a> ·
-  <a href="#wallet-and-payments">Wallet &amp; payments</a> ·
-  <a href="#request-a-tool">Request a tool</a>
-</p>
-
-<p align="center">
   <img src="./assets/demo.gif" alt="Tenjin in Claude Code: research, live crypto prices, company lookup, email verification, and computation" width="720">
 </p>
 
 ---
 
-## Why
+Giving a coding agent good tools is a chore. Every tool wants its own account and API key. Every MCP server you add loads its tool definitions into every session, whether the session needs them or not. You write rules so the agent remembers to use them, and it reaches for plain web search anyway. And some tools you need once, for a single lookup that isn't worth the setup.
 
-Giving your agent good tools is a chore today:
+The Tenjin router replaces all of that with one install. It watches the moments where a tool could help, suggests the one that fits, and your wallet pays the provider per call. You keep no API keys, and one plugin stands in for every tool in the catalog.
 
-- **A key for every tool.** Sign up, pick a plan, paste an API key into a config file. Five tools, five accounts.
-- **MCP servers crowd the context.** Every server you install loads its tool definitions into every session, needed or not.
-- **Your agent forgets anyway.** It reaches for plain web search out of habit, so you write rules to remind it, and it still slips.
-- **Some tools you need once.** Installing something permanent for a one-off lookup isn't worth the setup.
+## Install
 
-Tenjin handles all of it. Install it once and keep working. The Tenjin router watches the moments where a tool could help: your prompt, your agent's web searches and page fetches, the tasks it hands to subagents, and the questions it asks you. When a curated tool beats what your agent was about to do, the router suggests it and your agent calls it. Your wallet pays for each call through [x402](#wallet-and-payments), so you manage no keys and install nothing new.
-
-## Quick start
-
-In Claude Code or Claude Desktop, paste:
+Paste this into Claude Code or Claude Desktop:
 
 ```text
 Install Tenjin from tenjin.sh
 ```
 
-Your agent asks you about spend limits, installs it, then asks whether to add funds now; you never type a command. Then type `/reload-plugins`, or start a new session, and Tenjin is on (when upgrading from an earlier release, start a new session). It needs Claude Code 2.1.287 or newer.
+Your agent asks one question, "Use the defaults ($5 a day, $0.25 a call) or set your own limits", then installs the plugin and creates a wallet. If the wallet is empty, it asks whether to add $5 now. Type `/reload-plugins` or start a new session, and the router is on. It needs Claude Code 2.1.287 or newer.
 
-Or in a terminal (Node.js 22 or newer):
+From a terminal, with Node.js 22 or newer:
 
 ```bash
 npm i -g tenjin-cli
-tenjin install          # adds the Tenjin plugin to Claude Code and creates your wallet
-tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
+tenjin install          # asks about limits, adds the plugin, creates your wallet
+tenjin wallet fund 5    # add $5 with a card, through Coinbase
 ```
 
-## What it can do
-
-The router picks from a catalog we curate and maintain. When nothing in it fits, it can point your agent at a reviewed third-party pay-per-call service from the [Tenjin list](#tenjin-list-and-experimental-bazaar), and your agent decides whether to use it or to ask you first. Each routing call costs a flat [routing fee](#routing-fee) of $0.003, on top of the provider's price, paid from channel deposits of up to $0.25 that count against the spend limits you approve at install.
-
-| Tool                                                           | What your agent gets                                                                      | Price per call |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
-| **Docs lookup** · [Context7](https://context7.com)             | Current, version-specific docs for a library or API                                       | **Free**       |
-| **Web research** · [Exa](https://exa.ai)                       | Search results with the page content, not just links                                      | $0.007         |
-| **Read a page** · [Firecrawl](https://firecrawl.dev)           | One exact page as clean text, even when a plain fetch fails                               | $0.01          |
-| **Crypto prices** · [CoinMarketCap](https://coinmarketcap.com) | Live quotes for any coin                                                                  | $0.01          |
-| **Compute** · [Wolfram Alpha](https://www.wolframalpha.com)    | Math, unit conversions, science and data questions                                        | $0.02          |
-| **Email check** · [Hunter](https://hunter.io)                  | Whether an address is real and deliverable                                                | $0.008         |
-| **Person lookup** · [Apollo](https://www.apollo.io)            | A professional profile and work email from a name and company, a LinkedIn URL or an email | $0.01          |
-| **Company profile** · [Apollo](https://www.apollo.io)          | Industry, headcount, revenue and funding from a domain                                    | $0.01          |
-| **Company match** · [CompanyEnrich](https://companyenrich.com) | The company behind a name or a social URL                                                 | $0.01225       |
-| **X posts** · [glim](https://glim.sh)                          | Posts matching a search, or one post with its thread                                      | $0.005         |
-| **Reddit** · [glim](https://glim.sh)                           | Posts matching a search, or one thread with its comments                                  | $0.01 / $0.005 |
-
-Every tool, including the Tenjin list, with current prices: [tenjin.sh/tools](https://tenjin.sh/tools). More are added by demand: [tell us what you want](#request-a-tool).
-
-### Tenjin list and experimental Bazaar
-
-**The Tenjin list is on by default.** When nothing in the catalog fits a step (such as generating a sound effect), the router may suggest one third-party pay-per-call x402 service that Tenjin has reviewed. The suggestion names the seller, the URL, the price and the input it takes, and your agent judges whether to use it or to ask you first. It is paid like any lookup, under your spend limits.
-
-**The open Bazaar is experimental and off by default.** Turn it on with:
-
-```sh
-tenjin config set experimental.bazaar on
-```
-
-With it on, the router may also suggest sellers from Coinbase's open x402 Bazaar, and to find them, short snippets of your prompts are sent to Coinbase's public Bazaar search. Those sellers are unreviewed third parties, matches can be noisy, prices can vary with the input, and payments are real, under your spend limits. `tenjin config` and `tenjin doctor` show both settings. Turn it off with `tenjin config set experimental.bazaar off`.
+`tenjin install --project` sets it up for one project only.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A["Your prompt,<br>a web search,<br>or a subagent task"] --> B{"Tenjin<br>router"}
-    B -- "a tool fits" --> C["Agent calls it<br>through x402"]
-    C --> D["Wallet pays the provider,<br>result comes back"]
-    B -- "nothing better" --> E["Agent carries on"]
-```
+The router hooks into Claude Code where a tool could help: your prompt, each web search or page fetch (before it runs, and again if it comes back short), each task your agent hands to a subagent, and each question it asks you. At each one, Jev, a decision model from [TypeSafe](https://typesafe.ai), picks a tool from the catalog or none. It only picks: it never writes the call or an instruction for your agent.
 
-The Tenjin router hooks into Claude Code at your prompt, before each web search or page fetch, when your agent hands work to a subagent, and around a question your agent asks you. At each point it asks Jev, a decision model from [TypeSafe](https://typesafe.ai), whether a tool in the catalog fits. When none does, Jev may pick one third-party service from a short list matching the step (the Tenjin list, plus the open Bazaar if you turned it on), or none. Either way Jev only chooses from a list, so it never writes a call or an instruction for your agent; a third-party listing's description is the seller's own, and your agent judges it.
+When a tool fits, your agent sees one line naming it and its price, and calls it through the plugin's `request` tool. Tenjin checks the input against the tool's spec, pays the provider from your wallet within your limits, and hands back the result. When nothing fits, your agent carries on with its own tools. A search for a library's documentation runs as written, with current docs from Context7 added above the results.
 
-When one fits, your agent sees a one-line suggestion with the tool and its price, and calls it through the Tenjin plugin's MCP server: the offer's id alone shows the tool's inputs, an example and what it returns, and the id with the agent's input runs it. Tenjin builds the call, pays the provider from your wallet, within your limits, and hands back the result.
+To decide, the router sends your current prompt and up to six earlier messages, with secrets masked, plus the search, URL, task or question it is routing. It never sends tool results. [What the hooks send, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
 
-To pick a tool, the router sends your prompt and recent messages with secrets masked, plus the searches, URLs, subagent tasks and questions it routes; tool results stay on your machine. [What it sends, and everything install writes →](./docs/agent-permissions.md#what-the-hooks-send)
+## Tools
 
-## Wallet and payments
+The catalog covers web research (Exa), page reads (Firecrawl), library docs (Context7), computation (Wolfram Alpha), live crypto prices (CoinMarketCap), people, company and email lookups (Apollo, CompanyEnrich, Hunter), and X and Reddit (glim), plus reviewed pay-per-call services for images, video, voiceovers, music, transcription, academic papers, SEC filings, PDFs, screenshots and more. Most lookups cost a cent or two. [Every tool and its current price →](https://tenjin.sh/tools)
 
-Tenjin pays for tools with [x402](https://www.x402.org), an open standard that builds payments into HTTP. A paid endpoint answers `402 Payment Required` with its price, the client signs a payment for that amount, and the endpoint returns the result. Neither side needs an account or an API key. Read more: [x402.org](https://www.x402.org) · [whitepaper](https://www.x402.org/x402-whitepaper.pdf) · [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome) · [spec and SDKs](https://github.com/coinbase/x402).
+Missing one your agent keeps needing? [Request a tool](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement) or [report a bug](https://github.com/BackTrackCo/tenjin-agent/issues/new?labels=bug).
 
-### Your wallet
+**Experimental:** `tenjin config set experimental.bazaar on` lets the router also suggest unreviewed sellers from Coinbase's open x402 Bazaar. To find them, short snippets of your prompts go to Coinbase's public Bazaar search. It is off by default.
 
-`tenjin install` creates a wallet on your machine that holds [USDC](https://www.circle.com/usdc) on [Base](https://base.org). Tenjin encrypts the private key, unlocks it through your OS keychain, and never sends it anywhere. Tenjin never holds or moves your funds. Paying a provider costs no gas.
+## Wallet and limits
 
-### Limits
+`tenjin install` creates a wallet on your machine that holds USDC on Base. The CLI encrypts its private key, unlocks it through your OS keychain, and never sends it anywhere. Tenjin never holds your funds. Payments run over [x402](https://www.x402.org) ([whitepaper](https://www.x402.org/x402-whitepaper.pdf), [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome)), and paying a provider costs no gas.
 
 | Limit    | Default | Change it                             |
 | -------- | ------- | ------------------------------------- |
 | Per day  | $5      | `tenjin config set sessionBudget 2`   |
 | Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
-The daily budget is the control, the per-call limit is the runaway guard, and your wallet balance is the hard stop. Both defaults hold from the moment you install. `tenjin install` asks once, or tells your agent to ask you when the agent runs it: use the defaults, or set your own limits. The per-call limit cannot go below $0.25, the routing deposit. To turn the router off, run `tenjin config set router.enabled false`.
+The daily budget, over a rolling 24 hours, is the control. The per-call limit is the runaway guard, and it cannot go below $0.25, the routing deposit. The wallet balance is the hard stop. A call over either limit pays nothing on its own: your agent tells you the price, Claude Code asks through its own permission prompt, and the call runs once you say yes.
 
-A call that would pay more than the per-call limit (all its payments together, such as five takes of a video; today two video models at $0.42 and $0.45, hosting at $0.50 and research at $0.60 are priced above it) pays nothing on its own: your assistant tells you what it costs, and in Claude Code it asks you through Claude Code's own permission prompt and runs it once you say yes. [How the limits work →](./docs/agent-permissions.md#what-bounds-a-payment)
+Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent. Each deposit counts against your limits, so approving the limits at install approves the fee. When a routing call can't be paid, Claude Code tells you why once per session, and `tenjin doctor` names the fix. [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
-### Routing fee
-
-Each routing call costs a flat $0.003, paid over x402 `batch-settlement` by `tenjin mcp` from a channel deposit of up to $0.25. A deposit is an automatic payment: it counts against the limits above, and approving them at install approves the fee. The fees come out of the deposit and are not counted again. When a deposit is taken, Claude Code says so once; `tenjin status` shows it as prepaid routing credit, apart from what lookups cost, and `tenjin wallet balance` adds the credit still left. When a call cannot be paid, it takes the free path, and Claude Code tells you once per session why and what fixes it; `tenjin doctor` says the same. Details are in [docs/agent-permissions.md](docs/agent-permissions.md#what-bounds-a-router-payment-on-top-of-that).
-
-### Funding
-
-`tenjin wallet fund 5` opens a Coinbase Onramp checkout for your wallet. In the US, Apple Pay or Google Pay with no Coinbase account. Elsewhere, your Coinbase account. You can also send USDC on Base to the address `tenjin wallet address` prints; at a terminal it and `tenjin wallet fund` also draw that address as a QR code for a phone wallet to scan (`--no-qr` skips it).
-
-$5, the Apple Pay and Google Pay minimum, covers about 700 web searches, 500 page reads or 250 Wolfram Alpha answers.
-
-### Withdrawing
-
-`tenjin wallet send <amount> USDC <address>` sends funds to any address. It's a regular onchain transfer, so it needs a little ETH on Base for gas.
+`tenjin wallet fund 5` opens a Coinbase checkout for your wallet: Apple Pay or Google Pay with no Coinbase account in the US, your Coinbase account elsewhere. You can also send USDC on Base to the address `tenjin wallet address` prints. To move funds out, `tenjin wallet send <amount> USDC <address>` needs a per-send cap (`tenjin config set sendMaxAmount <usd>`) and a little ETH on Base for gas.
 
 ## Everyday commands
 
 ```bash
-tenjin status                  # what you've spent today
-tenjin wallet balance          # what's left
-tenjin wallet fund 5           # top up
-tenjin payments                # the paid lookups this machine made
-tenjin payments reconcile      # settle paid lookups whose settlement was unknown
-tenjin update                  # newest version; wallet and settings stay
-tenjin config set router.enabled false             # pause the router on this machine
-tenjin config set --project router.enabled false   # ...or just in this repo
-tenjin uninstall               # remove the Claude Code plugin; your wallet stays
+tenjin status            # spent today, and the limits in force
+tenjin wallet balance    # what's left
+tenjin payments          # the paid lookups this machine made
+tenjin doctor            # check that this machine can run a lookup
+tenjin update            # newest version; wallet and settings stay
+tenjin config set router.enabled false             # pause the router
+tenjin config set --project router.enabled false   # ...or only in this repo
+tenjin uninstall         # remove the plugin; your wallet stays
 ```
 
-Use `tenjin install --project` to set it up for a single project; `tenjin doctor` run in that project checks it, and `tenjin update` refreshes it with the rest. Add `--json` to any command for machine-readable output.
-
-The CLI asks npm at most once a day whether a newer version exists and says so; it never updates itself, so `tenjin update` is yours to run. `tenjin config set update.mode off` turns that check off, the request to npm included, and `TENJIN_NO_UPDATE_CHECK=1` in the environment does the same wherever it is set.
-
-Every paid lookup is recorded on your machine, with the files and full results it returned. [Where they live, and what `payments reconcile` does →](./docs/agent-permissions.md#what-a-paid-lookup-leaves-on-your-machine)
-
-<details>
-<summary>Spending limits: the fine print</summary>
-
-Limits are set only where no setting exists yet, so an update never overwrites yours. The daily budget is a rolling 24-hour window. Setting the daily limit to `0` blocks automatic payments; `tenjin config set sessionBudget none` removes the daily ceiling only.
-
-`tenjin pay <url>` pays any x402 endpoint you name. It ignores the automatic limits and always asks for your consent to the quoted price, interactively or with `--yes`. It is never used as a workaround when the router refuses. See the [safety model](./docs/safety-model.md).
-
-</details>
-
-## Request a tool
-
-Tenjin is in alpha, and the catalog grows with what people ask for. Missing a service your agent keeps needing? Hit a lookup that went to the wrong place? We want to hear it.
-
-- **[Request a tool →](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement)**
-- **[Report a bug →](https://github.com/BackTrackCo/tenjin-agent/issues/new?labels=bug)**
+The CLI checks npm at most once a day for a newer version and never updates itself; `tenjin config set update.mode off` stops the check.
 
 ## Learn more
 
-- [How a lookup runs, what it sends, and what install writes](./docs/agent-permissions.md)
+- [Permissions, hooks, and what install writes](./docs/agent-permissions.md)
 - [Safety model](./docs/safety-model.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 
 ## Developing
 
-Before contributing, read [CONTRIBUTING.md](./CONTRIBUTING.md) for the contributor agreement.
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) first for the contributor agreement.
 
 ```bash
 pnpm install
 pnpm run githooks   # once, to use the repo's git hooks
 pnpm run build
 pnpm run test
-pnpm run typecheck
-pnpm run lint
 ```
