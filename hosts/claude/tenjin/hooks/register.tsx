@@ -403,7 +403,7 @@ function labelOf(value: unknown): string | undefined {
   // "Reseller (Model)" names the model the person asked for: the trailing
   // group's contents. One still over the cap is cut with an ellipsis, never dropped.
   const text = clean(value, value.length + 1);
-  const name = (/ \(([^()]+)\)$/.exec(text)?.[1] ?? text).trim();
+  const name = (trailingGroup(text) ?? text).trim();
   const chars = Array.from(name);
   if (chars.length === 0) return undefined;
   return chars.length <= LABEL_CHARS
@@ -412,6 +412,20 @@ function labelOf(value: unknown): string | undefined {
         .slice(0, LABEL_CHARS - 1)
         .join('')
         .trimEnd()}…`;
+}
+
+/** The contents of a name's last balanced " (…)" group, or undefined when it
+ *  ends in none or its parentheses do not balance ("Foo (beta"). */
+function trailingGroup(text: string): string | undefined {
+  if (!text.endsWith(')')) return undefined;
+  let depth = 0;
+  for (let at = text.length - 1; at >= 0; at -= 1) {
+    if (text[at] === ')') depth += 1;
+    else if (text[at] === '(' && --depth === 0) {
+      return at > 1 && text[at - 1] === ' ' ? text.slice(at + 1, -1) : undefined;
+    }
+  }
+  return undefined;
 }
 
 function shortKey(value: string): string | undefined {

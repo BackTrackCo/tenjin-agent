@@ -432,6 +432,22 @@ test('a long service name is shortened, never dropped: the model in a trailing g
     ],
     ['b920ff14-0000-4a50-8c25-240e871602f3', 'Exa', 'Exa'],
     [
+      'b920ff14-0000-4a50-8c25-250000000020',
+      'GlianaAI (Recraft V4.1 Vector (SVG))',
+      'Recraft V4.1 Vector (SVG)',
+    ],
+    [
+      'b920ff14-0000-4a50-8c25-250000000021',
+      'AiSpace (Venice) (OpenAI GPT Image 2.5 Sunburst (edit))',
+      'OpenAI GPT Image 2.5 Sunburst (…',
+    ],
+    [
+      'b920ff14-0000-4a50-8c25-250000000022',
+      'AiSpace (Venice) (MiniMax Hailuo 3 Max (image to video))',
+      'MiniMax Hailuo 3 Max (image to…',
+    ],
+    ['b920ff14-0000-4a50-8c25-250000000023', 'Foo (beta', 'Foo (beta'],
+    [
       'b920ff14-0000-4a50-8c25-240000000010',
       'AiSpace (Venice) (Meta Muse Image)',
       'Meta Muse Image',
