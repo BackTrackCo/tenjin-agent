@@ -55,7 +55,7 @@ tenjin install          # adds the Tenjin plugin to your agent and creates your 
 tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
 
-Using Codex? `tenjin install` sets it up too. Run by your agent, it sets up the agent it runs in. In a terminal, it sets up the agent you have, and asks which when you have both Claude Code and Codex. `tenjin doctor` and `tenjin uninstall` then cover each agent install set up. In Codex, Tenjin looks at your prompt and at each web search. One of its hooks lets Tenjin's lookup tool run without asking you first, even if you told Codex to ask; to be asked, turn that hook off in `/hooks` ([details](docs/agent-permissions.md#codex)).
+**Codex (experimental):** `tenjin install` sets it up too ([how it hooks in](docs/agent-permissions.md#codex)).
 
 ## What it can do
 
