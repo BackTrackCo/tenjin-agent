@@ -117,12 +117,16 @@ export interface InstallHostArgs {
   project?: boolean;
   refresh?: boolean;
   yes?: boolean;
+  /** Carried into the answer commands, so the re-run is this install. */
+  noWallet?: boolean;
+  maxAutoSpend?: string;
+  sessionBudget?: string;
 }
 
 /** The hosts this install sets up, and the question it hands over, if any. */
 export interface HostChoice {
   hosts: Harness[];
-  /** Both hosts found and nobody answered: both are set up, and this asks. */
+  /** Both hosts found and nobody answered: nothing is set up, and this asks. */
   ask?: QuestionStep;
 }
 
@@ -132,9 +136,9 @@ export interface HostChoice {
  * a candidate (the agent's own host counts as found). With one, install goes
  * there; with none, to Claude Code, whose setup needs no binary. With both, a
  * recorded choice from an earlier install stands, `--yes` takes both, and a
- * person at a terminal is asked, both selected. Anyone else, an agent
- * included, gets both set up and the question in `nextSteps`, as the spend
- * question goes: the default holds until an answer changes it.
+ * person at a terminal is asked, both selected, before anything is written.
+ * Anyone else, an agent included, gets no host set up and the question in
+ * `nextSteps`, whose answers re-run the install with the choice.
  */
 export async function installHosts(
   args: InstallHostArgs,
@@ -156,7 +160,7 @@ export async function installHosts(
     agent === undefined &&
     ctx.flags.json !== true &&
     (deps.isInteractive ?? (ctx.io.isTTY && Boolean(process.stdin.isTTY)));
-  if (!interactive) return { hosts: found, ask: hostsStep() };
+  if (!interactive) return { hosts: [], ask: hostsStep(args) };
   const picked = await (deps.ask ?? askHosts)(found);
   if (picked === null || picked.length === 0) {
     throw new CliError('REFUSED', 'Install cancelled before anything was written.', {
@@ -169,30 +173,33 @@ export async function installHosts(
 const HOSTS_QUESTION = 'Tenjin found Claude Code and Codex here. Set it up for which?';
 
 /**
- * The hosts question for whoever ran the install. Both are already set up, so
- * the default runs nothing, and keeping one host removes the other.
+ * The hosts question for whoever ran the install. Nothing is set up yet, so
+ * each answer re-runs this install with the choice.
  */
-export function hostsStep(): QuestionStep {
+export function hostsStep(args: InstallHostArgs = {}): QuestionStep {
+  const install = (choice: string) =>
+    [
+      'tenjin install',
+      choice,
+      ...(args.noWallet === true ? ['--no-wallet'] : []),
+      ...(args.maxAutoSpend !== undefined ? [`--max-auto-spend ${args.maxAutoSpend}`] : []),
+      ...(args.sessionBudget !== undefined ? [`--session-budget ${args.sessionBudget}`] : []),
+    ].join(' ');
   const options: QuestionStep['options'] = [
-    { id: 'both', label: 'Claude Code and Codex', recommended: true, command: null },
+    { id: 'both', label: 'Claude Code and Codex', recommended: true, command: install('--yes') },
     {
       id: 'claude',
       label: 'Claude Code only',
       recommended: false,
-      command: 'tenjin uninstall --harness codex',
+      command: install('--harness claude'),
     },
-    {
-      id: 'codex',
-      label: 'Codex only',
-      recommended: false,
-      command: 'tenjin uninstall --harness claude',
-    },
+    { id: 'codex', label: 'Codex only', recommended: false, command: install('--harness codex') },
   ];
   return {
     id: 'hosts',
     question: HOSTS_QUESTION,
     options,
-    next: `In this session, ask the person this question with your question tool, offering these three options in order with the first marked recommended. Both are already set up. On "Claude Code and Codex", run nothing. On "Claude Code only", run \`${options[1]!.command}\`; on "Codex only", run \`${options[2]!.command}\`. Run the command alone, never joined with another command, and never ask the person to run a command.`,
+    next: `In this session, ask the person this question with your question tool, offering these three options in order with the first marked recommended. Nothing is set up until the answer. Run the command of the option they pick: ${options.map((o) => `"${o.label}": \`${o.command}\``).join('; ')}. Run it alone, never joined with another command, and never ask the person to run a command.`,
   };
 }
 
@@ -222,10 +229,10 @@ export function withSteps(
       ...(out.humanLines ?? []),
       ...(ask !== undefined
         ? [
+            'Nothing is set up until the person picks the agents.',
             `Ask the person in this session: ${ask.question}`,
             ...ask.options.map(
-              (o) =>
-                `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command ?? 'run nothing'}`,
+              (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command ?? ''}`,
             ),
           ]
         : []),

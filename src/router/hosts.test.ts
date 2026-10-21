@@ -133,15 +133,19 @@ describe('installHosts', () => {
     expect(out).toEqual({ hosts: ['codex'] });
   });
 
-  it('under an agent, sets up both and hands the question over in the same form', async () => {
+  it('under an agent, sets up nothing and hands the question over, answers re-running install', async () => {
     const env = { CLAUDECODE: '1' };
-    const out = await installHosts({}, ctx(true), { env, detect: both, ask: noQuestion });
-    expect(out.hosts).toEqual(['claude', 'codex']);
+    const out = await installHosts({ noWallet: true }, ctx(true), {
+      env,
+      detect: both,
+      ask: noQuestion,
+    });
+    expect(out.hosts).toEqual([]);
     expect(out.ask?.id).toBe('hosts');
     expect(out.ask?.options.map((o) => [o.id, o.recommended, o.command])).toEqual([
-      ['both', true, null],
-      ['claude', false, 'tenjin uninstall --harness codex'],
-      ['codex', false, 'tenjin uninstall --harness claude'],
+      ['both', true, 'tenjin install --yes --no-wallet'],
+      ['claude', false, 'tenjin install --harness claude --no-wallet'],
+      ['codex', false, 'tenjin install --harness codex --no-wallet'],
     ]);
     // The same question for a script with no terminal.
     expect(
@@ -168,6 +172,10 @@ describe('installHosts', () => {
 });
 
 describe('an agent install with both hosts found', () => {
+  let ran: Harness[] = [];
+  beforeEach(() => {
+    ran = [];
+  });
   /** The install action's flow: choose, run each host, record it, merge the steps. */
   async function install(args: { harness?: Harness; yes?: boolean }) {
     const { hosts, ask } = await installHosts(args, ctx(true), {
@@ -175,6 +183,7 @@ describe('an agent install with both hosts found', () => {
       detect: both,
     });
     const out = await runEach(hosts, async (host) => {
+      ran.push(host);
       await recordInstalledHost(dir, host);
       return {
         data: { host, nextSteps: [{ id: 'spend', question: host, options: [], next: '' }] },
@@ -183,15 +192,20 @@ describe('an agent install with both hosts found', () => {
     return withSteps(out, hosts, ask);
   }
 
-  it('records both when nobody answers, and carries the hosts question first', async () => {
+  it('writes nothing and records nothing until the answer, and carries only the hosts question', async () => {
     const out = await install({});
-    expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
-    const steps = (out.data as { nextSteps: { id: string; question: string }[] }).nextSteps;
-    expect(steps.map((s) => s.id)).toEqual(['hosts', 'spend']);
+    expect(ran).toEqual([]);
+    expect(await readInstalledHosts(dir)).toBeNull();
+    const steps = (out.data as { nextSteps: { id: string }[] }).nextSteps;
+    expect(steps.map((s) => s.id)).toEqual(['hosts']);
+    // Idempotent: the same run again still writes nothing.
+    await install({});
+    expect(ran).toEqual([]);
   });
 
   it('records one under --harness codex, and both under --yes', async () => {
     await install({ harness: 'codex' });
+    expect(ran).toEqual(['codex']);
     expect(await readInstalledHosts(dir)).toEqual(['codex']);
     await rm(join(dir, HOSTS_FILE));
     const out = await install({ yes: true });

@@ -14,7 +14,7 @@ export function registerCore(reg: Registration): void {
 
   leaf(SETUP, 'install', 'set up Tenjin for your agent and create a wallet')
     .description(
-      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. It sets up Claude Code or Codex, whichever this machine has, and asks which when it has both, both selected; run by an agent, both hold until the answer removes one. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
+      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. It sets up Claude Code or Codex, whichever this machine has, and asks which when it has both, both selected, before it writes anything; run by an agent, it hands the question over and the answer re-runs it. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
     )
     .addOption(hostOverride())
     .option('--project', 'register the plugin for this project only')
@@ -56,6 +56,9 @@ Learn more:
             ...(o.project === true ? { project: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
             ...(o.yes === true ? { yes: true } : {}),
+            ...(o.wallet === false ? { noWallet: true } : {}),
+            ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
+            ...(typeof o.sessionBudget === 'string' ? { sessionBudget: o.sessionBudget } : {}),
           },
           ctx,
         );
