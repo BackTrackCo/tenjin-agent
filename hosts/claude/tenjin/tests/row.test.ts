@@ -431,6 +431,25 @@ test('a long service name is shortened, never dropped: the model in a trailing g
       'A very long reseller name with…',
     ],
     ['b920ff14-0000-4a50-8c25-240e871602f3', 'Exa', 'Exa'],
+    [
+      'b920ff14-0000-4a50-8c25-240000000010',
+      'AiSpace (Venice) (Meta Muse Image)',
+      'Meta Muse Image',
+    ],
+    ['b920ff14-0000-4a50-8c25-240000000011', 'AiSpace (Venice) (Ideogram V4)', 'Ideogram V4'],
+    ['b920ff14-0000-4a50-8c25-240000000012', 'Treza (Recraft V4.1)', 'Recraft V4.1'],
+    [
+      'b920ff14-0000-4a50-8c25-240000000013',
+      'Orthogonal (Scrape Creators LinkedIn profile)',
+      'Scrape Creators LinkedIn profile',
+    ],
+    [
+      'b920ff14-0000-4a50-8c25-240000000014',
+      'StableEnrich (Google Maps Places)',
+      'Google Maps Places',
+    ],
+    ['b920ff14-0000-4a50-8c25-240000000015', 'glim', 'glim'],
+    ['b920ff14-0000-4a50-8c25-240000000016', 'CoinMarketCap', 'CoinMarketCap'],
   ] as const;
   const paid = `summary${JSON.stringify({
     status: 'fulfilled',
