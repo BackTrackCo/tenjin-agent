@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   notify:
-    if: github.repository == 'BackTrackCo/tenjin-agent'
+    if: github.repository_owner == 'BackTrackCo'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
