@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { chmod, mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CliError } from '../errors';
 import {
   passphraseBlobPath,
@@ -821,6 +821,26 @@ describe('storeDurably', () => {
     const path = passphraseFilePathFor(ACCOUNT, tmp);
     expect(await readFile(path, 'utf8')).toBe(value);
     if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it('the file store replaces an empty passphrase file left by a cut-off write', async () => {
+    const path = passphraseFilePathFor(ACCOUNT, tmp);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, '');
+    await expect(
+      storeDurably({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, 'secret'),
+    ).resolves.toBe('stored');
+    expect(await readFile(path, 'utf8')).toBe('secret');
+  });
+
+  it('the file store never replaces a non-empty passphrase file without update', async () => {
+    const path = passphraseFilePathFor(ACCOUNT, tmp);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, 'other');
+    await expect(
+      storeDurably({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, 'secret'),
+    ).resolves.toBe('conflict');
+    expect(await readFile(path, 'utf8')).toBe('other');
   });
 });
 

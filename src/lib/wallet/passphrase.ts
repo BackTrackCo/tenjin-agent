@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
+import { readFile, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { CliError } from '../errors';
 import { hasCode } from '../errno';
@@ -1230,8 +1230,19 @@ function fileStore(deps: PassphraseDeps): PassphraseStore {
     // The read strips one trailing LF, so a value ending in one never reads back.
     storable: (value) => !value.endsWith('\n'),
     async store(account, value, o) {
-      const write = o?.update === true ? writeFileAtomic : writeFileAtomicExclusive;
-      await write(pathFor(account), value, { mode: 0o600, dirMode: 0o700 });
+      const path = pathFor(account);
+      const mode = { mode: 0o600, dirMode: 0o700 };
+      if (o?.update === true) return writeFileAtomic(path, value, mode);
+      try {
+        await writeFileAtomicExclusive(path, value, mode);
+      } catch (err) {
+        // AN EMPTY FILE HOLDS NO SECRET. On Windows the exclusive write opens the
+        // target itself before writing, so a crash in between leaves it empty;
+        // it reads as a miss, and without this every later save (repair
+        // included) would hit EEXIST forever. Replacing it loses nothing.
+        if (!hasCode(err, 'EEXIST') || (await stat(path).catch(() => null))?.size !== 0) throw err;
+        await writeFileAtomic(path, value, mode);
+      }
     },
     async remove(account) {
       try {
