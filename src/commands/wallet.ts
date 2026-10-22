@@ -1,6 +1,6 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CliError } from '../lib/errors';
 import { emitNotice } from '../lib/output';
 import { walletPath } from '../lib/paths';
@@ -34,6 +34,7 @@ import {
   promptPassphrase,
   resolvePassphraseForCreate,
   storeNoun,
+  unstorableWhy,
   type CreatePassphraseResult,
   type DurableStore,
 } from '../lib/wallet/passphrase';
@@ -279,10 +280,25 @@ export function passphraseNote(p: CreatePassphraseResult, address: string, dir: 
   const account = address.toLowerCase();
   if (!p.durable) {
     const attempted = p.attempted ?? 'keychain';
-    if (attempted === 'file') {
-      return `Encrypted with TENJIN_WALLET_PASSPHRASE only: Tenjin could not save the passphrase to ${describeStoreLocation('file', account, dir)}, so Claude Code can unlock this wallet only where that variable is set. Check that ~/.tenjin is writable, then run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}.`;
+    const only = 'so Claude Code can unlock this wallet only where that variable is set.';
+    switch (p.notSaved) {
+      case 'rejected-characters':
+        // Repair would refuse the same value: the variable is the fix.
+        return `Encrypted with TENJIN_WALLET_PASSPHRASE only: ${unstorableWhy(attempted)}, ${only} Keep it set in the environment Claude Code starts from.`;
+      case 'conflict':
+      case 'kept-existing':
+        return `Encrypted with TENJIN_WALLET_PASSPHRASE only: ${describeStoreLocation(attempted, account, dir)} already holds a different passphrase for this wallet, ${only} Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE} to replace it.`;
+      default:
+        break;
     }
-    return `Encrypted with TENJIN_WALLET_PASSPHRASE only: the ${storeNoun(attempted)} did not answer, so Claude Code can unlock this wallet only where that variable is set. Once it answers, run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}.`;
+    if (attempted === 'file') {
+      const path = describeStoreLocation('file', account, dir);
+      return `Encrypted with TENJIN_WALLET_PASSPHRASE only: Tenjin could not save the passphrase to ${path}, ${only} Check that ${dirname(path)} is writable, then run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}.`;
+    }
+    if (p.notSaved === 'store-failed') {
+      return `Encrypted with TENJIN_WALLET_PASSPHRASE only: Tenjin could not save the passphrase to the ${storeNoun(attempted)}, ${only} Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}.`;
+    }
+    return `Encrypted with TENJIN_WALLET_PASSPHRASE only: the ${storeNoun(attempted)} did not answer, ${only} Once it answers, run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}.`;
   }
   if (p.source === 'file' || p.source === 'env') {
     if (p.fileReason === 'insecure-storage') {

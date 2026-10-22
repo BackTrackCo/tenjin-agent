@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, readFile, writeFile, stat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import * as Keystore from 'ox/Keystore';
@@ -709,7 +709,7 @@ describe('runWalletCreate: where the passphrase went (Q2, S4)', () => {
       attempted: 'file',
     });
     expect(fileFailed).toBe(
-      `Encrypted with TENJIN_WALLET_PASSPHRASE only: Tenjin could not save the passphrase to ${path}, so Claude Code can unlock this wallet only where that variable is set. Check that ~/.tenjin is writable, then run \`tenjin wallet repair\` yourself (it asks for the passphrase in your terminal; never paste it into chat).`,
+      `Encrypted with TENJIN_WALLET_PASSPHRASE only: Tenjin could not save the passphrase to ${path}, so Claude Code can unlock this wallet only where that variable is set. Check that ${dirname(path)} is writable, then run \`tenjin wallet repair\` yourself (it asks for the passphrase in your terminal; never paste it into chat).`,
     );
     expect(fileFailed).toContain(REPAIR_CLAUSE);
     expect(fileFailed.toLowerCase()).not.toContain('keychain');
@@ -723,6 +723,45 @@ describe('runWalletCreate: where the passphrase went (Q2, S4)', () => {
     });
     expect(osFailed).toContain(REPAIR_CLAUSE);
     expect(osFailed).toContain('the Linux keyring did not answer');
+
+    // A value the store refuses: the keychain answered, and repair would refuse it too.
+    const rejected = note({
+      passphrase: 'Passwört',
+      durable: false,
+      source: 'env',
+      origin: 'env',
+      location: 'TENJIN_WALLET_PASSPHRASE',
+      attempted: 'keychain',
+      notSaved: 'rejected-characters',
+    });
+    expect(rejected).toBe(
+      'Encrypted with TENJIN_WALLET_PASSPHRASE only: the macOS keychain writer only stores printable ASCII passphrases, so Claude Code can unlock this wallet only where that variable is set. Keep it set in the environment Claude Code starts from.',
+    );
+    expect(rejected).not.toContain('did not answer');
+    expect(rejected).not.toContain('tenjin wallet repair');
+    const fileRejected = note({
+      passphrase: 'p\n',
+      durable: false,
+      source: 'env',
+      origin: 'env',
+      location: 'TENJIN_WALLET_PASSPHRASE',
+      attempted: 'file',
+      notSaved: 'rejected-characters',
+    });
+    expect(fileRejected).toContain('ends in a line break');
+    expect(fileRejected).not.toContain('could not save');
+    const conflict = note({
+      passphrase: 'p',
+      durable: false,
+      source: 'env',
+      origin: 'env',
+      location: 'TENJIN_WALLET_PASSPHRASE',
+      attempted: 'keychain',
+      notSaved: 'conflict',
+    });
+    expect(conflict).toContain('already holds a different passphrase');
+    expect(conflict).toContain(REPAIR_CLAUSE);
+    expect(conflict).not.toContain('did not answer');
   });
 
   it('a sidecar write failure aborts the create with no wallet.json', async () => {

@@ -37,6 +37,7 @@ import {
   storeDurablyDetailed,
   storeNoun,
   toStoreOutcome,
+  unstorableWhy,
   walletStoreAccount,
   type PassphraseDeps,
   type PassphraseSource,
@@ -1194,8 +1195,10 @@ export async function repairLocalWalletPassphrase(
     case 'rejected-characters':
       throw new CliError(
         'REFUSED',
-        'This passphrase has characters the macOS keychain writer does not store; nothing was saved.',
-        { fix: 'Keep TENJIN_WALLET_PASSPHRASE set in the environment Claude Code starts from.' },
+        `This passphrase cannot be saved: ${unstorableWhy(target)}; nothing was saved.`,
+        {
+          fix: 'Keep TENJIN_WALLET_PASSPHRASE set in the environment Claude Code starts from.',
+        },
       );
     case 'store-failed': {
       const detail = written.detail ?? `the ${storeNoun(target)} write failed`;

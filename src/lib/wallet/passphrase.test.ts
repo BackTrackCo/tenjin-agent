@@ -1210,6 +1210,47 @@ describe('resolvePassphraseForCreate (never prompts, Q1)', () => {
     },
   );
 
+  it('never saves an env secret ending in a line break to the file, which would read back as another secret', async () => {
+    const res = await resolvePassphraseForCreate(
+      {
+        env: { TENJIN_WALLET_PASSPHRASE: 'x-secret\n' },
+        dir: tmp,
+        platform: 'freebsd',
+        isTTY: false,
+      },
+      ADDRESS,
+    );
+    expect(res).toMatchObject({
+      passphrase: 'x-secret\n',
+      source: 'env',
+      durable: false,
+      attempted: 'file',
+      notSaved: 'rejected-characters',
+    });
+    await expect(stat(passphraseFilePathFor(ACCOUNT, tmp))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    // Without the variable nothing answers: no stale file is read as the passphrase.
+    await expect(
+      resolvePassphrase({ env: {}, dir: tmp, platform: 'freebsd', isTTY: false }, ADDRESS),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  it.each([
+    ['secret-service', 'linux'],
+    ['dpapi', 'win32'],
+  ] as const)(
+    'the %s gate refuses a trailing line break before any write',
+    async (store, platform) => {
+      // An empty lookup is a miss; nothing here answers a write.
+      const { exec, calls } = recordingExec(() => ({ stdout: '' }));
+      await expect(
+        storeDurably({ env: {}, dir: tmp, platform, isTTY: false, exec }, store, ADDRESS, 'p\r\n'),
+      ).resolves.toBe('rejected-characters');
+      expect(calls.filter((c) => c.stdin !== undefined)).toEqual([]);
+    },
+  );
+
   it('a generated secret whose OS store write fails refuses with keychain_locked details', async () => {
     const { exec } = recordingExec((call) => {
       if (call.args[0] === 'default-keychain') return { stdout: '' };

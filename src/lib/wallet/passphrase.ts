@@ -271,8 +271,10 @@ interface PassphraseStore {
   probe(o?: StoreCallOptions): Promise<{ probe: StoreProbe; detail?: string }>;
   /**
    * When present, a cheap pre-check for values this backend's writer refuses on
-   * principle (the keychain's printable-ASCII gate) — so callers can tell
-   * "this passphrase's characters" apart from "the store write failed".
+   * principle (the keychain's printable-ASCII gate), or that its read would not
+   * give back byte for byte (a trailing line break the read strips) — so
+   * callers can tell "this passphrase's characters" apart from "the store
+   * write failed", and nothing is written that reads back as another secret.
    */
   storable?(value: string): boolean;
 }
@@ -787,6 +789,8 @@ export interface CreatePassphraseResult {
   fileReason?: 'no-keyring' | 'insecure-storage';
   /** durable:false only: the store the env secret could not be saved to (picks the passphraseNote wording). */
   attempted?: DurableStore;
+  /** durable:false only: why it was not saved there (picks the passphraseNote wording). */
+  notSaved?: Exclude<DurableWrite, 'stored' | 'already-stored'>;
 }
 
 /**
@@ -836,13 +840,17 @@ export async function resolvePassphraseForCreate(
   const origin = fromEnv !== null ? 'env' : 'generated';
   const secret = fromEnv ?? randomBytes(32).toString('base64url');
   const account = walletStoreAccount(address);
-  const envOnly = (attempted: DurableStore): CreatePassphraseResult => ({
+  const envOnly = (
+    attempted: DurableStore,
+    notSaved: Exclude<DurableWrite, 'stored' | 'already-stored'>,
+  ): CreatePassphraseResult => ({
     passphrase: secret,
     source: 'env',
     origin,
     location: 'TENJIN_WALLET_PASSPHRASE',
     durable: false,
     attempted,
+    notSaved,
   });
 
   let target: DurableStore;
@@ -858,7 +866,7 @@ export async function resolvePassphraseForCreate(
       target = 'file';
       fileReason = 'no-keyring';
     } else {
-      if (origin === 'env') return envOnly(probed.store);
+      if (origin === 'env') return envOnly(probed.store, 'uncertain');
       throw new CliError(
         'REFUSED',
         `The ${storeNoun(probed.store)} did not answer within ${Math.round(timeoutsOf(deps).probeMs / 1000)} s; it may be locked. No wallet was created.`,
@@ -878,7 +886,7 @@ export async function resolvePassphraseForCreate(
       ...(fileReason !== undefined ? { fileReason } : {}),
     };
   }
-  if (origin === 'env') return envOnly(target);
+  if (origin === 'env') return envOnly(target, written.outcome);
   const detail = written.detail ?? `the ${storeNoun(target)} write failed`;
   if (target === 'file') {
     // Decision 6: there is no keychain to unlock here, so neither the fix nor
@@ -1065,6 +1073,7 @@ function dpapiStore(deps: PassphraseDeps): PassphraseStore {
         return classifyStoreFailure('dpapi', err);
       }
     },
+    storable: readsBackFromStdout,
     async store(account, passphrase, o) {
       const { stdout } = await exec(
         'powershell.exe',
@@ -1132,6 +1141,7 @@ function secretServiceStore(deps: PassphraseDeps): PassphraseStore {
   return {
     source: 'secret-service',
     read,
+    storable: readsBackFromStdout,
     async store(account, passphrase, o) {
       // secret-tool store replaces an existing item itself; `update` adds nothing here.
       await exec(
@@ -1178,7 +1188,9 @@ function secretServiceStore(deps: PassphraseDeps): PassphraseStore {
  * the old value wrong, replaces one (`update`). fs calls are not killed, so the
  * per-call deadline is accepted and ignored. A read strips exactly one trailing
  * `\n` (someone may have written it with `echo`) and nothing else: a secret
- * ending in other whitespace round-trips.
+ * ending in other whitespace round-trips, and one ending in `\n` is refused
+ * before any write (`storable`), so a failed save never leaves a file that
+ * reads back as a different secret.
  */
 function fileStore(deps: PassphraseDeps): PassphraseStore {
   const pathFor = (account: string): string => passphraseFilePathFor(account, deps.dir);
@@ -1192,6 +1204,8 @@ function fileStore(deps: PassphraseDeps): PassphraseStore {
         return classifyStoreFailure('file', err);
       }
     },
+    // The read strips one trailing LF, so a value ending in one never reads back.
+    storable: (value) => !value.endsWith('\n'),
     async store(account, value, o) {
       const write = o?.update === true ? writeFileAtomic : writeFileAtomicExclusive;
       await write(pathFor(account), value, { mode: 0o600, dirMode: 0o700 });
@@ -1211,6 +1225,25 @@ function fileStore(deps: PassphraseDeps): PassphraseStore {
 /** The per-call exec options for a store call: the deadline when one was given, else none. */
 function callOpts(o: StoreCallOptions | undefined): { timeoutMs?: number } | undefined {
   return o?.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : undefined;
+}
+
+/**
+ * Whether a value survives a read that strips one trailing newline (LF or
+ * CRLF) from the store CLI's stdout: one that ends in CR or LF does not.
+ */
+function readsBackFromStdout(value: string): boolean {
+  return !/[\r\n]$/.test(value);
+}
+
+/**
+ * Why `store`'s `storable` gate turned a value away, as a clause: the
+ * keychain writer's printable-ASCII rule, or a line break at the end that the
+ * other stores' reads strip, so the saved value would not read back.
+ */
+export function unstorableWhy(store: DurableStore): string {
+  return store === 'keychain'
+    ? 'the macOS keychain writer only stores printable ASCII passphrases'
+    : `a passphrase that ends in a line break does not read back from the ${storeNoun(store)}`;
 }
 
 /** A store payload with exactly one optional trailing newline (LF or CRLF) stripped. */
