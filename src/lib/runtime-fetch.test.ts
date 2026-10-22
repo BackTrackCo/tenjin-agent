@@ -3,7 +3,14 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { download, extract, nodeArtifact, nodeKey, type ExtractSpawn } from './runtime-fetch';
+import {
+  download,
+  extract,
+  nodeArtifact,
+  nodeKey,
+  unpinnedPlatform,
+  type ExtractSpawn,
+} from './runtime-fetch';
 
 let dir: string;
 
@@ -37,6 +44,19 @@ describe('nodeKey', () => {
     ['linux', 'ia32', '2.35', 'linux ia32'],
   ] as const)('%s %s is null (%s)', (platform, arch, glibc, _why) => {
     expect(nodeKey(platform as NodeJS.Platform, arch, glibc)).toBeNull();
+  });
+});
+
+describe('unpinnedPlatform', () => {
+  it('names the real cause where no Node is pinned, and nothing where one is', () => {
+    expect(unpinnedPlatform('linux', 'x64', undefined)).toBe('linux-x64 with musl, not glibc');
+    expect(unpinnedPlatform('linux', 'arm64', '2.17')).toBe(
+      'linux-arm64 with glibc 2.17, older than 2.28',
+    );
+    expect(unpinnedPlatform('freebsd', 'x64', undefined)).toBe('freebsd-x64');
+    expect(unpinnedPlatform('win32', 'ia32', undefined)).toBe('win-ia32');
+    expect(unpinnedPlatform('linux', 'x64', '2.28')).toBeNull();
+    expect(unpinnedPlatform('darwin', 'arm64', null)).toBeNull();
   });
 });
 
@@ -146,23 +166,25 @@ describe('download', () => {
 });
 
 describe('extract', () => {
-  const recorder = (): { calls: [string, string[]][]; spawnImpl: ExtractSpawn } => {
-    const calls: [string, string[]][] = [];
+  const recorder = (): { calls: [string, string[], string][]; spawnImpl: ExtractSpawn } => {
+    const calls: [string, string[], string][] = [];
     return {
       calls,
-      spawnImpl: async (command, args) => {
-        calls.push([command, args]);
+      spawnImpl: async (command, args, o) => {
+        calls.push([command, args, o.cwd]);
         return { code: 0, stderr: '' };
       },
     };
   };
 
-  it("uses System32's tar.exe with -xf on win32", async () => {
+  it("uses System32's tar.exe with -xf on win32, run in the archive's folder with relative names", async () => {
     const { calls, spawnImpl } = recorder();
     const before = process.env.SystemRoot;
     delete process.env.SystemRoot;
+    // A user folder outside the ANSI code page never reaches tar's argv.
+    const tmp = 'C:\\Users\\Дмитрий\\.tenjin\\runtime\\tmp';
     try {
-      await extract('C:\\t\\node.zip', 'C:\\t\\out', {
+      await extract(`${tmp}\\dl-1a2b`, `${tmp}\\node-3c4d`, {
         member: 'node-v24.14.1-win-x64/node.exe',
         strip: 1,
         platform: 'win32',
@@ -176,20 +198,25 @@ describe('extract', () => {
         'C:\\Windows\\System32\\tar.exe',
         [
           '-xf',
-          'C:\\t\\node.zip',
+          'dl-1a2b',
           '-C',
-          'C:\\t\\out',
+          'node-3c4d',
           '--strip-components=1',
           'node-v24.14.1-win-x64/node.exe',
         ],
+        tmp,
       ],
     ]);
+    expect(calls[0]![1].join(' ')).toMatch(/^[\x20-\x7e]*$/);
   });
 
   it('uses tar -xzf on POSIX, with no strip or member when none is asked', async () => {
     const { calls, spawnImpl } = recorder();
     await extract('/t/a.tgz', '/t/out', { platform: 'linux', spawnImpl });
-    expect(calls).toEqual([['tar', ['-xzf', '/t/a.tgz', '-C', '/t/out']]]);
+    expect(calls).toEqual([['tar', ['-xzf', 'a.tgz', '-C', 'out'], '/t']]);
+    // A destination outside the archive's folder keeps its full path.
+    await extract('/t/a.tgz', '/elsewhere/out', { platform: 'linux', spawnImpl });
+    expect(calls[1]).toEqual(['tar', ['-xzf', 'a.tgz', '-C', '/elsewhere/out'], '/t']);
   });
 
   it('throws with what tar said, bounded', async () => {

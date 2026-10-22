@@ -228,6 +228,12 @@ describe('withRuntimeLock', () => {
     );
   });
 
+  /**
+   * Both waiters judge the SAME dead holder's lock stale: the second arrives
+   * inside the first's judgement, before the first moves anything, takes the
+   * lock over and is running its body when the first gets to its takeover.
+   * The first must find a different lock there and wait, not move the live one.
+   */
   it('lets exactly one of two waiters take over a stale lock, and never overlaps the bodies', async () => {
     lockAt(DEAD, new Date());
     let inside = 0;
@@ -238,8 +244,17 @@ describe('withRuntimeLock', () => {
       await new Promise((done) => setTimeout(done, 80));
       inside -= 1;
     };
-    const o = { isAlive: (pid: number) => pid !== DEAD, lockWaitMs: 5_000 };
-    await Promise.all([withRuntimeLock(root, body, o), withRuntimeLock(root, body, o)]);
+    const alive = (pid: number) => pid !== DEAD;
+    let second: Promise<void> | undefined;
+    const first = withRuntimeLock(root, body, {
+      lockWaitMs: 5_000,
+      isAlive: (pid) => {
+        second ??= withRuntimeLock(root, body, { isAlive: alive, lockWaitMs: 5_000 });
+        return alive(pid);
+      },
+    });
+    await Promise.all([first, second]);
+    expect(second).toBeDefined();
     expect(overlapped).toBe(false);
     expect(trashLocks()).toHaveLength(1);
   });
@@ -1033,11 +1048,17 @@ describe('setupRuntime', () => {
     expect(readRuntimeState(root)).toBeNull();
   });
 
-  it('falls back with no pinned Node for this platform', async () => {
+  it('falls back with no pinned Node for this platform, naming the platform as unpinned', async () => {
     const r = await setup('0.1.0-alpha.32', { platform: 'freebsd', arch: 'x64' });
-    expect(r).toMatchObject({ state: 'fallback', reason: 'no pinned Node for freebsd-x64' });
+    expect(r).toMatchObject({
+      state: 'fallback',
+      reason: 'no pinned Node for this platform, freebsd-x64',
+      unpinned: 'freebsd-x64',
+    });
+    // A build without a pin is not the platform's fault: a later build may carry one.
     const unpinned = await setup('0.1.0-alpha.32', { pkgPin: null });
     expect(unpinned).toMatchObject({ state: 'fallback', reason: `no pinned Node for ${KEY}` });
+    expect(unpinned.unpinned).toBeUndefined();
   });
 
   it.skipIf(!POSIX)(

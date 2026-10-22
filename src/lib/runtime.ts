@@ -41,7 +41,14 @@ import { CliError } from './errors';
 import { isSourceCheckout } from './install-location';
 import { LockTimeoutError } from './lock';
 import { defaultDataDir, launcherDir, runtimeDir } from './paths';
-import { download, extract, nodeArtifact, nodeKey } from './runtime-fetch';
+import {
+  download,
+  extract,
+  nodeArtifact,
+  nodeKey,
+  runningGlibc,
+  unpinnedPlatform,
+} from './runtime-fetch';
 import {
   nodeBinPath,
   readRuntimeState,
@@ -320,15 +327,6 @@ async function trash(root: string, path: string): Promise<void> {
   const to = join(tmpOf(root), `trash-${rand()}`);
   await rename(path, to);
   await rm(to, { recursive: true, force: true }).catch(() => undefined);
-}
-
-function runningGlibc(): string | null {
-  try {
-    const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } };
-    return report.header?.glibcVersionRuntime ?? null;
-  } catch {
-    return null;
-  }
 }
 
 /** What `<node> -p process.version` prints, or null when it does not run. */
@@ -1251,6 +1249,14 @@ export interface RuntimeSetup {
   firstTime: boolean;
   launcher: LauncherResult | null;
   reason?: string;
+  /**
+   * This machine's platform when Tenjin pins no Node for it (musl, glibc below
+   * 2.28, another architecture): no install here can set the runtime up, so
+   * nothing tells the person to retry.
+   */
+  unpinned?: string;
+  /** `kept` by a refresh that found a newer runtime and tried nothing: no failure to report. */
+  newer?: true;
   /** The newer current a plain install rolled back from. */
   replaced?: string;
   /** Set only for 'active'. */
@@ -1368,6 +1374,7 @@ export async function setupRuntime(o: {
       return {
         ...runs(usable),
         reason: `Tenjin ${usable.cli} is already set up here; this ${o.version} did not replace it`,
+        newer: true,
       };
     }
     replaced = usable.cli;
@@ -1393,6 +1400,10 @@ export async function setupRuntime(o: {
   try {
     const glibc = platform === 'linux' ? runningGlibc() : null;
     const key = nodeKey(platform, arch, glibc);
+    const unpinned = unpinnedPlatform(platform, arch, glibc);
+    if (unpinned !== null) {
+      return { ...failed(`no pinned Node for this platform, ${unpinned}`), unpinned };
+    }
     const build = runtimeBuild(o.moduleDir);
     const packageRoot =
       build !== null ? versionDir(build.root, build.cli) : packageRootOf(o.moduleDir);

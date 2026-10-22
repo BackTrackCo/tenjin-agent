@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { open, rm } from 'node:fs/promises';
-import { join, win32 } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import { CliError } from './errors';
 
 /**
@@ -51,6 +51,34 @@ export function nodeKey(
     return null;
   }
   return key;
+}
+
+/**
+ * Why Tenjin pins no Node for this machine, or null when it pins one: the
+ * platform and architecture, and on Linux the C library that rules it out.
+ * Said by install and doctor so the cause is named, never a pinned key.
+ */
+export function unpinnedPlatform(
+  platform: NodeJS.Platform,
+  arch: string,
+  glibc: string | null | undefined,
+): string | null {
+  if (nodeKey(platform, arch, glibc) !== null) return null;
+  const key = `${platform === 'win32' ? 'win' : platform}-${arch}`;
+  if (platform !== 'linux' || !KEYS.has(key)) return key;
+  return typeof glibc === 'string'
+    ? `${key} with glibc ${glibc}, older than ${MIN_GLIBC.join('.')}`
+    : `${key} with musl, not glibc`;
+}
+
+/** The glibc this Node runs on, or null: musl, or a report that cannot be read. */
+export function runningGlibc(): string | null {
+  try {
+    const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } };
+    return report.header?.glibcVersionRuntime ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export interface NodeArtifact {
@@ -154,15 +182,17 @@ function messageOf(err: unknown): string {
   return String(err);
 }
 
-/** How `extract` runs `tar`: exec form, no shell. A seam for tests. */
+/** How `extract` runs `tar`: exec form, no shell, in `cwd`. A seam for tests. */
 export type ExtractSpawn = (
   command: string,
   args: string[],
+  o: { cwd: string },
 ) => Promise<{ code: number | null; stderr: string }>;
 
-const spawnTar: ExtractSpawn = (command, args) =>
+const spawnTar: ExtractSpawn = (command, args, o) =>
   new Promise((resolve, reject) => {
     const child = spawn(command, args, {
+      cwd: o.cwd,
       shell: false,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
@@ -181,6 +211,12 @@ const spawnTar: ExtractSpawn = (command, args) =>
  * and on Windows `System32\tar.exe -xf`, which is bsdtar and reads a `.zip`
  * (Git's GNU tar, earlier on many PATHs, does not). `member` limits it to one
  * file, `strip` drops leading folders. A non-zero exit throws with what tar said.
+ *
+ * TAR RUNS IN THE ARCHIVE'S FOLDER and is given names relative to it. bsdtar
+ * reads its argv in the ANSI code page, so a user folder named outside it
+ * (Cyrillic on cp1252, an emoji) would reach it as `?`; the working directory
+ * goes to Windows as a wide string, and the names it is given are the
+ * runtime's own ASCII ones.
  */
 export async function extract(
   archive: string,
@@ -191,15 +227,18 @@ export async function extract(
   const command = windows
     ? win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
     : 'tar';
+  const path = windows ? win32 : posix;
+  const cwd = path.dirname(archive);
+  const into = path.relative(cwd, dest);
   const args = [
     windows ? '-xf' : '-xzf',
-    archive,
+    path.basename(archive),
     '-C',
-    dest,
+    into === '' ? '.' : into.startsWith('..') || path.isAbsolute(into) ? dest : into,
     ...(o.strip !== undefined && o.strip > 0 ? [`--strip-components=${o.strip}`] : []),
     ...(o.member !== undefined ? [o.member] : []),
   ];
-  const run = await (o.spawnImpl ?? spawnTar)(command, args);
+  const run = await (o.spawnImpl ?? spawnTar)(command, args, { cwd });
   if (run.code !== 0) {
     const said = run.stderr.trim().slice(0, 300);
     throw new Error(`tar could not unpack ${archive} (exit ${run.code})${said ? `: ${said}` : ''}`);
