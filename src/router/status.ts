@@ -7,7 +7,7 @@ import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { channelCredit } from './channel-credit';
-import { FUNDING_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
+import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -149,7 +149,7 @@ export async function runRouterStatus(
         ? ['wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries']
         : [
             `wallet ${toMoney(wallet.atomic.toString()).usd} USD`,
-            ...(wallet.atomic === 0n ? [FUNDING_LINE] : []),
+            ...(wallet.atomic === 0n ? [FUND_COMMAND_LINE] : []),
           ];
   return {
     data,

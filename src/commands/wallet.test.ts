@@ -45,7 +45,6 @@ vi.mock('../lib/passphrase-record', async (importOriginal) => {
 });
 
 import { getUsdcBalance } from '../lib/usdc';
-import { FUNDING_LINE } from '../router/fee';
 import {
   REPAIR_DONE_LINE,
   findPassphraseExports,
@@ -1182,7 +1181,10 @@ describe('runWalletBalance', () => {
     const { provider } = fakeRemoteProvider(address);
     mockedBalance.mockResolvedValue(0n);
     const empty = await runWalletBalance(makeCtx(), { provider });
-    expect(empty.humanLines).toEqual(['Balance: 0 USDC on Base', FUNDING_LINE]);
+    expect(empty.humanLines).toEqual([
+      'Balance: 0 USDC on Base',
+      'Fund it with `tenjin wallet fund 5`.',
+    ]);
     expect(empty.data).toMatchObject({ balance: { atomic: '0' } });
     mockedBalance.mockResolvedValue(5_000_000n);
     const funded = await runWalletBalance(makeCtx(), { provider });

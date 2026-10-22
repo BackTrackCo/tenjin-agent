@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
-import { FUNDING_LINE } from './fee';
+import { FUND_COMMAND_LINE } from './fee';
 import { runRouterStatus } from './status';
 
 /**
@@ -40,7 +40,11 @@ const status = (atomic: bigint | null) =>
 describe('status, the wallet line', () => {
   it('says how to fund a wallet at exactly $0', async () => {
     const result = await status(0n);
-    expect(result.humanLines?.slice(0, 3)).toEqual(['wallet 0 USD', FUNDING_LINE, 'lookups 0 USD']);
+    expect(result.humanLines?.slice(0, 3)).toEqual([
+      'wallet 0 USD',
+      'Fund it with `tenjin wallet fund 5`.',
+      'lookups 0 USD',
+    ]);
     expect(result.data).toMatchObject({
       wallet: { address: ADDRESS, balance: { atomic: '0', usd: '0' } },
     });
@@ -49,7 +53,7 @@ describe('status, the wallet line', () => {
   it('shows a funded balance with no funding line', async () => {
     const result = await status(5_000_000n);
     expect(result.humanLines?.slice(0, 2)).toEqual(['wallet 5 USD', 'lookups 0 USD']);
-    expect(result.humanLines).not.toContain(FUNDING_LINE);
+    expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
   });
 
   it('says the balance is unknown when the RPC did not answer, without a funding line', async () => {
@@ -57,7 +61,7 @@ describe('status, the wallet line', () => {
     expect(result.humanLines?.[0]).toBe(
       'wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries',
     );
-    expect(result.humanLines).not.toContain(FUNDING_LINE);
+    expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
     expect(result.data).toMatchObject({ wallet: { address: ADDRESS, balance: null } });
   });
 

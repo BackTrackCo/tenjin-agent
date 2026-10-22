@@ -12,7 +12,7 @@ import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { channelCredit } from '../router/channel-credit';
-import { FUNDING_LINE } from '../router/fee';
+import { FUND_COMMAND_LINE, FUNDING_LINE } from '../router/fee';
 import { markUnlockPending } from '../router/router-observation';
 import {
   commitLocalWallet,
@@ -657,7 +657,7 @@ export async function runWalletBalance(
     humanLines: [
       `Balance: ${balance.usd} USDC on Base` +
         (credit.atomic !== '0' ? ` (+${credit.usd} routing credit)` : ''),
-      ...(atomic === 0n ? [FUNDING_LINE] : []),
+      ...(atomic === 0n ? [FUND_COMMAND_LINE] : []),
     ],
   };
 }
