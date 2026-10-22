@@ -2,6 +2,7 @@ import {
   KEYCHAIN_LOCKED_FIX,
   REPAIR_CLAUSE,
   REPAIR_IN_TERMINAL,
+  unlockReasonOf,
   type UnlockReason,
 } from '../lib/wallet-unlock';
 
@@ -170,6 +171,20 @@ export function agentFixFor(reason: string, fallback: string): string {
   return Object.prototype.hasOwnProperty.call(WALLET_REASONS, reason)
     ? WALLET_REASONS[reason as keyof typeof WALLET_REASONS].agentFix
     : fallback;
+}
+
+/**
+ * An error's fix, as the MODEL reads it in the `request` tool's text (B1). An
+ * error carrying `details.unlock` gets its reason's `agentFix`, which asks the
+ * person to act and never asks for the passphrase or key; every other error
+ * keeps its own fix byte for byte. Gated on `unlockReasonOf`, never on
+ * `classifyUnlockError`: that one calls every undetailed error `wallet_locked`,
+ * and the request tool carries `REGISTRY_MISMATCH`, HTTP failures and the
+ * rest, whose own fixes must survive.
+ */
+export function agentFixOf(err: { fix?: string | undefined }): string {
+  const why = unlockReasonOf(err);
+  return why === null ? (err.fix ?? '') : agentFixFor(why, err.fix ?? '');
 }
 
 /**

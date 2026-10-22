@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { UnlockReason } from '../lib/wallet-unlock';
+import { CliError } from '../lib/errors';
+import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import { unpaid } from './fee';
 import {
   agentFixFor,
+  agentFixOf,
   ASK_FOR_REPAIR,
   ENV_PASSPHRASE_WRONG,
   KEYCHAIN_LOCKED_FIX,
@@ -142,6 +144,20 @@ describe('walletClearedSentence', () => {
 
   it('WALLET_CLASS is every unlock reason, the fallback and wallet_low', () => {
     expect([...WALLET_CLASS].sort()).toEqual([...ALL, 'wallet_low'].sort());
+  });
+});
+
+describe('agentFixOf', () => {
+  it("swaps a wallet error's person fix for its agentFix, and keeps every other fix", () => {
+    const missing = new CliError('USAGE', 'No wallet passphrase is available.', {
+      fix: REPAIR_IN_TERMINAL,
+      details: unlockDetails('passphrase_missing'),
+    });
+    expect(agentFixOf(missing)).toBe(ASK_FOR_REPAIR);
+    expect(agentFixOf(missing)).not.toContain(REPAIR_CLAUSE);
+    const other = new CliError('API_UNREACHABLE', 'x answered 500.', { fix: 'Nothing was paid.' });
+    expect(agentFixOf(other)).toBe('Nothing was paid.');
+    expect(agentFixOf(new CliError('API_UNREACHABLE', 'x'))).toBe('');
   });
 });
 
