@@ -10,11 +10,13 @@ import { describeStoreLocation } from '../lib/wallet/passphrase';
 import type { ClaudeRun } from './claude-cli';
 import { LAUNCHER_MARKER, renderPluginFiles } from './plugin-files';
 import { pluginFolderPath, writePluginFolder } from './plugin-folder';
+import { folderFor } from './plugin-registration';
 import {
   claudeInstallsLeft,
   removeRuntimeAndLaunchers,
   resolveUninstallTarget,
   runRouterUninstall,
+  runtimeKeptFor,
   type RouterUninstallDeps,
   type UninstallTarget,
 } from './uninstall';
@@ -375,6 +377,33 @@ describe('all or nothing', () => {
     expect(calls).toEqual([]);
   });
 
+  /**
+   * `install --project` with no `claude` writes the project's plugin folder
+   * and lists the project in `routerProjects`; Claude Code records nothing,
+   * so there is nothing `claude` must check, and the folder goes.
+   */
+  it('removes a project folder install made with no claude binary, with none to run', async () => {
+    const env = { CLAUDE_CONFIG_DIR: cfg, PATH: '' };
+    const folder = folderFor('local', env, home, other);
+    const written = await writePluginFolder(
+      folder,
+      renderPluginFiles('0.1.0-alpha.32', '/h/.tenjin/runtime/versions/x/dist/index.js', '/n'),
+    );
+    expect(written.state).toBe('written');
+    await persistRouterProject(data, other);
+    const { target, out } = await uninstall({ project: other }, elsewhere, {
+      findClaude: () => null,
+    });
+    expect(target).toEqual({ kind: 'project', path: other });
+    expect(removalsOf(out)).toEqual([{ scope: 'local', projectPath: other, state: 'absent' }]);
+    expect(await stat(folder).catch(() => null)).toBeNull();
+    const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
+      install?: { routerProjects?: string[] };
+    };
+    expect(config.install?.routerProjects ?? []).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
   it("removes nothing when Claude Code's record cannot be read", async () => {
     await writeFile(recordsFile(), '{not json');
     for (const o of [{}, { project: true as const }]) {
@@ -407,6 +436,35 @@ describe('what the receipt says it keeps', () => {
     });
     expect(withVar.out.humanLines?.at(-1)).toBe(
       'TENJIN_WALLET_PASSPHRASE is set in this shell; remove its export line from your shell startup file if you added one.',
+    );
+  });
+});
+
+describe('the kept line names the runtime only where there is one', () => {
+  it('says the marketplace alone until an install set the runtime up, then all three', async () => {
+    const dataDir = join(home, '.tenjin');
+    const defaultCtx = { ...ctx(), dataDir };
+    await writeRecords([userEntry(), localEntry(other)]);
+    const project = async () => {
+      await writeRecords([userEntry(), localEntry(other)]);
+      return runRouterUninstall(
+        { target: { kind: 'project', path: other } },
+        defaultCtx,
+        deps(elsewhere),
+      );
+    };
+    // A platform Tenjin pins no Node for, or a fallback install: no runtime.
+    expect((await project()).humanLines).toContain(
+      'Kept the tenjin marketplace: still used by your user install.',
+    );
+    expect(runtimeKeptFor(dataDir, home, ['Codex'])).toBeNull();
+    await mkdir(join(dataDir, 'runtime'), { recursive: true });
+    await writeFile(join(dataDir, 'runtime', 'state.json'), '{}');
+    expect((await project()).humanLines).toContain(
+      "Kept the tenjin marketplace, Tenjin's runtime and its launcher: still used by your user install.",
+    );
+    expect(runtimeKeptFor(dataDir, home, ['Codex'])).toBe(
+      "Kept Tenjin's runtime and its launcher: still used by Codex.",
     );
   });
 });

@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, resolve, sep } from 'node:path';
@@ -6,6 +7,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { defaultDataDir, runtimeDir } from '../lib/paths';
+import { runtimeStatePath } from '../lib/runtime-layout';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { removeAliveState } from './alive';
 import { findClaudeBinary, jsonList, jsonResult, runClaude, type ClaudeBinary } from './claude-cli';
@@ -88,12 +90,14 @@ function uncheckable(): CliError {
  * A project only that list names, and that holds nothing any more, is stale
  * and does not keep the shared parts. Throws when Claude Code's record is
  * there and cannot be read: what it holds is unknown, so nothing may go.
+ * `recorded` counts the installs Claude Code itself records: only those need
+ * `claude` to remove; a project only the list names is a folder install.
  */
 async function installRecords(
   dataDir: string,
   env: NodeJS.ProcessEnv,
   home: string,
-): Promise<InstallRecord[]> {
+): Promise<InstallRecord[] & { recorded: number }> {
   const claude = await recordedInstalls(env, home);
   if (claude === null) throw uncheckable();
   const listed = (await loadRawConfig(dataDir).catch(() => null))?.install?.routerProjects ?? [];
@@ -105,13 +109,14 @@ async function installRecords(
     seen.add(key);
     records.push(r.projectPath === null ? r : { scope: 'local', projectPath: key });
   }
+  const recorded = records.length;
   for (const dir of listed) {
     const key = await real(dir);
     if (seen.has(key) || !(await projectInstallAt(key, home, env))) continue;
     seen.add(key);
     records.push({ scope: 'local', projectPath: key });
   }
-  return records;
+  return Object.assign(records, { recorded });
 }
 
 /**
@@ -175,7 +180,10 @@ export async function runRouterUninstall(
     (deps.runClaude ?? runClaude)(binary!, args, { env, cwd: at });
 
   const records = await installRecords(ctx.dataDir, env, home);
-  if (binary === null && records.length > 0) throw uncheckable();
+  // Only what Claude Code records needs `claude` to remove. A project only
+  // `routerProjects` names is the folder a run with no `claude` wrote: it is
+  // `absent` below, and its folder goes in cleanUp.
+  if (binary === null && records.recorded > 0) throw uncheckable();
   const { target } = o;
   let targets = records.filter((r) =>
     target.kind === 'all'
@@ -281,7 +289,7 @@ export async function runRouterUninstall(
     const named = (list: Removal[]) => list.map(labelOf).join(', ') || 'nothing';
     throw new CliError(
       'REFUSED',
-      `${left.length} Tenjin install${left.length === 1 ? '' : 's'} could not be removed: ${left.map((r) => `${labelOf(r)}${r.reason !== undefined ? ` (${r.reason})` : ''}`).join(', ')}. Removed: ${named(gone)}. The ${MARKETPLACE_NAME} marketplace, Tenjin's runtime and its launcher were kept.`,
+      `${left.length} Tenjin install${left.length === 1 ? '' : 's'} could not be removed: ${left.map((r) => `${labelOf(r)}${r.reason !== undefined ? ` (${r.reason})` : ''}`).join(', ')}. Removed: ${named(gone)}. Kept ${sharedParts(ctx.dataDir, home)}.`,
       {
         details: { removed: gone.map(keyOf), left: left.map(keyOf), removals },
         fix: retryFix(target, left),
@@ -292,7 +300,7 @@ export async function runRouterUninstall(
   let marketplace: 'removed' | 'absent' | 'kept' = 'kept';
   let marketplaceWhy: string | undefined;
   if (remaining.length > 0) {
-    marketplaceWhy = `${sharedParts(ctx.dataDir, home)}: still used by ${remaining.map(nameOf).join(', ')}.`;
+    marketplaceWhy = `Kept ${sharedParts(ctx.dataDir, home)}: still used by ${remaining.map(nameOf).join(', ')}.`;
   } else if (binary === null) {
     marketplaceWhy = `the ${MARKETPLACE_NAME} marketplace was not checked: no claude binary on PATH or in CLAUDE_CODE_EXECPATH`;
   } else {
@@ -405,17 +413,26 @@ export async function claudeInstallsLeft(
   }
 }
 
-/** The line for a runtime kept because another recorded host still runs it; none under a data dir of its own. */
+/** The line for a runtime kept because another recorded host still runs it; none where there is no runtime. */
 export function runtimeKeptFor(dataDir: string, home: string, users: string[]): string | null {
-  if (!isDefaultDataDir(dataDir, home)) return null;
+  if (!hasRuntime(dataDir, home)) return null;
   return `Kept Tenjin's runtime and its launcher: still used by ${users.join(', ')}.`;
 }
 
-/** The parts every install shares, as the "kept" line names them. */
+/** The parts every install shares, as the "kept" lines name them: the runtime only where there is one. */
 function sharedParts(dataDir: string, home: string): string {
-  return isDefaultDataDir(dataDir, home)
-    ? `Kept the ${MARKETPLACE_NAME} marketplace, Tenjin's runtime and its launcher`
-    : `Kept the ${MARKETPLACE_NAME} marketplace`;
+  return hasRuntime(dataDir, home)
+    ? `the ${MARKETPLACE_NAME} marketplace, Tenjin's runtime and its launcher`
+    : `the ${MARKETPLACE_NAME} marketplace`;
+}
+
+/**
+ * Is there a runtime to keep? Only the default data dir has one, and only once
+ * an install set it up: a platform Tenjin pins no Node for, or an install that
+ * fell back, has none.
+ */
+function hasRuntime(dataDir: string, home: string): boolean {
+  return isDefaultDataDir(dataDir, home) && existsSync(runtimeStatePath(runtimeDir(dataDir)));
 }
 
 function isDefaultDataDir(dataDir: string, home: string): boolean {
