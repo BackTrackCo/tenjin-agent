@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
 import { configPath, walletPath } from '../lib/paths';
 import {
   DEFAULT_RPC_URL,
@@ -144,10 +145,12 @@ export async function walletNotice(
   });
   const balance = await read(address, rpcUrl, { timeoutMs });
   if (balance === null) return null;
-  const cap =
+  // The per-call limit as the spend policy reads it: the file's, else the default.
+  const cap = BigInt(
     typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
-      ? BigInt(config.maxAutoSpend)
-      : 0n;
+      ? config.maxAutoSpend
+      : DEFAULT_MAX_AUTO_SPEND,
+  );
   if (balance > 0n && balance >= cap) return null;
   return (
     `Tenjin wallet ${address.slice(0, 6)}…${address.slice(-4)} holds $${dollars(balance)}: ` +

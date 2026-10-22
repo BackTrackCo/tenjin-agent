@@ -38,6 +38,13 @@ describe('the wallet notice at session start', () => {
     expect(await walletNotice(dir, { read: async () => 250_000n })).toBeNull();
   });
 
+  it('uses the default per-call limit when the config sets none', async () => {
+    await wallet();
+    expect(await walletNotice(dir, { read: async () => 30_000n })).toContain('holds $0.03');
+    await rm(join(dir, 'balance.json'), { force: true });
+    expect(await walletNotice(dir, { read: async () => 300_000n })).toBeNull();
+  });
+
   it('says nothing with no wallet, or when the balance cannot be read', async () => {
     const read = vi.fn(async () => 0n);
     expect(await walletNotice(dir, { read })).toBeNull();
