@@ -32,6 +32,28 @@ describe('shellDependence', () => {
   ])('refuses %j', (launch, why) => {
     expect(shellDependence(launch)).toMatch(why);
   });
+
+  // The runtime's own Node: a home folder may hold spaces or parentheses, which
+  // exec form passes as one path.
+  it.each([
+    'C:\\Users\\Jane Doe\\.tenjin\\runtime\\node\\24.14.1\\node.exe',
+    'C:\\Users\\Jane (Work)\\.tenjin\\runtime\\node\\24.14.1\\node.exe',
+    '/home/Jane Doe/.tenjin/runtime/node/24.14.1/bin/node',
+    '/Users/zoë (x)/.tenjin/runtime/node/24.14.1/bin/node',
+  ])('passes the absolute command %s', (command) => {
+    expect(shellDependence({ command, args: ['/a b/index.js', 'mcp'] })).toBeNull();
+  });
+
+  it.each([
+    ['/home/$USER/.tenjin/runtime/node/24.14.1/bin/node', /shell syntax/],
+    ["/home/o'brien/.tenjin/runtime/node/24.14.1/bin/node", /shell syntax/],
+    ['C:\\Users\\a"b\\node.exe', /shell syntax/],
+    ['/usr/local/bin/tenjin', /npm shim/],
+    ['C:\\Users\\me\\AppData\\Roaming\\npm\\tenjin.cmd', /npm shim/],
+    ['node (x)', /shell syntax/],
+  ])('still refuses %s', (command, why) => {
+    expect(shellDependence({ command, args: [] })).toMatch(why);
+  });
 });
 
 describe('handlersIn', () => {

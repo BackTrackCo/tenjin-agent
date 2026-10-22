@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { versionFreeEntry } from '../commands/update';
+import { hasCode } from '../lib/errno';
 import {
   claudeConfigDir,
   jsonList,
@@ -24,13 +25,16 @@ import {
  * REGISTERING THE PLUGIN, WITH NO STEP LEFT TO THE PERSON. With a `claude`
  * binary (on PATH, or the one Claude Code names in `CLAUDE_CODE_EXECPATH`):
  *
- *   claude plugin marketplace add <package>/dist/hosts/claude --json
+ *   claude plugin marketplace add <marketplace folder> --json
  *   claude plugin install tenjin@tenjin --scope <scope> --json
  *   claude plugin update tenjin@tenjin --scope <scope> --json   (only when the version moved)
  *
- * The marketplace is a `directory` source read in place from the installed
- * package, so there is no git or network step and the plugin is the CLI's own
- * build. Each command is non-interactive, idempotent and answers one JSON line
+ * The marketplace folder is Tenjin's runtime, `~/.tenjin/runtime/claude`, or,
+ * where there is no runtime, the installed package's `dist/hosts/claude`. It is
+ * a `directory` source Claude Code reads in place, so there is no git or
+ * network step, the plugin is the CLI's own build, and an activation that
+ * re-renders the runtime folder takes effect at the next session with no
+ * command at all. Each command is non-interactive, idempotent and answers one JSON line
  * (lab, Claude Code 2.1.296): a second `add` of the same folder is a no-op, an
  * `add` of a moved folder repoints the marketplace, and `install` of an
  * installed plugin reports both versions. No binary, or a command that fails:
@@ -82,6 +86,8 @@ export interface RegisterOptions {
   hostsDir?: string | null;
   /** The CLI entry the folder fallback's commands run. Defaults to this package's `dist/index.js`. */
   cliEntry?: string;
+  /** The Node the folder fallback's commands run: the runtime's, or `node` from PATH when unset. */
+  node?: string;
 }
 
 /** Where the folder fallback lives for this scope. */
@@ -148,7 +154,7 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
   }
   const written = await writePluginFolder(
     folder,
-    renderPluginFiles(opts.version, opts.cliEntry ?? packageCliEntry()),
+    renderPluginFiles(opts.version, opts.cliEntry ?? packageCliEntry(), opts.node),
   );
   if (written.state === 'written') {
     return {
@@ -259,14 +265,18 @@ function commandDetail(out: ClaudeRun, result: Record<string, unknown> | null = 
 /**
  * Is this marketplace one `install` added? A directory source whose plugin
  * folder carries the `tenjin-cli` marker in its manifest, or, when that folder
- * is gone (a package manager removed the old version's directory), one whose
- * path is a `tenjin-cli` package's `dist/hosts/claude`.
+ * is gone (a package manager removed the old version's directory, or the
+ * runtime was removed), one whose path is a `tenjin-cli` package's
+ * `dist/hosts/claude` or Tenjin's `runtime/claude`.
  */
 export async function ownMarketplace(row: Record<string, unknown>): Promise<boolean> {
   const path = typeof row.path === 'string' ? row.path : undefined;
   if (row.source !== 'directory' || path === undefined) return false;
   if ((await stat(path).catch(() => null)) === null) {
-    return /tenjin-cli[\\/]dist[\\/]hosts[\\/]claude$/.test(path);
+    return (
+      /tenjin-cli[\\/]dist[\\/]hosts[\\/]claude$/.test(path) ||
+      /[\\/]runtime[\\/]claude$/.test(path)
+    );
   }
   return (await inspectPluginFolder(join(path, PLUGIN_DIR))) === 'ours';
 }
@@ -294,6 +304,54 @@ async function existingCopy(
       p.enabled === true,
   );
   return typeof row?.id === 'string' ? row.id : null;
+}
+
+/** One `tenjin@tenjin` install in Claude Code's own record. */
+export interface InstallRecord {
+  scope: 'user' | 'local';
+  /** The folder a `local` install ran in (not the git root); null for `user`. */
+  projectPath: string | null;
+}
+
+/**
+ * EVERY `tenjin@tenjin` INSTALL CLAUDE CODE RECORDS, in any scope or project,
+ * from `plugins/installed_plugins.json` (`{version: 2, plugins: {"tenjin@tenjin":
+ * [entry, …]}}`). `[]` when the file is absent, null when it is there but cannot
+ * be read. Keys are read by name, since their order varies, and `installPath`
+ * and `version` never: both go stale once the marketplace is repointed.
+ */
+export async function recordedInstalls(
+  env: NodeJS.ProcessEnv,
+  home: string,
+): Promise<InstallRecord[] | null> {
+  let raw: string;
+  try {
+    raw = await readFile(
+      join(claudeConfigDir(env, home), 'plugins', 'installed_plugins.json'),
+      'utf8',
+    );
+  } catch (err) {
+    return hasCode(err, 'ENOENT') ? [] : null;
+  }
+  let plugins: unknown;
+  try {
+    plugins = (JSON.parse(raw) as { plugins?: unknown }).plugins;
+  } catch {
+    return null;
+  }
+  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return null;
+  const entries = (plugins as Record<string, unknown>)[PLUGIN_ID];
+  if (!Array.isArray(entries)) return [];
+  const records: InstallRecord[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { scope, projectPath } = entry as { scope?: unknown; projectPath?: unknown };
+    if (scope === 'user') records.push({ scope, projectPath: null });
+    else if (scope === 'local' && typeof projectPath === 'string' && projectPath.length > 0) {
+      records.push({ scope, projectPath });
+    }
+  }
+  return records;
 }
 
 /** Claude Code's own record of installed plugins, read when no binary can be asked. */

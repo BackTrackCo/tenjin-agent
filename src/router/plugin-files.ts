@@ -11,12 +11,16 @@ import {
 } from './names';
 
 /**
- * THE CLAUDE CODE PLUGIN, AS FILES. `tenjin install` registers it with Claude
- * Code's own `claude plugin` commands from the package's `dist/hosts/claude`
- * folder, which the build renders from this module, and writes the same plugin
- * folder under the config dir's `skills/` when there is no `claude` binary to
- * run. The checked-in `hosts/claude/` templates are pinned to this render by a
- * test, so the two cannot drift.
+ * THE CLAUDE CODE PLUGIN, AS FILES, in two renders. `tenjin install` registers
+ * it with Claude Code's own `claude plugin` commands from Tenjin's runtime,
+ * `~/.tenjin/runtime/claude`, which `activate` renders with the runtime's
+ * absolute Node and entry (the runtime render). Where there is no runtime (a
+ * non-default data dir, an unsupported platform, a runtime that could not be
+ * set up) it registers the package's `dist/hosts/claude` instead, which the
+ * build renders from this module with `node` from PATH (the package render),
+ * and writes the same plugin folder under the config dir's `skills/` when there
+ * is no `claude` binary to run. The checked-in `hosts/claude/` templates are
+ * pinned to the package render by a test, so the two cannot drift.
  *
  * NOTHING HERE IMPORTS MORE THAN THE NAMES AND THE PRODUCTION ORIGIN:
  * `tsup.config.ts` loads this module to render the shipped files, and its
@@ -54,12 +58,15 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 export const ASK_MATCHER = 'AskUserQuestion';
 
 /**
- * EVERY COMMAND RUNS `node` IN EXEC FORM, with no shell (see `hook-form.ts`).
- * The shipped plugin loads in place from the package's `dist/hosts/claude/tenjin`,
+ * EVERY COMMAND RUNS NODE IN EXEC FORM, with no shell (see `hook-form.ts`).
+ * The package render loads in place from the package's `dist/hosts/claude/tenjin`,
  * so the bundle's entry is three folders above `${CLAUDE_PLUGIN_ROOT}`, which
  * Claude Code substitutes into each argument, and the checked-in template
- * stays static. The folder fallback lives under the config dir instead, and
- * `install` renders it with the absolute entry of the CLI that wrote it.
+ * stays static; its `node` is whichever one is on Claude Code's PATH. The
+ * runtime render names an absolute Node and entry instead, so neither a Node
+ * upgrade nor `npm rm -g` can take them away. The folder fallback lives under
+ * the config dir, and `install` renders it with the absolute entry of the CLI
+ * that wrote it.
  */
 export const PLUGIN_ROOT_ENTRY = '${CLAUDE_PLUGIN_ROOT}/../../../index.js';
 
@@ -69,9 +76,16 @@ export interface ExecLaunch {
   args: string[];
 }
 
-/** The CLI run by `node` from its entry script, never through the `tenjin` shim. */
-export function cliLaunch(args: readonly string[], entry: string = PLUGIN_ROOT_ENTRY): ExecLaunch {
-  return { command: 'node', args: [entry, ...args] };
+/**
+ * The CLI run by Node from its entry script, never through the `tenjin` shim:
+ * `node` from PATH, or the runtime's absolute Node.
+ */
+export function cliLaunch(
+  args: readonly string[],
+  entry: string = PLUGIN_ROOT_ENTRY,
+  node = 'node',
+): ExecLaunch {
+  return { command: node, args: [entry, ...args] };
 }
 
 /**
@@ -98,8 +112,8 @@ function permissionAnswer(decision: 'allow' | 'deny', reason: string): string {
 /** A fixed answer `node -e` prints from its own argument: no shell, no CLI, no quoting. */
 export const PRINT_ARGUMENT = 'process.stdout.write(process.argv[1])';
 
-function printed(answer: string): ExecLaunch {
-  return { command: 'node', args: ['-e', PRINT_ARGUMENT, answer] };
+function printed(answer: string, node: string): ExecLaunch {
+  return { command: node, args: ['-e', PRINT_ARGUMENT, answer] };
 }
 
 /**
@@ -111,12 +125,16 @@ function printed(answer: string): ExecLaunch {
  * still run (lab, Claude Code 2.1.296). The tool stays in the model's list. The
  * tool's transcript check (`admitHookEvent`) stays for a machine with hooks off.
  */
-export const DENY_HOOK = printed(
-  permissionAnswer(
-    'deny',
-    `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
-  ),
-);
+export function denyHook(node = 'node'): ExecLaunch {
+  return printed(
+    permissionAnswer(
+      'deny',
+      `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
+    ),
+    node,
+  );
+}
+export const DENY_HOOK = denyHook();
 
 /**
  * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, replacing the settings
@@ -125,7 +143,10 @@ export const DENY_HOOK = printed(
  * the tool. The tool still pays only within the local spend policy, and an
  * amount over it returns `needs_approval` with nothing paid.
  */
-export const ALLOW_HOOK = printed(permissionAnswer('allow', 'Tenjin lookup'));
+export function allowHook(node = 'node'): ExecLaunch {
+  return printed(permissionAnswer('allow', 'Tenjin lookup'), node);
+}
+export const ALLOW_HOOK = allowHook();
 
 /** One routing leg: Claude Code calls the plugin server's `hook` tool. */
 function leg(kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS): unknown[] {
@@ -167,15 +188,22 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
   ];
 }
 
-/** `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two permission answers. */
-export function renderPluginHooks(entry: string = PLUGIN_ROOT_ENTRY): {
+/**
+ * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
+ * permission answers. `node` runs all three commands, the answers included, so
+ * the runtime render names no `node` from PATH at all.
+ */
+export function renderPluginHooks(
+  entry: string = PLUGIN_ROOT_ENTRY,
+  node = 'node',
+): {
   hooks: Record<string, unknown[]>;
 } {
   const plan = [
-    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry)) },
+    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry, node)) },
     ...routerHookPlan(),
-    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(DENY_HOOK) },
-    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(ALLOW_HOOK) },
+    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(node)) },
+    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(allowHook(node)) },
   ];
   const hooks: Record<string, unknown[]> = {};
   for (const { event, hooks: handlers, ...rest } of plan) {
@@ -186,7 +214,8 @@ export function renderPluginHooks(entry: string = PLUGIN_ROOT_ENTRY): {
 
 /**
  * `.mcp.json`: the server Claude Code starts for the plugin, the CLI's entry
- * run by `node`, which Windows can spawn where it cannot spawn the shim.
+ * run by Node (`node` from PATH, or the runtime's absolute `node.exe` on
+ * Windows), which Windows can spawn where it cannot spawn the shim.
  *
  * `--plugin` KEEPS IT FROM BEING SUPPRESSED. Claude Code drops a plugin's MCP
  * server whose command and arguments match a server the user configured, and
@@ -196,10 +225,13 @@ export function renderPluginHooks(entry: string = PLUGIN_ROOT_ENTRY): {
  */
 export const PLUGIN_MCP_ARGS = ['mcp', '--plugin'] as const;
 
-export function renderPluginMcp(entry: string = PLUGIN_ROOT_ENTRY): {
+export function renderPluginMcp(
+  entry: string = PLUGIN_ROOT_ENTRY,
+  node = 'node',
+): {
   mcpServers: Record<string, unknown>;
 } {
-  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, entry) } };
+  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, entry, node) } };
 }
 
 /** The key whose presence marks a plugin manifest as one this CLI wrote. */
@@ -231,7 +263,7 @@ export function renderPluginManifest(version?: string): Record<string, unknown> 
 /** The plugin's folder inside the marketplace folder. */
 export const PLUGIN_DIR = PLUGIN_NAME;
 
-/** `.claude-plugin/marketplace.json`: one plugin, read in place from the package. */
+/** `.claude-plugin/marketplace.json`: one plugin, read in place from the runtime or the package. */
 export function renderMarketplace(version?: string): Record<string, unknown> {
   return {
     name: MARKETPLACE_NAME,
@@ -266,25 +298,141 @@ const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 /**
  * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
  * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
- * outside the package.
+ * outside the package, and `node` the Node that runs them: `node` from PATH
+ * unless this is the runtime render.
  */
-export function renderPluginFiles(version?: string, entry?: string): Record<string, string> {
+export function renderPluginFiles(
+  version?: string,
+  entry?: string,
+  node?: string,
+): Record<string, string> {
   return {
-    '.mcp.json': json(renderPluginMcp(entry)),
-    'hooks/hooks.json': json(renderPluginHooks(entry)),
+    '.mcp.json': json(renderPluginMcp(entry, node)),
+    'hooks/hooks.json': json(renderPluginHooks(entry, node)),
     '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
   };
 }
 
-/** The marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
-export function renderHostFiles(version?: string): Record<string, string> {
-  const plugin = Object.entries(renderPluginFiles(version)).map(
+/**
+ * What the runtime render runs: the runtime's absolute Node and the version's
+ * absolute `dist/index.js`. `home` is needed only for the win32 `.cmd`
+ * launcher, which names both from `%USERPROFILE%`.
+ */
+export interface RuntimeLaunch {
+  node: string;
+  entry: string;
+  platform?: NodeJS.Platform;
+  home?: string;
+}
+
+/**
+ * The marketplace folder's files: its catalog and the plugin under
+ * {@link PLUGIN_DIR}. With no `launch`, the package render, byte for byte what
+ * the build ships; with one, the runtime render, which runs `launch.node` and
+ * `launch.entry` and carries the plugin's `bin/` launchers.
+ */
+export function renderHostFiles(version?: string, launch?: RuntimeLaunch): Record<string, string> {
+  const files =
+    launch === undefined
+      ? renderPluginFiles(version)
+      : { ...renderPluginFiles(version, launch.entry, launch.node), ...renderPluginBin(launch) };
+  const plugin = Object.entries(files).map(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );
   return {
     '.claude-plugin/marketplace.json': json(renderMarketplace(version)),
     ...Object.fromEntries(plugin),
   };
+}
+
+/**
+ * The line every launcher carries. A file at a launcher's path without it is
+ * not Tenjin's, and is never overwritten or removed.
+ */
+export const LAUNCHER_MARKER = 'tenjin-runtime-launcher';
+/** The one fix for a missing runtime: npx installs from its own cache, not the broken launcher. */
+export const RUNTIME_MISSING_FIX = 'npx -y tenjin-cli@latest install';
+
+const missingSentence = (entry: string): string =>
+  `tenjin: Tenjin's runtime is missing (${entry}). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session.`;
+
+/** A single-quoted sh word: everything literal, a `'` closed, escaped and reopened. */
+const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
+/**
+ * THE `tenjin` LAUNCHER, as sh, for `~/.local/bin` and the plugin's `bin/`.
+ * It bakes the absolute Node and entry, so it reads no state and the atomic
+ * rename of the file is the switch. When either is gone it says how to put the
+ * runtime back instead of failing with a bare `not found`. On win32 it is for
+ * Git Bash, so the paths are written with forward slashes.
+ */
+export function renderLauncherSh(launch: RuntimeLaunch): string {
+  const slash = (p: string) =>
+    (launch.platform ?? process.platform) === 'win32' ? p.replaceAll('\\', '/') : p;
+  return [
+    '#!/bin/sh',
+    `# ${LAUNCHER_MARKER}`,
+    `node=${shQuote(slash(launch.node))}`,
+    `entry=${shQuote(slash(launch.entry))}`,
+    'if [ -x "$node" ] && [ -f "$entry" ]; then exec "$node" "$entry" "$@"; fi',
+    `echo "${missingSentence('$entry').replaceAll('`', '\\`')}" >&2`,
+    'exit 1',
+    '',
+  ].join('\n');
+}
+
+/** `path` relative to `home`, both Windows paths, or null when it is not under it. */
+function underHome(path: string, home: string): string | null {
+  const back = (p: string) => p.replaceAll('/', '\\');
+  const base = back(home).replace(/\\+$/, '');
+  const full = back(path);
+  if (!full.toLowerCase().startsWith(`${base.toLowerCase()}\\`)) return null;
+  return full.slice(base.length + 1);
+}
+
+/**
+ * THE `tenjin.cmd` LAUNCHER, for a Windows terminal only (never a plugin
+ * command). Both paths are `%USERPROFILE%` plus their part under the home
+ * folder, which is ASCII by construction, so a non-ASCII user name never has to
+ * survive cmd's code page. It throws when a path is outside `home`, or its part
+ * holds a non-ASCII character, `"` or `%`, which cmd would read. The run line is
+ * one parenthesized block, so cmd parses it whole before Node starts and a
+ * rewrite of the file mid-run cannot inject a stray line.
+ */
+export function renderLauncherCmd(launch: RuntimeLaunch & { home: string }): string {
+  const rel = (path: string): string => {
+    const part = underHome(path, launch.home);
+    if (part === null) throw new Error(`${path} is not under ${launch.home}`);
+    if (/[^\x20-\x7e]|["%]/.test(part)) {
+      throw new Error(`${path} holds a character a .cmd launcher cannot carry`);
+    }
+    return `%USERPROFILE%\\${part}`;
+  };
+  const node = rel(launch.node);
+  const entry = rel(launch.entry);
+  return [
+    '@echo off',
+    `rem ${LAUNCHER_MARKER}`,
+    `if exist "${node}" if exist "${entry}" ( "${node}" "${entry}" %* & exit /b )`,
+    `echo ${missingSentence(entry)} 1>&2`,
+    'exit /b 1',
+    '',
+  ].join('\r\n');
+}
+
+/**
+ * The plugin's `bin/`: Claude Code appends it to the END of its Bash tool's
+ * PATH, so this `tenjin` answers there when nothing earlier is named `tenjin`.
+ * `activate` writes these at 0o755: Claude Code never sets the exec bit, and
+ * skips a file without it.
+ */
+export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
+  const files: Record<string, string> = { 'bin/tenjin': renderLauncherSh(launch) };
+  if ((launch.platform ?? process.platform) === 'win32') {
+    if (launch.home === undefined) throw new Error('the .cmd launcher needs the home folder');
+    files['bin/tenjin.cmd'] = renderLauncherCmd({ ...launch, home: launch.home });
+  }
+  return files;
 }
 
 /**

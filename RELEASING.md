@@ -22,6 +22,13 @@ the two-job `workflow_dispatch`-only `.github/workflows/release.yml`, adapted fr
 the house template (`BackTrackCo/x402r-sdk`). Nothing auto-fires from a push or a
 tag: a maintainer clicks Run workflow at each step.
 
+**Moving the Node pin.** Tenjin's runtime downloads the Node that
+`package.json` `tenjinRuntime.node` pins, checked against the sha256 recorded
+there. To move it, run `node scripts/pin-node.mjs <24.x.y>` and commit the
+result before the release PR. It needs `gpg` (for `gpgv`) and refuses, writing
+nothing, unless Node's `SHASUMS256.txt` signature verifies against the release
+keys it pins. It runs at release time only, never in CI or during install.
+
 To cut a release (two clicks):
 
 1. **Dispatch (click 1)**: Actions -> Release -> Run workflow -> `main`. The

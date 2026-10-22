@@ -13,7 +13,11 @@ import {
   PLUGIN_DIR,
   PLUGIN_FILES,
   PLUGIN_ROOT_ENTRY,
+  LAUNCHER_MARKER,
+  RUNTIME_MISSING_FIX,
   renderHostFiles,
+  renderLauncherCmd,
+  renderLauncherSh,
   renderMarketplace,
   renderPluginFiles,
   renderPluginHooks,
@@ -175,6 +179,121 @@ describe('every command the plugin carries', () => {
       expect(`${files['hooks/hooks.json']}${files['.mcp.json']}`).not.toMatch(/"tenjin(\.cmd)?"/);
     });
   }
+});
+
+/**
+ * THE RUNTIME RENDER: the same plugin, with every command naming the runtime's
+ * absolute Node and entry, and the `bin/` launchers beside it.
+ */
+describe('the runtime render', () => {
+  const node = '/h/Jane Doe/.tenjin/runtime/node/24.0.0/bin/node';
+  const entry = '/h/Jane Doe/.tenjin/runtime/versions/1.2.3/dist/index.js';
+  const files = renderHostFiles('1.2.3', { node, entry, platform: 'linux' });
+
+  it('leaves the package render as it was when no launch is given', () => {
+    expect(renderHostFiles('1.2.3', undefined)).toEqual(renderHostFiles('1.2.3'));
+    expect(renderPluginFiles('1.2.3', undefined, undefined)).toEqual(renderPluginFiles('1.2.3'));
+    expect(Object.keys(renderHostFiles('1.2.3')).some((p) => p.includes('/bin/'))).toBe(false);
+    expect(DENY_HOOK.command).toBe('node');
+    expect(ALLOW_HOOK.command).toBe('node');
+  });
+
+  it('runs every command with the absolute node, the permission answers included', () => {
+    const hooks = JSON.parse(files[`${PLUGIN_DIR}/hooks/hooks.json`]!) as unknown;
+    const commands = handlersIn(hooks).filter((h) => commandForm(h) !== null) as ExecLaunch[];
+    expect(commands).toHaveLength(3);
+    for (const handler of commands) {
+      expect(handler.command).toBe(node);
+      expect(shellDependence(handler)).toBeNull();
+    }
+    expect(commands[0]!.args).toEqual([entry, 'hook', 'alive']);
+    const mcp = JSON.parse(files[`${PLUGIN_DIR}/.mcp.json`]!) as {
+      mcpServers: { router: ExecLaunch };
+    };
+    expect(mcp.mcpServers.router).toEqual({ command: node, args: [entry, 'mcp', '--plugin'] });
+    expect(shellDependence(mcp.mcpServers.router)).toBeNull();
+    const text = Object.values(files).join('');
+    expect(text).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+    expect(text).not.toMatch(/"command": "node"/);
+  });
+
+  it('keeps every other byte of the package render', () => {
+    const swap = (body: string) =>
+      body.replaceAll(JSON.stringify(node), '"node"').replaceAll(entry, PLUGIN_ROOT_ENTRY);
+    const plain = renderHostFiles('1.2.3');
+    for (const [path, body] of Object.entries(plain)) expect(swap(files[path]!), path).toBe(body);
+  });
+
+  it('carries the sh launcher in bin/ and no .cmd off Windows', () => {
+    expect(files[`${PLUGIN_DIR}/bin/tenjin`]).toBe(renderLauncherSh({ node, entry }));
+    expect(files[`${PLUGIN_DIR}/bin/tenjin.cmd`]).toBeUndefined();
+  });
+
+  it('writes the sh launcher with both paths quoted and the missing-runtime sentence', () => {
+    const sh = renderLauncherSh({ node: "/h/o'b/node", entry: '/h/e.js', platform: 'linux' });
+    expect(sh.split('\n')).toEqual([
+      '#!/bin/sh',
+      `# ${LAUNCHER_MARKER}`,
+      `node='/h/o'\\''b/node'`,
+      `entry='/h/e.js'`,
+      'if [ -x "$node" ] && [ -f "$entry" ]; then exec "$node" "$entry" "$@"; fi',
+      `echo "tenjin: Tenjin's runtime is missing ($entry). Reinstall it with \\\`${RUNTIME_MISSING_FIX}\\\`, then start a new Claude Code session." >&2`,
+      'exit 1',
+      '',
+    ]);
+  });
+
+  describe('on win32', () => {
+    const home = 'C:\\Users\\Zoë';
+    const winNode = `${home}\\.tenjin\\runtime\\node\\24.0.0\\node.exe`;
+    const winEntry = `${home}\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js`;
+    const win = renderHostFiles('1.2.3', {
+      node: winNode,
+      entry: winEntry,
+      platform: 'win32',
+      home,
+    });
+
+    it('runs node.exe and carries a CRLF, ASCII .cmd built from %USERPROFILE%', () => {
+      const mcp = JSON.parse(win[`${PLUGIN_DIR}/.mcp.json`]!) as {
+        mcpServers: { router: ExecLaunch };
+      };
+      expect(mcp.mcpServers.router.command).toBe(winNode);
+      expect(shellDependence(mcp.mcpServers.router)).toBeNull();
+      const cmd = win[`${PLUGIN_DIR}/bin/tenjin.cmd`]!;
+      expect([...cmd].every((c) => c.charCodeAt(0) < 0x80)).toBe(true);
+      const lines = cmd.split('\r\n');
+      expect(lines.join('')).not.toContain('\n');
+      expect(lines).toEqual([
+        '@echo off',
+        `rem ${LAUNCHER_MARKER}`,
+        'if exist "%USERPROFILE%\\.tenjin\\runtime\\node\\24.0.0\\node.exe" if exist "%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js" ( "%USERPROFILE%\\.tenjin\\runtime\\node\\24.0.0\\node.exe" "%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js" %* & exit /b )',
+        `echo tenjin: Tenjin's runtime is missing (%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session. 1>&2`,
+        'exit /b 1',
+        '',
+      ]);
+      const paths = cmd.match(/%USERPROFILE%[^"\s)]*/g)!;
+      for (const p of paths) expect(p.startsWith('%USERPROFILE%\\.tenjin\\runtime\\')).toBe(true);
+    });
+
+    it('writes the sh launcher with forward slashes for Git Bash', () => {
+      const sh = win[`${PLUGIN_DIR}/bin/tenjin`]!;
+      expect(sh).toContain(`node='C:/Users/Zoë/.tenjin/runtime/node/24.0.0/node.exe'`);
+      expect(sh).toContain(`entry='C:/Users/Zoë/.tenjin/runtime/versions/1.2.3/dist/index.js'`);
+    });
+
+    it('refuses a path with % or ", one outside home, and a launch with no home', () => {
+      const launch = { node: winNode, entry: winEntry, platform: 'win32' as const, home };
+      expect(() => renderLauncherCmd({ ...launch, entry: `${home}\\100%\\index.js` })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, entry: `${home}\\a"b\\index.js` })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, entry: `${home}\\é\\index.js` })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, node: 'D:\\node\\node.exe' })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, node: 'C:\\Users\\Zoëx\\node.exe' })).toThrow();
+      expect(() =>
+        renderHostFiles('1.2.3', { node: winNode, entry: winEntry, platform: 'win32' }),
+      ).toThrow();
+    });
+  });
 });
 
 describe('the manifest and the marketplace', () => {
