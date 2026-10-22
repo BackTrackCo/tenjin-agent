@@ -10,6 +10,7 @@ import {
   ALIVE_ARGS,
   ALLOW_HOOK,
   DENY_HOOK,
+  MOD_FILES,
   PLUGIN_DIR,
   PLUGIN_FILES,
   PLUGIN_ROOT_ENTRY,
@@ -27,9 +28,18 @@ import {
   renderCodexManifest,
   renderCodexMarketplace,
   renderCodexMcp,
+  type ModSources,
 } from './plugin-files';
+import { readModSources } from './plugin-folder';
 
 const HOSTS = fileURLToPath(new URL('../../hosts/claude', import.meta.url));
+
+/**
+ * Not shipped: the mod's tests (`claude plugin test`), and what Claude Code
+ * writes beside a mod it loads from this folder (its API types and a
+ * tsconfig extending them), which the folder's `.gitignore` keeps out.
+ */
+const NOT_SHIPPED = /^(\.gitignore$|tenjin\/(tests\/|\.claude-plugin\/types\/|tsconfig\.json$))/;
 
 function filesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -42,6 +52,13 @@ function filesUnder(dir: string): string[] {
   };
   walk(dir);
   return out.sort();
+}
+
+/** The mod as written, from the checked-in plugin folder. */
+async function checkedInMod(): Promise<ModSources> {
+  const mod = await readModSources(join(HOSTS, PLUGIN_DIR));
+  if (mod === undefined) throw new Error('the checked-in plugin folder carries no mod');
+  return mod;
 }
 
 /** One routing leg as the plugin carries it. */
@@ -57,19 +74,60 @@ const leg = (kind: Parameters<typeof hookToolInput>[0], timeout = 5) => [
 const command = (launch: ExecLaunch) => [{ type: 'command', ...launch, timeout: 5 }];
 
 describe('the checked-in hosts/claude templates', () => {
-  it('are exactly what the renderer writes, file for file', () => {
-    const rendered = renderHostFiles();
-    expect(filesUnder(HOSTS)).toEqual(Object.keys(rendered).sort());
+  it('are exactly what the renderer writes, file for file', async () => {
+    const rendered = renderHostFiles(undefined, await checkedInMod());
+    const shipped = filesUnder(HOSTS).filter((path) => !NOT_SHIPPED.test(path));
+    expect(shipped).toEqual(Object.keys(rendered).sort());
     for (const [path, body] of Object.entries(rendered)) {
-      // Parsed, so prettier's formatting of the checked-in copy is not drift.
-      expect(JSON.parse(readFileSync(join(HOSTS, path), 'utf8')), path).toEqual(JSON.parse(body));
+      const checkedIn = readFileSync(join(HOSTS, path), 'utf8');
+      // Parsed, so prettier's formatting of the checked-in copy is not drift;
+      // the mod's own files ship as written.
+      if (path.endsWith('.json')) expect(JSON.parse(checkedIn), path).toEqual(JSON.parse(body));
+      else expect(checkedIn, path).toBe(body);
     }
   });
 
   it('list every plugin file the folder fallback and uninstall act on', () => {
-    expect(filesUnder(join(HOSTS, PLUGIN_DIR))).toEqual([...PLUGIN_FILES].sort());
-    // The manifest is written last, so a crash never leaves it pointing at parts not yet there.
+    const shipped = filesUnder(join(HOSTS, PLUGIN_DIR)).filter(
+      (path) => !NOT_SHIPPED.test(`tenjin/${path}`),
+    );
+    expect(shipped).toEqual([...PLUGIN_FILES].sort());
+    for (const path of MOD_FILES) expect(PLUGIN_FILES).toContain(path);
+    // The module and its contract land before the hooks file that names them,
+    // and the manifest last, so a crash never leaves a part named but not there.
+    expect(PLUGIN_FILES.indexOf('hooks/register.tsx')).toBeLessThan(
+      PLUGIN_FILES.indexOf('hooks/hooks.json'),
+    );
     expect(PLUGIN_FILES.at(-1)).toBe('.claude-plugin/plugin.json');
+  });
+});
+
+describe('the mod', () => {
+  it('is named by the hooks file and its contract by the manifest, only when shipped', async () => {
+    const mod = await checkedInMod();
+    const withMod = renderPluginFiles('1.2.3', undefined, mod);
+    expect(JSON.parse(withMod['hooks/hooks.json']!)).toMatchObject({
+      modules: ['./register.tsx'],
+    });
+    expect(JSON.parse(withMod['.claude-plugin/plugin.json']!)).toMatchObject({
+      types: './types/index.d.ts',
+    });
+    expect(withMod['hooks/register.tsx']).toBe(mod['hooks/register.tsx']);
+    // A folder written without the mod's sources names no module that is not there.
+    const bare = renderPluginFiles('1.2.3');
+    expect(Object.keys(bare)).not.toContain('hooks/register.tsx');
+    expect(JSON.parse(bare['hooks/hooks.json']!)).not.toHaveProperty('modules');
+    expect(JSON.parse(bare['.claude-plugin/plugin.json']!)).not.toHaveProperty('types');
+  });
+
+  it('hooks our request tool by its plugin name and writes nothing under the data dir', async () => {
+    const source = (await checkedInMod())['hooks/register.tsx'];
+    expect(source).toContain(`const REQUEST_TOOL = '${REQUEST_TOOL}';`);
+    // Reads only: the module never calls a write, a process or a config change.
+    expect(source).not.toMatch(
+      /\$\.fs\.(write|mkdir|rm|unlink)|\$\.process\.|\$\.config\.set|\$\.settings/,
+    );
+    expect(source).not.toMatch(/on\('prompt\.(submit|compose)'/);
   });
 });
 
@@ -125,6 +183,8 @@ describe("the plugin's hooks", () => {
   });
 
   it('never name x402 anywhere the plugin shows', () => {
+    // The mod's source names it in comments and in its own test of what a
+    // surface may never draw; its surfaces are pinned by `claude plugin test`.
     expect(JSON.stringify(renderHostFiles('1.2.3'))).not.toMatch(/x402/i);
   });
 });

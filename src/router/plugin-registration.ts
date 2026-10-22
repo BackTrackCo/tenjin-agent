@@ -11,10 +11,11 @@ import {
   type ClaudeRun,
 } from './claude-cli';
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_NAME, SKILLS_DIR_PLUGIN_ID } from './names';
-import { PLUGIN_DIR, renderPluginFiles } from './plugin-files';
+import { PLUGIN_DIR, renderPluginFiles, type ModSources } from './plugin-files';
 import {
   inspectPluginFolder,
   pluginFolderPath,
+  readModSources,
   removePluginFolder,
   writePluginFolder,
   type FolderRemoval,
@@ -148,7 +149,11 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
   }
   const written = await writePluginFolder(
     folder,
-    renderPluginFiles(opts.version, opts.cliEntry ?? packageCliEntry()),
+    renderPluginFiles(
+      opts.version,
+      opts.cliEntry ?? packageCliEntry(),
+      await packageMod(opts.hostsDir),
+    ),
   );
   if (written.state === 'written') {
     return {
@@ -324,6 +329,20 @@ export async function packageHostsDir(
   const stable = versionFreeEntry(catalog) ?? catalog;
   if ((await stat(stable).catch(() => null))?.isFile() !== true) return null;
   return dirname(dirname(stable));
+}
+
+/**
+ * THE MOD'S SOURCES, ONE LOOKUP FOR EVERY PLUGIN FOLDER THIS MODULE WRITES.
+ * The mod ships as written in the package's own plugin folder
+ * (`dist/hosts/claude/tenjin`, or `hostsDir`'s), and a render carries it only
+ * when it is passed in: a plugin folder rendered anywhere else (the folder
+ * fallback here, or a marketplace folder rendered under the data dir) takes
+ * this result, or it ships without the mod. Undefined when the folder carries
+ * no mod or there is no package folder.
+ */
+export async function packageMod(hostsDir?: string | null): Promise<ModSources | undefined> {
+  const hosts = hostsDir === undefined ? await packageHostsDir() : hostsDir;
+  return hosts === null ? undefined : readModSources(join(hosts, PLUGIN_DIR));
 }
 
 /**

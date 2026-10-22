@@ -1,5 +1,24 @@
 # tenjin-cli
 
+## 0.1.0-alpha.31
+
+### Patch Changes
+
+- 10e3627: The `tenjin` Claude Code plugin now carries a mod (Claude Code 2.1.287 or later). Each paid lookup is one transcript line drawn as Claude Code draws an MCP call: while it runs, `⏺ Calling Exa search… · $0.007` with the query under it, and once it ends the dim `Called Exa search · $0.007 (ctrl+o to expand)`. In the ctrl+o transcript every call to the router, hidden ones included, is Claude Code's own row with its input and result. A lookup over a spend limit draws no row of its own; the `approve` call that runs it draws as that lookup. Several takes show what they all paid. A call that failed after paying shows the error dot, the amount and the state. A call the router sends back for a missing field, and the router's own free calls, draw nothing. A WebSearch or WebFetch held for a Tenjin offer shows as its native row struck through, `~~Web Search~~("best local LLM") · Tenjin offered Exa search`, and becomes, once the `request` call takes it up, `⏺ Exa search("best local LLM") · $0.007` in place. The mod reads only the kept spec and the offer record, and writes nothing under `~/.tenjin`.
+
+  Without the mod too: `tenjin hook alive` says at session start when the wallet holds less than the per-call limit, and the request tool stays out of tool search through `anthropic/alwaysLoad`.
+
+- f20c9a7: `tenjin install` sets up Tenjin in Codex too, with no flag. Run by an agent, it sets up the agent it runs in; in a terminal, it sets up Claude Code or Codex, whichever answers `--version`, and asks which when both do, both selected. It records the agents it set up in `installed-hosts.json` in the Tenjin data dir, and `tenjin doctor` and `tenjin uninstall` check or remove each one recorded. `--harness claude|codex` only overrides. An agent's install that also finds the other agent names it in one line, with how to add Tenjin there. For Codex it writes the wallet, the spend limits and the Codex plugin `tenjin` through `codex plugin marketplace add` and `codex plugin add` from the package's `dist/hosts/codex`. Its spend limits follow the same defaults as Claude Code: with no answer the defaults ($0.25 a call, $5 a day) hold and the spend question comes back in `nextSteps`, and `--max-auto-spend` (at least 0.25) and `--session-budget` set your own. The plugin's hooks route your prompt and one web call before it runs and after (a search, a page open, or a batch of them: a batch is blocked at most once, and the block names the rest of the call to run as written), its `router` server carries the request tool, named `mcp__router__request`, and a `PermissionRequest` hook allows that tool without a prompt (turn it off in `/hooks` to be asked first). Codex asks you to trust the four hooks in `/hooks`. On native Windows, the CLI starts npm's `codex.cmd` through the script behind it, and the allow hook carries a `commandWindows` form that `cmd.exe` prints as plain JSON. The plugin carries no version, so its hooks keep their trust across `tenjin update`. For Codex, `tenjin doctor` reads Codex's one hook list for the plugin and its trust, and writes nothing, and `tenjin uninstall` removes the plugin and its marketplace.
+
+  Every router request now names its host in `harness` (`claude` or `codex`), on the hook, tool and outcome bodies, so the router can leave out a lookup the host's own tools already do.
+
+- 10e3627: router: advertises the `label` and `fields` contract tokens. Offer lines start
+  at the tool's display name, the free docs lookup fetches the URL the server
+  builds when it says to, and the over-cap note reads each listed service's
+  price from its spec. The `request` tool gains a free browse of the tool list
+  (`{browse}`) and a spec by row id (`{tool}`). The footer, the paid ledger and
+  the redirect record carry the tool's label.
+
 ## 0.1.0-alpha.30
 
 ### Patch Changes

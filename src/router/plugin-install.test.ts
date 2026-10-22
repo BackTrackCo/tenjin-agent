@@ -9,7 +9,16 @@ import { aliveDir, runAliveHook } from './alive';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput, type HookKind } from './hook-tool';
 import { runRouterInstall } from './install';
-import { PLUGIN_FILES, renderHostFiles, renderPluginFiles } from './plugin-files';
+import { fileURLToPath } from 'node:url';
+import {
+  MOD_FILES,
+  PLUGIN_DIR,
+  PLUGIN_FILES,
+  renderHostFiles,
+  renderPluginFiles,
+  type ModSources,
+} from './plugin-files';
+import { readModSources } from './plugin-folder';
 import { runRouterUninstall } from './uninstall';
 
 /**
@@ -27,6 +36,7 @@ let cfg: string;
 let work: string;
 let hosts: string;
 let fake: FakeClaude;
+let mod: ModSources;
 
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 const probe400 = (async () =>
@@ -45,7 +55,11 @@ beforeEach(async () => {
   await mkdir(join(work, '.git'), { recursive: true });
   await mkdir(home, { recursive: true });
   await mkdir(data, { recursive: true });
-  for (const [path, body] of Object.entries(renderHostFiles(pkg.version))) {
+  // The package as the build lays it: the rendered files and the mod as written.
+  mod = (await readModSources(
+    join(fileURLToPath(new URL('../../hosts/claude', import.meta.url)), PLUGIN_DIR),
+  ))!;
+  for (const [path, body] of Object.entries(renderHostFiles(pkg.version, mod))) {
     await mkdir(dirname(join(hosts, path)), { recursive: true });
     await writeFile(join(hosts, path), body);
   }
@@ -236,7 +250,8 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       path: folder,
     });
     // Outside the package, so its commands carry the absolute entry install resolved.
-    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'));
+    // The mod's files are copied from the package's own plugin folder.
+    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'), mod);
     expect(JSON.parse(files['.mcp.json']!)).toEqual({
       mcpServers: {
         router: {
@@ -251,6 +266,21 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     expect(await readFile(join(hosted, 'SKILL.md'), 'utf8')).toBe('the hosted skill');
     expect(await exists(join(home, '.claude'))).toBe(false);
     expect(await fake.calls()).toEqual([]);
+  });
+
+  it('writes the folder without the mod when the package carries none', async () => {
+    await rm(join(hosts, PLUGIN_DIR, 'hooks', 'register.tsx'));
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ env: env({ PATH: await emptyPath() }) }),
+    );
+    expect(pluginOf(result)).toMatchObject({ method: 'skills-dir', state: 'written' });
+    const folder = join(cfg, 'skills', 'tenjin-router');
+    expect(await exists(join(folder, 'hooks', 'register.tsx'))).toBe(false);
+    // Its hooks file names no module that is not there.
+    const hooks = JSON.parse(await readFile(join(folder, 'hooks', 'hooks.json'), 'utf8'));
+    expect(hooks).not.toHaveProperty('modules');
   });
 
   it('falls back to the folder when a plugin command fails', async () => {
@@ -433,6 +463,43 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       install?: { routerProjects?: string[] };
     };
     expect(config.install?.routerProjects).toEqual([work]);
+  });
+});
+
+/**
+ * THE MOD SHIPS IN EVERY PLUGIN FOLDER INSTALL HANDS CLAUDE CODE. The mod is
+ * copied as written, never rendered, so a render that forgets it still writes
+ * a working plugin and every other test passes: these read the folder Claude
+ * Code is pointed at, whichever folder that is, and require each mod file in
+ * it byte for byte, with the hooks file naming the module.
+ */
+describe('the mod in the registered plugin', () => {
+  async function expectMod(pluginDir: string): Promise<void> {
+    expect(MOD_FILES).toContain('hooks/register.tsx');
+    for (const path of MOD_FILES) {
+      expect(await readFile(join(pluginDir, path), 'utf8'), path).toBe(mod[path]);
+    }
+    const hooks = JSON.parse(await readFile(join(pluginDir, 'hooks', 'hooks.json'), 'utf8'));
+    expect(hooks).toMatchObject({ modules: ['./register.tsx'] });
+  }
+
+  it('is in the marketplace folder the plugin commands add', async () => {
+    await runRouterInstall({}, ctx(), deps());
+    const added = (await fake.calls())
+      .map((call) => /^plugin marketplace add (.+) --json$/.exec(call)?.[1])
+      .find((path) => path !== undefined);
+    expect(added).toBeDefined();
+    await expectMod(join(added!, PLUGIN_DIR));
+  });
+
+  it('is in the folder the fallback writes', async () => {
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ env: env({ PATH: await emptyPath() }) }),
+    );
+    expect(pluginOf(result)).toMatchObject({ method: 'skills-dir', state: 'written' });
+    await expectMod(join(cfg, 'skills', 'tenjin-router'));
   });
 });
 

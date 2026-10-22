@@ -137,23 +137,56 @@ function spawnPrefetch(job: PrefetchJob): void {
 
 /**
  * The GET the prefetch makes, or null when this build will not make it: the
- * endpoint has to be the deployment the gate itself answered from. The hook
+ * URL has to be on the deployment the gate itself answered from. The hook
  * puts what comes back in front of the model, so a URL the answer names
  * anywhere else is not fetched.
  */
-export function docsUrl(endpoint: string, query: string, baseUrl: string): string | null {
+function onDeployment(value: string, baseUrl: string): URL | null {
   let url: URL;
   let base: URL;
   try {
-    url = new URL(endpoint);
+    url = new URL(value);
     base = new URL(baseUrl);
   } catch {
     return null;
   }
   if (url.username !== '' || url.password !== '') return null;
-  if (!isSameDeployment(url.origin, base.origin)) return null;
+  return isSameDeployment(url.origin, base.origin) ? url : null;
+}
+
+/** The docs GET built here from the offer's endpoint and the search, as a
+ *  server from before `delivery` needs. */
+export function docsUrl(endpoint: string, query: string, baseUrl: string): string | null {
+  const url = onDeployment(endpoint, baseUrl);
+  if (url === null) return null;
   url.searchParams.set('query', query.slice(0, DOCS_QUERY_MAX));
   return url.toString();
+}
+
+/** The free docs offer as the pre-call hook holds it. */
+export interface DocsOffer {
+  endpoint: string;
+  provider: string;
+  label?: string;
+  /** The server's word for how the offer is delivered (`decision.ts`). */
+  delivery?: 'offer' | 'augment';
+  augmentUrl?: string;
+}
+
+/**
+ * WHERE THE DOCS COME FROM. The server says it: `delivery: "augment"` with the
+ * `augmentUrl` it built, fetched as given once it is on the gate's own
+ * deployment, and `delivery: "offer"` is never fetched. A decision with no
+ * `delivery` comes from a server that predates it, and gets the URL this build
+ * used to make from the endpoint and the search.
+ */
+export function augmentTarget(offer: DocsOffer, query: string, baseUrl: string): string | null {
+  if (offer.delivery === 'offer') return null;
+  if (offer.delivery === 'augment') {
+    if (offer.augmentUrl === undefined) return null;
+    return onDeployment(offer.augmentUrl, baseUrl)?.toString() ?? null;
+  }
+  return docsUrl(offer.endpoint, query, baseUrl);
 }
 
 /**
@@ -169,18 +202,24 @@ export async function startAugment(
     toolUseId?: string;
     query: string;
   },
-  offer: { endpoint: string; provider: string },
+  offer: DocsOffer,
   baseUrl: string,
   deps: AugmentDeps,
 ): Promise<boolean> {
   if (call.toolUseId === undefined) return false;
-  const url = docsUrl(offer.endpoint, call.query, baseUrl);
+  const url = augmentTarget(offer, call.query, baseUrl);
   if (url === null) return false;
   const now = deps.now?.() ?? Date.now();
   if (!(await claimQuery(deps.dataDir, call.sessionId, call.agentId, call.query, now))) {
     return false;
   }
-  const out = await markAugment(deps.dataDir, call.sessionId, call.toolUseId, offer.provider, now);
+  const out = await markAugment(
+    deps.dataDir,
+    call.sessionId,
+    call.toolUseId,
+    { provider: offer.provider, ...(offer.label !== undefined ? { label: offer.label } : {}) },
+    now,
+  );
   if (out === null) return false;
   try {
     (deps.prefetch ?? spawnPrefetch)({ url, out, userAgent: composeUserAgent() });
@@ -224,14 +263,18 @@ export async function finishAugment(
   return {
     updatedToolOutput: {
       ...call.search.raw,
-      results: [docsLine(marker.provider || 'library', text), ...call.search.results],
+      results: [
+        docsLine(marker.label ?? `${marker.provider || 'library'} docs`, text),
+        ...call.search.results,
+      ],
     },
   };
 }
 
-/** The one string prepended to the search's results. */
-function docsLine(provider: string, text: string): string {
-  return `Tenjin router added ${provider} docs for this search (free). If they don't cover it, use the web results below.\n\n${text}`;
+/** The one string prepended to the search's results, naming the docs by the
+ *  service's label (`Context7 docs`), or by its provider's name plus "docs". */
+function docsLine(name: string, text: string): string {
+  return `Tenjin router added ${name} for this search (free). If they don't cover it, use the web results below.\n\n${text}`;
 }
 
 async function awaitBody(
