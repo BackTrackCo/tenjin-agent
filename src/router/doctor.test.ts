@@ -66,8 +66,8 @@ describe('routingFeeBlock', () => {
     ['a wallet tenjin mcp cannot unlock', { provider: verified('unverified') }, 'wallet_locked'],
     ['a wallet under the deposit', { fetchImpl: rpc(100_000n) }, 'wallet_low'],
     [
-      'a per-call limit under ten fees',
-      { policy: { ...POLICY, maxAutoSpendAtomic: 20_000n } },
+      'a per-call limit under the $0.25 deposit',
+      { policy: { ...POLICY, maxAutoSpendAtomic: 100_000n } },
       'limit_below_deposit',
     ],
     [
@@ -97,7 +97,7 @@ describe('routingFeeBlock', () => {
     expect(await routingFeeBlock(input({ policy: { ...POLICY, ...change } }))).toBe(why);
   });
 
-  it('names unanswered limits before a locked wallet, as the payer meets them', async () => {
+  it('names a zero per-call limit before a locked wallet, as the payer meets them', async () => {
     expect(
       await routingFeeBlock(
         input({ provider: verified('unverified'), policy: { ...POLICY, maxAutoSpendAtomic: 0n } }),
@@ -116,22 +116,13 @@ describe('routingFeeBlock', () => {
 });
 
 describe('routingFeeRow', () => {
-  it('points an unanswered limit at the spend question, with its fee terms and one-step yes', () => {
-    const row = routingFeeRow('limit_below_deposit', 'tenjin.sh', {
-      limits: { maxAutoSpend: '250000', sessionBudget: '5000000' },
-    });
+  it('raises a limit an earlier release left below the deposit to the $0.25 deposit', () => {
+    const row = routingFeeRow('limit_below_deposit', 'tenjin.sh');
     expect(row.status).toBe('warn');
-    expect(row.fix).toContain('May Tenjin pay for tool calls without asking you each time');
-    expect(row.fix).toContain('Routing costs $0.003 a call');
-    expect(row.fix).toContain('`tenjin config set maxAutoSpend 0.25`');
-    expect(row.fix).not.toContain('tenjin install --yes');
-    expect(row.fix).not.toContain('Raise it');
-  });
-
-  it('keeps the raise command for a limit the user chose', () => {
-    expect(routingFeeRow('limit_below_deposit', 'tenjin.sh', null).fix).toBe(
-      'Raise it with `tenjin config set maxAutoSpend 0.25`.',
+    expect(row.detail).toBe(
+      'the per-call spend limit is below the $0.25 routing deposit, so routing calls take the free path',
     );
+    expect(row.fix).toBe('Raise it with `tenjin config set maxAutoSpend 0.25`.');
   });
 });
 

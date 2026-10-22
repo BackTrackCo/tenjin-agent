@@ -136,11 +136,18 @@ describe('one free decision', () => {
     // is asking is read from `packet.pendingCall`, not from a field beside it.
     expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
       'accepts',
+      'harness',
       'packet',
       'schemaVersion',
     ]);
     // The catalog is on by default; the open Bazaar is not.
-    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['catalog', 'spec', 'jobs']);
+    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+    ]);
   });
 
   it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
@@ -159,6 +166,8 @@ describe('one free decision', () => {
       expect((call.body as { accepts: unknown }).accepts).toEqual([
         'catalog',
         'spec',
+        'label',
+        'fields',
         'jobs',
         'bazaar',
       ]);
@@ -185,6 +194,7 @@ describe('one free decision', () => {
     // The packet lives on the backend against the id; the client keeps none.
     expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
       'accepts',
+      'harness',
       'id',
       'query',
       'schemaVersion',

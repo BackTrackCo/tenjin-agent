@@ -1,5 +1,7 @@
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
+import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
+import { HARNESSES, type Harness } from '../router/names';
 import { SETUP, WALLET, type Registration } from './registration';
 
 /**
@@ -10,20 +12,28 @@ import { SETUP, WALLET, type Registration } from './registration';
 export function registerCore(reg: Registration): void {
   const { runCommand, leaf, addGlobalFlags } = reg;
 
-  leaf(SETUP, 'install', 'set up Tenjin for Claude Code and create a wallet')
+  leaf(SETUP, 'install', 'set up Tenjin for your agent and create a wallet')
     .description(
-      "Set up Claude Code to use Tenjin: a wallet if this machine has none, spend limits for each lookup, and the Claude Code plugin `tenjin` (its routing hooks and its `router` MCP server), registered through Claude Code's own `claude plugin` commands. A settings-based install from an earlier release is removed once the plugin has loaded.",
+      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. Run by an agent, it sets up the agent it runs in. In a terminal, it sets up Claude Code or Codex, whichever this machine has, and asks which when it has both. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
     )
+    .addOption(hostOverride())
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the default spend limits instead of asking')
+    .option('--yes', 'accept the defaults ($5 a day, $0.25 a call) instead of asking')
+    .option('--session-budget <usd|none>', 'your own daily limit, or none, instead of asking')
+    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
     .addHelpText(
       'after',
       `
 Examples:
   $ tenjin install
   $ tenjin install --project
+  $ tenjin install --max-auto-spend 0.50 --session-budget 10
+
+The daily limit is the control, the per-call limit the runaway guard, and the
+wallet balance the hard stop. To turn the router off instead:
+  $ tenjin config set router.enabled false
 
 Learn more:
   What the router may spend, and what leaves this machine:
@@ -33,36 +43,78 @@ Learn more:
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
-        const { runRouterInstall } = await import('../router/install');
-        return runRouterInstall(
-          {
-            ...(o.project === true ? { project: true } : {}),
-            ...(o.refresh === true ? { refresh: true } : {}),
-            ...(o.yes === true ? { yes: true } : {}),
-            ...(o.wallet === false ? { noWallet: true } : {}),
-          },
-          ctx,
-        );
+        const harness = o.harness as Harness | undefined;
+        // Nothing in the Codex plugin changes between builds, so nothing to refresh.
+        if (harness === 'codex' && o.refresh === true) {
+          throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
+        }
+        const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
+          await import('../router/hosts');
+        const hostArgs = {
+          ...(harness !== undefined ? { harness } : {}),
+          ...(o.project === true ? { project: true } : {}),
+          ...(o.refresh === true ? { refresh: true } : {}),
+          ...(o.yes === true ? { yes: true } : {}),
+        };
+        const hosts = await installHosts(hostArgs, ctx);
+        const note = otherHostNote(hostArgs).catch(() => undefined);
+        const out = await runEach(hosts, async (host) => {
+          const one =
+            host === 'codex'
+              ? await (await import('../router/codex-install')).runCodexInstall(codexArgs(o), ctx)
+              : await (
+                  await import('../router/install')
+                ).runRouterInstall(
+                  {
+                    ...(o.project === true ? { project: true } : {}),
+                    ...(o.refresh === true ? { refresh: true } : {}),
+                    ...(o.yes === true ? { yes: true } : {}),
+                    ...(o.wallet === false ? { noWallet: true } : {}),
+                    ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
+                    ...(typeof o.sessionBudget === 'string'
+                      ? { sessionBudget: o.sessionBudget }
+                      : {}),
+                  },
+                  ctx,
+                );
+          if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
+          return one;
+        });
+        return withNote(out, await note);
       });
     });
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      'Remove the Tenjin plugin `tenjin install` registered, and any settings-based install an earlier release wrote. Your wallet, spend ledger and config are kept.',
+      'Remove the Tenjin plugin from each agent `tenjin install` set up, and any settings-based install an earlier release wrote. For Codex it removes the plugin and its marketplace. Your wallet, spend ledger and config are kept.',
     )
+    .addOption(hostOverride())
     .option('--project', 'remove the project-only install')
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
-        const { runRouterUninstall } = await import('../router/uninstall');
-        return runRouterUninstall({ ...(o.project === true ? { project: true } : {}) }, ctx);
+        const harness = o.harness as Harness | undefined;
+        const { recordedHosts, uninstallEach } = await import('../router/hosts');
+        const hosts = await recordedHosts(
+          { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
+          ctx.dataDir,
+        );
+        return uninstallEach(hosts, ctx.dataDir, o.project === true, async (host) =>
+          host === 'codex'
+            ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
+            : (await import('../router/uninstall')).runRouterUninstall(
+                { ...(o.project === true ? { project: true } : {}) },
+                ctx,
+              ),
+        );
       });
     });
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      "Check everything a lookup needs: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, the wallet, and the router endpoint answering its 402. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails.",
+      "Check everything a lookup needs, for each agent `tenjin install` set up. For Claude Code: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, the wallet, and the router endpoint answering its 402. For Codex: Codex's hook list for the plugin and its hook trust. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails.",
     )
+    .addOption(hostOverride())
     .option('--project', 'check the project-only install, as --project registered it')
     .addHelpText(
       'after',
@@ -75,8 +127,21 @@ Examples:
     )
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
-        const { runRouterDoctor } = await import('../router/doctor');
-        return runRouterDoctor(ctx, this.opts().project === true ? { project: true } : {});
+        const o = this.opts();
+        const harness = o.harness as Harness | undefined;
+        const { checkEach, recordedHosts } = await import('../router/hosts');
+        const hosts = await recordedHosts(
+          { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
+          ctx.dataDir,
+        );
+        return checkEach(hosts, async (host) =>
+          host === 'codex'
+            ? (await import('../router/codex-install')).runCodexDoctor(codexArgs(o), ctx)
+            : (await import('../router/doctor')).runRouterDoctor(
+                ctx,
+                o.project === true ? { project: true } : {},
+              ),
+        );
       });
     });
 
@@ -197,9 +262,11 @@ Examples:
   // because it operates on the wallet and nothing else. Unlike `send`, this IS
   // also an MCP tool
   // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
-  // checkout page. The browser open and balance poll below are CLI-only, and
-  // both are off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
+  // checkout page. The browser open and balance poll below are CLI-only. The
+  // poll is off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
   // run takes it off stderr immediately rather than off a poll that outlives it.
+  // The open also runs under an agent harness, where the agent runs this on the
+  // person's yes to install's funding question.
   addGlobalFlags(wallet.command('fund [amountUsd]'))
     .summary('fund this wallet through a checkout link for your region')
     .description(
@@ -291,4 +358,22 @@ Examples:
         );
       });
     });
+}
+
+/** `--harness`: one agent host, overriding the hosts these commands find or recorded. */
+function hostOverride(): Option {
+  return new Option('--harness <host>', 'only this agent host, instead of the ones found').choices(
+    HARNESSES,
+  );
+}
+
+/** The Codex setup's flags, from install's, uninstall's or doctor's. */
+function codexArgs(o: Record<string, unknown>): import('../router/codex-install').CodexArgs {
+  return {
+    ...(o.project === true ? { project: true } : {}),
+    ...(o.yes === true ? { yes: true } : {}),
+    ...(o.wallet === false ? { noWallet: true } : {}),
+    ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
+    ...(typeof o.sessionBudget === 'string' ? { sessionBudget: o.sessionBudget } : {}),
+  };
 }

@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -45,6 +46,12 @@ const webFetchSamples = JSON.parse(
     'utf8',
   ),
 ) as Record<'shell' | 'page', WebFetchSample[]> & { pdf: WebFetchSample };
+
+/** The offer record a redirect leaves for the mod, as it lies on disk. */
+async function offerRecord(sessionId: string, toolUseId: string): Promise<unknown> {
+  const key = createHash('sha256').update(toolUseId).digest('hex');
+  return JSON.parse(await readFile(join(sessionDir(dir, sessionId), `offer-${key}.json`), 'utf8'));
+}
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -266,6 +273,7 @@ describe('the prompt hook', () => {
     // turn with no hint.
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'harness',
       'packet',
       'schemaVersion',
       'sessionId',
@@ -436,6 +444,7 @@ describe('the shortfall hook', () => {
     const sent = calls[0] as { body: Record<string, unknown> };
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'harness',
       'packet',
       'schemaVersion',
       'sessionId',
@@ -668,10 +677,10 @@ describe('the shortfall hook', () => {
 describe('the tool name in a hint', () => {
   it('comes from the plugin and server names, in a process the plugin launched', () => {
     expect(REQUEST_TOOL).toBe(`mcp__plugin_tenjin_${MCP_SERVER_NAME}__request`);
-    expect(toolNamed('Call request({query: "q"})', { CLAUDE_PLUGIN_ROOT: '/plugin' })).toBe(
-      'Call mcp__plugin_tenjin_router__request({query: "q"})',
-    );
-    expect(toolNamed('Call request({query: "q"})', {})).toBe(
+    expect(
+      toolNamed('Call request({query: "q"})', 'claude', { CLAUDE_PLUGIN_ROOT: '/plugin' }),
+    ).toBe('Call mcp__plugin_tenjin_router__request({query: "q"})');
+    expect(toolNamed('Call request({query: "q"})', 'claude', {})).toBe(
       'Call mcp__x402__request({query: "q"})',
     );
   });
@@ -2184,6 +2193,7 @@ describe('the delegation hook', () => {
       const sent = calls[0] as { body: Record<string, unknown> };
       expect(Object.keys(sent.body).sort()).toEqual([
         'accepts',
+        'harness',
         'packet',
         'schemaVersion',
         'sessionId',
@@ -2647,6 +2657,63 @@ describe('free docs on top of a search', () => {
     expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(true);
   });
 
+  /**
+   * THE SERVER SAYS HOW IT IS DELIVERED. `augment` with its `augmentUrl` is
+   * fetched as given, and the docs are named by the service's label; `offer`
+   * on a free lookup before a search is never fetched, and the search runs.
+   */
+  it("fetches the server's augmentUrl and names the docs by their label", async () => {
+    const augmentUrl = `${BASE}/api/docs-lookup?query=server+built`;
+    const served = {
+      ...FREE,
+      decision: { ...FREE.decision, label: 'Next.js docs', delivery: 'augment', augmentUrl },
+    };
+    const pre = await before('next.js middleware matcher', 'toolu_1', {}, served);
+    expect(pre.out).toMatchObject({ free: true, augmenting: true });
+    expect(jobs.map((job) => job.url)).toEqual([augmentUrl]);
+    await answer(jobs[0]!, 200, TEXT);
+    const post = await after('next.js middleware matcher', 'toolu_1');
+    const updated = (
+      post.out.response as { hookSpecificOutput: { updatedToolOutput: typeof SEARCH } }
+    ).hookSpecificOutput.updatedToolOutput;
+    expect(updated.results[0]).toBe(LINE.replace('Context7 docs', 'Next.js docs'));
+  });
+
+  it('fetches nothing when the server says a free lookup before a search is an offer', async () => {
+    const served = { ...FREE, decision: { ...FREE.decision, delivery: 'offer' } };
+    const pre = await before('next.js middleware matcher', 'toolu_1', {}, served);
+    expect(pre.out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', free: true });
+    expect(jobs).toHaveLength(0);
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+  });
+
+  it('records the label and the price of a redirect, for the mod to name its row', async () => {
+    const labelled = withHint(PRECALL_HINT);
+    await before(
+      'btc price today',
+      'toolu_1',
+      {},
+      {
+        ...labelled,
+        decision: { ...labelled.decision, label: 'Firecrawl scrape' },
+      },
+    );
+    expect(await offerRecord('sess-1', 'toolu_1')).toEqual({
+      version: 1,
+      at: expect.any(Number) as number,
+      offerId: expect.any(String) as string,
+      label: 'Firecrawl scrape',
+      priceAtomic: '15000',
+    });
+    await before('eth price today', 'toolu_2', {}, labelled);
+    expect(await offerRecord('sess-1', 'toolu_2')).toEqual({
+      version: 1,
+      at: expect.any(Number) as number,
+      offerId: expect.any(String) as string,
+      priceAtomic: '15000',
+    });
+  });
+
   it('lets a WebFetch run on a free offer, with no output and nothing fetched', async () => {
     const { deps: d, calls } = deps();
     const out = await runNativeHook(
@@ -2769,7 +2836,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -2845,7 +2912,7 @@ describe('a discovered service', () => {
 
     it('says which price is over the limit and to prefer one within it', async () => {
       expect(await shown(list('0.28'))).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit, or ask the user first\.$/,
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit\.$/,
       );
     });
 
@@ -2867,6 +2934,40 @@ describe('a discovered service', () => {
         ' Alternative from Coinbase\'s Bazaar (unreviewed): "Pricey" (its listing says ' +
         '"plans from $500 a month"), about $0.03: request({id: "x-1", input: {...}})';
       expect(await shown(list('0.03', seller))).not.toContain('Note:');
+    });
+
+    /** WITH SPECS THE FIELDS SAY IT: each other service's `priceAtomic`,
+     *  never the line's prose, so a line that starts at a label and quotes
+     *  its prices any way it likes still warns, and only when a field is over. */
+    it("reads each listed service's price from its spec when the offer carries specs", async () => {
+      const labelled = JSON.parse(
+        readFileSync(
+          fileURLToPath(new URL('./fixtures/wire-hook-execute-labelled.json', import.meta.url)),
+          'utf8',
+        ),
+      ) as { decision: { specs: Record<string, unknown>[] } };
+      const base = labelled.decision.specs[0]!;
+      const priced = (id: string, atomic: string) => ({
+        ...base,
+        id,
+        priceAtomic: atomic,
+        maxAmountAtomic: atomic,
+      });
+      const offered = (second: string, prose: string) => ({
+        ...DISCOVERED,
+        decision: {
+          ...DISCOVERED.decision,
+          candidate: { ...DISCOVERED.decision.candidate, providerPriceAtomic: '5000' },
+          hint:
+            `OneShot, $0.005: request({id: "${ID}", input: {...}}). ` +
+            `PDL, ${prose}: request({id: "04d63d65-cdbb-4a30", input: {...}}).`,
+          specs: [priced(ID, '5000'), priced('04d63d65-cdbb-4a30', second)],
+        },
+      });
+      expect(await shown(offered('280000', '$0.03'))).toMatch(
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
+      );
+      expect(await shown(offered('30000', 'about $0.28 per call'))).not.toContain('Note:');
     });
 
     /** A Tenjin list entry's or curated alternative's description is prose,
@@ -2905,6 +3006,8 @@ describe('a discovered service', () => {
     expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'catalog',
       'spec',
+      'label',
+      'fields',
       'jobs',
     ]);
     const fs = await import('node:fs/promises');
@@ -2921,6 +3024,8 @@ describe('a discovered service', () => {
     expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
       'catalog',
       'spec',
+      'label',
+      'fields',
       'jobs',
       'bazaar',
     ]);
@@ -2928,7 +3033,9 @@ describe('a discovered service', () => {
 
   it('denies a native call once, with the one-block sentence', async () => {
     const { fetchImpl } = router(DISCOVERED);
-    const event = await preCall('sound effect generator api', 'WebSearch');
+    const event = await preCall('sound effect generator api', 'WebSearch', {
+      tool_use_id: 'toolu_held',
+    });
     const out = await runNativeHook(event, { dataDir: dir, baseUrl: BASE, fetchImpl });
     expect(out).toMatchObject({ action: 'discovered', id: ID });
     expect(out.response).toEqual({
@@ -2938,12 +3045,18 @@ describe('a discovered service', () => {
         permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK}`,
       },
     });
-    // The next discovered offer is withheld while this one is undelivered.
-    const again = await runNativeHook(await preCall('sound effect generator api', 'WebSearch'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: router(DISCOVERED).fetchImpl,
+    // An offer the model acts on, never a block it narrates.
+    expect(`${SEEN_LINE} ${ONE_BLOCK}`).not.toMatch(/\b(block|blocked|denied|refused)\b/i);
+    // The offer record names the offer, which the mod matches its request call to.
+    expect(await offerRecord('sess-1', 'toolu_held')).toMatchObject({
+      version: 1,
+      offerId: ID,
     });
+    // The same search again is let run: the one-block rule.
+    const again = await runNativeHook(
+      await preCall('sound effect generator api', 'WebSearch', { tool_use_id: 'toolu_retry' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
     expect(again).toEqual({ response: null, alreadyRedirected: true });
   });
 
@@ -2990,7 +3103,7 @@ describe('a discovered service', () => {
    * line still names the service, with one sentence saying the call needs
    * approval; a curated offer over the cap is still withheld (above).
    */
-  it('is shown over the automatic cap, with a note to ask the user first', async () => {
+  it('is shown over the automatic cap, with a note that request returns needs_approval', async () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
@@ -3201,7 +3314,25 @@ describe('a question to the user', () => {
         'You pick a track: send me a licensed track.',
     });
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({ sessionId: 'sess-1', accepts: ['catalog', 'spec', 'jobs'] });
+    expect(body).toMatchObject({
+      sessionId: 'sess-1',
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+    });
+  });
+
+  it('leaves the offer record for the question it denied', async () => {
+    await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(await wasOffered(dir, 'sess-1', 'toolu_ask')).toBe(true);
+    expect(await offerRecord('sess-1', 'toolu_ask')).toMatchObject({
+      version: 1,
+      priceAtomic: (
+        DISCOVERED.decision as unknown as { candidate: { providerPriceAtomic: string } }
+      ).candidate.providerPriceAtomic,
+    });
   });
 
   it('denies the question once on an offer, then lets it be asked', async () => {

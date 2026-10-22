@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nativeSessionOf, readActor, sessionKey } from './session';
+import { nativeSessionOf, readActor, sessionKey, underAgentHarness } from './session';
 
 // Covered through the callers too, but pinned here because they all read ONE
 // copy: a change to precedence moves what a sweep closes and what the hook
@@ -54,5 +54,16 @@ describe('sessionKey', () => {
     expect(nativeSessionOf('abc')).toBe('abc');
     // A native id may itself carry a colon; only the first one is the prefix.
     expect(nativeSessionOf(sessionKey('claude', 'a:b'))).toBe('a:b');
+  });
+});
+
+describe('underAgentHarness', () => {
+  it('reads what Claude Code and Codex export to their agent, and nothing a terminal sets', () => {
+    expect(underAgentHarness({ CLAUDECODE: '1' })).toBe(true);
+    expect(underAgentHarness({ CLAUDE_CODE_SESSION_ID: 's' })).toBe(true);
+    expect(underAgentHarness({ CLAUDE_CODE_EXECPATH: '/bin/claude' })).toBe(true);
+    expect(underAgentHarness({ CODEX_SESSION_ID: 's' })).toBe(true);
+    expect(underAgentHarness({ CLAUDECODE: ' ', TENJIN_SESSION_ID: 'operator' })).toBe(false);
+    expect(underAgentHarness({})).toBe(false);
   });
 });

@@ -2,7 +2,7 @@ import { lstat, readdir, readFile, rm, rmdir } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { PLUGIN_NAME } from './names';
-import { OWNER_MARKER, PLUGIN_FILES } from './plugin-files';
+import { MOD_FILES, OWNER_MARKER, PLUGIN_FILES, type ModSources } from './plugin-files';
 
 /**
  * THE FOLDER FALLBACK: the plugin as a folder under a config dir's `skills/`,
@@ -19,6 +19,18 @@ import { OWNER_MARKER, PLUGIN_FILES } from './plugin-files';
  */
 
 export const FOLDER_NAME = 'tenjin-router';
+
+/**
+ * The mod's files from a plugin folder that carries them (the package's own
+ * `dist/hosts/claude/tenjin`), or undefined when any is missing: the folder
+ * fallback then writes the legs and the server without the mod.
+ */
+export async function readModSources(pluginDir: string): Promise<ModSources | undefined> {
+  const entries = await Promise.all(
+    MOD_FILES.map(async (path) => [path, await readFile(join(pluginDir, path), 'utf8')] as const),
+  ).catch(() => null);
+  return entries === null ? undefined : (Object.fromEntries(entries) as ModSources);
+}
 
 /** `<base>/skills/tenjin-router`, for a config dir or a project's `.claude`. */
 export function pluginFolderPath(base: string): string {
