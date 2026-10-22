@@ -82,6 +82,7 @@ import {
   type SignedAuthorization,
 } from './paid';
 import { routerSettings } from './settings';
+import type { Harness } from './names';
 import {
   answerState,
   completeJob,
@@ -216,6 +217,8 @@ export interface RequestToolDeps {
    *  ends), so the call is not handed back `running` at
    *  {@link MAX_CALL_WAIT_MS}. */
   waitsForJobs?: boolean;
+  /** The host that launched this server; absent is Claude Code. */
+  harness?: Harness;
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -562,6 +565,7 @@ async function requestTool(
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
+    harness: deps.harness ?? 'claude',
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -845,7 +849,7 @@ export async function runningJob(dataDir: string, id: string): Promise<string | 
 }
 
 /** Where a spec call's outcome report goes. */
-export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>;
+export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>;
 
 /**
  * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
@@ -865,6 +869,7 @@ export function reportOutcome(
       ctx: reportDeps.ctx,
       baseUrl: reportDeps.baseUrl,
       ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
+      ...(reportDeps.harness !== undefined ? { harness: reportDeps.harness } : {}),
     },
   );
 }

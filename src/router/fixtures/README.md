@@ -117,6 +117,18 @@ can still come back `discovered`, both with `specs`; the tool then shows the
 pick's own spec. A pick with no spec (the free docs lookup) is bound and
 answered `execute` as its id would be.
 
+## The harness
+
+Every form, the outcome report included, takes an optional `harness`: the
+agent host the client runs in, `claude` or `codex`. It changes which services
+the router offers, never payment, limits or the fee. A service the host's own
+tools already cover is left out on every form: the hook and tool offers, a
+page's routed reader, browse rows and `tool`. Codex gets no `glim-reddit-get`,
+because its hosted web tool reads a Reddit thread from its URL, so that page
+is answered `native`. No `harness` means `claude`, and an unknown token gets
+the `claude` answer. The server logs the mapped value (`claude`, `codex` or
+`other`) and never the raw token.
+
 ## Job specs
 
 This build adds `jobs` to `accepts`. A spec then carries `job` when its seller
@@ -174,6 +186,7 @@ ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 | `wire-hook-discovered-catalog.json`        | hook answer: a former list service as `discovered` under its catalog id, with its fields  |
 | `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
 | `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
+| `wire-hook-request-harness.json`           | the native hook from a Codex client: `harness`, before a Reddit thread fetch              |
 | `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
 
 Two rules the fixtures exist to hold:
@@ -203,6 +216,7 @@ Take these from here; do not re-derive them.
 | `input`                                    | a JSON object, 16384 bytes serialized; built into a spec's request here, never sent                                                                                      |
 | `accepts`                                  | an array of strings, 8 entries                                                                                                                                           |
 | `sessionId`                                | 1 to 200 characters                                                                                                                                                      |
+| `harness`                                  | a lowercase token, 1 to 32 characters, starting with a letter, then letters, digits, `_` and `-`                                                                         |
 | `pendingCall.query` / `.url` / `.question` | 1 to 4000 characters                                                                                                                                                     |
 | `packet.nativeOutcome`                     | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content` |
 | `gateHint.turnId` / `.lookupId`            | 1 to 64 characters                                                                                                                                                       |
