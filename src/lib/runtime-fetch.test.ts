@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   download,
   extract,
@@ -160,6 +161,36 @@ describe('download', () => {
           fetchImpl,
         }),
       ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    }
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('names the file and the errno, never the network, when a write to disk fails', async () => {
+    // FileHandle is not exported: its prototype is reached through a handle.
+    const probe = await open(join(dir, 'probe'), 'w');
+    const proto = Object.getPrototypeOf(probe) as { write: (...args: unknown[]) => unknown };
+    await probe.close();
+    rmSync(join(dir, 'probe'));
+    const full = vi
+      .spyOn(proto, 'write')
+      .mockRejectedValue(
+        Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }),
+      );
+    try {
+      const err = await download('https://nodejs.org/dist/x.tar.gz', {
+        dir,
+        maxBytes: 1_000_000,
+        timeoutMs: 5_000,
+        hash: 'sha256',
+        fetchImpl: serve(body),
+      }).catch((e: unknown) => e);
+      expect(err).toMatchObject({
+        code: 'UPDATE_FAILED',
+        message: expect.stringMatching(/^could not write .*dl-[0-9a-f]+: ENOSPC$/),
+      });
+      expect((err as Error).message).not.toContain('nodejs.org');
+    } finally {
+      full.mockRestore();
     }
     expect(readdirSync(dir)).toEqual([]);
   });

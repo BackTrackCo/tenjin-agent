@@ -114,7 +114,9 @@ function isHttps(url: string): boolean {
  * Stream `url` into a fresh file under `dir`, hashing as it goes. Refuses a URL
  * (or a redirect's final URL) that is not https, aborts past `maxBytes` or
  * `timeoutMs`, and unlinks the file on any failure, so a caller never finds a
- * half download. A transport failure is `NETWORK_ERROR`; the caller adds its fix.
+ * half download. A transport failure (the fetch, or reading the body) is
+ * `NETWORK_ERROR`, and the caller adds its fix; a write to disk that fails
+ * (ENOSPC, EACCES) is not the network's, and says which file and why.
  */
 export async function download(
   url: string,
@@ -157,7 +159,13 @@ export async function download(
         size += chunk.byteLength;
         if (size > o.maxBytes) throw tooLarge();
         hash.update(chunk);
-        await handle.write(chunk);
+        try {
+          await handle.write(chunk);
+        } catch (err) {
+          throw new CliError('UPDATE_FAILED', `could not write ${file}: ${codeOf(err)}`, {
+            cause: err,
+          });
+        }
       }
     } catch (err) {
       if (err instanceof CliError) throw err;
@@ -173,6 +181,12 @@ export async function download(
     await rm(file, { force: true }).catch(() => undefined);
     throw err;
   }
+}
+
+/** A file-system error's errno code (ENOSPC, EACCES), or its message when it has none. */
+function codeOf(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : messageOf(err);
 }
 
 function messageOf(err: unknown): string {
