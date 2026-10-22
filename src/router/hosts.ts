@@ -5,6 +5,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
 import { HARNESSES, type Harness } from './names';
+import type { UninstallTarget } from './uninstall';
 
 /**
  * WHICH AGENT HOSTS `install`, `doctor` AND `uninstall` SERVE. Nobody names a
@@ -240,32 +241,84 @@ export async function runEach(
 
 /**
  * Uninstall over the hosts: a host leaves the record only once its removal
- * left nothing behind. A Claude Code removal that reports the plugin `kept`,
- * or a Codex removal that failed (it throws), keeps the host recorded so a
- * later bare uninstall or doctor still finds it. A project uninstall leaves
- * the user-scope install, so it forgets nothing.
+ * left nothing behind. Claude Code leaves it when no install of it is left in
+ * any scope or project (its result's `remaining` is empty); Codex, user scope
+ * only, when its removal succeeded. A host whose removal failed (it throws)
+ * stays recorded, so a later uninstall or doctor still finds it, and every
+ * host is tried before one aggregated refusal.
+ *
+ * `finish` REMOVES WHAT EVERY INSTALL SHARES (Tenjin's runtime and its
+ * launcher), so it runs last and only when nothing could still use it: every
+ * host succeeded, Claude Code ran here with nothing remaining, and no host
+ * outside this run is still recorded.
  */
 export async function uninstallEach(
   hosts: readonly Harness[],
   dataDir: string,
-  project: boolean,
+  target: UninstallTarget,
   run: (host: Harness) => Promise<CommandResult>,
+  finish?: () => Promise<CommandResult>,
 ): Promise<CommandResult> {
-  return runEach(hosts, async (host) => {
-    const out = await run(host);
-    if (!project && !pluginKept(out.data)) await forgetInstalledHost(dataDir, host);
-    return out;
-  });
+  const done: { host: Harness; out: CommandResult }[] = [];
+  const failed: { host: Harness; err: CliError }[] = [];
+  let claudeGone = false;
+  for (const host of hosts) {
+    try {
+      const out = await run(host);
+      done.push({ host, out });
+      const gone = host === 'claude' ? nothingRemains(out.data) : target.kind !== 'project';
+      if (gone) await forgetInstalledHost(dataDir, host);
+      if (host === 'claude') claudeGone = gone;
+    } catch (err) {
+      if (!(err instanceof CliError)) throw err;
+      failed.push({ host, err });
+    }
+  }
+  const [only] = done;
+  if (failed.length > 0) {
+    const [first] = failed;
+    if (hosts.length === 1 && first !== undefined) throw first.err;
+    const data: Record<string, unknown> = { hosts };
+    for (const { host, out } of done) data[host] = out.data;
+    for (const { host, err } of failed) {
+      data[host] = {
+        error: err.message,
+        ...(err.details !== undefined ? { details: err.details } : {}),
+      };
+    }
+    throw new CliError(
+      'REFUSED',
+      failed.map(({ host, err }) => `${LABEL[host]}: ${err.message}`).join(' '),
+      {
+        details: data,
+        fix: failed.map(({ host, err }) => `${LABEL[host]}:\n${err.fix ?? err.message}`).join('\n'),
+      },
+    );
+  }
+  // One host keeps its own result shape, as runEach does.
+  const out: CommandResult =
+    hosts.length === 1 && only !== undefined
+      ? only.out
+      : {
+          data: Object.fromEntries([['hosts', hosts], ...done.map((d) => [d.host, d.out.data])]),
+          humanLines: done.flatMap((d) => [
+            `${LABEL[d.host]}:`,
+            ...(d.out.humanLines ?? []).map((l) => `  ${l}`),
+          ]),
+        };
+  const recorded = (await readInstalledHosts(dataDir)) ?? [];
+  if (finish === undefined || !claudeGone || recorded.length > 0) return out;
+  const shared = await finish();
+  return {
+    data: { ...(out.data as Record<string, unknown>), ...(shared.data as Record<string, unknown>) },
+    humanLines: [...(out.humanLines ?? []), ...(shared.humanLines ?? [])],
+  };
 }
 
-/** The Claude Code removal's `plugin.plugin: 'kept'`: the plugin is still there. */
-function pluginKept(data: unknown): boolean {
-  const plugin = (data as { plugin?: unknown } | null)?.plugin;
-  return (
-    plugin !== null &&
-    typeof plugin === 'object' &&
-    (plugin as { plugin?: unknown }).plugin === 'kept'
-  );
+/** The Claude Code removal's `remaining: []`: no install of it is left anywhere. */
+function nothingRemains(data: unknown): boolean {
+  const remaining = (data as { remaining?: unknown } | null)?.remaining;
+  return Array.isArray(remaining) && remaining.length === 0;
 }
 
 /**

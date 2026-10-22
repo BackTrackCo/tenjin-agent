@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { Option, type Command } from 'commander';
 import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
@@ -86,33 +87,61 @@ Learn more:
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      'Remove the Tenjin plugin from each agent `tenjin install` set up, and any settings-based install an earlier release wrote. For Codex it removes the plugin and its marketplace. Your wallet, spend ledger and config are kept.',
+      "Remove Tenjin's install for where you are: the project install of the folder you are in (from any subfolder), or else your user install. The tenjin marketplace, Tenjin's runtime and its launcher go once no install is left anywhere. Either all of it goes or nothing does, and it says what it keeps: your wallet, spend ledger and config. Run it before `npm uninstall -g tenjin-cli`.",
     )
     .addOption(hostOverride())
-    .option('--project', 'remove the project-only install')
+    .option(
+      '--project [path]',
+      "remove that project's install (this folder's when no path is given), from any folder",
+    )
+    .option('--all', "remove every Tenjin install: your user install and each project's")
     .action(async function (this: Command) {
       await runCommand('uninstall', this, async (ctx) => {
         const o = this.opts();
         const harness = o.harness as Harness | undefined;
-        const { recordedHosts, uninstallEach } = await import('../router/hosts');
+        const project = o.project as string | true | undefined;
+        if (o.all === true && project !== undefined) {
+          throw new CliError('USAGE', 'Pass --all or --project, not both.');
+        }
+        // Codex has user scope only, so its removal never reads Claude Code's records.
+        if (harness === 'codex' && project !== undefined) {
+          throw new CliError('USAGE', 'Codex has no project install; omit --project.');
+        }
+        const [{ recordedHosts, uninstallEach }, uninstall] = await Promise.all([
+          import('../router/hosts'),
+          import('../router/uninstall'),
+        ]);
+        const target: import('../router/uninstall').UninstallTarget =
+          harness === 'codex'
+            ? { kind: o.all === true ? 'all' : 'user' }
+            : await uninstall.resolveUninstallTarget(
+                {
+                  ...(o.all === true ? { all: true } : {}),
+                  ...(project !== undefined ? { project } : {}),
+                },
+                ctx,
+              );
+        // Codex only for a user or every-install target: it has no project scope.
         const hosts = await recordedHosts(
-          { ...(harness !== undefined ? { harness } : {}), project: o.project === true },
+          { ...(harness !== undefined ? { harness } : {}), project: target.kind === 'project' },
           ctx.dataDir,
         );
-        return uninstallEach(hosts, ctx.dataDir, o.project === true, async (host) =>
-          host === 'codex'
-            ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
-            : (await import('../router/uninstall')).runRouterUninstall(
-                { ...(o.project === true ? { project: true } : {}) },
-                ctx,
-              ),
+        return uninstallEach(
+          hosts,
+          ctx.dataDir,
+          target,
+          async (host) =>
+            host === 'codex'
+              ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
+              : uninstall.runRouterUninstall({ target }, ctx),
+          () => uninstall.removeRuntimeAndLaunchers(ctx.dataDir, homedir()),
         );
       });
     });
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      "Check everything a lookup needs, for each agent `tenjin install` set up. For Claude Code: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, whether the wallet can sign without a prompt, as the router Claude Code is running sees it when one is live, and the router endpoint answering its 402. For Codex: Codex's hook list for the plugin and its hook trust. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails; a check it cannot answer is a warning, never ok.",
+      "Check everything a lookup needs, for each agent `tenjin install` set up. For Claude Code: the Node floor, Claude Code's version, the Tenjin plugin, the runtime and launcher Claude Code starts, its router server, any settings install an earlier release left, the spend limits, whether the wallet can sign without a prompt, as the router Claude Code is running sees it when one is live, and the router endpoint answering its 402. For Codex: Codex's hook list for the plugin and its hook trust. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails; a check it cannot answer is a warning, never ok.",
     )
     .addOption(hostOverride())
     .option('--project', 'check the project-only install, as --project registered it')
@@ -147,7 +176,7 @@ Examples:
 
   leaf(SETUP, 'update', 'update tenjin-cli to the newest published version')
     .description(
-      'Update tenjin-cli to the newest version npm publishes on the latest tag. It then runs `install --refresh` on the new binary, so the Claude Code plugin is registered at the build that just landed.',
+      "Update Tenjin to the newest version on npm's latest tag, without npm: it downloads the release, checks it, and switches only once it runs; the previous version stays as the fallback.",
     )
     .option('--check', 'report whether a newer version exists without installing it')
     .action(async function (this: Command) {
@@ -242,7 +271,7 @@ Examples:
   addGlobalFlags(wallet.command('repair'))
     .summary('save the wallet passphrase so Claude Code can unlock it')
     .description(
-      'For a wallet Claude Code cannot unlock. Asks for the passphrase at the terminal (or uses TENJIN_WALLET_PASSPHRASE when that opens the wallet), checks it opens this wallet (the address does not change), saves it in the OS keychain, or in a file only you can read where there is none, and names a TENJIN_WALLET_PASSPHRASE in this shell that conflicts with it. Restart Claude Code afterwards: the next session confirms the unlock.',
+      'For a wallet Claude Code cannot unlock. Asks for the passphrase at the terminal (or uses TENJIN_WALLET_PASSPHRASE when that opens the wallet), checks it opens this wallet (the address does not change), saves it in the OS keychain, or in a file only you can read where there is none, and names a TENJIN_WALLET_PASSPHRASE in this shell that conflicts with it. Start a new Claude Code session afterwards: it confirms the unlock.',
     )
     .option(
       '--insecure-storage',

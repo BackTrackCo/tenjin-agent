@@ -1,9 +1,12 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, posix, resolve, sep, win32 } from 'node:path';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
+import { defaultDataDir, launcherDir, runtimeDir } from '../lib/paths';
+import { readRuntimeState, runtimeBuild, type RuntimeState } from '../lib/runtime-layout';
 import { resolveContextSettings } from '../lib/settings';
 import { isNewer } from '../lib/update-check';
 import type { WalletProvider } from '../lib/wallet';
@@ -18,6 +21,7 @@ import {
   CLAUDE_CODE_FLOOR,
   claudeConfigDir,
   findClaudeBinary,
+  jsonList,
   readClaudeCode,
   runClaude,
   type ClaudeBinary,
@@ -26,15 +30,15 @@ import {
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
 import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, SUGGESTED_FUND_USD, unpaid, usd } from './fee';
-import { loadStep, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
+import { NEW_SESSION_STEP, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
-import { PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
+import { MARKETPLACE_NAME, MCP_SERVER_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
+import { LAUNCHER_MARKER, PLUGIN_DIR, RUNTIME_MISSING_FIX } from './plugin-files';
 import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import {
   mcpServersState,
-  NEW_SESSION_FIX,
   readProcessSnapshot,
   RECONNECT_FIX,
   type InstalledAt,
@@ -66,6 +70,11 @@ import {
  * version, and `claude mcp get` for its `router` server. With no binary, the
  * plugin folder and the `alive` stamp stand in. A settings install of an
  * earlier release is reported with its migration state; doctor never migrates.
+ *
+ * THE RUNTIME CLAUDE CODE STARTS is read from the plugin it loads (the
+ * marketplace `claude plugin marketplace list` names, and its `.mcp.json`),
+ * run once with `--version`, and checked with the launcher a terminal needs.
+ * For the default data dir only: other data dirs keep the npm folder.
  *
  * EVERY FIX IS A STEP THE AGENT TAKES IN THE SESSION: a command it runs, or a
  * slash command the person types there. None sends anyone out of Claude Code.
@@ -108,12 +117,55 @@ export interface RouterDoctorDeps {
    * run: without it, a wallet's verify reads the developer's own keychain.
    */
   walletPassphrase?: PassphraseOverrides;
+  /** Where Claude Code starts the router from, read from the plugin it loads; tests inject it. */
+  readLaunch?: (binary: ClaudeBinary | null) => Promise<PluginLaunch | null>;
+  /** Runs `<command> <entry> --version` as Claude Code would, with no shell; tests inject it. */
+  runVersion?: (command: string, entry: string) => Promise<VersionRun>;
+  /** The first `tenjin` on PATH and what it is; tests inject it. */
+  pathTenjin?: () => Promise<PathTenjin | null>;
+}
+
+/** The plugin's `router` server as Claude Code will start it. */
+export interface PluginLaunch {
+  /** The marketplace folder, or the plugin folder of the folder fallback. */
+  path: string;
+  source: 'marketplace' | 'folder';
+  command: string;
+  /** Its first argument, `${CLAUDE_PLUGIN_ROOT}` expanded; null when it has none. */
+  entry: string | null;
+}
+
+export interface VersionRun {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+export interface PathTenjin {
+  path: string;
+  /** A launcher Tenjin wrote. */
+  marked: boolean;
+  version: string | null;
+  /** A build that hands a terminal run to Tenjin's runtime (its package carries `tenjinRuntime`). */
+  handsOff: boolean;
 }
 
 const NODE_FLOOR = 22;
-/** The stamp row's fix: a new session first, since a reload never stamps, then the Node it runs. */
-const STAMP_FIX =
-  "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
+/** The line the PATH layout's fixes end with: the runtime ends the dependence they describe. */
+const MOVE_TO_RUNTIME = ' Or run `tenjin install` to move Tenjin to its own runtime.';
+/**
+ * The stamp row's fix: a new session first, since a reload never stamps. On
+ * the PATH layout, then the Node Claude Code runs; a running Claude Code keeps
+ * the PATH it started with, so a new window is not enough there.
+ */
+function stampFix(fromPath: boolean): string {
+  const first =
+    "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp.";
+  return fromPath
+    ? `${first} If it still warns, run \`node --version\` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. After installing or updating Node, quit Claude Code fully, then start a new session.${MOVE_TO_RUNTIME}`
+    : first;
+}
 
 export async function runRouterDoctor(
   ctx: CommandContext,
@@ -147,6 +199,18 @@ export async function runRouterDoctor(
     liveObservations(observations, snapshot?.routers ?? null, deps.isAlive),
   );
 
+  // THE RUNTIME, for the default data dir only: other data dirs keep the npm
+  // folder's registration, and have no runtime to check.
+  const runtime = resolve(ctx.dataDir) === resolve(defaultDataDir(home));
+  const root = runtimeDir(ctx.dataDir);
+  const state = runtime ? readRuntimeState(root) : null;
+  const launch = await (
+    deps.readLaunch ?? ((binary) => readPluginLaunch(binary, { env, home, cwd, scope }))
+  )(claude.binary).catch(() => null);
+  // Which fixes fit: the ones that blame the `node` on Claude Code's PATH only
+  // when that is what starts the plugin.
+  const fromPath = launch !== null ? launch.command === 'node' : state === null;
+
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
   checks.push(claudeCodeCheck(claude));
   const plugin = await pluginCheck(claude, {
@@ -159,22 +223,24 @@ export async function runRouterDoctor(
     installed,
     snapshot,
     live,
+    fromPath,
   });
   checks.push(plugin.check);
+  if (plugin.registered && runtime) {
+    const onPath = state !== null ? await (deps.pathTenjin ?? (() => findPathTenjin(env)))() : null;
+    checks.push(await runtimeCheck({ launch, state, root, home, env, project, onPath, deps }));
+    const old = pathTenjinCheck(onPath, home);
+    if (old !== null) checks.push(old);
+  }
   if (plugin.registered && claude.binary !== null) {
-    checks.push(await serverCheck(claude.binary, env, cwd));
+    checks.push(await serverCheck(claude.binary, env, cwd, fromPath));
   }
   if (legacy.present || legacy.unreadable !== undefined) {
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
   }
   checks.push(routingCheck(router));
   checks.push(
-    mcpServersState(
-      snapshot?.routers ?? null,
-      installed,
-      pkg.version,
-      legacy.present ? NEW_SESSION_FIX : RECONNECT_FIX,
-    ).check,
+    mcpServersState(snapshot?.routers ?? null, installed, pkg.version, RECONNECT_FIX).check,
   );
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
@@ -452,14 +518,23 @@ interface PluginContext {
   snapshot: ProcessSnapshot | null;
   /** The served live observations (B2). */
   live: RouterObservation[];
+  /** Claude Code starts the plugin with the `node` on its PATH (no runtime). */
+  fromPath: boolean;
 }
 
 /** Whether a session has started the plugin at this version, as {@link pluginStart} tells it. */
 export type PluginStart = 'proven' | 'pending' | 'did-not-start' | 'unknown';
 
-/** The fix when a Claude Code started since this install did not start the plugin. */
-const DID_NOT_START_FIX =
-  'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then restart Claude Code.';
+/**
+ * The fix when a Claude Code started since this install did not start the
+ * plugin: the `node` on its PATH on that layout, else a new session and then
+ * the reinstall that rebuilds the runtime.
+ */
+function didNotStartFix(fromPath: boolean): string {
+  return fromPath
+    ? `Claude Code starts the plugin with the \`node\` on its own PATH, which must be 22 or newer: run \`node --version\` in the shell it starts from, then quit Claude Code fully and start a new session.${MOVE_TO_RUNTIME}`
+    : `Start a new Claude Code session; if Tenjin still does not start, run \`${RUNTIME_MISSING_FIX}\`.`;
+}
 
 /**
  * HAS A SESSION STARTED THE PLUGIN AT THIS VERSION, first match wins:
@@ -574,7 +649,7 @@ async function pluginCheck(
           status: 'fail',
           required: true,
           detail: `${listing.id} is installed but disabled, so no lookup is routed`,
-          fix: `Run \`claude plugin enable ${listing.id} --scope ${listing.scope ?? 'user'}\`, then ${loadStep(c.legacy.present)}.`,
+          fix: `Run \`claude plugin enable ${listing.id} --scope ${listing.scope ?? 'user'}\`, then ${NEW_SESSION_STEP}.`,
         },
       };
     }
@@ -628,14 +703,14 @@ async function pluginCheck(
                   required: false,
                   checked: false,
                   detail: `${at} is enabled; whether a session has started it at this version could not be checked${last}`,
-                  fix: STAMP_FIX,
+                  fix: stampFix(c.fromPath),
                 }
               : {
                   name,
                   status: 'warn',
                   required: false,
                   detail: `${at} is enabled, and the Claude Code started since this install has not started it${last}`,
-                  fix: DID_NOT_START_FIX,
+                  fix: didNotStartFix(c.fromPath),
                 },
     };
   }
@@ -688,14 +763,14 @@ async function pluginCheck(
                   required: false,
                   checked: false,
                   detail: `the plugin folder is at ${folder.path}; whether a session has loaded it could not be checked`,
-                  fix: `To load it, ${loadStep(c.legacy.present)}.`,
+                  fix: `To load it, ${NEW_SESSION_STEP}.`,
                 }
               : {
                   name,
                   status: 'warn',
                   required: false,
                   detail: `the plugin folder is at ${folder.path}, and the Claude Code started since this install has not loaded it`,
-                  fix: DID_NOT_START_FIX,
+                  fix: didNotStartFix(c.fromPath),
                 },
     };
   }
@@ -740,6 +815,7 @@ async function serverCheck(
   binary: ClaudeBinary,
   env: NodeJS.ProcessEnv,
   cwd: string,
+  fromPath: boolean,
 ): Promise<RouterCheck> {
   const name = 'router server';
   const run = await runClaude(binary, ['mcp', 'get', PLUGIN_SERVER], {
@@ -761,7 +837,280 @@ async function serverCheck(
     status: 'fail',
     required: true,
     detail: `${PLUGIN_SERVER} did not connect${status !== undefined ? `: ${status.slice(0, 200)}` : ''}`,
-    fix: 'Restart Claude Code (quit it from the tray) or sign out and in: the plugin starts the CLI with `node` from the PATH Claude Code started with, so a Claude Code opened before Node was installed cannot find it.',
+    fix: fromPath
+      ? `Quit Claude Code fully (from the tray, or sign out and in), then start a new session: the plugin starts the CLI with \`node\` from the PATH Claude Code started with, so a Claude Code opened before Node was installed cannot find it.${MOVE_TO_RUNTIME}`
+      : didNotStartFix(false),
+  };
+}
+
+/**
+ * WHERE CLAUDE CODE STARTS THE ROUTER FROM: the `tenjin` marketplace's folder
+ * as `claude plugin marketplace list` names it, or the folder fallback's, and
+ * the `router` server in its `.mcp.json`. Never `installed_plugins.json`,
+ * whose `installPath` goes stale once the marketplace is repointed.
+ */
+export async function readPluginLaunch(
+  binary: ClaudeBinary | null,
+  c: { env: NodeJS.ProcessEnv; home: string; cwd: string; scope: PluginScope },
+): Promise<PluginLaunch | null> {
+  let found: { path: string; source: PluginLaunch['source']; plugin: string } | null = null;
+  if (binary !== null) {
+    const out = await runClaude(binary, ['plugin', 'marketplace', 'list', '--json'], {
+      env: c.env,
+      cwd: c.cwd,
+    });
+    const row = (out.code === 0 ? jsonList(out.stdout) : null)?.find(
+      (m) => m.name === MARKETPLACE_NAME,
+    );
+    if (typeof row?.path === 'string') {
+      found = { path: row.path, source: 'marketplace', plugin: join(row.path, PLUGIN_DIR) };
+    }
+  }
+  if (found === null) {
+    const folder = await folderState(c.scope, c.env, c.home, c.cwd);
+    if (folder.state === 'ours')
+      found = { path: folder.path, source: 'folder', plugin: folder.path };
+  }
+  if (found === null) return null;
+  const mcp = JSON.parse(await readFile(join(found.plugin, '.mcp.json'), 'utf8')) as {
+    mcpServers?: Record<string, { command?: unknown; args?: unknown }>;
+  };
+  const server = mcp.mcpServers?.[MCP_SERVER_NAME];
+  if (typeof server?.command !== 'string') return null;
+  const first = Array.isArray(server.args) ? server.args[0] : undefined;
+  const entry =
+    typeof first === 'string'
+      ? resolve(first.split('${CLAUDE_PLUGIN_ROOT}').join(found.plugin))
+      : null;
+  return { path: found.path, source: found.source, command: server.command, entry };
+}
+
+/** `<command> <entry> --version`, in exec form: a `.cmd` is never spawned. */
+function runVersion(command: string, entry: string): Promise<VersionRun> {
+  return new Promise((done) => {
+    execFile(
+      command,
+      [entry, '--version'],
+      { shell: false, timeout: 15_000, windowsHide: true },
+      (err, stdout, stderr) => {
+        const failure = err as
+          (NodeJS.ErrnoException & { killed?: boolean; code?: unknown }) | null;
+        done({
+          code: failure === null ? 0 : typeof failure.code === 'number' ? failure.code : null,
+          stdout: String(stdout),
+          stderr: String(stderr),
+          timedOut: failure?.killed === true,
+        });
+      },
+    );
+  });
+}
+
+const exists = async (path: string): Promise<boolean> =>
+  (await stat(path).catch(() => null)) !== null;
+const samePath = async (a: string, b: string): Promise<boolean> =>
+  (await realpath(a).catch(() => resolve(a))) === (await realpath(b).catch(() => resolve(b)));
+
+/** `path` with the home folder written as `~`. */
+function tilde(path: string, home: string): string {
+  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
+}
+
+/**
+ * THE RUNTIME CLAUDE CODE STARTS, by what the plugin's `.mcp.json` names:
+ *
+ * - a marketplace outside `runtime/claude` while a runtime exists: an older
+ *   build moved it back (warn);
+ * - `node` from PATH: no runtime, so a Node upgrade or `npm rm -g` stops it
+ *   (warn);
+ * - an absolute Node or entry that is not there, or that does not run: Claude
+ *   Code cannot start the router (the one required failure, where `router
+ *   server` fails too);
+ * - otherwise ok, and the launcher a terminal needs is checked with it.
+ */
+async function runtimeCheck(i: {
+  launch: PluginLaunch | null;
+  state: RuntimeState | null;
+  root: string;
+  home: string;
+  env: NodeJS.ProcessEnv;
+  project: boolean;
+  onPath: PathTenjin | null;
+  deps: RouterDoctorDeps;
+}): Promise<RouterCheck> {
+  const name = 'runtime';
+  const flag = i.project ? ' --project' : '';
+  const t = (p: string) => tilde(p, i.home);
+  const { launch } = i;
+  if (launch === null) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      checked: false,
+      detail: "where Claude Code starts Tenjin from could not be read from the plugin's .mcp.json",
+    };
+  }
+  if (
+    i.state !== null &&
+    launch.source === 'marketplace' &&
+    !(await samePath(launch.path, join(i.root, 'claude')))
+  ) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `Claude Code loads Tenjin from ${t(launch.path)}, not Tenjin's runtime: an older tenjin-cli build registered it there`,
+      fix: `Run \`tenjin install${flag}\`, then start a new Claude Code session.`,
+    };
+  }
+  if (launch.command === 'node') {
+    const from = launch.entry !== null ? `, from ${t(dirname(launch.entry))}` : '';
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `Claude Code starts Tenjin with the \`node\` on its PATH${from}, so a Node upgrade or \`npm rm -g tenjin-cli\` stops it`,
+      fix: `Run \`tenjin install${flag}\` to move it to Tenjin's own runtime.`,
+    };
+  }
+  const failFix = `Run \`${RUNTIME_MISSING_FIX}${flag}\`, then start a new Claude Code session.`;
+  const missing = [launch.command, ...(launch.entry !== null ? [launch.entry] : [])];
+  const gone: string[] = [];
+  for (const p of missing) if (!(await exists(p))) gone.push(t(p));
+  if (launch.entry === null || gone.length > 0) {
+    return {
+      name,
+      status: 'fail',
+      required: true,
+      detail:
+        launch.entry === null
+          ? `Claude Code starts Tenjin with ${t(launch.command)} and no entry script, so the router cannot start`
+          : `Claude Code starts Tenjin with ${gone.join(' and ')}, which ${gone.length === 1 ? 'is' : 'are'} not there, so the router cannot start`,
+      fix: failFix,
+    };
+  }
+  const shown = `${t(launch.command)} ${t(launch.entry)} --version`;
+  const run = await (i.deps.runVersion ?? runVersion)(launch.command, launch.entry);
+  if (run.timedOut) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      checked: false,
+      detail: `\`${shown}\` did not answer within 15 s`,
+    };
+  }
+  if (run.code !== 0) {
+    const said = (run.stderr || run.stdout).trim().slice(0, 200);
+    return {
+      name,
+      status: 'fail',
+      required: true,
+      detail: `\`${shown}\` exited ${run.code ?? 'without a code'}${said.length > 0 ? `: ${said}` : ''}, so the router cannot start`,
+      fix: failFix,
+    };
+  }
+  const nodeVersion =
+    /[\\/]node[\\/](\d+\.\d+\.\d+)[\\/]/.exec(launch.command)?.[1] ??
+    i.state?.current.node ??
+    'unknown';
+  const from = runtimeBuild(dirname(launch.entry))?.root ?? i.root;
+  const detail = `Claude Code starts tenjin ${run.stdout.trim()} on Node ${nodeVersion} from ${t(from)}`;
+  // THE LAUNCHER A TERMINAL NEEDS once npm's copy is gone.
+  const platform = process.platform;
+  const launcher = join(launcherDir(i.home), platform === 'win32' ? 'tenjin.cmd' : 'tenjin');
+  if (!(await exists(launcher))) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `${detail}; ${t(launcher)} is missing, so a terminal does not find Tenjin's \`tenjin\``,
+      fix: `Run \`tenjin install${flag}\` to write it.`,
+    };
+  }
+  if (!launcherOnPath(launcherDir(i.home), i.env, platform)) {
+    const { pathLine } = await import('../lib/runtime');
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `${detail}; ${t(launcherDir(i.home))} is not on your PATH, so a terminal does not find \`tenjin\` there`,
+      fix: pathLine(i.env, i.home, platform),
+    };
+  }
+  return {
+    name,
+    status: 'ok',
+    required: true,
+    detail: `${detail}; tenjin on PATH: ${t(i.onPath?.path ?? launcher)}`,
+  };
+}
+
+/** Is `dir` on this environment's PATH, compared as `writeLaunchers` compares it? */
+function launcherOnPath(dir: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
+  const p = platform === 'win32' ? win32 : posix;
+  const norm = (value: string) => {
+    const full = p.resolve(value).replace(/[\\/]+$/, '');
+    return platform === 'win32' ? full.toLowerCase() : full;
+  };
+  const raw = (platform === 'win32' ? (env.Path ?? env.PATH) : env.PATH) ?? '';
+  return raw
+    .split(p.delimiter)
+    .filter((entry) => entry.length > 0)
+    .some((entry) => norm(entry) === norm(dir));
+}
+
+/**
+ * THE FIRST `tenjin` ON PATH, and the package behind it: the nearest
+ * `tenjin-cli` package above its realpath (npm's POSIX link), or
+ * `node_modules/tenjin-cli` beside it (npm's Windows shim). A launcher Tenjin
+ * wrote needs no package. Null when nothing is found or no package is
+ * identified.
+ */
+export async function findPathTenjin(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): Promise<PathTenjin | null> {
+  const raw = (platform === 'win32' ? (env.Path ?? env.PATH) : env.PATH) ?? '';
+  const delimiter = platform === 'win32' ? win32.delimiter : posix.delimiter;
+  const name = platform === 'win32' ? 'tenjin.cmd' : 'tenjin';
+  for (const dir of raw.split(delimiter).filter((d) => d.length > 0)) {
+    const path = join(dir, name);
+    if ((await stat(path).catch(() => null))?.isFile() !== true) continue;
+    const body = await readFile(path, 'utf8').catch(() => '');
+    if (body.includes(LAUNCHER_MARKER))
+      return { path, marked: true, version: null, handsOff: true };
+    let root: string | null;
+    if (platform === 'win32') root = join(dir, 'node_modules', 'tenjin-cli');
+    else {
+      const { packageRootOf } = await import('../lib/runtime');
+      root = packageRootOf(dirname(await realpath(path).catch(() => path)));
+    }
+    if (root === null) return null;
+    const manifest = await readFile(join(root, 'package.json'), 'utf8')
+      .then((t) => JSON.parse(t) as { name?: unknown; version?: unknown; tenjinRuntime?: unknown })
+      .catch(() => null);
+    if (manifest?.name !== 'tenjin-cli') return null;
+    return {
+      path,
+      marked: false,
+      version: typeof manifest.version === 'string' ? manifest.version : null,
+      handsOff: manifest.tenjinRuntime !== undefined,
+    };
+  }
+  return null;
+}
+
+/** An older npm copy a terminal runs instead of Tenjin's runtime, named; nothing else. */
+function pathTenjinCheck(found: PathTenjin | null, home: string): RouterCheck | null {
+  if (found === null || found.marked || found.handsOff) return null;
+  return {
+    name: 'tenjin on PATH',
+    status: 'warn',
+    required: false,
+    detail: `\`tenjin\` in a terminal runs tenjin-cli ${found.version ?? '(unknown version)'} at ${tilde(found.path, home)}, an older build that does not hand off to Tenjin's runtime`,
+    fix: 'Remove it with `npm uninstall -g tenjin-cli` using the Node that installed it, or upgrade it with `npm i -g tenjin-cli@latest`.',
   };
 }
 
@@ -807,7 +1156,7 @@ async function migrationCheck(
         required: false,
         detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
         fix: claude.meetsFloor
-          ? `To load the plugin, ${loadStep(true)}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
+          ? `To load the plugin, ${NEW_SESSION_STEP}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
           : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
       };
 }
