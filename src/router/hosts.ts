@@ -153,7 +153,7 @@ export async function installHosts(
 
 /**
  * Under an agent, the line naming the other host when its `--version` runs
- * too: information for the person, never a question.
+ * too: a yes/no question the agent asks the person, and what a yes runs.
  */
 export async function otherHostNote(
   args: InstallHostArgs,
@@ -167,7 +167,7 @@ export async function otherHostNote(
   if (agent === undefined) return undefined;
   const other: Harness = agent === 'claude' ? 'codex' : 'claude';
   if (!(await (deps.detect ?? detectHosts)(env)).includes(other)) return undefined;
-  return `${LABEL[other]} is also installed on this machine. To add Tenjin there, run tenjin install from a ${LABEL[other]} session, or tenjin install --harness ${other}.`;
+  return `${LABEL[other]} is also installed on this machine. Ask the person: "Should I also set up Tenjin for ${LABEL[other]}?" On yes, run \`tenjin install --harness ${other}\`.`;
 }
 
 /** The install result with `note` in its `notices` and as its last line. */

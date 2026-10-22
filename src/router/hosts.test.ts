@@ -92,10 +92,10 @@ describe('uninstallEach', () => {
 describe('otherHostNote', () => {
   it('names Codex under a Claude Code agent, and Claude Code under a Codex one', async () => {
     expect(await otherHostNote({}, { env: { CLAUDECODE: '1' }, detect: both })).toBe(
-      'Codex is also installed on this machine. To add Tenjin there, run tenjin install from a Codex session, or tenjin install --harness codex.',
+      'Codex is also installed on this machine. Ask the person: "Should I also set up Tenjin for Codex?" On yes, run `tenjin install --harness codex`.',
     );
     expect(await otherHostNote({}, { env: { CODEX_SESSION_ID: 'a' }, detect: both })).toBe(
-      'Claude Code is also installed on this machine. To add Tenjin there, run tenjin install from a Claude Code session, or tenjin install --harness claude.',
+      'Claude Code is also installed on this machine. Ask the person: "Should I also set up Tenjin for Claude Code?" On yes, run `tenjin install --harness claude`.',
     );
   });
 
