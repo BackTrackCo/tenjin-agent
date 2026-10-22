@@ -54,7 +54,9 @@ tenjin install          # adds the plugin and creates your wallet
 tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
 
-Needs Claude Code 2.1.287+ and Node.js 22+. Add `--project` to set it up for one project only. Codex support is on the way.
+Needs Claude Code 2.1.287+ and Node.js 22+. Add `--project` to set it up for one project only.
+
+**Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 
 ## Try it
 
