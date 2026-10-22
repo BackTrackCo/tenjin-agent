@@ -324,6 +324,62 @@ describe('routing outcomes that buy nothing', () => {
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
   });
 
+  /** The tool's text is the model's: a wallet reason carries its agentFix (B1). */
+  it("gives the model a wallet reason's ask-the-person fix when the free path answers fee_required", async () => {
+    const { fetchImpl } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'native',
+            diagnostics: {
+              reasonCode: 'fee_required',
+              stage: 'capability',
+              missing: [],
+              nextAction: 'x',
+            },
+          },
+        },
+      },
+    ]);
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: async (): Promise<never> => {
+        throw new RouteSkipped('passphrase_missing');
+      },
+    });
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain(WALLET_REASONS.passphrase_missing.reason);
+    expect(reason).toContain(ASK_FOR_REPAIR);
+    expect(reason).not.toContain(REPAIR_CLAUSE);
+  });
+
+  it("gives the model a wallet reason's ask-the-person fix when the call runs out of time", async () => {
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: async (): Promise<never> => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new RouteSkipped('passphrase_wrong');
+      },
+    });
+    const quick = { ...ctx(), flags: { ...ctx().flags, timeout: 50 } };
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(net([]).fetchImpl), ctx: quick, route },
+    );
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain(WALLET_REASONS.passphrase_wrong.reason);
+    expect(reason).toContain(ASK_FOR_REPAIR);
+    expect(reason).not.toContain(REPAIR_CLAUSE);
+  });
+
   it('asks once more on the paid path when a stale "no paid path" memo sent the call free', async () => {
     const feeOn = {
       schemaVersion: 1,

@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import type { DecisionRoute } from './decision';
-import { WALLET_REASONS } from './wallet-reasons';
+import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
 export { createExclusive, firstNoticeFor } from './notice-markers';
 
@@ -146,11 +146,17 @@ export function depositSentence(amountAtomic: bigint): string {
   return `Tenjin moved $${usd(amountAtomic)} into prepaid routing credit; each routing call uses $${usd(ROUTING_FEE_ATOMIC)}.`;
 }
 
-/** The one line the user sees, once per session and reason, when a call was not paid. */
-export function unpaidSentence(why: string): string | null {
+/**
+ * The one line the user sees, once per session and reason, when a call was not
+ * paid. Its reader picks the fix (B1): the person's by default; for the model
+ * (the `request` tool's text) a wallet unlock reason's `agentFix`, which asks
+ * the person to act and never for the passphrase, and any other reason's own.
+ */
+export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person'): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so calls take the free path until that is fixed. ${u.fix}`;
+  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
+  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so calls take the free path until that is fixed. ${fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
