@@ -116,7 +116,7 @@ echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 # fallback, with every source-tree test green. The manifest carries this
 # version, so the plugin Claude Code lists is the build that runs.
 HOSTS="./node_modules/tenjin-cli/dist/hosts/claude"
-for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
+for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts; do
   [ -f "$HOSTS/$f" ] || {
     echo "pack-smoke: FAIL: dist/hosts/claude/$f missing from the installed package" >&2
     exit 1
@@ -133,12 +133,34 @@ EXPECTED_VERSION="$EXPECTED_VERSION" HOSTS="$HOSTS" node -e '
   echo "pack-smoke: FAIL: the packed plugin manifest is not tenjin@$EXPECTED_VERSION" >&2
   exit 1
 }
-# Claude Code's own validator, where a runner has the binary.
+# The Codex plugin ships beside it, a local marketplace `codex plugin add` copies.
+CODEX_HOSTS="./node_modules/tenjin-cli/dist/hosts/codex"
+for f in .agents/plugins/marketplace.json tenjin/.codex-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
+  [ -f "$CODEX_HOSTS/$f" ] || {
+    echo "pack-smoke: FAIL: dist/hosts/codex/$f missing from the installed package" >&2
+    exit 1
+  }
+done
+# Claude Code's own validator, where a runner has the binary: the marketplace,
+# then the plugin with its mod, which validate reads as the engine will load it.
+# Then the mod's tests from the source tree, run against the PACKED module.
 if command -v claude >/dev/null 2>&1; then
   CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin validate "$HOSTS" >/dev/null || {
     echo "pack-smoke: FAIL: claude plugin validate rejected the packed marketplace" >&2
     exit 1
   }
+  CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin validate "$HOSTS/tenjin" >/dev/null || {
+    echo "pack-smoke: FAIL: claude plugin validate rejected the packed plugin and its mod" >&2
+    exit 1
+  }
+  MOD_DIR="$DATA_DIR/mod-under-test"
+  cp -R "$HOSTS/tenjin" "$MOD_DIR"
+  cp -R "$PKG_DIR/hosts/claude/tenjin/tests" "$MOD_DIR/tests"
+  CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin test "$MOD_DIR" >/dev/null 2>&1 || {
+    echo "pack-smoke: FAIL: claude plugin test failed against the packed mod" >&2
+    exit 1
+  }
+  echo "pack-smoke: packed mod validates and passes its tests (ok)"
 fi
 echo "pack-smoke: packed Claude Code plugin tenjin@$EXPECTED_VERSION (ok)"
 # Every plugin command, spawned with no shell from the installed package, so the

@@ -206,11 +206,11 @@ describe('decode', () => {
       expect(PreToolUseSpawn.tool_input.message.startsWith('gAAAAA')).toBe(true);
     });
 
-    it('wait_agent and the web tool are other', () => {
+    it('wait_agent stays other and a complete single web search maps to web', () => {
       expect(decoded(PreToolUseWait, 'wait').tool?.kind).toBe('other');
       expect(decoded(PreToolUseWebrun, 'webrun').tool).toMatchObject({
         name: 'webrun',
-        kind: 'other',
+        kind: 'web',
       });
     });
 

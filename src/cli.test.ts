@@ -216,13 +216,8 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain('--project');
     expect(help).toContain('--refresh');
-    for (const gone of [
-      '--harness',
-      '--bazaar-pay',
-      '--no-grant',
-      '--publish-mode',
-      '--status-line',
-    ])
+    expect(help).toContain('--harness');
+    for (const gone of ['--bazaar-pay', '--no-grant', '--publish-mode', '--status-line'])
       expect(help).not.toContain(gone);
   });
 
@@ -427,6 +422,15 @@ describe('the update nudge and `install --refresh`', () => {
     await main(['install', '--refresh', '--json'], cap.io);
     expect(existsSync(cachePath())).toBe(false);
     expect(fetched).toBe(0);
+  });
+
+  it('refuses a Codex refresh as usage, with nothing to bring up to date', async () => {
+    const cap = captureIo();
+    expect(await main(['install', '--harness', 'codex', '--refresh', '--json'], cap.io)).not.toBe(
+      0,
+    );
+    expect(cap.stdout()).toContain('no refresh');
+    expect(existsSync(cachePath())).toBe(false);
   });
 
   // The other half: without it the case above would pass on a nudge that was

@@ -36,6 +36,8 @@ export interface PaidRecord {
   ts: string;
   capabilityId: string;
   provider: string;
+  /** The service's display name, when its decision or spec carried one. */
+  label?: string;
   url: string;
   /** The input or query sent, masked and cut to {@link MAX_SENT_CHARS}. */
   sent: string;

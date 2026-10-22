@@ -3,9 +3,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  buildBrowseBody,
   buildHookBody,
   buildOutcomeBody,
   buildToolBody,
+  buildToolSpecBody,
   acceptsFor,
   CLIENT_ACCEPTS,
   parseForTests,
@@ -149,15 +151,41 @@ describe('the request bodies', () => {
     ).toEqual(tool);
   });
 
-  /** THIS BUILD ADDS `jobs` to a released build's accepts: each spec's `job`,
-   *  the services that never answer inline, and `count` on a media line. */
-  it("sends this build's accepts, jobs beside catalog and spec", () => {
-    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'jobs']);
+  /**
+   * WHAT THIS BUILD SAYS IT RUNS. Each token is one the server's README names
+   * as read (`spec`, `catalog`, `label`, `fields`, `jobs`, and `bazaar` behind
+   * its experiment), so the server sends each field this build parses and none
+   * it does not. A token is added only with the parser that takes its fields.
+   */
+  it("sends this build's accepts: the contract tokens it parses and runs", () => {
+    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs']);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
+      'label',
+      'fields',
       'jobs',
     ]);
-    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'jobs', 'bazaar']);
+    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs', 'bazaar']);
+    const read = ['spec', 'catalog', 'label', 'fields', 'jobs', 'discovered', 'bazaar', 'choices'];
+    for (const token of acceptsFor(true)) expect(read).toContain(token);
+    // The server's bounds: up to 16 tokens, each 1 to 32 characters.
+    expect(acceptsFor(true).length).toBeLessThanOrEqual(16);
+    for (const token of acceptsFor(true)) expect(token.length).toBeLessThanOrEqual(32);
+  });
+
+  it('builds the browse of the tool list and a row id request, byte for byte', () => {
+    const browse = fixture('wire-browse-request.json');
+    expect(
+      buildBrowseBody({ browse: browse.browse as string, accepts: browse.accepts as string[] }),
+    ).toEqual(browse);
+    const tool = fixture('wire-tool-request-by-id.json');
+    expect(
+      buildToolSpecBody({ tool: tool.tool as string, accepts: tool.accepts as string[] }),
+    ).toEqual(tool);
+    for (const body of [browse, tool]) {
+      expect(Object.keys(body)).not.toContain('packet');
+      expect(Object.keys(body)).not.toContain('query');
+    }
   });
 
   it('builds the query with no id that a spec answers, byte for byte', () => {
@@ -196,6 +224,61 @@ describe('the request bodies', () => {
     ]);
   });
 
+  /** A CODEX CLIENT NAMES ITS HOST, the server's own fixture copied across. */
+  it('builds the Codex hook request with its harness, byte for byte', () => {
+    const canonical = fixture('wire-hook-request-harness.json');
+    expect(
+      buildHookBody(canonical.packet as Packet, {
+        accepts: canonical.accepts as string[],
+        harness: 'codex',
+      }),
+    ).toEqual(canonical);
+  });
+
+  /**
+   * THE CLAUDE REPLAY. Every request this build sends, rebuilt the way it now
+   * goes out from Claude Code: the one change is `harness: "claude"`, with
+   * every other field and its value as before.
+   */
+  it('replays every Claude request with harness as the only new field', () => {
+    const hooks = readdirSync(dir).filter(
+      (name) => name.startsWith('wire-hook-request-') && name !== 'wire-hook-request-harness.json',
+    );
+    expect(hooks.length).toBeGreaterThanOrEqual(7);
+    for (const name of hooks) {
+      const canonical = fixture(name);
+      const body = buildHookBody(canonical.packet as Packet, {
+        ...(canonical.sessionId !== undefined ? { sessionId: canonical.sessionId as string } : {}),
+        ...(canonical.accepts !== undefined ? { accepts: canonical.accepts as string[] } : {}),
+        harness: 'claude',
+      });
+      expect(body, name).toEqual({ ...canonical, harness: 'claude' });
+    }
+    for (const name of readdirSync(dir).filter((n) => n.startsWith('wire-tool-request-'))) {
+      const canonical = fixture(name);
+      const accepts = canonical.accepts as string[];
+      // A browse row's id is its own form; every other tool request is a query.
+      const body =
+        typeof canonical.tool === 'string'
+          ? buildToolSpecBody({ tool: canonical.tool, accepts, harness: 'claude' })
+          : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
+      expect(body, name).toEqual({ ...canonical, harness: 'claude' });
+    }
+    const browse = fixture('wire-browse-request.json');
+    expect(
+      buildBrowseBody({
+        browse: browse.browse as string,
+        accepts: browse.accepts as string[],
+        harness: 'claude',
+      }),
+    ).toEqual({ ...browse, harness: 'claude' });
+    for (const name of ['wire-outcome-request.json', 'wire-outcome-unpaid.json']) {
+      const canonical = fixture(name);
+      const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
+      expect(body, name).toEqual({ ...canonical, harness: 'claude' });
+    }
+  });
+
   it('carries nothing about money on any form', () => {
     for (const name of [
       'wire-hook-request-prompt.json',
@@ -207,6 +290,9 @@ describe('the request bodies', () => {
       'wire-hook-request-catalog.json',
       'wire-tool-request-spec.json',
       'wire-tool-request-catalog.json',
+      'wire-browse-request.json',
+      'wire-tool-request-by-id.json',
+      'wire-hook-request-harness.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -473,6 +559,120 @@ describe('every answer payload on disk', () => {
     const expired = fixture('wire-lookup-expired-id.json');
     expect(String(expired.note)).toContain('unknown or expired');
     expect(parseForTests('tool', expired).success).toBe(true);
+  });
+
+  it('takes the label, the short line and the fields on a labelled offer', () => {
+    const payload = fixture('wire-hook-execute-labelled.json');
+    const decision = payload.decision as {
+      id: string;
+      label: string;
+      hint: string;
+      delivery: string;
+      specs: { label: string; holds: unknown; output: string }[];
+    };
+    expect(parseForTests('hook', payload).success).toBe(true);
+    // THE LINE STARTS AT THE LABEL and names no URL.
+    expect(decision.hint.startsWith(`${decision.label}, $`)).toBe(true);
+    expect(decision.hint).not.toMatch(/https?:\/\//);
+    expect(decision.delivery).toBe('offer');
+    expect(decision.specs[0]).toMatchObject({
+      label: decision.label,
+      holds: { WebSearch: 'query' },
+      output: 'json',
+    });
+    // Still strict: a field the contract does not name fails the answer.
+    expect(
+      parseForTests('hook', { ...payload, decision: { ...decision, surprise: 1 } }).success,
+    ).toBe(false);
+    expect(
+      parseForTests('hook', {
+        ...payload,
+        decision: { ...decision, label: 'x'.repeat(33) },
+      }).success,
+    ).toBe(false);
+    expect(
+      parseForTests('hook', { ...payload, decision: { ...decision, delivery: 'push' } }).success,
+    ).toBe(false);
+  });
+
+  it('takes augment and its URL on the free docs lookup before a search', () => {
+    const payload = fixture('wire-hook-execute-augment.json');
+    const decision = payload.decision as Record<string, unknown>;
+    expect(parseForTests('hook', payload).success).toBe(true);
+    expect(decision).toMatchObject({ delivery: 'augment', label: 'Context7 docs' });
+    expect(new URL(String(decision.augmentUrl)).searchParams.get('query')).toBe(
+      'next.js 16 middleware matcher',
+    );
+    expect(
+      parseForTests('hook', { ...payload, decision: { ...decision, augmentUrl: 'not a url' } })
+        .success,
+    ).toBe(false);
+  });
+
+  /**
+   * AN OLDER SERVER, OR ONE THAT DROPS A FIELD: every contract field is
+   * optional, so an answer without `label`, `delivery` or `augmentUrl` still
+   * parses, and the client falls back (`Tenjin lookup`, the free-price docs
+   * rule) instead of losing the offer.
+   */
+  it('parses each labelled answer with every contract field taken out', () => {
+    const without = (value: unknown, keys: string[]): Record<string, unknown> =>
+      Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).filter(([key]) => !keys.includes(key)),
+      );
+    const labelled = fixture('wire-hook-execute-labelled.json');
+    const plain = without(labelled.decision, ['label', 'delivery']);
+    expect(Object.keys(labelled.decision as object)).toEqual(
+      expect.arrayContaining(['label', 'delivery']),
+    );
+    const specs = (plain.specs as unknown[]).map((spec) =>
+      without(spec, ['label', 'holds', 'output']),
+    );
+    expect(parseForTests('hook', { ...labelled, decision: { ...plain, specs } }).success).toBe(
+      true,
+    );
+    const augment = fixture('wire-hook-execute-augment.json');
+    expect(augment.decision).toHaveProperty('augmentUrl');
+    const bare = without(augment.decision, ['augmentUrl', 'delivery', 'label']);
+    expect(parseForTests('hook', { ...augment, decision: bare }).success).toBe(true);
+    const byId = fixture('wire-lookup-spec-by-id.json');
+    const decision = byId.decision as { spec: unknown };
+    const spec = without(decision.spec, ['label', 'holds', 'output']);
+    expect(parseForTests('tool', { ...byId, decision: { ...decision, spec } }).success).toBe(true);
+  });
+
+  it("answers a browse row's id with its labelled spec under a fresh id", () => {
+    const payload = fixture('wire-lookup-spec-by-id.json');
+    const decision = payload.decision as {
+      action: string;
+      id: string;
+      hint: string;
+      spec: { capabilityId: string; label: string };
+    };
+    expect(parseForTests('tool', payload).success).toBe(true);
+    expect(parseForTests('hook', payload).success).toBe(false);
+    expect(decision.action).toBe('spec');
+    expect(decision.spec).toMatchObject({
+      capabilityId: fixture('wire-tool-request-by-id.json').tool,
+      label: 'CoinMarketCap quotes',
+    });
+    expect(decision.hint).toContain(`id: "${decision.id}"`);
+  });
+
+  it('parses the browse answer as rows, strictly, and nothing else as one', () => {
+    const payload = fixture('wire-browse.json');
+    expect(parseForTests('browse', payload).success).toBe(true);
+    expect(parseForTests('tool', payload).success).toBe(false);
+    expect(parseForTests('browse', fixture('wire-lookup-spec-by-id.json')).success).toBe(false);
+    const rows = payload.rows as Record<string, unknown>[];
+    expect(rows.map((row) => row.id)).toEqual(['cmc-quotes', 'stableenrich-exa-answer']);
+    const withRow = (row: Record<string, unknown>) => ({ ...payload, rows: [row] });
+    expect(parseForTests('browse', withRow({ ...rows[0]!, surprise: 1 })).success).toBe(false);
+    expect(parseForTests('browse', withRow({ ...rows[0]!, id: 'a b' })).success).toBe(false);
+    expect(parseForTests('browse', withRow({ ...rows[0]!, label: 'x'.repeat(121) })).success).toBe(
+      false,
+    );
+    expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
   });
 });
 

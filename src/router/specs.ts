@@ -36,6 +36,49 @@ function specPath(dataDir: string, id: string): string {
   return join(dataDir, SPECS_DIR, `${digest(id)}.json`);
 }
 
+/** The field of a kept spec that names the one input a row may show. */
+export const SHOWN_KEY = 'shown';
+
+/** Past this many characters an input is a prompt, not the key of a lookup. */
+export const SHOWN_INPUT_MAX_CHARS = 80;
+
+/**
+ * WHICH INPUT A ROW MAY SHOW FOR A SERVICE, decided here so the mod reads a
+ * field name and nothing else (`shown`, kept in the spec's own file). Only
+ * a lookup's identifying input: the field the catalog says takes a search's
+ * query or a fetch's URL (`holds`), else the service's first required string
+ * field (a company or person name, an expression). Never for a service the
+ * catalog marks as producing media (`output: "media"`: image, video, audio,
+ * music, speech), whose input is a prompt.
+ */
+export function shownInputField(spec: OfferSpec): string | null {
+  if (spec.output === 'media') return null;
+  const held = spec.holds?.WebSearch ?? spec.holds?.WebFetch;
+  if (held !== undefined) return held;
+  const properties = spec.input.properties;
+  if (properties === null || typeof properties !== 'object') return null;
+  const isString = (name: string) =>
+    (properties as Record<string, { type?: unknown }>)[name]?.type === 'string';
+  const required = Array.isArray(spec.input.required)
+    ? spec.input.required.filter((name): name is string => typeof name === 'string')
+    : [];
+  return required.find(isString) ?? Object.keys(properties).find(isString) ?? null;
+}
+
+/**
+ * The input a row shows for this call, or undefined: the field
+ * {@link shownInputField} names, when its value is a short single key. The
+ * mod applies the same cap to the value it reads.
+ */
+export function shownInput(spec: OfferSpec, input: Record<string, unknown>): string | undefined {
+  const field = shownInputField(spec);
+  if (field === null) return undefined;
+  const value = input[field];
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text.length > 0 && Array.from(text).length <= SHOWN_INPUT_MAX_CHARS ? text : undefined;
+}
+
 /**
  * Store each spec under its id, and drop expired ones. Never throws. Ages are
  * file mtimes, so they are read against the real clock, never a caller's.
@@ -47,12 +90,14 @@ export async function storeSpecs(
   if (specs === undefined || specs.length === 0) return;
   for (const spec of specs) {
     try {
-      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(spec), {
+      // `shown` rides beside the spec for the mod, and is dropped on read.
+      const kept = { ...spec, [SHOWN_KEY]: shownInputField(spec) };
+      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
         mode: 0o600,
         dirMode: 0o700,
       });
     } catch {
-      // The tool falls back to the server for this id.
+      // The tool falls back to the server for this id; a row shows no input.
     }
   }
   await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
@@ -68,7 +113,9 @@ export async function readSpec(dataDir: string, id: string): Promise<OfferSpec |
   try {
     const stat = await file.stat();
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
-    const parsed = OfferSpecSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
+    delete kept[SHOWN_KEY];
+    const parsed = OfferSpecSchema.safeParse(kept);
     return parsed.success && parsed.data.id === id ? parsed.data : null;
   } catch {
     return null;

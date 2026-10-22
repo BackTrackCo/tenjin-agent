@@ -77,6 +77,7 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     call: z.strictObject({
       capabilityId: z.string().min(1).max(200),
       provider: z.string().min(1).max(120),
+      label: z.string().max(200).optional(),
       media: z.boolean(),
       request: z.strictObject({
         url: z.string().min(1).max(16_384),

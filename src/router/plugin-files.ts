@@ -2,6 +2,7 @@ import { PAY_SKILL, PAY_SKILL_PATH } from './plugin-skill';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import {
+  CODEX_REQUEST_TOOL,
   MARKETPLACE_NAME,
   MCP_SERVER_NAME,
   PLUGIN_HOOK_TOOL,
@@ -167,9 +168,19 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
   ];
 }
 
-/** `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two permission answers. */
-export function renderPluginHooks(entry: string = PLUGIN_ROOT_ENTRY): {
+/** The mod's module, as `hooks/hooks.json` names it (relative to that file). */
+export const MOD_MODULE = './register.tsx';
+
+/**
+ * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
+ * permission answers, and the mod's module when the folder carries it.
+ */
+export function renderPluginHooks(
+  entry: string = PLUGIN_ROOT_ENTRY,
+  withMod = false,
+): {
   hooks: Record<string, unknown[]>;
+  modules?: string[];
 } {
   const plan = [
     { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry)) },
@@ -181,7 +192,7 @@ export function renderPluginHooks(entry: string = PLUGIN_ROOT_ENTRY): {
   for (const { event, hooks: handlers, ...rest } of plan) {
     (hooks[event] ??= []).push({ ...rest, hooks: handlers });
   }
-  return { hooks };
+  return { hooks, ...(withMod ? { modules: [MOD_MODULE] } : {}) };
 }
 
 /**
@@ -216,11 +227,13 @@ const DESCRIPTION =
  * template carries none. `metadata[tenjin-cli]` is the ownership marker the
  * folder fallback, `update` and `uninstall` check before they touch a folder.
  */
-export function renderPluginManifest(version?: string): Record<string, unknown> {
+export function renderPluginManifest(version?: string, withMod = false): Record<string, unknown> {
   return {
     name: PLUGIN_NAME,
     ...(version !== undefined ? { version } : {}),
     description: DESCRIPTION,
+    // The mod's `$.state` contract, which `claude plugin validate` checks.
+    ...(withMod ? { types: `./${MOD_TYPES}` } : {}),
     author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
     homepage: `${PRODUCTION_ORIGIN}/agents`,
     repository: 'https://github.com/BackTrackCo/tenjin-agent',
@@ -257,34 +270,166 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
  */
 export const PLUGIN_FILES = [
   '.mcp.json',
+  'types/index.d.ts',
+  'hooks/register.tsx',
   'hooks/hooks.json',
   PAY_SKILL_PATH,
   '.claude-plugin/plugin.json',
 ] as const;
+
+/** The mod's `$.state` contract, shipped as written. */
+export const MOD_TYPES = 'types/index.d.ts';
+/**
+ * THE MOD SHIPS AS WRITTEN, NOT RENDERED: `hosts/claude/tenjin/` holds its
+ * source, the build copies it into `dist/hosts/claude/tenjin/`, and the folder
+ * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
+ * later); nothing here builds or imports it.
+ */
+export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
+export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
  * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
  * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
- * outside the package.
+ * outside the package. Without the mod's sources the folder carries the legs
+ * and the server alone, and its hooks file names no module.
  */
-export function renderPluginFiles(version?: string, entry?: string): Record<string, string> {
+export function renderPluginFiles(
+  version?: string,
+  entry?: string,
+  mod?: ModSources,
+): Record<string, string> {
+  const withMod = mod !== undefined;
   return {
     '.mcp.json': json(renderPluginMcp(entry)),
-    'hooks/hooks.json': json(renderPluginHooks(entry)),
+    ...(mod ?? {}),
+    'hooks/hooks.json': json(renderPluginHooks(entry, withMod)),
     [PAY_SKILL_PATH]: PAY_SKILL,
-    '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
+    '.claude-plugin/plugin.json': json(renderPluginManifest(version, withMod)),
   };
 }
 
 /** The marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
-export function renderHostFiles(version?: string): Record<string, string> {
-  const plugin = Object.entries(renderPluginFiles(version)).map(
+export function renderHostFiles(version?: string, mod?: ModSources): Record<string, string> {
+  const plugin = Object.entries(renderPluginFiles(version, undefined, mod)).map(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );
   return {
     '.claude-plugin/marketplace.json': json(renderMarketplace(version)),
     ...Object.fromEntries(plugin),
+  };
+}
+
+/**
+ * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
+ * checked-in `hosts/codex/` by the same test. Its legs are command hooks: the
+ * prompt, and one web call before it runs and after (Codex has no
+ * PostToolUseFailure). Nothing in it names a release, so `codex plugin add`
+ * copies the same bytes from every build and the hooks' trust holds across a
+ * `tenjin update`.
+ */
+export const CODEX_WEB_MATCHER = 'webrun';
+export const CODEX_LEGS = ['prompt', 'native', 'shortfall'] as const;
+
+export function codexHookCommand(kind: (typeof CODEX_LEGS)[number]): string {
+  return `tenjin hook ${kind} --harness codex`;
+}
+
+/**
+ * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link ALLOW_HOOK_COMMAND}
+ * is in Claude Code. Codex runs a `PermissionRequest` hook before its approval
+ * policy, `never` included, so the tool runs without a prompt once the user
+ * trusts this hook with the others in `/hooks`. It also overrides a user's own
+ * `approval_mode = "prompt"` for the tool; that user turns this one hook off in
+ * `/hooks`. The wallet's spend limits still bound every payment.
+ */
+const CODEX_ALLOW_ANSWER = JSON.stringify({
+  hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+});
+export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
+/**
+ * The same answer under Windows' `cmd.exe /C`, through Codex's `commandWindows`
+ * override: cmd's `echo` prints single quotes as written, and Codex then
+ * rejects the output as JSON. The answer holds none of cmd's special
+ * characters, so a bare `echo` prints it as is.
+ */
+export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
+
+/** Every hook the Codex plugin carries: the three legs and the allow answer. */
+export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 1;
+
+function codexLeg(kind: (typeof CODEX_LEGS)[number], timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
+  return [{ type: 'command', command: codexHookCommand(kind), timeout }];
+}
+
+export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
+  return {
+    hooks: {
+      UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
+      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') }],
+      PostToolUse: [
+        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS) },
+      ],
+      PermissionRequest: [
+        {
+          matcher: CODEX_REQUEST_TOOL,
+          hooks: [
+            {
+              type: 'command',
+              command: CODEX_ALLOW_HOOK_COMMAND,
+              commandWindows: CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+              timeout: LOCAL_HOOK_TIMEOUT_SECONDS,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
+
+export function renderCodexMcp(): { mcpServers: Record<string, unknown> } {
+  return { mcpServers: { [MCP_SERVER_NAME]: { command: 'tenjin', args: [...CODEX_MCP_ARGS] } } };
+}
+
+/** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */
+export function renderCodexManifest(): Record<string, unknown> {
+  return {
+    name: PLUGIN_NAME,
+    description: DESCRIPTION,
+    author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
+    homepage: `${PRODUCTION_ORIGIN}/agents`,
+    repository: 'https://github.com/BackTrackCo/tenjin-agent',
+    interface: { displayName: 'Tenjin', developerName: 'Tenjin', category: 'Productivity' },
+    mcpServers: './.mcp.json',
+  };
+}
+
+/** `.agents/plugins/marketplace.json`: one local plugin, copied by `codex plugin add`. */
+export function renderCodexMarketplace(): Record<string, unknown> {
+  return {
+    name: MARKETPLACE_NAME,
+    interface: { displayName: 'Tenjin' },
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: { source: 'local', path: `./${PLUGIN_DIR}` },
+        policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+        category: 'Productivity',
+      },
+    ],
+  };
+}
+
+/** The Codex marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
+export function renderCodexHostFiles(): Record<string, string> {
+  return {
+    '.agents/plugins/marketplace.json': json(renderCodexMarketplace()),
+    [`${PLUGIN_DIR}/.mcp.json`]: json(renderCodexMcp()),
+    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
+    [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest()),
   };
 }

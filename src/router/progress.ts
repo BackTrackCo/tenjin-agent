@@ -94,15 +94,42 @@ interface SavedProgress extends Stamp {
   outcome?: string;
   /** Host plus path of the provider actually called, without a scheme. */
   endpoint?: string;
+  /** The service's display name as the server gave it. */
+  label?: string;
   /** The call's parameters as compact JSON. */
   parameters?: string;
   /** What the provider was paid, as USD. */
   price?: string;
 }
 
-/** A search being given free docs, and whose docs they are. */
+/** A search being given free docs, and whose docs they are: the service's
+ *  `label` when the decision carried one, else its provider's name. */
 interface SavedAugment extends Stamp {
   provider: string;
+  label?: string;
+}
+
+/**
+ * THE OFFER RECORD, one per native call a hook redirected, keyed by its
+ * `tool_use_id`: when it was made, the offer's id, its `label` when the
+ * decision carried one, and its price in atomic USDC. Part of the state
+ * contract between this CLI and the plugin's mod (`mod-state.ts`), which reads
+ * it to draw the redirected row and to find the `request` call that takes the
+ * offer up by its id; it never parses the reason the model read. Version 1
+ * grows by optional fields only, so a reader ignores one it does not know, and
+ * an older CLI's prune still reads it as a record.
+ */
+interface SavedOffer extends Stamp {
+  offerId?: string;
+  label?: string;
+  priceAtomic?: string;
+}
+
+/** What the offer record names: the offer's id, display name and price. */
+export interface OfferedTerms {
+  offerId?: string;
+  label?: string;
+  priceAtomic: string;
 }
 
 export interface ProgressStep {
@@ -111,6 +138,8 @@ export interface ProgressStep {
   outcome?: string;
   /** The executed provider's URL. It can differ from the hint's suggestion. */
   provider?: string;
+  /** The service's display name, from its decision, shown in place of the URL. */
+  label?: string;
   parameters?: unknown;
   price?: string;
 }
@@ -215,12 +244,22 @@ export async function markOffered(
   dataDir: string,
   sessionId: string,
   toolUseId: string,
+  offer: OfferedTerms,
   now = Date.now(),
 ): Promise<void> {
-  await write(join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`), {
+  const saved: SavedOffer = {
     version: 1,
     at: now,
-  });
+    ...(offer.offerId !== undefined && /^[\w.:-]{1,200}$/.test(offer.offerId)
+      ? { offerId: offer.offerId }
+      : {}),
+    ...(offer.label !== undefined ? { label: sanitize(offer.label, 32) } : {}),
+    ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
+  };
+  await write(
+    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
+    saved,
+  );
 }
 
 export async function wasOffered(
@@ -245,11 +284,16 @@ export async function markAugment(
   dataDir: string,
   sessionId: string,
   toolUseId: string,
-  provider: string,
+  docs: { provider: string; label?: string },
   now = Date.now(),
 ): Promise<string | null> {
   const base = join(sessionDir(dataDir, sessionId), `${AUGMENT_PREFIX}${digest(toolUseId)}`);
-  const saved: SavedAugment = { version: 1, at: now, provider: sanitize(provider, 60) };
+  const saved: SavedAugment = {
+    version: 1,
+    at: now,
+    provider: sanitize(docs.provider, 60),
+    ...(docs.label !== undefined ? { label: sanitize(docs.label, 32) } : {}),
+  };
   return (await write(`${base}.json`, saved)) ? `${base}${AUGMENT_BODY_SUFFIX}` : null;
 }
 
@@ -259,13 +303,19 @@ export async function augmentOf(
   sessionId: string,
   toolUseId: string,
   now = Date.now(),
-): Promise<{ at: number; provider: string; body: string } | null> {
+): Promise<{ at: number; provider: string; label?: string; body: string } | null> {
   const base = join(sessionDir(dataDir, sessionId), `${AUGMENT_PREFIX}${digest(toolUseId)}`);
   const row = await readJson(`${base}.json`);
   const stamp = stampOf(row);
   if (row === null || stamp === null || now - stamp.at > EXPIRY_MS) return null;
   const provider = typeof row.provider === 'string' ? sanitize(row.provider, 60) : '';
-  return { at: stamp.at, provider, body: `${base}${AUGMENT_BODY_SUFFIX}` };
+  const label = typeof row.label === 'string' ? sanitize(row.label, 32) : '';
+  return {
+    at: stamp.at,
+    provider,
+    ...(label !== '' ? { label } : {}),
+    body: `${base}${AUGMENT_BODY_SUFFIX}`,
+  };
 }
 
 /**
@@ -437,6 +487,7 @@ export async function writeProgress(
     operation: sanitize(step.operation ?? 'request', 24) || 'request',
     ...(step.outcome !== undefined ? { outcome: sanitize(step.outcome, 40) } : {}),
     ...(endpoint !== undefined ? { endpoint } : {}),
+    ...(step.label !== undefined ? { label: sanitize(step.label, 32) } : {}),
     ...(parameters !== undefined ? { parameters } : {}),
     ...(step.price !== undefined ? { price: sanitize(step.price, 24) } : {}),
   };
@@ -447,11 +498,11 @@ export interface LookupFooter {
   /** A decision is in flight. */
   routing(): Promise<void>;
   /** The EXECUTED provider, which can differ from what the hint suggested. */
-  calling(step: { provider: string; parameters?: unknown }): Promise<void>;
+  calling(step: { provider: string; label?: string; parameters?: unknown }): Promise<void>;
   /** The outcome, and what the provider was paid for it. */
   done(
     outcome: string,
-    step?: { provider?: string; parameters?: unknown; price?: string },
+    step?: { provider?: string; label?: string; parameters?: unknown; price?: string },
   ): Promise<void>;
 }
 
@@ -650,8 +701,8 @@ function holdMs(row: SavedProgress): number {
 }
 
 /**
- * One call, as the footer says it: `x402 · <tool>: <state> <host/path> ·
- * <parameters> · <price>`. Every field is sanitized AGAIN here, because what is
+ * One call, as the footer says it: `x402 · <tool>: <state> <label or host/path>
+ * · <parameters> · <price>`. Every field is sanitized AGAIN here, because what is
  * on disk is input to this process even when this process wrote it.
  */
 function line(row: SavedProgress, now: number): string {
@@ -669,7 +720,12 @@ function line(row: SavedProgress, now: number): string {
         : sanitize(row.outcome ?? 'done', 40);
   return (
     `x402 · ${operation}: ${state}` +
-    (row.endpoint !== undefined ? ` ${sanitize(row.endpoint, 110)}` : '') +
+    // The service's name where its decision gave one, else the URL called.
+    (row.label !== undefined
+      ? ` ${sanitize(row.label, 32)}`
+      : row.endpoint !== undefined
+        ? ` ${sanitize(row.endpoint, 110)}`
+        : '') +
     (row.parameters !== undefined ? ` · ${sanitize(row.parameters, 180)}` : '') +
     (row.price !== undefined ? ` · ${sanitize(row.price, 24)}` : '')
   );
@@ -704,7 +760,7 @@ async function readCall(path: string): Promise<SavedProgress | null> {
   const stamp = stampOf(row);
   if (row === null || stamp === null || typeof row.operation !== 'string') return null;
   if (!['routing', 'calling', 'done'].includes(row.phase as string)) return null;
-  const optional = ['outcome', 'endpoint', 'parameters', 'price'] as const;
+  const optional = ['outcome', 'endpoint', 'label', 'parameters', 'price'] as const;
   if (!optional.every((key) => row[key] === undefined || typeof row[key] === 'string')) return null;
   return {
     ...stamp,

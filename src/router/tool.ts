@@ -41,7 +41,11 @@ import {
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   reportSpecOutcome,
+  requestBrowse,
   requestDecision,
+  requestToolSpec,
+  type BrowseRow,
+  type DecisionOutcome,
   type SpecOutcome,
   type UnpaidReason,
   type DecisionContract,
@@ -82,6 +86,7 @@ import {
   type SignedAuthorization,
 } from './paid';
 import { routerSettings } from './settings';
+import type { Harness } from './names';
 import {
   answerState,
   completeJob,
@@ -159,6 +164,12 @@ export interface RequestToolArgs {
    *  that option's own offer under its own id, or `all` for every option side
    *  by side, one payment each. Every cap still applies. */
   choice?: string;
+  /** A free browse of the tool list: the need in a few words, or `""` for
+   *  every tool by kind. Sent alone; nothing is paid. */
+  browse?: string;
+  /** A browse row's id: that tool's spec, kept under a fresh offer id for
+   *  `{id, input}` to run. Sent alone; nothing is paid. */
+  tool?: string;
   /** Several takes of one media call, 2 to 5, each its own payment, where the
    *  spec allows them. The whole set meets the spend policy before any is
    *  signed. */
@@ -216,6 +227,8 @@ export interface RequestToolDeps {
    *  ends), so the call is not handed back `running` at
    *  {@link MAX_CALL_WAIT_MS}. */
   waitsForJobs?: boolean;
+  /** The host that launched this server; absent is Claude Code. */
+  harness?: Harness;
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -427,6 +440,7 @@ async function requestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  if (args.browse !== undefined || args.tool !== undefined) return readToolList(args, deps);
   // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
   // its record, with nothing built and nothing paid.
   if (args.job !== undefined && args.job.length > 0) {
@@ -562,6 +576,7 @@ async function requestTool(
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
+    harness: deps.harness ?? 'claude',
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -728,7 +743,9 @@ async function requestTool(
   const call: ProviderCall = {
     capabilityId: decision.capabilityId,
     provider: decision.provider,
-    media: decision.category === 'discovered',
+    ...(decision.label !== undefined ? { label: decision.label } : {}),
+    // The free docs lookup, the one answer with no spec: text, never files.
+    media: false,
     request: contract.request,
     terms: { source: decision.provider, maxAmountAtomic: decision.providerPriceAtomic },
     requestKey: `${decision.capabilityId}:${canonicalHash(contract.arguments ?? {})}`,
@@ -739,6 +756,118 @@ async function requestTool(
     ...(note !== undefined ? { note } : {}),
   };
   return (await payAndDeliver(call, { alone: { kind: 'call', call } }, deps, footer)).result;
+}
+
+/**
+ * THE TOOL LIST, READ FOR FREE. `{browse}` returns the rows the server's tool
+ * list has for a need, or every row by kind; `{tool}` fetches one row's spec
+ * and keeps it under the fresh offer id the server minted, so `{id, input}`
+ * runs it exactly as it runs a hook's offer. Neither is a lookup: no gate call,
+ * no routing fee, nothing paid, and the hooks' per-lookup routing is unchanged.
+ * Each form is sent alone, and the credential rule every other call follows
+ * applies to its words.
+ */
+async function readToolList(
+  args: RequestToolArgs,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  const others = (['query', 'id', 'input', 'choice', 'count', 'job'] as const).filter(
+    (key) => args[key] !== undefined,
+  );
+  if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
+    return fail(
+      'needs_input',
+      "`browse` and `tool` are each sent alone: browse the list, then call request({tool}) with one row's id.",
+    );
+  }
+  const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
+  if (mask(words) !== words) {
+    return fail('native', 'the words carry a credential-shaped value, so nothing was sent');
+  }
+  const settings = await resolveContextSettings(deps.ctx);
+  const decisionDeps = {
+    ctx: deps.ctx,
+    baseUrl: settings.baseUrl,
+    acceptsBazaar: settings.experimentalBazaar,
+    harness: deps.harness ?? 'claude',
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  };
+  if (args.browse !== undefined) {
+    const listed = await requestBrowse(words, decisionDeps);
+    if (listed.status !== 'decided') return listFailure(listed);
+    return showRows(listed.decision.rows);
+  }
+  if (words.length === 0) {
+    return fail('needs_input', '`tool` takes a row id from request({browse}).');
+  }
+  const fetched = await requestToolSpec(words, decisionDeps);
+  if (fetched.status !== 'decided') return listFailure(fetched);
+  const { decision } = fetched.decision;
+  if (decision.action === 'spec') {
+    const picked: OfferSpec = { ...decision.spec, id: decision.id };
+    await storeSpecs(deps.ctx.dataDir, [picked]);
+    return showSpec(picked.id, picked, [], decision.hint);
+  }
+  if (decision.action === 'native' || decision.action === 'needs_input') {
+    return fail(decision.action, decision.reason ?? 'That tool has no spec to show.', {
+      diagnostics: decision.diagnostics,
+    });
+  }
+  return fail(
+    'needs_input',
+    'The router answered that tool id with no spec, so nothing was kept or paid.',
+    { nextStep: 'Call request({query}) with the task instead.' },
+  );
+}
+
+/** A read of the list that got no answer. Nothing was paid on either form. */
+function listFailure(
+  outcome: Exclude<DecisionOutcome<unknown>, { status: 'decided' }>,
+): RequestToolResult {
+  if (outcome.status === 'skipped') return fail('failed', outcome.why);
+  return fail('failed', outcome.reason, {
+    ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),
+  });
+}
+
+/** One plain line of the server's text, for a row shown to the model. */
+const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').trim();
+
+/** The rows as the model reads them: each tool's name, what it does, its
+ *  price and the call that fetches its spec. */
+function showRows(rows: readonly BrowseRow[]): RequestToolResult {
+  const nextStep =
+    'Call request({tool: "<id>"}) for a tool\'s spec and the call that runs it, free. ' +
+    'A free row with no spec runs from request({query}).';
+  if (rows.length === 0) {
+    return {
+      isError: false,
+      summary:
+        'No tool in the list fits those words. Browse with other words, or with "" for every tool by kind.',
+      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n) },
+    };
+  }
+  const shown = rows.map((row) => ({
+    id: row.id,
+    label: flat(row.label),
+    does: flat(row.does),
+    price: row.free ? 'free' : flat(row.price),
+    kind: flat(row.kind),
+  }));
+  return {
+    isError: false,
+    summary: [
+      ...shown.map((row) => `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`),
+      nextStep,
+    ].join('\n'),
+    envelope: {
+      status: 'browse',
+      rows: shown,
+      nextStep,
+      cost: costLines(0n),
+      providerContentUntrusted: true,
+    },
+  };
 }
 
 /** The answer to `request({id})` when the hook kept that offer's spec, or to
@@ -845,7 +974,7 @@ export async function runningJob(dataDir: string, id: string): Promise<string | 
 }
 
 /** Where a spec call's outcome report goes. */
-export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl'>;
+export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>;
 
 /**
  * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
@@ -865,6 +994,7 @@ export function reportOutcome(
       ctx: reportDeps.ctx,
       baseUrl: reportDeps.baseUrl,
       ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
+      ...(reportDeps.harness !== undefined ? { harness: reportDeps.harness } : {}),
     },
   );
 }
@@ -974,6 +1104,7 @@ export async function paySpec(
     {
       capabilityId: spec.capabilityId,
       provider: spec.provider,
+      ...(spec.label !== undefined ? { label: spec.label } : {}),
       media: savesMedia(spec),
       request: built,
       terms: specTerms(spec),
@@ -1035,6 +1166,9 @@ function savesMedia(spec: Pick<OfferSpec, 'capabilityId' | 'output'>): boolean {
 export interface ProviderCall {
   capabilityId: string;
   provider: string;
+  /** The service's display name, from its decision or spec: what the footer
+   *  and the ledger name in place of the URL called. */
+  label?: string;
   /** A media service: a paid result's links and inline files are saved
    *  locally ({@link savesMedia}). */
   media: boolean;
@@ -1133,6 +1267,7 @@ async function payAndDeliver(
 }> {
   const built = call.request;
   const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
+  const named = call.label !== undefined ? { label: call.label } : {};
   const signing = watchSigning(deps.payDeps?.authorizer ?? deps.authorizer);
   // The answer that delivered, or a paid leg cut off after its headers came,
   // and the payment it carried: what a job is started from.
@@ -1142,7 +1277,7 @@ async function payAndDeliver(
     // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
     // executed destination, not the hint's suggestion, which is the whole point
     // of showing it.
-    await footer.calling({ provider: built.url, ...parameters });
+    await footer.calling({ provider: built.url, ...named, ...parameters });
     const paid = await runPay(
       {
         url: built.url,
@@ -1245,7 +1380,7 @@ async function payAndDeliver(
     const stop = (cli?.details as Record<string, unknown> | undefined)?.[PLAN_STOP] as
       PlanStop | undefined;
     if (stop !== undefined) {
-      await footer.done(stop.status, { provider: built.url, ...parameters });
+      await footer.done(stop.status, { provider: built.url, ...named, ...parameters });
       return {
         left: { amountAtomic: 0n, signed: signing.mayHaveSigned() },
         outcome: stop.outcome,
@@ -1337,6 +1472,7 @@ async function payAndDeliver(
           : String(err);
     await footer.done(status, {
       provider: built.url,
+      ...named,
       ...parameters,
       price: `$${toMoney(leftAtomic.toString()).usd}`,
     });
@@ -1425,7 +1561,7 @@ interface DeliveredMoney {
 /** What delivering needs of a call: a provider call, or a job's record of one. */
 type DeliverCall = Pick<
   ProviderCall,
-  'capabilityId' | 'provider' | 'media' | 'parameters' | 'sent' | 'note' | 'project'
+  'capabilityId' | 'provider' | 'label' | 'media' | 'parameters' | 'sent' | 'note' | 'project'
 > & { request: { url: string } };
 
 /**
@@ -1524,6 +1660,8 @@ async function deliverResult(
   }
   const base = {
     supplier: supplierOf(built.url),
+    // The service's display name, which the plugin's mod draws its row from.
+    ...(call.label !== undefined ? { label: call.label } : {}),
     ...parameters,
     cost: costLines(providerAtomic),
     ...(money.txHash !== undefined ? { settlementTxHash: money.txHash } : {}),
@@ -1543,6 +1681,7 @@ async function deliverResult(
   // withholding the product would be a second loss on top of the first.
   const shown = {
     provider: built.url,
+    ...(call.label !== undefined ? { label: call.label } : {}),
     ...parameters,
     price: `$${toMoney(providerAtomic.toString()).usd}`,
   };
@@ -2237,7 +2376,7 @@ export function failureOutcome(
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */
 function paidRecord(
-  decision: { capabilityId: string; provider: string },
+  decision: { capabilityId: string; provider: string; label?: string },
   url: string,
   sent: string,
   amountAtomic: bigint,
@@ -2253,6 +2392,7 @@ function paidRecord(
     ts: new Date((opts.now ?? Date.now)()).toISOString(),
     capabilityId: decision.capabilityId,
     provider: decision.provider,
+    ...(decision.label !== undefined ? { label: decision.label } : {}),
     url,
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
