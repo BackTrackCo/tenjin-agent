@@ -182,10 +182,14 @@ describe('routingFeeRow', () => {
   });
 });
 
+/** A data dir outside home (TENJIN_DATA_DIR), so the file row shows it as is. */
+const WALLET_DATA_DIR = '/srv/tenjin';
+const walletRowAt = (e: Eligibility) => walletRow(e, WALLET_DATA_DIR);
+
 describe('walletRow', () => {
   it('fails, as required, with today’s words when there is no wallet and no key', () => {
     expect(
-      walletRow(
+      walletRowAt(
         eligibility({
           address: null,
           source: null,
@@ -205,7 +209,7 @@ describe('walletRow', () => {
     const err = new CliError('CONFIG_INVALID', 'The wallet file is not valid JSON.', {
       fix: 'Restore it from a backup.',
     });
-    expect(walletRow(eligibility({ describeError: err, canSign: READY }))).toEqual({
+    expect(walletRowAt(eligibility({ describeError: err, canSign: READY }))).toEqual({
       name: 'wallet',
       status: 'fail',
       required: true,
@@ -215,7 +219,7 @@ describe('walletRow', () => {
   });
 
   it('fails an invalid TENJIN_WALLET_KEY as required', () => {
-    const row = walletRow(
+    const row = walletRowAt(
       eligibility({ canSign: canSign({ envKey: 'malformed', walletFile: 'absent' }) }),
     );
     expect(row).toMatchObject({ status: 'fail', required: true });
@@ -226,13 +230,13 @@ describe('walletRow', () => {
     ['keychain', 'macOS keychain'],
     ['secret-service', 'Linux keyring'],
     ['dpapi', 'DPAPI file'],
-    ['file', `passphrase file ~/.tenjin/passphrase.${ADDRESS.toLowerCase()}.plain`],
+    ['file', `passphrase file ${WALLET_DATA_DIR}/passphrase.${ADDRESS.toLowerCase()}.plain`],
     ['key-env', 'TENJIN_WALLET_KEY in this shell'],
     ['passphrase-env', 'TENJIN_WALLET_PASSPHRASE in this shell'],
     ['legacy', 'legacy keychain entry'],
   ])('passes a wallet that unlocks from %s', (source, where) => {
     expect(
-      walletRow(eligibility({ canSign: { status: 'ready', source: source as 'keychain' } })),
+      walletRowAt(eligibility({ canSign: { status: 'ready', source: source as 'keychain' } })),
     ).toEqual({
       name: 'wallet',
       status: 'ok',
@@ -242,7 +246,7 @@ describe('walletRow', () => {
   });
 
   it('passes TENJIN_WALLET_KEY alone', () => {
-    const row = walletRow(
+    const row = walletRowAt(
       eligibility({
         source: 'key-env',
         canSign: canSign({ envKey: 'valid', walletFile: 'absent' }),
@@ -254,7 +258,7 @@ describe('walletRow', () => {
 
   it('warns when the saved passphrase opened it and the variable is wrong', () => {
     expect(
-      walletRow(
+      walletRowAt(
         eligibility({
           canSign: { status: 'ready', source: 'keychain', warning: 'wrong' },
         }),
@@ -277,7 +281,7 @@ describe('walletRow', () => {
     'warns, never fails, about a wallet that cannot be unlocked (%s), with the person fix',
     (reason) => {
       const entry = WALLET_REASONS[reason as keyof typeof WALLET_REASONS];
-      const row = walletRow(eligibility({ canSign: blockedSign(reason) }));
+      const row = walletRowAt(eligibility({ canSign: blockedSign(reason) }));
       expect(row).toEqual({
         name: 'wallet',
         status: 'warn',
@@ -290,7 +294,7 @@ describe('walletRow', () => {
   );
 
   it('says a keychain that did not answer could not be checked, with the unlock fix', () => {
-    const row = walletRow(eligibility({ canSign: blockedSign('keychain_locked') }));
+    const row = walletRowAt(eligibility({ canSign: blockedSign('keychain_locked') }));
     expect(row).toMatchObject({
       status: 'warn',
       required: false,
@@ -301,7 +305,7 @@ describe('walletRow', () => {
   });
 
   it('says any other unknown could not be checked, with no fix', () => {
-    const row = walletRow(eligibility({ canSign: blockedSign('unlock_timeout') }));
+    const row = walletRowAt(eligibility({ canSign: blockedSign('unlock_timeout') }));
     expect(row).toEqual({
       name: 'wallet',
       status: 'warn',

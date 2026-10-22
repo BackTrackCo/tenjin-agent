@@ -8,6 +8,7 @@ import { resolveContextSettings } from '../lib/settings';
 import { isNewer } from '../lib/update-check';
 import type { WalletProvider } from '../lib/wallet';
 import { createLocalProvider, type PassphraseOverrides } from '../lib/wallet/local';
+import { describeStoreLocation } from '../lib/wallet/passphrase';
 import { walletFileExists } from '../lib/wallet/store';
 import type { SigningSource, UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext, CommandResult } from '../context';
@@ -191,7 +192,7 @@ export async function runRouterDoctor(
     host: host ?? '',
   });
   checks.push(host === null ? UNPARSED_BASE_URL_ROW : routingFeeRow(e, host));
-  checks.push(walletRow(e));
+  checks.push(walletRow(e, ctx.dataDir));
   checks.push(sessionRow(e, live, pkg.version));
   const now = deps.now?.() ?? Date.now();
   const probe = await probeRouter(settings.baseUrl, {
@@ -964,8 +965,9 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
   };
 }
 
-/** Where a ready wallet's passphrase (or key) came from, as the wallet row says it. */
-function signedFrom(source: SigningSource, address: string): string {
+/** Where a ready wallet's passphrase (or key) came from, as the wallet row says it;
+ *  the passphrase file under `dataDir`, which `TENJIN_DATA_DIR` moves. */
+function signedFrom(source: SigningSource, address: string, dataDir: string): string {
   switch (source) {
     case 'keychain':
       return 'macOS keychain';
@@ -974,7 +976,7 @@ function signedFrom(source: SigningSource, address: string): string {
     case 'dpapi':
       return 'DPAPI file';
     case 'file':
-      return `passphrase file ~/.tenjin/passphrase.${address.toLowerCase()}.plain`;
+      return `passphrase file ${describeStoreLocation('file', address.toLowerCase(), dataDir)}`;
     case 'key-env':
       return 'TENJIN_WALLET_KEY in this shell';
     case 'passphrase-env':
@@ -1002,7 +1004,7 @@ const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
  * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
  * file (B1, S3). A check that could not answer is said as not checked.
  */
-export function walletRow(e: Eligibility): RouterCheck {
+export function walletRow(e: Eligibility, dataDir: string): RouterCheck {
   const name = 'wallet';
   const sign = e.canSign;
   if (e.describeError !== null && e.describeError !== undefined) {
@@ -1044,7 +1046,7 @@ export function walletRow(e: Eligibility): RouterCheck {
       required: true,
       detail:
         sign.source !== undefined
-          ? `${address} unlocks without a prompt (${signedFrom(sign.source, address)})`
+          ? `${address} unlocks without a prompt (${signedFrom(sign.source, address, dataDir)})`
           : `${address} unlocks without a prompt`,
     };
   }
