@@ -942,6 +942,24 @@ describe('verifyLocalWallet reasons', () => {
   });
 });
 
+describe('--replace with a wrong saved passphrase', () => {
+  it('names the passphrase file it read, never an OS credential store entry', async () => {
+    const { account } = await seedWallet();
+    const path = passphraseFilePathFor(account, dataDir);
+    await writeFile(path, 'not-this-wallets', { mode: 0o600 });
+    const err = (await verifyAndPreserveOutgoingWallet({
+      dir: dataDir,
+      env: {},
+      passphrase: { platform: 'linux', isTTY: false, exec: emptySecretService },
+    }).catch((e) => e)) as CliError;
+    expect(err.code).toBe('REFUSED');
+    expect(err.message).toContain('--replace refused');
+    expect(err.fix).toContain(`fix the passphrase in ${path}`);
+    expect(err.fix).not.toContain('OS credential store');
+    await expect(stat(walletPath(dataDir))).resolves.toBeTruthy();
+  });
+});
+
 describe('--replace with a prompt-sourced outgoing passphrase (decision 6)', () => {
   it('stored: the sidecar records {by: replace}', async () => {
     const { account } = await seedWallet();

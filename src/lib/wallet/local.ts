@@ -653,7 +653,7 @@ export async function verifyAndPreserveOutgoingWallet(
         ? "Retry and enter that wallet's correct passphrase at the prompt, or set TENJIN_WALLET_PASSPHRASE to it"
         : resolved.source === 'env'
           ? 'TENJIN_WALLET_PASSPHRASE is set but does not decrypt it; set it to the correct passphrase'
-          : `Set TENJIN_WALLET_PASSPHRASE to its passphrase, or fix its OS credential store entry (service tenjin-cli, account ${account})`;
+          : `Set TENJIN_WALLET_PASSPHRASE to its passphrase, or fix ${storedEntryText(resolved.source, account, deps.dir).replace(/^The /, 'the ')}`;
     throw new CliError(
       'REFUSED',
       `Cannot verify the passphrase of the existing wallet ${address}; --replace refused.`,
