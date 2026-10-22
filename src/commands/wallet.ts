@@ -12,7 +12,7 @@ import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { channelCredit } from '../router/channel-credit';
-import { SUGGESTED_FUND_USD } from '../router/fee';
+import { FUNDING_LINE } from '../router/fee';
 import { markUnlockPending } from '../router/router-observation';
 import {
   commitLocalWallet,
@@ -48,12 +48,11 @@ import {
 import type { PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
 
-const FUNDING_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`, or send USDC on Base.`;
 const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 const isWindows = process.platform === 'win32';
 
 /** The last line `tenjin wallet repair` prints: the save is proven, the unlock is not yet. */
-export const REPAIR_DONE_LINE = 'Passphrase saved; restart Claude Code to verify.';
+export const REPAIR_DONE_LINE = 'Passphrase saved; start a new Claude Code session to verify.';
 
 export interface WalletCreateOptions {
   /**
@@ -658,6 +657,7 @@ export async function runWalletBalance(
     humanLines: [
       `Balance: ${balance.usd} USDC on Base` +
         (credit.atomic !== '0' ? ` (+${credit.usd} routing credit)` : ''),
+      ...(atomic === 0n ? [FUNDING_LINE] : []),
     ],
   };
 }

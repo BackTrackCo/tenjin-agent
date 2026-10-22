@@ -4,7 +4,7 @@ import { policyFix } from '../lib/spend-gate';
 import type { PlanAdmission, PlannedPayment } from '../lib/spend-plan';
 import { createQuote, type Quote } from '../lib/spend-quotes';
 import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
-import { resolveWalletProvider } from '../lib/wallet';
+import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
 import { KeptChoicesSchema, type KeptChoices } from './specs';
 import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './tool';
@@ -238,12 +238,17 @@ export async function planStop(
   }
 }
 
+/** The wallet a call pays from, as `runPay` resolves it: the pre-warmed
+ *  provider, the test seam's, or this machine's own. */
+export function paymentProvider(deps: RequestToolDeps): WalletProvider {
+  return deps.provider ?? deps.payDeps?.provider ?? resolveWalletProvider(deps.ctx);
+}
+
 /** The paying wallet's USDC balance, read the way `runPay` reads it, or null
  *  when there is no wallet or the read failed. */
 export async function walletBalance(deps: RequestToolDeps, rpcUrl: string): Promise<bigint | null> {
   try {
-    const provider = deps.provider ?? deps.payDeps?.provider ?? resolveWalletProvider(deps.ctx);
-    const { address } = await provider.describe();
+    const { address } = await paymentProvider(deps).describe();
     const read = deps.payDeps?.readBalance ?? readUsdcBalanceWithFallback;
     return await read(address, rpcUrl, {
       timeoutMs: Math.max(1, Math.floor(deps.ctx.flags.timeout / 2)),

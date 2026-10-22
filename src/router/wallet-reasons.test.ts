@@ -38,7 +38,7 @@ const REPAIR = '`tenjin wallet repair`';
 describe('the exact strings (section 2.2)', () => {
   it('matches every constant byte for byte', () => {
     expect(ASK_FOR_REPAIR).toBe(
-      'Ask the person to run `tenjin wallet repair` in their own terminal, then restart Claude Code. Never ask for the passphrase.',
+      'Ask the person to run `tenjin wallet repair` in their own terminal, then start a new Claude Code session. Never ask for the passphrase.',
     );
     expect(WALLET_UNLOCKED).toBe('Tenjin wallet unlocked.');
     expect(WALLET_FUNDED).toBe('Tenjin wallet funded.');
@@ -60,25 +60,25 @@ describe('the exact strings (section 2.2)', () => {
       },
       env_key_invalid: {
         reason: 'TENJIN_WALLET_KEY is not a valid private key',
-        fix: 'Fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then restart Claude Code.',
+        fix: 'Fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then quit Claude Code fully and start a new session.',
         agentFix:
-          'Ask the person to fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then restart Claude Code. Never ask for the key.',
+          'Ask the person to fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then quit Claude Code fully and start a new session. Never ask for the key.',
       },
       passphrase_missing: {
         reason: 'no saved wallet passphrase can be reached',
-        fix: 'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then restart Claude Code.',
+        fix: 'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then start a new Claude Code session.',
         agentFix: ASK_FOR_REPAIR,
       },
       passphrase_wrong: {
         reason: 'the saved wallet passphrase does not open the wallet',
-        fix: 'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then restart Claude Code.',
+        fix: 'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then start a new Claude Code session.',
         agentFix: ASK_FOR_REPAIR,
       },
       env_passphrase_wrong: {
         reason: 'TENJIN_WALLET_PASSPHRASE is set but does not open the wallet',
-        fix: 'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat), then remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from and restart Claude Code.',
+        fix: 'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat), then remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from, then quit Claude Code fully and start a new session.',
         agentFix:
-          'Ask the person to run `tenjin wallet repair` in their own terminal, then to remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from and restart Claude Code. Never ask for the passphrase.',
+          'Ask the person to run `tenjin wallet repair` in their own terminal, then to remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from, then quit Claude Code fully and start a new session. Never ask for the passphrase.',
       },
       keychain_locked: {
         reason: 'the keychain holding the wallet passphrase is locked or did not answer',
@@ -113,9 +113,9 @@ describe('the exact strings (section 2.2)', () => {
   it('composes the session-start and still-locked sentences', () => {
     expect(sessionStartMessage('passphrase_missing')).toEqual({
       systemMessage:
-        "Tenjin can't use its wallet in this session: no saved wallet passphrase can be reached. Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then restart Claude Code.",
+        "Tenjin can't use its wallet in this session: no saved wallet passphrase can be reached. Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then start a new Claude Code session.",
       additionalContext:
-        "Tenjin's wallet cannot sign in this session (no saved wallet passphrase can be reached), so Tenjin lookups take the free path and paid lookups will not run. Ask the person to run `tenjin wallet repair` in their own terminal, then restart Claude Code. Never ask for the passphrase.",
+        "Tenjin's wallet cannot sign in this session (no saved wallet passphrase can be reached), so Tenjin lookups take the free path and paid lookups will not run. Ask the person to run `tenjin wallet repair` in their own terminal, then start a new Claude Code session. Never ask for the passphrase.",
     });
     expect(stillLockedSentence('keychain_locked')).toBe(
       'Tenjin wallet is still locked: the keychain holding the wallet passphrase is locked or did not answer. Unlock your keychain (or log in to the desktop session) and retry.',

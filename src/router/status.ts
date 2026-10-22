@@ -2,11 +2,12 @@ import { toMoney } from '../lib/money';
 import { loadRawConfig, retiredPaymentKeys, RETIRED_PAYMENT_GUIDANCE } from '../lib/config';
 import { spentOf } from '../lib/spend-ledger';
 import { resolveContextSettings } from '../lib/settings';
+import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { channelCredit } from './channel-credit';
-import { ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
+import { FUNDING_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -21,12 +22,41 @@ import { ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
  * draws from, so it is shown apart from what lookups cost, with what the
  * channel still holds. It still counts toward the daily limit, like any
  * automatic payment.
+ *
+ * THE WALLET'S BALANCE LEADS, read from the chain with the same fallback a
+ * lookup uses, because a wallet at $0 is why nothing pays. A read that does
+ * not answer says so rather than failing the readout, and no wallet means no
+ * read at all.
  */
 
 export interface StatusDeps {
   now?: () => number;
   /** Seam for the wallet's routing credit; production reads its channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
+  /** Seam for the wallet and its USDC balance (null when the read failed);
+   *  null with no wallet. Production reads the chain. */
+  wallet?: (
+    ctx: CommandContext,
+    rpcUrl: string,
+  ) => Promise<{ address: string; atomic: bigint | null } | null>;
+}
+
+/** The wallet's address and USDC balance, or null with no wallet. Never
+ *  throws: a balance the RPC did not give is null. */
+async function walletOnChain(
+  ctx: CommandContext,
+  rpcUrl: string,
+): Promise<{ address: string; atomic: bigint | null } | null> {
+  let address: string;
+  try {
+    ({ address } = await describeWallet(resolveWalletProvider(ctx)));
+  } catch {
+    return null;
+  }
+  const atomic = await readUsdcBalanceWithFallback(address, rpcUrl, {
+    timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
+  }).catch(() => null);
+  return { address, atomic };
 }
 
 /** What the wallet's routing channel still holds; 0n with no wallet, or one
@@ -64,11 +94,21 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const creditAtomic = await (deps.routingCredit ?? walletRoutingCredit)(ctx);
+  const [creditAtomic, wallet] = await Promise.all([
+    (deps.routingCredit ?? walletRoutingCredit)(ctx),
+    (deps.wallet ?? walletOnChain)(ctx, settings.rpcUrl).catch(() => null),
+  ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const data = {
     baseUrl: settings.baseUrl,
     warnings,
+    wallet:
+      wallet === null
+        ? null
+        : {
+            address: wallet.address,
+            balance: wallet.atomic === null ? null : toMoney(wallet.atomic.toString()),
+          },
     window: {
       startedAtMs: ledger?.windowStartMs ?? null,
       committed: toMoney(committedAtomic.toString()),
@@ -102,9 +142,19 @@ export async function runRouterStatus(
       ? [`${data.routingCredit.remaining.usd} USD left (~${data.routingCredit.calls} calls)`]
       : []),
   ];
+  const walletLines =
+    wallet === null
+      ? []
+      : wallet.atomic === null
+        ? ['wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries']
+        : [
+            `wallet ${toMoney(wallet.atomic.toString()).usd} USDC on Base`,
+            ...(wallet.atomic === 0n ? [FUNDING_LINE] : []),
+          ];
   return {
     data,
     humanLines: [
+      ...walletLines,
       `lookups ${toMoney(lookupsAtomic.toString()).usd} USD` +
         (credit.length > 0 ? ` · routing credit ${credit.join(', ')}` : ''),
       budgetLine,
