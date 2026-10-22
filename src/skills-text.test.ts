@@ -773,6 +773,77 @@ describe('docs/troubleshooting.md: a wallet Tenjin cannot unlock', () => {
 });
 
 /**
+ * ONE RESTART INSTRUCTION: "start a new Claude Code session". `/reload-plugins`
+ * does not run the plugin's `SessionStart`, so a page names it only to say
+ * that. A fix to an environment variable says to quit Claude Code fully,
+ * which is still never "restart Claude Code".
+ */
+describe('every page and wallet fix says to start a new Claude Code session', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const pages = [
+    'README.md',
+    ...readdirSync(join(root, 'docs'))
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => join('docs', name)),
+  ];
+
+  it.each(pages)('%s never says "restart Claude Code"', (rel) => {
+    expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/restart Claude Code/i);
+  });
+
+  it.each(pages)('%s names /reload-plugins only to say what it does not run', (rel) => {
+    const sentences = readFileSync(join(root, rel), 'utf8').split(/(?<=\.)\s+|\n+/);
+    for (const sentence of sentences.filter((line) => line.includes('/reload-plugins'))) {
+      expect(sentence).toContain('does not run');
+    }
+  });
+
+  it('no wallet fix says "restart Claude Code"', async () => {
+    const { WALLET_REASONS } = await import('./router/wallet-reasons');
+    for (const [key, { fix, agentFix }] of Object.entries(WALLET_REASONS)) {
+      expect(fix, key).not.toMatch(/restart Claude Code/i);
+      expect(agentFix, key).not.toMatch(/restart Claude Code/i);
+    }
+  });
+});
+
+describe('docs/troubleshooting.md: Tenjin stopped after a Node upgrade', () => {
+  const TROUBLE = readFileSync(
+    fileURLToPath(new URL('../docs/troubleshooting.md', import.meta.url)),
+    'utf8',
+  );
+  const HEAD = '## Tenjin stopped after a Node upgrade (`Executable not found`, `cache-miss`)';
+  const section = ((): string => {
+    const start = TROUBLE.indexOf(HEAD);
+    const next = TROUBLE.indexOf('\n## ', start + HEAD.length);
+    return start === -1 ? '' : TROUBLE.slice(start, next === -1 ? undefined : next);
+  })();
+
+  it('is the second section, after the wallet-unlock one', () => {
+    const heads = TROUBLE.split('\n').filter((line) => line.startsWith('## '));
+    expect(heads.slice(0, 2)).toEqual(['## Tenjin cannot unlock the wallet', HEAD]);
+  });
+
+  it('names the symptoms, the npx fix with --project, and the new session', () => {
+    for (const text of [
+      'Executable not found',
+      'cache-miss',
+      'npx -y tenjin-cli@latest install',
+      'npx -y tenjin-cli@latest install --project',
+      'start a new Claude Code session',
+    ]) {
+      expect(section, text).toContain(text);
+    }
+  });
+
+  it('removes Tenjin with `tenjin uninstall` before `npm uninstall -g`', () => {
+    const uninstall = section.indexOf('tenjin uninstall');
+    expect(uninstall).toBeGreaterThan(-1);
+    expect(section.indexOf('npm uninstall -g')).toBeGreaterThan(uninstall);
+  });
+});
+
+/**
  * B1 and S3 across every page a person or an agent reads: no passphrase on a
  * command line (`TENJIN_WALLET_PASSPHRASE=<value>` is exactly that), and no
  * `--insecure-storage` in the skills, whose reader is an agent that would offer

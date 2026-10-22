@@ -44,7 +44,7 @@ Paste this into Claude Code:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent asks before it installs or spends anything, then sets everything up. Start a new session, and the router is on.
+Your agent asks before it installs or spends anything, then sets everything up. Start a new Claude Code session, and the router is on.
 
 Or from a terminal:
 
@@ -54,7 +54,7 @@ tenjin install          # adds the plugin and creates your wallet
 tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
 
-Needs Claude Code 2.1.287+ and Node.js 22+. Add `--project` to set it up for one project only.
+Needs Claude Code 2.1.287+, and Node.js 22+ with npm to install. Install copies Tenjin, with its own Node, into `~/.tenjin/runtime` and puts the `tenjin` command in `~/.local/bin`, so switching or removing Node later doesn't stop it. Add `--project` to set it up for one project only.
 
 **Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 
@@ -117,13 +117,13 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 ## Commands
 
 ```bash
-tenjin status                          # spent today, and your limits
+tenjin status                          # your balance, spent today, and your limits
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine
 tenjin doctor                          # check that a lookup can run
-tenjin update                          # newest version; wallet and settings stay
+tenjin update                          # newest version, no npm needed; the previous one stays
 tenjin config set router.enabled false # pause the router
-tenjin uninstall                       # remove the plugin; your wallet stays
+tenjin uninstall                       # run before `npm uninstall -g`; your wallet stays
 ```
 
 ## Request a tool
