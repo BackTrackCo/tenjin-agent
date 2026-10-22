@@ -405,6 +405,7 @@ describe('seal, the one way a packet leaves', () => {
   const QUERY_KEY = 'Zx81QpLm0aTe';
   const PATH_KEY = 'x9Y8z7W6v5U4t3S2r1Q0p9O8nM';
   const TOKEN = `ghp_${'A'.repeat(36)}`;
+  const HOOK_TOKEN = ['Qw3Er5Ty7U', 'i9Op1As3Df5Gh7'].join('');
   const SHAPES: Array<[string, string, string]> = [
     ['a 0x key', `sign with ${KEY}`, KEY],
     [
@@ -415,6 +416,11 @@ describe('seal, the one way a packet leaves', () => {
     ['a seed phrase', `restore ${SEED} and stop`, 'absurd abuse'],
     ['a URL query key', `https://api.acme.io/v1?api-key=${QUERY_KEY}`, QUERY_KEY],
     ['an RPC path key', `https://my-node.base-mainnet.quiknode.pro/${PATH_KEY}/`, PATH_KEY],
+    [
+      'a webhook token',
+      `https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/${HOOK_TOKEN}`,
+      HOOK_TOKEN,
+    ],
     ['a vendor token', `deploy with ${TOKEN}`, TOKEN],
   ];
 

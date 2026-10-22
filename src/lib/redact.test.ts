@@ -931,6 +931,30 @@ describe('the #296 credential shapes', () => {
   });
 });
 
+describe('webhook tokens in a query (#489)', () => {
+  // Split so the committed bytes carry no contiguous webhook URL for a scanner.
+  const SLACK = ['x9Y8z7W6v5U4', 't3S2r1Q0p9O8'].join('');
+  const DISCORD = [
+    'Ab3Cd5Ef7Gh9Jk2Lm4Np6Qr8St0Uv1Wx',
+    'Yz2Ab4Cd6Ef8Gh0Jk2Lm4Np6Qr8St0Uv1WxYz2A',
+  ].join('');
+
+  it('masks a Slack and a Discord webhook token', () => {
+    expect(mask(`post to https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/${SLACK}`)).toBe(
+      'post to https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/…[redacted 24 chars]',
+    );
+    expect(mask(`post to https://discord.com/api/webhooks/123456789012345678/${DISCORD}`)).toBe(
+      `post to https://discord.com/api/webhooks/123456789012345678/…[redacted ${DISCORD.length} chars]`,
+    );
+  });
+
+  it('leaves a public underscore slug alone', () => {
+    const url =
+      'https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/';
+    expect(mask(url)).toBe(url);
+  });
+});
+
 describe('the #388 follow-up shapes', () => {
   const HEX = '4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318';
   const SHA40 = '3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77';

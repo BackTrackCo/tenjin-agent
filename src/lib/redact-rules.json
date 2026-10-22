@@ -589,6 +589,22 @@
       }
     },
     {
+      "id": "webhook-url-token",
+      "tier": "warn",
+      "scopes": ["query"],
+      "description": "A webhook token in a URL path, keyed on the service's documented host: Slack (hooks.slack.com/services/T.../B.../<token> and /triggers/...), Discord (discord.com/api/webhooks/<id>/<token>, with or without /v10, and the discordapp.com, ptb and canary hosts) and Make (hook.make.com/<token>, and the regional hook.<region>.make.com). Query only: anyone holding the URL can post as the hook, and url-path-credential no longer masks in queries (tenjin-agent#489). Any path segment of 16 or more [A-Za-z0-9_-] characters after the host is the token; ids before it are shorter. The Slack lookbehind spans at most four segments, so a line of long segments stays linear. Google Chat carries its token in the query string, which url-query-credential masks. Teams connector URLs are retired (2026-05), and a Zapier catch-hook id is 5 characters, so neither is listed.",
+      "source": "tenjin (tenjin-agent#489)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\/(?=[\\w-]{16})(?<=\\bhttps?:\\/\\/(?:hooks\\.slack\\.com(?:\\/[\\w-]+){1,4}|(?:(?:ptb|canary)\\.)?discord(?:app)?\\.com\\/api(?:\\/v\\d+)?\\/webhooks\\/\\d+|hook(?:\\.[a-z]{2}\\d)?\\.make\\.com)\\/)[\\w-]{16,}(?=[.;:!]*(?:[\\/?#\\s\\\"'<>(),\\[\\]{}`]|$))",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 1
+      }
+    },
+    {
       "id": "url-query-credential",
       "tier": "warn",
       "scopes": ["query", "publish"],

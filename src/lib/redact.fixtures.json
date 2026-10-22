@@ -77,7 +77,10 @@
     ["2f8a5c1e9b", "4d7a3f6c0e8", "b2d5a9f1c4e"],
     ["6d1a8f3c9e", "2b5d7a0f4c8", "e1b6d3a9f2c"],
     ["Ab3Cd5Ef7G", "h9Jk2Lm4Np6", "Qr8St0Uv1Wx"],
-    ["5Rk8Tm2V", "p7Xs4Zb9", "Cd1Fg6Hj3"]
+    ["5Rk8Tm2V", "p7Xs4Zb9", "Cd1Fg6Hj3"],
+    ["Qw3Er5Ty", "7Ui9Op1A", "s3Df5Gh7"],
+    ["Zx2Cv4Bn6Mm8Lk0Jh2Gf4Ds", "6Aa8Pp0Oo2Ii4Uu6Yy8Tt0R", "r2Ee4Ww6Qq8Zz0Xx2Cc4Vv6"],
+    ["k3j5h7g9f1", "d3s5a7p9o1i", "3u5y7t9r1e3"]
   ],
   "cases": [
     {
@@ -1419,6 +1422,34 @@
       "label": "negative",
       "input": "probe https://eth-mainnet.g.alchemy.com/nft/v3/demo/getNFTsForOwner, https://rpc.ankr.com/eth, https://docs-demo.quiknode.pro/ and https://mainnet.gateway.tenderly.co",
       "expect_text": "probe https://eth-mainnet.g.alchemy.com/nft/v3/demo/getNFTsForOwner, https://rpc.ankr.com/eth, https://docs-demo.quiknode.pro/ and https://mainnet.gateway.tenderly.co"
+    },
+    {
+      "id": "webhook-url-token/slack",
+      "scope": "query",
+      "label": "positive",
+      "input": "the alert posts to https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/%%t57%% and fails",
+      "expect_text": "the alert posts to https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/…[redacted 24 chars] and fails"
+    },
+    {
+      "id": "webhook-url-token/discord",
+      "scope": "query",
+      "label": "positive",
+      "input": "the alert posts to https://discord.com/api/webhooks/123456789012345678/%%t58%% and fails",
+      "expect_text": "the alert posts to https://discord.com/api/webhooks/123456789012345678/…[redacted 69 chars] and fails"
+    },
+    {
+      "id": "webhook-url-token/make",
+      "scope": "query",
+      "label": "positive",
+      "input": "the alert posts to https://hook.eu1.make.com/%%t59%% and fails",
+      "expect_text": "the alert posts to https://hook.eu1.make.com/…[redacted 32 chars] and fails"
+    },
+    {
+      "id": "webhook-url-token/keeps-public-paths",
+      "scope": "query",
+      "label": "negative",
+      "input": "see https://discord.com/developers/docs/resources/webhook, https://hooks.zapier.com/hooks/catch/123456/zbB61/ and https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/",
+      "expect_text": "see https://discord.com/developers/docs/resources/webhook, https://hooks.zapier.com/hooks/catch/123456/zbB61/ and https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/"
     },
     {
       "id": "bare-hex-key/pos",
