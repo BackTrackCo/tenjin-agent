@@ -134,7 +134,11 @@ Learn more:
             host === 'codex'
               ? (await import('../router/codex-install')).runCodexUninstall(codexArgs(o), ctx)
               : uninstall.runRouterUninstall({ target }, ctx),
-          () => uninstall.removeRuntimeAndLaunchers(ctx.dataDir, homedir()),
+          {
+            remove: () => uninstall.removeRuntimeAndLaunchers(ctx.dataDir, homedir()),
+            claudeLeft: () => uninstall.claudeInstallsLeft(ctx),
+            keptFor: (users) => uninstall.runtimeKeptFor(ctx.dataDir, homedir(), users),
+          },
         );
       });
     });

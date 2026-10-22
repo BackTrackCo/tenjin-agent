@@ -8,8 +8,10 @@ import { CliError } from '../lib/errors';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { describeStoreLocation } from '../lib/wallet/passphrase';
 import type { ClaudeRun } from './claude-cli';
-import { LAUNCHER_MARKER } from './plugin-files';
+import { LAUNCHER_MARKER, renderPluginFiles } from './plugin-files';
+import { pluginFolderPath, writePluginFolder } from './plugin-folder';
 import {
+  claudeInstallsLeft,
   removeRuntimeAndLaunchers,
   resolveUninstallTarget,
   runRouterUninstall,
@@ -36,6 +38,8 @@ let elsewhere: string;
 let calls: { args: string; cwd: string }[];
 /** Folders whose `claude plugin uninstall` fails. */
 let failIn: Set<string>;
+/** Folders where `claude plugin uninstall` answers not_installed and keeps the record (a cwd Claude Code does not match). */
+let staleIn: Set<string>;
 
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'router-uninstall-')));
@@ -49,6 +53,7 @@ beforeEach(async () => {
   }
   calls = [];
   failIn = new Set();
+  staleIn = new Set();
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -96,6 +101,9 @@ const fakeRun: NonNullable<RouterUninstallDeps['runClaude']> = async (_bin, args
   if (args[0] === 'plugin' && args[1] === 'uninstall') {
     if (failIn.has(opts.cwd)) {
       return { code: 1, stdout: '{"outcome":"error","message":"boom"}\n', stderr: '' };
+    }
+    if (staleIn.has(opts.cwd)) {
+      return { code: 1, stdout: '{"outcome":"error","failureCode":"not_installed"}\n', stderr: '' };
     }
     const scope = args[args.indexOf('--scope') + 1];
     const raw = JSON.parse(await readFile(recordsFile(), 'utf8').catch(() => '{"plugins":{}}')) as {
@@ -248,6 +256,51 @@ describe('which install a run removes', () => {
   });
 });
 
+describe('a user install Claude Code does not record', () => {
+  /** The folder a run with no `claude` wrote, starting the runtime's own Node and entry. */
+  const userFolder = () => pluginFolderPath(cfg);
+  beforeEach(async () => {
+    const written = await writePluginFolder(
+      userFolder(),
+      renderPluginFiles('0.1.0-alpha.32', '/h/.tenjin/runtime/versions/x/dist/index.js', '/n'),
+    );
+    expect(written.state).toBe('written');
+  });
+
+  it('counts as remaining when a project goes, so the marketplace and runtime stay', async () => {
+    await writeRecords([localEntry(other)]);
+    const { target, out } = await uninstall({}, other);
+    expect(target).toEqual({ kind: 'project', path: other });
+    expect(out.data).toMatchObject({ remaining: ['user'], marketplace: 'kept' });
+    expect(out.humanLines).toContain(
+      'Kept the tenjin marketplace: still used by your user install.',
+    );
+    expect(calls.some((c) => c.args.startsWith('plugin marketplace'))).toBe(false);
+    expect(await stat(userFolder()).catch(() => null)).not.toBeNull();
+  });
+
+  it('goes with --all', async () => {
+    await writeRecords([localEntry(other)]);
+    const { out } = await uninstall({ all: true }, elsewhere);
+    expect(out.data).toMatchObject({ remaining: [], marketplace: 'removed' });
+    expect(await stat(userFolder()).catch(() => null)).toBeNull();
+  });
+
+  it('keeps Claude Code counted as holding an install for an uninstall it was not part of', async () => {
+    expect(await claudeInstallsLeft(ctx(), deps(elsewhere))).toBe(true);
+  });
+});
+
+describe('claudeInstallsLeft', () => {
+  it('is false only once Claude Code records nothing and no project or folder install is left', async () => {
+    expect(await claudeInstallsLeft(ctx(), deps(elsewhere))).toBe(false);
+    await writeRecords([localEntry(other)]);
+    expect(await claudeInstallsLeft(ctx(), deps(elsewhere))).toBe(true);
+    await writeFile(recordsFile(), '{not json');
+    expect(await claudeInstallsLeft(ctx(), deps(elsewhere))).toBe(true);
+  });
+});
+
 describe('all or nothing', () => {
   it('a local removal that fails under --all refuses, keeps the marketplace and names both', async () => {
     await writeRecords([userEntry(), localEntry(other)]);
@@ -262,6 +315,51 @@ describe('all or nothing', () => {
     expect((err as CliError).message).toContain('Removed: your user install.');
     expect((err as CliError).details).toMatchObject({ removed: ['user'], left: [other] });
     expect(calls.some((c) => c.args.startsWith('plugin marketplace'))).toBe(false);
+    expect((err as CliError).fix).toBe(
+      `Run \`tenjin uninstall --all\` again; if it still fails, type /plugin uninstall tenjin@tenjin in a Claude Code session started in ${other}.`,
+    );
+  });
+
+  /**
+   * Claude Code's record decides, not the exit code: `not_installed` from a
+   * folder Claude Code does not match (a symlinked project) leaves the install
+   * recorded, and the marketplace, runtime and launcher must not go under it.
+   */
+  it('refuses when Claude Code still records an install its uninstall called not installed', async () => {
+    await writeRecords([userEntry(), localEntry(other)]);
+    await persistRouterProject(data, other);
+    staleIn.add(other);
+    const err = await runRouterUninstall({ target: { kind: 'all' } }, ctx(), deps(elsewhere)).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ code: 'REFUSED', details: { removed: ['user'], left: [other] } });
+    expect(calls.some((c) => c.args.startsWith('plugin marketplace'))).toBe(false);
+    const config = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
+      install?: { routerProjects?: string[] };
+    };
+    expect(config.install?.routerProjects).toEqual([other]);
+  });
+
+  it('retries the run’s own target: --project from anywhere, bare for the user install', async () => {
+    await writeRecords([userEntry(), localEntry(other)]);
+    failIn.add(other);
+    const project = await runRouterUninstall(
+      { target: { kind: 'project', path: other } },
+      ctx(),
+      deps(home),
+    ).catch((e: unknown) => e);
+    expect((project as CliError).fix).toBe(
+      `Run \`tenjin uninstall --project ${other}\` again; if it still fails, type /plugin uninstall tenjin@tenjin in a Claude Code session started in ${other}.`,
+    );
+    failIn = new Set([home]);
+    const user = await runRouterUninstall(
+      { target: { kind: 'user' } },
+      ctx(),
+      deps(elsewhere),
+    ).catch((e: unknown) => e);
+    expect((user as CliError).fix).toBe(
+      'Run `tenjin uninstall` again; if it still fails, type /plugin uninstall tenjin@tenjin in a Claude Code session.',
+    );
   });
 
   it('removes nothing with no claude binary while installs are recorded', async () => {

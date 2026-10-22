@@ -184,6 +184,15 @@ export async function runRouterUninstall(
         ? r.projectPath === null
         : r.projectPath === target.path,
   );
+  // A USER INSTALL CLAUDE CODE DOES NOT RECORD (the folder a run with no
+  // `claude` wrote, which starts the runtime's own Node and entry) is one
+  // `--all` removes too, and one any other run leaves in use.
+  const userUnrecorded =
+    !records.some((r) => r.projectPath === null) &&
+    (await leftHere({ scope: 'user', projectPath: null }, env, home));
+  if (target.kind === 'all' && userUnrecorded && targets.length > 0) {
+    targets = [{ scope: 'user', projectPath: null }, ...targets];
+  }
   const others = records.filter((r) => !targets.includes(r));
   if (targets.length === 0) {
     // NOTHING CLAUDE CODE RECORDS FOR THE TARGET. A folder or settings install
@@ -237,7 +246,9 @@ export async function runRouterUninstall(
       (r.state !== 'skipped' && afterKeys.has(r.projectPath === null ? USER : r.projectPath)),
   );
   const gone = removals.filter((r) => !left.includes(r) && r.state !== 'skipped');
-  const remaining = left.length > 0 ? [] : (await liveOthers(others)).map(keyOf);
+  const userKept = userUnrecorded && !targets.some((r) => r.projectPath === null);
+  const remaining =
+    left.length > 0 ? [] : [...(userKept ? [USER] : []), ...(await liveOthers(others)).map(keyOf)];
 
   // THE INSTALLS THAT WENT leave their plugin folders and settings installs
   // too, and are forgotten, so a later `tenjin update` does not go looking for
@@ -273,7 +284,7 @@ export async function runRouterUninstall(
       `${left.length} Tenjin install${left.length === 1 ? '' : 's'} could not be removed: ${left.map((r) => `${labelOf(r)}${r.reason !== undefined ? ` (${r.reason})` : ''}`).join(', ')}. Removed: ${named(gone)}. The ${MARKETPLACE_NAME} marketplace, Tenjin's runtime and its launcher were kept.`,
       {
         details: { removed: gone.map(keyOf), left: left.map(keyOf), removals },
-        fix: `Run \`tenjin uninstall\` again; if it still fails, type /plugin uninstall ${PLUGIN_ID} in a Claude Code session started in ${named(left)}.`,
+        fix: retryFix(target, left),
       },
     );
   }
@@ -329,6 +340,31 @@ export async function runRouterUninstall(
   return { data, humanLines: lines };
 }
 
+/**
+ * The way back after a removal that failed: this run's own target again (a
+ * bare run here finds the same install; from elsewhere it would not), then
+ * Claude Code's own command, in each project's folder where one is left.
+ */
+function retryFix(target: UninstallTarget, left: Removal[]): string {
+  const again =
+    target.kind === 'all'
+      ? 'tenjin uninstall --all'
+      : target.kind === 'project'
+        ? `tenjin uninstall --project ${shellWord(target.path)}`
+        : 'tenjin uninstall';
+  const projects = left.flatMap((r) => (r.projectPath !== null ? [r.projectPath] : []));
+  const where =
+    projects.length === 0
+      ? 'a Claude Code session'
+      : `a Claude Code session started in ${projects.join(', ')}${projects.length < left.length ? ' (any session for your user install)' : ''}`;
+  return `Run \`${again}\` again; if it still fails, type /plugin uninstall ${PLUGIN_ID} in ${where}.`;
+}
+
+/** `path` as one shell word: quoted only when it needs to be. */
+function shellWord(path: string): string {
+  return /^[\w@%+=:,./~-]+$/.test(path) ? path : `'${path.replace(/'/g, "'\\''")}'`;
+}
+
 /** The other installs that can still be used: the user's, and projects still on disk. */
 async function liveOthers(others: InstallRecord[]): Promise<InstallRecord[]> {
   const live: InstallRecord[] = [];
@@ -347,6 +383,33 @@ async function leftHere(r: InstallRecord, env: NodeJS.ProcessEnv, home: string):
 const keyOf = (r: Pick<InstallRecord, 'projectPath'>): string => r.projectPath ?? USER;
 const nameOf = (key: string): string => (key === USER ? 'your user install' : key);
 const labelOf = (r: Pick<InstallRecord, 'projectPath'>): string => nameOf(keyOf(r));
+
+/**
+ * Does Claude Code hold any Tenjin install still, in any scope or project?
+ * Asked by an uninstall Claude Code was not part of (Codex removed last), so
+ * the runtime goes only once nothing at all can use it. A record that cannot
+ * be read counts as one.
+ */
+export async function claudeInstallsLeft(
+  ctx: CommandContext,
+  deps: RouterUninstallDeps = {},
+): Promise<boolean> {
+  const env = deps.env ?? process.env;
+  const home = deps.homeDir ?? homedir();
+  try {
+    const records = await installRecords(ctx.dataDir, env, home);
+    if ((await liveOthers(records)).length > 0) return true;
+    return await leftHere({ scope: 'user', projectPath: null }, env, home);
+  } catch {
+    return true;
+  }
+}
+
+/** The line for a runtime kept because another recorded host still runs it; none under a data dir of its own. */
+export function runtimeKeptFor(dataDir: string, home: string, users: string[]): string | null {
+  if (!isDefaultDataDir(dataDir, home)) return null;
+  return `Kept Tenjin's runtime and its launcher: still used by ${users.join(', ')}.`;
+}
 
 /** The parts every install shares, as the "kept" line names them. */
 function sharedParts(dataDir: string, home: string): string {

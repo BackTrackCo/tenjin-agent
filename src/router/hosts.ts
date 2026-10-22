@@ -239,6 +239,16 @@ export async function runEach(
   return { data, humanLines };
 }
 
+/** What every install shares (Tenjin's runtime and its launcher), as uninstall settles it last. */
+export interface SharedParts {
+  /** Removes them; their result is appended to the run's. */
+  remove: () => Promise<CommandResult>;
+  /** Whether Claude Code still holds an install anywhere; asked only when this run did not remove Claude Code's. */
+  claudeLeft: () => Promise<boolean>;
+  /** The line saying they were kept for these hosts, or null where there are none (a data dir of its own). */
+  keptFor: (hosts: string[]) => string | null;
+}
+
 /**
  * Uninstall over the hosts: a host leaves the record only once its removal
  * left nothing behind. Claude Code leaves it when no install of it is left in
@@ -247,17 +257,18 @@ export async function runEach(
  * stays recorded, so a later uninstall or doctor still finds it, and every
  * host is tried before one aggregated refusal.
  *
- * `finish` REMOVES WHAT EVERY INSTALL SHARES (Tenjin's runtime and its
- * launcher), so it runs last and only when nothing could still use it: every
- * host succeeded, Claude Code ran here with nothing remaining, and no host
- * outside this run is still recorded.
+ * `shared` IS SETTLED BY THE END STATE, last: removed only when every host
+ * succeeded, no host is still recorded, and Claude Code holds no install
+ * (this run's `remaining` is empty, or, when Claude Code was not part of this
+ * run, it records none), so the last host removed takes them whichever it is.
+ * Kept, and said so, when only another recorded host still uses them.
  */
 export async function uninstallEach(
   hosts: readonly Harness[],
   dataDir: string,
   target: UninstallTarget,
   run: (host: Harness) => Promise<CommandResult>,
-  finish?: () => Promise<CommandResult>,
+  shared?: SharedParts,
 ): Promise<CommandResult> {
   const done: { host: Harness; out: CommandResult }[] = [];
   const failed: { host: Harness; err: CliError }[] = [];
@@ -306,12 +317,22 @@ export async function uninstallEach(
             ...(d.out.humanLines ?? []).map((l) => `  ${l}`),
           ]),
         };
+  if (shared === undefined) return out;
+  // Claude Code's own result already names what it keeps for its installs.
+  const claudeRan = done.some((d) => d.host === 'claude');
+  if (claudeRan ? !claudeGone : await shared.claudeLeft()) return out;
   const recorded = (await readInstalledHosts(dataDir)) ?? [];
-  if (finish === undefined || !claudeGone || recorded.length > 0) return out;
-  const shared = await finish();
+  if (recorded.length > 0) {
+    const line = shared.keptFor(recorded.map((h) => LABEL[h]));
+    return line === null ? out : { ...out, humanLines: [...(out.humanLines ?? []), line] };
+  }
+  const removed = await shared.remove();
   return {
-    data: { ...(out.data as Record<string, unknown>), ...(shared.data as Record<string, unknown>) },
-    humanLines: [...(out.humanLines ?? []), ...(shared.humanLines ?? [])],
+    data: {
+      ...(out.data as Record<string, unknown>),
+      ...(removed.data as Record<string, unknown>),
+    },
+    humanLines: [...(out.humanLines ?? []), ...(removed.humanLines ?? [])],
   };
 }
 

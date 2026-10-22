@@ -19,6 +19,7 @@ import {
   runEach,
   uninstallEach,
   withNote,
+  type SharedParts,
 } from './hosts';
 import type { Harness } from './names';
 
@@ -78,11 +79,17 @@ describe('uninstallEach', () => {
     data: { removed: 'tenjin@tenjin' },
     humanLines: ['codex removed'],
   });
-  const finisher = () => {
+  /** The shared parts' seams; Claude Code holds no install unless `claudeHolds` says so. */
+  const finisher = (claudeHolds = false) => {
     const calls: number[] = [];
-    const finish = async (): Promise<CommandResult> => {
-      calls.push(1);
-      return { data: { runtime: { removed: true } }, humanLines: ["removed Tenjin's runtime"] };
+    const finish: SharedParts = {
+      remove: async () => {
+        calls.push(1);
+        return { data: { runtime: { removed: true } }, humanLines: ["removed Tenjin's runtime"] };
+      },
+      claudeLeft: async () => claudeHolds,
+      keptFor: (users) =>
+        `Kept Tenjin's runtime and its launcher: still used by ${users.join(', ')}.`,
     };
     return { calls, finish };
   };
@@ -117,13 +124,37 @@ describe('uninstallEach', () => {
     });
   });
 
-  it('never finishes a project target while Codex stays recorded', async () => {
+  it('never finishes a project target while Codex stays recorded, and says so', async () => {
     await recordInstalledHost(dir, 'claude');
     await recordInstalledHost(dir, 'codex');
     const { calls, finish } = finisher();
-    await uninstallEach(['claude'], dir, PROJECT, claudeLeft([]), finish);
+    const out = await uninstallEach(['claude'], dir, PROJECT, claudeLeft([]), finish);
     expect(calls).toHaveLength(0);
     expect(await readInstalledHosts(dir)).toEqual(['codex']);
+    expect(out.humanLines?.at(-1)).toBe(
+      "Kept Tenjin's runtime and its launcher: still used by Codex.",
+    );
+  });
+
+  /**
+   * Claude Code removed first, Codex last: the run that removes Codex never
+   * runs Claude Code's removal, so the end state decides, not who ran.
+   */
+  it('finishes when Codex is the last host removed and Claude Code holds nothing', async () => {
+    await recordInstalledHost(dir, 'codex', async () => false);
+    const { calls, finish } = finisher();
+    const out = await uninstallEach(['codex'], dir, USER, codexOk, finish);
+    expect(calls).toHaveLength(1);
+    expect(await readInstalledHosts(dir)).toBeNull();
+    expect(out.humanLines?.at(-1)).toBe("removed Tenjin's runtime");
+  });
+
+  it('keeps them when Codex goes but Claude Code, not in this run, still holds an install', async () => {
+    await recordInstalledHost(dir, 'codex', async () => false);
+    const { calls, finish } = finisher(true);
+    const out = await uninstallEach(['codex'], dir, USER, codexOk, finish);
+    expect(calls).toHaveLength(0);
+    expect(out.humanLines).toEqual(['codex removed']);
   });
 
   it('keeps a failed host recorded, tries the rest, and refuses once', async () => {
@@ -162,10 +193,13 @@ describe('uninstallEach', () => {
   });
 
   it('names what finish could not remove, and still succeeds', async () => {
-    const out = await uninstallEach(['claude'], dir, USER, claudeLeft([]), async () => ({
-      data: { runtime: { removed: false, left: ['C:\\rt\\node.exe'] } },
-      humanLines: ['  delete C:\\rt\\node.exe after this exits'],
-    }));
+    const out = await uninstallEach(['claude'], dir, USER, claudeLeft([]), {
+      ...finisher().finish,
+      remove: async () => ({
+        data: { runtime: { removed: false, left: ['C:\\rt\\node.exe'] } },
+        humanLines: ['  delete C:\\rt\\node.exe after this exits'],
+      }),
+    });
     expect(out.humanLines).toContain('  delete C:\\rt\\node.exe after this exits');
   });
 });
