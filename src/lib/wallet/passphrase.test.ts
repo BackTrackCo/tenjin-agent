@@ -25,8 +25,7 @@ import {
   probeDurableStore,
   resolvePassphrase,
   resolvePassphraseForCreate,
-  storeDurably,
-  storePassphraseForWallet,
+  storeDurablyDetailed,
   toStoreOutcome,
   walletStoreAccount,
   type DurableWrite,
@@ -592,87 +591,52 @@ describe('legacy shared-slot migration (S10)', () => {
   });
 });
 
-describe('storePassphraseForWallet — the --replace archive writer', () => {
+describe('the --replace archive write: storeDurablyDetailed through toStoreOutcome', () => {
+  /** What local.ts's archive writer makes of a keychain write. */
+  const archive = async (exec: ExecFn, passphrase: string) =>
+    toStoreOutcome(
+      (
+        await storeDurablyDetailed(
+          { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
+          'keychain',
+          ADDRESS,
+          passphrase,
+        )
+      ).outcome,
+    );
+
   it('stores and verifies under the wallet account (stored)', async () => {
     const { exec, entries } = fakeKeychain();
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
-        ADDRESS,
-        'typed-base64url-pass',
-      ),
-    ).resolves.toBe('stored');
+    await expect(archive(exec, 'typed-base64url-pass')).resolves.toBe('stored');
     expect(entries.get(ACCOUNT)).toBe('typed-base64url-pass');
   });
 
   it('an existing identical entry counts as stored without a write', async () => {
     const { exec, calls } = fakeKeychain({ [ACCOUNT]: 'already-there' });
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
-        ADDRESS,
-        'already-there',
-      ),
-    ).resolves.toBe('stored');
+    await expect(archive(exec, 'already-there')).resolves.toBe('stored');
     expect(calls.every((c) => c.args[0] !== '-i')).toBe(true);
   });
 
   it('names the keychain character gate for a value outside printable ASCII', async () => {
     const { exec, calls } = fakeKeychain();
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
-        ADDRESS,
-        'pässwörd',
-      ),
-    ).resolves.toBe('rejected-characters');
+    await expect(archive(exec, 'pässwörd')).resolves.toBe('rejected-characters');
     expect(calls.every((c) => c.args[0] === 'find-generic-password')).toBe(true);
   });
 
   it('an existing identical entry beats the character gate: unstorable but already stored', async () => {
     const { exec, calls } = fakeKeychain({ [ACCOUNT]: 'pässwörd' });
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
-        ADDRESS,
-        'pässwörd',
-      ),
-    ).resolves.toBe('stored');
+    await expect(archive(exec, 'pässwörd')).resolves.toBe('stored');
     expect(calls.every((c) => c.args[0] !== '-i')).toBe(true);
-  });
-
-  it('reports no-store on a platform without one', async () => {
-    const { exec, calls } = recordingExec(() => new Error('exec must not run'));
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'freebsd', isTTY: false, exec },
-        ADDRESS,
-        'p',
-      ),
-    ).resolves.toBe('no-store');
-    expect(calls).toHaveLength(0);
   });
 
   it('reports store-failed when the write does not stick', async () => {
     const { exec } = recordingExec((call) => (call.args[0] === '-i' ? { stdout: '' } : notFound()));
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
-        ADDRESS,
-        'typed-base64url-pass',
-      ),
-    ).resolves.toBe('store-failed');
+    await expect(archive(exec, 'typed-base64url-pass')).resolves.toBe('store-failed');
   });
 
   it('S1: a different value already there, or after the write, is store-failed, never stored', async () => {
     const pre = fakeKeychain({ [ACCOUNT]: 'someone-elses' });
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec: pre.exec },
-        ADDRESS,
-        'mine',
-      ),
-    ).resolves.toBe('store-failed');
+    await expect(archive(pre.exec, 'mine')).resolves.toBe('store-failed');
     expect(pre.calls.every((c) => c.args[0] !== '-i')).toBe(true);
 
     let wrote = false;
@@ -683,17 +647,11 @@ describe('storePassphraseForWallet — the --replace archive writer', () => {
       }
       return wrote ? { stdout: 'another-writer\n' } : notFound();
     });
-    await expect(
-      storePassphraseForWallet(
-        { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
-        ADDRESS,
-        'mine',
-      ),
-    ).resolves.toBe('store-failed');
+    await expect(archive(exec, 'mine')).resolves.toBe('store-failed');
   });
 });
 
-describe('storeDurably', () => {
+describe('storeDurablyDetailed', () => {
   const deps = (exec: ExecFn) => ({
     env: {},
     dir: tmp,
@@ -719,7 +677,9 @@ describe('storeDurably', () => {
       () => undefined,
       () => ({ stdout: 'secret\n' }),
     );
-    await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe('stored');
+    await expect(
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'stored' });
   });
 
   it('a killed write with an equal read-back is stored (it committed)', async () => {
@@ -727,7 +687,9 @@ describe('storeDurably', () => {
       () => killedErr('security'),
       () => ({ stdout: 'secret\n' }),
     );
-    await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe('stored');
+    await expect(
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'stored' });
   });
 
   it('a killed write followed by a miss or a locked read is uncertain', async () => {
@@ -736,9 +698,9 @@ describe('storeDurably', () => {
         () => killedErr('security'),
         () => readBack,
       );
-      await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe(
-        'uncertain',
-      );
+      await expect(
+        storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+      ).resolves.toMatchObject({ outcome: 'uncertain' });
     }
   });
 
@@ -747,14 +709,16 @@ describe('storeDurably', () => {
       () => exited('security', 45),
       () => notFound(),
     );
-    await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe(
-      'store-failed',
-    );
+    await expect(
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'store-failed' });
   });
 
   it('a pre-existing different value with no replaceIf is conflict, with zero writes', async () => {
     const { exec, calls } = fakeKeychain({ [ACCOUNT]: 'other' });
-    await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe('conflict');
+    await expect(
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'conflict' });
     expect(calls.filter((c) => c.args[0] === '-i')).toHaveLength(0);
   });
 
@@ -762,8 +726,8 @@ describe('storeDurably', () => {
     const { exec, calls } = fakeKeychain({ [ACCOUNT]: 'other' });
     const replaceIf = vi.fn(async () => false);
     await expect(
-      storeDurably(deps(exec), 'keychain', ADDRESS, 'secret', { replaceIf }),
-    ).resolves.toBe('kept-existing');
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret', { replaceIf }),
+    ).resolves.toMatchObject({ outcome: 'kept-existing' });
     expect(replaceIf).toHaveBeenCalledWith('other');
     expect(calls.filter((c) => c.args[0] === '-i')).toHaveLength(0);
   });
@@ -771,8 +735,10 @@ describe('storeDurably', () => {
   it('replaceIf true writes once, with -U', async () => {
     const { exec, calls, entries } = fakeKeychain({ [ACCOUNT]: 'other' });
     await expect(
-      storeDurably(deps(exec), 'keychain', ADDRESS, 'secret', { replaceIf: async () => true }),
-    ).resolves.toBe('stored');
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret', {
+        replaceIf: async () => true,
+      }),
+    ).resolves.toMatchObject({ outcome: 'stored' });
     const adds = calls.filter((c) => c.args[0] === '-i');
     expect(adds).toHaveLength(1);
     expect(adds[0]?.stdin).toBe(
@@ -786,16 +752,18 @@ describe('storeDurably', () => {
       () => undefined,
       () => ({ stdout: 'another-writer\n' }),
     );
-    await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe('conflict');
+    await expect(
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'conflict' });
   });
 
   it('a locked pre-read is uncertain, with zero writes', async () => {
     const { exec, calls } = recordingExec(() =>
       exited('security', 51, 'User interaction is not allowed.'),
     );
-    await expect(storeDurably(deps(exec), 'keychain', ADDRESS, 'secret')).resolves.toBe(
-      'uncertain',
-    );
+    await expect(
+      storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'uncertain' });
     expect(calls.filter((c) => c.args[0] === '-i')).toHaveLength(0);
   });
 
@@ -806,7 +774,7 @@ describe('storeDurably', () => {
       () => exited('security', 1),
     ]) {
       const { exec, calls } = scripted(write, () => notFound());
-      await storeDurably(deps(exec), 'keychain', ADDRESS, 'secret');
+      await storeDurablyDetailed(deps(exec), 'keychain', ADDRESS, 'secret');
       const adds = calls.filter((c) => c.args[0] === '-i');
       expect(adds).toHaveLength(1);
       expect(adds[0]?.stdin).toContain(`'secret'`);
@@ -816,8 +784,8 @@ describe('storeDurably', () => {
   it('the file store round-trips a value ending in whitespace (one trailing LF only is stripped)', async () => {
     const value = 'ends with space ';
     await expect(
-      storeDurably({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, value),
-    ).resolves.toBe('stored');
+      storeDurablyDetailed({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, value),
+    ).resolves.toMatchObject({ outcome: 'stored' });
     const path = passphraseFilePathFor(ACCOUNT, tmp);
     expect(await readFile(path, 'utf8')).toBe(value);
     if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600);
@@ -828,8 +796,8 @@ describe('storeDurably', () => {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, '');
     await expect(
-      storeDurably({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, 'secret'),
-    ).resolves.toBe('stored');
+      storeDurablyDetailed({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'stored' });
     expect(await readFile(path, 'utf8')).toBe('secret');
   });
 
@@ -838,8 +806,8 @@ describe('storeDurably', () => {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, 'other');
     await expect(
-      storeDurably({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, 'secret'),
-    ).resolves.toBe('conflict');
+      storeDurablyDetailed({ env: {}, dir: tmp, isTTY: false }, 'file', ADDRESS, 'secret'),
+    ).resolves.toMatchObject({ outcome: 'conflict' });
     expect(await readFile(path, 'utf8')).toBe('other');
   });
 });
@@ -883,13 +851,13 @@ describe('deadlines (B3, S9)', () => {
     expect(calls.every((c) => c.opts?.timeoutMs === 5000)).toBe(true);
   });
 
-  it('storeDurably headless gives each exec at most 10000 ms, at a TTY at most 60000 ms', async () => {
+  it('storeDurablyDetailed headless gives each exec at most 10000 ms, at a TTY at most 60000 ms', async () => {
     for (const [isTTY, bound] of [
       [false, STORE_TIMEOUTS.writeMs],
       [true, STORE_TIMEOUTS.interactiveWriteMs],
     ] as const) {
       const { exec, calls } = fakeKeychain();
-      await storeDurably(
+      await storeDurablyDetailed(
         { env: {}, dir: tmp, platform: 'darwin', isTTY, exec },
         'keychain',
         ADDRESS,
@@ -914,13 +882,13 @@ describe('deadlines (B3, S9)', () => {
       }
     };
     await expect(
-      storeDurably(
+      storeDurablyDetailed(
         { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
         'keychain',
         ADDRESS,
         's',
       ),
-    ).resolves.toBe('stored');
+    ).resolves.toMatchObject({ outcome: 'stored' });
     expect(inner.calls.map((c) => c.opts?.timeoutMs)).toEqual([10000, 8000, 6000]);
   });
 
@@ -935,13 +903,13 @@ describe('deadlines (B3, S9)', () => {
       }
     };
     await expect(
-      storeDurably(
+      storeDurablyDetailed(
         { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec },
         'keychain',
         ADDRESS,
         's',
       ),
-    ).resolves.toBe('uncertain');
+    ).resolves.toMatchObject({ outcome: 'uncertain' });
     expect(inner.calls.filter((c) => c.args[0] === '-i')).toHaveLength(0);
   });
 
@@ -963,7 +931,7 @@ describe('deadlines (B3, S9)', () => {
       if (args[0] === '-i') await new Promise((r) => setTimeout(r, 3000));
       return inner.exec(file, args, stdin, opts);
     };
-    const run = storeDurably(
+    const run = storeDurablyDetailed(
       { env: {}, dir: tmp, platform: 'darwin', isTTY: true, exec, onWait },
       'keychain',
       ADDRESS,
@@ -972,7 +940,7 @@ describe('deadlines (B3, S9)', () => {
     await vi.advanceTimersByTimeAsync(999);
     expect(onWait).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(5000);
-    await expect(run).resolves.toBe('stored');
+    await expect(run).resolves.toMatchObject({ outcome: 'stored' });
     expect(onWait).toHaveBeenCalledOnce();
     expect(onWait).toHaveBeenCalledWith(KEYCHAIN_WAIT_LINE);
   });
@@ -985,7 +953,7 @@ describe('deadlines (B3, S9)', () => {
       if (args[0] === '-i') await new Promise((r) => setTimeout(r, 3000));
       return inner.exec(file, args, stdin, opts);
     };
-    const run = storeDurably(
+    const run = storeDurablyDetailed(
       { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec, onWait },
       'keychain',
       ADDRESS,
@@ -994,7 +962,7 @@ describe('deadlines (B3, S9)', () => {
     await vi.advanceTimersByTimeAsync(5000);
     await run;
     vi.useRealTimers();
-    await storeDurably({ env: {}, dir: tmp, isTTY: true, onWait }, 'file', ADDRESS, 's');
+    await storeDurablyDetailed({ env: {}, dir: tmp, isTTY: true, onWait }, 'file', ADDRESS, 's');
     expect(onWait).not.toHaveBeenCalled();
   });
 });
@@ -1307,8 +1275,13 @@ describe('resolvePassphraseForCreate (never prompts, Q1)', () => {
       // An empty lookup is a miss; nothing here answers a write.
       const { exec, calls } = recordingExec(() => ({ stdout: '' }));
       await expect(
-        storeDurably({ env: {}, dir: tmp, platform, isTTY: false, exec }, store, ADDRESS, 'p\r\n'),
-      ).resolves.toBe('rejected-characters');
+        storeDurablyDetailed(
+          { env: {}, dir: tmp, platform, isTTY: false, exec },
+          store,
+          ADDRESS,
+          'p\r\n',
+        ),
+      ).resolves.toMatchObject({ outcome: 'rejected-characters' });
       expect(calls.filter((c) => c.stdin !== undefined)).toEqual([]);
     },
   );
@@ -1570,16 +1543,16 @@ describe('no secret in errors (S2)', () => {
     clean(err);
   });
 
-  it("storeDurably's pre-read and read-back, and create's refusal", async () => {
+  it("storeDurablyDetailed's pre-read and read-back, and create's refusal", async () => {
     const onWait = vi.fn();
     await expect(
-      storeDurably(
+      storeDurablyDetailed(
         { env: {}, dir: tmp, platform: 'darwin', isTTY: true, exec: leakyExec, onWait },
         'keychain',
         ADDRESS,
         's',
       ),
-    ).resolves.toBe('uncertain');
+    ).resolves.toMatchObject({ outcome: 'uncertain' });
     let wrote = false;
     const readBackLeaks: ExecFn = async (_file, args) => {
       if (args[0] === '-i') {

@@ -1073,7 +1073,7 @@ export interface RepairOutcome {
  *    otherwise the platform store when its probe answers, the 0600 file when
  *    there is none (S4), and a refusal when it does not answer (S3: never a
  *    hint at plaintext).
- * 3. storeDurably, allowed to replace an existing entry ONLY after proving that
+ * 3. storeDurablyDetailed, allowed to replace an existing entry ONLY after proving that
  *    entry does not open the wallet. It succeeds only when the store reads this
  *    passphrase back (S1): a different value after the write is a refusal,
  *    never "saved".
