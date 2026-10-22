@@ -90,7 +90,7 @@ describe('runHookKind and wallet news', () => {
       ...extra,
     };
   }
-  /** A walletNews that records its calls and its acks, in order. */
+  /** A walletNews that records its calls, acks and releases, in order. */
   function news(lines: string[]) {
     const log: string[] = [];
     const walletNews = vi.fn(async (sessionId: string) => {
@@ -99,6 +99,9 @@ describe('runHookKind and wallet news', () => {
         lines,
         ack: async () => {
           log.push('ack');
+        },
+        release: () => {
+          log.push('release');
         },
       };
     });
@@ -119,7 +122,21 @@ describe('runHookKind and wallet news', () => {
     expect(walletNews).not.toHaveBeenCalled();
   });
 
-  it('does not ack when the dispatch throws', async () => {
+  it('releases, and does not ack, when the dispatch throws', async () => {
+    // No WALLET_UNLOCKED, so nothing before the dispatch reads the clock:
+    // the throw comes from inside the prompt handler.
+    const { walletNews, log } = news(['a queued line']);
+    const now = vi.fn((): number => {
+      throw new Error('clock gone');
+    });
+    await expect(runHookKind('prompt', prompt('s1'), deps({ walletNews, now }))).rejects.toThrow(
+      'clock gone',
+    );
+    expect(now).toHaveBeenCalled();
+    expect(log).toEqual(['news:s1', 'release']);
+  });
+
+  it('releases the lines when settling the unlocked line throws', async () => {
     const { walletNews, log } = news([WALLET_UNLOCKED]);
     await expect(
       runHookKind(
@@ -133,7 +150,7 @@ describe('runHookKind and wallet news', () => {
         }),
       ),
     ).rejects.toThrow('clock gone');
-    expect(log).toEqual(['news:s1']);
+    expect(log).toEqual(['news:s1', 'release']);
   });
 
   it('settles the session when the news says the wallet is unlocked', async () => {
