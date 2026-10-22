@@ -1383,6 +1383,62 @@ describe('a wallet that cannot sign', () => {
     });
   });
 
+  /** A free call pays nothing: no wallet at all (`--no-wallet`), or one that
+   *  cannot sign, never withholds it, on any leg. */
+  it('offers a free curated call with no wallet, on the prompt and delegation legs', async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(join(dir, 'wallet.json'));
+    const FREE = { ...EXECUTE, decision: { ...EXECUTE.decision, providerPriceAtomic: '0' } };
+    expect(
+      await spendShortfall(
+        { providerPriceAtomic: '0', endpoint: 'https://example.test/spec' },
+        { dataDir: dir, baseUrl: BASE, env: {} },
+        Date.now() + 3_000,
+      ),
+    ).toBeNull();
+    expect(
+      await spendShortfall(
+        { providerPriceAtomic: '0', endpoint: 'https://example.test/spec' },
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+        Date.now() + 3_000,
+      ),
+    ).toBeNull();
+    const prompt = await runPromptHook(promptEvent('what does the next.js matcher do'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(FREE).fetchImpl,
+      env: {},
+    });
+    expect(prompt).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
+    expect(prompt.response).not.toBeNull();
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'Read the spec.' } },
+    ]);
+    const task = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: {
+          description: 'read the spec',
+          prompt: 'Read https://example.test/spec and summarize the auth section.',
+          subagent_type: 'general-purpose',
+        },
+      },
+      {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(FREE).fetchImpl,
+        env: {},
+        signer: () => blocked,
+      },
+    );
+    expect(task).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
+    expect(task.response).not.toBeNull();
+  });
+
   /** The note rides in a hook's `additionalContext`, so its reader is the
    *  model: it asks the person to repair, and never names the variable (B1). */
   it("words a blocked signer's note for the model", async () => {

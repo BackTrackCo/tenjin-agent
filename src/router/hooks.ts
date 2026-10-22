@@ -677,6 +677,9 @@ export async function spendShortfall(
   } catch {
     return approval("needs approval under this machine's spend limits");
   }
+  // A free call pays nothing, so it needs nothing from the wallet: one that
+  // cannot sign, or no wallet at all (`--no-wallet`), never withholds it.
+  if (BigInt(decision.providerPriceAtomic) === 0n) return null;
   // The policy said yes above (its `needs_approval` keeps today's sentence),
   // so the verdict below decides only the wallet's part.
   const facts = await readWalletFacts(deps.dataDir, deps.env ?? process.env);
