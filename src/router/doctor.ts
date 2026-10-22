@@ -1151,7 +1151,7 @@ export function sessionRow(
       name,
       status: 'warn',
       required: false,
-      detail: `the router Claude Code started (pid ${blocked.pid}) ${detail}`,
+      detail: `the router Claude Code started (pid ${blocked.pid}) cannot unlock the wallet: ${detail}`,
       ...(fix !== undefined ? { fix } : {}),
     };
   }
