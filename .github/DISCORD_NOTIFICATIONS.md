@@ -40,5 +40,7 @@ closes. Delivery goes directly from GitHub Actions to Discord.
 `pull_request_target` lets the default-branch workflow notify for fork PRs.
 It reads only GitHub's event JSON and never checks out or runs PR code. It has
 no GitHub token permissions, and titles cannot trigger Discord mentions.
+The notification job runs only in `BackTrackCo/tenjin-agent`; copies in
+contributors' forks skip it and do not need Discord webhook secrets.
 
 To stop notifications, disable this workflow in the repository's Actions tab.
