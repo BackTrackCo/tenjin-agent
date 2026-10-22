@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
+import { proxyNodeStep, proxySkipped } from '../lib/env-proxy';
 import { CliError } from '../lib/errors';
 import { MANAGERS, classifyManager, refuse, resolveManagerScript } from '../lib/install-location';
 import type { Delegable } from '../lib/install-location';
@@ -145,6 +146,8 @@ export interface UpdateDeps {
   stage?: typeof stageTarball;
   ensure?: typeof ensureNode;
   place?: typeof placeVersion;
+  /** Test seam; production asks this Node whether it can use the shell's proxy. */
+  proxySupported?: boolean;
 }
 
 interface UpdateData {
@@ -442,6 +445,8 @@ async function runtimeUpdate(
     stage = await (deps.stage ?? rt.stageTarball)(root, latest, {
       timeoutMs: STAGE_TIMEOUT_MS,
       fetchImpl: deps.fetchImpl,
+    }).catch((err: unknown) => {
+      throw proxyNamed(err, deps);
     });
   }
 
@@ -461,7 +466,7 @@ async function runtimeUpdate(
     await (deps.place ?? rt.placeVersion)(root, stage, latest);
   } catch (err) {
     await rm(stage, { recursive: true, force: true }).catch(() => undefined);
-    throw err;
+    throw proxyNamed(err, deps);
   }
   const home = deps.homeDir ?? homedir();
   emitWriteNotice(ctx.io, `tenjin update: staged tenjin-cli ${latest} in ${tilde(root, home)}`);
@@ -493,6 +498,22 @@ async function runtimeUpdate(
     ],
     latest,
   );
+}
+
+/**
+ * A download in the runtime branch that failed on a Node which skips the
+ * shell's proxy (#470), said as that with the step that works: `tenjin update`
+ * again on the same Node fails the same way.
+ */
+function proxyNamed(err: unknown, deps: UpdateDeps): unknown {
+  if (!(err instanceof CliError) || err.code !== 'NETWORK_ERROR') return err;
+  const skipped = proxySkipped(process.env, deps.proxySupported);
+  if (skipped === null) return err;
+  const step = proxyNodeStep('tenjin update');
+  return new CliError('NETWORK_ERROR', `${err.message}: ${skipped}`, {
+    fix: `${step.charAt(0).toUpperCase()}${step.slice(1)}.`,
+    cause: err,
+  });
 }
 
 /** Why the child kept the previous runtime, from its `data.runtime.reason`. */

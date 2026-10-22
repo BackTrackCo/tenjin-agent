@@ -320,6 +320,26 @@ describe.skipIf(!POSIX)('ensureNode', () => {
     expect(readdirSync(join(root, 'tmp')).filter((n) => !n.startsWith('trash-'))).toEqual([]);
   });
 
+  it('marks complete again, with no download, a node/<V> whose .complete is gone but whose binary runs', async () => {
+    // What uninstall leaves on Windows while a session runs node.exe: the
+    // folder cannot be renamed away, and needs not be.
+    const dir = join(root, 'node', V);
+    mkdirSync(join(dir, 'bin'), { recursive: true });
+    writeFileSync(join(dir, 'bin', 'node'), `#!/bin/sh\necho v${V}\n`, { mode: 0o755 });
+    const fetchImpl = server({});
+    const renames = vi.mocked(fsp.rename);
+    renames.mockClear();
+    const bin = await ensureNode(
+      root,
+      { version: V, sha256: { [KEY]: 'a'.repeat(64) } },
+      opts(fetchImpl),
+    );
+    expect(bin).toBe(nodeBinPath(root, V, 'darwin'));
+    expect(fetchImpl.urls).toEqual([]);
+    expect(renames).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(join(dir, '.complete'), 'utf8'))).toEqual({ version: V });
+  });
+
   it('is a NETWORK_ERROR that says to check nodejs.org when the download fails', async () => {
     const fetchImpl = (async () => {
       throw new TypeError('fetch failed');
@@ -387,6 +407,47 @@ describe('stageSelf and placeVersion', () => {
     await placeVersion(root, third, v);
     expect(readFileSync(join(dir, 'dist', 'index.js'), 'utf8')).toBe(`// tenjin-cli ${v}\n`);
     expect(existsSync(join(dir, '.complete'))).toBe(true);
+  });
+});
+
+describe('placeVersion renames on Windows', () => {
+  const busy = (code: string) => Object.assign(new Error(code), { code });
+  const stageOf = async (version: string): Promise<string> => {
+    const stage = await stageSelf(root, npmPackage(version, null));
+    return stage;
+  };
+
+  it('retries a rename that antivirus holds for a moment, then places the version', async () => {
+    const stage = await stageOf('1.0.0');
+    const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    let failures = 0;
+    vi.mocked(fsp.rename).mockImplementation((async (from, to) => {
+      if (from === stage && failures < 2) {
+        failures += 1;
+        throw busy(failures === 1 ? 'EPERM' : 'EACCES');
+      }
+      return real.rename(from, to);
+    }) as typeof fsp.rename);
+    const dir = await placeVersion(root, stage, '1.0.0', { platform: 'win32' });
+    expect(failures).toBe(2);
+    expect(existsSync(join(dir, '.complete'))).toBe(true);
+  });
+
+  it('does not retry anywhere else', async () => {
+    const stage = await stageOf('1.0.0');
+    const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    let calls = 0;
+    vi.mocked(fsp.rename).mockImplementation((async (from, to) => {
+      if (from === stage) {
+        calls += 1;
+        throw busy('EPERM');
+      }
+      return real.rename(from, to);
+    }) as typeof fsp.rename);
+    await expect(placeVersion(root, stage, '1.0.0', { platform: 'linux' })).rejects.toThrow(
+      'EPERM',
+    );
+    expect(calls).toBe(1);
   });
 });
 
@@ -716,7 +777,10 @@ describe('launchers', () => {
   });
 });
 
-/** A version and its node in place, as ensureNode and placeVersion leave them. */
+/** An hour ago: a folder placed then is past collect's grace for one on its way to activation. */
+const anHourAgo = () => new Date(Date.now() - 60 * 60_000);
+
+/** A version and its node in place, as an earlier ensureNode and placeVersion left them. */
 function placed(cli: string, node: string, pin?: NodePin): void {
   const dir = versionDir(root, cli);
   mkdirSync(join(dir, 'dist'), { recursive: true });
@@ -734,6 +798,8 @@ function placed(cli: string, node: string, pin?: NodePin): void {
   mkdirSync(dirname(bin), { recursive: true });
   writeFileSync(bin, '#!/bin/sh\n', { mode: 0o755 });
   writeFileSync(join(root, 'node', node, '.complete'), JSON.stringify({ version: node }));
+  utimesSync(join(dir, '.complete'), anHourAgo(), anHourAgo());
+  utimesSync(join(root, 'node', node, '.complete'), anHourAgo(), anHourAgo());
 }
 
 const actOpts = () => ({ home, env: {}, platform: 'darwin' as const });
@@ -816,6 +882,25 @@ describe('activate', () => {
     expect(existsSync(join(home, '.local', 'bin', 'tenjin'))).toBe(false);
   });
 
+  it('refuses, changing nothing, a version or Node a collect removed since it was placed', async () => {
+    placed('1.0.0', '24.0.0');
+    placed('1.1.0', '24.1.0');
+    await activate(root, { cli: '1.0.0', node: '24.0.0' }, actOpts());
+    const state = readFileSync(runtimeStatePath(root), 'utf8');
+    const claude = snapshot(join(root, 'claude'));
+    rmSync(versionDir(root, '1.1.0'), { recursive: true });
+    await expect(activate(root, { cli: '1.1.0', node: '24.1.0' }, actOpts())).rejects.toThrow(
+      /no longer in place/,
+    );
+    placed('1.1.0', '24.1.0');
+    rmSync(join(root, 'node', '24.1.0', '.complete'));
+    await expect(activate(root, { cli: '1.1.0', node: '24.1.0' }, actOpts())).rejects.toThrow(
+      /no longer in place/,
+    );
+    expect(readFileSync(runtimeStatePath(root), 'utf8')).toBe(state);
+    expect(snapshot(join(root, 'claude'))).toEqual(claude);
+  });
+
   it('leaves current unchanged and pending set when the render throws mid-way', async () => {
     placed('1.0.0', '24.0.0');
     placed('1.1.0', '24.0.0');
@@ -881,6 +966,39 @@ describe('collect', () => {
     }
     expect(readdirSync(join(versionDir(root, '1.3.0'), '.live'))).toEqual(['111']);
     expect(readdirSync(join(root, 'tmp'))).toEqual([]);
+  });
+
+  it('spares a version and Node placed in the last 15 minutes that no state names yet', async () => {
+    // Update's parent placed 1.1.0 on Node 24.1.0 and its child is verifying
+    // it; another install's collect runs meanwhile.
+    placed('1.0.0', '24.0.0');
+    placed('1.1.0', '24.1.0', { version: '24.1.0', sha256: {} });
+    placed('0.9.0', '22.0.0');
+    const now = new Date();
+    utimesSync(join(versionDir(root, '1.1.0'), '.complete'), now, now);
+    utimesSync(join(root, 'node', '24.1.0', '.complete'), now, now);
+    state({ current: { cli: '1.0.0', node: '24.0.0' } });
+    const r = await collect(root);
+    expect(readdirSync(join(root, 'versions')).sort()).toEqual(['1.0.0', '1.1.0']);
+    expect(readdirSync(join(root, 'node')).sort()).toEqual(['24.0.0', '24.1.0']);
+    expect(r.kept).toContainEqual({
+      path: versionDir(root, '1.1.0'),
+      reason: 'placed for an activation still on its way',
+    });
+    // Once the grace has passed, nothing keeps them.
+    const later = await collect(root, { now: () => Date.now() + 16 * 60_000 });
+    expect(later.removed.sort()).toEqual(
+      [versionDir(root, '1.1.0'), join(root, 'node', '24.1.0')].sort(),
+    );
+  });
+
+  it('refreshes the grace of a complete version placeVersion finds already there', async () => {
+    placed('1.0.0', '24.0.0');
+    placed('1.1.0', '24.0.0');
+    state({ current: { cli: '1.0.0', node: '24.0.0' } });
+    await placeVersion(root, await stageSelf(root, npmPackage('1.1.0', null)), '1.1.0');
+    await collect(root);
+    expect(existsSync(versionDir(root, '1.1.0'))).toBe(true);
   });
 
   it('keeps a pending version when there is no current yet', async () => {
@@ -1046,6 +1164,30 @@ describe('setupRuntime', () => {
     expect(r.reason).toMatch(/could not download/);
     expect(r.reason!.length).toBeLessThanOrEqual(200);
     expect(readRuntimeState(root)).toBeNull();
+  });
+
+  it('names the proxy, and the step that works, when the download skipped the shell’s proxy (#470)', async () => {
+    const env = { HTTPS_PROXY: 'http://proxy.corp:3128' };
+    const r = await setup('0.1.0-alpha.32', { fetchImpl: failing(), env, proxySupported: false });
+    expect(r).toMatchObject({ state: 'fallback' });
+    expect(r.reason).toMatch(
+      new RegExp(
+        `^this shell sets HTTPS_PROXY, which Node ${process.versions.node.replace(/\./g, '\\.')} cannot send downloads through: could not download`,
+      ),
+    );
+    expect(r.reason!.length).toBeLessThanOrEqual(200);
+    expect(r.fix).toBe(
+      "run `tenjin install` once with Node 24.14 or newer, which uses the proxy; Tenjin's own Node does from then on",
+    );
+    // A Node that uses the proxy, or no proxy at all: an ordinary failure, retried as one.
+    for (const o of [
+      { env, proxySupported: true },
+      { env: {}, proxySupported: false },
+    ]) {
+      const plain = await setup('0.1.0-alpha.32', { fetchImpl: failing(), ...o });
+      expect(plain.reason).toMatch(/^could not download/);
+      expect(plain.fix).toBeUndefined();
+    }
   });
 
   it('falls back with no pinned Node for this platform, naming the platform as unpinned', async () => {

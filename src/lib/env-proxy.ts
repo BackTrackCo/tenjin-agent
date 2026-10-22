@@ -42,3 +42,23 @@ export function useEnvProxy(
     return 'invalid';
   }
 }
+
+/**
+ * Why this Node's requests go past the proxy the environment names, or null
+ * when none is named or this Node can use it. On a network whose only way out
+ * is that proxy, a download then fails however often it is retried while the
+ * same Node runs it, so a failure is said as this, never as a bare retry.
+ */
+export function proxySkipped(
+  env: NodeJS.ProcessEnv,
+  supported: boolean = envProxySupported(),
+): string | null {
+  const name = proxyVariable(env);
+  if (name === undefined || supported) return null;
+  return `this shell sets ${name}, which Node ${process.versions.node} cannot send downloads through`;
+}
+
+/** The step that works once a download skipped the proxy: one run on a Node that uses it. */
+export function proxyNodeStep(command: string): string {
+  return `run \`${command}\` once with Node 24.14 or newer, which uses the proxy; Tenjin's own Node does from then on`;
+}

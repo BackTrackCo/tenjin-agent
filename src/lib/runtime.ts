@@ -21,6 +21,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -36,6 +37,7 @@ import {
   type RuntimeLaunch,
 } from '../router/plugin-files';
 import { writeFileAtomic } from './atomic-json';
+import { proxyNodeStep, proxySkipped } from './env-proxy';
 import { hasCode } from './errno';
 import { CliError } from './errors';
 import { isSourceCheckout } from './install-location';
@@ -320,12 +322,49 @@ async function markComplete(dir: string, version: string): Promise<void> {
   await writeFile(join(dir, '.complete'), `${JSON.stringify({ version })}\n`);
 }
 
+/**
+ * Mark a folder already in place as just placed (its `.complete` touched), so
+ * a `collect` before the activation it is kept for spares it.
+ */
+async function touchComplete(dir: string): Promise<void> {
+  const now = new Date();
+  await utimes(join(dir, '.complete'), now, now).catch(() => undefined);
+}
+
+/** How long a Windows rename of a fresh folder is retried. */
+const RENAME_RETRY_MS = 2_000;
+
+/**
+ * Rename a folder. On Windows, antivirus and the indexer briefly hold a file
+ * just written inside it open, and the rename fails with EPERM, EACCES or
+ * EBUSY meanwhile, so it is retried there for up to 2 s with backoff, as npm's
+ * graceful-fs does. A failure that outlasts that (a running `node.exe`) stands.
+ */
+async function renameDir(
+  from: string,
+  to: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  const deadline = Date.now() + RENAME_RETRY_MS;
+  for (let wait = 20; ; wait = Math.min(wait * 2, 400)) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      const transient =
+        platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].some((c) => hasCode(err, c));
+      if (!transient || Date.now() + wait > deadline) throw err;
+      await new Promise((done) => setTimeout(done, wait));
+    }
+  }
+}
+
 /** Move whatever sits at `path` into `tmp/trash-*`, so nothing half-removed is ever at a live path. */
-async function trash(root: string, path: string): Promise<void> {
+async function trash(root: string, path: string, platform?: NodeJS.Platform): Promise<void> {
   if (!existsSync(path)) return;
   await mkdir(tmpOf(root), { recursive: true });
   const to = join(tmpOf(root), `trash-${rand()}`);
-  await rename(path, to);
+  await renameDir(path, to, platform);
   await rm(to, { recursive: true, force: true }).catch(() => undefined);
 }
 
@@ -349,7 +388,11 @@ function nodeVersionOf(bin: string): Promise<string | null> {
 /**
  * The pinned Node, in `node/<V>`, downloaded once. The archive must match the
  * pin's sha256 before anything is unpacked, and the binary must say it is
- * `v<V>` before it is marked complete. Returns the binary's path.
+ * `v<V>` before it is marked complete. A `node/<V>` whose `.complete` is gone
+ * but whose binary still says `v<V>` is marked complete again rather than
+ * replaced: uninstall leaves exactly that behind on Windows while a session
+ * runs it, and a folder whose `node.exe` runs cannot be renamed away. Returns
+ * the binary's path.
  */
 export async function ensureNode(
   root: string,
@@ -375,7 +418,14 @@ export async function ensureNode(
     async () => {
       const dir = join(root, 'node', pin.version);
       const bin = nodeBinPath(root, pin.version, platform);
-      if (completeValid(dir) && existsSync(bin)) return bin;
+      if (completeValid(dir) && existsSync(bin)) {
+        await touchComplete(dir);
+        return bin;
+      }
+      if (existsSync(bin) && (await nodeVersionOf(bin)) === `v${pin.version}`) {
+        await markComplete(dir, pin.version);
+        return bin;
+      }
       const made: string[] = [];
       try {
         await mkdir(tmpOf(root), { recursive: true });
@@ -416,9 +466,9 @@ export async function ensureNode(
           );
         }
         await markComplete(stage, pin.version);
-        await trash(root, dir);
+        await trash(root, dir, platform);
         await mkdir(dirname(dir), { recursive: true });
-        await rename(stage, dir);
+        await renameDir(stage, dir, platform);
         return bin;
       } finally {
         for (const path of made)
@@ -583,27 +633,29 @@ export async function stageTarball(
 
 /**
  * Put a staged version at `versions/<version>`, marked complete last. One
- * already there and complete is kept and the stage dropped; anything else there
+ * already there and complete is kept (its `.complete` touched, so a `collect`
+ * before its activation spares it) and the stage dropped; anything else there
  * (a crash mid-copy) is moved to trash and replaced.
  */
 export async function placeVersion(
   root: string,
   stageDir: string,
   version: string,
-  o: LockOptions = {},
+  o: LockOptions & { platform?: NodeJS.Platform } = {},
 ): Promise<string> {
   return withRuntimeLock(
     root,
     async () => {
       const dir = versionDir(root, version);
       if (completeValid(dir)) {
+        await touchComplete(dir);
         await rm(stageDir, { recursive: true, force: true });
         return dir;
       }
       await markComplete(stageDir, version);
-      await trash(root, dir);
+      await trash(root, dir, o.platform);
       await mkdir(dirname(dir), { recursive: true });
-      await rename(stageDir, dir);
+      await renameDir(stageDir, dir, o.platform);
       return dir;
     },
     o,
@@ -1046,6 +1098,20 @@ export async function activate(
   return withRuntimeLock(
     root,
     async () => {
+      // THE BUILD MUST STILL BE THERE: it was placed under an earlier hold of
+      // the lock, and a collect may have run since. A switch to a folder that
+      // is gone would leave Claude Code starting nothing.
+      if (
+        !completeValid(versionDir(root, next.cli)) ||
+        !existsSync(launch.entry) ||
+        !completeValid(join(root, 'node', next.node)) ||
+        !existsSync(launch.node)
+      ) {
+        throw new CliError(
+          'UPDATE_FAILED',
+          `tenjin-cli ${next.cli} or its Node ${next.node} is no longer in place in ${root}, so the runtime was not switched to it`,
+        );
+      }
       const oldStateText = await readOrNull(runtimeStatePath(root));
       const old = readRawState(root);
       await writeState(root, { ...old, pending: next });
@@ -1104,18 +1170,28 @@ export async function activate(
 }
 
 const IN_USE = 'in use; removed by a later install';
+const PLACED = 'placed for an activation still on its way';
 const TMP_MAX_AGE_MS = 60 * 60_000;
+/**
+ * How long a folder no state names is spared after it was placed: longer than
+ * any install runs from `placeVersion` or `ensureNode` to `activate` (update's
+ * child, verify included, is killed at 60 s).
+ */
+const PLACED_GRACE_MS = 15 * 60_000;
 
 /**
  * GC, under the lock. Keeps the current, previous and pending versions, every
- * version a running `tenjin mcp` marked live, and the Node versions they pin;
- * removes the rest by renaming each into `tmp/trash-*` first. A folder held
- * open (Windows: a running `node.exe`) is kept for a later install. Then sweeps
- * `tmp/` of trash and of anything older than an hour.
+ * version a running `tenjin mcp` marked live, the Node versions they pin, and
+ * any version or Node placed in the last 15 minutes (by its `.complete`): the
+ * lock is held per step, so one placed for an activation still on its way
+ * (update's child verifying it) has no role yet. Removes the rest by renaming
+ * each into `tmp/trash-*` first. A folder held open (Windows: a running
+ * `node.exe`) is kept for a later install. Then sweeps `tmp/` of trash and of
+ * anything older than an hour.
  */
 export async function collect(
   root: string,
-  o: LockOptions = {},
+  o: LockOptions & { platform?: NodeJS.Platform } = {},
 ): Promise<{ removed: string[]; kept: { path: string; reason: string }[] }> {
   const isAlive = o.isAlive ?? pidAlive;
   const now = o.now ?? Date.now;
@@ -1137,7 +1213,7 @@ export async function collect(
         const to = join(tmpOf(root), `trash-${rand()}`);
         try {
           await mkdir(tmpOf(root), { recursive: true });
-          await rename(path, to);
+          await renameDir(path, to, o.platform);
         } catch (err) {
           kept.push({
             path,
@@ -1150,6 +1226,12 @@ export async function collect(
         removed.push(path);
         await rm(to, { recursive: true, force: true }).catch(() => undefined);
       };
+      const placedJustNow = async (dir: string): Promise<boolean> =>
+        completeValid(dir) &&
+        (await stat(join(dir, '.complete')).then(
+          (s) => now() - s.mtimeMs < PLACED_GRACE_MS,
+          () => false,
+        ));
 
       const versions = join(root, 'versions');
       for (const name of await readdir(versions).catch(() => [] as string[])) {
@@ -1167,6 +1249,10 @@ export async function collect(
           kept.push({ path: dir, reason: 'a running tenjin mcp uses it' });
           const pin = readNodePin(dir);
           if (pin !== null) keepNode.add(pin.version);
+        } else if (await placedJustNow(dir)) {
+          kept.push({ path: dir, reason: PLACED });
+          const pin = readNodePin(dir);
+          if (pin !== null) keepNode.add(pin.version);
         } else {
           await remove(dir);
         }
@@ -1176,6 +1262,7 @@ export async function collect(
       for (const name of await readdir(nodes).catch(() => [] as string[])) {
         const dir = join(nodes, name);
         if (keepNode.has(name)) kept.push({ path: dir, reason: 'pinned by a kept version' });
+        else if (await placedJustNow(dir)) kept.push({ path: dir, reason: PLACED });
         else await remove(dir);
       }
 
@@ -1255,6 +1342,8 @@ export interface RuntimeSetup {
    * nothing tells the person to retry.
    */
   unpinned?: string;
+  /** The step that works, said in place of a retry that would fail the same way. */
+  fix?: string;
   /** `kept` by a refresh that found a newer runtime and tried nothing: no failure to report. */
   newer?: true;
   /** The newer current a plain install rolled back from. */
@@ -1325,6 +1414,8 @@ export async function setupRuntime(o: {
   platform?: NodeJS.Platform;
   arch?: string;
   verify?: typeof verifyBuild;
+  /** Test seam; production asks this Node whether it can use the shell's proxy. */
+  proxySupported?: boolean;
 }): Promise<RuntimeSetup> {
   const root = runtimeDir(o.dataDir);
   if (isSourceCheckout(o.moduleDir) || resolve(o.dataDir) !== resolve(defaultDataDir(o.home))) {
@@ -1397,6 +1488,9 @@ export async function setupRuntime(o: {
       ? { ...runs(usable), reason }
       : { state: 'fallback', root, firstTime, launcher: null, reason };
 
+  // Set while the pinned Node downloads: a failure then, on a Node that skips
+  // the shell's proxy, is the proxy's (#470), which no retry on that Node fixes.
+  let downloading = false;
   try {
     const glibc = platform === 'linux' ? runningGlibc() : null;
     const key = nodeKey(platform, arch, glibc);
@@ -1416,9 +1510,13 @@ export async function setupRuntime(o: {
     // A runtime build setting itself up is already in place.
     if (build === null || build.cli !== o.version || resolve(build.root) !== resolve(root)) {
       const stage = await within(stageSelf(root, packageRoot!), left(REFRESH_BUDGET_MS));
-      await within(placeVersion(root, stage, o.version, lockOpts()), left(REFRESH_BUDGET_MS));
+      await within(
+        placeVersion(root, stage, o.version, { ...lockOpts(), platform }),
+        left(REFRESH_BUDGET_MS),
+      );
     }
     const nodeMs = left(REFRESH_NODE_MS);
+    downloading = true;
     await within(
       ensureNode(root, pin, {
         ...lockOpts(),
@@ -1430,6 +1528,7 @@ export async function setupRuntime(o: {
       }),
       nodeMs,
     );
+    downloading = false;
     const launch = launchOf(next);
     const verified = await (o.verify ?? verifyBuild)(
       launch,
@@ -1457,6 +1556,16 @@ export async function setupRuntime(o: {
       ...(replaced !== undefined ? { replaced } : {}),
     };
   } catch (err) {
-    return failed((err instanceof Error ? err.message : String(err)).slice(0, 200));
+    const message = err instanceof Error ? err.message : String(err);
+    const network =
+      (err instanceof CliError && err.code === 'NETWORK_ERROR') || err instanceof BudgetGone;
+    const skipped = downloading && network ? proxySkipped(o.env, o.proxySupported) : null;
+    if (skipped !== null) {
+      return {
+        ...failed(`${skipped}: ${message}`.slice(0, 200)),
+        fix: proxyNodeStep('tenjin install'),
+      };
+    }
+    return failed(message.slice(0, 200));
   }
 }

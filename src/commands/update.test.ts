@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -1538,6 +1538,46 @@ describe('runUpdate: the runtime branch', () => {
     expect(stderr()).toContain(
       'tenjin update: staged tenjin-cli 0.1.0-alpha.7 in ~/.tenjin/runtime',
     );
+  });
+
+  it('names the proxy, and a Node that uses it, when the download skipped the shell’s proxy (#470)', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    const offline: UpdateDeps['ensure'] = async () => {
+      throw new CliError('NETWORK_ERROR', 'could not download https://nodejs.org/x: fetch failed');
+    };
+    vi.stubEnv('HTTPS_PROXY', 'http://proxy.corp:3128');
+    try {
+      const run = async (proxySupported: boolean) =>
+        runUpdate(
+          { check: false },
+          ctx,
+          await deps({
+            moduleDir: await installedTree('_npx', 'f00d'),
+            currentVersion: '0.1.0-alpha.5',
+            homeDir: home,
+            spawnImpl: children(async () => undefined).impl,
+            stage: s.stage,
+            ensure: offline,
+            proxySupported,
+          }),
+        ).catch((e: unknown) => e);
+      const err = await run(false);
+      expect(err).toMatchObject({
+        code: 'NETWORK_ERROR',
+        message: `could not download https://nodejs.org/x: fetch failed: this shell sets HTTPS_PROXY, which Node ${process.versions.node} cannot send downloads through`,
+        fix: "Run `tenjin update` once with Node 24.14 or newer, which uses the proxy; Tenjin's own Node does from then on.",
+      });
+      // The stage goes either way; nothing points at it.
+      expect(existsSync(join(root, 'tmp', 'stage-0.1.0-alpha.7-fixture'))).toBe(false);
+      expect(await run(true)).toMatchObject({
+        message: 'could not download https://nodejs.org/x: fetch failed',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('copies this npm build when it is the release, and downloads no tarball', async () => {

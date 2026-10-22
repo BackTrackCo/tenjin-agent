@@ -208,6 +208,31 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     expect((refreshed.data as { notices: string[] }).notices).toContain(line);
   });
 
+  it('fallback with a step that works: names that step, never the retry, in lines and notices', async () => {
+    const reason = 'this shell sets HTTPS_PROXY, which Node 22.12.0 cannot send downloads through';
+    const fix =
+      "run `tenjin install` once with Node 24.14 or newer, which uses the proxy; Tenjin's own Node does from then on";
+    const fallback = async () =>
+      ({
+        state: 'fallback',
+        root: runtimeRoot,
+        firstTime: true,
+        launcher: null,
+        reason,
+        fix,
+      }) as const;
+    const line = `Tenjin's own runtime could not be set up (${reason}), so the plugin still runs on the Node on your PATH; ${fix}.`;
+    const result = await runRouterInstall({}, ctx(), deps(fallback));
+    expect(result.humanLines!.filter((l) => l.includes('could not be set up'))).toEqual([
+      `! ${line}`,
+    ]);
+    expect(result.humanLines!.join('\n')).not.toContain('again to retry');
+    expect(runtimeOf(result)).toMatchObject({ reason, fix });
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(fallback));
+    expect((refreshed.data as { notices: string[] }).notices).toContain(line);
+  });
+
   it('kept after this build failed its checks: names both versions and the retry, in lines and notices', async () => {
     const reason = 'tenjin --version printed nothing';
     const kept = async () =>

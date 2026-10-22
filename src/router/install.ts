@@ -655,6 +655,7 @@ function runtimeData(rt: RuntimeSetup | null): Record<string, unknown> | null {
     ...(rt.cli !== undefined ? { cli: rt.cli } : {}),
     ...(rt.nodeVersion !== undefined ? { nodeVersion: rt.nodeVersion } : {}),
     ...(rt.reason !== undefined ? { reason: rt.reason } : {}),
+    ...(rt.fix !== undefined ? { fix: rt.fix } : {}),
     ...(rt.replaced !== undefined ? { replaced: rt.replaced } : {}),
   };
 }
@@ -697,18 +698,20 @@ function runtimeSentence(rt: RuntimeSetup, home: string): string | null {
 /**
  * Why the plugin still runs on the Node on PATH, or on an older runtime build
  * than this one. A platform Tenjin pins no Node for is said as it is, with no
- * retry: no install here can set the runtime up. A refresh that found a newer
+ * retry: no install here can set the runtime up. A failure with a step that
+ * works (a download that skipped the shell's proxy) names that step instead. A refresh that found a newer
  * runtime tried nothing, so it says nothing.
  */
 function fallbackSentence(rt: RuntimeSetup): string | null {
   if (rt.state === 'fallback' && rt.unpinned !== undefined) {
     return `Tenjin pins no Node for this platform (${rt.unpinned}), so the plugin runs from npm's copy on the Node on your PATH, as before.`;
   }
+  const next = rt.fix ?? 'run `tenjin install` again to retry';
   if (rt.state === 'fallback') {
-    return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; run \`tenjin install\` again to retry.`;
+    return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; ${next}.`;
   }
   if (rt.state === 'kept' && rt.reason !== undefined && rt.newer !== true) {
-    const retry = rt.unpinned === undefined ? '; run `tenjin install` again to retry' : '';
+    const retry = rt.unpinned === undefined ? `; ${next}` : '';
     return `tenjin-cli ${pkg.version} could not be set up (${rt.reason}), so Tenjin keeps running ${rt.cli ?? 'the runtime it has'}${retry}.`;
   }
   return null;
