@@ -20,6 +20,7 @@ import { WALLET_REASONS } from './wallet-reasons';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
+  FREE_PATH_RESERVE_MS,
   RoutingPayer,
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
@@ -826,6 +827,18 @@ describe('RoutingPayer and the wallet verdict', () => {
     expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'not_checked' });
   });
 
+  it('leaves the free path its share of the budget while an unlock never answers', async () => {
+    const router = new FakeRouter();
+    const getSigner = vi.fn(() => new Promise<TenjinSigner>(() => undefined));
+    const p = payer(router, { now: () => Date.now(), getSigner });
+    void p.prewarm();
+    const started = Date.now();
+    const outcome = await callWith(p, router, FREE_PATH_RESERVE_MS + 300);
+    expect(tookFreePath(outcome, router)).toBe('unlock_timeout');
+    expect(Date.now() - started).toBeLessThan(FREE_PATH_RESERVE_MS + 300);
+    expect(getSigner).toHaveBeenCalledTimes(1);
+  });
+
   it('runs one unlock for the prewarm and every call waiting on it', async () => {
     const router = new FakeRouter();
     const getSigner = vi.fn(() => new Promise<TenjinSigner>(() => undefined));
@@ -895,6 +908,44 @@ describe('RoutingPayer and the wallet verdict', () => {
     expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(3);
+  });
+
+  it('stops reporting a definite block a minute on, and unlocks again with no call asking', async () => {
+    const router = new FakeRouter();
+    let created = false;
+    const fail = unlockFails('no_wallet');
+    const getSigner = vi.fn(() => (created ? Promise.resolve(testSigner(wallet)) : fail()));
+    const p = payer(router, { getSigner });
+    await p.prewarm();
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'no_wallet' });
+    // `tenjin wallet create` mid-session, and no routing call ever asks for the fee.
+    created = true;
+    clock += SIGNER_RECHECK_MS - 1;
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'no_wallet' });
+    clock += 1;
+    // Stale: it gates nothing while the unlock it started runs.
+    expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'not_checked' });
+    await vi.waitFor(() => expect(p.signVerdict()).toEqual({ status: 'ready' }));
+    expect(getSigner).toHaveBeenCalledTimes(2);
+    expect(router.log).toEqual([]);
+  });
+
+  it('unlocks again at once when the wallet changes under a definite block', async () => {
+    const router = new FakeRouter();
+    let stamp = '1:1';
+    let repaired = false;
+    const fail = unlockFails('passphrase_wrong');
+    const getSigner = vi.fn(() => (repaired ? Promise.resolve(testSigner(wallet)) : fail()));
+    const p = payer(router, { getSigner, unlockStamp: async () => stamp });
+    await p.prewarm();
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'passphrase_wrong' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(getSigner).toHaveBeenCalledTimes(1);
+    repaired = true;
+    stamp = '1:2';
+    p.signVerdict();
+    await vi.waitFor(() => expect(p.signVerdict()).toEqual({ status: 'ready' }));
+    expect(getSigner).toHaveBeenCalledTimes(2);
   });
 
   it('asks the server first while this process has seen no 402, even over a known block', async () => {

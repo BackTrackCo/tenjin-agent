@@ -94,7 +94,8 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   is never remembered as a block: the next call tries again.
  * - THE UNLOCK IS ONE FLIGHT, BOUNDED IN ITS WAIT, NEVER IN ITS READ. Every
  *   caller (and the prewarm) awaits the same unlock, each only up to its own
- *   call's budget (`unlock_timeout`). Nothing here aborts the unlock or the
+ *   call's budget less the free path's reserve (`unlock_timeout`), so the
+ *   call still routes unpaid. Nothing here aborts the unlock or the
  *   store read under it, so an OS unlock dialog stays up, and whatever it
  *   answers is the next call's (B3).
  *
@@ -102,6 +103,13 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  * only from its server entry, and its fetch wrapper rewraps a hook's error as
  * a plain `Error`, so the reason rides on the call instead.
  */
+
+/** The sign verdict before any unlock has settled, or while one runs over a stale block. */
+const NOT_CHECKED: SignVerdict = {
+  status: 'unknown',
+  reason: 'not_checked',
+  detail: UNKNOWN_DETAIL['not_checked']!,
+};
 
 /**
  * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
@@ -126,6 +134,12 @@ const ABSENT_TTL_MS = 60 * 60_000;
  * `tenjin wallet repair` is picked up at once, anything else within a minute.
  */
 export const SIGNER_RECHECK_MS = 60_000;
+/**
+ * THE FREE PATH'S SHARE OF A CALL'S BUDGET: a call waiting on an unlock stops
+ * waiting this long before its budget ends, so the unpaid route still fits
+ * in what is left (an unknown verdict never skips a routing attempt).
+ */
+export const FREE_PATH_RESERVE_MS = 1_000;
 /** The wallet balance read before a deposit, inside the caller's budget.
  *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
 export const BALANCE_TIMEOUT_MS = 1_000;
@@ -305,15 +319,29 @@ export class RoutingPayer {
     await this.unlock().catch(() => undefined);
   }
 
-  /** What the last settled unlock said, with no I/O; unknown `not_checked` before any. */
+  /**
+   * What the last settled unlock said, with no waiting; unknown `not_checked`
+   * before any. A definite block is believed only as the pay path believes it
+   * (decision 16): within {@link SIGNER_RECHECK_MS}, with no unlock running
+   * and nothing it was read from changed. Past that it reads unknown, which
+   * gates nothing, and an unlock starts in the background, so a wallet created
+   * or repaired mid-session is picked up although no call asks for the fee.
+   * The stamp is read in the background too: a change starts the unlock, and
+   * the next caller reads its answer.
+   */
   signVerdict(): SignVerdict {
-    return (
-      this.memo?.verdict ?? {
-        status: 'unknown',
-        reason: 'not_checked',
-        detail: UNKNOWN_DETAIL['not_checked']!,
-      }
-    );
+    const memo = this.memo;
+    if (memo === null) return NOT_CHECKED;
+    if (!isDefiniteBlock(memo.verdict)) return memo.verdict;
+    if (this.unlocking !== null) return NOT_CHECKED;
+    if (this.now() - memo.at >= SIGNER_RECHECK_MS) {
+      void this.prewarm();
+      return NOT_CHECKED;
+    }
+    void this.stamp().then((stamp) => {
+      if (this.memo === memo && stamp !== memo.stamp) void this.prewarm();
+    });
+    return memo.verdict;
   }
 
   /**
@@ -720,8 +748,9 @@ export class RoutingPayer {
    *
    * A definite block the memo still believes skips before any unlock
    * ({@link freshBlock}). Otherwise the call joins the one unlock in flight
-   * (or starts it) and waits for it only until its own budget ends, then
-   * skips with `unlock_timeout`. THE BUDGET BOUNDS THE WAIT, NEVER THE READ
+   * (or starts it) and waits for it only until {@link FREE_PATH_RESERVE_MS}
+   * before its own budget ends, then skips with `unlock_timeout`, leaving the
+   * free path its time. THE BUDGET BOUNDS THE WAIT, NEVER THE READ
    * (B3): the unlock runs on, unaborted, its store read under no deadline, so
    * an OS unlock dialog stays up; its answer lands in the memo, and a signer
    * nobody was left waiting for is the next call's.
@@ -739,7 +768,7 @@ export class RoutingPayer {
     else {
       this.waiters += 1;
       try {
-        signer = await this.waitFor(this.unlock(), call.until);
+        signer = await this.waitFor(this.unlock(), call.until - FREE_PATH_RESERVE_MS);
       } catch (err) {
         if (err instanceof RouteSkipped) throw err;
         this.warn(err instanceof Error ? err.message : String(err));
