@@ -1194,19 +1194,23 @@ const TMP_MAX_AGE_MS = 60 * 60_000;
  */
 const PLACED_GRACE_MS = 15 * 60_000;
 
+/** Why `collect` keeps a version a `keep` pointer names. */
+const KEPT_FOR_FOLDER = 'a plugin folder runs it';
+
 /**
  * GC, under the lock. Keeps the current, previous and pending versions, every
- * version a running `tenjin mcp` marked live, the Node versions they pin, and
- * any version or Node placed in the last 15 minutes (by its `.complete`): the
- * lock is held per step, so one placed for an activation still on its way
- * (update's child verifying it) has no role yet. Removes the rest by renaming
- * each into `tmp/trash-*` first. A folder held open (Windows: a running
- * `node.exe`) is kept for a later install. Then sweeps `tmp/` of trash and of
- * anything older than an hour.
+ * version in `keep` (a plugin folder that runs it by absolute path, which
+ * `state.json` does not name), every version a running `tenjin mcp` marked
+ * live, the Node versions they pin, and any version or Node placed in the
+ * last 15 minutes (by its `.complete`): the lock is held per step, so one
+ * placed for an activation still on its way (update's child verifying it) has
+ * no role yet. Removes the rest by renaming each into `tmp/trash-*` first. A
+ * folder held open (Windows: a running `node.exe`) is kept for a later
+ * install. Then sweeps `tmp/` of trash and of anything older than an hour.
  */
 export async function collect(
   root: string,
-  o: LockOptions & { platform?: NodeJS.Platform } = {},
+  o: LockOptions & { platform?: NodeJS.Platform; keep?: readonly RuntimePointer[] } = {},
 ): Promise<{ removed: string[]; kept: { path: string; reason: string }[] }> {
   const isAlive = o.isAlive ?? pidAlive;
   const now = o.now ?? Date.now;
@@ -1222,6 +1226,10 @@ export async function collect(
         const p = state[role];
         if (p === null) continue;
         if (!roles.has(p.cli)) roles.set(p.cli, role);
+        keepNode.add(p.node);
+      }
+      for (const p of o.keep ?? []) {
+        if (!roles.has(p.cli)) roles.set(p.cli, KEPT_FOR_FOLDER);
         keepNode.add(p.node);
       }
       const remove = async (path: string): Promise<void> => {

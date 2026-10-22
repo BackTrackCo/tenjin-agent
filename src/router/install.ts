@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
 import { persistRouterDefaults, persistRouterProject, type RouterLimits } from '../commands/config';
@@ -13,7 +13,7 @@ import { defaultDataDir, runtimeDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
-import { runtimeStatePath } from '../lib/runtime-layout';
+import { runtimeBuild, runtimeStatePath, type RuntimePointer } from '../lib/runtime-layout';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import {
   loadRawConfig,
@@ -39,9 +39,11 @@ import {
   type LegacyInstall,
   type LegacyRemoval,
 } from './legacy-install';
-import { PLUGIN_ID } from './names';
+import { MCP_SERVER_NAME, PLUGIN_ID } from './names';
 import { CLAUDE_CODE_FLOOR } from './claude-cli';
+import { inspectPluginFolder } from './plugin-folder';
 import {
+  folderFor,
   folderState,
   marketplaceAdded,
   readPluginListing,
@@ -402,7 +404,9 @@ export async function runRouterInstall(
     // registered, written or migrated.
     if (!project && hasRuntime(ctx.dataDir, home)) {
       const rt = await setUpRuntime();
-      if (runtimeLaunch(rt) !== null) await collectRuntime(rt.root);
+      if (runtimeLaunch(rt) !== null) {
+        await collectRuntime(rt.root, await fallbackFolders(ctx.dataDir, env, home, cwd, false));
+      }
       return runtimeOnlyRefresh(ctx, rt, home);
     }
     throw new CliError(
@@ -481,8 +485,9 @@ export async function runRouterInstall(
   // empty folder. The render it holds passed `verifyBuild`, so it stays.
   // Old versions are collected only once the plugin is registered.
   if (rt !== null && launch !== null) {
-    if (plugin.state !== 'failed') await collectRuntime(rt.root);
-    else if (!marketplaceAdded(plugin, launch.hostsDir)) {
+    if (plugin.state !== 'failed') {
+      await collectRuntime(rt.root, await fallbackFolders(ctx.dataDir, env, home, cwd, project));
+    } else if (!marketplaceAdded(plugin, launch.hostsDir)) {
       await rt.restore?.().catch(() => undefined);
     }
   }
@@ -665,14 +670,73 @@ function runtimeOnlyRefresh(ctx: CommandContext, rt: RuntimeSetup, home: string)
   };
 }
 
-/** GC of the runtime's unused versions: an optimisation that never holds install up or fails it. */
-async function collectRuntime(root: string): Promise<void> {
+/**
+ * GC of the runtime's unused versions: an optimisation that never holds
+ * install up or fails it. The plugin folders in `folders` that are ours run a
+ * runtime version and its Node by absolute path, which `state.json` does not
+ * name, so those are kept.
+ */
+async function collectRuntime(root: string, folders: readonly string[]): Promise<void> {
   try {
     const { collect } = await import('../lib/runtime');
-    await collect(root, { lockWaitMs: 5_000 });
+    await collect(root, { lockWaitMs: 5_000, keep: await folderPointers(root, folders) });
   } catch {
     // The next install collects them.
   }
+}
+
+/**
+ * Every plugin folder an install wrote where it could run no `claude` binary:
+ * the user's under the config dir, and each recorded project's (plus this
+ * run's, for a `--project` run not recorded yet) under its `.claude/skills/`.
+ */
+async function fallbackFolders(
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  cwd: string,
+  project: boolean,
+): Promise<string[]> {
+  const projects = (await loadRawConfig(dataDir).catch(() => null))?.install?.routerProjects ?? [];
+  return [
+    folderFor('user', env, home, cwd),
+    ...[...projects, ...(project ? [cwd] : [])].map((dir) => folderFor('local', env, home, dir)),
+  ];
+}
+
+/** A `node/<V>` folder name: digits and dots only, so a `..` can never pass. */
+const NODE_DIR_RE = /^\d+\.\d+\.\d+$/;
+
+/**
+ * The runtime version and Node each folder that exists and is ours runs, read
+ * from its `.mcp.json`: an entry under `<root>/versions/<cli>/` run by a Node
+ * under `<root>/node/<V>/`. A folder run from a package, or unreadable, names
+ * none.
+ */
+async function folderPointers(root: string, folders: readonly string[]): Promise<RuntimePointer[]> {
+  const pointers: RuntimePointer[] = [];
+  for (const dir of folders) {
+    if ((await inspectPluginFolder(dir)) !== 'ours') continue;
+    const server = await readFile(join(dir, '.mcp.json'), 'utf8')
+      .then(
+        (raw) =>
+          (
+            JSON.parse(raw) as {
+              mcpServers?: Record<string, { command?: unknown; args?: unknown }>;
+            }
+          ).mcpServers?.[MCP_SERVER_NAME],
+      )
+      .catch(() => undefined);
+    const entry = Array.isArray(server?.args) ? (server.args[0] as unknown) : undefined;
+    const node = server?.command;
+    if (typeof entry !== 'string' || typeof node !== 'string') continue;
+    const build = runtimeBuild(dirname(entry));
+    const nodeVersion = relative(join(root, 'node'), node).split(sep)[0] ?? '';
+    if (build !== null && resolve(build.root) === resolve(root) && NODE_DIR_RE.test(nodeVersion)) {
+      pointers.push({ cli: build.cli, node: nodeVersion });
+    }
+  }
+  return pointers;
 }
 
 /** What the plugin is registered from when the runtime has a build for it, or null for this package. */

@@ -1,17 +1,18 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { LauncherResult, RuntimeSetup } from '../lib/runtime';
-import { readRuntimeState } from '../lib/runtime-layout';
+import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/runtime-layout';
 import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput } from './hook-tool';
 import { runRouterInstall } from './install';
+import { renderPluginFiles } from './plugin-files';
 
 /**
  * INSTALL ON TENJIN'S RUNTIME, through a fake `claude` and an injected
@@ -371,6 +372,57 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
       `Replacing tenjin-cli 0.1.0-alpha.99 with ${pkg.version}.`,
     ]);
     expect(runtimeOf(result)).toMatchObject({ replaced: '0.1.0-alpha.99' });
+  });
+
+  /**
+   * Where no `claude` binary could be run, a project's plugin folder runs a
+   * runtime version and its Node by absolute path, and `state.json` names
+   * neither once later activations moved on. GC must not take them from it.
+   */
+  it('GC keeps the version and Node a recorded project’s plugin folder runs', async () => {
+    const anHourAgo = new Date(Date.now() - 60 * 60_000);
+    const place = async (cli: string, node: string) => {
+      for (const [dir, version, file] of [
+        [versionDir(runtimeRoot, cli), cli, versionEntry(runtimeRoot, cli)],
+        [join(runtimeRoot, 'node', node), node, nodeBinPath(runtimeRoot, node)],
+      ] as const) {
+        await mkdir(dirname(file), { recursive: true });
+        await writeFile(file, '');
+        await writeFile(join(dir, '.complete'), JSON.stringify({ version }));
+        await utimes(join(dir, '.complete'), anHourAgo, anHourAgo);
+      }
+    };
+    await place('0.1.0-alpha.20', '22.0.0');
+    await place('0.1.0-alpha.10', '21.0.0');
+    await writeFile(
+      join(runtimeRoot, 'state.json'),
+      JSON.stringify({ schemaVersion: 1, current: { cli: pkg.version, node: NODE_V } }),
+    );
+    const project = join(root, 'proj');
+    const folder = join(project, '.claude', 'skills', 'tenjin-router');
+    const files = renderPluginFiles(
+      '0.1.0-alpha.20',
+      versionEntry(runtimeRoot, '0.1.0-alpha.20'),
+      nodeBinPath(runtimeRoot, '22.0.0'),
+    );
+    for (const [path, body] of Object.entries(files)) {
+      await mkdir(dirname(join(folder, path)), { recursive: true });
+      await writeFile(join(folder, path), body);
+    }
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ install: { routerProjects: [project] } }),
+    );
+    await runRouterInstall(
+      {},
+      ctx(),
+      deps(async () => setup()),
+    );
+    expect(existsSync(versionDir(runtimeRoot, '0.1.0-alpha.20'))).toBe(true);
+    expect(existsSync(join(runtimeRoot, 'node', '22.0.0'))).toBe(true);
+    // What nothing runs is still collected.
+    expect(existsSync(versionDir(runtimeRoot, '0.1.0-alpha.10'))).toBe(false);
+    expect(existsSync(join(runtimeRoot, 'node', '21.0.0'))).toBe(false);
   });
 
   it('a project install uses the same runtime at local scope', async () => {

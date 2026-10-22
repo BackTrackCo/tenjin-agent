@@ -1033,6 +1033,23 @@ describe('collect', () => {
     expect(existsSync(versionDir(root, '1.1.0'))).toBe(true);
   });
 
+  it('keeps a version a plugin folder runs, and the Node it names, though no state names them', async () => {
+    placed('1.0.0', '24.0.0');
+    placed('0.9.0', '22.0.0');
+    placed('0.8.0', '21.0.0');
+    state({ current: { cli: '1.0.0', node: '24.0.0' } });
+    const r = await collect(root, { keep: [{ cli: '0.9.0', node: '22.0.0' }] });
+    expect(readdirSync(join(root, 'versions')).sort()).toEqual(['0.9.0', '1.0.0']);
+    expect(readdirSync(join(root, 'node')).sort()).toEqual(['22.0.0', '24.0.0']);
+    expect(r.kept).toContainEqual({
+      path: versionDir(root, '0.9.0'),
+      reason: 'a plugin folder runs it',
+    });
+    expect(r.removed.sort()).toEqual(
+      [versionDir(root, '0.8.0'), join(root, 'node', '21.0.0')].sort(),
+    );
+  });
+
   it('keeps a pending version when there is no current yet', async () => {
     placed('1.0.0', '24.0.0');
     state({ current: null, previous: null, pending: { cli: '1.0.0', node: '24.0.0' } });
