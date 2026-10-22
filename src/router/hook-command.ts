@@ -82,8 +82,9 @@ function sessionIdOf(event: unknown): string | null {
  * router as serving a session, and a leg without one (or the command form,
  * which never passes it) must not. The lines ride in `systemMessage` beside the
  * leg's own notices, and are acknowledged only once the response carrying them
- * is built: a dispatch that throws skips the ack, so the next leg offers them
- * again rather than losing them.
+ * is built: a leg that throws releases them instead of acking, so the next
+ * leg offers them again rather than losing them. A leg running at the same
+ * time is never handed lines another leg holds.
  */
 export async function runHookKind(
   kind: HookKind,
@@ -98,26 +99,33 @@ export async function runHookKind(
       ? await hookDeps.walletNews(sessionId).catch(() => null)
       : null;
   for (const line of news?.lines ?? []) notices.add(line);
-  if (sessionId !== null && news?.lines.includes(WALLET_UNLOCKED) === true) {
-    // Said here already: a paid call later in this session must not say it
-    // again, and a relapse must be told again.
-    await settleCurrent(hookDeps.dataDir, sessionId, hookDeps.now?.() ?? Date.now()).catch(
-      () => undefined,
-    );
+  let response: unknown | null;
+  try {
+    if (sessionId !== null && news?.lines.includes(WALLET_UNLOCKED) === true) {
+      // Said here already: a paid call later in this session must not say it
+      // again, and a relapse must be told again.
+      await settleCurrent(hookDeps.dataDir, sessionId, hookDeps.now?.() ?? Date.now()).catch(
+        () => undefined,
+      );
+    }
+    const outcome =
+      kind === 'prompt'
+        ? await runPromptHook(event, deps)
+        : kind === 'native'
+          ? await runNativeHook(event, deps)
+          : kind === 'shortfall'
+            ? await runShortfallHook(event, deps)
+            : kind === 'ask'
+              ? await runAskHook(event, deps)
+              : kind === 'answer'
+                ? await runAnswerHook(event, deps)
+                : await runDelegationHook(event, deps);
+    response = withNotices(outcome.response, notices);
+  } catch (err) {
+    // No answer carries the lines: the next leg is offered them again.
+    news?.release();
+    throw err;
   }
-  const outcome =
-    kind === 'prompt'
-      ? await runPromptHook(event, deps)
-      : kind === 'native'
-        ? await runNativeHook(event, deps)
-        : kind === 'shortfall'
-          ? await runShortfallHook(event, deps)
-          : kind === 'ask'
-            ? await runAskHook(event, deps)
-            : kind === 'answer'
-              ? await runAnswerHook(event, deps)
-              : await runDelegationHook(event, deps);
-  const response = withNotices(outcome.response, notices);
   if (news !== null) await news.ack().catch(() => undefined);
   return response;
 }

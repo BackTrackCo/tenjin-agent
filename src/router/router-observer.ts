@@ -9,6 +9,7 @@ import {
   type RouterObservation,
   type UnlockRecord,
 } from './router-observation';
+import type { WalletNews } from './hooks';
 import type { PayerObservation } from './routing-payer';
 import { stillLockedSentence, WALLET_UNLOCKED } from './wallet-reasons';
 
@@ -45,7 +46,7 @@ export interface RouterObserver {
   /** Deduped one-time lines (ENV_PASSPHRASE_WRONG from the payer provider's onWarning). */
   queueNews: (line: string) => void;
   /** HookDeps.walletNews. */
-  takeNews: (sessionId: string) => Promise<{ lines: string[]; ack: () => Promise<void> }>;
+  takeNews: (sessionId: string) => Promise<WalletNews>;
   /** Remove the exit handler and the observation (tests; the process exit does it otherwise). */
   dispose: () => void;
 }
@@ -83,6 +84,14 @@ export function createRouterObserver(o: {
   const queue: string[] = [];
   /** Whether a leg's ack has settled this process's confirmation (step 4). */
   let settled = false;
+  /**
+   * What a leg still in flight has claimed: its queued lines, and whether it
+   * holds the confirmation. Legs overlap (parallel WebSearch calls each run a
+   * hook), and a claimed line or confirmation is no other leg's until the leg
+   * holding it acks or releases it, so each is said once.
+   */
+  const claimed = new Set<string>();
+  let confirming = false;
   let disposed = false;
 
   // Writes go one after another, so the file always ends at the latest state.
@@ -154,7 +163,8 @@ export function createRouterObserver(o: {
         observation = { ...observation, servedSession: true, at: now() };
         write();
       }
-      const queued = [...queue];
+      const queued = queue.filter((line) => !claimed.has(line));
+      for (const line of queued) claimed.add(line);
       const lines = [...queued];
       const sign = observation.sign;
       // Step 2: no verdict yet (the prewarm is still unlocking): only the
@@ -162,7 +172,10 @@ export function createRouterObserver(o: {
       let confirmation: { address: string; record: UnlockRecord } | null = null;
       const hasVerdict =
         sign.status !== 'pending' && !(sign.status === 'unknown' && sign.reason === 'not_checked');
-      if (!settled && hasVerdict) {
+      const confirms = !settled && !confirming && hasVerdict;
+      if (confirms) {
+        // Claimed before the first await, so an overlapping leg skips it.
+        confirming = true;
         // Step 3: compare the verdict with what the machine recorded last.
         confirmation = await verdictRecord().catch(() => null);
         if (confirmation !== null) {
@@ -179,18 +192,31 @@ export function createRouterObserver(o: {
         }
       }
       // Step 4: nothing is marked delivered until the leg carrying these
-      // lines has built its response; a leg that fails leaves them queued.
+      // lines has built its response; a leg that fails releases them.
+      let done = false;
+      const unclaim = (): void => {
+        for (const line of queued) claimed.delete(line);
+        if (confirms) confirming = false;
+      };
       return {
         lines,
         ack: async () => {
+          if (done) return;
+          done = true;
           for (const line of queued) {
             const at = queue.indexOf(line);
             if (at !== -1) queue.splice(at, 1);
           }
+          unclaim();
           if (confirmation !== null && !settled) {
             settled = true;
             await writeUnlockRecord(o.dataDir, confirmation.record);
           }
+        },
+        release: () => {
+          if (done) return;
+          done = true;
+          unclaim();
         },
       };
     },

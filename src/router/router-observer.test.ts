@@ -113,11 +113,33 @@ describe('takeNews', () => {
     o.observe(READY);
     const first = await o.takeNews('s1');
     expect(first.lines).toEqual([WALLET_UNLOCKED]);
-    // No ack (the leg failed): still awaiting, and offered again.
+    // Released, not acked (the leg failed): still awaiting, and offered again.
+    first.release();
     expect((await readUnlockRecord(dir, ADDRESS))?.status).toBe('awaiting_confirmation');
     const second = await o.takeNews('s1');
     expect(second.lines).toEqual([WALLET_UNLOCKED]);
     await second.ack();
+    expect(await readUnlockRecord(dir, ADDRESS)).toMatchObject({ status: 'ready' });
+    expect((await o.takeNews('s1')).lines).toEqual([]);
+  });
+
+  it('hands overlapping legs each line once, and a released line to the next leg', async () => {
+    await markUnlockPending(dir, ADDRESS, NOW - 1000);
+    const o = observer();
+    o.queueNews(ENV_PASSPHRASE_WRONG);
+    o.observe(READY);
+    // Two parallel WebSearch legs, both in flight before either acks.
+    const [a, b] = await Promise.all([o.takeNews('s1'), o.takeNews('s1')]);
+    expect([...a.lines, ...b.lines].sort()).toEqual([ENV_PASSPHRASE_WRONG, WALLET_UNLOCKED].sort());
+    const holder = a.lines.length > 0 ? a : b;
+    const other = holder === a ? b : a;
+    expect(other.lines).toEqual([]);
+    await other.ack();
+    // The holder failed: the next leg says it all, once.
+    holder.release();
+    const next = await o.takeNews('s1');
+    expect(next.lines).toEqual([ENV_PASSPHRASE_WRONG, WALLET_UNLOCKED]);
+    await next.ack();
     expect(await readUnlockRecord(dir, ADDRESS)).toMatchObject({ status: 'ready' });
     expect((await o.takeNews('s1')).lines).toEqual([]);
   });

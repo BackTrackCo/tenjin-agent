@@ -579,7 +579,19 @@ export interface HookDeps {
    * lines. `ack()` runs once the response carrying them is built; only then
    * are they marked delivered (and awaiting_confirmation cleared).
    */
-  walletNews?: (sessionId: string) => Promise<{ lines: string[]; ack: () => Promise<void> }>;
+  walletNews?: (sessionId: string) => Promise<WalletNews>;
+}
+
+/**
+ * One leg's one-time wallet lines, CLAIMED for that leg: a leg running at the
+ * same time is not handed them. `ack()` marks them delivered once the response
+ * carrying them is built; `release()` hands them back for the next leg when
+ * the leg failed before answering.
+ */
+export interface WalletNews {
+  lines: string[];
+  ack: () => Promise<void>;
+  release: () => void;
 }
 
 /**
