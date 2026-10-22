@@ -77,15 +77,25 @@ export interface ExecLaunch {
 }
 
 /**
+ * HOW A PLUGIN RENDER DEPARTS FROM THE PACKAGE RENDER, one optional field
+ * each, passed as the last argument of every render that takes it: a render
+ * that sets none is byte for byte what the build ships.
+ */
+export interface RenderOptions {
+  /** The Node every command runs: the runtime's absolute Node, or `node` from PATH when unset. */
+  node?: string;
+}
+
+/**
  * The CLI run by Node from its entry script, never through the `tenjin` shim:
  * `node` from PATH, or the runtime's absolute Node.
  */
 export function cliLaunch(
   args: readonly string[],
   entry: string = PLUGIN_ROOT_ENTRY,
-  node = 'node',
+  o: RenderOptions = {},
 ): ExecLaunch {
-  return { command: node, args: [entry, ...args] };
+  return { command: o.node ?? 'node', args: [entry, ...args] };
 }
 
 /**
@@ -125,13 +135,13 @@ function printed(answer: string, node: string): ExecLaunch {
  * still run (lab, Claude Code 2.1.296). The tool stays in the model's list. The
  * tool's transcript check (`admitHookEvent`) stays for a machine with hooks off.
  */
-export function denyHook(node = 'node'): ExecLaunch {
+export function denyHook(o: RenderOptions = {}): ExecLaunch {
   return printed(
     permissionAnswer(
       'deny',
       `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
     ),
-    node,
+    o.node ?? 'node',
   );
 }
 export const DENY_HOOK = denyHook();
@@ -143,8 +153,8 @@ export const DENY_HOOK = denyHook();
  * the tool. The tool still pays only within the local spend policy, and an
  * amount over it returns `needs_approval` with nothing paid.
  */
-export function allowHook(node = 'node'): ExecLaunch {
-  return printed(permissionAnswer('allow', 'Tenjin lookup'), node);
+export function allowHook(o: RenderOptions = {}): ExecLaunch {
+  return printed(permissionAnswer('allow', 'Tenjin lookup'), o.node ?? 'node');
 }
 export const ALLOW_HOOK = allowHook();
 
@@ -190,20 +200,20 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
 
 /**
  * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
- * permission answers. `node` runs all three commands, the answers included, so
- * the runtime render names no `node` from PATH at all.
+ * permission answers. `o.node` runs all three commands, the answers included,
+ * so the runtime render names no `node` from PATH at all.
  */
 export function renderPluginHooks(
   entry: string = PLUGIN_ROOT_ENTRY,
-  node = 'node',
+  o: RenderOptions = {},
 ): {
   hooks: Record<string, unknown[]>;
 } {
   const plan = [
-    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry, node)) },
+    { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry, o)) },
     ...routerHookPlan(),
-    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(node)) },
-    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(allowHook(node)) },
+    { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(o)) },
+    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(allowHook(o)) },
   ];
   const hooks: Record<string, unknown[]> = {};
   for (const { event, hooks: handlers, ...rest } of plan) {
@@ -227,11 +237,11 @@ export const PLUGIN_MCP_ARGS = ['mcp', '--plugin'] as const;
 
 export function renderPluginMcp(
   entry: string = PLUGIN_ROOT_ENTRY,
-  node = 'node',
+  o: RenderOptions = {},
 ): {
   mcpServers: Record<string, unknown>;
 } {
-  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, entry, node) } };
+  return { mcpServers: { [MCP_SERVER_NAME]: cliLaunch(PLUGIN_MCP_ARGS, entry, o) } };
 }
 
 /** The key whose presence marks a plugin manifest as one this CLI wrote. */
@@ -298,17 +308,17 @@ const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 /**
  * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
  * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
- * outside the package, and `node` the Node that runs them: `node` from PATH
+ * outside the package, and `o.node` the Node that runs them: `node` from PATH
  * unless this is the runtime render.
  */
 export function renderPluginFiles(
   version?: string,
   entry?: string,
-  node?: string,
+  o: RenderOptions = {},
 ): Record<string, string> {
   return {
-    '.mcp.json': json(renderPluginMcp(entry, node)),
-    'hooks/hooks.json': json(renderPluginHooks(entry, node)),
+    '.mcp.json': json(renderPluginMcp(entry, o)),
+    'hooks/hooks.json': json(renderPluginHooks(entry, o)),
     '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
   };
 }
@@ -325,17 +335,30 @@ export interface RuntimeLaunch {
   home?: string;
 }
 
+/** How a marketplace folder render departs from the package render; see {@link RenderOptions}. */
+export interface HostRenderOptions {
+  /** The runtime render's Node and entry; it also adds the plugin's `bin/` launchers. */
+  launch?: RuntimeLaunch;
+}
+
 /**
  * The marketplace folder's files: its catalog and the plugin under
- * {@link PLUGIN_DIR}. With no `launch`, the package render, byte for byte what
- * the build ships; with one, the runtime render, which runs `launch.node` and
- * `launch.entry` and carries the plugin's `bin/` launchers.
+ * {@link PLUGIN_DIR}. With no `o.launch`, the package render, byte for byte
+ * what the build ships; with one, the runtime render, which runs `launch.node`
+ * and `launch.entry` and carries the plugin's `bin/` launchers.
  */
-export function renderHostFiles(version?: string, launch?: RuntimeLaunch): Record<string, string> {
+export function renderHostFiles(
+  version?: string,
+  o: HostRenderOptions = {},
+): Record<string, string> {
+  const { launch } = o;
   const files =
     launch === undefined
       ? renderPluginFiles(version)
-      : { ...renderPluginFiles(version, launch.entry, launch.node), ...renderPluginBin(launch) };
+      : {
+          ...renderPluginFiles(version, launch.entry, { node: launch.node }),
+          ...renderPluginBin(launch),
+        };
   const plugin = Object.entries(files).map(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );

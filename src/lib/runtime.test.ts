@@ -840,7 +840,7 @@ describe('activate', () => {
       platform: 'darwin' as const,
       home,
     };
-    expect(snapshot(join(root, 'claude'))).toEqual(renderHostFiles('1.0.0', launch));
+    expect(snapshot(join(root, 'claude'))).toEqual(renderHostFiles('1.0.0', { launch }));
     if (POSIX)
       expect(statSync(join(root, 'claude', 'tenjin', 'bin', 'tenjin')).mode & 0o777).toBe(0o755);
     expect(act.launcher.state).toBe('written');

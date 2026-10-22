@@ -154,7 +154,7 @@ export async function registerPlugin(opts: RegisterOptions): Promise<PluginRegis
   }
   const written = await writePluginFolder(
     folder,
-    renderPluginFiles(opts.version, opts.cliEntry ?? packageCliEntry(), opts.node),
+    renderPluginFiles(opts.version, opts.cliEntry ?? packageCliEntry(), { node: opts.node }),
   );
   if (written.state === 'written') {
     return {

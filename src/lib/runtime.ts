@@ -779,7 +779,7 @@ export async function verifyBuild(
 
     ms = budget(VERIFY_HOOKS_MS);
     if (ms <= 0) return outOfTime;
-    const { hooks } = renderPluginHooks(launch.entry, launch.node);
+    const { hooks } = renderPluginHooks(launch.entry, { node: launch.node });
     const commands = Object.entries(hooks).flatMap(([event, groups]) =>
       (
         handlersIn({ hooks: { [event]: groups } }) as {
@@ -816,7 +816,7 @@ export async function verifyBuild(
 
     ms = budget(VERIFY_MCP_MS);
     if (ms <= 0) return outOfTime;
-    const server = renderPluginMcp(launch.entry, launch.node).mcpServers.router as {
+    const server = renderPluginMcp(launch.entry, { node: launch.node }).mcpServers.router as {
       command: string;
       args: string[];
     };
@@ -1124,7 +1124,7 @@ export async function activate(
       const old = readRawState(root);
       await writeState(root, { ...old, pending: next });
 
-      const files = renderHostFiles(next.cli, launch);
+      const files = renderHostFiles(next.cli, { launch });
       const order = renderOrder(files);
       const oldBodies = new Map<string, string | null>();
       try {
@@ -1409,7 +1409,7 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
 /** Does `runtime/claude` hold, byte for byte, the runtime render for this launch? */
 function hostsMatch(hostsDir: string, version: string, launch: RuntimeLaunch): boolean {
   try {
-    return Object.entries(renderHostFiles(version, launch)).every(
+    return Object.entries(renderHostFiles(version, { launch })).every(
       ([path, body]) => readFileSync(join(hostsDir, path), 'utf8') === body,
     );
   } catch {

@@ -1283,7 +1283,7 @@ describe('readPluginLaunch', () => {
 
   it("reads the runtime render's absolute Node and entry", async () => {
     const launch = { node: '/h/.tenjin/runtime/node/24.14.0/bin/node', entry: '/h/e/index.js' };
-    await marketplaceAt(join(root, 'runtime', 'claude'), renderHostFiles(pkg.version, launch));
+    await marketplaceAt(join(root, 'runtime', 'claude'), renderHostFiles(pkg.version, { launch }));
     expect(await read()).toMatchObject({ command: launch.node, entry: launch.entry });
   });
 });

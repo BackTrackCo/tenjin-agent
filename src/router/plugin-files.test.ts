@@ -9,6 +9,7 @@ import { commandForm, handlersIn, shellDependence } from './hook-form';
 import {
   ALIVE_ARGS,
   ALLOW_HOOK,
+  cliLaunch,
   DENY_HOOK,
   PLUGIN_DIR,
   PLUGIN_FILES,
@@ -188,14 +189,28 @@ describe('every command the plugin carries', () => {
 describe('the runtime render', () => {
   const node = '/h/Jane Doe/.tenjin/runtime/node/24.0.0/bin/node';
   const entry = '/h/Jane Doe/.tenjin/runtime/versions/1.2.3/dist/index.js';
-  const files = renderHostFiles('1.2.3', { node, entry, platform: 'linux' });
+  const files = renderHostFiles('1.2.3', { launch: { node, entry, platform: 'linux' } });
 
   it('leaves the package render as it was when no launch is given', () => {
-    expect(renderHostFiles('1.2.3', undefined)).toEqual(renderHostFiles('1.2.3'));
-    expect(renderPluginFiles('1.2.3', undefined, undefined)).toEqual(renderPluginFiles('1.2.3'));
+    expect(renderHostFiles('1.2.3', {})).toEqual(renderHostFiles('1.2.3'));
+    expect(renderPluginFiles('1.2.3', undefined, {})).toEqual(renderPluginFiles('1.2.3'));
     expect(Object.keys(renderHostFiles('1.2.3')).some((p) => p.includes('/bin/'))).toBe(false);
     expect(DENY_HOOK.command).toBe('node');
     expect(ALLOW_HOOK.command).toBe('node');
+  });
+
+  /** One trailing options object, so another render option joins it rather than a new position. */
+  it('takes the Node as an option of the last argument, on every render', () => {
+    const folder = renderPluginFiles('1.2.3', entry, { node });
+    expect(JSON.parse(folder['hooks/hooks.json']!)).toEqual(renderPluginHooks(entry, { node }));
+    expect(JSON.parse(folder['.mcp.json']!)).toEqual(renderPluginMcp(entry, { node }));
+    expect(cliLaunch(['hook', 'alive'], entry, { node })).toEqual({
+      command: node,
+      args: [entry, 'hook', 'alive'],
+    });
+    for (const [path, body] of Object.entries(folder)) {
+      expect(files[`${PLUGIN_DIR}/${path}`], path).toBe(body);
+    }
   });
 
   it('runs every command with the absolute node, the permission answers included', () => {
@@ -248,10 +263,7 @@ describe('the runtime render', () => {
     const winNode = `${home}\\.tenjin\\runtime\\node\\24.0.0\\node.exe`;
     const winEntry = `${home}\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js`;
     const win = renderHostFiles('1.2.3', {
-      node: winNode,
-      entry: winEntry,
-      platform: 'win32',
-      home,
+      launch: { node: winNode, entry: winEntry, platform: 'win32', home },
     });
 
     it('runs node.exe and carries a CRLF, ASCII .cmd built from %USERPROFILE%', () => {
@@ -290,7 +302,7 @@ describe('the runtime render', () => {
       expect(() => renderLauncherCmd({ ...launch, node: 'D:\\node\\node.exe' })).toThrow();
       expect(() => renderLauncherCmd({ ...launch, node: 'C:\\Users\\Zoëx\\node.exe' })).toThrow();
       expect(() =>
-        renderHostFiles('1.2.3', { node: winNode, entry: winEntry, platform: 'win32' }),
+        renderHostFiles('1.2.3', { launch: { node: winNode, entry: winEntry, platform: 'win32' } }),
       ).toThrow();
     });
   });

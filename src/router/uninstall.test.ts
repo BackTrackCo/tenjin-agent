@@ -264,7 +264,9 @@ describe('a user install Claude Code does not record', () => {
   beforeEach(async () => {
     const written = await writePluginFolder(
       userFolder(),
-      renderPluginFiles('0.1.0-alpha.32', '/h/.tenjin/runtime/versions/x/dist/index.js', '/n'),
+      renderPluginFiles('0.1.0-alpha.32', '/h/.tenjin/runtime/versions/x/dist/index.js', {
+        node: '/n',
+      }),
     );
     expect(written.state).toBe('written');
   });
@@ -387,7 +389,9 @@ describe('all or nothing', () => {
     const folder = folderFor('local', env, home, other);
     const written = await writePluginFolder(
       folder,
-      renderPluginFiles('0.1.0-alpha.32', '/h/.tenjin/runtime/versions/x/dist/index.js', '/n'),
+      renderPluginFiles('0.1.0-alpha.32', '/h/.tenjin/runtime/versions/x/dist/index.js', {
+        node: '/n',
+      }),
     );
     expect(written.state).toBe('written');
     await persistRouterProject(data, other);

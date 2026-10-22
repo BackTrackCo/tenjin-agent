@@ -400,11 +400,9 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     );
     const project = join(root, 'proj');
     const folder = join(project, '.claude', 'skills', 'tenjin-router');
-    const files = renderPluginFiles(
-      '0.1.0-alpha.20',
-      versionEntry(runtimeRoot, '0.1.0-alpha.20'),
-      nodeBinPath(runtimeRoot, '22.0.0'),
-    );
+    const files = renderPluginFiles('0.1.0-alpha.20', versionEntry(runtimeRoot, '0.1.0-alpha.20'), {
+      node: nodeBinPath(runtimeRoot, '22.0.0'),
+    });
     for (const [path, body] of Object.entries(files)) {
       await mkdir(dirname(join(folder, path)), { recursive: true });
       await writeFile(join(folder, path), body);
