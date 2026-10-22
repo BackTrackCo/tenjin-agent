@@ -79,6 +79,26 @@ describe('parsePs', () => {
     expect(snapshot.claude).toEqual([{ pid: 100, startedAt: BEFORE, ppid: 1 }]);
   });
 
+  it('finds the Claude Code the desktop app started, whose path holds a space', () => {
+    const bin =
+      '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude';
+    const out = [
+      ps(90, 1, 'S', START, '/Applications/Claude.app/Contents/MacOS/Claude'),
+      ps(
+        95,
+        90,
+        'S',
+        START,
+        `/Applications/Claude.app/Contents/Helpers/disclaimer --pgroup -- ${bin} --verbose`,
+      ),
+      ps(100, 95, 'S', START, `${bin} --output-format stream-json --verbose`),
+      ps(300, 100, 'S', LATER, 'node /x/hosts/claude/tenjin/../../../index.js mcp --plugin'),
+    ].join('\n');
+    const snapshot = parsePs(out, 0);
+    expect(snapshot.routers).toEqual([expect.objectContaining({ pid: 300, underClaude: true })]);
+    expect(snapshot.claude).toEqual([{ pid: 100, startedAt: BEFORE, ppid: 95 }]);
+  });
+
   it('does not count a router `claude mcp get` started as under a session', () => {
     const out = [
       ps(100, 1, 'S', LATER, 'claude mcp get plugin:tenjin:router'),
@@ -97,6 +117,9 @@ describe('isClaudeCode', () => {
     '/Users/me/.local/share/claude/versions/2.1.296',
     'node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js',
     '/usr/local/bin/node /opt/claude-code/cli.js --continue',
+    '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude --output-format stream-json --verbose',
+    '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude',
+    'C:\\Program Files\\Claude\\claude.exe --resume',
   ])('is a session: %s', (args) => {
     expect(isClaudeCode(args)).toBe(true);
   });
@@ -113,6 +136,10 @@ describe('isClaudeCode', () => {
     'node /x/tenjin mcp',
     'vim claude.md',
     '/usr/bin/claudette',
+    '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude mcp list',
+    '/Applications/Claude.app/Contents/MacOS/Claude',
+    '/usr/bin/vim notes /opt/claude-code/cli.js',
+    '/usr/bin/less my notes/about claude-code.md',
   ])('is not a session: %s', (args) => {
     expect(isClaudeCode(args)).toBe(false);
   });

@@ -159,29 +159,58 @@ const INTERPRETER = /^(node|nodejs|bun)(\.exe)?$/i;
 
 /** Is this path Claude Code's own binary or bundle? */
 function isClaudePath(token: string): boolean {
-  const base = token.split(/[/\\]/).pop() ?? token;
   return (
-    base === 'claude' ||
-    base === 'claude.exe' ||
+    isClaudeBinary(token) ||
     token.includes('/claude/versions/') ||
     token.includes('/claude-code/') ||
     token.includes('@anthropic-ai/claude-code/cli.js')
   );
 }
 
+/** Is this the `claude` binary itself (its basename), not just a path under Claude Code's folder? */
+function isClaudeBinary(path: string): boolean {
+  const base = path.split(/[/\\]/).pop() ?? path;
+  return base === 'claude' || base === 'claude.exe';
+}
+
+/**
+ * Where Claude Code's path, starting at `tokens[at]`, ends: the index of the
+ * first token after it, or -1 when it is not Claude Code. `ps` joins the
+ * arguments with spaces, so a path that holds one (the desktop app's
+ * `/Users/<u>/Library/Application Support/Claude/claude-code/<ver>/.../claude`)
+ * spans several tokens. An absolute path is extended over the tokens after it
+ * while none starts a new path or a flag, and a joined path counts only when
+ * it ends at the `claude` binary itself.
+ */
+function claudePathEnd(tokens: string[], at: number): number {
+  const first = tokens[at];
+  if (first === undefined) return -1;
+  if (isClaudePath(first)) return at + 1;
+  if (!/^(\/|[A-Za-z]:\\)/.test(first)) return -1;
+  let path = first;
+  for (let i = at + 1; i < tokens.length; i += 1) {
+    const next = tokens[i]!;
+    if (/^[-/\\]/.test(next)) return -1;
+    path = `${path} ${next}`;
+    if (isClaudeBinary(path)) return i + 1;
+  }
+  return -1;
+}
+
 /**
  * A Claude Code SESSION, from its `ps` arguments: the first token is the
- * `claude` binary (or an installed version of it), or an interpreter running
- * Claude Code's bundle. Its one-shot subcommands (`claude mcp get`, `claude
- * plugin list`, `claude update`, ...) are not sessions, and are left out.
+ * `claude` binary (or an installed version of it, whose path may hold
+ * spaces), or an interpreter running Claude Code's bundle. Its one-shot
+ * subcommands (`claude mcp get`, `claude plugin list`, `claude update`, ...)
+ * are not sessions, and are left out.
  */
 export function isClaudeCode(args: string): boolean {
   const tokens = args.trim().split(/\s+/);
   let at = 0;
   if (tokens[0] !== undefined && INTERPRETER.test(tokens[0].split(/[/\\]/).pop() ?? '')) at = 1;
-  const bin = tokens[at];
-  if (bin === undefined || !isClaudePath(bin)) return false;
-  const sub = tokens[at + 1];
+  const end = claudePathEnd(tokens, at);
+  if (end < 0) return false;
+  const sub = tokens[end];
   return sub === undefined || !ONE_SHOT.has(sub);
 }
 
