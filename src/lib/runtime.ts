@@ -1367,10 +1367,8 @@ export interface RuntimeSetup {
   unpinned?: string;
   /** The step that works, said in place of a retry that would fail the same way. */
   fix?: string;
-  /** `kept` by a refresh that found a newer runtime and tried nothing: no failure to report. */
+  /** `kept` because the runtime already runs a newer build: no failure to report. */
   newer?: true;
-  /** The newer current a plain install rolled back from. */
-  replaced?: string;
   /** Set only for 'active'. */
   restore?: () => Promise<void>;
 }
@@ -1482,16 +1480,16 @@ export async function setupRuntime(o: {
     existsSync(launchOf(state.current).entry)
       ? state.current
       : null;
-  let replaced: string | undefined;
+  // AN OLDER BUILD NEVER REPLACES A NEWER ONE, refresh or not: npm's copy can
+  // outlive an update and still answer `tenjin`, and an install run from it must
+  // not silently roll every scope back. Going back is `tenjin uninstall`, then
+  // installing the older version.
   if (usable !== null && isNewer(usable.cli, o.version)) {
-    if (o.refresh) {
-      return {
-        ...runs(usable),
-        reason: `Tenjin ${usable.cli} is already set up here; this ${o.version} did not replace it`,
-        newer: true,
-      };
-    }
-    replaced = usable.cli;
+    return {
+      ...runs(usable),
+      reason: `Tenjin ${usable.cli} is already set up here; this ${o.version} did not replace it`,
+      newer: true,
+    };
   }
   if (
     usable !== null &&
@@ -1576,7 +1574,6 @@ export async function setupRuntime(o: {
       firstTime,
       launcher: activation.launcher,
       restore: activation.restore,
-      ...(replaced !== undefined ? { replaced } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

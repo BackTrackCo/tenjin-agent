@@ -1165,7 +1165,6 @@ describe('setupRuntime', () => {
         firstTime: true,
       });
       expect(first.restore).toBeTypeOf('function');
-      expect(first.replaced).toBeUndefined();
       expect(readRuntimeState(root)?.current).toEqual({ cli: '0.1.0-alpha.32', node: V });
 
       const fetchImpl = nodeServer();
@@ -1184,26 +1183,21 @@ describe('setupRuntime', () => {
   });
 
   it.skipIf(!POSIX)(
-    'keeps a newer current under refresh, and rolls back to this build without',
+    'never lets an older build replace a newer current, with or without refresh',
     async () => {
       await setup('0.1.0-alpha.40');
-      const kept = await setup('0.1.0-alpha.32', { refresh: true });
-      expect(kept).toMatchObject({
-        state: 'kept',
-        cli: '0.1.0-alpha.40',
-        entry: versionEntry(root, '0.1.0-alpha.40'),
-        reason:
-          'Tenjin 0.1.0-alpha.40 is already set up here; this 0.1.0-alpha.32 did not replace it',
-      });
-      expect(readRuntimeState(root)?.current.cli).toBe('0.1.0-alpha.40');
-
-      const rolled = await setup('0.1.0-alpha.32');
-      expect(rolled).toMatchObject({
-        state: 'active',
-        cli: '0.1.0-alpha.32',
-        replaced: '0.1.0-alpha.40',
-      });
-      expect(readRuntimeState(root)?.previous?.cli).toBe('0.1.0-alpha.40');
+      for (const opts of [{ refresh: true }, {}]) {
+        const kept = await setup('0.1.0-alpha.32', opts);
+        expect(kept).toMatchObject({
+          state: 'kept',
+          newer: true,
+          cli: '0.1.0-alpha.40',
+          entry: versionEntry(root, '0.1.0-alpha.40'),
+          reason:
+            'Tenjin 0.1.0-alpha.40 is already set up here; this 0.1.0-alpha.32 did not replace it',
+        });
+        expect(readRuntimeState(root)?.current.cli).toBe('0.1.0-alpha.40');
+      }
     },
   );
 

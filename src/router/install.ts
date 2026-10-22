@@ -766,7 +766,6 @@ function runtimeData(rt: RuntimeSetup | null): Record<string, unknown> | null {
     ...(rt.nodeVersion !== undefined ? { nodeVersion: rt.nodeVersion } : {}),
     ...(rt.reason !== undefined ? { reason: rt.reason } : {}),
     ...(rt.fix !== undefined ? { fix: rt.fix } : {}),
-    ...(rt.replaced !== undefined ? { replaced: rt.replaced } : {}),
   };
 }
 
@@ -1450,13 +1449,7 @@ function lines(
           warn(`The router did not answer: ${s.router.detail}`),
           ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
         ];
-  // A plain install of an older build is how a person rolls back; it says so.
-  const rollback =
-    s.rt?.replaced !== undefined
-      ? [`Replacing tenjin-cli ${s.rt.replaced} with ${pkg.version}.`]
-      : [];
   return [
-    ...rollback,
     s.plugin.state === 'failed'
       ? warn('Tenjin could not finish setting up Claude Code')
       : s.plugin.state === 'deferred'

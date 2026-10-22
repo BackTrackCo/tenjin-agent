@@ -6,7 +6,7 @@ Tenjin keeps working after a Node upgrade. Install copies Tenjin into `~/.tenjin
 
 The `tenjin` command is now a launcher in `~/.local/bin` (`tenjin.cmd` too on Windows), and the plugin carries the same launcher in its `bin/`, which Claude Code puts at the end of the Bash tool's PATH. When the runtime is gone, the launcher says so and names the fix: `npx -y tenjin-cli@latest install`, then start a new Claude Code session. Install says when `~/.local/bin` is not on your PATH and gives the line to add, and leaves a `tenjin` there that is not its own.
 
-`tenjin update` no longer needs npm. It downloads the new version from the npm registry, checks it against the registry's SHA-512, and has the new build check itself on its own Node before it switches anything; a failed check keeps the version you had. The previous version stays in the runtime, and older ones are removed only once nothing runs from them. `tenjin install` with an older build switches back to it, and says so.
+`tenjin update` no longer needs npm. It downloads the new version from the npm registry, checks it against the registry's SHA-512, and has the new build check itself on its own Node before it switches anything; a failed check keeps the version you had. The previous version stays in the runtime, and older ones are removed only once nothing runs from them. An older build never replaces a newer one; to go back, run `tenjin uninstall`, then install the older version.
 
 `tenjin doctor` checks the runtime Claude Code starts, and names an older `tenjin` first on your PATH, or a plugin an older build moved back to its npm folder.
 

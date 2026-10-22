@@ -362,18 +362,6 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     });
   });
 
-  it('a plain install that rolled back says so in exactly one line', async () => {
-    const result = await runRouterInstall(
-      {},
-      ctx(),
-      deps(async () => setup({ replaced: '0.1.0-alpha.99', firstTime: false })),
-    );
-    expect(result.humanLines!.filter((l) => l.startsWith('Replacing tenjin-cli'))).toEqual([
-      `Replacing tenjin-cli 0.1.0-alpha.99 with ${pkg.version}.`,
-    ]);
-    expect(runtimeOf(result)).toMatchObject({ replaced: '0.1.0-alpha.99' });
-  });
-
   /**
    * Where no `claude` binary could be run, a project's plugin folder runs a
    * runtime version and its Node by absolute path, and `state.json` names

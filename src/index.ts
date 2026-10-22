@@ -27,16 +27,14 @@ if (Number.isNaN(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
 // before `~/.local/bin` on PATH, so a `tenjin` typed in a terminal may be an
 // npm copy older than the runtime the plugin runs; it must not answer for it.
 // When the runtime's current version is strictly newer, this build runs that
-// one instead. `install` is exempt: it is how a person rolls back to the build
-// they ran, and its `--refresh` (what `tenjin update` runs) refuses to
-// downgrade on its own. The status line, the hooks and `tenjin mcp` pay
+// one instead, `install` included, so an old copy never sets up anything older
+// than what is already running. The status line, the hooks and `tenjin mcp` pay
 // nothing for this check; any failure falls through and this build runs.
 const verb = process.argv[2];
 if (
   verb !== 'status-line' &&
   verb !== 'hook' &&
   verb !== 'mcp' &&
-  verb !== 'install' &&
   process.env.TENJIN_HANDOFF !== '1'
 ) {
   const [{ handoffTarget }, { default: pkg }] = await Promise.all([
