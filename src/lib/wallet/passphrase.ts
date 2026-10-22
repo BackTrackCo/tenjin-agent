@@ -217,7 +217,7 @@ export interface PassphraseDeps {
   readDeadlineMs?: number;
   /**
    * Create and repair at a TTY: called once with KEYCHAIN_WAIT_LINE when
-   * storeDurably has not settled after `waitLineAfterMs`. Commands wire it to
+   * storeDurablyDetailed has not settled after `waitLineAfterMs`. Commands wire it to
    * stderr.
    */
   onWait?: (line: string) => void;
@@ -246,7 +246,7 @@ export type DurableWrite =
   | 'store-failed'
   | 'rejected-characters';
 
-/** Why `storePassphraseForWallet` could not produce a durable per-address copy. */
+/** A --replace archive write's outcome ({@link toStoreOutcome}); `no-store`: nowhere to write. */
 export type StorePassphraseOutcome =
   'stored' | 'no-store' | 'rejected-characters' | 'store-failed' | 'uncertain';
 
@@ -259,7 +259,7 @@ export interface StoreCallOptions {
  * A durable passphrase store, keyed by ACCOUNT (the wallet's lowercase address,
  * or the read-only legacy `wallet` slot). Reads never throw: they classify. A
  * write throws the StoreExecError (or the fs error, for the file store) so
- * storeDurably can tell a killed write, which may have committed, from a
+ * storeDurablyDetailed can tell a killed write, which may have committed, from a
  * definite failure.
  */
 interface PassphraseStore {
@@ -289,7 +289,7 @@ interface PassphraseStore {
  * through to a different, prompted passphrase while the committed value won
  * every later decrypt. That fall-through is gone. One secret per address is
  * chosen before any write, and every write is followed by a read-back
- * (storeDurably), so a killed write that did commit reads back as stored, and
+ * (storeDurablyDetailed), so a killed write that did commit reads back as stored, and
  * one that did not reads back as missing. The worst a kill leaves is an orphan
  * keychain entry for an address whose create was then abandoned, which no
  * wallet will ever read.
@@ -612,7 +612,7 @@ async function migrateLegacyEntry(
   return true;
 }
 
-/** storeDurably's outcome with the classified reason behind it, for the caller's message. */
+/** storeDurablyDetailed's outcome with the classified reason behind it, for the message. */
 export interface DurableWriteResult {
   outcome: DurableWrite;
   /** Why it was not stored, built from the classified kind only (S2). Absent on success. */
@@ -639,17 +639,6 @@ export interface DurableWriteResult {
  * started. At a terminal, a write still unsettled after a second prints
  * KEYCHAIN_WAIT_LINE once through `onWait`. The file store never waits.
  */
-export async function storeDurably(
-  deps: PassphraseDeps,
-  store: DurableStore,
-  address: string,
-  secret: string,
-  opts: { replaceIf?: (existing: string) => Promise<boolean> } = {},
-): Promise<DurableWrite> {
-  return (await storeDurablyDetailed(deps, store, address, secret, opts)).outcome;
-}
-
-/** {@link storeDurably}, also returning the classified detail behind a failure. */
 export async function storeDurablyDetailed(
   deps: PassphraseDeps,
   storeName: DurableStore,
@@ -749,10 +738,10 @@ function writeFailureDetail(
 }
 
 /**
- * S1: how storePassphraseForWallet maps storeDurably's DurableWrite. `stored`
- * only ever means the store holds the intended value: a store that holds a
- * DIFFERENT one (`conflict`, or `kept-existing`, which storePassphraseForWallet
- * never asks for since it passes no replaceIf) is `store-failed`.
+ * S1: how the --replace archive writer (local.ts) maps storeDurablyDetailed's
+ * DurableWrite. `stored` only ever means the store holds the intended value: a
+ * store that holds a DIFFERENT one (`conflict`, or `kept-existing`, which that
+ * writer never asks for since it passes no replaceIf) is `store-failed`.
  */
 export function toStoreOutcome(w: DurableWrite): Exclude<StorePassphraseOutcome, 'no-store'> {
   switch (w) {
@@ -771,26 +760,6 @@ export function toStoreOutcome(w: DurableWrite): Exclude<StorePassphraseOutcome,
     case 'rejected-characters':
       return 'rejected-characters';
   }
-}
-
-/**
- * Ensure `passphrase` has a durable per-address copy (used by `wallet create
- * --replace` to ARCHIVE the outgoing wallet's prompt-entered passphrase before
- * the switch). `target` defaults to the platform store; with neither, the
- * outcome is `no-store`. `stored` only when the entry reads back byte-identical
- * (an existing identical entry counts); a different value already there, or
- * after the write, is `store-failed`, never `stored` (S1). Never touches any
- * other entry.
- */
-export async function storePassphraseForWallet(
-  deps: PassphraseDeps,
-  address: string,
-  passphrase: string,
-  opts: { target?: DurableStore } = {},
-): Promise<StorePassphraseOutcome> {
-  const target = opts.target ?? storeFor(deps)?.source;
-  if (target === undefined) return 'no-store';
-  return toStoreOutcome(await storeDurably(deps, target, address, passphrase));
 }
 
 /** What `resolvePassphraseForCreate` chose, and where the secret now lives. */
@@ -843,7 +812,7 @@ export async function probeDurableStore(
  * with the variable set does not strand the wallet once the variable is gone.
  *
  * The write happens BEFORE the caller encrypts and is proven by reading it back
- * (storeDurably), so a generated passphrase can never be lost between
+ * (storeDurablyDetailed), so a generated passphrase can never be lost between
  * generating it and persisting the encrypted key: a generated secret that is
  * not proven stored refuses the create. An env secret is still the user's to
  * keep, so its create goes ahead with `durable: false`. This path never touches

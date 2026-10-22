@@ -4,8 +4,6 @@ import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib
 import type { DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
-export { createExclusive, firstNoticeFor } from './notice-markers';
-
 /**
  * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call on the paid
  * path pays $0.003 over x402 `batch-settlement`, and the stock SDK client in
