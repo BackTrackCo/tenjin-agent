@@ -28,11 +28,18 @@ import {
   type ArchivedWalletInfo,
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
-import { readWalletRecord, walletExistsError, walletFileExists } from '../lib/wallet/store';
+import {
+  readWalletRecord,
+  walletExistsError,
+  walletFileExists,
+  type WalletRecord,
+} from '../lib/wallet/store';
 import {
   describeStoreLocation,
   promptPassphrase,
+  resolvePassphrase,
   resolvePassphraseForCreate,
+  STORE_TIMEOUTS,
   storeNoun,
   unstorableWhy,
   type CreatePassphraseResult,
@@ -366,8 +373,10 @@ const SHELL_STARTUP_FILES = [
  * prompt, and marks the unlock as awaiting confirmation, which the next
  * session's router confirms ("Tenjin wallet unlocked.").
  *
- * With no terminal and no usable variable it refuses with REPAIR_IN_TERMINAL
- * and never suggests passing the passphrase inline (B1): a passphrase never
+ * With no terminal and a wrong variable, the saved passphrase is checked in
+ * its place, so a headless run still names the variable when the saved one
+ * already opens the wallet. With no terminal and nothing usable it refuses with
+ * REPAIR_IN_TERMINAL and never suggests passing the passphrase inline (B1): a passphrase never
  * goes on a command line or into chat. It reports success only when the store
  * reads this passphrase back (S1). A TENJIN_WALLET_PASSPHRASE in this shell
  * that does not open the wallet is named, with the startup-file line that
@@ -403,10 +412,22 @@ export async function runWalletRepair(
     // A mismatch is a tampered file; repair refuses it below with the tamper error.
     if (opened !== 'wrong') candidate = fromEnv;
   }
+  const interactive = ctx.io.isTTY && (opts.passphrase?.isTTY ?? Boolean(process.stdin.isTTY));
+  if (candidate === undefined && !interactive && envState === 'wrong') {
+    // Headless with a wrong variable: a SAVED passphrase that opens the wallet
+    // is the candidate, so an agent's run reaches the same conflict line (unset
+    // the variable) a person's prompt would, instead of a bare USAGE.
+    candidate = await savedPassphraseThatOpens(dir, env, record, opts.passphrase);
+  }
   if (candidate === undefined) {
-    const interactive = ctx.io.isTTY && (opts.passphrase?.isTTY ?? Boolean(process.stdin.isTTY));
     if (!interactive) {
-      throw new CliError('USAGE', 'No passphrase to check.', { fix: REPAIR_IN_TERMINAL });
+      throw new CliError(
+        'USAGE',
+        envState === 'wrong'
+          ? 'No passphrase to check: TENJIN_WALLET_PASSPHRASE is set but does not open this wallet, and no saved passphrase does.'
+          : 'No passphrase to check.',
+        { fix: REPAIR_IN_TERMINAL },
+      );
     }
     const entered = await promptPassphrase(
       { env, ...opts.passphrase },
@@ -480,6 +501,37 @@ export async function runWalletRepair(
       REPAIR_DONE_LINE,
     ],
   };
+}
+
+/**
+ * The saved passphrase (keychain, 0600 file or legacy slot; never the variable
+ * and never a prompt) when it opens this wallet, else undefined. Reads are
+ * bounded like doctor's verify, so a locked keychain cannot hang a headless
+ * run; any failure to read reads as "none".
+ */
+async function savedPassphraseThatOpens(
+  dir: string,
+  env: NodeJS.ProcessEnv,
+  record: WalletRecord,
+  overrides: PassphraseOverrides | undefined,
+): Promise<string | undefined> {
+  try {
+    const saved = await resolvePassphrase(
+      {
+        env,
+        dir,
+        ...overrides,
+        isTTY: false,
+        readDeadlineMs: overrides?.timeouts?.verifyReadMs ?? STORE_TIMEOUTS.verifyReadMs,
+      },
+      record.address,
+      { skipEnv: true },
+    );
+    const opened = await openKeystore(record.keystore, record.address, saved.passphrase);
+    return opened === 'ok' ? saved.passphrase : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Every TENJIN_WALLET_PASSPHRASE line in the usual shell startup files, as `~/<file>:<line>`. */

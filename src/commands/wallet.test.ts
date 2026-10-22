@@ -876,6 +876,54 @@ describe('runWalletRepair', () => {
     expect(`${err.message} ${err.fix}`).not.toContain('TENJIN_WALLET_PASSPHRASE=');
   });
 
+  it('headless with a wrong variable and a saved passphrase that opens: names the variable, not USAGE', async () => {
+    const address = await strandedWallet();
+    const account = address.toLowerCase();
+    const bashrc = ['# one', 'export TENJIN_WALLET_PASSPHRASE=the-wrong-one'].join('\n');
+    const prompt = vi.fn(async () => 'never');
+    const { exec } = fakeKeychain({ [account]: PASSPHRASE });
+    const res = await runWalletRepair(makeCtx(), {
+      home: '/home/someone',
+      readText: async (path) => (path === join('/home/someone', '.bashrc') ? bashrc : null),
+      env: { TENJIN_WALLET_PASSPHRASE: 'the-wrong-one' },
+      passphrase: { platform: 'darwin', isTTY: false, exec, prompt },
+    });
+    expect(prompt).not.toHaveBeenCalled();
+    const data = res.data as WalletRepairData;
+    expect(data.alreadySaved).toBe(true);
+    expect(data.passphraseStore).toBe('keychain');
+    expect(data.envOverride).toEqual({
+      state: 'wrong',
+      exports: [{ file: '~/.bashrc', line: 2 }],
+    });
+    expect(res.humanLines).toContain(
+      '! TENJIN_WALLET_PASSPHRASE is set in this shell but does not open this wallet. Tenjin now uses the saved passphrase, but remove the variable: `unset TENJIN_WALLET_PASSPHRASE`, and delete the export at ~/.bashrc:2.',
+    );
+    expect(JSON.stringify(res)).not.toContain('the-wrong-one');
+    expect(JSON.stringify(res)).not.toContain(PASSPHRASE);
+  });
+
+  it('headless with a wrong variable and nothing saved that opens: USAGE naming the variable (B1)', async () => {
+    const address = await strandedWallet();
+    const err = await catchCliError(
+      runWalletRepair(makeCtx(), {
+        ...noShellFiles,
+        env: { TENJIN_WALLET_PASSPHRASE: 'the-wrong-one' },
+        passphrase: {
+          platform: 'darwin',
+          isTTY: false,
+          exec: fakeKeychain({ [address.toLowerCase()]: 'also-wrong' }).exec,
+        },
+      }),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.message).toBe(
+      'No passphrase to check: TENJIN_WALLET_PASSPHRASE is set but does not open this wallet, and no saved passphrase does.',
+    );
+    expect(err.fix).toBe(REPAIR_IN_TERMINAL);
+    expect(JSON.stringify({ m: err.message, f: err.fix })).not.toContain('the-wrong-one');
+  });
+
   it('a conflict from the store fails, and never prints the done line (S1)', async () => {
     await strandedWallet();
     let wrote = false;
