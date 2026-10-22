@@ -23,6 +23,7 @@ import {
   activate,
   collect,
   ensureNode,
+  NewerRuntime,
   pathLine,
   placeVersion,
   readNodePin,
@@ -914,6 +915,23 @@ describe('activate', () => {
     expect(snapshot(join(home, '.local', 'bin'))).toEqual(afterA.bin);
   });
 
+  it('refuses, writing nothing, an older build once a newer one is current', async () => {
+    placed('1.0.0', '24.0.0');
+    placed('1.1.0', '24.0.0');
+    await activate(root, { cli: '1.1.0', node: '24.0.0' }, actOpts());
+    const before = {
+      claude: snapshot(join(root, 'claude')),
+      state: readFileSync(runtimeStatePath(root), 'utf8'),
+      bin: snapshot(join(home, '.local', 'bin')),
+    };
+    const refused = activate(root, { cli: '1.0.0', node: '24.0.0' }, actOpts());
+    await expect(refused).rejects.toBeInstanceOf(NewerRuntime);
+    await expect(refused).rejects.toMatchObject({ current: { cli: '1.1.0', node: '24.0.0' } });
+    expect(snapshot(join(root, 'claude'))).toEqual(before.claude);
+    expect(readFileSync(runtimeStatePath(root), 'utf8')).toBe(before.state);
+    expect(snapshot(join(home, '.local', 'bin'))).toEqual(before.bin);
+  });
+
   it('refuses, changing nothing, a version or Node a collect removed since it was placed', async () => {
     placed('1.0.0', '24.0.0');
     placed('1.1.0', '24.1.0');
@@ -1242,6 +1260,84 @@ describe('setupRuntime', () => {
         expect(readRuntimeState(root)?.current.cli).toBe('0.1.0-alpha.40');
       }
     },
+  );
+
+  it.skipIf(!POSIX)(
+    'never switches back to an older build when a newer install finished while it staged',
+    async () => {
+      let afterNewer: {
+        state: string;
+        claude: Record<string, string>;
+        bin: Record<string, string>;
+      };
+      // The older install read no runtime, staged, and verifies while the newer one runs whole.
+      const verify = (async () => {
+        expect((await setup('0.1.0-alpha.40')).state).toBe('active');
+        afterNewer = {
+          state: readFileSync(runtimeStatePath(root), 'utf8'),
+          claude: snapshot(join(root, 'claude')),
+          bin: snapshot(join(home, '.local', 'bin')),
+        };
+        return { ok: true };
+      }) as unknown as typeof verifyBuild;
+      const older = await setup('0.1.0-alpha.32', { verify });
+      expect(older).toMatchObject({
+        state: 'kept',
+        newer: true,
+        cli: '0.1.0-alpha.40',
+        reason:
+          'Tenjin 0.1.0-alpha.40 is already set up here; this 0.1.0-alpha.32 did not replace it',
+      });
+      expect(older.restore).toBeUndefined();
+      expect(readFileSync(runtimeStatePath(root), 'utf8')).toBe(afterNewer!.state);
+      expect(snapshot(join(root, 'claude'))).toEqual(afterNewer!.claude);
+      expect(snapshot(join(home, '.local', 'bin'))).toEqual(afterNewer!.bin);
+    },
+  );
+
+  it.skipIf(!POSIX)(
+    'writes no launcher for a build already current once a newer install has switched since',
+    async () => {
+      await setup('0.1.0-alpha.32');
+      const newer = await setup('0.1.0-alpha.40');
+      const afterNewer = {
+        state: readFileSync(runtimeStatePath(root), 'utf8'),
+        claude: snapshot(join(root, 'claude')),
+        bin: snapshot(join(home, '.local', 'bin')),
+      };
+      // Back to alpha.32 as current, alpha.40 still placed.
+      await newer.restore!();
+      expect(readRuntimeState(root)?.current.cli).toBe('0.1.0-alpha.32');
+      // Hold the lock, so this install reads alpha.32 as current and then waits for it.
+      mkdirSync(join(root, '.lock'));
+      writeFileSync(
+        join(root, '.lock', 'owner.json'),
+        JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
+      );
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      let settled: Awaited<ReturnType<typeof setupRuntime>> | undefined;
+      const again = setup('0.1.0-alpha.32').then((r) => (settled = r));
+      const waitUntil = performance.now() + 10_000;
+      while (vi.getTimerCount() === 0 && settled === undefined && performance.now() < waitUntil) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(settled).toBeUndefined();
+      // The newer install switches while this one waits, then lets the lock go.
+      writeFileSync(runtimeStatePath(root), afterNewer.state);
+      for (const [path, body] of Object.entries(afterNewer.claude)) {
+        writeFileSync(join(root, 'claude', path), body);
+      }
+      for (const [path, body] of Object.entries(afterNewer.bin)) {
+        writeFileSync(join(home, '.local', 'bin', path), body, { mode: 0o755 });
+      }
+      rmSync(join(root, '.lock'), { recursive: true });
+      await vi.advanceTimersByTimeAsync(100);
+      await again;
+      expect(settled).toMatchObject({ state: 'kept', newer: true, cli: '0.1.0-alpha.40' });
+      expect(snapshot(join(home, '.local', 'bin'))).toEqual(afterNewer.bin);
+      expect(readFileSync(runtimeStatePath(root), 'utf8')).toBe(afterNewer.state);
+    },
+    20_000,
   );
 
   it('falls back with no runtime and a failed download', async () => {

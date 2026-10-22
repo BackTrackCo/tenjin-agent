@@ -1097,14 +1097,31 @@ export interface Activation {
   restore: () => Promise<void>;
 }
 
+/** Are `p`'s Node and entry both in place, so the runtime can run it? */
+function runnable(root: string, p: RuntimePointer, platform: NodeJS.Platform): boolean {
+  return existsSync(nodeBinPath(root, p.node, platform)) && existsSync(versionEntry(root, p.cli));
+}
+
+/**
+ * `activate` refused, writing nothing: the runtime already runs `current`, a
+ * newer build than the one it was asked to switch to.
+ */
+export class NewerRuntime extends Error {
+  constructor(readonly current: RuntimePointer) {
+    super(`Tenjin ${current.cli} is already set up here`);
+  }
+}
+
 /**
  * SWITCH THE RUNTIME TO `next`, under the lock: record it as `pending`, render
  * `runtime/claude` for it, write the launchers, then make it `current` and
- * clear `pending` in one write. A crash in between leaves `pending` set, which
- * GC keeps and the next install re-renders; a render that throws puts the old
- * files back and leaves `pending`. `restore()` undoes the whole switch, for a
- * caller whose registration then failed, and does nothing once a later
- * activation has written `state.json` (its random `activation` id is gone).
+ * clear `pending` in one write. It throws {@link NewerRuntime}, writing
+ * nothing, when `current` is already a newer build that runs. A crash in
+ * between leaves `pending` set, which GC keeps and the next install
+ * re-renders; a render that throws puts the old files back and leaves
+ * `pending`. `restore()` undoes the whole switch, for a caller whose
+ * registration then failed, and does nothing once a later activation has
+ * written `state.json` (its random `activation` id is gone).
  */
 export async function activate(
   root: string,
@@ -1122,6 +1139,18 @@ export async function activate(
   return withRuntimeLock(
     root,
     async () => {
+      // AN OLDER BUILD NEVER REPLACES A NEWER ONE, checked again here: the
+      // caller read `current` before staging, without the lock, and a newer
+      // install may have switched to its own build since. Writing `next` now
+      // would silently roll every scope back.
+      const old = readRawState(root);
+      if (
+        old.current !== null &&
+        isNewer(old.current.cli, next.cli) &&
+        runnable(root, old.current, platform)
+      ) {
+        throw new NewerRuntime(old.current);
+      }
       // THE BUILD MUST STILL BE THERE: it was placed under an earlier hold of
       // the lock, and a collect may have run since. A switch to a folder that
       // is gone would leave Claude Code starting nothing.
@@ -1137,7 +1166,6 @@ export async function activate(
         );
       }
       const oldStateText = await readOrNull(runtimeStatePath(root));
-      const old = readRawState(root);
       await writeState(root, { ...old, pending: next });
 
       const files = renderHostFiles(next.cli, { launch, mod: await runtimeMod(launch) });
@@ -1494,36 +1522,55 @@ export async function setupRuntime(o: {
     launcher: null,
   });
 
+  const keptNewer = (p: RuntimePointer): RuntimeSetup => ({
+    ...runs(p),
+    reason: `Tenjin ${p.cli} is already set up here; this ${o.version} did not replace it`,
+    newer: true,
+  });
+
   const state = readRuntimeState(root);
-  const usable =
-    state !== null &&
-    existsSync(launchOf(state.current).node) &&
-    existsSync(launchOf(state.current).entry)
-      ? state.current
-      : null;
+  const usable = state !== null && runnable(root, state.current, platform) ? state.current : null;
   // AN OLDER BUILD NEVER REPLACES A NEWER ONE, refresh or not: npm's copy can
   // outlive an update and still answer `tenjin`, and an install run from it must
   // not silently roll every scope back. Going back is `tenjin uninstall`, then
-  // installing the older version.
-  if (usable !== null && isNewer(usable.cli, o.version)) {
-    return {
-      ...runs(usable),
-      reason: `Tenjin ${usable.cli} is already set up here; this ${o.version} did not replace it`,
-      newer: true,
-    };
-  }
-  if (
+  // installing the older version. `activate` checks again under the lock.
+  if (usable !== null && isNewer(usable.cli, o.version)) return keptNewer(usable);
+  const alreadyCurrent =
     usable !== null &&
     state !== null &&
     usable.cli === o.version &&
     state.pending === null &&
     completeValid(versionDir(root, usable.cli)) &&
     completeValid(join(root, 'node', usable.node)) &&
-    (await hostsMatch(hostsDir, o.version, launchOf(usable)))
-  ) {
-    const launcher = await writeLaunchers(o.home, launchOf(usable), { env: o.env, platform });
-    return { ...runs(usable), state: 'current', launcher };
-  }
+    (await hostsMatch(hostsDir, o.version, launchOf(usable)));
+
+  /**
+   * THE LAUNCHERS OF A BUILD ALREADY CURRENT, written under the lock and only
+   * while it still is: a newer install may have switched the runtime since
+   * `state` was read, and this build's launchers would then point every
+   * terminal back at it. Null when the state moved some other way, so the
+   * whole setup runs and re-renders.
+   */
+  const stillCurrent = (p: RuntimePointer): Promise<RuntimeSetup | null> =>
+    withRuntimeLock(
+      root,
+      async () => {
+        const now = readRawState(root);
+        if (
+          now.current !== null &&
+          isNewer(now.current.cli, p.cli) &&
+          runnable(root, now.current, platform)
+        ) {
+          return keptNewer(now.current);
+        }
+        if (now.pending !== null || now.current?.cli !== p.cli || now.current.node !== p.node) {
+          return null;
+        }
+        const launcher = await writeLaunchers(o.home, launchOf(p), { env: o.env, platform });
+        return { ...runs(p), state: 'current', launcher };
+      },
+      lockOpts(),
+    );
 
   const failed = (reason: string): RuntimeSetup =>
     usable !== null
@@ -1534,6 +1581,10 @@ export async function setupRuntime(o: {
   // the shell's proxy, is the proxy's (#470), which no retry on that Node fixes.
   let downloading = false;
   try {
+    if (alreadyCurrent) {
+      const current = await stillCurrent(usable);
+      if (current !== null) return current;
+    }
     const glibc = platform === 'linux' ? runningGlibc() : null;
     const key = nodeKey(platform, arch, glibc);
     const unpinned = unpinnedPlatform(platform, arch, glibc);
@@ -1597,6 +1648,7 @@ export async function setupRuntime(o: {
       restore: activation.restore,
     };
   } catch (err) {
+    if (err instanceof NewerRuntime) return keptNewer(err.current);
     const message = err instanceof Error ? err.message : String(err);
     const network =
       (err instanceof CliError && err.code === 'NETWORK_ERROR') || err instanceof BudgetGone;
