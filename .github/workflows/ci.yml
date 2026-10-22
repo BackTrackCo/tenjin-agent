@@ -40,6 +40,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
+      - name: Validate generated workspace guidance
+        run: node scripts/check-workspace-adapters.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
