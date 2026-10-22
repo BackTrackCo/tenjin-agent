@@ -308,8 +308,27 @@ export async function runRouterUninstall(
   } else {
     // THE MARKETPLACE GOES ONLY WHEN IT IS THE ONE `install` ADDED, and
     // unscoped from home: that clears every scope's record of it.
-    const listed = jsonList((await run(['plugin', 'marketplace', 'list', '--json'], home)).stdout);
-    const row = listed?.find((m) => m.name === MARKETPLACE_NAME);
+    const listing = await run(['plugin', 'marketplace', 'list', '--json'], home);
+    const listed = jsonList(listing.stdout);
+    if (listed === null) {
+      // A LIST THAT DID NOT ANSWER IS NOT AN ABSENT MARKETPLACE: it may still be
+      // registered on the runtime's folder, so the shared parts stay with it.
+      await cleanUp();
+      const again = againCommand(target);
+      throw new CliError(
+        'REFUSED',
+        `The ${MARKETPLACE_NAME} marketplace could not be checked (claude plugin marketplace list${listing.stderr.trim() !== '' ? `: ${listing.stderr.trim().slice(0, 200)}` : ''}). Removed: ${named(gone)}. Kept ${sharedParts(ctx.dataDir, home)}.`,
+        {
+          details: {
+            removed: gone.map(keyOf),
+            left: [`${MARKETPLACE_NAME} marketplace`],
+            removals,
+          },
+          fix: `Run \`${again}\` again.`,
+        },
+      );
+    }
+    const row = listed.find((m) => m.name === MARKETPLACE_NAME);
     if (row === undefined) marketplace = 'absent';
     else if (!(await ownMarketplace(row))) {
       marketplaceWhy = `kept the ${MARKETPLACE_NAME} marketplace: it is not one \`tenjin install\` added`;

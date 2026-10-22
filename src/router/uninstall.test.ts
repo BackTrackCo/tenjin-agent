@@ -45,6 +45,8 @@ let failIn: Set<string>;
 let staleIn: Set<string>;
 /** `claude plugin marketplace remove` fails, as a marketplace Claude Code holds open would. */
 let marketplaceRemoveFails: boolean;
+/** `claude plugin marketplace list` answers nothing readable. */
+let marketplaceListFails: boolean;
 
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'router-uninstall-')));
@@ -60,6 +62,7 @@ beforeEach(async () => {
   failIn = new Set();
   staleIn = new Set();
   marketplaceRemoveFails = false;
+  marketplaceListFails = false;
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -130,6 +133,7 @@ const fakeRun: NonNullable<RouterUninstallDeps['runClaude']> = async (_bin, args
     return { code: 1, stdout: '{"outcome":"error","message":"EBUSY"}\n', stderr: '' };
   }
   if (args.join(' ') === 'plugin marketplace list --json') {
+    if (marketplaceListFails) return { code: 1, stdout: '', stderr: 'settings unreadable' };
     return ok(
       JSON.stringify([
         { name: 'tenjin', source: 'directory', path: join(home, '.tenjin', 'runtime', 'claude') },
@@ -413,6 +417,38 @@ describe('all or nothing', () => {
     const out = await run();
     expect(out.data).toMatchObject({ remaining: [], marketplace: 'removed' });
     expect(sharedRemoved).toBe(1);
+  });
+
+  it('refuses when the marketplace cannot be listed, keeping the runtime and the launcher', async () => {
+    await writeRecords([userEntry()]);
+    marketplaceListFails = true;
+    let sharedRemoved = 0;
+    const shared: SharedParts = {
+      remove: async () => {
+        sharedRemoved += 1;
+        return { data: {}, humanLines: [] };
+      },
+      claudeLeft: async () => false,
+      keptFor: () => null,
+    };
+    const target: UninstallTarget = { kind: 'user' };
+    const err = await uninstallEach(
+      ['claude'],
+      data,
+      target,
+      () => runRouterUninstall({ target }, ctx(), deps(elsewhere)),
+      shared,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).exitCode).toBe(3);
+    expect(err).toMatchObject({
+      message:
+        'The tenjin marketplace could not be checked (claude plugin marketplace list: settings unreadable). Removed: your user install. Kept the tenjin marketplace.',
+      details: { removed: ['user'], left: ['tenjin marketplace'] },
+      fix: 'Run `tenjin uninstall` again.',
+    });
+    expect(sharedRemoved).toBe(0);
+    expect(calls.some((c) => c.args === 'plugin marketplace remove tenjin --json')).toBe(false);
   });
 
   it('removes nothing with no claude binary while installs are recorded', async () => {
