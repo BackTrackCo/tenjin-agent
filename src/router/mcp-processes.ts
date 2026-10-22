@@ -33,6 +33,11 @@ export interface McpProcess {
    * Codex one, a test harness. Absent (injected) counts as true.
    */
   underClaude?: boolean;
+  /**
+   * The CLI version it runs, when it runs from Tenjin's runtime
+   * (`runtime/versions/<v>/dist/index.js`). Absent for any other launch.
+   */
+  version?: string;
 }
 
 /**
@@ -121,13 +126,15 @@ export function parsePs(stdout: string, selfPid: number): ProcessSnapshot {
   const routers: McpProcess[] = [];
   const claude: McpProcess[] = [];
   for (const row of rows) {
-    if (row.pid !== selfPid && isTenjinMcp(row.args)) {
+    const mcp = row.pid !== selfPid ? tenjinMcp(row.args) : null;
+    if (mcp !== null) {
       routers.push({
         pid: row.pid,
         startedAt: row.startedAt,
         ppid: row.ppid,
         kind: routerKind(row.args),
         underClaude: underClaude(row),
+        ...(mcp.version !== undefined ? { version: mcp.version } : {}),
       });
     } else if (isClaudeCode(row.args)) {
       claude.push({ pid: row.pid, startedAt: row.startedAt, ppid: row.ppid });
@@ -215,18 +222,36 @@ export function isClaudeCode(args: string): boolean {
 }
 
 /**
- * `tenjin mcp`, however the bin was invoked: `node /path/bin/tenjin mcp`,
- * `tenjin mcp`, or the plugin's `node <plugin root>/../../../index.js mcp`.
+ * A runtime build's entry, `<root>/runtime/versions/<v>/dist/index.js`, with
+ * the version. Anchored at the token's end, because `ps` joins arguments with
+ * spaces: a data dir under a home with a space splits the path, and its last
+ * token still ends this way.
  */
-function isTenjinMcp(args: string): boolean {
+const RUNTIME_ENTRY = /[/\\]runtime[/\\]versions[/\\]([^/\\]+)[/\\]dist[/\\]index\.js$/;
+
+/**
+ * `tenjin mcp`, however the bin was invoked: `node /path/bin/tenjin mcp`,
+ * `tenjin mcp`, the npm folder plugin's `node <plugin root>/../../../index.js
+ * mcp`, or the runtime plugin's `<runtime node> <runtime>/versions/<v>/dist/index.js
+ * mcp`, which also says the version it runs. Null when it is none of these.
+ */
+function tenjinMcp(args: string): { version?: string } | null {
   const tokens = args.trim().split(/\s+/);
-  const bin = tokens.findIndex(
-    (t) =>
+  let version: string | undefined;
+  const bin = tokens.findIndex((t) => {
+    const runtime = RUNTIME_ENTRY.exec(t);
+    if (runtime !== null) {
+      version = runtime[1];
+      return true;
+    }
+    return (
       /(^|[/\\])tenjin(\.js|\.cmd)?$/.test(t) ||
       /[/\\]tenjin-cli[/\\]/.test(t) ||
-      /[/\\]hosts[/\\]claude[/\\]tenjin[/\\]\.\.[/\\]\.\.[/\\]\.\.[/\\]index\.js$/.test(t),
-  );
-  return bin >= 0 && tokens[bin + 1] === 'mcp';
+      /[/\\]hosts[/\\]claude[/\\]tenjin[/\\]\.\.[/\\]\.\.[/\\]\.\.[/\\]index\.js$/.test(t)
+    );
+  });
+  if (bin < 0 || tokens[bin + 1] !== 'mcp') return null;
+  return version !== undefined ? { version } : {};
 }
 
 /**
@@ -254,23 +279,27 @@ export interface McpServersState {
   check: RouterCheck;
 }
 
-/** Worded for the session the person is in: a slash command there, never a terminal. */
-export const RECONNECT_FIX =
-  'Type /reload-plugins in this Claude Code session, or start a new session.';
 /**
- * WHILE A SETTINGS INSTALL IS STILL HERE, only a new session. `/reload-plugins`
- * reconnects plugin servers alone, so the plugin would load beside a
- * pre-upgrade `x402` server that does not know to stay silent, and every
- * event would route twice for the rest of that session.
+ * Worded for the session the person is in, never a terminal. Only a new
+ * session: `/reload-plugins` reconnects the server but does not run the
+ * plugin's `SessionStart`, and while a settings install is still here it would
+ * load the plugin beside a pre-upgrade `x402` server, so every event would
+ * route twice.
  */
-export const NEW_SESSION_FIX =
-  'Start a new Claude Code session: the earlier Tenjin setup is still in this one, and /reload-plugins would run both.';
+export const RECONNECT_FIX =
+  'Start a new Claude Code session: this one still runs the earlier Tenjin build.';
+/** The same step while a settings install is still here; kept as its own export for its callers. */
+export const NEW_SESSION_FIX = RECONNECT_FIX;
 
 /**
  * The `mcp server` check from a process list and the install time. Never a
  * failure.
  *
- * STALE MEANS A CLAUDE CODE SESSION IS STILL RUNNING THE OLD BUILD. A Codex
+ * STALE MEANS A CLAUDE CODE SESSION IS STILL RUNNING THE OLD BUILD. A router
+ * launched from Tenjin's runtime says its version, so it is stale when that is
+ * not `version`, whenever it started: the runtime switches builds without any
+ * package being written. Any other router is stale when it started before the
+ * install. A Codex
  * router (`kind: 'codex'`) and one nothing Claude started (`underClaude:
  * false`: a terminal, a test) are not this check's business, so they are not
  * counted. An injected entry without those fields counts, as it always did.
@@ -298,15 +327,16 @@ export function mcpServersState(
     );
   }
   if (procs.length === 0) return check('none running (starts with the next session)');
-  if (installed === null) {
+  if (installed === null && procs.some((p) => p.version === undefined)) {
     return unchecked(`${procs.length} running; when this build was installed is unknown`);
   }
   const stale = procs.filter(
     (p) =>
       p.kind !== 'codex' &&
       p.underClaude !== false &&
-      p.startedAt !== null &&
-      p.startedAt < installed,
+      (p.version !== undefined
+        ? p.version !== version
+        : p.startedAt !== null && installed !== null && p.startedAt < installed),
   ).length;
   if (stale === 0) {
     return check(`${procs.length} running, all started after this install`);
@@ -360,12 +390,16 @@ export async function readProcessSnapshot(
   return { snapshot, installed };
 }
 
-/** The check, read from this machine (or the injected sources). */
+/**
+ * The check, read from this machine (or the injected sources). `version` is
+ * the build the plugin now runs, when that is not this one: `tenjin update`'s
+ * parent names the version it just moved the runtime to.
+ */
 export async function readMcpServers(
   deps: ProcessDeps = {},
-  opts: { settingsInstallPending?: boolean } = {},
+  opts: { settingsInstallPending?: boolean; version?: string } = {},
 ): Promise<McpServersState> {
   const { snapshot, installed } = await readProcessSnapshot(deps);
   const fix = opts.settingsInstallPending === true ? NEW_SESSION_FIX : RECONNECT_FIX;
-  return mcpServersState(snapshot?.routers ?? null, installed, pkg.version, fix);
+  return mcpServersState(snapshot?.routers ?? null, installed, opts.version ?? pkg.version, fix);
 }

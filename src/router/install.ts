@@ -1,6 +1,7 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
 import { persistRouterDefaults, persistRouterProject, type RouterLimits } from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
@@ -9,6 +10,7 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
+import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import {
   loadRawConfig,
@@ -39,6 +41,7 @@ import { CLAUDE_CODE_FLOOR } from './claude-cli';
 import {
   folderState,
   readPluginListing,
+  recordedInstalls,
   registerPlugin,
   type PluginRegistration,
   type PluginScope,
@@ -68,20 +71,28 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * the Claude Code plugin `tenjin`, registered with no step left to the person.
  *
  * WHAT IT WRITES. The wallet and the spend defaults under the data dir, as
- * before. The plugin is registered through Claude Code's own `claude plugin`
- * commands from this package's `dist/hosts/claude` folder (see
- * `plugin-registration.ts`), or written as a folder under the config dir's
- * `skills/` where no `claude` binary can be run. The plugin carries the seven
- * routing legs, the `router` MCP server, and the hooks that allow the request
- * tool and deny the legs' own tool to the model, so this command writes
- * nothing into `settings.json` or `~/.claude.json` itself.
+ * before. With the default data dir, this build is copied into Tenjin's own
+ * runtime, `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
+ * `~/.local/bin` (see `lib/runtime.ts`), and the plugin is registered from
+ * the runtime's `claude` folder, whose commands run that Node and that copy,
+ * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. A non-default
+ * data dir, a source checkout, or a runtime that could not be set up keeps
+ * the registration from this package's `dist/hosts/claude` folder, run by the
+ * `node` on PATH. Either way the plugin goes through Claude Code's own `claude
+ * plugin` commands (see `plugin-registration.ts`), or is written as a folder
+ * under the config dir's `skills/` where no `claude` binary can be run. The
+ * plugin carries the seven routing legs, the `router` MCP server, and the
+ * hooks that allow the request tool and deny the legs' own tool to the model,
+ * so this command writes nothing into `settings.json` or `~/.claude.json`
+ * itself.
  *
  * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
  * the spend question comes back for the agent to ask there, the funding question
  * with the install its answer picks, the `claude`
  * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
  * plugin command falls back to the folder, and the one step after it is
- * typing `/reload-plugins` in the same session, or starting the next one.
+ * starting a new Claude Code session: `/reload-plugins` does not run the
+ * plugin's `SessionStart`, so only a new session loads Tenjin fully.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -95,19 +106,20 @@ export const DISCLOSURE: readonly string[] = [
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];
 
-/** What the person does after a successful install, in the session they are in. */
-export const RELOAD_STEP =
-  'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
 /**
- * The same step while a settings install is still here: only a new session.
- * `/reload-plugins` would load the plugin beside the pre-upgrade `x402` server
- * that session is still running, and every event would route twice.
+ * What the person does after a successful install: only a new session.
+ * `/reload-plugins` does not run the plugin's `SessionStart`, and while a
+ * settings install is still here it would load the plugin beside the
+ * pre-upgrade `x402` server that session is still running, so every event
+ * would route twice.
  */
 export const NEW_SESSION_STEP = 'start a new Claude Code session so Tenjin loads';
+/** The same step; kept as its own export for its callers. */
+export const RELOAD_STEP = NEW_SESSION_STEP;
 
-/** The step that loads the plugin, given whether a settings install is still here. */
-export function loadStep(settingsInstallPresent: boolean): string {
-  return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
+/** The step that loads the plugin: a new session, whether or not a settings install is still here. */
+export function loadStep(_settingsInstallPresent: boolean): string {
+  return NEW_SESSION_STEP;
 }
 
 export interface RouterInstallArgs {
@@ -119,10 +131,13 @@ export interface RouterInstallArgs {
   project?: boolean;
   /**
    * Bring what this machine ALREADY has up to the running build: the plugin,
-   * or a settings install the plugin then replaces, with no config write. A
-   * refusal when nothing of ours is here. `tenjin update` spawns exactly this
-   * after it swaps the binary, so the flag's name and meaning are a
-   * compatibility contract.
+   * or a settings install the plugin then replaces, with no spend-limit
+   * write. A refusal when nothing of ours is here. It may add Tenjin's runtime
+   * and its launcher to an install that predates them (never a downgrade: a
+   * newer runtime is kept), and records the project installs Claude Code
+   * lists so `tenjin update` refreshes them too. `tenjin update` spawns
+   * exactly this after it swaps the binary, so the flag's name and meaning
+   * are a compatibility contract.
    */
   refresh?: boolean;
   /**
@@ -169,6 +184,8 @@ export interface RouterInstallDeps extends WalletDeps {
   fetchImpl?: typeof fetch;
   /** The wallet's USDC balance in atomic units; production reads Base. */
   walletBalance?: (address: string, rpcUrl: string) => Promise<bigint>;
+  /** Sets up Tenjin's runtime for this build; tests inject it, production runs `setupRuntime`. */
+  runtime?: (o: Parameters<typeof setupRuntime>[0]) => Promise<RuntimeSetup>;
 }
 
 export type LimitsChoice = 'approve' | 'own';
@@ -353,6 +370,13 @@ export async function runRouterInstall(
   const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
   const paths = settingsInstallPaths(project, env, home, cwd);
   const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
+  // CLAUDE CODE'S OWN PROJECT INSTALLS ARE RECORDED, before a refresh can
+  // refuse: `tenjin update` refreshes every recorded project after its home
+  // child, so a project an older release installed without recording it
+  // moves to the runtime with the rest. A user-scope run only; never fatal.
+  if (!project) {
+    await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
+  }
 
   if (args.refresh === true && !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))) {
     throw new CliError(
@@ -396,20 +420,49 @@ export async function runRouterInstall(
   // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
   // on any version and would silence the settings install in every session,
   // leaving the machine unrouted. So nothing is registered until `claude
-  // update`, and the settings install keeps routing.
-  const plugin: PluginRegistration =
-    !claude.meetsFloor && legacy.present
-      ? deferredRegistration(scope, claude)
-      : await registerPlugin({
-          binary: claude.binary,
-          scope,
-          version: pkg.version,
-          env,
-          home,
-          cwd,
-          ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
-          ...(deps.cliEntry !== undefined ? { cliEntry: deps.cliEntry } : {}),
-        });
+  // update`, and the settings install keeps routing, and no runtime is set up.
+  const deferred = !claude.meetsFloor && legacy.present;
+  // TENJIN'S OWN RUNTIME, set up before the plugin is registered from it. Only
+  // a folder rendered from a build that passed its checks is registered;
+  // anything else keeps today's registration from this package (`fallback`,
+  // `skipped`). A `kept` runtime (newer, or this build failed its checks)
+  // registers that runtime's own version. One user-scope `marketplace add`
+  // repoints every project install too, since Claude Code keeps one global
+  // `tenjin` row; a `--project` run repoints the same row to the same folder.
+  const rt = deferred
+    ? null
+    : await (deps.runtime ?? defaultRuntime)({
+        dataDir: ctx.dataDir,
+        home,
+        env,
+        version: pkg.version,
+        moduleDir: dirname(fileURLToPath(import.meta.url)),
+        refresh: args.refresh === true,
+      });
+  const launch = runtimeLaunch(rt);
+  const plugin: PluginRegistration = deferred
+    ? deferredRegistration(scope, claude)
+    : await registerPlugin({
+        binary: claude.binary,
+        scope,
+        version: launch?.version ?? pkg.version,
+        env,
+        home,
+        cwd,
+        ...(launch !== null
+          ? { hostsDir: launch.hostsDir, cliEntry: launch.cliEntry, node: launch.node }
+          : {
+              ...(deps.hostsDir !== undefined ? { hostsDir: deps.hostsDir } : {}),
+              ...(deps.cliEntry !== undefined ? { cliEntry: deps.cliEntry } : {}),
+            }),
+      });
+  // A registration that failed after this run switched the runtime puts the
+  // runtime back, so Claude Code is never left on a folder it was not given.
+  // Old versions are collected only once the plugin is registered.
+  if (rt !== null && launch !== null) {
+    if (plugin.state === 'failed') await rt.restore?.().catch(() => undefined);
+    else await collectRuntime(rt.root);
+  }
   // A PROJECT INSTALL IS RECORDED, so `tenjin update`, which refreshes from
   // home where this scope is not visible, refreshes it from here too.
   if (project && plugin.state !== 'failed') {
@@ -427,13 +480,16 @@ export async function runRouterInstall(
   // A `tenjin mcp` that started before this install runs the old build until
   // its session reloads it. Named, never killed.
   const pending = settingsInstallStays(migration);
-  const servers = await readMcpServers(deps, { settingsInstallPending: pending });
+  const servers = await readMcpServers(deps, {
+    settingsInstallPending: pending,
+    ...(launch !== null ? { version: launch.version } : {}),
+  });
   const serverLines =
     servers.stale > 0
       ? [paint(ctx.io, 'yellow', `! ${servers.check.detail}. ${servers.check.fix ?? ''}`.trim())]
       : [];
   const claudeCode = claudeCodeData(claude);
-  const notices = refreshNotices(plugin, claude, migration);
+  const notices = refreshNotices(plugin, claude, migration, rt, home);
   if (args.refresh === true) {
     // A refresh that could not register the plugin is not a converged install,
     // unless the settings install it would replace still routes here.
@@ -455,9 +511,11 @@ export async function runRouterInstall(
         removedSkills,
         scope,
         mcpServer: servers.check,
+        runtime: runtimeData(rt),
+        launcher: rt?.launcher ?? null,
       },
       humanLines: [
-        ...refreshLines(ctx, plugin, claude, migration),
+        ...refreshLines(ctx, plugin, claude, migration, rt, home),
         ...removedKeysLines,
         ...serverLines,
       ],
@@ -523,6 +581,8 @@ export async function runRouterInstall(
     disclosure: DISCLOSURE,
     removedSkills,
     mcpServer: servers.check,
+    runtime: runtimeData(rt),
+    launcher: rt?.launcher ?? null,
   };
   return {
     data,
@@ -537,11 +597,135 @@ export async function runRouterInstall(
         policy: effective.policy,
         ...(spendAsk !== undefined ? { spendAsk } : {}),
         router,
+        rt,
+        home,
       }),
       ...removedKeysLines,
       ...serverLines,
     ],
   };
+}
+
+/** Loaded lazily: the status line shares this module's chunk and must not load the runtime. */
+async function defaultRuntime(o: Parameters<typeof setupRuntime>[0]): Promise<RuntimeSetup> {
+  const { setupRuntime } = await import('../lib/runtime');
+  return setupRuntime(o);
+}
+
+/** GC of the runtime's unused versions: an optimisation that never holds install up or fails it. */
+async function collectRuntime(root: string): Promise<void> {
+  try {
+    const { collect } = await import('../lib/runtime');
+    await collect(root, { lockWaitMs: 5_000 });
+  } catch {
+    // The next install collects them.
+  }
+}
+
+/** What the plugin is registered from when the runtime has a build for it, or null for this package. */
+function runtimeLaunch(
+  rt: RuntimeSetup | null,
+): { version: string; hostsDir: string; cliEntry: string; node: string } | null {
+  if (rt === null || (rt.state !== 'active' && rt.state !== 'current' && rt.state !== 'kept')) {
+    return null;
+  }
+  if (
+    rt.cli === undefined ||
+    rt.hostsDir === undefined ||
+    rt.entry === undefined ||
+    rt.node === undefined
+  ) {
+    return null;
+  }
+  return { version: rt.cli, hostsDir: rt.hostsDir, cliEntry: rt.entry, node: rt.node };
+}
+
+function runtimeData(rt: RuntimeSetup | null): Record<string, unknown> | null {
+  if (rt === null) return null;
+  return {
+    state: rt.state,
+    root: rt.root,
+    ...(rt.cli !== undefined ? { cli: rt.cli } : {}),
+    ...(rt.nodeVersion !== undefined ? { nodeVersion: rt.nodeVersion } : {}),
+    ...(rt.reason !== undefined ? { reason: rt.reason } : {}),
+    ...(rt.replaced !== undefined ? { replaced: rt.replaced } : {}),
+  };
+}
+
+/**
+ * Adds to `install.routerProjects` every project install Claude Code records
+ * that is still on disk and not yet there. An unreadable record adds nothing.
+ */
+async function recordClaudeProjects(
+  dataDir: string,
+  known: readonly string[],
+  env: NodeJS.ProcessEnv,
+  home: string,
+): Promise<void> {
+  const records = await recordedInstalls(env, home).catch(() => null);
+  if (records === null || records.every((r) => r.projectPath === null)) return;
+  const seen = new Set([
+    ...known,
+    ...(await Promise.all(known.map((dir) => realpath(dir).catch(() => dir)))),
+  ]);
+  for (const { projectPath } of records) {
+    if (projectPath === null || seen.has(projectPath)) continue;
+    if ((await stat(projectPath).catch(() => null))?.isDirectory() !== true) continue;
+    seen.add(projectPath);
+    await persistRouterProject(dataDir, projectPath).catch(() => undefined);
+  }
+}
+
+/** `path` with the home folder written as `~`. */
+function tilde(path: string, home: string): string {
+  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
+}
+
+/** The first activation's line, said once: where Tenjin runs from now. */
+function runtimeSentence(rt: RuntimeSetup, home: string): string | null {
+  if (rt.state !== 'active' || !rt.firstTime) return null;
+  return `Runs from ${tilde(rt.root, home)} on its own Node ${rt.nodeVersion ?? ''}, so a Node upgrade or \`npm rm -g tenjin-cli\` no longer stops it.`;
+}
+
+/** Why the plugin still runs on the Node on PATH. */
+function fallbackSentence(rt: RuntimeSetup): string | null {
+  if (rt.state !== 'fallback') return null;
+  return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; run \`tenjin install\` again to retry.`;
+}
+
+/**
+ * What the person needs to know about the `tenjin` launcher: only a file in
+ * its place that is not Tenjin's, a write that failed, or a launcher folder
+ * off PATH. npm's own link there (npm prefix `~/.local`) says nothing.
+ */
+function launcherSentence(launcher: LauncherResult | null, home: string): string | null {
+  if (launcher === null) return null;
+  if (launcher.state === 'foreign') {
+    const who = launcher.reason?.replace(/ is not Tenjin's$/, '') ?? launcher.paths[0] ?? '';
+    return `${who} is not Tenjin's, so it was left as it is, and \`tenjin\` there runs that file instead of Tenjin's runtime. Move it aside and run \`tenjin install\` again to put Tenjin's there.`;
+  }
+  if (launcher.state === 'failed') {
+    const dir = launcher.paths[0] !== undefined ? tilde(dirname(launcher.paths[0]), home) : '';
+    return `Tenjin's \`tenjin\` launcher could not be written to ${dir} (${launcher.reason ?? 'unknown reason'}), so a terminal finds \`tenjin\` only through npm's copy; run \`tenjin install\` again to retry.`;
+  }
+  if ((launcher.state === 'written' || launcher.state === 'current') && !launcher.onPath) {
+    return `~/.local/bin is not on your PATH, so a terminal will not find \`tenjin\` once npm's copy is gone (inside Claude Code the plugin's own \`tenjin\` is on the Bash tool's PATH). Add it: ${launcher.pathLine ?? ''}`;
+  }
+  return null;
+}
+
+/** The runtime's lines under install's summary: where it runs from, or what needs the person. */
+function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home: string): string[] {
+  if (rt === null) return [];
+  const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
+  const runs = runtimeSentence(rt, home);
+  const fallback = fallbackSentence(rt);
+  const launcher = launcherSentence(rt.launcher, home);
+  return [
+    ...(runs !== null ? [`  ${runs}`] : []),
+    ...(fallback !== null ? [warn(fallback)] : []),
+    ...(launcher !== null ? [warn(launcher)] : []),
+  ];
 }
 
 function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
@@ -676,6 +860,8 @@ function refreshNotices(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   migration: Migration,
+  rt: RuntimeSetup | null,
+  home: string,
 ): string[] {
   const out: string[] = [];
   if (plugin.state === 'deferred') {
@@ -689,6 +875,13 @@ function refreshNotices(
   }
   const status = statusLineNotice(migration);
   if (status !== null) out.push(status);
+  if (rt !== null) {
+    const runs = runtimeSentence(rt, home);
+    if (runs !== null) out.push(`Tenjin ${runs.charAt(0).toLowerCase()}${runs.slice(1)}`);
+    for (const sentence of [fallbackSentence(rt), launcherSentence(rt.launcher, home)]) {
+      if (sentence !== null) out.push(sentence);
+    }
+  }
   return out;
 }
 
@@ -1091,6 +1284,8 @@ function lines(
     policy: SpendPolicy;
     spendAsk?: QuestionStep;
     router: RouterCheck;
+    rt: RuntimeSetup | null;
+    home: string;
   },
 ): string[] {
   const ok = paint(ctx.io, 'green', '✓');
@@ -1116,7 +1311,13 @@ function lines(
           warn(`The router did not answer: ${s.router.detail}`),
           ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
         ];
+  // A plain install of an older build is how a person rolls back; it says so.
+  const rollback =
+    s.rt?.replaced !== undefined
+      ? [`Replacing tenjin-cli ${s.rt.replaced} with ${pkg.version}.`]
+      : [];
   return [
+    ...rollback,
     s.plugin.state === 'failed'
       ? warn('Tenjin could not finish setting up Claude Code')
       : s.plugin.state === 'deferred'
@@ -1125,6 +1326,7 @@ function lines(
     ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
       ? ['  For this project only; check it with: tenjin doctor --project']
       : []),
+    ...runtimeLines(ctx, s.rt, s.home),
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...(s.fund !== undefined ? fundLines(s.fund) : []),
@@ -1143,8 +1345,11 @@ function refreshLines(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   migration: Migration,
+  rt: RuntimeSetup | null,
+  home: string,
 ): string[] {
   const issues = [
+    ...runtimeLines(ctx, rt, home),
     ...pluginLines(ctx, plugin),
     ...claudeLines(ctx, claude),
     ...migrationLines(ctx, migration),

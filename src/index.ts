@@ -23,6 +23,37 @@ if (Number.isNaN(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
   process.exit(1);
 }
 
+// A STALE COPY HANDS OFF TO TENJIN'S RUNTIME. npm's global bin folder can come
+// before `~/.local/bin` on PATH, so a `tenjin` typed in a terminal may be an
+// npm copy older than the runtime the plugin runs; it must not answer for it.
+// When the runtime's current version is strictly newer, this build runs that
+// one instead. `install` is exempt: it is how a person rolls back to the build
+// they ran, and its `--refresh` (what `tenjin update` runs) refuses to
+// downgrade on its own. The status line, the hooks and `tenjin mcp` pay
+// nothing for this check; any failure falls through and this build runs.
+const verb = process.argv[2];
+if (
+  verb !== 'status-line' &&
+  verb !== 'hook' &&
+  verb !== 'mcp' &&
+  verb !== 'install' &&
+  process.env.TENJIN_HANDOFF !== '1'
+) {
+  const [{ handoffTarget }, { default: pkg }] = await Promise.all([
+    import('./lib/runtime-layout'),
+    import('../package.json'),
+  ]);
+  const target = handoffTarget(import.meta.url, pkg.version, process.env);
+  if (target !== null) {
+    const { spawnSync } = await import('node:child_process');
+    const run = spawnSync(target.node, [target.entry, ...process.argv.slice(2)], {
+      stdio: 'inherit',
+      env: { ...process.env, TENJIN_HANDOFF: '1' },
+    });
+    if (run.error === undefined) process.exit(run.status ?? 1);
+  }
+}
+
 // THE STATUS LINE NEVER LOADS THE CLI. Claude Code runs it once a second for as
 // long as a session is open, and commander, zod and the command tree are parse
 // cost it has no use for. Only the bare invocation is diverted; `--help` and

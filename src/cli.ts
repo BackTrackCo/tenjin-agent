@@ -139,12 +139,14 @@ export function buildProgram(
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
-    // `install --refresh` promises to converge what exists and create nothing.
-    // Under `tenjin update` the child is held to that by TENJIN_NO_UPDATE_CHECK,
-    // but a hand-run refresh arrives here with nothing set, and the nudge below
-    // would materialize `update-check.json` under a data dir this mode was not
-    // allowed to add a single file to. Read here rather than in the command
-    // body: the nudge fires after the body has already thrown its refusal.
+    // `install --refresh` promises to converge what exists and add nothing but
+    // Tenjin's runtime, its launcher and the record of Claude Code's project
+    // installs. Under `tenjin update` the child is held to that by
+    // TENJIN_NO_UPDATE_CHECK, but a hand-run refresh arrives here with nothing
+    // set, and the nudge below would materialize `update-check.json` under a
+    // data dir this mode was not allowed to add it to. Read here rather than in
+    // the command body: the nudge fires after the body has already thrown its
+    // refusal.
     const refreshRun = command === 'install' && cmd.optsWithGlobals().refresh === true;
     // Read BEFORE the envelope, from the last check's cache only: this is the
     // agent's copy of the nudge, and it must not cost a network call or a delay.
