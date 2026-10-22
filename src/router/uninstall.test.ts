@@ -8,6 +8,7 @@ import { CliError } from '../lib/errors';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { describeStoreLocation } from '../lib/wallet/passphrase';
 import type { ClaudeRun } from './claude-cli';
+import { uninstallEach, type SharedParts } from './hosts';
 import { LAUNCHER_MARKER, renderPluginFiles } from './plugin-files';
 import { pluginFolderPath, writePluginFolder } from './plugin-folder';
 import { folderFor } from './plugin-registration';
@@ -42,6 +43,8 @@ let calls: { args: string; cwd: string }[];
 let failIn: Set<string>;
 /** Folders where `claude plugin uninstall` answers not_installed and keeps the record (a cwd Claude Code does not match). */
 let staleIn: Set<string>;
+/** `claude plugin marketplace remove` fails, as a marketplace Claude Code holds open would. */
+let marketplaceRemoveFails: boolean;
 
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'router-uninstall-')));
@@ -56,6 +59,7 @@ beforeEach(async () => {
   calls = [];
   failIn = new Set();
   staleIn = new Set();
+  marketplaceRemoveFails = false;
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -121,6 +125,9 @@ const fakeRun: NonNullable<RouterUninstallDeps['runClaude']> = async (_bin, args
     raw.plugins['tenjin@tenjin'] = keep;
     await writeFile(recordsFile(), JSON.stringify(raw));
     return ok('{"outcome":"ok"}\n');
+  }
+  if (args.join(' ') === 'plugin marketplace remove tenjin --json' && marketplaceRemoveFails) {
+    return { code: 1, stdout: '{"outcome":"error","message":"EBUSY"}\n', stderr: '' };
   }
   if (args.join(' ') === 'plugin marketplace list --json') {
     return ok(
@@ -364,6 +371,48 @@ describe('all or nothing', () => {
     expect((user as CliError).fix).toBe(
       'Run `tenjin uninstall` again; if it still fails, type /plugin uninstall tenjin@tenjin in a Claude Code session.',
     );
+  });
+
+  /**
+   * The marketplace is the runtime's `claude` folder: while Claude Code still
+   * registers it, the runtime, and the launcher a retry runs, stay.
+   */
+  it('refuses when the marketplace cannot be removed, keeping the runtime and the launcher', async () => {
+    await writeRecords([userEntry()]);
+    marketplaceRemoveFails = true;
+    let sharedRemoved = 0;
+    const shared: SharedParts = {
+      remove: async () => {
+        sharedRemoved += 1;
+        return { data: {}, humanLines: [] };
+      },
+      claudeLeft: async () => false,
+      keptFor: () => null,
+    };
+    const target: UninstallTarget = { kind: 'user' };
+    const run = () =>
+      uninstallEach(
+        ['claude'],
+        data,
+        target,
+        () => runRouterUninstall({ target }, ctx(), deps(elsewhere)),
+        shared,
+      );
+    const err = await run().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).exitCode).toBe(3);
+    expect(err).toMatchObject({
+      message:
+        'The tenjin marketplace could not be removed (claude plugin marketplace remove: EBUSY). Removed: your user install. Kept the tenjin marketplace.',
+      details: { removed: ['user'], left: ['tenjin marketplace'] },
+      fix: 'Run `tenjin uninstall` again; if it still fails, run `claude plugin marketplace remove tenjin`, then `tenjin uninstall`.',
+    });
+    expect(sharedRemoved).toBe(0);
+    // The retry it names finds the marketplace with no plugin left, and finishes.
+    marketplaceRemoveFails = false;
+    const out = await run();
+    expect(out.data).toMatchObject({ remaining: [], marketplace: 'removed' });
+    expect(sharedRemoved).toBe(1);
   });
 
   it('removes nothing with no claude binary while installs are recorded', async () => {

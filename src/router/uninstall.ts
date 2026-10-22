@@ -38,7 +38,9 @@ import {
  * ALL OR NOTHING FOR THE SHARED PARTS. The marketplace (and, through `finish`
  * in `hosts.ts`, Tenjin's runtime and its launcher) go only when no install is
  * left anywhere and every removal this run asked for succeeded. A removal that
- * fails refuses, naming what was removed and what is left.
+ * fails refuses, naming what was removed and what is left; so does a
+ * marketplace Claude Code would not remove, which keeps the runtime its folder
+ * lives in, and the launcher that retries.
  *
  * THE WALLET AND `spend.json` STAY. Removing an integration is not a reason to
  * destroy a key that holds funds or a ledger that records what was spent; both
@@ -284,9 +286,9 @@ export async function runRouterUninstall(
     }
   };
 
+  const named = (list: Removal[]) => list.map(labelOf).join(', ') || 'nothing';
   if (left.length > 0) {
     await cleanUp();
-    const named = (list: Removal[]) => list.map(labelOf).join(', ') || 'nothing';
     throw new CliError(
       'REFUSED',
       `${left.length} Tenjin install${left.length === 1 ? '' : 's'} could not be removed: ${left.map((r) => `${labelOf(r)}${r.reason !== undefined ? ` (${r.reason})` : ''}`).join(', ')}. Removed: ${named(gone)}. Kept ${sharedParts(ctx.dataDir, home)}.`,
@@ -316,10 +318,31 @@ export async function runRouterUninstall(
         ['plugin', 'marketplace', 'remove', MARKETPLACE_NAME, '--json'],
         home,
       );
-      if (removed.code === 0) marketplace = 'removed';
-      else {
-        marketplaceWhy = `kept the ${MARKETPLACE_NAME} marketplace: claude plugin marketplace remove did not succeed`;
+      if (removed.code !== 0) {
+        // A MARKETPLACE STILL REGISTERED KEEPS ITS FOLDER: it is the runtime's
+        // `claude` folder, so the runtime and the launcher a retry runs must
+        // stay with it. A refusal keeps `uninstallEach` from removing them.
+        await cleanUp();
+        const result = jsonResult(removed.stdout);
+        const why =
+          typeof result?.message === 'string'
+            ? result.message
+            : removed.stderr.trim().slice(0, 200);
+        const again = againCommand(target);
+        throw new CliError(
+          'REFUSED',
+          `The ${MARKETPLACE_NAME} marketplace could not be removed (claude plugin marketplace remove${why !== '' ? `: ${why}` : ''}). Removed: ${named(gone)}. Kept ${sharedParts(ctx.dataDir, home)}.`,
+          {
+            details: {
+              removed: gone.map(keyOf),
+              left: [`${MARKETPLACE_NAME} marketplace`],
+              removals,
+            },
+            fix: `Run \`${again}\` again; if it still fails, run \`claude plugin marketplace remove ${MARKETPLACE_NAME}\`, then \`${again}\`.`,
+          },
+        );
       }
+      marketplace = 'removed';
     }
   }
   await cleanUp();
@@ -354,18 +377,22 @@ export async function runRouterUninstall(
  * Claude Code's own command, in each project's folder where one is left.
  */
 function retryFix(target: UninstallTarget, left: Removal[]): string {
-  const again =
-    target.kind === 'all'
-      ? 'tenjin uninstall --all'
-      : target.kind === 'project'
-        ? `tenjin uninstall --project ${shellWord(target.path)}`
-        : 'tenjin uninstall';
+  const again = againCommand(target);
   const projects = left.flatMap((r) => (r.projectPath !== null ? [r.projectPath] : []));
   const where =
     projects.length === 0
       ? 'a Claude Code session'
       : `a Claude Code session started in ${projects.join(', ')}${projects.length < left.length ? ' (any session for your user install)' : ''}`;
   return `Run \`${again}\` again; if it still fails, type /plugin uninstall ${PLUGIN_ID} in ${where}.`;
+}
+
+/** This run's own target as a command: a bare run here finds the same install; from elsewhere it would not. */
+function againCommand(target: UninstallTarget): string {
+  return target.kind === 'all'
+    ? 'tenjin uninstall --all'
+    : target.kind === 'project'
+      ? `tenjin uninstall --project ${shellWord(target.path)}`
+      : 'tenjin uninstall';
 }
 
 /** `path` as one shell word: quoted only when it needs to be. */
