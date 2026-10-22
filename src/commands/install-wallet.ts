@@ -11,7 +11,12 @@ import {
   unlockReasonOf,
   type DurableStore,
 } from '../lib/wallet-unlock';
-import { canSign, signFromVerification, type SignVerdict } from '../router/eligibility';
+import {
+  canSign,
+  isDefiniteBlock,
+  signFromVerification,
+  type SignVerdict,
+} from '../router/eligibility';
 import {
   readProcessSnapshot,
   type ListMcpProcesses,
@@ -341,7 +346,9 @@ function withoutEnvPassphrase(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  *    Ready means every Claude Code can sign. Otherwise the full env: ready
  *    means only this variable opens it (`shellOnly: 'passphrase'`); anything
  *    else reports the saved-store verdict, except that "no passphrase" is not
- *    definite while the variable is set (S13), so it is unknown.
+ *    definite while the variable is set (S13): it is the full env's definite
+ *    block (a wrong variable, `env_passphrase_wrong`) when there is one, as
+ *    doctor reports it, and unknown otherwise.
  * 3. Otherwise one verify.
  */
 export async function defaultWalletSigning(
@@ -380,6 +387,8 @@ export async function defaultWalletSigning(
         return { signing: { ...full, source: 'passphrase-env' }, shellOnly: 'passphrase' };
       }
       if (saved.status === 'blocked' && saved.reason === 'passphrase_missing') {
+        // The variable was tried and definitely failed: that is the answer.
+        if (isDefiniteBlock(full)) return { signing: full };
         return {
           signing: {
             status: 'unknown',
