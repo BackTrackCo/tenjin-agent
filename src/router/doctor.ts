@@ -3,6 +3,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, posix, resolve, sep, win32 } from 'node:path';
 import pkg from '../../package.json';
+import { hasCode } from '../lib/errno';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import { defaultDataDir, launcherDir, runtimeDir } from '../lib/paths';
@@ -136,6 +137,12 @@ export interface PluginLaunch {
   command: string | null;
   /** Its first argument, `${CLAUDE_PLUGIN_ROOT}` expanded; null when it has none. */
   entry: string | null;
+  /**
+   * The plugin's `.mcp.json` is not there at all: the folder Claude Code loads
+   * was deleted (an npm prefix a Node upgrade took, or the runtime), so
+   * nothing can start the router from it.
+   */
+  missing?: true;
 }
 
 export interface VersionRun {
@@ -228,11 +235,12 @@ export async function runRouterDoctor(
   // Which fixes fit: the ones that blame the `node` on Claude Code's PATH only
   // when that is what starts the plugin, read from the folder Claude Code
   // loads. One under `runtime/claude` whose files are gone is the runtime's.
+  // A folder that no longer holds the plugin is no PATH's fault, whichever it is.
   const fromPath =
     launch === null
       ? state === null
       : launch.command === null
-        ? !(await inRuntimeFolder(launch, root))
+        ? !(await pluginGone(launch, root))
         : launch.command === 'node';
   const layout: Layout = !fromPath
     ? 'runtime'
@@ -905,13 +913,24 @@ export async function readPluginLaunch(
   }
   if (found === null) return null;
   // A folder Claude Code still loads from, with its files gone (the runtime
-  // deleted), is said as that: where it loads from is known, and empty.
-  const none = { path: found.path, source: found.source, command: null, entry: null };
+  // deleted, or the npm prefix a Node upgrade took), is said as that: where
+  // it loads from is known, and empty.
+  let missing = false;
   const mcp = (await readFile(join(found.plugin, '.mcp.json'), 'utf8')
     .then((text) => JSON.parse(text) as unknown)
-    .catch(() => null)) as {
+    .catch((err: unknown) => {
+      missing = hasCode(err, 'ENOENT') || hasCode(err, 'ENOTDIR');
+      return null;
+    })) as {
     mcpServers?: Record<string, { command?: unknown; args?: unknown }>;
   } | null;
+  const none = {
+    path: found.path,
+    source: found.source,
+    command: null,
+    entry: null,
+    ...(missing ? { missing: true as const } : {}),
+  };
   const server = mcp?.mcpServers?.[MCP_SERVER_NAME];
   if (typeof server?.command !== 'string') return none;
   const first = Array.isArray(server.args) ? server.args[0] : undefined;
@@ -955,6 +974,17 @@ async function inRuntimeFolder(launch: PluginLaunch, root: string): Promise<bool
   return launch.source === 'marketplace' && samePath(launch.path, join(root, 'claude'));
 }
 
+/**
+ * Does the folder Claude Code loads hold no plugin at all: `runtime/claude`
+ * with no router to read, or any folder whose `.mcp.json` is gone? Either
+ * way the router cannot start, and only a reinstall puts it back.
+ */
+async function pluginGone(launch: PluginLaunch, root: string): Promise<boolean> {
+  return (
+    launch.command === null && (launch.missing === true || (await inRuntimeFolder(launch, root)))
+  );
+}
+
 const exists = async (path: string): Promise<boolean> =>
   (await stat(path).catch(() => null)) !== null;
 const samePath = async (a: string, b: string): Promise<boolean> =>
@@ -968,7 +998,8 @@ function tilde(path: string, home: string): string {
 /**
  * THE RUNTIME CLAUDE CODE STARTS, by what the plugin's `.mcp.json` names:
  *
- * - `runtime/claude` with no router to read: the runtime was deleted, so
+ * - `runtime/claude` with no router to read, or any folder whose `.mcp.json`
+ *   is gone (the runtime deleted, or the npm prefix a Node upgrade took):
  *   Claude Code cannot start the router (the one required failure);
  * - a marketplace outside `runtime/claude` while a runtime exists: an older
  *   build moved it back (warn);
@@ -1006,7 +1037,7 @@ async function runtimeCheck(i: {
     detail: "where Claude Code starts Tenjin from could not be read from the plugin's .mcp.json",
   };
   if (launch === null) return unread;
-  if (launch.command === null && (await inRuntimeFolder(launch, i.root))) {
+  if (await pluginGone(launch, i.root)) {
     return {
       name,
       status: 'fail',

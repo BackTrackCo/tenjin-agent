@@ -1011,6 +1011,46 @@ describe('the runtime rows', () => {
     ]);
   });
 
+  /**
+   * PR 1 or alpha.30 registered npm's folder; a Node upgrade deleted that
+   * prefix, so Claude Code loads a folder that is gone, and no runtime exists
+   * yet. The runtime row fails with the npx reinstall, and nothing blames the
+   * `node` on Claude Code's PATH.
+   */
+  it('fails, with the npx reinstall, when the npm folder Claude Code loads is gone', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const npm = join(root, 'old-prefix', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+    const gone: PluginLaunch = {
+      path: join(npm, 'hosts', 'claude'),
+      source: 'marketplace',
+      command: null,
+      entry: null,
+      missing: true,
+    };
+    const over = {
+      readLaunch: async () => gone,
+      listProcesses: async () => ({ routers: [], claude: [{ pid: 9, startedAt: 2_000 }] }),
+    };
+    const { by, out } = await run(over);
+    expect(out).toBeInstanceOf(CliError);
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'fail',
+      required: true,
+      detail: `Claude Code loads Tenjin from ${join(npm, 'hosts', 'claude')}, which no longer holds its plugin, so the router cannot start`,
+      fix: FAIL_FIX,
+    });
+    for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
+      expect(fix).toBe(
+        'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+      );
+    }
+    const project = await run({ ...over, project: true });
+    expect(project.by['runtime']?.fix).toBe(
+      'Run `npx -y tenjin-cli@latest install --project`, then start a new Claude Code session.',
+    );
+  });
+
   it('says a platform with no pinned Node runs npm’s copy by design, and never offers the move', async () => {
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
     const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
@@ -1223,7 +1263,14 @@ describe('readPluginLaunch', () => {
       source: 'marketplace',
       command: null,
       entry: null,
+      missing: true,
     });
+  });
+
+  it('does not call a .mcp.json that is there but unreadable missing', async () => {
+    const path = join(root, 'pkg', 'dist', 'hosts', 'claude');
+    await marketplaceAt(path, { 'tenjin/.mcp.json': '{not json' });
+    expect(await read()).toEqual({ path, source: 'marketplace', command: null, entry: null });
   });
 
   it("reads the runtime render's absolute Node and entry", async () => {
