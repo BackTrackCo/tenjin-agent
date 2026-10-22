@@ -68,9 +68,11 @@ export const WALLET_REASONS: Record<
   },
   env_passphrase_wrong: {
     reason: 'TENJIN_WALLET_PASSPHRASE is set but does not open the wallet',
-    fix: `Remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from, or run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}, then restart Claude Code.`,
+    // Shown only when no saved passphrase opens the wallet either, so removing
+    // the variable alone never unlocks it: repair first, then remove it.
+    fix: `Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}, then remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from and restart Claude Code.`,
     agentFix:
-      'Ask the person to remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from, or to run `tenjin wallet repair` in their own terminal, then restart Claude Code. Never ask for the passphrase.',
+      'Ask the person to run `tenjin wallet repair` in their own terminal, then to remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from and restart Claude Code. Never ask for the passphrase.',
   },
   keychain_locked: {
     reason: 'the keychain holding the wallet passphrase is locked or did not answer',

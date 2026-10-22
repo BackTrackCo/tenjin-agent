@@ -4,9 +4,9 @@
 
 Claude Code's message line, the session's first message or `tenjin doctor` says Tenjin cannot use its wallet, and names one of these reasons. Until it is fixed, Tenjin lookups take the free path and paid lookups do not run; your assistant's own tools keep working.
 
-- **`no saved wallet passphrase can be reached`.** The passphrase was never saved where Claude Code can read it, or the file Tenjin saved it in is gone. Before 0.1.0-alpha.31, a passphrase typed at a prompt, or given in `TENJIN_WALLET_PASSPHRASE` for one command, was not saved when no keychain answered. Run `tenjin wallet repair` (below).
+- **`no saved wallet passphrase can be reached`.** The passphrase was never saved where Claude Code can read it, or the file Tenjin saved it in is gone. Before 0.1.0-alpha.31, a passphrase given in `TENJIN_WALLET_PASSPHRASE` when the wallet was created was never saved, and one typed at the create prompt was not saved either (create prompted only when no keychain answered). Run `tenjin wallet repair` (below).
 - **`the saved wallet passphrase does not open the wallet`.** The keychain or the passphrase file holds a passphrase, but not this wallet's. Run `tenjin wallet repair` (below).
-- **`TENJIN_WALLET_PASSPHRASE is set but does not open the wallet`.** The variable in the environment Claude Code starts from is wrong, and no saved passphrase opens the wallet either. Remove the variable (below), or run `tenjin wallet repair`.
+- **`TENJIN_WALLET_PASSPHRASE is set but does not open the wallet`.** The variable in the environment Claude Code starts from is wrong, and no saved passphrase opens the wallet either, so removing the variable alone does not unlock it. Run `tenjin wallet repair` (below) first, then remove the variable (below).
 - **`the keychain holding the wallet passphrase is locked or did not answer`.** The passphrase is saved, but the keychain did not hand it over. Unlock your keychain (or log in to the desktop session) and retry. Nothing needs repairing, and Tenjin never switches to another passphrase on its own.
 
 ### Run `tenjin wallet repair`
@@ -21,7 +21,7 @@ It checks that the passphrase opens this wallet, saves it the way `tenjin wallet
 
 ### Remove a wrong `TENJIN_WALLET_PASSPHRASE`
 
-Only when a message says the variable is wrong (`TENJIN_WALLET_PASSPHRASE is set but wrong; remove it.`, the reason above, or repair's own line), remove it from the environment Claude Code starts from, and delete the line that exports it from your shell startup file (repair names the file and line):
+Only when a message says the variable is wrong (`TENJIN_WALLET_PASSPHRASE is set but wrong; remove it.`, or repair's own line), remove it from the environment Claude Code starts from, and delete the line that exports it from your shell startup file (repair names the file and line). When the reason is `TENJIN_WALLET_PASSPHRASE is set but does not open the wallet`, run `tenjin wallet repair` first: no saved passphrase opens the wallet until it does.
 
 ```bash
 unset TENJIN_WALLET_PASSPHRASE
