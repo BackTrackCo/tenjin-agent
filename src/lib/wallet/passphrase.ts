@@ -816,7 +816,8 @@ export interface CreatePassphraseResult {
  * keychain, no PowerShell, or a platform with no OS store at all) and sends the
  * secret to the 0600 file. `uncertain` (killed at 3 s, refused, anything
  * unclear) is NOT absent: the store exists and may just be locked, so callers
- * refuse rather than fall to plaintext (S3).
+ * refuse rather than fall to plaintext (S3). DPAPI has no lock, so its probe is
+ * never `uncertain`: anything but a missing PowerShell is `available`.
  */
 export async function probeDurableStore(
   deps: PassphraseDeps,
@@ -1123,9 +1124,14 @@ function dpapiStore(deps: PassphraseDeps): PassphraseStore {
         );
         return { probe: 'available' };
       } catch (err) {
+        // DPAPI has no lock state: the only thing a probe can learn is whether
+        // powershell.exe exists. A slow cold start killed at the probe bound, or
+        // any other answer, still means it does, so it is never `uncertain`
+        // (which would refuse create and repair with an unlock fix that cannot
+        // apply). A write that then fails is reported by the write itself.
         const failure = classifyStoreFailure('dpapi', err);
         if (failure.kind === 'absent') return { probe: 'absent', detail: failure.detail };
-        return { probe: 'uncertain', ...('detail' in failure ? { detail: failure.detail } : {}) };
+        return { probe: 'available' };
       }
     },
   };

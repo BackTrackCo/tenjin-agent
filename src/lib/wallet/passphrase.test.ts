@@ -1086,7 +1086,7 @@ describe('probeDurableStore', () => {
     await expect(run(killedErr('secret-tool'))).resolves.toMatchObject({ probe: 'uncertain' });
   });
 
-  it('win32: powershell resolving is available, ENOENT absent, anything else uncertain', async () => {
+  it('win32: ENOENT is absent and anything else is available (DPAPI has no lock)', async () => {
     const run = (out: { stdout: string } | Error) =>
       probeDurableStore({
         env: {},
@@ -1099,7 +1099,9 @@ describe('probeDurableStore', () => {
       probe: 'available',
     });
     await expect(run(enoent('powershell.exe'))).resolves.toMatchObject({ probe: 'absent' });
-    await expect(run(exited('powershell.exe', 1))).resolves.toMatchObject({ probe: 'uncertain' });
+    await expect(run(exited('powershell.exe', 1))).resolves.toMatchObject({ probe: 'available' });
+    // A cold powershell.exe killed at the 3 s probe bound is slow, not locked.
+    await expect(run(killedErr('powershell.exe'))).resolves.toMatchObject({ probe: 'available' });
   });
 
   it('a platform without an OS store is absent, with no exec', async () => {
