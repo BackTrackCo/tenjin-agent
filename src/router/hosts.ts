@@ -1,4 +1,5 @@
 import { readFile, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CommandContext, CommandResult } from '../context';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -44,8 +45,36 @@ async function writeHosts(dataDir: string, hosts: readonly Harness[]): Promise<v
   await writeFileAtomic(path, `${JSON.stringify({ hosts }, null, 2)}\n`, { mode: 0o600 });
 }
 
-export async function recordInstalledHost(dataDir: string, host: Harness): Promise<void> {
-  const hosts = (await readInstalledHosts(dataDir)) ?? [];
+/**
+ * Is the Claude Code plugin here already, from a release that wrote no record?
+ * Claude Code's own plugin list file, as doctor reads it with no binary, or
+ * the plugin folder of ours at user scope.
+ */
+export async function claudePluginPresent(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): Promise<boolean> {
+  const [{ listedInClaudeFiles }, { folderState }] = await Promise.all([
+    import('./doctor'),
+    import('./plugin-registration'),
+  ]);
+  if (await listedInClaudeFiles(env, home)) return true;
+  return (await folderState('user', env, home, home)).state === 'ours';
+}
+
+/**
+ * A host whose setup finished. The first record on a machine whose Claude
+ * Code plugin came from a release before the record starts with Claude Code,
+ * so doctor and uninstall keep covering it.
+ */
+export async function recordInstalledHost(
+  dataDir: string,
+  host: Harness,
+  present: () => Promise<boolean> = () => claudePluginPresent(),
+): Promise<void> {
+  const recorded = await readInstalledHosts(dataDir);
+  const hosts =
+    recorded ?? (host !== 'claude' && (await present().catch(() => false)) ? ['claude'] : []);
   if (hosts.includes(host)) return;
   await writeHosts(
     dataDir,

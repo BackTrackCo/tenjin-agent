@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import { CliError } from '../lib/errors';
 import {
   agentHost,
   checkEach,
+  claudePluginPresent,
   detectHosts,
   forgetInstalledHost,
   HOSTS_FILE,
@@ -40,7 +41,7 @@ const both = async (): Promise<Harness[]> => ['claude', 'codex'];
 describe('the installed-hosts record', () => {
   it('records each host once, in a fixed order, and forgets it again', async () => {
     expect(await readInstalledHosts(dir)).toBeNull();
-    await recordInstalledHost(dir, 'codex');
+    await recordInstalledHost(dir, 'codex', async () => false);
     await recordInstalledHost(dir, 'claude');
     await recordInstalledHost(dir, 'codex');
     expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
@@ -57,7 +58,7 @@ describe('the installed-hosts record', () => {
   });
 
   it('checks or removes the recorded hosts, unless overridden or project-scoped', async () => {
-    await recordInstalledHost(dir, 'codex');
+    await recordInstalledHost(dir, 'codex', async () => false);
     expect(await recordedHosts({}, dir)).toEqual(['codex']);
     expect(await recordedHosts({ harness: 'claude' }, dir)).toEqual(['claude']);
     expect(await recordedHosts({ project: true }, dir)).toEqual(['claude']);
@@ -117,6 +118,30 @@ describe('otherHostNote', () => {
       humanLines: ['done', 'Codex is also installed.'],
     });
     expect(withNote(out, undefined)).toBe(out);
+  });
+});
+
+describe('the first record on a machine with a released Claude Code install', () => {
+  it('starts with Claude Code, so bare doctor and uninstall still cover it', async () => {
+    const config = join(dir, 'claude');
+    await mkdir(join(config, 'plugins'), { recursive: true });
+    await writeFile(
+      join(config, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ plugins: { 'tenjin@tenjin': [] } }),
+    );
+    const env = { CLAUDE_CONFIG_DIR: config };
+    expect(await claudePluginPresent(env, dir)).toBe(true);
+    expect(await claudePluginPresent({ CLAUDE_CONFIG_DIR: join(dir, 'none') }, dir)).toBe(false);
+    await recordInstalledHost(dir, 'codex', () => claudePluginPresent(env, dir));
+    expect(await readInstalledHosts(dir)).toEqual(['claude', 'codex']);
+    expect(await recordedHosts({}, dir)).toEqual(['claude', 'codex']);
+  });
+
+  it('records the host alone with no Claude Code plugin, and never re-seeds a record', async () => {
+    await recordInstalledHost(dir, 'codex', async () => false);
+    expect(await readInstalledHosts(dir)).toEqual(['codex']);
+    await recordInstalledHost(dir, 'codex', async () => true);
+    expect(await readInstalledHosts(dir)).toEqual(['codex']);
   });
 });
 
