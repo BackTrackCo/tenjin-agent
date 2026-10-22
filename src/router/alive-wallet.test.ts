@@ -24,23 +24,28 @@ async function wallet(config: Record<string, unknown> = {}): Promise<void> {
 }
 
 describe('the wallet notice at session start', () => {
-  it('says an empty wallet, with the fund command and the $5 floor', async () => {
+  it('says the balance, with the fund command and the $5 floor, and no address', async () => {
     await wallet({ maxAutoSpend: '250000' });
-    expect(await walletNotice(dir, { read: async () => 0n })).toBe(
-      'Tenjin wallet 0x5c6e…B7ff holds $0.00: run `tenjin wallet fund` to add $5 or more, and lookups pay from it.',
-    );
+    const notice = await walletNotice(dir, { read: async () => 0n });
+    expect(notice).toBe('Tenjin balance: $0.00. Run `tenjin wallet fund` to add $5 or more.');
+    // The balance, never the wallet's address.
+    expect(notice).not.toMatch(/0x/i);
   });
 
   it('says a wallet under the per-call limit, and nothing for one at or over it', async () => {
     await wallet({ maxAutoSpend: '250000' });
-    expect(await walletNotice(dir, { read: async () => 100_000n })).toContain('holds $0.10');
+    expect(await walletNotice(dir, { read: async () => 100_000n })).toContain(
+      'Tenjin balance: $0.10.',
+    );
     await rm(join(dir, 'balance.json'), { force: true });
     expect(await walletNotice(dir, { read: async () => 250_000n })).toBeNull();
   });
 
   it('uses the default per-call limit when the config sets none', async () => {
     await wallet();
-    expect(await walletNotice(dir, { read: async () => 30_000n })).toContain('holds $0.03');
+    expect(await walletNotice(dir, { read: async () => 30_000n })).toContain(
+      'Tenjin balance: $0.03.',
+    );
     await rm(join(dir, 'balance.json'), { force: true });
     expect(await walletNotice(dir, { read: async () => 300_000n })).toBeNull();
   });

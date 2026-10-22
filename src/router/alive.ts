@@ -152,10 +152,7 @@ export async function walletNotice(
       : DEFAULT_MAX_AUTO_SPEND,
   );
   if (balance > 0n && balance >= cap) return null;
-  return (
-    `Tenjin wallet ${address.slice(0, 6)}…${address.slice(-4)} holds $${dollars(balance)}: ` +
-    'run `tenjin wallet fund` to add $5 or more, and lookups pay from it.'
-  );
+  return `Tenjin balance: $${dollars(balance)}. Run \`tenjin wallet fund\` to add $5 or more.`;
 }
 
 /** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
