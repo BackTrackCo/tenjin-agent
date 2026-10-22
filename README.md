@@ -15,9 +15,10 @@
 
 <p align="center">
   <a href="#install">Install</a> ·
-  <a href="#tools">Tools</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#wallet-and-limits">Wallet and limits</a>
+  <a href="#try-it">Try it</a> ·
+  <a href="#what-your-agent-can-do">Tools</a> ·
+  <a href="#wallet-and-limits">Wallet and limits</a> ·
+  <a href="#request-a-tool">Request a tool</a>
 </p>
 
 <p align="center">
@@ -53,31 +54,40 @@ tenjin install          # adds the plugin and creates your wallet
 tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
 
-Needs Claude Code 2.1.287+ and Node.js 22+. Codex support is on the way.
+Needs Claude Code 2.1.287+ and Node.js 22+. Add `--project` to set it up for one project only. Codex support is on the way.
 
-Then work as usual. Try:
+## Try it
+
+Work as usual. Ask for something your agent can't do on its own:
 
 ```text
-> What are BTC and ETH trading at?
-> How do I paginate list results with the Stripe Node SDK?
-> Is ada@example.com a deliverable address?
-> Integrate x^2 sin(x) dx from 0 to pi.
+> Generate a 10-second voiceover that says "Welcome to Tenjin"
+> Make a whoosh sound effect for a page transition
+> Make a hero image of plum blossoms in ukiyo-e style
+> Make a 5-second video of a paper crane unfolding
+> Summarize the risk factors in Nvidia's latest 10-K
+> What are people on Reddit saying about Bun vs Node lately?
 ```
 
-## Tools
+The router names the tool and its price, and your agent calls it.
 
-| Your agent needs                                   | Provider                       |
-| -------------------------------------------------- | ------------------------------ |
-| Web research                                       | Exa                            |
-| A page's contents                                  | Firecrawl                      |
-| Current library docs                               | Context7                       |
-| Math and computation                               | Wolfram Alpha                  |
-| Live crypto prices                                 | CoinMarketCap                  |
-| People, companies and emails                       | Apollo, CompanyEnrich, Hunter  |
-| X and Reddit                                       | glim                           |
-| Images, video, voice, papers, SEC filings and more | Reviewed pay-per-call services |
+## What your agent can do
 
-Most lookups cost a cent or two. [Every tool and its price →](https://tenjin.sh/tools) · [Request a tool](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement)
+| Your agent needs                       | With                            | Per call     |
+| -------------------------------------- | ------------------------------- | ------------ |
+| Library docs                           | Context7                        | free         |
+| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢ |
+| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢     |
+| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢  |
+| X and Reddit                           | glim                            | 0.1¢ to 1¢   |
+| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14¢  |
+| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 3¢ to 12¢    |
+| Video clips                            | MiniMax Hailuo, Google Veo      | 42¢ to 45¢   |
+| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢   |
+| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢           |
+| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢  |
+
+We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
 ## How it works
 
@@ -96,9 +106,11 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 | Per day  | $5      | `tenjin config set sessionBudget 2`   |
 | Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
-A call over a limit pays nothing until you say yes. Routing costs $0.003 a call. [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
+- A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
+- Routing costs $0.003 a call, on top of the tool's price. $5 covers about 500 web searches, 130 images or 40 voiceovers.
+- Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
-Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
+[How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 
@@ -111,6 +123,13 @@ tenjin update                          # newest version; wallet and settings sta
 tenjin config set router.enabled false # pause the router
 tenjin uninstall                       # remove the plugin; your wallet stays
 ```
+
+## Request a tool
+
+Tenjin is in alpha, and the catalog grows with what people ask for.
+
+- **[Request a tool →](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement)**
+- **[Report a bug →](https://github.com/BackTrackCo/tenjin-agent/issues/new?labels=bug)**
 
 ## Learn more
 
