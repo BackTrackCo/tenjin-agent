@@ -938,13 +938,21 @@ describe('the runtime rows', () => {
     });
     expect(missing.by['runtime']?.detail).toContain('~/.local/bin/tenjin is missing');
     await writeFile(launcher(), '');
-    const off = await run({
+    const offPath = {
       env: { ...fake.env, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: join(root, 'cfg') },
-    });
+    };
+    const off = await run({ ...offPath, pathTenjin: async () => null });
     expect(off.by['runtime']).toMatchObject({
       status: 'warn',
       fix: `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`,
     });
+    // npm's copy still answers in a terminal and hands off, so off PATH is no finding.
+    const npmCopy = join(root, 'npm', 'bin', 'tenjin');
+    const viaNpm = await run({
+      ...offPath,
+      pathTenjin: async () => ({ path: npmCopy, marked: false, version: CLI, handsOff: true }),
+    });
+    expect(viaNpm.by['runtime']).toMatchObject({ status: 'ok' });
   });
 
   it('shows no runtime row under a non-default data dir', async () => {

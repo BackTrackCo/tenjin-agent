@@ -1134,7 +1134,9 @@ async function runtimeCheck(i: {
       fix: `Run \`tenjin install${flag}\` to write it.`,
     };
   }
-  if (!launcherOnPath(launcherDir(i.home), i.env, platform)) {
+  // Off PATH is only worth a row when the terminal finds no `tenjin` at all: npm's
+  // copy hands off to the runtime, and an old one gets its own row below.
+  if (i.onPath === null && !launcherOnPath(launcherDir(i.home), i.env, platform)) {
     const { pathLine } = await import('../lib/runtime');
     return {
       name,
