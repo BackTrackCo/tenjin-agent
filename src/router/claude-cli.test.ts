@@ -98,8 +98,8 @@ describe('reading the plugin commands', () => {
 
 describe('the request tool name a process exposes', () => {
   it('is the plugin tool when the plugin launched it, else the settings install tool', () => {
-    expect(requestToolName({ CLAUDE_PLUGIN_ROOT: '/p' })).toBe(REQUEST_TOOL);
-    expect(requestToolName({})).toBe(LEGACY_REQUEST_TOOL);
+    expect(requestToolName('claude', { CLAUDE_PLUGIN_ROOT: '/p' })).toBe(REQUEST_TOOL);
+    expect(requestToolName('claude', {})).toBe(LEGACY_REQUEST_TOOL);
     expect(REQUEST_TOOL).toBe('mcp__plugin_tenjin_router__request');
     expect(LEGACY_REQUEST_TOOL).toBe('mcp__x402__request');
   });

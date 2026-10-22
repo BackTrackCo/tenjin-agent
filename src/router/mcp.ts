@@ -20,7 +20,7 @@ import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitHookEvent } from './hook-session';
 import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
 import type { HookDeps } from './hooks';
-import { launchedByPlugin, MCP_SERVER_NAME } from './names';
+import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { chainReader, RoutingPayer } from './routing-payer';
 import {
   runApproveTool,
@@ -187,6 +187,8 @@ export interface RouterMcpOptions {
   homeDir?: string;
   /** Test seam for this process's environment: whether the plugin launched it. */
   env?: NodeJS.ProcessEnv;
+  /** The host that launched this server (`tenjin mcp --harness`); absent is Claude Code. */
+  harness?: Harness;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -339,6 +341,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             : {}),
           ...(opts.handlerDeps?.payDeps !== undefined ? { payDeps: opts.handlerDeps.payDeps } : {}),
           ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
+          harness: opts.harness ?? 'claude',
         },
       );
       return toolResult(result);
@@ -407,12 +410,15 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // is plain arguments, so each call must still carry its session's own
   // transcript (`admitHookEvent`); any other call answers "no opinion" with
   // nothing sent.
+  // Codex runs its legs as command hooks, so its server carries no hook tool
+  // for the model to see or forge.
+  if (opts.harness === 'codex') return server;
   const env = opts.env ?? process.env;
   const fromPlugin = launchedByPlugin(env);
   server.registerTool(
     HOOK_TOOL,
     {
-      title: "Tenjin's routing hooks (called by Claude Code, not by you)",
+      title: "Tenjin's routing hooks (called by your agent host, not by you)",
       description:
         "Called by the Tenjin plugin's hooks, once per routing leg, with the hook event. " +
         'Never call it yourself: to make a lookup, call `request`.',

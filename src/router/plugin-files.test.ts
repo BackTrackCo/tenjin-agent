@@ -21,6 +21,13 @@ import {
   renderPluginManifest,
   renderPluginMcp,
   type ExecLaunch,
+  CODEX_ALLOW_HOOK_COMMAND,
+  CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+  renderCodexHooks,
+  renderCodexHostFiles,
+  renderCodexManifest,
+  renderCodexMarketplace,
+  renderCodexMcp,
   type ModSources,
 } from './plugin-files';
 import { readModSources } from './plugin-folder';
@@ -242,5 +249,79 @@ describe('the manifest and the marketplace', () => {
       name: 'tenjin',
       plugins: [{ name: 'tenjin', source: './tenjin', version: '1.2.3' }],
     });
+  });
+});
+
+const CODEX_HOSTS = fileURLToPath(new URL('../../hosts/codex', import.meta.url));
+
+describe('the checked-in hosts/codex templates', () => {
+  it('are exactly what the renderer writes, file for file', () => {
+    const rendered = renderCodexHostFiles();
+    expect(filesUnder(CODEX_HOSTS)).toEqual(Object.keys(rendered).sort());
+    for (const [path, body] of Object.entries(rendered)) {
+      expect(JSON.parse(readFileSync(join(CODEX_HOSTS, path), 'utf8')), path).toEqual(
+        JSON.parse(body),
+      );
+    }
+  });
+
+  it('carry the prompt leg, one web search before and after, and the request tool allow', () => {
+    const { hooks } = renderCodexHooks();
+    const cmd = (kind: string, timeout = 5) => [
+      { type: 'command', command: `tenjin hook ${kind} --harness codex`, timeout },
+    ];
+    expect(hooks).toEqual({
+      UserPromptSubmit: [{ hooks: cmd('prompt') }],
+      PreToolUse: [{ matcher: 'webrun', hooks: cmd('native') }],
+      PostToolUse: [{ matcher: 'webrun', hooks: cmd('shortfall', 15) }],
+      PermissionRequest: [
+        {
+          matcher: 'mcp__router__request',
+          hooks: [
+            {
+              type: 'command',
+              command: CODEX_ALLOW_HOOK_COMMAND,
+              commandWindows: CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+              timeout: 5,
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('allows the request tool with the static answer Codex documents for PermissionRequest', () => {
+    expect(CODEX_ALLOW_HOOK_COMMAND).toBe(
+      `echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'`,
+    );
+  });
+
+  it('gives cmd.exe a bare echo, whose output is the same JSON answer', () => {
+    const answer = {
+      hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+    };
+    // Codex runs it as `cmd.exe /C "<command>"`; cmd's echo prints the rest of the line as is.
+    expect(CODEX_ALLOW_HOOK_COMMAND_WINDOWS.startsWith('echo ')).toBe(true);
+    const printed = CODEX_ALLOW_HOOK_COMMAND_WINDOWS.slice('echo '.length);
+    expect(JSON.parse(printed)).toEqual(answer);
+    expect(printed).not.toMatch(/[&|<>^%'!]/);
+  });
+
+  it("names #25's plugin and server, starts the server as Codex's, and never names x402", () => {
+    expect(renderCodexMcp()).toEqual({
+      mcpServers: { router: { command: 'tenjin', args: ['mcp', '--harness', 'codex'] } },
+    });
+    expect(renderCodexMarketplace()).toMatchObject({
+      name: 'tenjin',
+      plugins: [{ name: 'tenjin', source: { source: 'local', path: './tenjin' } }],
+    });
+    expect(JSON.stringify(renderCodexHostFiles())).not.toMatch(/x402/i);
+  });
+
+  it('carries no version, so every build ships the same bytes and hook trust holds', () => {
+    const manifest = JSON.parse(renderCodexHostFiles()['tenjin/.codex-plugin/plugin.json']!);
+    expect(manifest).toMatchObject({ name: 'tenjin', mcpServers: './.mcp.json' });
+    expect(manifest).not.toHaveProperty('version');
+    expect(renderCodexManifest()).not.toHaveProperty('version');
   });
 });

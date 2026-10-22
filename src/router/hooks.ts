@@ -38,7 +38,8 @@ import {
   UNREACHABLE_BACKOFF_MS,
   writeRouterMemo,
 } from './router-memo';
-import { requestToolName } from './names';
+import { requestToolName, type Harness } from './names';
+import { codexRouterEvent, codexSession } from './codex-event';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } from './augment';
 import {
@@ -173,6 +174,10 @@ export interface NativeCall {
   agentId?: string;
   agentType?: string;
   cwd?: string;
+  /** A Codex `webrun` call's input without `pending`, when anything else is in it. */
+  rest?: Record<string, unknown>;
+  /** Every search and URL in the call, `pending` first; absent means `pending` alone. */
+  targets?: PendingCall[];
 }
 
 /** One hook event, as this file uses it. */
@@ -410,13 +415,17 @@ export const HINT_SOURCE = 'Tenjin router (installed by the user)';
 
 const BARE_CALL_RE = /(?<![\w$])request\(\{/g;
 
-export function toolNamed(hint: string, env: NodeJS.ProcessEnv = process.env): string {
-  return hint.replace(BARE_CALL_RE, `${requestToolName(env)}({`);
+export function toolNamed(
+  hint: string,
+  host: Harness = 'claude',
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return hint.replace(BARE_CALL_RE, `${requestToolName(host, env)}({`);
 }
 
 /** The server's line as the prompt hint and the redirect both carry it. */
-function attributed(hint: string): string {
-  return `${HINT_SOURCE}: ${toolNamed(hint)}`;
+function attributed(hint: string, host: Harness): string {
+  return `${HINT_SOURCE}: ${toolNamed(hint, host)}`;
 }
 
 /** This client's one sentence on a redirect: the promise {@link runNativeHook} keeps. */
@@ -433,8 +442,8 @@ function savedPdfHint(path: string): string {
 }
 
 /** Where the offer sits after the free tool came back short. */
-function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string): string {
-  return `${HINT_SOURCE}: your ${tool} call came back short. Optional: ${toolNamed(hint)}`;
+function shortfallOffer(tool: 'WebSearch' | 'WebFetch', hint: string, host: Harness): string {
+  return `${HINT_SOURCE}: your ${tool} call came back short. Optional: ${toolNamed(hint, host)}`;
 }
 
 /**
@@ -532,6 +541,8 @@ function delegationOffer(hint: string): string {
 
 export interface HookDeps {
   dataDir: string;
+  /** The host whose event this is, Claude Code when absent. */
+  harness?: Harness;
   /** Overrides the resolved base URL entirely; tests point it at a local stub. */
   baseUrl?: string;
   /** The environment the base URL precedence reads `TENJIN_BASE_URL` from. */
@@ -839,7 +850,7 @@ export interface PromptHookOutcome {
  * approval or funds ({@link vetOffer}): it may be the only service for the step.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
-  const event = decodeEvent(raw);
+  const event = eventOf(raw, deps);
   if (event?.kind !== 'prompt') return { response: null };
   return offerOnUserText(event, event.prompt, 'UserPromptSubmit', deps);
 }
@@ -853,7 +864,7 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
  * host reads next. Anything else is no output at all.
  */
 export async function runAnswerHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
-  const event = decodeEvent(raw);
+  const event = eventOf(raw, deps);
   if (event?.kind !== 'answer' || event.answers === null) return { response: null };
   return offerOnUserText(event, event.answers, 'PostToolUse', deps);
 }
@@ -871,7 +882,10 @@ async function offerOnUserText(
   if (router === null) return { response: null };
 
   const sealed = seal(
-    scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, text), router.settings),
+    scoped(
+      await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
+      router.settings,
+    ),
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
@@ -889,7 +903,7 @@ async function offerOnUserText(
   return {
     action: outcome.action,
     id: outcome.id,
-    ...injection(hookEventName, attributed(vetted.offer.hint)),
+    ...injection(hookEventName, attributed(vetted.offer.hint, hostOf(deps))),
   };
 }
 
@@ -1031,6 +1045,7 @@ async function routeNativeCall(
       await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
         ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
         ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+        harness: hostOf(deps),
       }),
       router.settings,
     ),
@@ -1124,15 +1139,29 @@ async function routeNativeCall(
  * search's results (`augment.ts`). A WebFetch just runs.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
-  const event = decodeEvent(raw);
+  const event = eventOf(raw, deps);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
   const target = redirectTarget(event.pending);
+  // A batch is blocked at most once: the redirect claims every search and URL
+  // in it, and a call naming any claimed one runs.
+  const targets = [...new Set((event.targets ?? [event.pending]).map(redirectTarget))];
+  const session = localSession(event.sessionId, deps);
+  const claim = (t: string) => claimRedirect(deps.dataDir, session, event.agentId, t, deps.now?.());
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
-    repeated: async () =>
-      !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
-    redirected: () =>
-      redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
+    repeated: async () => {
+      if (!(await claim(target))) return true;
+      await Promise.all(targets.filter((t) => t !== target).map(claim));
+      return false;
+    },
+    redirected: async () => {
+      for (const t of targets) {
+        if (await redirectClaimed(deps.dataDir, session, event.agentId, t, deps.now?.())) {
+          return true;
+        }
+      }
+      return false;
+    },
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -1141,7 +1170,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       pending.tool === 'WebSearch' &&
       (await startAugment(
         {
-          sessionId: event.sessionId,
+          sessionId: session,
           query: pending.query,
           ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
           ...(event.toolUseId !== undefined ? { toolUseId: event.toolUseId } : {}),
@@ -1159,10 +1188,27 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     };
   }
   if (event.toolUseId !== undefined) {
-    const terms = offeredTerms(routed.offer);
-    await markOffered(deps.dataDir, event.sessionId, event.toolUseId, terms, deps.now?.());
+    await markOffered(
+      deps.dataDir,
+      session,
+      event.toolUseId,
+      offeredTerms(routed.offer),
+      deps.now?.(),
+    );
   }
-  return redirect(routed.offer);
+  return redirect(
+    routed.offer,
+    hostOf(deps),
+    event.rest === undefined ? ONE_BLOCK : `${ONE_BLOCK} ${restSentence(event.rest)}`,
+  );
+}
+
+/**
+ * The deny blocked the whole Codex call: the rest of it, exactly as written,
+ * to run again natively.
+ */
+function restSentence(rest: Record<string, unknown>): string {
+  return `Nothing else in this web.run call ran either; to run the rest as written, call web.run again with exactly ${JSON.stringify(rest)}`;
 }
 
 /** What the offer record keeps of a redirect: the offer's id, its label, from
@@ -1182,7 +1228,7 @@ function offeredTerms(offer: OfferDecision): OfferedTerms {
  * Deny the call once with the server's line: the redirect both pre-call arms
  * make, after `routeNativeCall` has claimed its target ({@link claimRedirect}).
  */
-function redirect(offer: OfferDecision, oneBlock = ONE_BLOCK): NativeHookOutcome {
+function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): NativeHookOutcome {
   return {
     response: {
       hookSpecificOutput: {
@@ -1191,7 +1237,7 @@ function redirect(offer: OfferDecision, oneBlock = ONE_BLOCK): NativeHookOutcome
         // THE SERVER'S LINE, attributed and tool-named, then this client's one
         // sentence. The line already carries the id and the exact search, URL
         // or question that was denied.
-        permissionDecisionReason: `${attributed(offer.hint)} ${oneBlock}`,
+        permissionDecisionReason: `${attributed(offer.hint, host)} ${oneBlock}`,
       },
     },
     action: offer.action,
@@ -1216,7 +1262,7 @@ function redirect(offer: OfferDecision, oneBlock = ONE_BLOCK): NativeHookOutcome
  * question runs.
  */
 export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
-  const event = decodeEvent(raw);
+  const event = eventOf(raw, deps);
   if (event?.kind !== 'ask' || event.pending === null) return { response: null };
   // The question itself is the target, claimed exactly as a search or a URL is.
   const target = redirectTarget(event.pending);
@@ -1236,13 +1282,13 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
   if (event.toolUseId !== undefined) {
     await markOffered(
       deps.dataDir,
-      event.sessionId,
+      localSession(event.sessionId, deps),
       event.toolUseId,
       offeredTerms(routed.offer),
       deps.now?.(),
     );
   }
-  return redirect(routed.offer, ONE_BLOCK_QUESTION);
+  return redirect(routed.offer, hostOf(deps), ONE_BLOCK_QUESTION);
 }
 
 /**
@@ -1273,11 +1319,11 @@ export async function runShortfallHook(
   raw: unknown,
   deps: HookDeps,
 ): Promise<ShortfallHookOutcome> {
-  const event = decodeEvent(raw);
+  const event = eventOf(raw, deps);
   if (event?.kind !== 'shortfall') return { response: null };
   const augment = await finishAugment(
     {
-      sessionId: event.sessionId,
+      sessionId: localSession(event.sessionId, deps),
       search: event.search,
       ...(event.toolUseId !== undefined ? { toolUseId: event.toolUseId } : {}),
     },
@@ -1334,7 +1380,12 @@ async function offerOnShortfall(
   if (pending === null) return { response: null };
   if (
     event.toolUseId !== undefined &&
-    (await wasOffered(deps.dataDir, event.sessionId, event.toolUseId, deps.now?.()))
+    (await wasOffered(
+      deps.dataDir,
+      localSession(event.sessionId, deps),
+      event.toolUseId,
+      deps.now?.(),
+    ))
   ) {
     return { response: null, nativeOutcome, alreadyOffered: true };
   }
@@ -1350,7 +1401,7 @@ async function offerOnShortfall(
         hookEventName: eventName,
         // THE SERVER'S LINE, attributed and framed as the option it is. It
         // already carries the id and the exact search or URL that came back short.
-        additionalContext: shortfallOffer(event.tool, routed.offer.hint),
+        additionalContext: shortfallOffer(event.tool, routed.offer.hint, hostOf(deps)),
       },
     },
     nativeOutcome,
@@ -1381,7 +1432,7 @@ export async function runDelegationHook(
   raw: unknown,
   deps: HookDeps,
 ): Promise<DelegationHookOutcome> {
-  const event = decodeEvent(raw);
+  const event = eventOf(raw, deps);
   if (event?.kind !== 'delegation') return { response: null };
   const { task } = event;
   if (task === null || task.trim().length === 0) return { response: null };
@@ -1460,6 +1511,7 @@ async function openFooter(
   /** `withheld` is why an `execute` was not shown, in the footer's words. */
   close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
 }> {
+  sessionId = localSession(sessionId, deps);
   const now = (): number => deps.now?.() ?? Date.now();
   const directory = sessionDir(deps.dataDir, sessionId);
   const callId = newCallId();
@@ -1546,6 +1598,7 @@ async function decide(
       ctx: hookContext(deps),
       baseUrl,
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
+      harness: hostOf(deps),
       timeoutMs: Math.max(0, deadline - now),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== null ? { route } : {}),
@@ -1683,4 +1736,18 @@ async function routerFor(
  */
 function scoped(packet: Packet, router: RouterSettings): Packet {
   return router.context.value === 'turn' ? { ...packet, history: [] } : packet;
+}
+
+function hostOf(deps: HookDeps): Harness {
+  return deps.harness ?? 'claude';
+}
+
+/** The harness's event in the arms' shape, from that harness's own decoder. */
+function eventOf(raw: unknown, deps: HookDeps): HookEvent | null {
+  return hostOf(deps) === 'codex' ? codexRouterEvent(raw) : decodeEvent(raw);
+}
+
+/** Where this session's local state lives; a Codex session never shares Claude's. */
+function localSession(sessionId: string, deps: HookDeps): string {
+  return hostOf(deps) === 'codex' ? codexSession(sessionId) : sessionId;
 }

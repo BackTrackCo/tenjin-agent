@@ -1,6 +1,7 @@
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import {
+  CODEX_REQUEST_TOOL,
   MARKETPLACE_NAME,
   MCP_SERVER_NAME,
   PLUGIN_HOOK_TOOL,
@@ -315,5 +316,117 @@ export function renderHostFiles(version?: string, mod?: ModSources): Record<stri
   return {
     '.claude-plugin/marketplace.json': json(renderMarketplace(version)),
     ...Object.fromEntries(plugin),
+  };
+}
+
+/**
+ * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
+ * checked-in `hosts/codex/` by the same test. Its legs are command hooks: the
+ * prompt, and one web call before it runs and after (Codex has no
+ * PostToolUseFailure). Nothing in it names a release, so `codex plugin add`
+ * copies the same bytes from every build and the hooks' trust holds across a
+ * `tenjin update`.
+ */
+export const CODEX_WEB_MATCHER = 'webrun';
+export const CODEX_LEGS = ['prompt', 'native', 'shortfall'] as const;
+
+export function codexHookCommand(kind: (typeof CODEX_LEGS)[number]): string {
+  return `tenjin hook ${kind} --harness codex`;
+}
+
+/**
+ * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link ALLOW_HOOK_COMMAND}
+ * is in Claude Code. Codex runs a `PermissionRequest` hook before its approval
+ * policy, `never` included, so the tool runs without a prompt once the user
+ * trusts this hook with the others in `/hooks`. It also overrides a user's own
+ * `approval_mode = "prompt"` for the tool; that user turns this one hook off in
+ * `/hooks`. The wallet's spend limits still bound every payment.
+ */
+const CODEX_ALLOW_ANSWER = JSON.stringify({
+  hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+});
+export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
+/**
+ * The same answer under Windows' `cmd.exe /C`, through Codex's `commandWindows`
+ * override: cmd's `echo` prints single quotes as written, and Codex then
+ * rejects the output as JSON. The answer holds none of cmd's special
+ * characters, so a bare `echo` prints it as is.
+ */
+export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
+
+/** Every hook the Codex plugin carries: the three legs and the allow answer. */
+export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 1;
+
+function codexLeg(kind: (typeof CODEX_LEGS)[number], timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
+  return [{ type: 'command', command: codexHookCommand(kind), timeout }];
+}
+
+export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
+  return {
+    hooks: {
+      UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
+      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') }],
+      PostToolUse: [
+        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS) },
+      ],
+      PermissionRequest: [
+        {
+          matcher: CODEX_REQUEST_TOOL,
+          hooks: [
+            {
+              type: 'command',
+              command: CODEX_ALLOW_HOOK_COMMAND,
+              commandWindows: CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+              timeout: LOCAL_HOOK_TIMEOUT_SECONDS,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
+
+export function renderCodexMcp(): { mcpServers: Record<string, unknown> } {
+  return { mcpServers: { [MCP_SERVER_NAME]: { command: 'tenjin', args: [...CODEX_MCP_ARGS] } } };
+}
+
+/** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */
+export function renderCodexManifest(): Record<string, unknown> {
+  return {
+    name: PLUGIN_NAME,
+    description: DESCRIPTION,
+    author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
+    homepage: `${PRODUCTION_ORIGIN}/agents`,
+    repository: 'https://github.com/BackTrackCo/tenjin-agent',
+    interface: { displayName: 'Tenjin', developerName: 'Tenjin', category: 'Productivity' },
+    mcpServers: './.mcp.json',
+  };
+}
+
+/** `.agents/plugins/marketplace.json`: one local plugin, copied by `codex plugin add`. */
+export function renderCodexMarketplace(): Record<string, unknown> {
+  return {
+    name: MARKETPLACE_NAME,
+    interface: { displayName: 'Tenjin' },
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: { source: 'local', path: `./${PLUGIN_DIR}` },
+        policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+        category: 'Productivity',
+      },
+    ],
+  };
+}
+
+/** The Codex marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
+export function renderCodexHostFiles(): Record<string, string> {
+  return {
+    '.agents/plugins/marketplace.json': json(renderCodexMarketplace()),
+    [`${PLUGIN_DIR}/.mcp.json`]: json(renderCodexMcp()),
+    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
+    [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest()),
   };
 }

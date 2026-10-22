@@ -1647,7 +1647,7 @@ describe('an offer with a request spec', () => {
         'utf8',
       ),
     ) as Record<string, unknown>;
-    expect(Object.keys(report).sort()).toEqual(Object.keys(fixture).sort());
+    expect(Object.keys(report).sort()).toEqual([...Object.keys(fixture), 'harness'].sort());
   });
 
   it('refuses an input that misses the spec, naming every problem, and reports it unpaid', async () => {
@@ -1677,6 +1677,7 @@ describe('an offer with a request spec', () => {
     expect(await reported(calls)).toEqual({
       schemaVersion: 1,
       id: SPEC_ID,
+      harness: 'claude',
       status: 'unpaid',
       reason: 'input',
       ms: expect.any(Number) as number,
@@ -1917,6 +1918,7 @@ describe('an offer with a request spec', () => {
     expect(await reported(calls)).toEqual({
       schemaVersion: 1,
       id: SPEC_ID,
+      harness: 'claude',
       status: 'unpaid',
       reason: 'provider',
       httpStatus: 503,
@@ -1994,6 +1996,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query,
       accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -2080,6 +2083,7 @@ describe('an offer with a request spec', () => {
       query: 'BTC price',
       id: SPEC_ID,
       accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      harness: 'claude',
     });
   });
 });
@@ -2428,9 +2432,28 @@ describe('the tool list, read for free', () => {
       schemaVersion: 1,
       browse: 'live crypto prices',
       accepts: ACCEPTS,
+      harness: 'claude',
     });
     expect(route).not.toHaveBeenCalled();
     expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('names the Codex harness on a browse and on a row id request', async () => {
+    const listed = net([{ url: ROUTER, status: 200, body: BROWSE }]);
+    await runRequestTool(
+      { browse: 'live crypto prices' },
+      { ...deps(listed.fetchImpl), route, harness: 'codex' },
+    );
+    expect(JSON.parse(listed.calls[0]!.body!)).toMatchObject({ harness: 'codex' });
+    const spec = net([{ url: ROUTER, status: 200, body: BY_ID }]);
+    await runRequestTool(
+      { tool: 'cmc-quotes' },
+      { ...deps(spec.fetchImpl), route, harness: 'codex' },
+    );
+    expect(JSON.parse(spec.calls[0]!.body!)).toMatchObject({
+      tool: 'cmc-quotes',
+      harness: 'codex',
+    });
   });
 
   it('browses every tool for an empty need, and says so when none fit', async () => {
@@ -2511,6 +2534,7 @@ describe('the tool list, read for free', () => {
       schemaVersion: 1,
       tool: 'cmc-quotes',
       accepts: ACCEPTS,
+      harness: 'claude',
     });
     expect(route).not.toHaveBeenCalled();
 

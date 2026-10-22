@@ -1,5 +1,11 @@
 import { Option, type Command } from 'commander';
+import { HARNESSES, type Harness } from '../router/names';
 import { INTEGRATION, SETUP, type Registration } from './registration';
+
+/** `--harness`: the agent host this command serves. */
+export function harnessOption(): Option {
+  return new Option('--harness <host>', 'the agent host').choices(HARNESSES).default('claude');
+}
 
 /**
  * The router product: the hook commands, the MCP server that carries the
@@ -13,9 +19,9 @@ import { INTEGRATION, SETUP, type Registration } from './registration';
 export function registerRouter(reg: Registration): void {
   const { io, runCommand, leaf, addGlobalFlags, buildContext } = reg;
 
-  const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by Claude Code)')
+  const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by your agent host)')
     .description(
-      "The handlers Tenjin's Claude Code plugin runs. Each reads one hook event on stdin and writes the harness response, or nothing, on stdout. You never run these by hand.",
+      "The handlers Tenjin's Claude Code and Codex plugins run. Each reads one hook event on stdin and writes the harness response, or nothing, on stdout. You never run these by hand.",
     )
     .helpCommand(false);
   // Normally answered by the fast path in `index.ts`, before the command tree
@@ -42,6 +48,7 @@ export function registerRouter(reg: Registration): void {
     ['answer', "PostToolUse on AskUserQuestion: offer a paid lookup beside the user's answers"],
   ] as const) {
     addGlobalFlags(hook.command(name))
+      .addOption(harnessOption())
       .summary(summary)
       .action(async function (this: Command) {
         const ctx = buildContext(this);
@@ -50,6 +57,7 @@ export function registerRouter(reg: Registration): void {
         // reaches every other command; the env layer is read inside.
         await runHookCommand(name, io, {
           dataDir: ctx.dataDir,
+          harness: this.opts().harness as Harness,
           ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
         });
       });
@@ -72,13 +80,18 @@ export function registerRouter(reg: Registration): void {
     // The plugin's `.mcp.json` passes it so Claude Code does not take its server
     // for a duplicate of a settings install's `tenjin mcp` (see `plugin-files.ts`).
     .addOption(new Option('--plugin', 'started by the Tenjin Claude Code plugin').hideHelp())
+    .addOption(harnessOption().hideHelp())
     .description(
       "Run the local stdio MCP server that carries the `request` tool: one free routing decision per lookup, then the provider call, built here from the offer's spec and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
     )
     .action(async function (this: Command) {
       const ctx = buildContext(this);
       const { runRouterMcpServer } = await import('../router/mcp');
-      await runRouterMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
+      await runRouterMcpServer({
+        dataDir: ctx.dataDir,
+        flags: ctx.flags,
+        harness: this.opts().harness as Harness,
+      });
     });
 
   leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")
