@@ -75,19 +75,19 @@ The router names the tool and its price, and your agent calls it.
 
 ## What your agent can do
 
-| Your agent needs                       | With                            | Per call     |
-| -------------------------------------- | ------------------------------- | ------------ |
-| Library docs                           | Context7                        | free         |
-| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢ |
-| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢     |
-| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢  |
-| X and Reddit                           | glim                            | 0.1¢ to 1¢   |
-| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14¢  |
-| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 3¢ to 12¢    |
-| Video clips                            | MiniMax Hailuo, Google Veo      | 42¢ to 45¢   |
-| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢   |
-| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢           |
-| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢  |
+| Your agent needs                       | With                            | Per call      |
+| -------------------------------------- | ------------------------------- | ------------- |
+| Library docs                           | Context7                        | free          |
+| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢  |
+| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢      |
+| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢   |
+| X and Reddit                           | glim                            | 0.1¢ to 1¢    |
+| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14.4¢ |
+| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 1¢ to 12¢     |
+| Video clips                            | MiniMax Hailuo, Google Veo      | 15.5¢ to 45¢  |
+| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢    |
+| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢            |
+| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢   |
 
 We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
