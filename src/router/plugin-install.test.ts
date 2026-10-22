@@ -87,6 +87,9 @@ function deps(over: Record<string, unknown> = {}) {
     walletExists: async () => true,
     walletAddress: async () => ADDRESS,
     createWallet: vi.fn(async () => ADDRESS),
+    walletSigning: async () => ({
+      signing: { status: 'ready' as const, source: 'keychain' as const },
+    }),
     listMcpProcesses: async () => [],
     ...over,
   };
@@ -701,7 +704,15 @@ describe('tenjin doctor', () => {
           ).checks
         : (
             out as {
-              data: { checks: { name: string; status: string; detail: string; fix?: string }[] };
+              data: {
+                checks: {
+                  name: string;
+                  status: string;
+                  detail: string;
+                  fix?: string;
+                  checked?: false;
+                }[];
+              };
             }
           ).data.checks;
     return Object.fromEntries(list.map((c) => [c.name, c]));
@@ -729,7 +740,7 @@ describe('tenjin doctor', () => {
     expect(c['claude code']).toMatchObject({ status: 'ok', detail: '2.1.296' });
     expect(c['plugin']).toMatchObject({
       status: 'ok',
-      detail: `tenjin@tenjin ${pkg.version} enabled`,
+      detail: `tenjin@tenjin ${pkg.version} enabled, and a session has started it`,
     });
     expect(c['router server']).toMatchObject({ status: 'ok' });
     expect(c['settings install']).toBeUndefined();
@@ -744,36 +755,66 @@ describe('tenjin doctor', () => {
     ).toEqual([]);
   });
 
-  describe('the session stamp, with a claude binary present', () => {
-    const fix =
+  describe('whether a session has started the plugin, with a claude binary present', () => {
+    const STAMP_FIX =
       "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
+    const NODE_FIX =
+      'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then restart Claude Code.';
+    const INSTALLED = 1_800_000_000_000;
+    /** A process list: Claude Code sessions and routers, started at these times. */
+    const processes = (claude: number[], routers: { startedAt: number; kind?: string }[] = []) => ({
+      installedAt: async () => INSTALLED,
+      listProcesses: async () => ({
+        claude: claude.map((startedAt, i) => ({ pid: 100 + i, startedAt })),
+        routers: routers.map((r, i) => ({
+          pid: 200 + i,
+          startedAt: r.startedAt,
+          kind: r.kind ?? 'plugin',
+          underClaude: true,
+        })),
+      }),
+    });
 
-    it('warns when no session has started the plugin, though `claude mcp get` connects', async () => {
+    it('passes as pending when nothing has started since the install', async () => {
       await fake.respond('list', listed('tenjin@tenjin', pkg.version));
-      const c = await checks();
+      const c = await checks(processes([INSTALLED - 60_000]));
       expect(c['plugin']).toMatchObject({
-        status: 'warn',
-        detail: `tenjin@tenjin ${pkg.version} is enabled, and no session has started it at this version`,
-        fix,
+        status: 'ok',
+        detail: `tenjin@tenjin ${pkg.version} enabled; the next Claude Code session starts it`,
       });
       expect(c['router server']).toMatchObject({ status: 'ok' });
     });
 
-    it('warns when the last session started an older version', async () => {
+    it('warns, with the Node fix, when a Claude Code started since did not start it', async () => {
       await fake.respond('list', listed('tenjin@tenjin', pkg.version));
       await runAliveHook({ session_id: 's' }, { dataDir: data, version: '0.0.1' });
-      const c = await checks();
-      expect(c['plugin']).toMatchObject({ status: 'warn', fix });
+      const c = await checks(processes([INSTALLED + 60_000]));
+      expect(c['plugin']).toMatchObject({ status: 'warn', fix: NODE_FIX });
       expect(c['plugin']?.detail).toContain('(last 0.0.1, at ');
+    });
+
+    it('passes when a plugin router under Claude Code started since the install', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      const c = await checks(processes([INSTALLED + 1], [{ startedAt: INSTALLED + 2 }]));
+      expect(c['plugin']).toMatchObject({
+        status: 'ok',
+        detail: `tenjin@tenjin ${pkg.version} enabled, and a session has started it`,
+      });
+    });
+
+    it('says not checked, never ok, with no stamp and no process list', async () => {
+      await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+      const c = await checks({ listMcpProcesses: async () => null });
+      expect(c['plugin']).toMatchObject({ status: 'warn', checked: false, fix: STAMP_FIX });
     });
 
     it('passes when a session started this version', async () => {
       await fake.respond('list', listed('tenjin@tenjin', pkg.version));
       await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
-      const c = await checks();
+      const c = await checks(processes([INSTALLED + 60_000]));
       expect(c['plugin']).toMatchObject({
         status: 'ok',
-        detail: `tenjin@tenjin ${pkg.version} enabled`,
+        detail: `tenjin@tenjin ${pkg.version} enabled, and a session has started it`,
       });
     });
   });
@@ -796,11 +837,39 @@ describe('tenjin doctor', () => {
     expect(away['plugin']?.status).toBe('fail');
   });
 
-  it('fails a disabled plugin, with the command that enables it', async () => {
+  it('fails a disabled plugin, with the command that enables it at its scope', async () => {
     await fake.respond('list', listed('tenjin@tenjin', pkg.version, false));
     const c = await checks();
     expect(c['plugin']?.status).toBe('fail');
-    expect(c['plugin']?.fix).toContain('claude plugin enable tenjin@tenjin');
+    expect(c['plugin']?.fix).toContain('claude plugin enable tenjin@tenjin --scope user');
+  });
+
+  it('names the project a local install was made for, and enables nothing from elsewhere', async () => {
+    const other = join(root, 'p');
+    await mkdir(other, { recursive: true });
+    await fake.respond(
+      'list',
+      listed('tenjin@tenjin', pkg.version, false, { scope: 'local', projectPath: other }),
+    );
+    const c = await checks();
+    expect(c['plugin']).toMatchObject({
+      status: 'fail',
+      detail: `tenjin@tenjin is installed for ${other} only, so nothing is routed from ${work}`,
+      fix: `To check that install, run \`tenjin doctor\` from ${other}.`,
+    });
+    for (const check of Object.values(c)) {
+      expect(check.fix ?? '', check.name).not.toContain('claude plugin enable');
+    }
+  });
+
+  it('enables a local install disabled in its own project at its own scope', async () => {
+    await fake.respond(
+      'list',
+      listed('tenjin@tenjin', pkg.version, false, { scope: 'local', projectPath: work }),
+    );
+    const c = await checks();
+    expect(c['plugin']?.status).toBe('fail');
+    expect(c['plugin']?.fix).toContain('claude plugin enable tenjin@tenjin --scope local');
   });
 
   it('warns about a plugin registered at another version', async () => {
@@ -840,8 +909,15 @@ describe('tenjin doctor', () => {
     await runRouterInstall({}, ctx(), deps({ env: env({ PATH: await emptyPath() }) }));
     const c = await checks({ env: env({ PATH: await emptyPath() }) });
     expect(c['claude code']?.status).toBe('warn');
-    expect(c['plugin']).toMatchObject({ status: 'warn' });
-    expect(c['plugin']?.fix).toContain('/reload-plugins');
+    expect(c['plugin']).toMatchObject({ status: 'ok' });
+    expect(c['plugin']?.detail).toContain('the next Claude Code session starts it');
+    // With no process list either, it could not check, and says how to load it.
+    const unknown = await checks({
+      env: env({ PATH: await emptyPath() }),
+      listMcpProcesses: async () => null,
+    });
+    expect(unknown['plugin']).toMatchObject({ status: 'warn', checked: false });
+    expect(unknown['plugin']?.fix).toContain('/reload-plugins');
   });
 
   /** Leaving the session to run a command; restarting Claude Code is not that. */
@@ -856,11 +932,15 @@ describe('tenjin doctor', () => {
     }
   });
 
-  it('keeps the stamp and router server fixes inside the session', async () => {
+  it('keeps the plugin and router server fixes inside the session', async () => {
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
-    const c = await checks({ env: env({ CLAUDECODE: '1' }) });
-    expect(c['plugin']?.detail).toContain('no session has started it');
+    const c = await checks({
+      env: env({ CLAUDECODE: '1' }),
+      installedAt: async () => 1_000,
+      listProcesses: async () => ({ routers: [], claude: [{ pid: 9, startedAt: 2_000 }] }),
+    });
+    expect(c['plugin']?.detail).toContain('has not started it');
     expect(c['PATH']).toBeUndefined();
     expect(c['router server']?.status).toBe('fail');
     for (const row of ['plugin', 'router server']) {

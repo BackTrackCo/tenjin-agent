@@ -100,7 +100,23 @@ export async function fakeClaude(root: string): Promise<FakeClaude> {
   };
 }
 
-/** One `claude plugin list --json` row. */
-export function listed(id: string, version: string, enabled = true): string {
-  return `${JSON.stringify([{ id, version, scope: 'user', enabled }])}\n`;
+/**
+ * One `claude plugin list --json` row: user scope unless `at` names another
+ * scope, and a `projectPath` for a project or local install.
+ */
+export function listed(
+  id: string,
+  version: string,
+  enabled = true,
+  at: { scope?: string; projectPath?: string } = {},
+): string {
+  return `${JSON.stringify([
+    {
+      id,
+      version,
+      scope: at.scope ?? 'user',
+      enabled,
+      ...(at.projectPath !== undefined ? { projectPath: at.projectPath } : {}),
+    },
+  ])}\n`;
 }

@@ -44,7 +44,12 @@ import {
   type PluginScope,
 } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
-import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
+import {
+  readMcpServers,
+  type InstalledAt,
+  type ListMcpProcesses,
+  type ListProcesses,
+} from './mcp-processes';
 import {
   ROUTER_DEFAULTS,
   ROUTING_FEE_TERMS,
@@ -56,6 +61,7 @@ import {
   type SpendOption,
 } from './spend-question';
 import { underAgentHarness } from '../lib/session';
+import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
 /**
  * `tenjin install` for the router product: the wallet, the spend limits, and
@@ -137,6 +143,8 @@ export interface RouterInstallArgs {
 }
 
 export interface RouterInstallDeps extends WalletDeps {
+  /** This user's running routers and Claude Code processes; tests inject them. */
+  listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
   listMcpProcesses?: ListMcpProcesses;
   /** When this build was installed; tests inject it. */
@@ -457,7 +465,11 @@ export async function runRouterInstall(
   }
   // The shelf install's wallet step, unchanged except that it never asks: a
   // lookup cannot be paid without a wallet, so install makes one. A failure is
-  // reported, never fatal; everything above is useful without it.
+  // reported, never fatal; everything above is useful without it. It checks
+  // that the wallet can SIGN (`verify`), and nothing about routing or funds:
+  // install computes no routing eligibility, and its funding step below is
+  // today's (S6). Loaded lazily: the status line shares this module's chunk
+  // and must not load the wallet layer.
   const { resolveWallet } = await import('../commands/install-wallet');
   const wallet = await resolveWallet(ctx, deps, args.noWallet === true ? 'flag' : undefined, false);
   // Read back AFTER the write: a machine that already carried its own caps
@@ -489,7 +501,14 @@ export async function runRouterInstall(
     plugin,
     claudeCode,
     migration,
-    next: nextStep(plugin, claude, wallet, migration, asksAgent && nextSteps.length > 0),
+    next: nextStep(
+      plugin,
+      claude,
+      wallet,
+      migration,
+      asksAgent && nextSteps.length > 0,
+      ctx.io.isTTY,
+    ),
     nextSteps,
     // The check for this scope, said outright; a bare doctor in the project
     // also finds it from what the project holds.
@@ -554,15 +573,53 @@ function registrationFix(plugin: PluginRegistration): string {
   return `Run \`tenjin doctor${flag}\` to see the cause, then run \`tenjin install${flag}\` again.`;
 }
 
-/** The one step after the install, for the agent to relay in the session. */
+/** The unlock reasons `tenjin wallet repair` fixes: a saved passphrase that is gone or wrong. */
+const REPAIRABLE: ReadonlySet<string> = new Set([
+  'passphrase_missing',
+  'passphrase_wrong',
+  'env_passphrase_wrong',
+]);
+
+/**
+ * The repair step, worded for whoever reads install's output (decision 15):
+ * a person at a terminal runs it; an agent (no TTY) asks the person to, and
+ * never asks for the passphrase (B1).
+ */
+function repairStep(tty: boolean): string {
+  return tty
+    ? `run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}`
+    : 'ask the person to run `tenjin wallet repair` in their own terminal (never ask for the passphrase)';
+}
+
+/**
+ * The one step after the install, for the agent to relay in the session. A
+ * wallet whose saved passphrase is gone or wrong is repaired first; otherwise
+ * today's steps, unchanged (no new funding step for an existing wallet, S6).
+ */
 function nextStep(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
   asksQuestion: boolean,
+  tty: boolean,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
+  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion);
+  const signing = wallet.signing;
+  if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
+    steps.unshift(repairStep(tty));
+  }
+  return steps.join(', then ');
+}
+
+function todaysSteps(
+  plugin: PluginRegistration,
+  claude: ClaudeCodeState,
+  wallet: WalletOutcome,
+  migration: Migration,
+  asksQuestion: boolean,
+): string[] {
   const steps: string[] = [];
   if (asksQuestion) {
     steps.push('ask the person the question in nextSteps, then run what the answer names');
@@ -574,11 +631,11 @@ function nextStep(
     steps.push(
       'run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
     );
-    return steps.join(', then ');
+    return steps;
   }
   if (!claude.meetsFloor) steps.unshift('run `claude update`');
   steps.push(loadStep(settingsInstallStays(migration)));
-  return steps.join(', then ');
+  return steps;
 }
 
 /** Is a settings install still on this machine after this run? */
@@ -904,9 +961,62 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   };
 }
 
+/**
+ * THE WALLET LINE, and who reads it. At a TTY a person ran install, so the
+ * person's wording; without one an agent did, and relays it, so a blocked
+ * wallet's fix and the S7 passphrase line take the agent's wording (B1,
+ * decision 15): ask the person, never ask for the passphrase.
+ *
+ * A ✓ only for a wallet every Claude Code can unlock: a durable store, a
+ * legacy entry, or a variable a served router has already signed with. A
+ * wallet that signs only through a variable in this shell is a yellow `!`
+ * (S7), as is one that cannot be unlocked, or could not be checked.
+ */
 function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
-  if (w.status === 'created') return [`${ok} Wallet created: ${w.address}`];
-  if (w.status === 'existing') return [`${ok} Wallet: ${w.address}`];
+  const warn = (text: string) => paint(ctx.io, 'yellow', text);
+  if (w.status === 'created' || w.status === 'existing') {
+    const a = w.address ?? '';
+    const signing = w.signing;
+    const tty = ctx.io.isTTY;
+    if (signing?.status === 'blocked') {
+      const wallet = Object.prototype.hasOwnProperty.call(WALLET_REASONS, signing.reason)
+        ? WALLET_REASONS[signing.reason as keyof typeof WALLET_REASONS]
+        : undefined;
+      return [
+        warn(`! Wallet ${a} cannot be unlocked by Claude Code: ${signing.detail}.`),
+        `  ${tty ? (wallet?.fix ?? signing.fix) : agentFixFor(signing.reason, signing.fix)}`,
+      ];
+    }
+    if (signing?.status === 'unknown') {
+      return [
+        warn(`! Wallet: ${a}; could not check that it unlocks (${signing.detail}).`),
+        '  Run `tenjin doctor` to check it again.',
+      ];
+    }
+    if (w.shellOnly === 'key') {
+      return [
+        warn(
+          `! Wallet: ${a} signs here only through TENJIN_WALLET_KEY in this shell; Claude Code must have the same variable.`,
+        ),
+      ];
+    }
+    if (w.shellOnly === 'passphrase') {
+      return [
+        warn(
+          tty
+            ? `! Wallet: ${a} unlocks here only through TENJIN_WALLET_PASSPHRASE in this shell; Claude Code must have the same variable, or run \`tenjin wallet repair\` yourself to store the passphrase ${REPAIR_CLAUSE}.`
+            : `! Wallet: ${a} unlocks here only through TENJIN_WALLET_PASSPHRASE in this shell; Claude Code must have the same variable, or ask the person to run \`tenjin wallet repair\` in their own terminal to store the passphrase. Never ask for the passphrase.`,
+        ),
+      ];
+    }
+    if (w.status === 'created') {
+      return [
+        `${ok} Wallet created: ${a}`,
+        ...(w.passphrase !== undefined ? [`  ${w.passphrase.note}`] : []),
+      ];
+    }
+    return [`${ok} Wallet: ${a}`];
+  }
   if (w.reason === 'flag') return ['  No wallet yet. Create one with: tenjin wallet create'];
   return [
     paint(ctx.io, 'yellow', `! No wallet was created. ${w.warning ?? ''}`.trimEnd()),
@@ -1023,7 +1133,7 @@ function lines(
     ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks)}`,
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY)}`,
   ];
 }
 
