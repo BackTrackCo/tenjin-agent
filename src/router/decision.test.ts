@@ -141,7 +141,13 @@ describe('one free decision', () => {
       'schemaVersion',
     ]);
     // The catalog is on by default; the open Bazaar is not.
-    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual(['catalog', 'spec', 'jobs']);
+    expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+    ]);
   });
 
   it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
@@ -160,6 +166,8 @@ describe('one free decision', () => {
       expect((call.body as { accepts: unknown }).accepts).toEqual([
         'catalog',
         'spec',
+        'label',
+        'fields',
         'jobs',
         'bazaar',
       ]);

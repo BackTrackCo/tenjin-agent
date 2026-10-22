@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { envProxySupported } from '../lib/env-proxy';
-import { DOCS_QUERY_MAX, docsUrl, PREFETCH_SCRIPT, prefetchEnv } from './augment';
+import { augmentTarget, DOCS_QUERY_MAX, docsUrl, PREFETCH_SCRIPT, prefetchEnv } from './augment';
 
 const exec = promisify(execFile);
 
@@ -123,6 +123,45 @@ describe('the docs URL', () => {
     ['no URL at all', 'not a url'],
   ])('is not fetched at all for %s', (_label, endpoint) => {
     expect(docsUrl(endpoint, 'q', 'https://tenjin.sh')).toBeNull();
+  });
+});
+
+describe('where the docs come from', () => {
+  const ENDPOINT = 'https://tenjin.sh/api/docs-lookup';
+  const BUILT = `${ENDPOINT}?query=next.js+16+middleware+matcher`;
+  const offer = { endpoint: ENDPOINT, provider: 'Context7', label: 'Context7 docs' };
+
+  it("fetches the server's augmentUrl as given when the decision says augment", () => {
+    expect(
+      augmentTarget(
+        { ...offer, delivery: 'augment', augmentUrl: BUILT },
+        'a different query',
+        'https://tenjin.sh',
+      ),
+    ).toBe(BUILT);
+  });
+
+  it('fetches nothing for an offer, or for an augment with no URL or one off the deployment', () => {
+    expect(augmentTarget({ ...offer, delivery: 'offer' }, 'q', 'https://tenjin.sh')).toBeNull();
+    expect(augmentTarget({ ...offer, delivery: 'augment' }, 'q', 'https://tenjin.sh')).toBeNull();
+    expect(
+      augmentTarget(
+        { ...offer, delivery: 'augment', augmentUrl: 'https://docs.example.test/x?query=q' },
+        'q',
+        'https://tenjin.sh',
+      ),
+    ).toBeNull();
+    expect(
+      augmentTarget(
+        { ...offer, delivery: 'augment', augmentUrl: 'https://u:p@tenjin.sh/api/docs-lookup' },
+        'q',
+        'https://tenjin.sh',
+      ),
+    ).toBeNull();
+  });
+
+  it('builds the URL from the endpoint and the search for a server that sends no delivery', () => {
+    expect(augmentTarget(offer, 'next.js 16 middleware matcher', 'https://tenjin.sh')).toBe(BUILT);
   });
 });
 

@@ -46,6 +46,7 @@ import {
   bindDecision,
   claimRedirect,
   markOffered,
+  type OfferedTerms,
   newCallId,
   noteSession,
   pruneProgress,
@@ -693,8 +694,10 @@ interface Shortfall {
  * make good on alone is withheld, as it always was. A DISCOVERED one is never
  * withheld where someone can ask the user: it is the only line naming a
  * service that can do the step, so it is shown with one sentence saying the
- * call needs approval or funds, and the host asks first. Where nobody can ask
- * (a subagent's call, a delegated task) it is withheld like any other.
+ * call needs approval or funds; its `needs_approval` result names the
+ * `approve` call, which is the asking, so the host never asks first. Where
+ * nobody can ask (a subagent's call, a delegated task) it is withheld like
+ * any other.
  *
  * An offer that is shown can still list OTHER services beside its own: a Tenjin
  * list menu, or an alternative after a curated line. One priced over the cap
@@ -709,7 +712,7 @@ async function vetOffer<T extends OfferDecision>(
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
   const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
   if (shortfall === null) {
-    const note = await overCapNote(offer.hint, deps, canAskUser);
+    const note = await overCapNote(offer, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
   }
   if (offer.action === 'discovered' && canAskUser) {
@@ -723,7 +726,9 @@ async function vetOffer<T extends OfferDecision>(
  *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
  *  a curated alternative, and "$0.30 via https://" for a curated offer's own
  *  (already checked as a field, so it fits). A dollar amount anywhere else is
- *  a description's words ("seats from $500/month"), never a price. */
+ *  a description's words ("seats from $500/month"), never a price. Read only
+ *  for an offer that carries no specs: every other one names each service's
+ *  price as a field. */
 const LISTED_PRICE_RE =
   /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
 
@@ -732,20 +737,44 @@ const LISTED_PRICE_RE =
 const QUOTED_RE = /"(?:[^"\\]|\\.)*"/g;
 
 /**
+ * The other services an offer names, by price in atomic USDC: every spec
+ * beside the offer's own (its line and its specs name the same ids), or, for
+ * an offer with no specs, each price the line quotes.
+ */
+function listedPrices(offer: OfferDecision): bigint[] {
+  if (offer.specs !== undefined) {
+    return offer.specs
+      .filter((spec) => spec.id !== offer.id)
+      .map((spec) => BigInt(spec.priceAtomic));
+  }
+  return [...offer.hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].flatMap((match) => {
+    try {
+      return [BigInt(parseUsdToAtomic((match[1] ?? match[2]) as string))];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** A listed price as a line quotes one: dollars with at least two decimals. */
+function listedUsd(atomic: bigint): string {
+  const [whole, fraction = ''] = toMoney(atomic.toString()).usd.split('.');
+  return `${whole}.${fraction.padEnd(2, '0')}`;
+}
+
+/**
  * ONE SENTENCE FOR A LISTED SERVICE OVER THE AUTO-SPEND CAP, or null. The offer
  * itself already fits (it passed {@link spendShortfall}), so a price over the
  * cap here is another entry: People Data Labs at $0.28 beside a $0.005 email
- * finder, under a $0.25 cap, was picked and refused. Quiet when the hint
- * quotes no such price or the settings cannot be read.
+ * finder, under a $0.25 cap, was picked and refused. Quiet when the offer
+ * names no such price or the settings cannot be read.
  */
 async function overCapNote(
-  hint: string,
+  offer: OfferDecision,
   deps: HookDeps,
   canAskUser: boolean,
 ): Promise<string | null> {
-  const listed = [...hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].map(
-    (match) => (match[1] ?? match[2]) as string,
-  );
+  const listed = listedPrices(offer);
   if (listed.length === 0) return null;
   let cap: bigint;
   try {
@@ -753,26 +782,14 @@ async function overCapNote(
   } catch {
     return null;
   }
-  const over = [
-    ...new Set(
-      listed.filter((usd) => {
-        try {
-          return BigInt(parseUsdToAtomic(usd)) > cap;
-        } catch {
-          return false;
-        }
-      }),
-    ),
-  ];
+  const over = [...new Set(listed.filter((atomic) => atomic > cap).map(listedUsd))];
   if (over.length === 0) return null;
   const prices = over.map((usd) => `$${usd}`).join(' and ');
   const which = over.length > 1 ? 'those services' : 'that service';
   return (
     `Note: ${prices} ${over.length > 1 ? 'are' : 'is'} above this machine's automatic per-call limit ` +
     `($${toMoney(cap.toString()).usd}), so request returns needs_approval for ${which}; ` +
-    (canAskUser
-      ? 'prefer one within the limit, or ask the user first.'
-      : 'use one within the limit.')
+    (canAskUser ? 'prefer one within the limit.' : 'use one within the limit.')
   );
 }
 
@@ -1171,7 +1188,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     };
   }
   if (event.toolUseId !== undefined) {
-    await markOffered(deps.dataDir, session, event.toolUseId, deps.now?.());
+    await markOffered(
+      deps.dataDir,
+      session,
+      event.toolUseId,
+      offeredTerms(routed.offer),
+      deps.now?.(),
+    );
   }
   return redirect(
     routed.offer,
@@ -1186,6 +1209,19 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
  */
 function restSentence(rest: Record<string, unknown>): string {
   return `Nothing else in this web.run call ran either; to run the rest as written, call web.run again with exactly ${JSON.stringify(rest)}`;
+}
+
+/** What the offer record keeps of a redirect: the offer's id, its label, from
+ *  its decision or else its own spec, and its price. */
+function offeredTerms(offer: OfferDecision): OfferedTerms {
+  const label =
+    (offer.action === 'execute' ? offer.label : undefined) ??
+    offer.specs?.find((spec) => spec.id === offer.id)?.label;
+  return {
+    offerId: offer.id,
+    ...(label !== undefined ? { label } : {}),
+    priceAtomic: termsOf(offer).providerPriceAtomic,
+  };
 }
 
 /**
@@ -1220,9 +1256,10 @@ function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): Na
  *
  * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
  * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
- * with a note telling the host to ask the user first; here the question IS
- * the asking, so denying it to say "ask the user" strands the turn. Any
- * shortfall, curated or discovered, withholds the offer and the question runs.
+ * with a note that the call needs approval or funds; here the question IS
+ * the asking, so denying it for a call that cannot run alone strands the
+ * turn. Any shortfall, curated or discovered, withholds the offer and the
+ * question runs.
  */
 export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1241,6 +1278,15 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
     return { response: null, action: routed.offer.action, id: routed.offer.id, free: true };
+  }
+  if (event.toolUseId !== undefined) {
+    await markOffered(
+      deps.dataDir,
+      localSession(event.sessionId, deps),
+      event.toolUseId,
+      offeredTerms(routed.offer),
+      deps.now?.(),
+    );
   }
   return redirect(routed.offer, hostOf(deps), ONE_BLOCK_QUESTION);
 }

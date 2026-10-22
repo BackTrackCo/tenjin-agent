@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1002,7 +1003,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1994,7 +1995,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
       harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
@@ -2081,7 +2082,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
       harness: 'claude',
     });
   });
@@ -2383,5 +2384,191 @@ describe('the outcome a failed call reports', () => {
     ['a bug before anything was signed', new TypeError('boom')],
   ])('reports nothing for %s', (_label, err) => {
     expect(failureOutcome(err, before)).toBeNull();
+  });
+});
+
+/**
+ * THE TOOL LIST, READ FOR FREE, end to end against a scripted router: a browse
+ * returns the server's rows and pays nothing, a row's id fetched with `tool`
+ * keeps its spec under the fresh id the server minted, and `{id, input}` then
+ * runs that spec like any offer. Neither read takes the paid routing path.
+ */
+describe('the tool list, read for free', () => {
+  const wire = (name: string): Record<string, unknown> =>
+    JSON.parse(
+      readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'),
+    ) as Record<string, unknown>;
+  const BROWSE = wire('wire-browse.json');
+  const BY_ID = wire('wire-lookup-spec-by-id.json');
+  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs'];
+  /** A paid routing path that must never be asked. */
+  const route = vi.fn(async () => {
+    throw new Error('the paid routing path was asked');
+  });
+
+  it('lists the rows for a need, sends only the browse, and pays nothing', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: BROWSE }]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { browse: 'live crypto prices' },
+      { ...deps(fetchImpl, auth), route },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({
+      status: 'browse',
+      cost: ['provider price 0 USD'],
+      rows: [
+        { id: 'cmc-quotes', label: 'CoinMarketCap quotes', price: '1¢' },
+        { id: 'stableenrich-exa-answer', label: 'Exa Answer', kind: 'Web research' },
+      ],
+    });
+    expect(result.summary).toContain(
+      'CoinMarketCap quotes (id cmc-quotes, 1¢, Live crypto prices)',
+    );
+    expect(result.summary).toContain('request({tool: "<id>"})');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ url: `${ROUTER}${ROUTER_PATH}`, method: 'POST', paid: false });
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      browse: 'live crypto prices',
+      accepts: ACCEPTS,
+      harness: 'claude',
+    });
+    expect(route).not.toHaveBeenCalled();
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  it('names the Codex harness on a browse and on a row id request', async () => {
+    const listed = net([{ url: ROUTER, status: 200, body: BROWSE }]);
+    await runRequestTool(
+      { browse: 'live crypto prices' },
+      { ...deps(listed.fetchImpl), route, harness: 'codex' },
+    );
+    expect(JSON.parse(listed.calls[0]!.body!)).toMatchObject({ harness: 'codex' });
+    const spec = net([{ url: ROUTER, status: 200, body: BY_ID }]);
+    await runRequestTool(
+      { tool: 'cmc-quotes' },
+      { ...deps(spec.fetchImpl), route, harness: 'codex' },
+    );
+    expect(JSON.parse(spec.calls[0]!.body!)).toMatchObject({
+      tool: 'cmc-quotes',
+      harness: 'codex',
+    });
+  });
+
+  it('browses every tool for an empty need, and says so when none fit', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: { ...BROWSE, rows: [] } }]);
+    const result = await runRequestTool({ browse: '' }, deps(fetchImpl));
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ browse: '' });
+    expect(result).toMatchObject({ isError: false, envelope: { status: 'browse', rows: [] } });
+    expect(result.summary).toMatch(/^No tool in the list fits/);
+  });
+
+  it('shows a free row as free and flattens the text to one line', async () => {
+    const rows = BROWSE.rows as Record<string, unknown>[];
+    const { fetchImpl } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          ...BROWSE,
+          rows: [{ ...rows[0]!, does: 'Live\ncrypto‮prices', free: true, price: 'Free' }],
+        },
+      },
+    ]);
+    const result = await runRequestTool({ browse: 'prices' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({
+      rows: [{ does: 'Live crypto prices', price: 'free' }],
+    });
+  });
+
+  it.each([
+    ['an id', { browse: 'prices', id: 'k3f9-abcd' }],
+    ['a query', { tool: 'cmc-quotes', query: 'prices' }],
+    ['both forms', { browse: 'prices', tool: 'cmc-quotes' }],
+  ])('refuses a read of the list sent with %s, and sends nothing', async (_label, args) => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(args, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input' });
+    expect(calls).toEqual([]);
+  });
+
+  it('never sends a need that carries a credential', async () => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { browse: 'use sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(calls).toEqual([]);
+  });
+
+  it('reads an answer it cannot parse as a failure, with nothing paid', async () => {
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: { ...BROWSE, surprise: 1 } }]);
+    const result = await runRequestTool({ browse: 'prices' }, deps(fetchImpl));
+    expect(result).toMatchObject({
+      isError: true,
+      envelope: { status: 'failed', cost: ['provider price 0 USD'] },
+    });
+  });
+
+  it("keeps a row's spec under the server's id, then runs it from {id, input}", async () => {
+    await noteSession(dir, 'sess-1');
+    const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
+    const served = {
+      ...BY_ID,
+      decision: {
+        ...decision,
+        spec: {
+          ...decision.spec,
+          payTo: '0x1111111111111111111111111111111111111111',
+          request: { ...(decision.spec.request as object), url: PROVIDER },
+        },
+      },
+    };
+    const first = net([{ url: ROUTER, status: 200, body: served }]);
+    const shown = await runRequestTool({ tool: 'cmc-quotes' }, { ...deps(first.fetchImpl), route });
+    expect(shown.envelope).toMatchObject({ status: 'spec', id: decision.id });
+    expect(shown.summary).toContain(`request({id: "${decision.id}"`);
+    expect(JSON.parse(first.calls[0]!.body!)).toEqual({
+      schemaVersion: 1,
+      tool: 'cmc-quotes',
+      accepts: ACCEPTS,
+      harness: 'claude',
+    });
+    expect(route).not.toHaveBeenCalled();
+
+    const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    const ran = await runRequestTool(
+      { id: decision.id, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+      deps(second.fetchImpl),
+    );
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.01 USD'] });
+    // The footer names the service by its label, and the ledger keeps it.
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
+    );
+    const ledger = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
+    expect(JSON.parse(ledger.at(-1)!)).toMatchObject({
+      capabilityId: 'cmc-quotes',
+      label: 'CoinMarketCap quotes',
+    });
+  });
+
+  it("passes on the server's needs_input for a row with no spec, and keeps nothing", async () => {
+    const answer = {
+      schemaVersion: 1,
+      routerVersion: 'v',
+      decision: {
+        action: 'needs_input',
+        reason:
+          'This tool has no spec: call request({query}) with the task, and it is looked up from there.',
+        diagnostics: { reasonCode: 'spec_missing', stage: 'bind', missing: [], nextAction: '' },
+      },
+    };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool({ tool: 'context7-docs' }, deps(fetchImpl));
+    expect(result.envelope).toMatchObject({ status: 'needs_input', reasonCode: 'spec_missing' });
+    expect(result.summary).toContain('request({query})');
   });
 });

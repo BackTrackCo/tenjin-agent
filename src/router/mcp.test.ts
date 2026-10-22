@@ -15,6 +15,7 @@ import type { OfferSpec } from './decision';
 import {
   buildRouterMcpServer,
   MAX_RESULT_SIZE_CHARS,
+  ALWAYS_LOAD_KEY,
   MAX_RESULT_SIZE_KEY,
   pollProgress,
   promptsBeforeApprove,
@@ -105,9 +106,11 @@ describe('the router MCP server', () => {
       const tools = await client.listTools();
       // `approve` is Claude Code's alone (below): this client never sees it.
       expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
-      // The harness reads its inline-result threshold from the listed tool.
+      // The harness reads its inline-result threshold from the listed tool,
+      // and keeps it out of tool search.
       expect(tools.tools[0]!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
+        [ALWAYS_LOAD_KEY]: true,
       });
       expect(tools.tools[1]!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
