@@ -882,6 +882,38 @@ describe('activate', () => {
     expect(existsSync(join(home, '.local', 'bin', 'tenjin'))).toBe(false);
   });
 
+  /**
+   * The lock is released between an activation and its caller's registration,
+   * so install A's restore can run after install B activated and registered.
+   */
+  it('restore() changes nothing once a later activation has written, and still restores while it is the last', async () => {
+    placed('1.0.0', '24.0.0');
+    placed('1.1.0', '24.0.0');
+    const a = await activate(root, { cli: '1.0.0', node: '24.0.0' }, actOpts());
+    const afterA = {
+      claude: snapshot(join(root, 'claude')),
+      state: readFileSync(runtimeStatePath(root), 'utf8'),
+      bin: snapshot(join(home, '.local', 'bin')),
+    };
+    const b = await activate(root, { cli: '1.1.0', node: '24.0.0' }, actOpts());
+    const afterB = {
+      claude: snapshot(join(root, 'claude')),
+      state: readFileSync(runtimeStatePath(root), 'utf8'),
+      bin: snapshot(join(home, '.local', 'bin')),
+    };
+    // A was a first activation: its restore would delete every file B rendered.
+    await a.restore();
+    expect(snapshot(join(root, 'claude'))).toEqual(afterB.claude);
+    expect(readFileSync(runtimeStatePath(root), 'utf8')).toBe(afterB.state);
+    expect(snapshot(join(home, '.local', 'bin'))).toEqual(afterB.bin);
+    expect(readRuntimeState(root)?.current).toEqual({ cli: '1.1.0', node: '24.0.0' });
+    // B is still the last activation, so its restore puts A's switch back.
+    await b.restore();
+    expect(snapshot(join(root, 'claude'))).toEqual(afterA.claude);
+    expect(readFileSync(runtimeStatePath(root), 'utf8')).toBe(afterA.state);
+    expect(snapshot(join(home, '.local', 'bin'))).toEqual(afterA.bin);
+  });
+
   it('refuses, changing nothing, a version or Node a collect removed since it was placed', async () => {
     placed('1.0.0', '24.0.0');
     placed('1.1.0', '24.1.0');

@@ -1010,6 +1010,12 @@ interface RawState {
   current: RuntimePointer | null;
   previous: RuntimePointer | null;
   pending: RuntimePointer | null;
+  /**
+   * The id of the activation whose final write this is, so its `restore()`
+   * can tell whether a later activation has written since. Unset before the
+   * first activation that carried one.
+   */
+  activation?: string;
 }
 
 function pointerOf(raw: unknown): RuntimePointer | null {
@@ -1031,6 +1037,7 @@ function readRawState(root: string): RawState {
       current: pointerOf(raw.current),
       previous: pointerOf(raw.previous),
       pending: pointerOf(raw.pending),
+      ...(typeof raw.activation === 'string' ? { activation: raw.activation } : {}),
     };
   } catch {
     return { current: null, previous: null, pending: null };
@@ -1080,7 +1087,8 @@ export interface Activation {
  * clear `pending` in one write. A crash in between leaves `pending` set, which
  * GC keeps and the next install re-renders; a render that throws puts the old
  * files back and leaves `pending`. `restore()` undoes the whole switch, for a
- * caller whose registration then failed.
+ * caller whose registration then failed, and does nothing once a later
+ * activation has written `state.json` (its random `activation` id is gone).
  */
 export async function activate(
   root: string,
@@ -1138,12 +1146,19 @@ export async function activate(
 
       const previous =
         old.current !== null && old.current.cli !== next.cli ? old.current : old.previous;
-      await writeState(root, { current: next, previous, pending: null });
+      const activation = rand();
+      await writeState(root, { current: next, previous, pending: null, activation });
 
       const restore = () =>
         withRuntimeLock(
           root,
           async () => {
+            // ONLY WHILE THIS ACTIVATION IS STILL THE LAST ONE. The lock is
+            // released between this switch and the caller's registration, so
+            // another install may have activated (and registered) since;
+            // putting back what was here before this one would overwrite its
+            // switch, or, on a first activation, delete its files.
+            if (readRawState(root).activation !== activation) return;
             for (const path of [...order].reverse()) {
               await putBack(join(hosts, path), oldBodies.get(path) ?? null, modeFor(path));
             }

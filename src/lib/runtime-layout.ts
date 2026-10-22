@@ -12,7 +12,8 @@ import { isNewer, parseVersion } from './version-order';
  * synchronous and imports no other Tenjin module but the paths and the version
  * order.
  *
- *   <root>/state.json                 which version is current, previous, pending
+ *   <root>/state.json                 which version is current, previous, pending,
+ *                                     and the id of the activation that wrote it
  *   <root>/node/<V>/bin/node          (win32: node/<V>/node.exe)
  *   <root>/versions/<cli>/dist/index.js
  *   <root>/versions/<cli>/.live/<pid> one per `tenjin mcp` running from it
