@@ -411,7 +411,7 @@ async function pluginCheck(
 }
 
 /** Claude Code's own record, read when no binary can be asked. */
-async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promise<boolean> {
+export async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promise<boolean> {
   try {
     const raw = await readFile(
       join(claudeConfigDir(env, home), 'plugins', 'installed_plugins.json'),

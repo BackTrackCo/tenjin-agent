@@ -647,7 +647,12 @@ export const SHOW_NOT_RUN =
  * it, and the defaults hold.
  */
 function spendStep(args: RouterInstallArgs): QuestionStep {
-  const options = spendOptions(installCommand(args));
+  return spendStepFor(installCommand(args));
+}
+
+/** The same question, for an install an agent runs again as `command`. */
+export function spendStepFor(command: string): QuestionStep {
+  const options = spendOptions(command);
   const [byDefault, custom] = options as [SpendOption, SpendOption];
   return {
     id: 'spend',
@@ -667,7 +672,9 @@ function installCommand(args: RouterInstallArgs): string {
 }
 
 /** The limits the person named with `--max-auto-spend` and `--session-budget`, refused before any write. */
-function namedLimits(args: RouterInstallArgs): {
+export function namedLimits(
+  args: Pick<RouterInstallArgs, 'maxAutoSpend' | 'sessionBudget' | 'refresh'>,
+): {
   limits: Partial<RouterLimits>;
   keys: (keyof RouterLimits)[];
 } {
@@ -795,7 +802,9 @@ function fundLines(fund: FundStep): string[] {
  * question names the routing fee and its deposits too, and either answer
  * approves it. Cancelling at any step writes nothing.
  */
-async function approveLimits(deps: RouterInstallDeps): Promise<RouterLimits> {
+export async function approveLimits(
+  deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
+): Promise<RouterLimits> {
   const choice = await (deps.promptLimits ?? promptLimits)(
     `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS}\n${FEE_APPROVAL}`,
   );
@@ -880,12 +889,12 @@ function promptAmount(message: string, placeholder: string): Promise<string | nu
   return askText({ message, placeholder });
 }
 
-interface EffectiveLimits {
+export interface EffectiveLimits {
   maxAutoSpend: string;
   sessionBudget: string;
 }
 
-function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
+export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
   return {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:

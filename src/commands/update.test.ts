@@ -160,6 +160,15 @@ describe('runUpdate', () => {
     expect(result.humanLines?.join(' ')).not.toContain('Routing costs');
   });
 
+  it('never re-adds the Codex plugin: it carries no version, so nothing changes between builds', async () => {
+    const { ctx } = makeCtx();
+    const spawned = spawnRecorder();
+    const result = await runUpdate({ check: false }, ctx, await deps({ spawnImpl: spawned.impl }));
+    expect(spawned.calls.some((call) => call.args.includes('--harness'))).toBe(false);
+    expect(spawned.calls.some((call) => call.cmd === 'codex')).toBe(false);
+    expect(result.data).not.toHaveProperty('codex');
+  });
+
   // The live-registry regression this command has to survive: `alpha` sat on
   // 0.1.0-alpha.7 from 2026-07-31 while every later build shipped on `latest`,
   // and `next` never moved off the first one. A prerelease build reads `latest`

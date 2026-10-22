@@ -51,9 +51,11 @@ Or in a terminal (Node.js 22 or newer):
 
 ```bash
 npm i -g tenjin-cli
-tenjin install          # adds the Tenjin plugin to Claude Code and creates your wallet
+tenjin install          # adds the Tenjin plugin to your agent and creates your wallet
 tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
 ```
+
+**Codex (experimental):** `tenjin install` sets it up too ([how it hooks in](docs/agent-permissions.md#codex)).
 
 ## What it can do
 
