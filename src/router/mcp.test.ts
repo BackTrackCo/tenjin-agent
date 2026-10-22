@@ -805,7 +805,12 @@ describe('the payer verdict and the wallet news', () => {
     return (await readObservations(dir)).find((o) => o.pid === process.pid);
   }
 
-  it("gates the legs on the payer's verdict, carries the observer's news, and prewarms only through the payer", async () => {
+  /**
+   * One prompt leg through `tenjin mcp`'s hook tool, with `payer` and the
+   * hook env `env`. Returns the answer and how many times the hook legs asked
+   * the payer for its verdict (this test's own calls left out).
+   */
+  async function promptLeg(payer: RoutingPayer, env: NodeJS.ProcessEnv, obs = observer()) {
     const homeDir = join(dir, 'home');
     const project = join(homeDir, '.claude', 'projects', '-repo');
     await mkdir(project, { recursive: true });
@@ -813,30 +818,18 @@ describe('the payer verdict and the wallet news', () => {
     await writeFile(transcript, '');
     const fake = new FakeRouter();
     fake.body = OFFER;
-    const payer = new RoutingPayer(
-      payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey()), {
-        getSigner: async () => {
-          throw new CliError('PROVIDER_ERROR', 'no passphrase', {
-            details: unlockDetails('passphrase_missing'),
-          });
-        },
-      }),
-    );
-    const prewarm = vi.spyOn(payer, 'prewarm');
-    const signVerdict = vi.spyOn(payer, 'signVerdict');
-    const obs = observer();
-    obs.queueNews('A one-time wallet line.');
     const server = buildRouterMcpServer({
       dataDir: dir,
       homeDir: await realpath(homeDir),
       payer,
       observer: obs,
-      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+      hookDeps: {
+        baseUrl: 'https://router.test',
+        fetchImpl: fake.fetch,
+        warn: () => undefined,
+        env,
+      },
     });
-    expect(prewarm).toHaveBeenCalledTimes(1);
-    // The request tool's provider is not unlocked beside the payer's prewarm.
-    expect(providerSpy.getSigner).toBe(0);
-    await vi.waitFor(() => expect(payer.signVerdict().status).toBe('blocked'));
     const event: Record<string, string> = {
       hook_event_name: 'UserPromptSubmit',
       session_id: 'sess-wired',
@@ -846,6 +839,7 @@ describe('the payer verdict and the wallet news', () => {
     };
     const client = await connect(server);
     try {
+      const signVerdict = vi.spyOn(payer, 'signVerdict');
       const called = await client.callTool({
         name: 'hook',
         arguments: Object.fromEntries(
@@ -855,23 +849,65 @@ describe('the payer verdict and the wallet news', () => {
           }),
         ),
       });
+      const asked = signVerdict.mock.calls.length;
+      signVerdict.mockRestore();
       const text = (called.content as { text: string }[])[0]!.text;
       const answer = JSON.parse(text) as {
         systemMessage?: string;
         hookSpecificOutput?: { additionalContext?: string };
       };
-      // The payer's blocked verdict withholds the offer.
-      expect(signVerdict).toHaveBeenCalled();
-      expect(answer.hookSpecificOutput?.additionalContext ?? '').not.toContain(
-        'CoinMarketCap fits this',
-      );
-      // The observer's news rides in systemMessage, and the router is now serving a session.
-      expect(answer.systemMessage).toContain('A one-time wallet line.');
-      expect((await settledObservation())?.servedSession).toBe(true);
+      return { answer, asked, served: (await settledObservation())?.servedSession };
     } finally {
       await client.close();
       await server.close();
     }
+  }
+
+  it("withholds on the payer's blocked verdict though the files alone would offer, carries the news, and prewarms only through the payer", async () => {
+    const payer = new RoutingPayer(
+      payerDeps(new FakeRouter(), dir, privateKeyToAccount(generatePrivateKey()), {
+        getSigner: async () => {
+          throw new CliError('PROVIDER_ERROR', 'no passphrase', {
+            details: unlockDetails('passphrase_missing'),
+          });
+        },
+      }),
+    );
+    const prewarm = vi.spyOn(payer, 'prewarm');
+    const obs = observer();
+    obs.queueNews('A one-time wallet line.');
+    // Prewarmed by building the server; wait for its verdict before the leg.
+    const built = buildRouterMcpServer({ dataDir: dir, payer, observer: observer() });
+    await built.close();
+    expect(prewarm).toHaveBeenCalledTimes(1);
+    // The request tool's provider is not unlocked beside the payer's prewarm.
+    expect(providerSpy.getSigner).toBe(0);
+    await vi.waitFor(() => expect(payer.signVerdict().status).toBe('blocked'));
+    // A valid key in the hook env: the files alone would say ready and offer.
+    const { answer, asked, served } = await promptLeg(
+      payer,
+      { TENJIN_WALLET_KEY: generatePrivateKey() },
+      obs,
+    );
+    expect(asked).toBeGreaterThan(0);
+    expect(answer.hookSpecificOutput?.additionalContext ?? '').not.toContain(
+      'CoinMarketCap fits this',
+    );
+    // The observer's news rides in systemMessage, and the router is now serving a session.
+    expect(answer.systemMessage).toContain('A one-time wallet line.');
+    expect(served).toBe(true);
+  });
+
+  it("offers on the payer's ready verdict though the files alone would withhold", async () => {
+    const payer = new RoutingPayer(
+      payerDeps(new FakeRouter(), dir, privateKeyToAccount(generatePrivateKey())),
+    );
+    await payer.prewarm();
+    expect(payer.signVerdict().status).toBe('ready');
+    // No wallet.json and no key in the hook env: the files alone say no_wallet.
+    const { answer, asked } = await promptLeg(payer, {});
+    expect(asked).toBeGreaterThan(0);
+    expect(answer.hookSpecificOutput?.additionalContext ?? '').toContain('CoinMarketCap fits this');
   });
 
   it('a server that answers only tools/list leaves servedSession false', async () => {
