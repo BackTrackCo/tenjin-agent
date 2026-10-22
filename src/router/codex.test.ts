@@ -165,18 +165,101 @@ describe('Codex transcript ownership and bounds', () => {
 });
 
 describe('Codex web events', () => {
-  it('maps only one complete, unfiltered search, and passes batches and mixed calls through', () => {
+  /** Real `webrun` inputs from Codex 0.163 rollouts, the routed entry, and the exact rest. */
+  const shapes: [string, Record<string, unknown>, unknown, Record<string, unknown> | undefined][] =
+    [
+      [
+        'a lone search',
+        { search_query: [{ q: 'example search' }] },
+        { tool: 'WebSearch', query: 'example search' },
+        undefined,
+      ],
+      [
+        'a three-query batch, filter inside q',
+        {
+          search_query: [
+            { q: 'best local LLM 16GB Mac' },
+            { q: 'ollama qwen3 site:reddit.com' },
+            { q: 'llama.cpp metal benchmarks' },
+          ],
+          response_length: 'medium',
+        },
+        { tool: 'WebSearch', query: 'best local LLM 16GB Mac' },
+        {
+          search_query: [
+            { q: 'ollama qwen3 site:reddit.com' },
+            { q: 'llama.cpp metal benchmarks' },
+          ],
+          response_length: 'medium',
+        },
+      ],
+      [
+        'a search plus an open',
+        { search_query: [{ q: 'a' }], open: [{ ref_id: 'https://example.com/p' }] },
+        { tool: 'WebSearch', query: 'a' },
+        { open: [{ ref_id: 'https://example.com/p' }] },
+      ],
+      [
+        'a domain-filtered search beside a plain one',
+        {
+          search_query: [{ q: 'a', domains: ['example.com'] }, { q: 'b', recency: 7 }, { q: 'c' }],
+        },
+        { tool: 'WebSearch', query: 'c' },
+        {
+          search_query: [
+            { q: 'a', domains: ['example.com'] },
+            { q: 'b', recency: 7 },
+          ],
+        },
+      ],
+      [
+        'one URL open',
+        { open: [{ ref_id: 'https://www.reddit.com/r/rust/comments/1dh773j/report/' }] },
+        { tool: 'WebFetch', url: 'https://www.reddit.com/r/rust/comments/1dh773j/report/' },
+        undefined,
+      ],
+      [
+        'an open at a line, then a URL open',
+        {
+          open: [{ ref_id: 'https://a.example/x', lineno: 40 }, { ref_id: 'https://b.example/y' }],
+        },
+        { tool: 'WebFetch', url: 'https://b.example/y' },
+        { open: [{ ref_id: 'https://a.example/x', lineno: 40 }] },
+      ],
+      [
+        'an open at a line alone',
+        { open: [{ ref_id: 'https://a.example/x', lineno: 40 }] },
+        null,
+        undefined,
+      ],
+      ['a turn-reference open', { open: [{ ref_id: 'turn0search0' }] }, null, undefined],
+      ['a find only', { find: [{ ref_id: 'turn0view0', pattern: 'price' }] }, null, undefined],
+      ['a click only', { click: [{ ref_id: 'turn0view0', id: 3 }] }, null, undefined],
+      ['weather', { weather: [{ location: 'Toronto' }] }, null, undefined],
+      [
+        'a filtered search alone',
+        { search_query: [{ q: 'a', domains: ['example.com'] }] },
+        null,
+        undefined,
+      ],
+    ];
+
+  it.each(shapes)('reads %s as its entry and the exact rest', (_, tool_input, entry, rest) => {
+    const event = codexRouterEvent({ ...native, tool_input });
+    if (entry === null) {
+      expect(event).toBeNull();
+      return;
+    }
+    expect(event).toMatchObject({ kind: 'native', pending: entry });
+    expect((event as { rest?: unknown }).rest).toEqual(rest);
+  });
+
+  it('keeps the daemon view: only a lone plain search is a web tool', () => {
     expect(codexRouterEvent(native)).toMatchObject({
       kind: 'native',
       pending: { tool: 'WebSearch', query: 'example search' },
     });
-    for (const tool_input of [
-      { search_query: [{ q: 'a' }, { q: 'b' }] },
-      { search_query: [{ q: 'a', domains: ['example.com'] }] },
-      { search_query: [{ q: 'a' }], open: [{ ref_id: 'https://example.com' }] },
-      { search_query: [{ q: 'a' }], find: [] },
-    ])
-      expect(codexRouterEvent({ ...native, tool_input })).toBeNull();
+    expect(codexRouterEvent(native)).not.toHaveProperty('rest');
   });
 
   it('gives a child agent no routing: it has no request tool to call', () => {
@@ -198,6 +281,15 @@ describe('Codex web events', () => {
     ).toMatchObject({ kind: 'shortfall', nativeOutcome: null });
     expect(codexRouterEvent({ ...post, tool_response: '' })).toMatchObject({
       nativeOutcome: { error: 'Web search returned no results' },
+    });
+    // A batch returns one text for the whole call: only an empty one is short.
+    const batchPost = { ...post, tool_input: { search_query: [{ q: 'a' }, { q: 'b' }] } };
+    expect(codexRouterEvent({ ...batchPost, tool_response: '' })).toMatchObject({
+      pending: { tool: 'WebSearch', query: 'a' },
+      nativeOutcome: { error: 'Web search returned no results' },
+    });
+    expect(codexRouterEvent({ ...batchPost, tool_response: 'some results' })).toMatchObject({
+      nativeOutcome: null,
     });
     expect(codexRouterEvent({ ...post, tool_response: { changed: 'schema' } })).toMatchObject({
       nativeOutcome: null,
@@ -296,6 +388,79 @@ describe('Codex routing through the router', () => {
     expect(String(at(out.response, 'hookSpecificOutput', 'additionalContext'))).toContain(
       CODEX_REQUEST_TOOL,
     );
+  });
+
+  const batch = {
+    search_query: [{ q: 'example search' }, { q: 'second search site:example.com' }],
+    open: [{ ref_id: 'https://example.com/page', lineno: 12 }],
+    response_length: 'short',
+  };
+  const rest = {
+    search_query: [{ q: 'second search site:example.com' }],
+    open: [{ ref_id: 'https://example.com/page', lineno: 12 }],
+    response_length: 'short',
+  };
+
+  it('denies a batch once, naming the rest as exact JSON, and lets the re-run through', async () => {
+    const { bodies, fetchImpl } = router(paidOffer);
+    const event = { ...native, tool_input: batch, cwd: dir, transcript_path: transcript };
+    const out = await runNativeHook(event, codexDeps(fetchImpl));
+    expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    const reason = String(at(out.response, 'hookSpecificOutput', 'permissionDecisionReason'));
+    expect(reason).toContain(`${CODEX_REQUEST_TOOL}({`);
+    expect(reason.endsWith(`call web.run again with exactly ${JSON.stringify(rest)}`)).toBe(true);
+    expect(bodies).toHaveLength(1);
+    expect(at(bodies[0], 'packet', 'pendingCall')).toEqual({
+      tool: 'WebSearch',
+      query: 'example search',
+    });
+    // The rest, and the whole call again, run with no second router call.
+    const routerCalls = bodies.length;
+    for (const [id, tool_input] of [
+      ['call-rest', rest],
+      ['call-again', batch],
+    ] as const) {
+      const again = await runNativeHook(
+        { ...event, tool_use_id: id, tool_input },
+        codexDeps(fetchImpl),
+      );
+      expect(again.response).toBeNull();
+    }
+    expect(bodies.length).toBe(routerCalls);
+  });
+
+  it('routes a lone URL open as WebFetch, and runs a batch untouched on a free or no offer', async () => {
+    const page = 'https://www.reddit.com/r/rust/comments/1dh773j/report/';
+    const paid = router(paidOffer);
+    const out = await runNativeHook(
+      {
+        ...native,
+        tool_input: { open: [{ ref_id: page }] },
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(paid.fetchImpl),
+    );
+    expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    expect(at(paid.bodies[0], 'packet', 'pendingCall')).toEqual({ tool: 'WebFetch', url: page });
+    const freeOffer = {
+      ...paidOffer,
+      decision: { ...paidOffer.decision, providerPriceAtomic: '0' },
+    };
+    for (const answer of [freeOffer, nativeAnswer]) {
+      const { fetchImpl } = router(answer);
+      const ran = await runNativeHook(
+        {
+          ...native,
+          tool_use_id: `call-${String(answer === nativeAnswer)}`,
+          tool_input: { ...batch, search_query: [{ q: 'fresh search' }, ...rest.search_query] },
+          cwd: dir,
+          transcript_path: transcript,
+        },
+        codexDeps(fetchImpl),
+      );
+      expect(ran.response).toBeNull();
+    }
   });
 
   /** One hook command run, its stdout captured. */

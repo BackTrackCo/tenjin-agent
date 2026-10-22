@@ -290,7 +290,7 @@ export function renderHostFiles(version?: string): Record<string, string> {
 /**
  * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
  * checked-in `hosts/codex/` by the same test. Its legs are command hooks: the
- * prompt, and one web search before it runs and after (Codex has no
+ * prompt, and one web call before it runs and after (Codex has no
  * PostToolUseFailure). Nothing in it names a release, so `codex plugin add`
  * copies the same bytes from every build and the hooks' trust holds across a
  * `tenjin update`.

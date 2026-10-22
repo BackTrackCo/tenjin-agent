@@ -1,12 +1,13 @@
-import { decode } from '../adapters/codex-wire';
+import { decode, splitWebrun } from '../adapters/codex-wire';
 import type { HookEvent } from './hooks';
 
 /**
- * A Codex hook event as the router's arms read it. Only the root session's
- * prompt and one complete, unfiltered `webrun` search map: a batch cannot be
- * partly denied, and a child's task is ciphertext. Everything else is null.
- * Codex has no PostToolUseFailure, so the after-call arm reads a failed search
- * from PostToolUse: an empty result is a shortfall, an unknown shape is not.
+ * A Codex hook event as the router's arms read it: the root session's prompt,
+ * and any `webrun` call holding a plain search or a URL open, read as that one
+ * entry ({@link splitWebrun}) with the rest of the call beside it. A child's
+ * task is ciphertext. Everything else is null. Codex has no
+ * PostToolUseFailure and returns one text for the whole call, so the
+ * after-call arm reads a shortfall only from an empty result.
  */
 export function codexRouterEvent(raw: unknown): HookEvent | null {
   const input = decode(raw);
@@ -19,11 +20,16 @@ export function codexRouterEvent(raw: unknown): HookEvent | null {
   if (input.event === 'prompt' && input.prompt !== undefined)
     return { kind: 'prompt', ...common, prompt: input.prompt };
   const tool = input.tool;
-  if (tool?.kind !== 'web') return null;
+  const toolInput = (raw as { tool_input?: unknown }).tool_input;
+  if (tool?.name !== 'webrun' || toolInput === null || typeof toolInput !== 'object') return null;
+  const split = splitWebrun(toolInput as Record<string, unknown>);
+  if (split === null) return null;
   const call = {
     ...common,
-    tool: 'WebSearch' as const,
-    pending: { tool: 'WebSearch' as const, query: tool.query },
+    tool: split.entry.tool,
+    pending: split.entry,
+    ...(split.rest !== null ? { rest: split.rest } : {}),
+    targets: split.targets,
     ...(tool.callId !== undefined ? { toolUseId: tool.callId } : {}),
   };
   if (input.event === 'tool.before') return { kind: 'native', ...call };
@@ -34,7 +40,8 @@ export function codexRouterEvent(raw: unknown): HookEvent | null {
     ...call,
     eventName: 'PostToolUse',
     nativeOutcome: text === '' ? { error: 'Web search returned no results' } : null,
-    search: text === undefined ? null : { raw: {}, results: [] },
+    search:
+      text === undefined || split.entry.tool !== 'WebSearch' ? null : { raw: {}, results: [] },
     savedPdf: null,
   };
 }

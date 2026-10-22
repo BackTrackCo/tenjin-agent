@@ -173,6 +173,10 @@ export interface NativeCall {
   agentId?: string;
   agentType?: string;
   cwd?: string;
+  /** A Codex `webrun` call's input without `pending`, when anything else is in it. */
+  rest?: Record<string, unknown>;
+  /** Every search and URL in the call, `pending` first; absent means `pending` alone. */
+  targets?: PendingCall[];
 }
 
 /** One hook event, as this file uses it. */
@@ -1121,12 +1125,26 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const event = eventOf(raw, deps);
   if (event?.kind !== 'native' || event.pending === null) return { response: null };
   const target = redirectTarget(event.pending);
+  // A batch is blocked at most once: the redirect claims every search and URL
+  // in it, and a call naming any claimed one runs.
+  const targets = [...new Set((event.targets ?? [event.pending]).map(redirectTarget))];
   const session = localSession(event.sessionId, deps);
+  const claim = (t: string) => claimRedirect(deps.dataDir, session, event.agentId, t, deps.now?.());
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
-    repeated: async () =>
-      !(await claimRedirect(deps.dataDir, session, event.agentId, target, deps.now?.())),
-    redirected: () => redirectClaimed(deps.dataDir, session, event.agentId, target, deps.now?.()),
+    repeated: async () => {
+      if (!(await claim(target))) return true;
+      await Promise.all(targets.filter((t) => t !== target).map(claim));
+      return false;
+    },
+    redirected: async () => {
+      for (const t of targets) {
+        if (await redirectClaimed(deps.dataDir, session, event.agentId, t, deps.now?.())) {
+          return true;
+        }
+      }
+      return false;
+    },
   });
   if (routed.offer === null) return routed.outcome;
   if (routed.free === true) {
@@ -1155,7 +1173,19 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   if (event.toolUseId !== undefined) {
     await markOffered(deps.dataDir, session, event.toolUseId, deps.now?.());
   }
-  return redirect(routed.offer, hostOf(deps));
+  return redirect(
+    routed.offer,
+    hostOf(deps),
+    event.rest === undefined ? ONE_BLOCK : `${ONE_BLOCK} ${restSentence(event.rest)}`,
+  );
+}
+
+/**
+ * The deny blocked the whole Codex call: the rest of it, exactly as written,
+ * to run again natively.
+ */
+function restSentence(rest: Record<string, unknown>): string {
+  return `Nothing else in this web.run call ran either; to run the rest as written, call web.run again with exactly ${JSON.stringify(rest)}`;
 }
 
 /**
