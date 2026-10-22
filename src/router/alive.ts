@@ -152,7 +152,8 @@ export async function walletNotice(
       : DEFAULT_MAX_AUTO_SPEND,
   );
   if (balance > 0n && balance >= cap) return null;
-  return `Tenjin balance: $${dollars(balance)}. Run \`tenjin wallet fund\` to add $5 or more.`;
+  // Only the person reads it, inside the session: they ask, the agent runs it.
+  return `Tenjin balance: $${dollars(balance)}. Ask your agent to add $5 or more to Tenjin.`;
 }
 
 /** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
