@@ -769,11 +769,12 @@ describe('tenjin doctor', () => {
   });
 
   describe('whether a session has started the plugin, with a claude binary present', () => {
-    // The PATH layout's fixes: this data dir is not the default, so it has no runtime.
+    // The PATH layout's fixes: this data dir is not the default, so it has no
+    // runtime, and none offers a move `tenjin install` would not make here.
     const STAMP_FIX =
-      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. After installing or updating Node, quit Claude Code fully, then start a new session. Or run `tenjin install` to move Tenjin to its own runtime.";
+      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. After installing or updating Node, quit Claude Code fully, then start a new session.";
     const NODE_FIX =
-      'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then quit Claude Code fully and start a new session. Or run `tenjin install` to move Tenjin to its own runtime.';
+      'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then quit Claude Code fully and start a new session.';
     const INSTALLED = 1_800_000_000_000;
     /** A process list: Claude Code sessions and routers, started at these times. */
     const processes = (claude: number[], routers: { startedAt: number; kind?: string }[] = []) => ({
