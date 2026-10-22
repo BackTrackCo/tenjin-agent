@@ -155,6 +155,7 @@ To stop the router without removing anything, `tenjin config set router.enabled 
 - Every hook request carries this session's id, so one session is not offered the same pay-per-call service twice.
 - With `router.context turn`, no prior messages are sent: the prompt on a prompt, your latest message on a native call, and the task on a delegation. `tenjin config set router.context turn` sets it for this machine, and `--project` for this repository.
 - Slash commands and one-word acknowledgements are never sent at all.
+- With `tenjin config set experimental.bazaar on` (off by default), short snippets of your prompts also go to Coinbase's public x402 Bazaar search, so the router can suggest unreviewed sellers listed there.
 - The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
 - On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
 - On every call run from an offer's spec: the offer's id, how the call ended, the provider's HTTP status and how long it took. A call stopped before anything was paid says which side stopped it: the input, the offer's terms, the provider's answer, the network, or the wallet. Never the input or the result.
@@ -178,3 +179,8 @@ A subagent is only redirected or offered a lookup when it is known to have `mcp_
 ## Not the same as `allowlistCreators`
 
 `allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The plugin's permission answers on this page are a harness setting about which tool may run. They are separate gates and neither substitutes for the other.
+
+## Other settings
+
+- `tenjin wallet send <amount> USDC <address>` moves funds out. It needs a per-send cap (`tenjin config set sendMaxAmount <usd>`) and a little ETH on Base for gas.
+- The CLI checks npm at most once a day for a newer version and never updates itself. `tenjin config set update.mode off` stops the check.
