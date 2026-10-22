@@ -46,9 +46,13 @@ export const WALLET_REASONS: Record<
     agentFix: 'Run `tenjin doctor`.',
   },
   wallet_corrupt: {
-    reason: 'the wallet file cannot be read',
-    fix: 'Run `tenjin doctor`.',
-    agentFix: 'Run `tenjin doctor`.',
+    // Both causes: a wallet.json nothing can parse, and a keystore that
+    // decrypts to a key that does not match its stored address. Doctor and
+    // install show this fix themselves, so it must not send the person there.
+    reason: 'the wallet file cannot be read or does not match its key',
+    fix: 'Move the wallet file aside, then run `tenjin wallet create` for a fresh key or set TENJIN_WALLET_KEY to use the intended one.',
+    agentFix:
+      'Ask the person to move the wallet file aside and run `tenjin wallet create` for a fresh key, or to set TENJIN_WALLET_KEY to the intended one. Never ask for the key.',
   },
   env_key_invalid: {
     reason: 'TENJIN_WALLET_KEY is not a valid private key',
