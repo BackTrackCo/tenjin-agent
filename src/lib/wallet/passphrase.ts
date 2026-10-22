@@ -479,6 +479,8 @@ export function readStoredPassphrase(
  * the legacy slot or the prompt would answer "did the keychain say no?" with a
  * guess. At a TTY the person is asked instead; elsewhere it throws
  * `keychain_locked`, whose fix is to unlock the keychain, never plaintext (S3).
+ * A locked LEGACY slot still lets the file be read, but a file miss after it is
+ * `keychain_locked` too, never `passphrase_missing`.
  *
  * A legacy hit carries a `migrateLegacy` handle the caller invokes only after
  * proving the passphrase decrypts this wallet (see ResolvedPassphrase). Reads
@@ -516,6 +518,11 @@ export async function resolvePassphrase(
   }
 
   const store = storeFor(deps);
+  // A legacy slot that holds an entry but did not answer. The 0600 file is
+  // still read (it may hold this wallet's passphrase, and the shared legacy
+  // slot may hold another wallet's), but if it misses too the answer is
+  // `keychain_locked`, never a definite `passphrase_missing` (Unknown never blocks).
+  let legacyLocked: { source: DurableStore; detail: string } | null = null;
   if (store !== null) {
     const own = await store.read(account, readOpts);
     if (own.kind === 'hit') return { passphrase: own.value, source: store.source };
@@ -532,6 +539,7 @@ export async function resolvePassphrase(
           migrateLegacy: () => migrateLegacyEntry(legacyOps(store, deps), account, legacy.value),
         };
       }
+      if (legacy.kind === 'locked') legacyLocked = { source: store.source, detail: legacy.detail };
     }
   }
 
@@ -539,6 +547,15 @@ export async function resolvePassphrase(
   if (file.kind === 'hit') return { passphrase: file.value, source: 'file' };
 
   if (canPrompt(deps)) return prompted();
+  if (legacyLocked !== null) {
+    throw storeLockedError(
+      legacyLocked.source,
+      LEGACY_ACCOUNT,
+      legacyLocked.detail,
+      deps.dir,
+      false,
+    );
+  }
   throw noPassphraseError();
 }
 

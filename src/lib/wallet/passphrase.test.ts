@@ -285,6 +285,46 @@ describe('no sidecar resolves exactly as before', () => {
     expect(prompt).toHaveBeenCalledOnce();
   });
 
+  it('a locked legacy slot after a per-address miss is keychain_locked, never passphrase_missing', async () => {
+    const lockedLegacy = recordingExec((call) =>
+      call.args.includes(LEGACY_ACCOUNT)
+        ? exited(
+            'security',
+            36,
+            'security: SecKeychainSearchCopyNext: User interaction is not allowed.',
+          )
+        : notFound(),
+    );
+    const err = (await resolvePassphrase(
+      { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec: lockedLegacy.exec },
+      ADDRESS,
+    ).catch((e) => e)) as CliError;
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.details).toMatchObject({
+      unlock: { reason: 'keychain_locked', source: 'keychain' },
+    });
+    expect(err.fix).toBe(KEYCHAIN_LOCKED_FIX);
+    expect(lockedLegacy.calls).toHaveLength(2);
+
+    // A killed legacy read (verify's deadline) is the same unknown.
+    const killedLegacy = recordingExec((call) =>
+      call.args.includes(LEGACY_ACCOUNT) ? killedErr('security') : notFound(),
+    );
+    const killed = (await resolvePassphrase(
+      { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec: killedLegacy.exec },
+      ADDRESS,
+    ).catch((e) => e)) as CliError;
+    expect(killed.details).toMatchObject({ unlock: { reason: 'keychain_locked' } });
+
+    // The 0600 file is still read, and a hit there wins.
+    await writeFile(passphraseFilePathFor(ACCOUNT, tmp), 'file-pass\n', { mode: 0o600 });
+    const fromFile = await resolvePassphrase(
+      { env: {}, dir: tmp, platform: 'darwin', isTTY: false, exec: lockedLegacy.exec },
+      ADDRESS,
+    );
+    expect(fromFile).toEqual({ passphrase: 'file-pass', source: 'file' });
+  });
+
   it('the file store is consulted after legacy and before the prompt', async () => {
     await writeFile(passphraseFilePathFor(ACCOUNT, tmp), 'file-pass\n', { mode: 0o600 });
     const { exec, calls } = recordingExec(() => notFound());
