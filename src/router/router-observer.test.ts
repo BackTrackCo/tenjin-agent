@@ -170,6 +170,7 @@ describe('takeNews', () => {
     o.observe(BLOCKED);
     const news = await o.takeNews('s1');
     expect(news.lines).toEqual([stillLockedSentence('passphrase_wrong')]);
+    expect(news.told).toBe('passphrase_wrong');
     expect(news.lines[0]).toContain(REPAIR_CLAUSE);
     expect(news.lines[0]).not.toContain(WALLET_REASONS.passphrase_wrong.agentFix);
     await news.ack();

@@ -590,6 +590,12 @@ export interface HookDeps {
  */
 export interface WalletNews {
   lines: string[];
+  /**
+   * The reason a still-locked line in `lines` names, if any. The leg marks it
+   * told for the session, so the fee notice for the same reason stays quiet
+   * (once per session and reason).
+   */
+  told?: string;
   ack: () => Promise<void>;
   release: () => void;
 }

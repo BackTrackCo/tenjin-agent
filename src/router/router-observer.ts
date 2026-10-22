@@ -170,6 +170,7 @@ export function createRouterObserver(o: {
       // Step 2: no verdict yet (the prewarm is still unlocking): only the
       // queued lines, and unlock-state is not read.
       let confirmation: { address: string; record: UnlockRecord } | null = null;
+      let told: string | undefined;
       const hasVerdict =
         sign.status !== 'pending' && !(sign.status === 'unknown' && sign.reason === 'not_checked');
       const confirms = !settled && !confirming && hasVerdict;
@@ -187,7 +188,8 @@ export function createRouterObserver(o: {
             lines.push(WALLET_UNLOCKED);
           }
           if (sign.status === 'blocked' && prev?.status === 'awaiting_confirmation') {
-            lines.push(stillLockedSentence((sign.reason ?? 'wallet_locked') as UnlockReason));
+            told = sign.reason ?? 'wallet_locked';
+            lines.push(stillLockedSentence(told as UnlockReason));
           }
         }
       }
@@ -200,6 +202,7 @@ export function createRouterObserver(o: {
       };
       return {
         lines,
+        ...(told !== undefined ? { told } : {}),
         ack: async () => {
           if (done) return;
           done = true;

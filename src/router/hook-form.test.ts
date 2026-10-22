@@ -91,12 +91,13 @@ describe('runHookKind and wallet news', () => {
     };
   }
   /** A walletNews that records its calls, acks and releases, in order. */
-  function news(lines: string[]) {
+  function news(lines: string[], told?: string) {
     const log: string[] = [];
     const walletNews = vi.fn(async (sessionId: string) => {
       log.push(`news:${sessionId}`);
       return {
         lines,
+        ...(told !== undefined ? { told } : {}),
         ack: async () => {
           log.push('ack');
         },
@@ -161,6 +162,15 @@ describe('runHookKind and wallet news', () => {
     // Already said: no second clear line, and the reason may be told again.
     expect(await noticeCleared(dir, 's1', Date.now())).toBeNull();
     expect(await noticeFor(dir, 's1', 'passphrase_missing', Date.now())).toBe('tell');
+  });
+
+  it('marks a still-locked reason told, so the fee notice for it stays quiet', async () => {
+    const { walletNews } = news(['Tenjin wallet is still locked: x. y'], 'passphrase_missing');
+    const answer = await runHookKind('prompt', prompt('s1'), deps({ walletNews }));
+    expect(answer).toEqual({ systemMessage: 'Tenjin wallet is still locked: x. y' });
+    expect(await noticeFor(dir, 's1', 'passphrase_missing', Date.now())).toBe('quiet');
+    // Only that reason: another one is still news.
+    expect(await noticeFor(dir, 's1', 'passphrase_wrong', Date.now())).toBe('tell');
   });
 
   it('leaves a leg with no news as it was', async () => {

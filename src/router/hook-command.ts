@@ -11,7 +11,7 @@ import type { Io } from '../lib/output';
 import { sessionServedByPlugin } from './alive';
 import type { HookKind } from './hook-tool';
 import { launchedByPlugin } from './names';
-import { settleCurrent } from './notice-markers';
+import { noticeFor, settleCurrent } from './notice-markers';
 import { WALLET_UNLOCKED } from './wallet-reasons';
 
 /**
@@ -105,6 +105,13 @@ export async function runHookKind(
       // Said here already: a paid call later in this session must not say it
       // again, and a relapse must be told again.
       await settleCurrent(hookDeps.dataDir, sessionId, hookDeps.now?.() ?? Date.now()).catch(
+        () => undefined,
+      );
+    }
+    if (sessionId !== null && news?.told !== undefined) {
+      // The still-locked line is this session's notice for that reason: the
+      // fee notice on this leg (or a later one) must not repeat it.
+      await noticeFor(hookDeps.dataDir, sessionId, news.told, hookDeps.now?.() ?? Date.now()).catch(
         () => undefined,
       );
     }
