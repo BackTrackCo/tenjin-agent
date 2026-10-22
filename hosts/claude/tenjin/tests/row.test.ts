@@ -294,7 +294,8 @@ test("a run this mod unfolds draws the folded row; the engine-expanded run is th
       plugin: 'tenjin',
       surface: 'terminal',
       component: 'ToolUse',
-      props: lookup,
+      // The engine marks the rows of a run a hook unfolded as expanded.
+      props: { ...lookup, isExpanded: true },
     });
     const lines = await shownLines(ui);
     await ui.unmount();
@@ -388,35 +389,44 @@ test('a paid lookup with no label still draws: the provider names it, else the e
   await result.unmount();
 });
 
-test('a standalone finished lookup that was never in a run shows no ctrl+o hint', async ($, on) => {
+test('ctrl+o shows every request call in full: a standalone row, the hidden ones too', async ($, on) => {
   const { files } = machine(on);
   await keepSpec(files, OFFER, EXA);
-  on('tool.call', { tool: TOOL }, async () => ({ result: PAID, text: PAID }));
+  const spec = envelope('spec', { id: OFFER, cost: ['provider price 0 USD'] });
+  on('tool.call', { tool: TOOL }, async (_$, e) =>
+    e.tool_use_id === 'toolu_spec' ? { result: spec, text: spec } : { result: PAID, text: PAID },
+  );
+  engineRows(on);
+  on('ui.render', { component: 'ToolResult' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine result'] });
+  });
   await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_alone', id: OFFER, input: INPUT });
-  // As the fullscreen transcript draws it: a ToolUse row, no run around it.
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_spec', id: OFFER });
   const alone = toolRow('toolu_alone', TOOL, { id: OFFER, input: INPUT }, PAID);
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: alone });
-    expect(await rowText(ui)).toBe('Called Exa search · $0.04');
+  const hidden = toolRow('toolu_spec', TOOL, { id: OFFER }, spec);
+  const mount = async (component: 'ToolUse' | 'ToolResult', props: unknown) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component,
+      props: props as never,
+    });
+    const lines = await shownLines(ui);
     await ui.unmount();
-  }
-  // Drawn in its one-call run, it carries the hint there and after.
-  const run = await $.ui.mount({
-    plugin: 'tenjin',
-    surface: 'terminal',
-    component: 'ToolGroup',
-    props: groupOf([alone]),
-  });
-  expect(await rowText(run)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
-  await run.unmount();
-  const after = await $.ui.mount({
-    plugin: 'tenjin',
-    surface: 'terminal',
-    component: 'ToolUse',
-    props: alone,
-  });
-  expect(await rowText(after)).toBe('Called Exa search · $0.04 (ctrl+o to expand)');
-  await after.unmount();
+    return lines;
+  };
+  // Normal view: the standalone row folds with the hint, the spec answer draws nothing.
+  expect((await mount('ToolUse', alone)).join('')).toBe(
+    'Called Exa search · $0.04 (ctrl+o to expand)',
+  );
+  expect(await mount('ToolUse', hidden)).toEqual([]);
+  // ctrl+o (`isExpanded`): both are the engine's own row and result.
+  expect(await mount('ToolUse', { ...alone, isExpanded: true })).toEqual(['engine row']);
+  expect(await mount('ToolUse', { ...hidden, isExpanded: true })).toEqual(['engine row']);
+  const result = { tool_use_id: 'toolu_spec', tool: TOOL, output: spec, isErrored: false };
+  expect(await mount('ToolResult', result)).toEqual([]);
+  expect(await mount('ToolResult', { ...result, isExpanded: true })).toEqual(['engine result']);
 });
 
 test('a long service name is shortened, never dropped: the model in a trailing group, else an ellipsis', async ($, on) => {
@@ -581,4 +591,49 @@ test('a choice call is named as the line named the option, after a free spec che
     await call;
     expect(await mount([check, toolRow(useId, TOOL, args, paid)])).toBe(ended);
   }
+});
+
+test('an over-limit lookup is one row: the needs_approval answer draws nothing, approve draws the lookup', async ($, on) => {
+  const { files, clock } = machine(on);
+  await keepSpec(files, OFFER, { label: 'Exa search', priceAtomic: '775000' });
+  const APPROVE = 'mcp__plugin_tenjin_router__approve';
+  const quote = 'q_abcdefghijkl';
+  const over = envelope('needs_approval', {
+    reason: 'One call to Exa costs $0.775.',
+    quote: { id: quote, what: 'one call to Exa', total: '$0.775' },
+    cost: ['provider price 0 USD'],
+  });
+  const paid = envelope('fulfilled', { cost: ['provider price 0.775 USD'] });
+  on('tool.call', { tool: TOOL }, async () => ({ result: over, text: over }));
+  let release = (): void => undefined;
+  on('tool.call', { tool: APPROVE }, async () => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { result: paid, text: paid };
+  });
+  const mount = async (props: unknown) => {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolGroup',
+      props: groupOf([props]),
+    });
+    const text = await rowText(ui);
+    await ui.unmount();
+    return text;
+  };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_over', id: OFFER, input: INPUT });
+  expect(await mount(toolRow('toolu_over', TOOL, { id: OFFER, input: INPUT }, over))).toBe('');
+  const args = { quote, total: '$0.775', what: 'one call to Exa' };
+  const running = $.tool.call({ tool: APPROVE, tool_use_id: 'toolu_approve', ...args } as never);
+  await clock.settle();
+  expect(await mount(toolRow('toolu_approve', APPROVE, args))).toBe(
+    '⏺ Calling Exa search… · $0.775  ⎿  "rust async runtimes"',
+  );
+  release();
+  await running;
+  expect(await mount(toolRow('toolu_approve', APPROVE, args, paid))).toBe(
+    'Called Exa search · $0.775 (ctrl+o to expand)',
+  );
 });

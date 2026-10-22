@@ -14,17 +14,16 @@ import type { TenjinHeld, TenjinRow } from '../types';
  *   `⏺ ~~Web Search~~("q") · Tenjin offered Exa search` while held, then in
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
  *
- * Free router calls and `needs_input` answers draw nothing; a charged failure
+ * An over-limit answer draws nothing, and the `approve` call that runs its
+ * quote draws as the lookup's own row. Free router calls and `needs_input`
+ * answers draw nothing; a charged failure
  * draws the error dot, the amount and the state, never a success.
  *
- * EXPANDED: where the engine itself expanded the run a lookup sits in (ctrl+o,
- * --verbose: `ToolGroup.isExpanded` as received), the row steps aside and the
- * engine draws its own expanded MCP row, input and result. Its title there is
- * the engine's: the tool's static title, without the service name or price.
- * `(ctrl+o to expand)` is drawn only on a lookup that sits in a run, where
- * ctrl+o makes the engine expand that run. No documented prop marks a
- * standalone row (the fullscreen transcript) as expanded, so it shows its one
- * line with no hint.
+ * EXPANDED: wherever the view shows rows in full (ctrl+o, --verbose: the
+ * engine's `isExpanded`, or a run it expanded), every call of ours steps aside
+ * and the engine draws its own MCP row, input and result, the calls hidden
+ * here included. Its title there is the tool's static one. A row of a run
+ * this mod unfolded in the normal view stays compact.
  *
  * READ ONLY: the spec file, the choice set and the offer record (`src/router/mod-state.ts`),
  * and the request tool's own envelope. The mod writes nothing under the data
@@ -32,6 +31,9 @@ import type { TenjinHeld, TenjinRow } from '../types';
  */
 
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
+/** The `approve` call runs a quoted lookup, and draws as that lookup's own row. */
+const APPROVE_TOOL = 'mcp__plugin_tenjin_router__approve';
+const OURS = new Set([REQUEST_TOOL, APPROVE_TOOL]);
 /** The native tools a hook holds, by the names the engine draws them under. */
 const NATIVE_NAMES: Readonly<Record<string, string>> = {
   WebSearch: 'Web Search',
@@ -47,8 +49,9 @@ const LINKS = { plugin: 'tenjin', key: 'links' } as const;
  * forgets it, so a row draws one line until its run is expanded again.
  */
 const expandedByEngine = new Set<string>();
-/** Calls drawn in a run, which ctrl+o expands: the only rows that carry the hint. */
-const inRun = new Set<string>();
+/** Calls of a run this mod unfolded in the normal view, whose rows the engine
+ *  marks `isExpanded` though nobody asked to see them in full. */
+const unfoldedByUs = new Set<string>();
 const DOT = '⏺';
 const GUTTER = '  ⎿  ';
 const INDENT = '     ';
@@ -58,7 +61,7 @@ const SHOWN_MAX_CHARS = 80;
 const ENVELOPE = '{"status":"';
 const SECRET_NAME = /(api[_-]?key|token|secret|passw|authorization|cookie|private[_-]?key)/i;
 /** Answers that ran nothing the person paid for: the router's own, or a retry ahead. */
-const HIDDEN = new Set(['spec', 'discovered', 'native', 'browse', 'needs_input']);
+const HIDDEN = new Set(['spec', 'discovered', 'native', 'browse', 'needs_input', 'needs_approval']);
 /** Endings drawn with no state word. */
 const PLAIN = new Set(['fulfilled', 'running']);
 const ERRORS = new Set(['failed', 'interrupted', 'partial']);
@@ -85,11 +88,44 @@ export const register: Register = (on) => {
       $.ui.invalidate('ui.render');
     }
     const ran = await next(e);
-    const ended = endOf(envelopeOf(ran.text));
+    const envelope = envelopeOf(ran.text);
+    const ended = endOf(envelope);
     const label = row?.label ?? ended.label;
     // A job poll is not a lookup of its own (see `rowOf`).
     if (label !== undefined && !isJobPoll(e)) {
       await $.state.set(ref, { ...row, ...ended, label });
+      // OVER A LIMIT: the quote the `approve` call will run, for its row's name.
+      const quote = asRecord(envelope?.quote)?.id;
+      if (typeof quote === 'string')
+        await $.state.set({ ...LINKS, id: `quote:${quote}` }, e.tool_use_id);
+      $.ui.invalidate('ui.render');
+    }
+    return ran;
+  });
+
+  // THE APPROVE CALL IS THE LOOKUP: named as the request it quoted, priced at
+  // the total the person approved, drawn as that lookup's own row.
+  on('tool.call', { tool: APPROVE_TOOL }, async ($, e, next) => {
+    const from = typeof e.quote === 'string' ? await link($, `quote:${e.quote}`) : undefined;
+    const asked = from === undefined ? undefined : await row($, from);
+    const ref = { ...ROWS, id: e.tool_use_id };
+    const total = typeof e.total === 'string' && /^\$?\d/.test(e.total) ? e.total : undefined;
+    const price = total === undefined ? asked?.price : total.startsWith('$') ? total : `$${total}`;
+    const quoted: TenjinRow | undefined =
+      asked === undefined
+        ? undefined
+        : {
+            label: asked.label,
+            ...(price !== undefined ? { price } : {}),
+            ...(asked.argument !== undefined ? { argument: asked.argument } : {}),
+          };
+    if (quoted !== undefined) {
+      await $.state.set(ref, quoted);
+      $.ui.invalidate('ui.render');
+    }
+    const ran = await next(e);
+    if (quoted !== undefined) {
+      await $.state.set(ref, { ...quoted, ...endOf(envelopeOf(ran.text)), label: quoted.label });
       $.ui.invalidate('ui.render');
     }
     return ran;
@@ -114,19 +150,22 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const { calls, isExpanded } = e.props;
     const ids = calls.flatMap((c) => (c.tool_use_id !== undefined ? [c.tool_use_id] : []));
-    for (const id of ids) inRun.add(id);
     // EXPANDED BY THE ENGINE (ctrl+o, --verbose): our rows step aside there.
     if (isExpanded) {
       const fresh = ids.filter((id) => !expandedByEngine.has(id));
       for (const id of fresh) expandedByEngine.add(id);
+      for (const id of ids) unfoldedByUs.delete(id);
       if (fresh.length > 0) $.ui.invalidate('ui.render');
       return next(e);
     }
     // Back in the normal view, and unfolded by us: one line per row, nothing beneath.
     if (ids.filter((id) => expandedByEngine.delete(id)).length > 0) $.ui.invalidate('ui.render');
-    const unfold = () => next({ ...e, props: { ...e.props, isExpanded: true } });
-    const ours = calls.filter((c) => c.tool === REQUEST_TOOL);
-    const others = calls.filter((c) => c.tool !== REQUEST_TOOL);
+    const unfold = () => {
+      for (const id of ids) unfoldedByUs.add(id);
+      return next({ ...e, props: { ...e.props, isExpanded: true } });
+    };
+    const ours = calls.filter((c) => OURS.has(c.tool));
+    const others = calls.filter((c) => !OURS.has(c.tool));
     if (ours.length === 0) {
       for (const c of others) {
         if (c.tool in NATIVE_NAMES && c.tool_use_id !== undefined) {
@@ -141,7 +180,7 @@ export const register: Register = (on) => {
     const ui = $.ui.resolve(e);
     const drawn = rows.filter((row): row is TenjinRow => row !== null);
     if (drawn.length === 0) return <ui.Box display="none" />;
-    return <ui.Box flexDirection="column">{drawn.map((row) => callRow(ui, row, true))}</ui.Box>;
+    return <ui.Box flexDirection="column">{drawn.map((row) => callRow(ui, row))}</ui.Box>;
   });
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
@@ -154,7 +193,11 @@ export const register: Register = (on) => {
       const asked = nativeArgument(input);
       const takerId = await link($, `take:${held.offerId}`);
       const taker = takerId === undefined ? undefined : await row($, takerId);
-      if (taker !== undefined && taker.status !== 'needs_input') {
+      if (
+        taker !== undefined &&
+        taker.status !== 'needs_input' &&
+        taker.status !== 'needs_approval'
+      ) {
         const shape = { ...shapeOf(taker), name: taker.label };
         return line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
       }
@@ -167,13 +210,16 @@ export const register: Register = (on) => {
       const argued = asked !== undefined ? { argument: asked } : {};
       return line(ui, { state: 'running', name, ...offered, ...argued }, true);
     }
-    if (tool !== REQUEST_TOOL) return next(e);
+    if (!OURS.has(tool)) return next(e);
     const ui = $.ui.resolve(e);
-    // In a run the engine expanded, the engine draws its own expanded row,
-    // input and result, exactly as for any MCP call: a lookup that replaced a
-    // held call (form A) as well, so what it bought opens there too.
-    const expanded = expandedByEngine.has(tool_use_id);
-    const drawn = await rowOf($, tool_use_id, e.props, expanded);
+    // SHOWN IN FULL (ctrl+o, --verbose, a run the engine expanded): every call
+    // of ours is the engine's own row, input and result, the hidden ones too.
+    // A row of a run this mod unfolded is marked expanded, and stays compact.
+    const full =
+      expandedByEngine.has(tool_use_id) ||
+      (e.props.isExpanded === true && !unfoldedByUs.has(tool_use_id));
+    if (full) return next(e);
+    const drawn = await rowOf($, tool_use_id, e.props);
     // A charged call this mod cannot name is the engine's row, never hidden.
     if (drawn === null)
       return (await unnamedCharge($, tool_use_id, e.props.output)) ? (
@@ -181,13 +227,14 @@ export const register: Register = (on) => {
       ) : (
         <ui.Box display="none" />
       );
-    return expanded ? next(e) : callRow(ui, drawn, inRun.has(tool_use_id));
+    return callRow(ui, drawn);
   });
 
   // The envelope the model read, and a held call's deny: the row says both.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const { Box } = $.ui.resolve(e);
-    if (e.props.tool === REQUEST_TOOL) {
+    if (OURS.has(e.props.tool)) {
+      if (e.props.isExpanded === true) return next(e);
       const unnamed = await unnamedCharge($, e.props.tool_use_id, e.props.output);
       return unnamed ? next(e) : <Box display="none" />;
     }
@@ -271,7 +318,6 @@ async function rowOf(
   $: Dollar,
   id: string,
   call: { input: unknown; output?: unknown; isInterrupted: boolean },
-  expanded = false,
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
   // A JOB POLL repeats the result and the cost of the call that started it.
@@ -286,7 +332,7 @@ async function rowOf(
   if (drawn.status !== undefined && PLAIN.has(drawn.status) && drawn.paid === undefined)
     return null;
   const offer = drawn.offerId;
-  if (!expanded && offer !== undefined && (await link($, `hold:${offer}`)) !== undefined) {
+  if (offer !== undefined && (await link($, `hold:${offer}`)) !== undefined) {
     if ((await link($, `take:${offer}`)) === id) return null;
   }
   return drawn;
@@ -303,7 +349,7 @@ function shapeOf(row: TenjinRow): Shape {
 /** A request call's own row: `Calling X… · $p` with its input under it while it
  *  runs, then the folded `Called X · $p`; a refusal or a charged failure keeps
  *  its dot and its state. */
-function callRow(ui: Elements, row: TenjinRow, expandable: boolean) {
+function callRow(ui: Elements, row: TenjinRow) {
   const shape = shapeOf(row);
   if (shape.state === 'running') {
     const under = row.argument !== undefined ? [`"${row.argument}"`] : [];
@@ -311,13 +357,13 @@ function callRow(ui: Elements, row: TenjinRow, expandable: boolean) {
   }
   // Ended and plain, as Claude Code leaves an ended MCP call wherever it is
   // drawn (its one-call run, or the standalone row that run becomes).
-  if (row.status === 'fulfilled') return folded(ui, row, expandable);
+  if (row.status === 'fulfilled') return folded(ui, row);
   return line(ui, row.argument !== undefined ? { ...shape, argument: row.argument } : shape);
 }
 
 /** An ended lookup folded as the engine folds an ended MCP call: no dot, all dim. */
-function folded({ Box, Text }: Elements, row: TenjinRow, expandable: boolean) {
-  const hint = expandable ? ` ${EXPAND_HINT}` : '';
+function folded({ Box, Text }: Elements, row: TenjinRow) {
+  const hint = ` ${EXPAND_HINT}`;
   return (
     <Box flexDirection="row" marginTop={1}>
       <Box minWidth={2} />
