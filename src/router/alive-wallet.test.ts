@@ -24,10 +24,10 @@ async function wallet(config: Record<string, unknown> = {}): Promise<void> {
 }
 
 describe('the wallet notice at session start', () => {
-  it('says the balance and the $5 floor, asks nothing of a CLI, and shows no address', async () => {
+  it('says the balance, asks the person to ask their agent, and shows no address', async () => {
     await wallet({ maxAutoSpend: '250000' });
     const notice = await walletNotice(dir, { read: async () => 0n });
-    expect(notice).toBe('Tenjin balance: $0.00. Ask your agent to add $5 or more to Tenjin.');
+    expect(notice).toBe('Tenjin balance: $0.00. Ask your agent to add funds to Tenjin.');
     // The balance, never the wallet's address.
     expect(notice).not.toMatch(/0x/i);
   });
