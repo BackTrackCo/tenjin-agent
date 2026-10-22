@@ -22,7 +22,9 @@ either limit. There is no API key and no account.
 When a person asks you to "Install Tenjin from tenjin.sh", run these steps yourself;
 never ask them to open a terminal.
 
-1. Run `npm i -g tenjin-cli@latest` (Node.js 24 or newer).
+1. Ask the person once, with your question tool: "Install the Tenjin CLI? This runs
+   `npm i -g tenjin-cli@latest`." Offer Yes and Not now. On Yes, run that command
+   alone (Node.js 22 or newer). On Not now, stop.
 2. Run `tenjin install` alone and follow its output. Before you run anything else,
    ask the person each question it returns, in its order and wording, with the answers
    it offers, using your question tool. Then run only what the chosen answer names,
