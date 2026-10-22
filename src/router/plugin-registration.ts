@@ -240,6 +240,16 @@ async function viaPluginCommands(
   return { ok: true, state: 'updated' };
 }
 
+/**
+ * Did this registration's `claude plugin marketplace add <hosts>` succeed?
+ * Then Claude Code's one global `tenjin` row names `hosts` now, whatever
+ * failed after it, and loads the plugin from there in place.
+ */
+export function marketplaceAdded(reg: PluginRegistration, hosts: string): boolean {
+  const add = `claude plugin marketplace add ${hosts} `;
+  return reg.steps.some((s) => s.ok && s.command.startsWith(add));
+}
+
 async function step(
   steps: RegistrationStep[],
   args: string[],

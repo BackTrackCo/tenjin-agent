@@ -188,6 +188,55 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     expect(runtimeOf(refreshed)).toMatchObject({ state: 'fallback', reason });
   });
 
+  it('a platform with no pinned Node says so once, with no retry that cannot work', async () => {
+    const unpinned = 'linux-x64 with musl, not glibc';
+    const fallback = async () =>
+      ({
+        state: 'fallback',
+        root: runtimeRoot,
+        firstTime: true,
+        launcher: null,
+        reason: `no pinned Node for this platform, ${unpinned}`,
+        unpinned,
+      }) as const;
+    const result = await runRouterInstall({}, ctx(), deps(fallback));
+    const line = `Tenjin pins no Node for this platform (${unpinned}), so the plugin runs from npm's copy on the Node on your PATH, as before.`;
+    expect(result.humanLines!.filter((l) => l.includes('pins no Node'))).toEqual([`! ${line}`]);
+    expect(result.humanLines!.join('\n')).not.toContain('again to retry');
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(fallback));
+    expect((refreshed.data as { notices: string[] }).notices).toContain(line);
+  });
+
+  it('kept after this build failed its checks: names both versions and the retry, in lines and notices', async () => {
+    const reason = 'tenjin --version printed nothing';
+    const kept = async () =>
+      setup({ state: 'kept', cli: '0.1.0-alpha.31', launcher: null, reason });
+    const line = `tenjin-cli ${pkg.version} could not be set up (${reason}), so Tenjin keeps running 0.1.0-alpha.31; run \`tenjin install\` again to retry.`;
+    const result = await runRouterInstall({}, ctx(), deps(kept));
+    expect(result.humanLines!.filter((l) => l.includes('could not be set up'))).toEqual([
+      `! ${line}`,
+    ]);
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(kept));
+    expect((refreshed.data as { notices: string[] }).notices).toContain(line);
+    // A refresh that found a newer runtime tried nothing, so there is nothing to say.
+    const newer = await runRouterInstall(
+      { refresh: true },
+      ctx(),
+      deps(async () =>
+        setup({
+          state: 'kept',
+          cli: '0.1.0-alpha.99',
+          launcher: null,
+          reason: `Tenjin 0.1.0-alpha.99 is already set up here; this ${pkg.version} did not replace it`,
+          newer: true,
+        }),
+      ),
+    );
+    expect((newer.data as { notices: string[] }).notices).toEqual([]);
+  });
+
   it('skipped: the same lines as today’s install, from this package’s folder', async () => {
     const skipped = await runRouterInstall(
       {},
@@ -213,6 +262,39 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     );
     expect(pluginOf(result)).toMatchObject({ state: 'failed' });
     expect(restore).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Claude Code reads `runtime/claude` in place once `add` repointed its one
+   * `tenjin` row there. On a first activation the restore would delete every
+   * file in it, leaving the row on an empty folder and no router at all.
+   */
+  it('keeps the activated render when `add` repointed the marketplace and install or update then fails', async () => {
+    await fake.respond('list', listed('tenjin@tenjin', '0.0.1'));
+    await fake.respond('install', '{"outcome":"error","message":"timed out"}\n', 1);
+    const restore = vi.fn(async () => undefined);
+    const failedInstall = await runRouterInstall(
+      {},
+      ctx(),
+      deps(async () => setup({ restore })),
+    );
+    expect(pluginOf(failedInstall)).toMatchObject({ state: 'failed' });
+    expect(await fake.calls()).toContain(
+      `plugin marketplace add ${join(runtimeRoot, 'claude')} --json`,
+    );
+    await fake.respond(
+      'install',
+      `${JSON.stringify({ outcome: 'ok', installedVersion: '0.0.1', availableVersion: pkg.version })}\n`,
+    );
+    await fake.respond('update', '{"outcome":"error","message":"timed out"}\n', 1);
+    const failedUpdate = await runRouterInstall(
+      {},
+      ctx(),
+      deps(async () => setup({ restore })),
+    );
+    expect(pluginOf(failedUpdate)).toMatchObject({ state: 'failed' });
+    expect((await fake.calls()).some((c) => c.startsWith('plugin update'))).toBe(true);
+    expect(restore).not.toHaveBeenCalled();
   });
 
   it('a registration that succeeds does not restore', async () => {

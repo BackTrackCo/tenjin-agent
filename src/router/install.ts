@@ -40,6 +40,7 @@ import { PLUGIN_ID } from './names';
 import { CLAUDE_CODE_FLOOR } from './claude-cli';
 import {
   folderState,
+  marketplaceAdded,
   readPluginListing,
   recordedInstalls,
   registerPlugin,
@@ -458,10 +459,16 @@ export async function runRouterInstall(
       });
   // A registration that failed after this run switched the runtime puts the
   // runtime back, so Claude Code is never left on a folder it was not given.
+  // UNLESS ITS `marketplace add` WENT THROUGH: Claude Code's one `tenjin` row
+  // now names `runtime/claude` and reads it in place, so putting back what was
+  // there (nothing at all, on a first activation) would leave it loading an
+  // empty folder. The render it holds passed `verifyBuild`, so it stays.
   // Old versions are collected only once the plugin is registered.
   if (rt !== null && launch !== null) {
-    if (plugin.state === 'failed') await rt.restore?.().catch(() => undefined);
-    else await collectRuntime(rt.root);
+    if (plugin.state !== 'failed') await collectRuntime(rt.root);
+    else if (!marketplaceAdded(plugin, launch.hostsDir)) {
+      await rt.restore?.().catch(() => undefined);
+    }
   }
   // A PROJECT INSTALL IS RECORDED, so `tenjin update`, which refreshes from
   // home where this scope is not visible, refreshes it from here too.
@@ -687,10 +694,24 @@ function runtimeSentence(rt: RuntimeSetup, home: string): string | null {
   return `Runs from ${tilde(rt.root, home)} on its own Node ${rt.nodeVersion ?? ''}, so a Node upgrade or \`npm rm -g tenjin-cli\` no longer stops it.`;
 }
 
-/** Why the plugin still runs on the Node on PATH. */
+/**
+ * Why the plugin still runs on the Node on PATH, or on an older runtime build
+ * than this one. A platform Tenjin pins no Node for is said as it is, with no
+ * retry: no install here can set the runtime up. A refresh that found a newer
+ * runtime tried nothing, so it says nothing.
+ */
 function fallbackSentence(rt: RuntimeSetup): string | null {
-  if (rt.state !== 'fallback') return null;
-  return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; run \`tenjin install\` again to retry.`;
+  if (rt.state === 'fallback' && rt.unpinned !== undefined) {
+    return `Tenjin pins no Node for this platform (${rt.unpinned}), so the plugin runs from npm's copy on the Node on your PATH, as before.`;
+  }
+  if (rt.state === 'fallback') {
+    return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; run \`tenjin install\` again to retry.`;
+  }
+  if (rt.state === 'kept' && rt.reason !== undefined && rt.newer !== true) {
+    const retry = rt.unpinned === undefined ? '; run `tenjin install` again to retry' : '';
+    return `tenjin-cli ${pkg.version} could not be set up (${rt.reason}), so Tenjin keeps running ${rt.cli ?? 'the runtime it has'}${retry}.`;
+  }
+  return null;
 }
 
 /**
