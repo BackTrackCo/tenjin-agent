@@ -108,7 +108,10 @@ describe('the request tool name a process exposes', () => {
 describe('the alive leg', () => {
   it('marks the session and stamps the machine, and the marker silences only that session', async () => {
     const data = join(root, 'data');
-    await runAliveHook({ session_id: 'sess-1' }, { dataDir: data, version: '9.9.9' });
+    // No wallet file: nothing definite to say, so it prints nothing (Q4).
+    expect(
+      await runAliveHook({ session_id: 'sess-1' }, { dataDir: data, version: '9.9.9', env: {} }),
+    ).toBeNull();
     expect(await sessionServedByPlugin(data, { session_id: 'sess-1' })).toBe(true);
     expect(await sessionServedByPlugin(data, { session_id: 'sess-2' })).toBe(false);
     expect(await sessionServedByPlugin(data, {})).toBe(false);
@@ -117,12 +120,16 @@ describe('the alive leg', () => {
 
   it('prunes markers older than a week and never touches a file it did not write', async () => {
     const data = join(root, 'data');
-    await runAliveHook({ session_id: 'old' }, { dataDir: data, version: '1' });
+    expect(
+      await runAliveHook({ session_id: 'old' }, { dataDir: data, version: '1', env: {} }),
+    ).toBeNull();
     const [marker] = (await readdir(aliveDir(data))).filter((n) => /^[0-9a-f]{32}$/.test(n));
     const longAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
     await utimes(join(aliveDir(data), marker!), longAgo, longAgo);
     await writeFile(join(aliveDir(data), 'mine.txt'), 'x');
-    await runAliveHook({ session_id: 'new' }, { dataDir: data, version: '1' });
+    expect(
+      await runAliveHook({ session_id: 'new' }, { dataDir: data, version: '1', env: {} }),
+    ).toBeNull();
     expect(await sessionServedByPlugin(data, { session_id: 'old' })).toBe(false);
     expect(await sessionServedByPlugin(data, { session_id: 'new' })).toBe(true);
     expect(await removeAliveState(data)).toBe(true);
@@ -132,8 +139,13 @@ describe('the alive leg', () => {
   it('never fails the session: an unwritable data dir is swallowed', async () => {
     const file = join(root, 'not-a-dir');
     await writeFile(file, '');
-    await expect(
-      runAliveHook({ session_id: 's' }, { dataDir: file, version: '1' }),
-    ).resolves.toBeUndefined();
+    // It resolves, whatever it can or cannot say about a wallet it cannot reach.
+    const answer = await runAliveHook(
+      { session_id: 's' },
+      { dataDir: file, version: '1', env: {} },
+    );
+    expect(answer === null || answer.hookSpecificOutput.hookEventName === 'SessionStart').toBe(
+      true,
+    );
   });
 });

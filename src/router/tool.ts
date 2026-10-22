@@ -6,6 +6,7 @@ import {
   type PayDeps,
 } from '../commands/pay';
 import { CliError } from '../lib/errors';
+import { unlockReasonOf } from '../lib/wallet-unlock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';
 import { mask } from '../lib/redact';
@@ -64,6 +65,7 @@ import {
 } from './plan';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { clearRouterMemo } from './router-memo';
+import { agentFixFor } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
@@ -1338,7 +1340,7 @@ async function payAndDeliver(
       : rejectedInput
         ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
         : cli !== undefined
-          ? `${cli.message} ${cli.fix ?? ''}`.trim()
+          ? `${cli.message} ${agentFixOf(cli)}`.trim()
           : String(err);
     await footer.done(status, {
       provider: built.url,
@@ -2560,4 +2562,18 @@ export function fail(
       providerContentUntrusted: true,
     },
   };
+}
+
+/**
+ * A CliError's fix, as the MODEL reads it in this tool's text (B1). An error
+ * carrying `details.unlock` gets its reason's `agentFix`, which asks the person
+ * to act and never asks for the passphrase or key; every other CliError keeps
+ * its own fix byte for byte. Gated on `unlockReasonOf`, never on
+ * `classifyUnlockError`: that one calls every undetailed error `wallet_locked`,
+ * and this path carries `REGISTRY_MISMATCH`, HTTP failures and the rest, whose
+ * own fixes must survive.
+ */
+function agentFixOf(cli: CliError): string {
+  const why = unlockReasonOf(cli);
+  return why === null ? (cli.fix ?? '') : agentFixFor(why, cli.fix ?? '');
 }

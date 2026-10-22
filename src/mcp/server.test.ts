@@ -34,7 +34,10 @@ import {
   testWalletProvider,
 } from '../lib/read-test-utils';
 import { loadSearches, recordSearch } from '../lib/searches';
-import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
+import type { SpendAuthorizer, SpendAuthorization, WalletProvider } from '../lib/wallet';
+import { CliError } from '../lib/errors';
+import { REPAIR_IN_TERMINAL, unlockDetails } from '../lib/wallet-unlock';
+import { ASK_FOR_REPAIR, WALLET_REASONS } from '../router/wallet-reasons';
 
 let dir: string;
 beforeEach(async () => {
@@ -162,6 +165,16 @@ describe('buildTenjinMcpServer, tool surface', () => {
     expect(schema).toContain('show');
     expect(schema).not.toContain('send');
   });
+
+  // `repair` takes a passphrase a person types at their own terminal, so it is
+  // never an MCP action: the enum stays exactly the three it was.
+  it('offers exactly show, balance and create on tenjin_wallet, never repair', async () => {
+    const client = await connect({ dataDir: dir });
+    const { tools } = await client.listTools();
+    const wallet = tools.find((t) => t.name === 'tenjin_wallet');
+    const action = (wallet?.inputSchema.properties as Record<string, { enum?: string[] }>).action;
+    expect(action?.enum).toEqual(['show', 'balance', 'create']);
+  });
 });
 
 describe('tenjin_search', () => {
@@ -255,6 +268,105 @@ describe('tenjin_buy consent', () => {
     expect(sc.data.entitlement).toBe('purchased');
     // A pure MCP client cannot read the local bodyPath file, so the body is inline.
     expect(sc.data.body).toContain('full body');
+  });
+});
+
+/**
+ * `fail()` writes for the MODEL: the text's `fix:` line and the envelope's `fix`
+ * both reach it. A wallet error's person fix ("run `tenjin wallet repair`
+ * yourself ...") becomes the model-facing `agentFix` there, which tells it to
+ * ask the person and never to ask for the passphrase (B1). Only an error that
+ * carries `details.unlock` is swapped: every other error keeps its own fix.
+ */
+describe('fail(): wallet errors reach the model with agentFix', () => {
+  /** A provider whose every signing path throws `err`, injected into tenjin_buy. */
+  function throwingProvider(err: unknown): WalletProvider {
+    return {
+      id: 'local',
+      describe: async () => {
+        throw err;
+      },
+      getSigner: async () => {
+        throw err;
+      },
+      diagnostics: async () => ({ warnings: [] }),
+    };
+  }
+
+  /** A paid buy, approved, whose signer throws `err`: the failure `fail()` shapes. */
+  async function buyFailing(err: unknown): Promise<{ text: string; sc: ErrorEnvelope }> {
+    const pr = buildPaymentRequired();
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(pr),
+      siwx: () => reply.paymentRequired(pr),
+      payment: () => reply.entitled(readBody()),
+    });
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: {
+        buy: {
+          fetchImpl: fetch,
+          provider: throwingProvider(err),
+          authorizer: fakeAuthorizer('allow'),
+        },
+      },
+    });
+    const res = await client.callTool({ name: 'tenjin_buy', arguments: { ref: URL_, yes: true } });
+    expect(res.isError).toBe(true);
+    const text = (res.content as { text: string }[]).map((c) => c.text).join('\n');
+    return { text, sc: res.structuredContent as ErrorEnvelope };
+  }
+
+  /** The text's `fix:` line, without the prefix. */
+  const fixLine = (text: string): string | undefined =>
+    text
+      .split('\n')
+      .find((l) => l.startsWith('fix: '))
+      ?.slice('fix: '.length);
+
+  it('a passphrase_missing error carries ASK_FOR_REPAIR in the text and the envelope', async () => {
+    const { text, sc } = await buyFailing(
+      // The shape passphrase.ts's noPassphraseError throws: a person fix.
+      new CliError('USAGE', 'No wallet passphrase is available.', {
+        fix: REPAIR_IN_TERMINAL,
+        details: unlockDetails('passphrase_missing', 'keychain'),
+      }),
+    );
+    expect(fixLine(text)).toBe(ASK_FOR_REPAIR);
+    const error = sc.error as ErrorEnvelope['error'] & { fix?: string };
+    expect(error.fix).toBe(ASK_FOR_REPAIR);
+    expect(error.details).toEqual({ unlock: { reason: 'passphrase_missing', source: 'keychain' } });
+    const all = `${text}\n${JSON.stringify(sc)}`;
+    expect(all).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+    expect(all).not.toContain(REPAIR_IN_TERMINAL);
+  });
+
+  it("an env_passphrase_wrong error carries that reason's agentFix", async () => {
+    const { text, sc } = await buyFailing(
+      new CliError('WALLET_INVALID_KEY', 'TENJIN_WALLET_PASSPHRASE does not open the wallet.', {
+        fix: WALLET_REASONS.env_passphrase_wrong.fix,
+        details: unlockDetails('env_passphrase_wrong', 'env'),
+      }),
+    );
+    expect(fixLine(text)).toBe(WALLET_REASONS.env_passphrase_wrong.agentFix);
+    expect((sc.error as { fix?: string }).fix).toBe(WALLET_REASONS.env_passphrase_wrong.agentFix);
+  });
+
+  // The regression this gate exists for: classifyUnlockError calls EVERY
+  // undetailed error `wallet_locked`, and swapping on it would replace a
+  // registry or HTTP error's own fix with `Run \`tenjin doctor\`.`.
+  it.each([
+    ['REGISTRY_MISMATCH', new CliError('REGISTRY_MISMATCH', 'registry moved', { fix: 'X-fix' })],
+    [
+      'an undetailed WALLET_MISSING',
+      new CliError('WALLET_MISSING', 'No wallet.', { fix: 'Run `tenjin wallet create`.' }),
+    ],
+  ])('%s keeps its own fix, byte for byte', async (_label, err) => {
+    const { text, sc } = await buyFailing(err);
+    expect(fixLine(text)).toBe(err.fix);
+    expect((sc.error as { fix?: string }).fix).toBe(err.fix);
+    expect(text).not.toContain(WALLET_REASONS.wallet_locked.fix);
   });
 });
 

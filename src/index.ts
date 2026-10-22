@@ -34,8 +34,9 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
 }
 
 // THE PLUGIN'S SessionStart LEG NEVER LOADS THE CLI EITHER. It runs before
-// every session starts, writes two small files and prints nothing, so it
-// takes the same shortcut. A flag falls through to the command tree.
+// every session starts, writes two small files and prints one JSON line only
+// when the wallet file or its saved passphrase file is unusable, so it takes
+// the same shortcut. A flag falls through to the command tree.
 if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] === 'alive') {
   const [{ aliveMain }, { dataDir }, { default: pkg }] = await Promise.all([
     import('./router/alive'),

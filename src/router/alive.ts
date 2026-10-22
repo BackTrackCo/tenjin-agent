@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { readWalletFacts } from '../lib/wallet-facts';
+import { noticeFor } from './notice-markers';
+import { sessionStartMessage } from './wallet-reasons';
 
 /**
  * THE PLUGIN SAYS IT IS HERE. While a machine carries both the plugin and the
@@ -19,6 +22,11 @@ import { join } from 'node:path';
  *
  * SHIM: the per-session check goes on or after 2026-12-01, the first release
  * cut 30 or more days after the plugin PR 2 ships; the stamp stays for doctor.
+ *
+ * It also says, once, when the wallet's FILES already show it cannot sign in
+ * this session ({@link walletAtStart}). That is a file fact, not a verdict:
+ * `alive` never unlocks, never execs, never reads a keychain and never replays
+ * what a router saw (Q4). Everything else waits for the router's first notice.
  */
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -46,15 +54,28 @@ export interface AliveStamp {
   version: string;
 }
 
+/** What a `SessionStart` hook prints when the wallet cannot sign: one line for
+ *  the person, one for the model. */
+export interface AliveAnswer {
+  systemMessage: string;
+  hookSpecificOutput: { hookEventName: 'SessionStart'; additionalContext: string };
+}
+
 /**
- * The `alive` leg: marker, stamp, prune. It prints nothing, because a
- * `SessionStart` hook's stdout is added to the session's context, and it never
- * fails the session: every error is swallowed.
+ * The `alive` leg: marker, stamp, prune, then the wallet's files. It prints
+ * only when the wallet file is unreadable or the saved passphrase file is gone
+ * (with TENJIN_WALLET_PASSPHRASE unset), because a `SessionStart` hook's stdout
+ * is added to the session's context and nothing else there is definite before
+ * a router has tried to unlock; everything else waits for the router's first
+ * notice. The answer carries the person's fix in `systemMessage` and the
+ * model's `agentFix` in `additionalContext` (B1), and the reason's notice
+ * marker is written so the session's first prompt leg does not say it again.
+ * It never fails the session: every error is swallowed, and gives null.
  */
 export async function runAliveHook(
   event: unknown,
-  opts: { dataDir: string; version: string; now?: number },
-): Promise<void> {
+  opts: { dataDir: string; version: string; now?: number; env?: NodeJS.ProcessEnv },
+): Promise<AliveAnswer | null> {
   const sessionId = sessionIdOf(event);
   const now = opts.now ?? Date.now();
   const dir = aliveDir(opts.dataDir);
@@ -69,6 +90,47 @@ export async function runAliveHook(
   } catch {
     // A marker that could not be written costs only a duplicate offer.
   }
+  try {
+    const reason = await walletAtStart(opts.dataDir, opts.env ?? process.env);
+    if (reason === null) return null;
+    const { systemMessage, additionalContext } = sessionStartMessage(reason);
+    if (sessionId !== null) {
+      await noticeFor(opts.dataDir, sessionId, reason, now).catch(() => undefined);
+    }
+    return {
+      systemMessage,
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WHAT THE FILES ALONE SAY AT SESSION START, and only what is definite (Q4).
+ * Filesystem only: one wallet.json read, the sidecar read and a few stats; no
+ * exec, no keychain, no scrypt, and never the router's unlock-state, so it
+ * cannot repeat a verdict that has since changed. In order:
+ *
+ * - a TENJIN_WALLET_KEY (valid or not) shadows the file, and whether it works
+ *   is the router's to report: null;
+ * - no wallet.json: null, never `no_wallet`, because the person may have
+ *   installed with `--no-wallet` on purpose;
+ * - a wallet.json nothing can read: `wallet_corrupt`;
+ * - the sidecar names the file store, its `.plain` file is gone, and
+ *   TENJIN_WALLET_PASSPHRASE is unset: `passphrase_missing`;
+ * - anything else: null.
+ */
+export async function walletAtStart(
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+): Promise<'wallet_corrupt' | 'passphrase_missing' | null> {
+  const facts = await readWalletFacts(dataDir, env);
+  if (facts.envKey !== 'absent') return null;
+  if (facts.walletFile === 'absent') return null;
+  if (facts.walletFile === 'unparsable') return 'wallet_corrupt';
+  if (facts.passphraseFileMissing && !facts.envPassphraseSet) return 'passphrase_missing';
+  return null;
 }
 
 async function pruneMarkers(dir: string, now: number): Promise<void> {
@@ -112,10 +174,35 @@ export async function removeAliveState(dataDir: string): Promise<boolean> {
   return true;
 }
 
-/** The command form's entry, read off stdin: `tenjin hook alive`. */
-export async function aliveMain(opts: { dataDir: string; version: string }): Promise<void> {
-  const raw = await readStdin(1_000).catch(() => '');
-  await runAliveHook(parseEvent(raw), opts);
+/**
+ * The command form's entry, read off stdin: `tenjin hook alive`. It writes the
+ * answer, when there is one, as one JSON line and WAITS for the write to land:
+ * on macOS stdout to a pipe is asynchronous, and `src/index.ts` calls
+ * `process.exit(0)` right after this returns, which would drop it.
+ */
+export async function aliveMain(opts: {
+  dataDir: string;
+  version: string;
+  env?: NodeJS.ProcessEnv;
+  /** Test seams: the harness event and the stream the answer goes to. */
+  readEvent?: () => Promise<string>;
+  stdout?: Pick<NodeJS.WritableStream, 'write'>;
+}): Promise<void> {
+  const raw = await (opts.readEvent ?? (() => readStdin(1_000)))().catch(() => '');
+  const answer = await runAliveHook(parseEvent(raw), {
+    dataDir: opts.dataDir,
+    version: opts.version,
+    ...(opts.env !== undefined ? { env: opts.env } : {}),
+  });
+  if (answer === null) return;
+  const out = opts.stdout ?? process.stdout;
+  await new Promise<void>((resolve) => {
+    try {
+      out.write(`${JSON.stringify(answer)}\n`, () => resolve());
+    } catch {
+      resolve();
+    }
+  });
 }
 
 function parseEvent(raw: string): unknown {

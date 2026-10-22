@@ -11,6 +11,8 @@ import type { Io } from '../lib/output';
 import { sessionServedByPlugin } from './alive';
 import type { HookKind } from './hook-tool';
 import { launchedByPlugin } from './names';
+import { settleCurrent } from './notice-markers';
+import { WALLET_UNLOCKED } from './wallet-reasons';
 
 /**
  * `tenjin hook prompt`, `native`, `shortfall`, `agent`, `ask` and `answer`. The harness writes
@@ -61,10 +63,27 @@ export async function runHookCommand(kind: HookKind, io: Io, deps: HookCommandDe
   if (response !== null) io.stdout.write(`${JSON.stringify(response)}\n`);
 }
 
+/** A session id as the hook schemas take one: a string of 1 to 200 characters. */
+function sessionIdOf(event: unknown): string | null {
+  if (event === null || typeof event !== 'object') return null;
+  const id = (event as { session_id?: unknown }).session_id;
+  return typeof id === 'string' && id.length > 0 && id.length <= 200 ? id : null;
+}
+
 /**
  * ONE HOOK EVENT, by kind, to its handler; the harness's answer or null. The
  * command above and the `hook` tool of `tenjin mcp` both run it, so the
  * handlers are the same whichever transport carried the event.
+ *
+ * THE ROUTER'S WALLET NEWS (B2, decision 14). Inside `tenjin mcp`,
+ * {@link HookDeps.walletNews} hands this leg the one-time wallet lines
+ * ("Tenjin wallet unlocked.", a still-locked line, a wrong-variable warning),
+ * and only for an event carrying a session id: that call is what marks the
+ * router as serving a session, and a leg without one (or the command form,
+ * which never passes it) must not. The lines ride in `systemMessage` beside the
+ * leg's own notices, and are acknowledged only once the response carrying them
+ * is built: a dispatch that throws skips the ack, so the next leg offers them
+ * again rather than losing them.
  */
 export async function runHookKind(
   kind: HookKind,
@@ -73,6 +92,19 @@ export async function runHookKind(
 ): Promise<unknown | null> {
   const notices = new Set<string>();
   const deps: HookDeps = { ...hookDeps, notice: (line) => notices.add(line) };
+  const sessionId = sessionIdOf(event);
+  const news =
+    sessionId !== null && hookDeps.walletNews !== undefined
+      ? await hookDeps.walletNews(sessionId).catch(() => null)
+      : null;
+  for (const line of news?.lines ?? []) notices.add(line);
+  if (sessionId !== null && news?.lines.includes(WALLET_UNLOCKED) === true) {
+    // Said here already: a paid call later in this session must not say it
+    // again, and a relapse must be told again.
+    await settleCurrent(hookDeps.dataDir, sessionId, hookDeps.now?.() ?? Date.now()).catch(
+      () => undefined,
+    );
+  }
   const outcome =
     kind === 'prompt'
       ? await runPromptHook(event, deps)
@@ -85,12 +117,19 @@ export async function runHookKind(
             : kind === 'answer'
               ? await runAnswerHook(event, deps)
               : await runDelegationHook(event, deps);
-  if (notices.size === 0) return outcome.response;
-  // The harness shows `systemMessage` to the user, whatever the event.
+  const response = withNotices(outcome.response, notices);
+  if (news !== null) await news.ack().catch(() => undefined);
+  return response;
+}
+
+/** The handler's answer with this leg's notices in `systemMessage`, which the
+ *  harness shows to the user whatever the event; the answer alone when none. */
+function withNotices(response: unknown, notices: Set<string>): unknown | null {
+  if (notices.size === 0) return response;
   const systemMessage = [...notices].join('\n');
-  return outcome.response === null || typeof outcome.response !== 'object'
+  return response === null || typeof response !== 'object'
     ? { systemMessage }
-    : { ...outcome.response, systemMessage };
+    : { ...response, systemMessage };
 }
 
 async function readStdin(): Promise<string> {
