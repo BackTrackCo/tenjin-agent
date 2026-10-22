@@ -412,7 +412,7 @@ describe('sessionRow', () => {
       name: 'claude session',
       status: 'warn',
       required: false,
-      detail: `the router Claude Code started (pid 4242) ${entry.reason}`,
+      detail: `the router Claude Code started (pid 4242) cannot unlock the wallet: ${entry.reason}`,
       fix: entry.fix,
     });
     expectPersonFix(row.fix);
@@ -665,13 +665,19 @@ describe('runRouterDoctor, with its seams injected', () => {
 
   it('reports the session a served live router saw, and only that one', async () => {
     const live = observation({ pid: 777, startedAt: 5_000 });
+    // A health-check router (`claude mcp get`): alive and listed under Claude,
+    // so only `servedSession: false` can leave it out.
+    const unserved = observation({ pid: 778, servedSession: false });
     const { by, out } = await run({
       eligibility: async () => eligibility(),
       listProcesses: async () => ({
-        routers: [{ pid: 777, startedAt: 5_000, kind: 'plugin', underClaude: true }],
+        routers: [
+          { pid: 777, startedAt: 5_000, kind: 'plugin', underClaude: true },
+          { pid: 778, startedAt: unserved.startedAt, kind: 'plugin', underClaude: true },
+        ],
         claude: [],
       }),
-      readObservations: async () => [live, observation({ pid: 778, servedSession: false })],
+      readObservations: async () => [live, unserved],
     });
     expect(by['claude session']).toMatchObject({ status: 'ok' });
     expect(by['claude session']?.detail).toContain('(pid 777,');
