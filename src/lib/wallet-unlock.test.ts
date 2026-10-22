@@ -47,7 +47,13 @@ describe('the exact strings', () => {
       'Unlock your keychain (or log in to the desktop session) and retry.',
     );
     expect(FILE_STORE_FAILED_FIX('/home/u/.tenjin/passphrase.0xab.plain')).toBe(
-      'Tenjin could not save the passphrase to /home/u/.tenjin/passphrase.0xab.plain; check that ~/.tenjin is writable.',
+      'Tenjin could not save the passphrase to /home/u/.tenjin/passphrase.0xab.plain; check that /home/u/.tenjin is writable.',
+    );
+    expect(FILE_STORE_FAILED_FIX('~/.tenjin/passphrase.0xab.plain')).toContain(
+      'check that ~/.tenjin is writable.',
+    );
+    expect(FILE_STORE_FAILED_FIX('/srv/tenjin/passphrase.0xab.plain')).toContain(
+      'check that /srv/tenjin is writable.',
     );
     expect(NO_KEYRING_LINE('/p')).toBe(
       'No keyring reachable from this session; passphrase saved to /p (readable only by you).',

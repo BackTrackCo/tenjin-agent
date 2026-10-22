@@ -108,7 +108,9 @@ export const KEYCHAIN_LOCKED_FIX =
  * OS store: there is no keychain to unlock when the file could not be written.
  */
 export function FILE_STORE_FAILED_FIX(path: string): string {
-  return `Tenjin could not save the passphrase to ${path}; check that ~/.tenjin is writable.`;
+  // The file's own folder (`TENJIN_DATA_DIR` moves it), cut by hand: this module imports nothing.
+  const dir = path.replace(/[/\\][^/\\]*$/, '') || '/';
+  return `Tenjin could not save the passphrase to ${path}; check that ${dir} is writable.`;
 }
 
 /** Shown once when create or repair has waited on the keychain for a second at a terminal. */
