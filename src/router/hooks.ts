@@ -639,7 +639,8 @@ function gateDeadline(deps: HookDeps): number {
  *   no wallet and no key, a malformed TENJIN_WALLET_KEY, a wallet.json nobody
  *   can read, or the saved passphrase file gone while TENJIN_WALLET_PASSPHRASE
  *   is unset. Approval cannot unlock a wallet mid-session, so this one
- *   withholds discovered offers too ({@link vetOffer}, Q3), and its note rides
+ *   withholds discovered offers too ({@link vetOffer}, Q3), and it wins over
+ *   the policy's `needs_approval` for any price above zero. Its note rides
  *   in `additionalContext`, so it carries the model's `agentFix` (B1).
  * - THE BALANCE. A fresh install's wallet holds no USDC, and the authorization
  *   it signs is refused after the free call was already denied: the user got
@@ -673,7 +674,9 @@ export async function spendShortfall(
     withheld: 'offer needs approval',
     note: `Note: ${price} ${detail}; request will pay nothing and return needs_approval with what it costs.`,
   });
-  let rpcUrl: string;
+  // The policy's answer: today's approval Shortfall, or the RPC to read the
+  // balance from once it said yes.
+  let policy: Shortfall | { rpcUrl: string };
   try {
     const settings = await resolveContextSettings(hookContext(deps));
     const ledger = await readSpendSummary(deps.dataDir, {
@@ -684,26 +687,30 @@ export async function spendShortfall(
       creator: new URL(decision.endpoint).host,
       sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
     });
-    if (evaluation.decision !== 'allow') {
-      return approval(
-        evaluation.reason === 'above_auto_spend'
-          ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
-          : "needs approval under this machine's spend limits",
-      );
-    }
-    rpcUrl = settings.rpcUrl;
+    policy =
+      evaluation.decision !== 'allow'
+        ? approval(
+            evaluation.reason === 'above_auto_spend'
+              ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
+              : "needs approval under this machine's spend limits",
+          )
+        : { rpcUrl: settings.rpcUrl };
   } catch {
-    return approval("needs approval under this machine's spend limits");
+    policy = approval("needs approval under this machine's spend limits");
   }
   // A free call pays nothing, so it needs nothing from the wallet: one that
   // cannot sign, or no wallet at all (`--no-wallet`), never withholds it.
-  if (BigInt(decision.providerPriceAtomic) === 0n) return null;
-  // The policy said yes above (its `needs_approval` keeps today's sentence),
-  // so the verdict below decides only the wallet's part.
+  if (BigInt(decision.providerPriceAtomic) === 0n) return 'rpcUrl' in policy ? null : policy;
   const facts = await readWalletFacts(deps.dataDir, deps.env ?? process.env);
   const sign = deps.signer?.() ?? canSign(facts);
+  // A wallet that definitely cannot sign is said before the policy's
+  // `needs_approval` (Q3): approving an over-cap call cannot unlock it
+  // mid-session, so even a discovered offer is withheld.
+  if (sign.status === 'blocked') return cannotSign(sign);
+  if (!('rpcUrl' in policy)) return policy;
+  const { rpcUrl } = policy;
   let balance: bigint | null = null;
-  if (sign.status !== 'blocked' && facts.address !== null && facts.envKey !== 'valid') {
+  if (facts.address !== null && facts.envKey !== 'valid') {
     // A balance read in the last minute stands: a burst of parallel lookups
     // otherwise asks the public RPC once each, past its rate limit.
     const readBalance = rememberingBalanceReader(deps.dataDir, {
@@ -732,6 +739,11 @@ export async function spendShortfall(
       note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
     };
   }
+  return cannotSign(v);
+}
+
+/** The Shortfall of a wallet that definitely cannot sign; {@link vetOffer} always withholds it. */
+function cannotSign(v: { reason: string; detail: string; fix: string }): Shortfall {
   return {
     withheld: 'wallet cannot sign',
     note: `Note: Tenjin's wallet cannot pay for this (${v.detail}); ${agentFixFor(v.reason, v.fix)}`,

@@ -1340,6 +1340,49 @@ describe('a wallet that cannot sign', () => {
     expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
   });
 
+  /** Approving an over-cap call cannot unlock the wallet either: the blocked
+   *  signer wins over the policy's `needs_approval`. */
+  it('withholds a discovered offer priced over the cap too, and shows it on an unknown verdict', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '50000', confirm: 'above:50000' }),
+    );
+    const terms = { providerPriceAtomic: '53501', endpoint: 'https://example.test/spec' };
+    expect(
+      await spendShortfall(
+        terms,
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+        Date.now() + 3_000,
+      ),
+    ).toMatchObject({ withheld: 'wallet cannot sign', signBlocked: true });
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
+
+    expect(
+      await spendShortfall(
+        terms,
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => unknown },
+        Date.now() + 3_000,
+      ),
+    ).toMatchObject({ withheld: 'offer needs approval' });
+    const shown = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(shown).toMatchObject({ action: 'discovered', id: DISCOVERED.decision.id });
+    expect(JSON.stringify(shown.response)).toContain('needs_approval');
+  });
+
   it('offers on an unknown verdict', async () => {
     const { fetchImpl } = router(EXECUTE);
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
