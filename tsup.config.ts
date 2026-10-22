@@ -1,7 +1,12 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { defineConfig } from 'tsup';
-import { renderCodexHostFiles, renderHostFiles } from './src/router/plugin-files';
+import {
+  MOD_FILES,
+  PLUGIN_DIR,
+  renderCodexHostFiles,
+  renderHostFiles,
+} from './src/router/plugin-files';
 
 /**
  * THE PLUGINS SHIP IN `dist/hosts/claude` AND `dist/hosts/codex`, rendered from
@@ -9,11 +14,19 @@ import { renderCodexHostFiles, renderHostFiles } from './src/router/plugin-files
  * Claude Code manifest (the Codex plugin carries none). `tenjin install`
  * registers those folders as local marketplaces, so they must sit inside the
  * published `files`; `dist` already is. The checked-in `hosts/` templates are
- * pinned to the same render by a test.
+ * pinned to the same render by a test, and the Claude mod's two files are
+ * copied from them as written.
  */
 function writeHosts(): void {
   const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
-  const hosts = { claude: renderHostFiles(version), codex: renderCodexHostFiles() };
+  // The mod ships as written: its source is the checked-in plugin folder.
+  const mod = Object.fromEntries(
+    MOD_FILES.map((path) => [
+      path,
+      readFileSync(join('hosts', 'claude', PLUGIN_DIR, path), 'utf8'),
+    ]),
+  ) as Record<(typeof MOD_FILES)[number], string>;
+  const hosts = { claude: renderHostFiles(version, { mod }), codex: renderCodexHostFiles() };
   for (const [host, files] of Object.entries(hosts)) {
     for (const [path, body] of Object.entries(files)) {
       const target = join('dist', 'hosts', host, path);

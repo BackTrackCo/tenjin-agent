@@ -29,13 +29,16 @@ import { basename, dirname, join, posix, relative, resolve, sep, win32 } from 'n
 import { handlersIn } from '../router/hook-form';
 import {
   LAUNCHER_MARKER,
+  PLUGIN_DIR,
   renderHostFiles,
   renderLauncherCmd,
   renderLauncherSh,
   renderPluginHooks,
   renderPluginMcp,
+  type ModSources,
   type RuntimeLaunch,
 } from '../router/plugin-files';
+import { readModSources } from '../router/plugin-folder';
 import { writeFileAtomic } from './atomic-json';
 import { proxyNodeStep, proxySkipped } from './env-proxy';
 import { hasCode } from './errno';
@@ -1060,17 +1063,30 @@ async function putBack(path: string, body: string | null, mode: number): Promise
   else await writeFileAtomic(path, body, { mode });
 }
 
-/** The marketplace's files in the order a reader can never see a half render: the parts, then the manifest, then the catalog. */
+/**
+ * The marketplace's files in the order a reader can never see a half render:
+ * the parts (the mod's files before the hooks file that names its module), then
+ * the manifest, then the catalog.
+ */
 function renderOrder(files: Record<string, string>): string[] {
   const rank = (path: string): number => {
-    if (path === 'tenjin/.mcp.json') return 0;
     if (path === 'tenjin/hooks/hooks.json') return 1;
     if (path.startsWith('tenjin/bin/')) return 2;
-    if (path === '.claude-plugin/marketplace.json') return 5;
-    if (path === 'tenjin/.claude-plugin/plugin.json') return 4;
-    return 3;
+    if (path === 'tenjin/.claude-plugin/plugin.json') return 3;
+    if (path === '.claude-plugin/marketplace.json') return 4;
+    return 0;
   };
   return Object.keys(files).sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * THE MOD THE BUILD AT `launch.entry` SHIPS, as written in its own
+ * `dist/hosts/claude/tenjin`, so the runtime render carries the mod of the
+ * version it runs, never the running package's. Undefined when that build
+ * carries none: the render then names no module.
+ */
+function runtimeMod(launch: RuntimeLaunch): Promise<ModSources | undefined> {
+  return readModSources(join(dirname(launch.entry), 'hosts', 'claude', PLUGIN_DIR));
 }
 
 const modeFor = (path: string): number => (path.startsWith('tenjin/bin/') ? 0o755 : 0o644);
@@ -1124,7 +1140,7 @@ export async function activate(
       const old = readRawState(root);
       await writeState(root, { ...old, pending: next });
 
-      const files = renderHostFiles(next.cli, { launch });
+      const files = renderHostFiles(next.cli, { launch, mod: await runtimeMod(launch) });
       const order = renderOrder(files);
       const oldBodies = new Map<string, string | null>();
       try {
@@ -1405,9 +1421,14 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
 }
 
 /** Does `runtime/claude` hold, byte for byte, the runtime render for this launch? */
-function hostsMatch(hostsDir: string, version: string, launch: RuntimeLaunch): boolean {
+async function hostsMatch(
+  hostsDir: string,
+  version: string,
+  launch: RuntimeLaunch,
+): Promise<boolean> {
+  const mod = await runtimeMod(launch);
   try {
-    return Object.entries(renderHostFiles(version, { launch })).every(
+    return Object.entries(renderHostFiles(version, { launch, mod })).every(
       ([path, body]) => readFileSync(join(hostsDir, path), 'utf8') === body,
     );
   } catch {
@@ -1498,7 +1519,7 @@ export async function setupRuntime(o: {
     state.pending === null &&
     completeValid(versionDir(root, usable.cli)) &&
     completeValid(join(root, 'node', usable.node)) &&
-    hostsMatch(hostsDir, o.version, launchOf(usable))
+    (await hostsMatch(hostsDir, o.version, launchOf(usable)))
   ) {
     const launcher = await writeLaunchers(o.home, launchOf(usable), { env: o.env, platform });
     return { ...runs(usable), state: 'current', launcher };

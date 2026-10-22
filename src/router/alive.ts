@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
+import { configPath, walletPath } from '../lib/paths';
+import {
+  DEFAULT_RPC_URL,
+  readUsdcBalanceWithFallback,
+  rememberingBalanceReader,
+} from '../lib/usdc-balance';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { noticeFor } from './notice-markers';
 import { sessionStartMessage } from './wallet-reasons';
@@ -70,6 +77,7 @@ export interface AliveAnswer {
  * notice. The answer carries the person's fix in `systemMessage` and the
  * model's `agentFix` in `additionalContext` (B1), and the reason's notice
  * marker is written so the session's first prompt leg does not say it again.
+ * ({@link aliveMain} adds the balance notice as JSON when there is no answer.)
  * It never fails the session: every error is swallowed, and gives null.
  */
 export async function runAliveHook(
@@ -174,11 +182,66 @@ export async function removeAliveState(dataDir: string): Promise<boolean> {
   return true;
 }
 
+/** How long the leg waits on a balance read before it says nothing. */
+export const WALLET_READ_MS = 2_000;
+
+/**
+ * THE WALLET, SAID TO THE PERSON AT THE START OF A SESSION while it cannot
+ * pay: the leg's `systemMessage`, which Claude Code shows the user and never
+ * the model, on every surface and without the mod. Null when there is no
+ * wallet, the balance could not be read in time, or the wallet holds at least
+ * the per-call limit.
+ */
+export async function walletNotice(
+  dataDir: string,
+  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number } = {},
+): Promise<string | null> {
+  const wallet = await readJson(walletPath(dataDir));
+  const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
+  if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
+  const config = await readJson(configPath(dataDir));
+  const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
+  const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
+  const read = rememberingBalanceReader(dataDir, {
+    ...(opts.read !== undefined ? { read: opts.read } : {}),
+  });
+  const balance = await read(address, rpcUrl, { timeoutMs });
+  if (balance === null) return null;
+  // The per-call limit as the spend policy reads it: the file's, else the default.
+  const cap = BigInt(
+    typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
+      ? config.maxAutoSpend
+      : DEFAULT_MAX_AUTO_SPEND,
+  );
+  if (balance > 0n && balance >= cap) return null;
+  // Only the person reads it, inside the session: they ask, the agent runs it.
+  return `Tenjin balance: $${dollars(balance)}. Ask your agent to add funds to Tenjin.`;
+}
+
+/** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
+function dollars(atomic: bigint): string {
+  const fraction = (atomic % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return `${atomic / 1_000_000n}.${fraction.padEnd(2, '0')}`;
+}
+
+async function readJson(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const value: unknown = JSON.parse(await readFile(path, 'utf8'));
+    return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The command form's entry, read off stdin: `tenjin hook alive`. It writes the
  * answer, when there is one, as one JSON line and WAITS for the write to land:
  * on macOS stdout to a pipe is asynchronous, and `src/index.ts` calls
- * `process.exit(0)` right after this returns, which would drop it.
+ * `process.exit(0)` right after this returns, which would drop it. With no
+ * answer from the wallet's files, it prints the balance notice
+ * ({@link walletNotice}) as a JSON `systemMessage`, which Claude Code shows the
+ * user; plain text would be added to the session's context. A wallet that
+ * cannot sign is told that, never to add funds.
  */
 export async function aliveMain(opts: {
   dataDir: string;
@@ -194,11 +257,13 @@ export async function aliveMain(opts: {
     version: opts.version,
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   });
-  if (answer === null) return;
+  const notice = answer === null ? await walletNotice(opts.dataDir).catch(() => null) : null;
+  const payload = answer ?? (notice !== null ? { systemMessage: notice } : null);
+  if (payload === null) return;
   const out = opts.stdout ?? process.stdout;
   await new Promise<void>((resolve) => {
     try {
-      out.write(`${JSON.stringify(answer)}\n`, () => resolve());
+      out.write(`${JSON.stringify(payload)}\n`, () => resolve());
     } catch {
       resolve();
     }

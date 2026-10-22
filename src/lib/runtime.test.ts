@@ -1175,6 +1175,49 @@ describe('setupRuntime', () => {
     },
   );
 
+  it.skipIf(!POSIX)(
+    'renders the mod the build ships into runtime/claude, then reports it current',
+    async () => {
+      const mod = {
+        'types/index.d.ts': 'export interface State {}\n',
+        'hooks/register.tsx': 'export default function register() {}\n',
+      };
+      const pkg = npmPackage(
+        '0.1.0-alpha.32',
+        pin,
+        Object.fromEntries(
+          Object.entries(mod).map(([path, body]) => [`dist/hosts/claude/tenjin/${path}`, body]),
+        ),
+      );
+      const run = () =>
+        setupRuntime({
+          dataDir,
+          home,
+          env: {},
+          version: '0.1.0-alpha.32',
+          moduleDir: join(pkg, 'dist'),
+          refresh: false,
+          fetchImpl: nodeServer(),
+          verify: ok,
+          ...PLATFORM,
+        });
+      expect((await run()).state).toBe('active');
+      const launch = {
+        node: nodeBinPath(root, V, 'darwin'),
+        entry: versionEntry(root, '0.1.0-alpha.32'),
+        platform: 'darwin' as const,
+        home,
+      };
+      const claude = snapshot(join(root, 'claude'));
+      expect(claude).toEqual(renderHostFiles('0.1.0-alpha.32', { launch, mod }));
+      expect(claude['tenjin/hooks/register.tsx']).toBe(mod['hooks/register.tsx']);
+      expect(JSON.parse(claude['tenjin/hooks/hooks.json']!)).toMatchObject({
+        modules: ['./register.tsx'],
+      });
+      expect((await run()).state).toBe('current');
+    },
+  );
+
   it.skipIf(!POSIX)('re-renders when pending is left set by a crash', async () => {
     await setup('0.1.0-alpha.32');
     const s = JSON.parse(readFileSync(runtimeStatePath(root), 'utf8'));

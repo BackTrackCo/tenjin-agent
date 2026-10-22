@@ -84,6 +84,11 @@ export interface ExecLaunch {
 export interface RenderOptions {
   /** The Node every command runs: the runtime's absolute Node, or `node` from PATH when unset. */
   node?: string;
+  /**
+   * The mod's sources, as written: the folder then carries them, its hooks
+   * file names the module and its manifest the types. Unset, it carries none.
+   */
+  mod?: ModSources;
 }
 
 /**
@@ -198,16 +203,21 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
   ];
 }
 
+/** The mod's module, as `hooks/hooks.json` names it (relative to that file). */
+export const MOD_MODULE = './register.tsx';
+
 /**
  * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
- * permission answers. `o.node` runs all three commands, the answers included,
- * so the runtime render names no `node` from PATH at all.
+ * permission answers, and the mod's module when `o.mod` carries it. `o.node`
+ * runs all three commands, the answers included, so the runtime render names
+ * no `node` from PATH at all.
  */
 export function renderPluginHooks(
   entry: string = PLUGIN_ROOT_ENTRY,
   o: RenderOptions = {},
 ): {
   hooks: Record<string, unknown[]>;
+  modules?: string[];
 } {
   const plan = [
     { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry, o)) },
@@ -219,7 +229,7 @@ export function renderPluginHooks(
   for (const { event, hooks: handlers, ...rest } of plan) {
     (hooks[event] ??= []).push({ ...rest, hooks: handlers });
   }
-  return { hooks };
+  return { hooks, ...(o.mod !== undefined ? { modules: [MOD_MODULE] } : {}) };
 }
 
 /**
@@ -258,11 +268,16 @@ const DESCRIPTION =
  * template carries none. `metadata[tenjin-cli]` is the ownership marker the
  * folder fallback, `update` and `uninstall` check before they touch a folder.
  */
-export function renderPluginManifest(version?: string): Record<string, unknown> {
+export function renderPluginManifest(
+  version?: string,
+  o: RenderOptions = {},
+): Record<string, unknown> {
   return {
     name: PLUGIN_NAME,
     ...(version !== undefined ? { version } : {}),
     description: DESCRIPTION,
+    // The mod's `$.state` contract, which `claude plugin validate` checks.
+    ...(o.mod !== undefined ? { types: `./${MOD_TYPES}` } : {}),
     author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
     homepage: `${PRODUCTION_ORIGIN}/agents`,
     repository: 'https://github.com/BackTrackCo/tenjin-agent',
@@ -299,17 +314,32 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
  */
 export const PLUGIN_FILES = [
   '.mcp.json',
+  'types/index.d.ts',
+  'hooks/register.tsx',
   'hooks/hooks.json',
   '.claude-plugin/plugin.json',
 ] as const;
+
+/** The mod's `$.state` contract, shipped as written. */
+export const MOD_TYPES = 'types/index.d.ts';
+/**
+ * THE MOD SHIPS AS WRITTEN, NOT RENDERED: `hosts/claude/tenjin/` holds its
+ * source, the build copies it into `dist/hosts/claude/tenjin/`, and the folder
+ * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
+ * later); nothing here builds or imports it.
+ */
+export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
+export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
  * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
  * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
- * outside the package, and `o.node` the Node that runs them: `node` from PATH
- * unless this is the runtime render.
+ * outside the package, `o.node` the Node that runs them (`node` from PATH
+ * unless this is the runtime render), and `o.mod` the mod's sources. Without
+ * them the folder carries the legs and the server alone, and its hooks file
+ * names no module.
  */
 export function renderPluginFiles(
   version?: string,
@@ -318,8 +348,9 @@ export function renderPluginFiles(
 ): Record<string, string> {
   return {
     '.mcp.json': json(renderPluginMcp(entry, o)),
+    ...(o.mod ?? {}),
     'hooks/hooks.json': json(renderPluginHooks(entry, o)),
-    '.claude-plugin/plugin.json': json(renderPluginManifest(version)),
+    '.claude-plugin/plugin.json': json(renderPluginManifest(version, o)),
   };
 }
 
@@ -339,24 +370,27 @@ export interface RuntimeLaunch {
 export interface HostRenderOptions {
   /** The runtime render's Node and entry; it also adds the plugin's `bin/` launchers. */
   launch?: RuntimeLaunch;
+  /** The mod's sources, as {@link RenderOptions.mod}. */
+  mod?: ModSources;
 }
 
 /**
  * The marketplace folder's files: its catalog and the plugin under
  * {@link PLUGIN_DIR}. With no `o.launch`, the package render, byte for byte
- * what the build ships; with one, the runtime render, which runs `launch.node`
- * and `launch.entry` and carries the plugin's `bin/` launchers.
+ * what the build ships when `o.mod` is the mod as written; with one, the
+ * runtime render, which runs `launch.node` and `launch.entry`, carries the
+ * plugin's `bin/` launchers, and carries the mod when `o.mod` does.
  */
 export function renderHostFiles(
   version?: string,
   o: HostRenderOptions = {},
 ): Record<string, string> {
-  const { launch } = o;
+  const { launch, mod } = o;
   const files =
     launch === undefined
-      ? renderPluginFiles(version)
+      ? renderPluginFiles(version, undefined, { mod })
       : {
-          ...renderPluginFiles(version, launch.entry, { node: launch.node }),
+          ...renderPluginFiles(version, launch.entry, { node: launch.node, mod }),
           ...renderPluginBin(launch),
         };
   const plugin = Object.entries(files).map(
