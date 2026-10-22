@@ -40,11 +40,7 @@ const status = (atomic: bigint | null) =>
 describe('status, the wallet line', () => {
   it('says how to fund a wallet at exactly $0', async () => {
     const result = await status(0n);
-    expect(result.humanLines?.slice(0, 3)).toEqual([
-      'wallet 0 USDC on Base',
-      FUNDING_LINE,
-      'lookups 0 USD',
-    ]);
+    expect(result.humanLines?.slice(0, 3)).toEqual(['wallet 0 USD', FUNDING_LINE, 'lookups 0 USD']);
     expect(result.data).toMatchObject({
       wallet: { address: ADDRESS, balance: { atomic: '0', usd: '0' } },
     });
@@ -52,7 +48,7 @@ describe('status, the wallet line', () => {
 
   it('shows a funded balance with no funding line', async () => {
     const result = await status(5_000_000n);
-    expect(result.humanLines?.slice(0, 2)).toEqual(['wallet 5 USDC on Base', 'lookups 0 USD']);
+    expect(result.humanLines?.slice(0, 2)).toEqual(['wallet 5 USD', 'lookups 0 USD']);
     expect(result.humanLines).not.toContain(FUNDING_LINE);
   });
 

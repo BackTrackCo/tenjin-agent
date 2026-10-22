@@ -148,7 +148,7 @@ export async function runRouterStatus(
       : wallet.atomic === null
         ? ['wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries']
         : [
-            `wallet ${toMoney(wallet.atomic.toString()).usd} USDC on Base`,
+            `wallet ${toMoney(wallet.atomic.toString()).usd} USD`,
             ...(wallet.atomic === 0n ? [FUNDING_LINE] : []),
           ];
   return {
