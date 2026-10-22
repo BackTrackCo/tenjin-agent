@@ -1338,7 +1338,11 @@ describe('setupRuntime', () => {
     let settled: Awaited<ReturnType<typeof setupRuntime>> | undefined;
     const started = Date.now();
     void setup('0.1.0-alpha.32', { refresh: true, fetchImpl }).then((r) => (settled = r));
-    for (let i = 0; i < 2_000 && !asked; i += 1) await new Promise((r) => setImmediate(r));
+    // Staging copies the package on real disk I/O before the download starts,
+    // which a slow runner stretches past any fixed tick count. Wait for the
+    // fetch on the wall clock: these fake timers leave `performance` alone.
+    const waitUntil = performance.now() + 20_000;
+    while (!asked && performance.now() < waitUntil) await new Promise((r) => setImmediate(r));
     expect(asked).toBe(true);
     for (let i = 0; i < 40 && settled === undefined; i += 1) {
       await vi.advanceTimersByTimeAsync(1_000);
@@ -1346,5 +1350,5 @@ describe('setupRuntime', () => {
     }
     expect(settled).toMatchObject({ state: 'fallback', reason: 'the 35 s refresh budget ran out' });
     expect(Date.now() - started).toBeLessThanOrEqual(35_000);
-  });
+  }, 30_000);
 });
