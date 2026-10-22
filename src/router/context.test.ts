@@ -414,7 +414,7 @@ describe('seal, the one way a packet leaves', () => {
     ],
     ['a seed phrase', `restore ${SEED} and stop`, 'absurd abuse'],
     ['a URL query key', `https://api.acme.io/v1?api-key=${QUERY_KEY}`, QUERY_KEY],
-    ['a URL path key', `https://hooks.acme.io/services/${PATH_KEY}`, PATH_KEY],
+    ['an RPC path key', `https://my-node.base-mainnet.quiknode.pro/${PATH_KEY}/`, PATH_KEY],
     ['a vendor token', `deploy with ${TOKEN}`, TOKEN],
   ];
 

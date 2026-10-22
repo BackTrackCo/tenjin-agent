@@ -884,10 +884,9 @@ describe('mask() carries the key, PEM, seed-phrase and URL credential rows (#388
     );
   });
 
-  it('masks a long mixed path segment', () => {
-    expect(mask('https://hooks.acme.io/services/x9Y8z7W6v5U4t3S2r1Q0p9O8nM')).toBe(
-      'https://hooks.acme.io/services/…[redacted 26 chars]',
-    );
+  it('leaves a long mixed path segment in a query', () => {
+    const url = 'https://hooks.acme.io/services/x9Y8z7W6v5U4t3S2r1Q0p9O8nM';
+    expect(mask(url)).toBe(url);
   });
 
   it('leaves ordinary URLs untouched', () => {

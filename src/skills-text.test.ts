@@ -31,7 +31,7 @@ const SRC_DIR = fileURLToPath(new URL('.', import.meta.url));
 
 /** The shape this file reads out of `lib/redact-rules.json`; redact.ts owns the full type. */
 interface ScanRuleCorpus {
-  rules: Array<{ id: string; tier?: string }>;
+  rules: Array<{ id: string; tier?: string; scopes: string[] }>;
 }
 
 /**
@@ -451,7 +451,12 @@ describe('tenjin-publish teaches complete public card context', () => {
     const corpus = JSON.parse(
       readFileSync(join(SRC_DIR, 'lib', 'redact-rules.json'), 'utf8'),
     ) as ScanRuleCorpus;
-    const warns = new Set(corpus.rules.filter((r) => r.tier === 'warn').map((r) => r.id));
+    // A row scoped `query` alone is masked and never reported, so it has no triage.
+    const warns = new Set(
+      corpus.rules
+        .filter((r) => r.tier === 'warn' && r.scopes.includes('publish'))
+        .map((r) => r.id),
+    );
     expect(warns.size, 'no warn detectors found; the corpus read is broken').toBeGreaterThan(5);
 
     const section = text.slice(text.indexOf('warnings split in two'));

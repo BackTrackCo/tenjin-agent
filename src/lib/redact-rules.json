@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries and router packets by `mask()`; regex rows, plus the `hex64`, `pemBlock` and `bip39` algorithm rows). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries and router packets by `mask()`; regex rows, plus the `hex64`, `pemBlock` and `bip39` algorithm rows). A row scoped `query` alone is masked and never reported. Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
   "publicHexConstants": [
     {
       "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -573,6 +573,22 @@
       }
     },
     {
+      "id": "rpc-url-key",
+      "tier": "warn",
+      "scopes": ["query"],
+      "description": "An RPC provider key in a URL path, keyed on the provider's documented host: QuickNode (<name>.<network>.quiknode.pro/<key>/), Alchemy (<chain>.g.alchemy.com/v2/<key> and /nft/v3/<key>), Infura (<network>.infura.io/v3/<key> and /ws/v3/<key>), Ankr (rpc.ankr.com/<chain>/<token>), Chainstack (nd-NNN-NNN-NNN.p2pify.com/<key>, <network>.core.chainstack.com/<key> and /ws/<key>), GetBlock (go.getblock.io/<token>/, shared.<region>.getblock.io/<token>/), dRPC (lb.drpc.live/<network>/<key>) and Tenderly (<network>.gateway.tenderly.co/<key>). Query only: it keeps the node key of tenjin-agent#388 out of a router packet now that url-path-credential no longer masks in queries (tenjin-agent#489). The key must be 16 or more [A-Za-z0-9_-] characters with a letter and a digit, so a keyless path (Alchemy `demo`, a chain name) stays. Blast API is left out: it shut down.",
+      "source": "tenjin (tenjin-agent#489)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\/(?=[\\w-]{16})(?<=\\b(?:https?|wss?):\\/\\/(?:[\\w-]+(?:\\.[\\w-]+)*\\.quiknode\\.pro|[\\w-]+\\.g\\.alchemy\\.com\\/(?:v2|nft\\/v3)|[\\w-]+\\.infura\\.io\\/(?:ws\\/)?v3|rpc\\.ankr\\.com\\/[\\w-]+|(?:ws-)?nd-[\\d-]+\\.p2pify\\.com|[\\w-]+\\.core\\.chainstack\\.com(?:\\/ws)?|(?:go|(?:shared|dedicated|limitless)\\.[\\w-]+)\\.getblock\\.io|lb\\.drpc\\.(?:live|org)\\/[\\w-]+|[\\w-]+\\.gateway\\.tenderly\\.co)\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)[\\w-]{16,}(?=[.;:!]*(?:[\\/?#\\s\\\"'<>(),\\[\\]{}`]|$))",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 1
+      }
+    },
+    {
       "id": "url-query-credential",
       "tier": "warn",
       "scopes": ["query", "publish"],
@@ -591,12 +607,12 @@
     {
       "id": "url-path-credential",
       "tier": "warn",
-      "scopes": ["query", "publish"],
-      "description": "A path segment of 24 or more [A-Za-z0-9_-] characters that mixes letters and digits, on an http(s) URL: the shape a webhook secret or a signed-link token takes. A CDN hash or a content id in a path masks too; in a query that costs one routing offer. Four exclusions, each from a measured miss: a segment with two hyphenated words (an article slug) or two whole underscore-joined words of 3+ letters each (a Reddit slug; a token tail like `live_abcD3f` is not a whole word, so it still masks), a 40-hex git commit after a git path marker (/commit/, /commits/, /blob/, /tree/, /raw/, /compare/) or on a git host (github.com, gitlab.com, bitbucket.org, codeberg.org), since elsewhere a 40-hex segment is a node key (https://<name>.quiknode.pro/<40 hex>/), a 0x-prefixed 64-hex (the hex64 row already calls a 64-hex inside a URL a hash), a UUID, and a URL character class that stops at quotes, brackets and commas, so one match never spans two URLs in a JSON string. The segment must be whole (a `.` or `%` inside it is a filename or an encoded slug, not a token). The shape lookahead runs before the scheme lookbehind, and the lookbehind is bounded, so a line of short segments stays linear.",
+      "scopes": ["publish"],
+      "description": "A path segment of 24 or more [A-Za-z0-9_-] characters that mixes letters and digits, on an http(s) URL: the shape a webhook secret or a signed-link token takes. Not masked in a query: a document id, a gist, a share link or a Reddit slug has the same shape, and a mask there stops a public read with nothing sent (tenjin-agent#489). `rpc-url-key` masks the node keys a query can carry in a path. Four exclusions, each from a measured miss: a segment with two hyphenated words (an article slug), a 40-hex git commit after a git path marker (/commit/, /commits/, /blob/, /tree/, /raw/, /compare/) or on a git host (github.com, gitlab.com, bitbucket.org, codeberg.org), since elsewhere a 40-hex segment is a node key (https://<name>.quiknode.pro/<40 hex>/), a 0x-prefixed 64-hex (the hex64 row already calls a 64-hex inside a URL a hash), a UUID, and a URL character class that stops at quotes, brackets and commas, so one match never spans two URLs in a JSON string. The segment must be whole (a `.` or `%` inside it is a filename or an encoded slug, not a token). The shape lookahead runs before the scheme lookbehind, and the lookbehind is bounded, so a line of short segments stays linear.",
       "source": "tenjin (tenjin-agent#388)",
       "match": {
         "kind": "regex",
-        "pattern": "\\/(?=[\\w-]{24})(?<=\\bhttps?:\\/\\/[^\\s?#\"'`<>()\\[\\]{},]{1,2048}\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)(?![\\w-]*?(?:(?<![A-Za-z])[A-Za-z]{3,}-[A-Za-z]{3}|(?<![A-Za-z\\d])[A-Za-z]{3,}_[A-Za-z]{3,}(?![A-Za-z\\d])))(?!(?:0x[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![\\w-]))(?!(?=[0-9a-f]{40}(?![\\w-]))(?<=\\/(?:commit|commits|blob|tree|raw|compare)\\/|\\bhttps?:\\/\\/(?:www\\.)?(?:github\\.com|gitlab\\.com|bitbucket\\.org|codeberg\\.org)\\/[^\\s?#\"'`<>()\\[\\]{},]{0,2048}))[\\w-]{24,}(?=[.;:!]*(?:[\\/?#\\s\"'<>(),\\[\\]{}`]|$))",
+        "pattern": "\\/(?=[\\w-]{24})(?<=\\bhttps?:\\/\\/[^\\s?#\"'`<>()\\[\\]{},]{1,2048}\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)(?![\\w-]*?(?<![A-Za-z])[A-Za-z]{3,}-[A-Za-z]{3})(?!(?:0x[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![\\w-]))(?!(?=[0-9a-f]{40}(?![\\w-]))(?<=\\/(?:commit|commits|blob|tree|raw|compare)\\/|\\bhttps?:\\/\\/(?:www\\.)?(?:github\\.com|gitlab\\.com|bitbucket\\.org|codeberg\\.org)\\/[^\\s?#\"'`<>()\\[\\]{},]{0,2048}))[\\w-]{24,}(?=[.;:!]*(?:[\\/?#\\s\"'<>(),\\[\\]{}`]|$))",
         "flags": "gi"
       },
       "excerpt": {
