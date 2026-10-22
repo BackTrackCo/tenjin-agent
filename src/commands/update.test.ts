@@ -1702,6 +1702,37 @@ describe('runUpdate: the runtime branch', () => {
     });
   });
 
+  it('refuses a runtime build under a non-default data dir as that, not as a project-local copy', async () => {
+    await writeState('0.1.0-alpha.6');
+    const build = join(root, 'versions', '0.1.0-alpha.6', 'dist');
+    await mkdir(build, { recursive: true });
+    const shelf = join(home, 'shelf');
+    await mkdir(shelf, { recursive: true });
+    const { ctx } = makeCtx();
+    ctx.dataDir = shelf;
+    const spawned = spawnRecorder();
+    const err = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        moduleDir: build,
+        currentVersion: '0.1.0-alpha.6',
+        homeDir: home,
+        spawnImpl: spawned.impl,
+        stage: forbiddenStage,
+        ensure: forbiddenEnsure,
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message:
+        "This tenjin runs from Tenjin's runtime, which only the default data dir (~/.tenjin) uses, and TENJIN_DATA_DIR is ~/shelf, so nothing was updated",
+    });
+    expect((err as CliError).fix).toMatch(/^Run `tenjin update` with TENJIN_DATA_DIR unset/);
+    expect((err as CliError).message).not.toContain('project-local');
+    expect(spawned.calls).toEqual([]);
+  });
+
   /**
    * The home child records Claude Code's project installs an older release
    * never did, so the list is read after it; each project runs the same new

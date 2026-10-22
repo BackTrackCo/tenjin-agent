@@ -240,6 +240,8 @@ export async function runUpdate(
     return runtimeUpdate(ctx, deps, { ...runtime, base, latest, current, moduleDir, data });
   }
 
+  await refuseRuntimeElsewhere(ctx, moduleDir, deps.homeDir ?? homedir());
+
   // `latest` is argv-safe here: isNewer returned true, so it matched VERSION_RE.
   const spec = `tenjin-cli@${latest}`;
 
@@ -371,6 +373,28 @@ async function runtimeHere(
   const inRuntime = runtimeBuild(moduleDir) !== null;
   if (state === null && !inRuntime) return null;
   return { root, current: state?.current.cli ?? null, inRuntime };
+}
+
+/**
+ * A RUNTIME BUILD UNDER ANOTHER DATA DIR has no npm install to update: it is
+ * `~/.local/bin/tenjin` run with `TENJIN_DATA_DIR` set, and the runtime belongs
+ * to the default data dir alone. Said as that, before the npm branch's
+ * refusals would call it a project-local dependency.
+ */
+async function refuseRuntimeElsewhere(
+  ctx: CommandContext,
+  moduleDir: string,
+  home: string,
+): Promise<void> {
+  const { runtimeBuild } = await import('../lib/runtime-layout');
+  if (runtimeBuild(moduleDir) === null) return;
+  throw new CliError(
+    'REFUSED',
+    `This tenjin runs from Tenjin's runtime, which only the default data dir (${tilde(defaultDataDir(home), home)}) uses, and TENJIN_DATA_DIR is ${tilde(ctx.dataDir, home)}, so nothing was updated`,
+    {
+      fix: 'Run `tenjin update` with TENJIN_DATA_DIR unset: the runtime belongs to the default data dir. Another data dir runs on an npm copy, updated with `npm i -g tenjin-cli@latest`.',
+    },
+  );
 }
 
 /**
