@@ -369,6 +369,20 @@ describe('global flags are position-independent', () => {
     }
   });
 
+  it('`wallet repair` resolves to wallet.repair, and --insecure-storage parses on repair and create', async () => {
+    for (const verb of ['repair', 'create']) {
+      const cap = captureIo();
+      expect(await main(['wallet', verb, '--insecure-storage', '--timeout', 'abc'], cap.io)).toBe(
+        2,
+      );
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.error.code).toBe('USAGE');
+      // A rejected flag would be a 'tenjin' parse error; the leaf's own name
+      // proves `--insecure-storage` was accepted there.
+      expect(parsed.command).toBe(`wallet.${verb}`);
+    }
+  });
+
   it('trailing --json suppresses stderr on a TTY, exactly like leading --json', async () => {
     const lead = captureIo(true);
     await main(['--json', 'doctor', '--timeout', 'abc'], lead.io);

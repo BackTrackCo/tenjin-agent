@@ -9,7 +9,11 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 import type { WalletProvider } from '../lib/wallet';
-import type { ExecFn } from '../lib/wallet/passphrase';
+import { StoreExecError, describeStoreLocation, type ExecFn } from '../lib/wallet/passphrase';
+import { passphraseFilePathFor, passphraseRecordPath } from '../lib/paths';
+import { readPassphraseRecord } from '../lib/passphrase-record';
+import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
+import { readUnlockRecord } from '../router/router-observation';
 import { payerDir } from '../router/fee';
 
 // This suite runs real ox scrypt (N=262144) several times per test; the 5s
@@ -24,12 +28,54 @@ vi.mock('../lib/usdc', () => ({
   getUsdcBalance: vi.fn(),
 }));
 
+// Records, for each sidecar write, whether wallet.json already existed: the
+// sidecar must be written before the key is encrypted and committed.
+const sidecarWrites = vi.hoisted(() => [] as Array<{ walletExisted: boolean }>);
+vi.mock('../lib/passphrase-record', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../lib/passphrase-record')>();
+  const { existsSync } = await import('node:fs');
+  const { join: joinPath } = await import('node:path');
+  return {
+    ...orig,
+    writePassphraseRecord: async (...args: Parameters<typeof orig.writePassphraseRecord>) => {
+      sidecarWrites.push({ walletExisted: existsSync(joinPath(args[0], 'wallet.json')) });
+      return orig.writePassphraseRecord(...args);
+    },
+  };
+});
+
 import { getUsdcBalance } from '../lib/usdc';
-import { runWalletCreate, runWalletShow, runWalletBalance } from './wallet';
+import {
+  REPAIR_DONE_LINE,
+  findPassphraseExports,
+  passphraseNote,
+  runWalletBalance,
+  runWalletCreate,
+  runWalletRepair,
+  runWalletShow,
+  type WalletRepairData,
+} from './wallet';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const isWindows = process.platform === 'win32';
 const PASSPHRASE = 'test-passphrase-123';
+
+/** `security`'s "no such item" (exit 44), and a duplicate add (exit 45). */
+const notFound = (): StoreExecError => new StoreExecError('security', { code: 44 });
+const duplicate = (): StoreExecError => new StoreExecError('security', { code: 45 });
+/** A keychain that never answers: every call is killed on its deadline. */
+const silentKeychain: ExecFn = async () => {
+  throw new StoreExecError('security', { killed: true, signal: 'SIGKILL' });
+};
+/**
+ * The default for a create that only needs the env passphrase: a darwin
+ * keychain that never answers, so the env secret is used as given and saved
+ * nowhere (durable: false), exactly as before Q2. No test reaches a real
+ * keychain or keyring.
+ */
+const offline = {
+  passphrase: { platform: 'darwin' as NodeJS.Platform, isTTY: false, exec: silentKeychain },
+};
 
 let tmp: string;
 let dataDir: string;
@@ -96,23 +142,24 @@ function fakeKeychain(initial: Record<string, string> = {}): {
   const writes: { args: string[]; stdin?: string }[] = [];
   const exec: ExecFn = async (file, args, stdin) => {
     expect(file).toBe('security');
+    if (args[0] === 'default-keychain') return { stdout: '', stderr: '' };
     if (args[0] === '-i') {
       writes.push({ args, stdin });
-      const m = stdin?.match(/^add-generic-password -s tenjin-cli -a (\S+) -w '([^']*)'\n$/);
+      const m = stdin?.match(
+        /^add-generic-password -s tenjin-cli -a (\S+) (?:-w '([^']*)'|-X ([0-9a-f]+))( -U)?\n$/,
+      );
       if (!m) throw new Error(`unexpected security -i payload: ${String(stdin)}`);
-      if (entries.has(m[1] as string)) throw new Error('errSecDuplicateItem');
-      entries.set(m[1] as string, m[2] as string);
+      if (entries.has(m[1] as string) && m[4] === undefined) throw duplicate();
+      entries.set(m[1] as string, m[2] ?? Buffer.from(m[3] as string, 'hex').toString('utf8'));
       return { stdout: '', stderr: '' };
     }
     if (args[0] === 'find-generic-password') {
       const value = entries.get(args[args.indexOf('-a') + 1] as string);
-      if (value === undefined) throw new Error('could not be found');
+      if (value === undefined) throw notFound();
       return { stdout: `${value}\n`, stderr: '' };
     }
     if (args[0] === 'delete-generic-password') {
-      if (!entries.delete(args[args.indexOf('-a') + 1] as string)) {
-        throw new Error('could not be found');
-      }
+      if (!entries.delete(args[args.indexOf('-a') + 1] as string)) throw notFound();
       return { stdout: '', stderr: '' };
     }
     throw new Error(`unexpected security call: ${args.join(' ')}`);
@@ -162,13 +209,13 @@ function fakeRemoteProvider(
 
 describe('runWalletCreate', () => {
   it.skipIf(isWindows)('writes a 0600 wallet file inside a 0700 dir', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     expect((await stat(walletFile())).mode & 0o777).toBe(0o600);
     expect((await stat(dataDir)).mode & 0o777).toBe(0o700);
   });
 
   it('stores an encrypted keystore v2 record and never the raw key', async () => {
-    const res = await runWalletCreate(makeCtx());
+    const res = await runWalletCreate(makeCtx(), offline);
     const address = (res.data as { address: string }).address;
     expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
     const stored = await readStored();
@@ -188,18 +235,18 @@ describe('runWalletCreate', () => {
   });
 
   it('emits the exact funding line', async () => {
-    const res = await runWalletCreate(makeCtx());
+    const res = await runWalletCreate(makeCtx(), offline);
     expect(res.humanLines).toContain('Fund it with `tenjin wallet fund 5`, or send USDC on Base.');
   });
 
   it('reports that the key is stored encrypted', async () => {
-    const res = await runWalletCreate(makeCtx());
+    const res = await runWalletCreate(makeCtx(), offline);
     expect(res.humanLines?.some((l) => l.includes('keystore v3'))).toBe(true);
   });
 
   it('refuses to overwrite an existing wallet (WALLET_EXISTS, exit 3)', async () => {
-    await runWalletCreate(makeCtx());
-    const err = await catchCliError(runWalletCreate(makeCtx()));
+    await runWalletCreate(makeCtx(), offline);
+    const err = await catchCliError(runWalletCreate(makeCtx(), offline));
     expect(err.code).toBe('WALLET_EXISTS');
     expect(err.exitCode).toBe(3);
     expect(err.message).toContain(walletFile());
@@ -214,7 +261,7 @@ describe('runWalletCreate', () => {
 
   it('warns about env shadowing in both data and human lines', async () => {
     vi.stubEnv('TENJIN_WALLET_KEY', generatePrivateKey());
-    const res = await runWalletCreate(makeCtx());
+    const res = await runWalletCreate(makeCtx(), offline);
     const warnings = (res.data as { warnings: string[] }).warnings;
     expect(warnings.some((w) => w.includes('TENJIN_WALLET_KEY'))).toBe(true);
     expect(res.humanLines?.some((l) => l.includes('TENJIN_WALLET_KEY'))).toBe(true);
@@ -297,7 +344,7 @@ describe('runWalletCreate', () => {
   it('--replace refuses (REFUSED) when the outgoing passphrase cannot be verified, changing nothing', async () => {
     // Wallet encrypted with the env passphrase, which is then lost; the keychain
     // holds a WRONG value under the wallet's account.
-    const created = await runWalletCreate(makeCtx());
+    const created = await runWalletCreate(makeCtx(), offline);
     const address = (created.data as { address: string }).address;
     const account = address.toLowerCase();
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
@@ -332,6 +379,8 @@ describe('runWalletCreate', () => {
     });
     const firstAccount = (firstRes.data as { address: string }).address.toLowerCase();
     const pass = seed.entries.get(firstAccount) as string;
+    // A pre-per-wallet install also predates the sidecar.
+    await rm(passphraseRecordPath(dataDir));
     const { exec, entries } = fakeKeychain({ wallet: pass }); // legacy slot only
 
     const secondRes = await runWalletCreate(makeCtx(), {
@@ -348,9 +397,9 @@ describe('runWalletCreate', () => {
   });
 
   it('--replace with the env passphrase archives the keystore and reports env as the durable copy', async () => {
-    const firstRes = await runWalletCreate(makeCtx());
+    const firstRes = await runWalletCreate(makeCtx(), offline);
     const firstAddress = (firstRes.data as { address: string }).address;
-    const secondRes = await runWalletCreate(makeCtx(), { replace: true });
+    const secondRes = await runWalletCreate(makeCtx(), { ...offline, replace: true });
     const data = secondRes.data as {
       address: string;
       replaced?: { address: string; passphrasePreserved: string };
@@ -371,7 +420,7 @@ describe('runWalletCreate', () => {
   // replacement (passphrase store included) must run BEFORE the old keystore
   // moves, so a failure leaves the OLD wallet active, visible, and untouched.
   it('a failure while preparing the replacement leaves the old wallet active (no park, no loss)', async () => {
-    const created = await runWalletCreate(makeCtx()); // env passphrase
+    const created = await runWalletCreate(makeCtx(), offline); // env passphrase
     const address = (created.data as { address: string }).address;
     const account = address.toLowerCase();
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
@@ -382,10 +431,15 @@ describe('runWalletCreate', () => {
       expect(file).toBe('security');
       if (args[0] === 'find-generic-password') {
         const value = entries.get(args[args.indexOf('-a') + 1] as string);
-        if (value === undefined) throw new Error('not found');
+        if (value === undefined) throw notFound();
         return { stdout: `${value}\n`, stderr: '' };
       }
-      throw new Error('keychain is read-only'); // any write/delete fails
+      // Anything else (the probe included) is refused: the store can serve the
+      // outgoing wallet but cannot take the new one.
+      throw new StoreExecError('security', {
+        code: 51,
+        stderr: 'User interaction is not allowed.',
+      });
     };
     const before = await readFile(walletFile(), 'utf8');
 
@@ -395,7 +449,7 @@ describe('runWalletCreate', () => {
         passphrase: { platform: 'darwin', isTTY: false, exec },
       }),
     );
-    expect(err.code).toBe('USAGE'); // the new wallet's passphrase had nowhere durable to go
+    expect(err.code).toBe('REFUSED'); // the new wallet's passphrase had nowhere durable to go
     // The old wallet never moved: still the active wallet, no .bak, show still works.
     expect(await readFile(walletFile(), 'utf8')).toBe(before);
     await expect(stat(join(dataDir, `wallet.${account}.json.bak`))).rejects.toMatchObject({
@@ -405,12 +459,12 @@ describe('runWalletCreate', () => {
   });
 
   it('--replace archives a prompt-entered passphrase to the store when its characters allow', async () => {
-    const created = await runWalletCreate(makeCtx()); // PASSPHRASE is base64url-safe
+    const created = await runWalletCreate(makeCtx(), offline); // PASSPHRASE is base64url-safe
     const address = (created.data as { address: string }).address;
     const account = address.toLowerCase();
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
     const { exec, entries } = fakeKeychain(); // both entries missing: resolution prompts
-    const prompt = vi.fn(async () => PASSPHRASE);
+    const prompt = vi.fn(async (_label: string) => PASSPHRASE);
 
     const res = await runWalletCreate(makeCtx(), {
       replace: true,
@@ -419,7 +473,11 @@ describe('runWalletCreate', () => {
     const data = res.data as {
       replaced?: { address: string; passphrasePreserved: string; unarchivedReason?: string };
     };
-    expect(prompt).toHaveBeenCalled();
+    // Q1 (decision 6): the only prompt is for the OUTGOING wallet, by its address;
+    // the new wallet's secret is generated, never asked for.
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(prompt.mock.calls[0]?.[0]).toContain(address);
+    expect((res.data as { passphraseOrigin: string }).passphraseOrigin).toBe('generated');
     expect(data.replaced).toMatchObject({ address, passphrasePreserved: 'store' });
     expect(data.replaced?.unarchivedReason).toBeUndefined();
     // The typed passphrase was archived under the OLD wallet's own account.
@@ -427,13 +485,13 @@ describe('runWalletCreate', () => {
   });
 
   it('--replace names the keychain character gate when a typed passphrase cannot be archived', async () => {
-    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', 'has spaces in it');
-    const created = await runWalletCreate(makeCtx());
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', 'pässwörd typed');
+    const created = await runWalletCreate(makeCtx(), offline);
     const address = (created.data as { address: string }).address;
     const account = address.toLowerCase();
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
     const { exec, entries } = fakeKeychain();
-    const prompt = vi.fn(async () => 'has spaces in it');
+    const prompt = vi.fn(async () => 'pässwörd typed');
 
     const res = await runWalletCreate(makeCtx(), {
       replace: true,
@@ -448,7 +506,7 @@ describe('runWalletCreate', () => {
     });
     // The message blames the keychain's character gate, not a missing store.
     const line = res.humanLines?.find((l) => l.includes('NOT archived'));
-    expect(line).toContain('base64url');
+    expect(line).toContain('printable ASCII');
     expect(line).not.toContain('no OS credential store');
     // Nothing was written under the old account; the keystore was still parked.
     expect(entries.has(account)).toBe(false);
@@ -457,13 +515,24 @@ describe('runWalletCreate', () => {
     ).resolves.toBeTruthy();
   });
 
-  it('errors USAGE when no passphrase source is available (headless, non-mac)', async () => {
+  it('headless Linux with no keyring saves a generated passphrase to the 0600 file (S4)', async () => {
     vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
-    const err = await catchCliError(
-      runWalletCreate(makeCtx(), { passphrase: { platform: 'linux', isTTY: false } }),
+    const exec: ExecFn = async () => {
+      throw new StoreExecError('secret-tool', { code: 'ENOENT', enoent: true });
+    };
+    const res = await runWalletCreate(makeCtx(), {
+      passphrase: { platform: 'linux', isTTY: false, exec },
+    });
+    const data = res.data as { address: string; passphraseSource: string; passphraseNote: string };
+    const path = describeStoreLocation('file', data.address.toLowerCase(), dataDir);
+    expect(data.passphraseSource).toBe('file');
+    expect(data.passphraseNote).toBe(NO_KEYRING_LINE(path));
+    expect(res.humanLines).toContain(NO_KEYRING_LINE(path));
+    const secret = await readFile(
+      passphraseFilePathFor(data.address.toLowerCase(), dataDir),
+      'utf8',
     );
-    expect(err.code).toBe('USAGE');
-    expect(err.fix).toContain('TENJIN_WALLET_PASSPHRASE');
+    expect(await addressFromWalletFile(secret)).toBe(data.address);
   });
 
   // Serialized by the create lock: the loser blocks until the winner commits, then
@@ -471,7 +540,10 @@ describe('runWalletCreate', () => {
   // exclusive write stays the final authority for the single-process crash window.
   it('two concurrent creates: one wins, the other is WALLET_EXISTS, no clobber', async () => {
     const ctx = makeCtx();
-    const results = await Promise.allSettled([runWalletCreate(ctx), runWalletCreate(ctx)]);
+    const results = await Promise.allSettled([
+      runWalletCreate(ctx, offline),
+      runWalletCreate(ctx, offline),
+    ]);
     const winners = results.filter((r) => r.status === 'fulfilled');
     const losers = results.filter((r) => r.status === 'rejected');
     expect(winners).toHaveLength(1);
@@ -539,9 +611,306 @@ describe('runWalletCreate', () => {
   });
 });
 
+describe('runWalletCreate: where the passphrase went (Q2, S4)', () => {
+  const GENERATED_KEYCHAIN = (a: string) =>
+    `Passphrase saved to your macOS keychain (service tenjin-cli, account ${a}); signing will be transparent on this machine.`;
+  const GENERATED_DPAPI = (a: string) =>
+    `Passphrase saved to a DPAPI-encrypted per-wallet file (passphrase.${a}.dpapi), readable only by you on this Windows machine; signing will be transparent here.`;
+  const GENERATED_KEYRING = (a: string) =>
+    `Passphrase saved to your Linux keyring (Secret Service, service tenjin-cli, account ${a}); signing will be transparent on this machine.`;
+
+  it("a generated keychain secret: the data fields, today's note, and the sidecar written before the wallet", async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    sidecarWrites.length = 0;
+    const { exec } = fakeKeychain();
+    const res = await runWalletCreate(makeCtx(), {
+      passphrase: { platform: 'darwin', isTTY: false, exec },
+    });
+    const data = res.data as Record<string, unknown> & { address: string };
+    const account = data.address.toLowerCase();
+    expect(data).toMatchObject({
+      passphraseSource: 'keychain',
+      passphraseLocation: describeStoreLocation('keychain', account),
+      passphraseOrigin: 'generated',
+      passphraseDurable: true,
+      passphraseNote: GENERATED_KEYCHAIN(account),
+    });
+    expect(res.humanLines).toContain(GENERATED_KEYCHAIN(account));
+    expect(await readPassphraseRecord(dataDir, account)).toMatchObject({
+      store: 'keychain',
+      by: 'create',
+    });
+    expect(sidecarWrites).toEqual([{ walletExisted: false }]);
+  });
+
+  it('an env secret saved to the keychain says the variable is no longer needed', async () => {
+    const { exec, entries } = fakeKeychain();
+    const res = await runWalletCreate(makeCtx(), {
+      passphrase: { platform: 'darwin', isTTY: false, exec },
+    });
+    const data = res.data as { address: string; passphraseNote: string; passphraseOrigin: string };
+    const account = data.address.toLowerCase();
+    expect(data.passphraseOrigin).toBe('env');
+    expect(entries.get(account)).toBe(PASSPHRASE);
+    expect(data.passphraseNote).toBe(
+      `Passphrase from TENJIN_WALLET_PASSPHRASE saved to ${describeStoreLocation('keychain', account)}; Claude Code can unlock this wallet without the variable.`,
+    );
+  });
+
+  it('--insecure-storage writes the 0600 file and says who can spend', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    const res = await runWalletCreate(makeCtx(), { ...offline, insecureStorage: true });
+    const data = res.data as { address: string; passphraseNote: string; passphraseSource: string };
+    const path = describeStoreLocation('file', data.address.toLowerCase(), dataDir);
+    expect(data.passphraseSource).toBe('file');
+    expect(data.passphraseNote).toBe(
+      `Passphrase saved to ${path} (readable only by you). Anyone who can read that file and wallet.json can spend this wallet.`,
+    );
+  });
+
+  it('an env secret no store answered for is not durable, and says how to fix it', async () => {
+    const res = await runWalletCreate(makeCtx(), offline);
+    const data = res.data as {
+      passphraseNote: string;
+      passphraseDurable: boolean;
+      passphraseSource: string;
+    };
+    expect(data.passphraseSource).toBe('env');
+    expect(data.passphraseDurable).toBe(false);
+    expect(data.passphraseNote).toBe(
+      'Encrypted with TENJIN_WALLET_PASSPHRASE only: the macOS keychain did not answer, so Claude Code can unlock this wallet only where that variable is set. Once it answers, run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat).',
+    );
+    await expect(stat(passphraseRecordPath(dataDir))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('every passphraseNote case, byte for byte', () => {
+    const a = '0xab5801a7d398351b8be11c439e05c5b3259aec9b';
+    const base = { passphrase: 'p', durable: true } as const;
+    const note = (p: Parameters<typeof passphraseNote>[0]) => passphraseNote(p, a, dataDir);
+    const path = describeStoreLocation('file', a, dataDir);
+    expect(note({ ...base, source: 'keychain', origin: 'generated', location: 'x' })).toBe(
+      GENERATED_KEYCHAIN(a),
+    );
+    expect(note({ ...base, source: 'dpapi', origin: 'generated', location: 'x' })).toBe(
+      GENERATED_DPAPI(a),
+    );
+    expect(note({ ...base, source: 'secret-service', origin: 'generated', location: 'x' })).toBe(
+      GENERATED_KEYRING(a),
+    );
+    expect(
+      note({ ...base, source: 'file', origin: 'env', location: path, fileReason: 'no-keyring' }),
+    ).toBe(NO_KEYRING_LINE(path));
+    const fileFailed = note({
+      passphrase: 'p',
+      durable: false,
+      source: 'env',
+      origin: 'env',
+      location: 'TENJIN_WALLET_PASSPHRASE',
+      attempted: 'file',
+    });
+    expect(fileFailed).toBe(
+      `Encrypted with TENJIN_WALLET_PASSPHRASE only: Tenjin could not save the passphrase to ${path}, so Claude Code can unlock this wallet only where that variable is set. Check that ~/.tenjin is writable, then run \`tenjin wallet repair\` yourself (it asks for the passphrase in your terminal; never paste it into chat).`,
+    );
+    expect(fileFailed).toContain(REPAIR_CLAUSE);
+    expect(fileFailed.toLowerCase()).not.toContain('keychain');
+    const osFailed = note({
+      passphrase: 'p',
+      durable: false,
+      source: 'env',
+      origin: 'env',
+      location: 'TENJIN_WALLET_PASSPHRASE',
+      attempted: 'secret-service',
+    });
+    expect(osFailed).toContain(REPAIR_CLAUSE);
+    expect(osFailed).toContain('the Linux keyring did not answer');
+  });
+
+  it('a sidecar write failure aborts the create with no wallet.json', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    await mkdir(passphraseRecordPath(dataDir), { recursive: true }); // a directory: the write fails
+    const { exec } = fakeKeychain();
+    await expect(
+      runWalletCreate(makeCtx(), { passphrase: { platform: 'darwin', isTTY: false, exec } }),
+    ).rejects.toBeTruthy();
+    await expect(stat(walletFile())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('Q1: a plain create never calls the prompt, with or without a TTY', async () => {
+    vi.stubEnv('TENJIN_WALLET_PASSPHRASE', '');
+    for (const isTTY of [false, true]) {
+      await rm(dataDir, { recursive: true, force: true });
+      const prompt = vi.fn(async () => 'never');
+      const { exec } = fakeKeychain();
+      await runWalletCreate(terminalCtx({ isTTY, json: true }), {
+        passphrase: { platform: 'darwin', isTTY, exec, prompt },
+      });
+      expect(prompt).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('runWalletRepair', () => {
+  /** A wallet encrypted with PASSPHRASE and saved nowhere (env only). */
+  async function strandedWallet(): Promise<string> {
+    const res = await runWalletCreate(makeCtx(), offline);
+    return (res.data as { address: string }).address;
+  }
+  const noShellFiles = { home: '/nonexistent-home', readText: async () => null };
+
+  it('saves the env passphrase that opens the wallet; data and lines in order; marks the unlock pending', async () => {
+    const address = await strandedWallet();
+    const account = address.toLowerCase();
+    const { exec, entries } = fakeKeychain();
+    const prompt = vi.fn(async () => 'never');
+    const res = await runWalletRepair(terminalCtx(), {
+      ...noShellFiles,
+      env: { TENJIN_WALLET_PASSPHRASE: PASSPHRASE },
+      passphrase: { platform: 'darwin', isTTY: true, exec, prompt },
+    });
+    const location = describeStoreLocation('keychain', account);
+    const data: WalletRepairData = {
+      address,
+      passphraseStore: 'keychain',
+      location,
+      alreadySaved: false,
+      replacedUnusableEntry: false,
+      envOverride: { state: 'matches', exports: [] },
+      restartRequired: true,
+      next: REPAIR_DONE_LINE,
+    };
+    expect(res.data).toEqual(data);
+    expect(res.humanLines).toEqual([
+      `Wallet: ${address}`,
+      'Passphrase verified: it opens this wallet.',
+      `Saved to ${location}.`,
+      'TENJIN_WALLET_PASSPHRASE in this shell matches; the saved copy is enough, so you can remove it.',
+      REPAIR_DONE_LINE,
+    ]);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(entries.get(account)).toBe(PASSPHRASE);
+    expect(await readUnlockRecord(dataDir, address)).toMatchObject({
+      status: 'awaiting_confirmation',
+    });
+    expect(await readPassphraseRecord(dataDir, account)).toMatchObject({
+      store: 'keychain',
+      by: 'repair',
+    });
+  });
+
+  it('a wrong variable in the shell: the prompt is used, and the export line is named', async () => {
+    const address = await strandedWallet();
+    const zshrc = [
+      ...Array.from({ length: 11 }, (_, i) => `# line ${i + 1}`),
+      'export TENJIN_WALLET_PASSPHRASE=nope',
+    ].join('\n');
+    const prompt = vi.fn(async (_label: string) => PASSPHRASE);
+    const { exec } = fakeKeychain();
+    const res = await runWalletRepair(terminalCtx(), {
+      home: '/home/someone',
+      readText: async (path) => (path === join('/home/someone', '.zshrc') ? zshrc : null),
+      env: { TENJIN_WALLET_PASSPHRASE: 'the-wrong-one' },
+      passphrase: { platform: 'darwin', isTTY: true, exec, prompt },
+    });
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(prompt.mock.calls[0]?.[0]).toBe(`Passphrase for wallet ${address}: `);
+    const data = res.data as WalletRepairData;
+    expect(data.envOverride).toEqual({ state: 'wrong', exports: [{ file: '~/.zshrc', line: 12 }] });
+    expect(res.humanLines).toContain(
+      '! TENJIN_WALLET_PASSPHRASE is set in this shell but does not open this wallet. Tenjin now uses the saved passphrase, but remove the variable: `unset TENJIN_WALLET_PASSPHRASE`, and delete the export at ~/.zshrc:12.',
+    );
+    expect(res.humanLines?.at(-1)).toBe(REPAIR_DONE_LINE);
+    expect(JSON.stringify(res)).not.toContain('nope');
+  });
+
+  it('no terminal and no usable variable: USAGE whose fix is exactly REPAIR_IN_TERMINAL (B1)', async () => {
+    await strandedWallet();
+    const err = await catchCliError(
+      runWalletRepair(makeCtx(), {
+        ...noShellFiles,
+        env: {},
+        passphrase: { platform: 'darwin', isTTY: false, exec: fakeKeychain().exec },
+      }),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.exitCode).toBe(2);
+    expect(err.fix).toBe(REPAIR_IN_TERMINAL);
+    expect(`${err.message} ${err.fix}`).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+  });
+
+  it('a conflict from the store fails, and never prints the done line (S1)', async () => {
+    await strandedWallet();
+    let wrote = false;
+    const inner = fakeKeychain();
+    const exec: ExecFn = async (file, args, stdin, opts) => {
+      if (args[0] === '-i') wrote = true;
+      if (wrote && args[0] === 'find-generic-password')
+        return { stdout: 'another-writer\n', stderr: '' };
+      return inner.exec(file, args, stdin, opts);
+    };
+    const err = await catchCliError(
+      runWalletRepair(makeCtx(), {
+        ...noShellFiles,
+        env: { TENJIN_WALLET_PASSPHRASE: PASSPHRASE },
+        passphrase: { platform: 'darwin', isTTY: false, exec },
+      }),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.exitCode).not.toBe(0);
+    expect(JSON.stringify({ message: err.message, fix: err.fix })).not.toContain(REPAIR_DONE_LINE);
+    expect(await readUnlockRecord(dataDir, (await readStored()).address)).toBeNull();
+  });
+
+  it('with Secret Service absent, the saved line is exactly NO_KEYRING_LINE (S4)', async () => {
+    const address = await strandedWallet();
+    const exec: ExecFn = async () => {
+      throw new StoreExecError('secret-tool', { code: 'ENOENT', enoent: true });
+    };
+    const res = await runWalletRepair(makeCtx(), {
+      ...noShellFiles,
+      env: { TENJIN_WALLET_PASSPHRASE: PASSPHRASE },
+      passphrase: { platform: 'linux', isTTY: false, exec },
+    });
+    const path = describeStoreLocation('file', address.toLowerCase(), dataDir);
+    expect(res.humanLines?.[2]).toBe(NO_KEYRING_LINE(path));
+  });
+
+  it('notes a TENJIN_WALLET_KEY that shadows the file', async () => {
+    await strandedWallet();
+    const res = await runWalletRepair(makeCtx(), {
+      ...noShellFiles,
+      env: { TENJIN_WALLET_PASSPHRASE: PASSPHRASE, TENJIN_WALLET_KEY: generatePrivateKey() },
+      passphrase: { platform: 'darwin', isTTY: false, exec: fakeKeychain().exec },
+    });
+    expect(res.humanLines?.[0]).toBe(
+      'TENJIN_WALLET_KEY is set and shadows the wallet file; repair fixes only the file wallet.',
+    );
+  });
+});
+
+describe('findPassphraseExports', () => {
+  it('skips comments and numbers lines from 1', () => {
+    expect(
+      findPassphraseExports([
+        {
+          path: '~/.zshrc',
+          text: 'export TENJIN_WALLET_PASSPHRASE=a\n  # export TENJIN_WALLET_PASSPHRASE=b\nexport OTHER=1\n',
+        },
+        {
+          path: '~/.config/fish/config.fish',
+          text: 'set -gx PATH x\nset -gx TENJIN_WALLET_PASSPHRASE c',
+        },
+        { path: '~/.profile', text: 'export TENJIN_WALLET_PASSPHRASE_OLD=d' },
+      ]),
+    ).toEqual([
+      { file: '~/.zshrc', line: 1 },
+      { file: '~/.config/fish/config.fish', line: 2 },
+    ]);
+  });
+});
+
 describe('runWalletShow', () => {
   it('returns the describe() shape plus custody posture from the file provider', async () => {
-    const created = await runWalletCreate(makeCtx());
+    const created = await runWalletCreate(makeCtx(), offline);
     const res = await runWalletShow(makeCtx());
     expect(res.data).toMatchObject({
       address: (created.data as { address: string }).address,
@@ -555,9 +924,9 @@ describe('runWalletShow', () => {
   });
 
   it('lists archived (replaced) wallets as a recovery hint, not a wallet switcher', async () => {
-    const firstRes = await runWalletCreate(makeCtx());
+    const firstRes = await runWalletCreate(makeCtx(), offline);
     const firstAccount = (firstRes.data as { address: string }).address.toLowerCase();
-    const secondRes = await runWalletCreate(makeCtx(), { replace: true });
+    const secondRes = await runWalletCreate(makeCtx(), { ...offline, replace: true });
     const res = await runWalletShow(makeCtx());
     const data = res.data as { address: string; archivedWallets?: string[] };
     // ONE active wallet — the new one; the archived address appears only as a
@@ -570,7 +939,7 @@ describe('runWalletShow', () => {
   });
 
   it('does not decrypt and never leaks a private key', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     const res = await runWalletShow(makeCtx());
     const serialized = JSON.stringify(res);
     expect(serialized).not.toContain('privateKey');
@@ -596,7 +965,7 @@ describe('runWalletShow', () => {
   });
 
   it.skipIf(isWindows)('warns when file permissions are not 0600', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     await chmod(walletFile(), 0o644);
     const res = await runWalletShow(makeCtx());
     const warnings = (res.data as { warnings: string[] }).warnings;
@@ -604,7 +973,7 @@ describe('runWalletShow', () => {
   });
 
   it('reports env credential source and shadow warning when env shadows the file', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     vi.stubEnv('TENJIN_WALLET_KEY', generatePrivateKey());
     const res = await runWalletShow(makeCtx());
     const data = res.data as { credentialSource: string; warnings: string[] };
@@ -656,7 +1025,7 @@ describe('runWalletShow', () => {
   });
 
   it('remote provider ignores a stale local wallet.json + env key (no contamination, no leak)', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     await chmod(walletFile(), 0o644);
     vi.stubEnv('TENJIN_WALLET_KEY', generatePrivateKey());
 
@@ -682,7 +1051,7 @@ describe('runWalletShow', () => {
 
 describe('runWalletBalance', () => {
   it('returns dual-form money from the on-chain read', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     mockedBalance.mockResolvedValue(250000n);
     const res = await runWalletBalance(makeCtx());
     expect((res.data as { balance: unknown }).balance).toEqual({ atomic: '250000', usd: '0.25' });
@@ -702,7 +1071,7 @@ describe('runWalletBalance', () => {
   });
 
   it('maps an RPC failure to RPC_ERROR with a config fix', async () => {
-    await runWalletCreate(makeCtx());
+    await runWalletCreate(makeCtx(), offline);
     mockedBalance.mockRejectedValue(new Error('rpc down'));
     const err = await catchCliError(runWalletBalance(makeCtx()));
     expect(err.code).toBe('RPC_ERROR');
