@@ -1,20 +1,19 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
-import { evaluateSpendPolicy, type SpendPolicy } from '../lib/policy';
-import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
-import { spentOf } from '../lib/spend-ledger';
+import { resolveContextSettings } from '../lib/settings';
 import { isNewer } from '../lib/update-check';
-import { readUsdcBalance } from '../lib/usdc-balance';
-import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
-import { readSpendSummary } from '../lib/wallet/spend';
+import type { WalletProvider } from '../lib/wallet';
+import { createLocalProvider, type PassphraseOverrides } from '../lib/wallet/local';
+import { describeStoreLocation } from '../lib/wallet/passphrase';
 import { walletFileExists } from '../lib/wallet/store';
+import type { SigningSource, UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext, CommandResult } from '../context';
 import { agentsWithoutRequestTool } from './agent-tools';
-import { readAliveStamp } from './alive';
+import { readAliveStamp, type AliveStamp } from './alive';
 import {
   CLAUDE_CODE_FLOOR,
   claudeConfigDir,
@@ -24,24 +23,39 @@ import {
   type ClaudeBinary,
   type ClaudeCodeState,
 } from './claude-cli';
-import {
-  CHANNEL_DEPOSIT_ATOMIC,
-  feeRefusal,
-  refusedWhy,
-  ROUTING_FEE_ATOMIC,
-  SUGGESTED_FUND_USD,
-  unpaid,
-  usd,
-} from './fee';
-import { channelCredit } from './channel-credit';
+import { isDefiniteBlock } from './eligibility';
+import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, SUGGESTED_FUND_USD, unpaid, usd } from './fee';
 import { loadStep, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
 import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
-import { readMcpServers, type InstalledAt, type ListMcpProcesses } from './mcp-processes';
+import {
+  mcpServersState,
+  NEW_SESSION_FIX,
+  readProcessSnapshot,
+  RECONNECT_FIX,
+  type InstalledAt,
+  type ListMcpProcesses,
+  type ListProcesses,
+  type ProcessSnapshot,
+} from './mcp-processes';
 import { clearRouterMemo, readRouterMemo, type RouterMemo } from './router-memo';
+import {
+  liveObservations,
+  readObservations,
+  servedObservations,
+  type RouterObservation,
+} from './router-observation';
+import {
+  KEYCHAIN_LOCKED_FIX,
+  NO_SESSION_CHECKED,
+  REPAIR_CLAUSE,
+  UNKNOWN_DETAIL,
+  WALLET_REASONS,
+} from './wallet-reasons';
 
 /**
  * `tenjin doctor` for the router product: the things that decide whether a
@@ -75,11 +89,25 @@ export interface RouterDoctorDeps {
   fetchImpl?: typeof fetch;
   /** Node's own version, for the floor check. */
   nodeVersion?: string;
-  /** This user's running `tenjin mcp` processes; tests inject them. */
+  /** This user's running routers and Claude Code processes; tests inject them. */
+  listProcesses?: ListProcesses;
+  /** This user's running `tenjin mcp` processes alone (the older seam); tests inject them. */
   listMcpProcesses?: ListMcpProcesses;
   /** When this build was installed; tests inject it. */
   installedAt?: InstalledAt;
   now?: () => number;
+  /** The one eligibility check doctor makes; tests inject it. Defaults to {@link checkEligibility}. */
+  eligibility?: (input: EligibilityInput) => Promise<Eligibility>;
+  /** What the running `tenjin mcp` processes wrote about themselves; tests inject it. */
+  readObservations?: (dataDir: string) => Promise<RouterObservation[]>;
+  /** Whether a pid is alive, when `ps` could not run; tests inject it. */
+  isAlive?: (pid: number) => boolean;
+  /**
+   * Passphrase-resolution seam for the wallet's verify (keychain exec,
+   * platform). Tests MUST set it, or inject `eligibility`, before a verify can
+   * run: without it, a wallet's verify reads the developer's own keychain.
+   */
+  walletPassphrase?: PassphraseOverrides;
 }
 
 const NODE_FLOOR = 22;
@@ -107,10 +135,31 @@ export async function runRouterDoctor(
   const scope: PluginScope = project ? 'local' : 'user';
   const paths = settingsInstallPaths(project, env, home, cwd);
   const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
+  // THE PROCESSES AND WHAT THE ROUTERS SAW, READ FIRST: before `claude mcp
+  // get` (serverCheck) starts a `tenjin mcp` of its own. That router serves no
+  // hook, so it never reads as a session anyway (servedSession stays false,
+  // B2), but nothing it does can reach this snapshot either.
+  const [{ snapshot, installed }, observations] = await Promise.all([
+    readProcessSnapshot(deps),
+    (deps.readObservations ?? readObservations)(ctx.dataDir).catch(() => [] as RouterObservation[]),
+  ]);
+  const live = servedObservations(
+    liveObservations(observations, snapshot?.routers ?? null, deps.isAlive),
+  );
 
   const checks: RouterCheck[] = [nodeCheck(deps.nodeVersion ?? process.version)];
   checks.push(claudeCodeCheck(claude));
-  const plugin = await pluginCheck(claude, { scope, env, home, cwd, dataDir: ctx.dataDir, legacy });
+  const plugin = await pluginCheck(claude, {
+    scope,
+    env,
+    home,
+    cwd,
+    dataDir: ctx.dataDir,
+    legacy,
+    installed,
+    snapshot,
+    live,
+  });
   checks.push(plugin.check);
   if (plugin.registered && claude.binary !== null) {
     checks.push(await serverCheck(claude.binary, env, cwd));
@@ -119,11 +168,32 @@ export async function runRouterDoctor(
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
   }
   checks.push(routingCheck(router));
-  checks.push((await readMcpServers(deps, { settingsInstallPending: legacy.present })).check);
+  checks.push(
+    mcpServersState(
+      snapshot?.routers ?? null,
+      installed,
+      pkg.version,
+      legacy.present ? NEW_SESSION_FIX : RECONNECT_FIX,
+    ).check,
+  );
   checks.push(spendCheck(settings.policy.maxAutoSpendAtomic, settings.policy.sessionBudgetAtomic));
   checks.push(experimentalCheck(settings.experimentalBazaar));
-  checks.push(await routingFeeCheck(ctx, settings, deps.fetchImpl));
-  checks.push(...(await walletCheck(ctx)));
+
+  let host: string | null;
+  try {
+    host = new URL(settings.baseUrl).host;
+  } catch {
+    // The router check below names the bad base URL and its fix.
+    host = null;
+  }
+  const e = await shellEligibility(ctx, deps, env, {
+    policy: settings.policy,
+    rpcUrl: settings.rpcUrl,
+    host: host ?? '',
+  });
+  checks.push(host === null ? UNPARSED_BASE_URL_ROW : routingFeeRow(e, host));
+  checks.push(walletRow(e, ctx.dataDir));
+  checks.push(sessionRow(e, live, pkg.version));
   const now = deps.now?.() ?? Date.now();
   const probe = await probeRouter(settings.baseUrl, {
     timeoutMs: ctx.flags.timeout,
@@ -153,6 +223,14 @@ export async function runRouterDoctor(
     baseUrl: settings.baseUrl,
     scope,
     settingsPath: paths.settingsPath,
+    session: { observed: live },
+    eligibility: {
+      canSign: e.canSign,
+      canPayRouting: e.canPayRouting,
+      savedSign: e.savedSign,
+      balanceAtomic: e.balanceAtomic?.toString() ?? null,
+      creditAtomic: e.creditAtomic?.toString() ?? null,
+    },
   };
   if (failure !== undefined) {
     // REFUSED, the exit-3 class: a machine this command found unready is
@@ -165,18 +243,118 @@ export async function runRouterDoctor(
   return { data, humanLines: doctorLines(checks) };
 }
 
-/** The human report: one line a check, and under each row to look at, its
- *  fix, as `--json` carries it. */
+/** The routing-fee row when there is no host to check it against. */
+const UNPARSED_BASE_URL_ROW: RouterCheck = {
+  name: 'routing fee',
+  status: 'warn',
+  required: false,
+  detail: 'not checked, because the base URL is not a URL',
+  checked: false,
+};
+
+/** `env` without TENJIN_WALLET_PASSPHRASE: what a Claude Code started without it would see. */
+function withoutEnvPassphrase(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const rest = { ...env };
+  delete rest.TENJIN_WALLET_PASSPHRASE;
+  return rest;
+}
+
+/**
+ * The wallet as this shell would open it: `resolveWalletProvider`'s provider,
+ * built from doctor's own env (so a test's env, not the runner's, decides).
+ * Nothing here prompts: `verify` forces `isTTY: false` and keeps its 5 s read
+ * deadline, and `describe` never needs a passphrase.
+ */
+function walletProviderFor(
+  ctx: CommandContext,
+  env: NodeJS.ProcessEnv,
+  overrides: PassphraseOverrides | undefined,
+): WalletProvider {
+  return createLocalProvider({
+    dir: ctx.dataDir,
+    env,
+    passphrase: { ...overrides, isTTY: ctx.io.isTTY ? undefined : false },
+  });
+}
+
+/**
+ * THE ONE ELIGIBILITY CHECK, for the wallet, routing-fee and session rows.
+ * Never rejects: a check that throws (an injected one included) reads as
+ * "could not check" on every row it feeds, never as ok and never as a block.
+ *
+ * SAVED PASSPHRASE FIRST (S7, decision 19). With TENJIN_WALLET_PASSPHRASE set,
+ * `verifySaved` asks the same question install's default signing check asks
+ * first: does the keychain or the file open the wallet WITHOUT the variable?
+ * So a correct variable that a store also holds reports that store, and the
+ * session row can say whether a Claude Code started without it could sign.
+ */
+async function shellEligibility(
+  ctx: CommandContext,
+  deps: RouterDoctorDeps,
+  env: NodeJS.ProcessEnv,
+  s: { policy: EligibilityInput['policy']; rpcUrl: string; host: string },
+): Promise<Eligibility> {
+  try {
+    const keySet = (env.TENJIN_WALLET_KEY ?? '').trim().length > 0;
+    const provider =
+      keySet || (await walletFileExists(ctx.dataDir))
+        ? walletProviderFor(ctx, env, deps.walletPassphrase)
+        : null;
+    const passphraseSet = (env.TENJIN_WALLET_PASSPHRASE ?? '').length > 0;
+    return await (deps.eligibility ?? checkEligibility)({
+      dataDir: ctx.dataDir,
+      env,
+      policy: s.policy,
+      rpcUrl: s.rpcUrl,
+      host: s.host,
+      timeoutMs: ctx.flags.timeout,
+      provider,
+      ...(provider !== null && passphraseSet
+        ? {
+            verifySaved: () =>
+              walletProviderFor(ctx, withoutEnvPassphrase(env), deps.walletPassphrase).verify?.() ??
+              Promise.resolve(undefined),
+          }
+        : {}),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+  } catch {
+    const failed = {
+      status: 'unknown' as const,
+      reason: 'check_failed',
+      detail: UNKNOWN_DETAIL['check_failed']!,
+    };
+    return {
+      address: null,
+      source: null,
+      canSign: failed,
+      canPayRouting: failed,
+      savedSign: null,
+      balanceAtomic: null,
+      creditAtomic: null,
+      describeError: null,
+    };
+  }
+}
+
+/**
+ * The human report: one line a check, and under each row to look at, its fix,
+ * as `--json` carries it. The summary counts what the person can act on apart
+ * from what could not be checked: a check that could not answer
+ * (`checked: false`) is shown as a warning but is nothing to fix.
+ */
 export function doctorLines(checks: RouterCheck[]): string[] {
-  const bad = checks.filter((c) => c.status !== 'ok').length;
+  const act = checks.filter((c) => c.status !== 'ok' && c.checked !== false).length;
+  const unchecked = checks.filter((c) => c.checked === false).length;
+  const allPass = checks.every((c) => c.status === 'ok');
   return [
     ...checks.flatMap((c) => [
       `${c.status === 'ok' ? 'ok  ' : c.status === 'warn' ? 'warn' : 'fail'}  ${c.name}: ${c.detail}`,
       ...(c.status !== 'ok' && c.fix !== undefined ? [`      fix: ${c.fix}`] : []),
     ]),
-    bad === 0
+    allPass
       ? `${checks.length} checks, all pass.`
-      : `${checks.length} checks, ${bad} to look at.`,
+      : `${checks.length} checks, ${act} to act on${unchecked > 0 ? `, ${unchecked} not checked` : ''}.`,
   ];
 }
 
@@ -269,6 +447,63 @@ interface PluginContext {
   cwd: string;
   dataDir: string;
   legacy: LegacyInstall;
+  /** When this build was installed, for {@link pluginStart}. */
+  installed: number | null;
+  snapshot: ProcessSnapshot | null;
+  /** The served live observations (B2). */
+  live: RouterObservation[];
+}
+
+/** Whether a session has started the plugin at this version, as {@link pluginStart} tells it. */
+export type PluginStart = 'proven' | 'pending' | 'did-not-start' | 'unknown';
+
+/** The fix when a Claude Code started since this install did not start the plugin. */
+const DID_NOT_START_FIX =
+  'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then restart Claude Code.';
+
+/**
+ * HAS A SESSION STARTED THE PLUGIN AT THIS VERSION, first match wins:
+ *
+ * 1. `proven`: the `alive` stamp is at or above `version`; or a router that
+ *    served a Claude session (B2) runs `version`; or a plugin router under a
+ *    Claude Code started at or after this install.
+ * 2. `unknown`: no stamp, and no process list to look at (`ps` could not run).
+ * 3. `did-not-start`: a Claude Code started at or after this install is
+ *    running and none of the above holds. Its plugin never came up: most
+ *    often the `node` on Claude Code's own PATH is too old.
+ * 4. `pending`: nothing has started since the install; the next session will.
+ *
+ * Pure: the caller reads the stamp, the snapshot and the observations.
+ */
+export function pluginStart(i: {
+  version: string;
+  stamp: AliveStamp | null;
+  installed: number | null;
+  snapshot: ProcessSnapshot | null;
+  live: RouterObservation[];
+}): PluginStart {
+  const since = (startedAt: number | null): boolean =>
+    i.installed !== null && startedAt !== null && startedAt >= i.installed;
+  if (i.stamp !== null && !isNewer(i.version, i.stamp.version)) return 'proven';
+  if (servedObservations(i.live).some((o) => o.cliVersion === i.version)) return 'proven';
+  if (
+    i.snapshot?.routers.some(
+      (r) => r.kind === 'plugin' && r.underClaude !== false && since(r.startedAt),
+    ) === true
+  ) {
+    return 'proven';
+  }
+  if (i.snapshot === null && i.stamp === null) return 'unknown';
+  if (i.snapshot?.claude.some((c) => since(c.startedAt)) === true) return 'did-not-start';
+  return 'pending';
+}
+
+/** Does any of `paths` name the same directory as `dir`, links resolved? */
+async function sameDirAsAny(paths: string[], dir: string): Promise<boolean> {
+  const real = (p: string) => realpath(p).catch(() => p);
+  const here = await real(dir);
+  for (const path of paths) if ((await real(path)) === here) return true;
+  return false;
 }
 
 /**
@@ -317,6 +552,21 @@ async function pluginCheck(
     }
     if (listing.id === null) return missing(`${PLUGIN_ID} is not installed in Claude Code`);
     if (!listing.enabled) {
+      // A PROJECT INSTALL MADE ELSEWHERE is listed from here as disabled.
+      // Enabling it here is not the fix: it was meant for that project, and
+      // there it is checked.
+      if (listing.projects.length > 0 && !(await sameDirAsAny(listing.projects, c.cwd))) {
+        return {
+          registered: false,
+          check: {
+            name,
+            status: 'fail',
+            required: true,
+            detail: `${listing.id} is installed for ${listing.projects.join(', ')} only, so nothing is routed from ${c.cwd}`,
+            fix: `To check that install, run \`tenjin doctor\` from ${listing.projects[0]}.`,
+          },
+        };
+      }
       return {
         registered: false,
         check: {
@@ -324,7 +574,7 @@ async function pluginCheck(
           status: 'fail',
           required: true,
           detail: `${listing.id} is installed but disabled, so no lookup is routed`,
-          fix: `Run \`claude plugin enable ${listing.id}\`, then ${loadStep(c.legacy.present)}.`,
+          fix: `Run \`claude plugin enable ${listing.id} --scope ${listing.scope ?? 'user'}\`, then ${loadStep(c.legacy.present)}.`,
         },
       };
     }
@@ -340,25 +590,53 @@ async function pluginCheck(
         },
       };
     }
-    // Claude Code's own environment shows only in the `alive` stamp, which the
-    // plugin's SessionStart leg writes from a real session: doctor's PATH may
-    // find a Node that Claude Code's does not.
+    // Claude Code's own environment shows only in a real session: the `alive`
+    // stamp its SessionStart leg writes, a router it started, or its absence
+    // from a Claude Code started since. Doctor's PATH may find a Node that
+    // Claude Code's does not.
     const stamp = await readAliveStamp(c.dataDir);
-    if (stamp === null || isNewer(pkg.version, stamp.version)) {
-      return {
-        registered: true,
-        check: {
-          name,
-          status: 'warn',
-          required: false,
-          detail: `${listing.id} ${pkg.version} is enabled, and no session has started it at this version${stamp !== null ? ` (last ${stamp.version}, at ${stamp.at})` : ''}`,
-          fix: STAMP_FIX,
-        },
-      };
-    }
+    const start = pluginStart({
+      version: pkg.version,
+      stamp,
+      installed: c.installed,
+      snapshot: c.snapshot,
+      live: c.live,
+    });
+    const at = `${listing.id} ${pkg.version}`;
+    const last = stamp !== null ? ` (last ${stamp.version}, at ${stamp.at})` : '';
     return {
       registered: true,
-      check: { name, status: 'ok', required: true, detail: `${listing.id} ${pkg.version} enabled` },
+      check:
+        start === 'proven'
+          ? {
+              name,
+              status: 'ok',
+              required: true,
+              detail: `${at} enabled, and a session has started it`,
+            }
+          : start === 'pending'
+            ? {
+                name,
+                status: 'ok',
+                required: true,
+                detail: `${at} enabled; the next Claude Code session starts it`,
+              }
+            : start === 'unknown'
+              ? {
+                  name,
+                  status: 'warn',
+                  required: false,
+                  checked: false,
+                  detail: `${at} is enabled; whether a session has started it at this version could not be checked${last}`,
+                  fix: STAMP_FIX,
+                }
+              : {
+                  name,
+                  status: 'warn',
+                  required: false,
+                  detail: `${at} is enabled, and the Claude Code started since this install has not started it${last}`,
+                  fix: DID_NOT_START_FIX,
+                },
     };
   }
   const folder = await folderState(c.scope, c.env, c.home, c.cwd);
@@ -376,23 +654,49 @@ async function pluginCheck(
   }
   if (folder.state === 'ours') {
     const stamp = await readAliveStamp(c.dataDir);
+    const start = pluginStart({
+      version: pkg.version,
+      stamp,
+      installed: c.installed,
+      snapshot: c.snapshot,
+      live: c.live,
+    });
     return {
       registered: true,
       check:
-        stamp === null
+        start === 'proven'
           ? {
-              name,
-              status: 'warn',
-              required: false,
-              detail: `the plugin folder is at ${folder.path} and has not loaded in a session yet`,
-              fix: `To load it, ${loadStep(c.legacy.present)}.`,
-            }
-          : {
               name,
               status: 'ok',
               required: true,
-              detail: `the plugin folder at ${folder.path} loaded, last at ${stamp.at}`,
-            },
+              detail:
+                stamp !== null
+                  ? `the plugin folder at ${folder.path} loaded, last at ${stamp.at}`
+                  : `the plugin folder at ${folder.path} is loaded, and a session has started it`,
+            }
+          : start === 'pending'
+            ? {
+                name,
+                status: 'ok',
+                required: true,
+                detail: `the plugin folder is at ${folder.path}; the next Claude Code session starts it`,
+              }
+            : start === 'unknown'
+              ? {
+                  name,
+                  status: 'warn',
+                  required: false,
+                  checked: false,
+                  detail: `the plugin folder is at ${folder.path}; whether a session has loaded it could not be checked`,
+                  fix: `To load it, ${loadStep(c.legacy.present)}.`,
+                }
+              : {
+                  name,
+                  status: 'warn',
+                  required: false,
+                  detail: `the plugin folder is at ${folder.path}, and the Claude Code started since this install has not loaded it`,
+                  fix: DID_NOT_START_FIX,
+                },
     };
   }
   if (await listedInClaudeFiles(c.env, c.home)) {
@@ -539,53 +843,61 @@ function routingCheck(router: RouterSettings | Error): RouterCheck {
   return { name, status: 'ok', required: false, detail: 'on' };
 }
 
+/** The unlock reasons a routing-fee row words from WALLET_REASONS, with the PERSON fix (decision 15). */
+const UNLOCK_WHY: ReadonlySet<string> = new Set([
+  'wallet_corrupt',
+  'env_key_invalid',
+  'passphrase_missing',
+  'passphrase_wrong',
+  'env_passphrase_wrong',
+  'keychain_locked',
+  'wallet_locked',
+]);
+
 /**
- * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: the reasons the session
- * notice gives (`unpaid`), worked out here from the wallet, the spend limits,
- * the ledger and the channel the SDK keeps. Never a failure: a call the fee
- * cannot pay takes the free path. A payment that failed in a session leaves
- * nothing to read here; these are the causes this can check.
+ * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: `canPayRouting`, the
+ * verdict the payer and the hooks reach on the same facts, in TODAY'S words
+ * (S5). Never a failure: a call the fee cannot pay takes the free path.
+ *
+ * - ready: today's ok row, byte for byte;
+ * - blocked by money or policy: today's `unpaid` detail, and today's fix
+ *   (`fixes[why]`, else fee.ts's own);
+ * - blocked because the wallet cannot sign: the WALLET_REASONS fragment and
+ *   the verdict's PERSON fix, never `agentFix`: doctor is read by a person;
+ * - unknown (a balance or a keychain that did not answer): "could not check",
+ *   never ok, never a fix.
  */
-async function routingFeeCheck(
-  ctx: CommandContext,
-  settings: ResolvedSettings,
-  fetchImpl: typeof fetch | undefined,
-): Promise<RouterCheck> {
-  let host: string;
-  try {
-    host = new URL(settings.baseUrl).host;
-  } catch {
-    // The router check below names the bad base URL and its fix.
+export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: string): RouterCheck {
+  const name = 'routing fee';
+  const v = e.canPayRouting;
+  if (v.status === 'unknown') {
     return {
-      name: 'routing fee',
+      name,
       status: 'warn',
       required: false,
-      detail: 'not checked, because the base URL is not a URL',
+      checked: false,
+      detail: `could not check: ${v.detail}`,
     };
   }
-  const why = await routingFeeBlock({
-    dataDir: ctx.dataDir,
-    policy: settings.policy,
-    rpcUrl: settings.rpcUrl,
-    host,
-    timeoutMs: ctx.flags.timeout,
-    provider: (await walletFileExists(ctx.dataDir)) ? resolveWalletProvider(ctx) : null,
-    ...(fetchImpl !== undefined ? { fetchImpl } : {}),
-  }).catch(() => null);
-  return routingFeeRow(why, host);
-}
-
-/** The routing-fee row for what {@link routingFeeBlock} found. */
-export function routingFeeRow(why: string | null, host: string): RouterCheck {
-  const u = why === null ? null : unpaid(why);
-  if (why === null || u === null) {
+  if (v.status === 'ready') {
     return {
-      name: 'routing fee',
+      name,
       status: 'ok',
       required: false,
       detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
     };
   }
+  const why = v.reason;
+  if (UNLOCK_WHY.has(why)) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `${WALLET_REASONS[why as keyof typeof WALLET_REASONS].reason}, so routing calls take the free path`,
+      fix: v.fix,
+    };
+  }
+  const u = unpaid(why);
   const fixes: Record<string, string> = {
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
     limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
@@ -594,57 +906,12 @@ export function routingFeeRow(why: string | null, host: string): RouterCheck {
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
   };
   return {
-    name: 'routing fee',
+    name,
     status: 'warn',
     required: false,
-    detail: `${u.reason}, so routing calls take the free path`,
-    fix: fixes[why] ?? u.fix,
+    detail: `${u?.reason ?? v.detail}, so routing calls take the free path`,
+    fix: fixes[why] ?? u?.fix ?? v.fix,
   };
-}
-
-/** What {@link routingFeeBlock} reads; `provider` is null with no wallet. */
-export interface RoutingFeeInput {
-  dataDir: string;
-  policy: SpendPolicy;
-  rpcUrl: string;
-  /** The router's host, the creator a deposit pays. */
-  host: string;
-  timeoutMs: number;
-  provider: WalletProvider | null;
-  fetchImpl?: typeof fetch;
-}
-
-/** Why the next deposit would be refused, or null when the fee can be paid. */
-export async function routingFeeBlock(input: RoutingFeeInput): Promise<string | null> {
-  const { provider, policy } = input;
-  // The fee's per-payment checks first, before the wallet, as the payer runs
-  // them on every call: a channel with credit pays nothing they refuse, and a
-  // limit below the deposit is the fix to name, not the passphrase.
-  const refused = feeRefusal(policy, input.host);
-  if (refused !== null) return refused;
-  if (provider === null) return 'no_wallet';
-  const verified = await provider.verify?.().catch(() => null);
-  if (verified !== undefined && verified !== null && verified.status !== 'verified') {
-    return 'wallet_locked';
-  }
-  const ledger = await readSpendSummary(input.dataDir);
-  const spent = ledger === null ? 0n : spentOf(ledger);
-  const { address } = await describeWallet(provider);
-  if ((await channelCredit(input.dataDir, address)) >= ROUTING_FEE_ATOMIC) return null;
-  // The deposit is always the full $0.25 and meets the whole policy, as the
-  // payer's: a per-call limit below it refuses it, mapped the payer's way.
-  const evaluation = evaluateSpendPolicy(policy, {
-    mode: 'automatic',
-    amountAtomic: CHANNEL_DEPOSIT_ATOMIC,
-    creator: input.host,
-    sessionSpentAtomic: spent,
-  });
-  if (evaluation.decision !== 'allow') return refusedWhy(evaluation.reason);
-  const balance = await readUsdcBalance(address, input.rpcUrl, {
-    timeoutMs: input.timeoutMs,
-    ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-  });
-  return balance !== null && balance < CHANNEL_DEPOSIT_ATOMIC ? 'wallet_low' : null;
 }
 
 /** INFORMATIONAL: which experiment is on, in one line. Either state passes. */
@@ -698,30 +965,232 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
   };
 }
 
-async function walletCheck(ctx: CommandContext): Promise<RouterCheck[]> {
-  if (!(await walletFileExists(ctx.dataDir))) {
-    return [
-      {
-        name: 'wallet',
-        status: 'fail',
-        required: true,
-        detail: 'no wallet on this machine, so nothing can pay',
-        fix: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
-      },
-    ];
+/** Where a ready wallet's passphrase (or key) came from, as the wallet row says it;
+ *  the passphrase file under `dataDir`, which `TENJIN_DATA_DIR` moves. */
+function signedFrom(source: SigningSource, address: string, dataDir: string): string {
+  switch (source) {
+    case 'keychain':
+      return 'macOS keychain';
+    case 'secret-service':
+      return 'Linux keyring';
+    case 'dpapi':
+      return 'DPAPI file';
+    case 'file':
+      return `passphrase file ${describeStoreLocation('file', address.toLowerCase(), dataDir)}`;
+    case 'key-env':
+      return 'TENJIN_WALLET_KEY in this shell';
+    case 'passphrase-env':
+      return 'TENJIN_WALLET_PASSPHRASE in this shell';
+    case 'legacy':
+      return 'legacy keychain entry';
   }
-  try {
-    const described = await describeWallet(resolveWalletProvider(ctx));
-    return [{ name: 'wallet', status: 'ok', required: true, detail: described.address }];
-  } catch (err) {
-    return [
-      {
-        name: 'wallet',
-        status: 'fail',
-        required: true,
-        detail: err instanceof CliError ? err.message : String(err),
-        ...(err instanceof CliError && err.fix !== undefined ? { fix: err.fix } : {}),
-      },
-    ];
+}
+
+/** The unlock reasons a wallet row warns about with the WALLET_REASONS person fix. */
+const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
+  'passphrase_missing',
+  'passphrase_wrong',
+  'env_passphrase_wrong',
+  'wallet_corrupt',
+]);
+
+/**
+ * THE WALLET ROW: can this shell's wallet SIGN, and with what.
+ *
+ * Exit codes keep their meaning (S11): no wallet, a wallet.json `describe`
+ * cannot read, and an invalid TENJIN_WALLET_KEY fail as required, exactly as
+ * before. A wallet that is there but cannot be unlocked only warns: lookups
+ * still run on the free path, and the fix is a person's, never `agentFix`
+ * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
+ * file (B1, S3). A check that could not answer is said as not checked.
+ */
+export function walletRow(e: Eligibility, dataDir: string): RouterCheck {
+  const name = 'wallet';
+  const sign = e.canSign;
+  if (e.describeError !== null && e.describeError !== undefined) {
+    const err = e.describeError;
+    return {
+      name,
+      status: 'fail',
+      required: true,
+      detail: err instanceof CliError ? err.message : String(err),
+      ...(err instanceof CliError && err.fix !== undefined ? { fix: err.fix } : {}),
+    };
   }
+  if (sign.status === 'blocked' && sign.reason === 'no_wallet') {
+    return {
+      name,
+      status: 'fail',
+      required: true,
+      detail: 'no wallet on this machine, so nothing can pay',
+      fix: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
+    };
+  }
+  if (sign.status === 'blocked' && sign.reason === 'env_key_invalid') {
+    return { name, status: 'fail', required: true, detail: sign.detail, fix: sign.fix };
+  }
+  const address = e.address ?? 'the wallet';
+  if (sign.status === 'ready') {
+    if (sign.warning !== undefined) {
+      return {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `${address} unlocks with the saved passphrase; TENJIN_WALLET_PASSPHRASE is set but wrong`,
+        fix: 'Remove it from this shell and your shell profile: `unset TENJIN_WALLET_PASSPHRASE`.',
+      };
+    }
+    return {
+      name,
+      status: 'ok',
+      required: true,
+      detail:
+        sign.source !== undefined
+          ? `${address} unlocks without a prompt (${signedFrom(sign.source, address, dataDir)})`
+          : `${address} unlocks without a prompt`,
+    };
+  }
+  if (sign.status === 'blocked') {
+    const fix = WARN_UNLOCK.has(sign.reason)
+      ? WALLET_REASONS[sign.reason as keyof typeof WALLET_REASONS].fix
+      : sign.fix;
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `${address} cannot be unlocked: ${sign.detail}`,
+      fix,
+    };
+  }
+  return {
+    name,
+    status: 'warn',
+    required: false,
+    checked: false,
+    detail: `could not check whether ${address} unlocks: ${sign.detail}`,
+    ...(sign.reason === 'keychain_locked' ? { fix: KEYCHAIN_LOCKED_FIX } : {}),
+  };
+}
+
+/** The S7 repair fix: the person saves the passphrase where every Claude Code can read it. */
+const SAVE_FOR_EVERY_SESSION_FIX = `Run \`tenjin wallet repair\` yourself to save the passphrase where every Claude Code can read it ${REPAIR_CLAUSE}.`;
+
+/** `HH:MM`, local time, for a router's start. */
+function clock(ms: number): string {
+  return new Date(ms).toTimeString().slice(0, 5);
+}
+
+/**
+ * THE `claude session` ROW: what the router a running Claude Code started saw
+ * when it tried to unlock this wallet, read from the observation it wrote.
+ * Doctor's own shell is not that session: its environment, its PATH and its
+ * keychain answer can all differ, which is the whole point of this row.
+ *
+ * Only a router that has served a Claude hook counts (B2): one started by
+ * `claude mcp get` or `list`, a Codex one, or one prewarmed with no hook
+ * served yet, is not "the running Claude session" and is ignored.
+ *
+ * With none, the row says what this shell alone can say, and is not checked,
+ * except in the one case it can say more (S7): this shell signs only through
+ * TENJIN_WALLET_PASSPHRASE and the saved stores DEFINITELY do not open the
+ * wallet, so a Claude Code started without the variable cannot unlock it. An
+ * unknown saved-store answer (a locked keychain) makes no such claim.
+ *
+ * Never a failure, and never new routing-fee wording (S5): the routing-fee
+ * row says that.
+ */
+export function sessionRow(
+  shell: Eligibility,
+  live: RouterObservation[],
+  version: string = pkg.version,
+): RouterCheck {
+  const name = 'claude session';
+  // At this version first, then the most recent: the router the next lookup most likely meets.
+  const served = [...servedObservations(live)].sort(
+    (a, b) =>
+      Number(b.cliVersion === version) - Number(a.cliVersion === version) ||
+      b.startedAt - a.startedAt,
+  );
+  if (served.length === 0) {
+    const shellReady = shell.canSign.status === 'ready' && shell.canPayRouting.status === 'ready';
+    const detail = shellReady ? NO_SESSION_CHECKED : 'no running Claude session checked';
+    if (
+      shell.source === 'passphrase-env' &&
+      shell.savedSign !== null &&
+      isDefiniteBlock(shell.savedSign)
+    ) {
+      return {
+        name,
+        status: 'warn',
+        required: false,
+        detail: `${detail}, and a Claude Code started without TENJIN_WALLET_PASSPHRASE cannot unlock the wallet`,
+        fix: SAVE_FOR_EVERY_SESSION_FIX,
+      };
+    }
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      checked: false,
+      detail,
+      ...(shell.source === 'key-env'
+        ? { fix: 'Start Claude Code from a shell that sets TENJIN_WALLET_KEY.' }
+        : {}),
+    };
+  }
+
+  const blocked = served.find((o) => o.sign.status === 'blocked');
+  if (blocked !== undefined) {
+    const reason = blocked.sign.reason ?? '';
+    const wallet = Object.prototype.hasOwnProperty.call(WALLET_REASONS, reason)
+      ? WALLET_REASONS[reason as keyof typeof WALLET_REASONS]
+      : undefined;
+    const detail = blocked.sign.detail ?? wallet?.reason ?? reason;
+    const fix = wallet?.fix ?? blocked.sign.fix;
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `the router Claude Code started (pid ${blocked.pid}) cannot unlock the wallet: ${detail}`,
+      ...(fix !== undefined ? { fix } : {}),
+    };
+  }
+
+  const here = shell.address?.toLowerCase() ?? null;
+  const other = served.find(
+    (o) => o.address !== null && here !== null && o.address.toLowerCase() !== here,
+  );
+  if (other !== undefined) {
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      detail: `Claude Code's router uses ${other.address}, this shell ${shell.address}`,
+    };
+  }
+
+  const waiting = served.find((o) => o.sign.status !== 'ready');
+  if (waiting !== undefined) {
+    const why =
+      waiting.sign.status === 'pending'
+        ? 'it has not tried to unlock yet'
+        : (waiting.sign.detail ??
+          UNKNOWN_DETAIL[waiting.sign.reason ?? ''] ??
+          UNKNOWN_DETAIL['check_failed']!);
+    return {
+      name,
+      status: 'warn',
+      required: false,
+      checked: false,
+      detail: `could not check whether the router Claude Code started (pid ${waiting.pid}) unlocks the wallet: ${why}`,
+    };
+  }
+
+  const o = served[0]!;
+  return {
+    name,
+    status: 'ok',
+    required: false,
+    detail: `the router Claude Code started (pid ${o.pid}, since ${clock(o.startedAt)}, v${o.cliVersion}) unlocked ${o.address ?? shell.address ?? 'the wallet'}`,
+  };
 }

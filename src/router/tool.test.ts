@@ -25,6 +25,8 @@ import {
 import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
+import { unlockDetails } from '../lib/wallet-unlock';
+import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -321,6 +323,62 @@ describe('routing outcomes that buy nothing', () => {
     expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
+  });
+
+  /** The tool's text is the model's: a wallet reason carries its agentFix (B1). */
+  it("gives the model a wallet reason's ask-the-person fix when the free path answers fee_required", async () => {
+    const { fetchImpl } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          schemaVersion: 1,
+          routerVersion: 'v',
+          decision: {
+            action: 'native',
+            diagnostics: {
+              reasonCode: 'fee_required',
+              stage: 'capability',
+              missing: [],
+              nextAction: 'x',
+            },
+          },
+        },
+      },
+    ]);
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: async (): Promise<never> => {
+        throw new RouteSkipped('passphrase_missing');
+      },
+    });
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(fetchImpl), route },
+    );
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain(WALLET_REASONS.passphrase_missing.reason);
+    expect(reason).toContain(ASK_FOR_REPAIR);
+    expect(reason).not.toContain(REPAIR_CLAUSE);
+  });
+
+  it("gives the model a wallet reason's ask-the-person fix when the call runs out of time", async () => {
+    const route = async () => ({
+      path: '/api/x402-router/route',
+      send: async (): Promise<never> => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new RouteSkipped('passphrase_wrong');
+      },
+    });
+    const quick = { ...ctx(), flags: { ...ctx().flags, timeout: 50 } };
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(net([]).fetchImpl), ctx: quick, route },
+    );
+    const reason = String(result.envelope.reason);
+    expect(reason).toContain(WALLET_REASONS.passphrase_wrong.reason);
+    expect(reason).toContain(ASK_FOR_REPAIR);
+    expect(reason).not.toContain(REPAIR_CLAUSE);
   });
 
   it('asks once more on the paid path when a stale "no paid path" memo sent the call free', async () => {
@@ -2384,6 +2442,55 @@ describe('the outcome a failed call reports', () => {
     ['a bug before anything was signed', new TypeError('boom')],
   ])('reports nothing for %s', (_label, err) => {
     expect(failureOutcome(err, before)).toBeNull();
+  });
+});
+
+/**
+ * B1: the request tool's text is read by the MODEL, so an error carrying
+ * `details.unlock` reaches it with that reason's `agentFix` (ask the person,
+ * never ask for the passphrase). Every other CliError keeps its own fix.
+ */
+describe('the fix a failed request hands the model', () => {
+  const text = (result: Awaited<ReturnType<typeof runRequestTool>>) =>
+    `${result.summary}\n${JSON.stringify(result.envelope)}`;
+
+  async function failsWith(err: CliError) {
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: decision() },
+      { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+    ]);
+    vi.mocked(runPay).mockRejectedValueOnce(err);
+    return runRequestTool({ query: 'BTC and ETH price', id: 'k3f9-abcd' }, deps(fetchImpl));
+  }
+
+  it('swaps a passphrase_missing fix for the ask-the-person one', async () => {
+    const result = await failsWith(
+      new CliError('PROVIDER_ERROR', 'no saved passphrase can be reached', {
+        fix: WALLET_REASONS.passphrase_missing.fix,
+        details: unlockDetails('passphrase_missing', 'file'),
+      }),
+    );
+    expect(text(result)).toContain(ASK_FOR_REPAIR);
+    expect(text(result)).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+    expect(text(result)).not.toContain(REPAIR_CLAUSE);
+  });
+
+  it('keeps a non-wallet CliError fix, and never swaps in wallet advice', async () => {
+    const result = await failsWith(
+      new CliError('REGISTRY_MISMATCH', 'the live terms differ', { fix: 'X-fix' }),
+    );
+    expect(text(result)).toContain('X-fix');
+    expect(text(result)).not.toContain('Run `tenjin doctor`.');
+    for (const entry of Object.values(WALLET_REASONS)) {
+      expect(text(result)).not.toContain(entry.agentFix);
+    }
+  });
+
+  it('keeps an undetailed WALLET_MISSING fix byte for byte', async () => {
+    const fix = 'Run `tenjin wallet create` to make one, then retry.';
+    const result = await failsWith(new CliError('WALLET_MISSING', 'no wallet here', { fix }));
+    expect(text(result)).toContain(`no wallet here ${fix}`);
+    expect(text(result)).not.toContain(ASK_FOR_REPAIR);
   });
 });
 

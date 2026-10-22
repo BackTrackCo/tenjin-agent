@@ -1,4 +1,5 @@
 import type { Address, Hex, TransactionSerializable, TypedDataDefinition } from 'viem';
+import type { DurableStore, SigningSource, UnlockReason } from '../wallet-unlock';
 
 /**
  * The wallet seam. Commands resolve a WalletProvider and never touch a raw key:
@@ -61,6 +62,12 @@ export interface WalletDiagnostics {
    * scan, never a keychain probe.
    */
   archivedWallets?: string[];
+  /**
+   * Where the passphrase sidecar (`passphrase-store.json`) says this wallet's
+   * passphrase was saved. A file read, never a store probe, so `show` stays
+   * free of keychain prompts. Absent when there is no record for the wallet.
+   */
+  passphraseStore?: DurableStore;
   warnings: string[];
 }
 
@@ -89,11 +96,18 @@ export interface TenjinSigner {
  * `unverified` is the honest third answer and the reason this type is not a
  * boolean: a keystore whose passphrase is only reachable through a TTY prompt is
  * neither proven good nor proven bad, and reporting either would be a guess.
+ *
+ * `reason` lets callers stop parsing `detail`: it is the same {@link UnlockReason}
+ * the signing path throws with. `unverified` with `keychain_locked` or
+ * `unlock_timeout` is unknown (the store or the clock did not answer); with
+ * `passphrase_missing` it is definite (no source holds a passphrase at all).
+ * `source` and `warning` on `verified` say what opened the wallet, and that a
+ * wrong TENJIN_WALLET_PASSPHRASE was passed over to get there.
  */
 export type WalletVerification =
-  | { status: 'verified'; detail: string }
-  | { status: 'unverified'; detail: string }
-  | { status: 'broken'; detail: string; fix: string };
+  | { status: 'verified'; detail: string; source?: SigningSource; warning?: string }
+  | { status: 'unverified'; detail: string; reason?: UnlockReason }
+  | { status: 'broken'; detail: string; fix: string; reason?: UnlockReason };
 
 export interface WalletProvider {
   id: string;

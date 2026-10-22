@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  isClaudeCode,
   listMcpProcesses,
   mcpServersState,
   parsePs,
   readMcpServers,
+  readProcessSnapshot,
   RECONNECT_FIX,
 } from './mcp-processes';
 
@@ -12,21 +14,134 @@ const BEFORE = Date.parse('Wed Oct 7 16:34:07 2026');
 const AFTER = Date.parse('Wed Oct 7 23:00:00 2026');
 
 describe('parsePs', () => {
-  it('keeps this user’s `tenjin mcp` lines with their start times, and nothing else', () => {
+  const START = 'Wed Oct  7 16:34:07 2026';
+  const LATER = 'Wed Oct  7 23:00:00 2026';
+  /** One `ps -o pid=,ppid=,stat=,lstart=,args=` line. */
+  const ps = (pid: number, ppid: number, stat: string, when: string, args: string) =>
+    ` ${pid} ${ppid} ${stat}   ${when}     ${args}`;
+
+  it('keeps this user’s `tenjin mcp` lines with their start times and parents, and nothing else', () => {
     const out = [
-      ' 9044 Wed Oct  7 16:34:07 2026     node /opt/homebrew/bin/tenjin mcp',
-      ' 9100 Wed Oct  7 23:00:00 2026     /usr/bin/node /usr/lib/node_modules/tenjin-cli/dist/index.js mcp',
-      ' 9150 Wed Oct  7 23:00:00 2026     node /src/agent/dist/hosts/claude/tenjin/../../../index.js mcp --plugin',
-      ' 9200 Wed Oct  7 23:00:00 2026     node /opt/homebrew/bin/tenjin doctor',
-      ' 9300 Wed Oct  7 23:00:00 2026     tail -F tenjin mcp.log',
-      '   42 Wed Oct  7 23:00:00 2026     node /opt/homebrew/bin/tenjin mcp',
+      ps(9044, 1, 'S', START, 'node /opt/homebrew/bin/tenjin mcp'),
+      ps(9100, 1, 'Ss', LATER, '/usr/bin/node /usr/lib/node_modules/tenjin-cli/dist/index.js mcp'),
+      ps(
+        9150,
+        1,
+        'S+',
+        LATER,
+        'node /src/agent/dist/hosts/claude/tenjin/../../../index.js mcp --plugin',
+      ),
+      ps(9200, 1, 'S', LATER, 'node /opt/homebrew/bin/tenjin doctor'),
+      ps(9300, 1, 'S', LATER, 'tail -F tenjin mcp.log'),
+      ps(42, 1, 'S', LATER, 'node /opt/homebrew/bin/tenjin mcp'),
       'garbage',
     ].join('\n');
-    expect(parsePs(out, 42)).toEqual([
-      { pid: 9044, startedAt: BEFORE },
-      { pid: 9100, startedAt: AFTER },
-      { pid: 9150, startedAt: AFTER },
+    expect(parsePs(out, 42)).toEqual({
+      routers: [
+        { pid: 9044, startedAt: BEFORE, ppid: 1, kind: 'other', underClaude: false },
+        { pid: 9100, startedAt: AFTER, ppid: 1, kind: 'other', underClaude: false },
+        { pid: 9150, startedAt: AFTER, ppid: 1, kind: 'plugin', underClaude: false },
+      ],
+      claude: [],
+    });
+  });
+
+  it('skips a zombie router: it has exited', () => {
+    const out = [
+      ps(500, 1, 'Z', LATER, 'node /opt/homebrew/bin/tenjin mcp'),
+      ps(501, 1, 'Z+', LATER, 'node /opt/homebrew/bin/tenjin mcp --plugin'),
+      ps(502, 1, 'S', LATER, 'node /opt/homebrew/bin/tenjin mcp'),
+    ].join('\n');
+    expect(parsePs(out, 0).routers.map((r) => r.pid)).toEqual([502]);
+  });
+
+  it('tells the plugin router, the Codex router and any other apart', () => {
+    const out = [
+      ps(1, 0, 'S', LATER, 'node /x/tenjin mcp --plugin'),
+      ps(2, 0, 'S', LATER, 'node /x/tenjin mcp --harness codex'),
+      ps(3, 0, 'S', LATER, 'node /x/tenjin mcp'),
+    ].join('\n');
+    expect(parsePs(out, 0).routers.map((r) => r.kind)).toEqual(['plugin', 'codex', 'other']);
+  });
+
+  it('finds the Claude Code a router runs under, two levels up', () => {
+    const out = [
+      ps(100, 1, 'Ss', START, '/Users/me/.local/share/claude/versions/2.1.296'),
+      ps(200, 100, 'S', LATER, '/bin/sh /x/plugin-wrapper.sh'),
+      ps(300, 200, 'S', LATER, 'node /x/tenjin mcp --plugin'),
+      ps(400, 1, 'S', LATER, 'node /x/tenjin mcp'),
+    ].join('\n');
+    const snapshot = parsePs(out, 0);
+    expect(snapshot.routers).toEqual([
+      expect.objectContaining({ pid: 300, underClaude: true }),
+      expect.objectContaining({ pid: 400, underClaude: false }),
     ]);
+    expect(snapshot.claude).toEqual([{ pid: 100, startedAt: BEFORE, ppid: 1 }]);
+  });
+
+  it('finds the Claude Code the desktop app started, whose path holds a space', () => {
+    const bin =
+      '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude';
+    const out = [
+      ps(90, 1, 'S', START, '/Applications/Claude.app/Contents/MacOS/Claude'),
+      ps(
+        95,
+        90,
+        'S',
+        START,
+        `/Applications/Claude.app/Contents/Helpers/disclaimer --pgroup -- ${bin} --verbose`,
+      ),
+      ps(100, 95, 'S', START, `${bin} --output-format stream-json --verbose`),
+      ps(300, 100, 'S', LATER, 'node /x/hosts/claude/tenjin/../../../index.js mcp --plugin'),
+    ].join('\n');
+    const snapshot = parsePs(out, 0);
+    expect(snapshot.routers).toEqual([expect.objectContaining({ pid: 300, underClaude: true })]);
+    expect(snapshot.claude).toEqual([{ pid: 100, startedAt: BEFORE, ppid: 95 }]);
+  });
+
+  it('does not count a router `claude mcp get` started as under a session', () => {
+    const out = [
+      ps(100, 1, 'S', LATER, 'claude mcp get plugin:tenjin:router'),
+      ps(200, 100, 'S', LATER, 'node /x/tenjin mcp --plugin'),
+    ].join('\n');
+    const snapshot = parsePs(out, 0);
+    expect(snapshot.routers[0]?.underClaude).toBe(false);
+    expect(snapshot.claude).toEqual([]);
+  });
+});
+
+describe('isClaudeCode', () => {
+  it.each([
+    'claude',
+    '/opt/homebrew/bin/claude --resume',
+    '/Users/me/.local/share/claude/versions/2.1.296',
+    'node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    '/usr/local/bin/node /opt/claude-code/cli.js --continue',
+    '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude --output-format stream-json --verbose',
+    '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude',
+    'C:\\Program Files\\Claude\\claude.exe --resume',
+  ])('is a session: %s', (args) => {
+    expect(isClaudeCode(args)).toBe(true);
+  });
+
+  it.each([
+    'claude mcp get plugin:tenjin:router',
+    'claude mcp list',
+    'claude plugin list --json',
+    'claude config get',
+    'claude update',
+    'claude doctor',
+    'claude setup-token',
+    'node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js mcp list',
+    'node /x/tenjin mcp',
+    'vim claude.md',
+    '/usr/bin/claudette',
+    '/Users/me/Library/Application Support/Claude/claude-code/2.1.304/6bbba6adc37f/claude.app/Contents/MacOS/claude mcp list',
+    '/Applications/Claude.app/Contents/MacOS/Claude',
+    '/usr/bin/vim notes /opt/claude-code/cli.js',
+    '/usr/bin/less my notes/about claude-code.md',
+  ])('is not a session: %s', (args) => {
+    expect(isClaudeCode(args)).toBe(false);
   });
 });
 
@@ -71,12 +186,19 @@ describe('mcpServersState', () => {
     });
   });
 
-  it('says unknown, and passes, where processes cannot be listed', () => {
-    expect(mcpServersState(null, INSTALLED).check).toMatchObject({
-      status: 'ok',
-      detail: 'unknown: running `tenjin mcp` processes cannot be listed on this platform',
+  it('says it could not check, never a pass, where processes cannot be listed', () => {
+    expect(mcpServersState(null, INSTALLED).check).toEqual({
+      name: 'mcp server',
+      status: 'warn',
+      required: false,
+      checked: false,
+      detail:
+        'could not check for `tenjin mcp` processes started before this install: they cannot be listed on this platform',
     });
-    expect(mcpServersState([{ pid: 1, startedAt: BEFORE }], null).check.status).toBe('ok');
+    expect(mcpServersState([{ pid: 1, startedAt: BEFORE }], null).check).toMatchObject({
+      status: 'warn',
+      checked: false,
+    });
     // A start time ps did not give is not called stale.
     expect(mcpServersState([{ pid: 1, startedAt: null }], INSTALLED).stale).toBe(0);
   });
@@ -88,7 +210,49 @@ describe('mcpServersState', () => {
       },
       installedAt: async () => INSTALLED,
     });
-    expect(state.check.detail).toMatch(/^unknown/);
+    expect(state.check).toMatchObject({ status: 'warn', checked: false });
+    expect(state.check.detail).toMatch(/^could not check/);
+  });
+
+  it('counts no router nothing Claude started, and no Codex router, as stale', () => {
+    const { stale, check } = mcpServersState(
+      [
+        { pid: 1, startedAt: BEFORE, kind: 'plugin', underClaude: false },
+        { pid: 2, startedAt: BEFORE, kind: 'codex', underClaude: true },
+        { pid: 3, startedAt: BEFORE, kind: 'plugin', underClaude: true },
+      ],
+      INSTALLED,
+      '0.1.0',
+    );
+    expect(stale).toBe(1);
+    expect(check.detail).toMatch(/^1 running `tenjin mcp` process started before/);
+  });
+});
+
+describe('readProcessSnapshot', () => {
+  it('takes the routers-only seam as a snapshot with no Claude Code process', async () => {
+    expect(
+      await readProcessSnapshot({
+        listMcpProcesses: async () => [{ pid: 7, startedAt: AFTER }],
+        installedAt: async () => INSTALLED,
+      }),
+    ).toEqual({
+      snapshot: { routers: [{ pid: 7, startedAt: AFTER }], claude: [] },
+      installed: INSTALLED,
+    });
+  });
+
+  it('reads a failing source as null, and never rejects', async () => {
+    expect(
+      await readProcessSnapshot({
+        listProcesses: async () => {
+          throw new Error('ps missing');
+        },
+        installedAt: async () => {
+          throw new Error('no package.json');
+        },
+      }),
+    ).toEqual({ snapshot: null, installed: null });
   });
 });
 

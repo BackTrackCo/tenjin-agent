@@ -47,7 +47,7 @@ Every router packet is masked before it leaves the machine: provider token shape
 
 ## Permission boundaries
 
-The recommended free harness permissions are documented in [agent-permissions.md](./agent-permissions.md). They are intentionally narrow and do not include `pay`, `wallet send`, `wallet create`, `config set`, `install`, or `mcp`.
+The recommended free harness permissions are documented in [agent-permissions.md](./agent-permissions.md). They are intentionally narrow and do not include `pay`, `wallet send`, `wallet create`, `wallet repair`, `config set`, `install`, or `mcp`.
 
 Codex's default `workspace-write` sandbox also needs network access for paid x402 calls:
 

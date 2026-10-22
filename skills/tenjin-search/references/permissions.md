@@ -79,13 +79,15 @@ mints its own read-scoped delegation, once, and reuses it for 24h.
 ## Never propose these
 
 Never propose an allowlist line for `tenjin wallet send`, `tenjin publish`,
-`tenjin edit`, `tenjin delete`, `tenjin wallet create`, `tenjin config set`,
-`tenjin install`, `tenjin mcp`, or `tenjin update`, and never propose a broad one
-(`Bash(tenjin:*)`, `Bash(tenjin wallet:*)`, `Bash(tenjin config:*)`) that would
-swallow them. Each is a human decision: `tenjin wallet send` moves money out of
-the wallet, `tenjin delete` destroys a published piece, `tenjin config set` can
-widen the spend policy the agent runs under, and `tenjin update` replaces the
-binary you then run.
+`tenjin edit`, `tenjin delete`, `tenjin wallet create`, `tenjin wallet repair`,
+`tenjin config set`, `tenjin install`, `tenjin mcp`, or `tenjin update`, and never
+propose a broad one (`Bash(tenjin:*)`, `Bash(tenjin wallet:*)`,
+`Bash(tenjin config:*)`) that would swallow them. Each is a human decision:
+`tenjin wallet send` moves money out of the wallet, `tenjin delete` destroys a
+published piece, `tenjin config set` can widen the spend policy the agent runs
+under, and `tenjin update` replaces the binary you then run. `tenjin wallet repair`
+takes a passphrase only the person types: ask the person to run it in their own
+terminal, and never ask for the passphrase.
 
 `publish` and `edit` are the exception you still never propose: when the operator
 sets `publish.mode` to auto or full-auto, `tenjin install` writes both rules. The

@@ -365,6 +365,16 @@ export interface PluginListing {
   version: string | null;
   /** False when the list itself could not be read. */
   read: boolean;
+  /** The chosen row's scope (`user`, `project`, `local`), or null when it names none. */
+  scope: string | null;
+  /**
+   * The projects a `tenjin@tenjin` install is recorded for and NOT enabled
+   * here: each row's `projectPath`. A `local` install made in one project is
+   * listed from every other directory as disabled, and enabling it there is
+   * not the fix; running from that project is. Empty when the list was not
+   * read or names none.
+   */
+  projects: string[];
 }
 
 export async function readPluginListing(
@@ -374,17 +384,32 @@ export async function readPluginListing(
 ): Promise<PluginListing> {
   const out = await runClaude(binary, ['plugin', 'list', '--json'], { env, cwd });
   const rows = out.code === 0 ? jsonList(out.stdout) : null;
-  if (rows === null) return { id: null, enabled: false, version: null, read: false };
+  if (rows === null) {
+    return { id: null, enabled: false, version: null, read: false, scope: null, projects: [] };
+  }
+  const projects = rows
+    .filter(
+      (r) =>
+        r.id === PLUGIN_ID &&
+        r.enabled !== true &&
+        typeof r.projectPath === 'string' &&
+        r.projectPath.length > 0,
+    )
+    .map((r) => r.projectPath as string);
   const row =
     rows.find((r) => r.id === PLUGIN_ID && r.enabled === true) ??
     rows.find((r) => r.id === SKILLS_DIR_PLUGIN_ID && r.enabled === true) ??
     rows.find((r) => r.id === PLUGIN_ID || r.id === SKILLS_DIR_PLUGIN_ID);
-  if (row === undefined) return { id: null, enabled: false, version: null, read: true };
+  if (row === undefined) {
+    return { id: null, enabled: false, version: null, read: true, scope: null, projects };
+  }
   return {
     id: String(row.id),
     enabled: row.enabled === true,
     version: typeof row.version === 'string' ? row.version : null,
     read: true,
+    scope: typeof row.scope === 'string' ? row.scope : null,
+    projects,
   };
 }
 
