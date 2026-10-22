@@ -1,6 +1,7 @@
+import { existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
 import { persistRouterDefaults, persistRouterProject, type RouterLimits } from '../commands/config';
@@ -8,9 +9,11 @@ import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
+import { defaultDataDir, runtimeDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
+import { runtimeStatePath } from '../lib/runtime-layout';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import {
   loadRawConfig,
@@ -133,12 +136,14 @@ export interface RouterInstallArgs {
   /**
    * Bring what this machine ALREADY has up to the running build: the plugin,
    * or a settings install the plugin then replaces, with no spend-limit
-   * write. A refusal when nothing of ours is here. It may add Tenjin's runtime
-   * and its launcher to an install that predates them (never a downgrade: a
-   * newer runtime is kept), and records the project installs Claude Code
-   * lists so `tenjin update` refreshes them too. `tenjin update` spawns
-   * exactly this after it swaps the binary, so the flag's name and meaning
-   * are a compatibility contract.
+   * write. A refusal when nothing of ours is here; a runtime alone (Codex
+   * kept it after Claude Code's install was removed) is brought up to the
+   * running build with nothing for Claude Code created. It may add Tenjin's
+   * runtime and its launcher to an install that predates them (never a
+   * downgrade: a newer runtime is kept), and records the project installs
+   * Claude Code lists so `tenjin update` refreshes them too. `tenjin update`
+   * spawns exactly this after it swaps the binary, so the flag's name and
+   * meaning are a compatibility contract.
    */
   refresh?: boolean;
   /**
@@ -379,7 +384,27 @@ export async function runRouterInstall(
     await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
   }
 
+  const setUpRuntime = () =>
+    (deps.runtime ?? defaultRuntime)({
+      dataDir: ctx.dataDir,
+      home,
+      env,
+      version: pkg.version,
+      moduleDir: dirname(fileURLToPath(import.meta.url)),
+      refresh: args.refresh === true,
+    });
+
   if (args.refresh === true && !(await somethingToRefresh(claude, scope, legacy, env, home, cwd))) {
+    // A RUNTIME WITH NO CLAUDE CODE SURFACE: `tenjin uninstall --harness
+    // claude` keeps the runtime and its launcher while Codex still runs them,
+    // and `tenjin update` brings that runtime up to its new build through this
+    // same refresh. Only the runtime step runs; nothing for Claude Code is
+    // registered, written or migrated.
+    if (!project && hasRuntime(ctx.dataDir, home)) {
+      const rt = await setUpRuntime();
+      if (runtimeLaunch(rt) !== null) await collectRuntime(rt.root);
+      return runtimeOnlyRefresh(ctx, rt, home);
+    }
     throw new CliError(
       'REFUSED',
       `Nothing to refresh: neither the ${PLUGIN_ID} plugin nor a settings install of Tenjin is registered here.`,
@@ -430,16 +455,7 @@ export async function runRouterInstall(
   // registers that runtime's own version. One user-scope `marketplace add`
   // repoints every project install too, since Claude Code keeps one global
   // `tenjin` row; a `--project` run repoints the same row to the same folder.
-  const rt = deferred
-    ? null
-    : await (deps.runtime ?? defaultRuntime)({
-        dataDir: ctx.dataDir,
-        home,
-        env,
-        version: pkg.version,
-        moduleDir: dirname(fileURLToPath(import.meta.url)),
-        refresh: args.refresh === true,
-      });
+  const rt = deferred ? null : await setUpRuntime();
   const launch = runtimeLaunch(rt);
   const plugin: PluginRegistration = deferred
     ? deferredRegistration(scope, claude)
@@ -617,6 +633,36 @@ export async function runRouterInstall(
 async function defaultRuntime(o: Parameters<typeof setupRuntime>[0]): Promise<RuntimeSetup> {
   const { setupRuntime } = await import('../lib/runtime');
   return setupRuntime(o);
+}
+
+/** Is there a runtime here? Only the default data dir has one, and only once an install set it up. */
+function hasRuntime(dataDir: string, home: string): boolean {
+  return (
+    resolve(dataDir) === resolve(defaultDataDir(home)) &&
+    existsSync(runtimeStatePath(runtimeDir(dataDir)))
+  );
+}
+
+/**
+ * A refresh that brought only the runtime up to date, for a machine with no
+ * Claude Code surface of Tenjin's: `plugin` is null, and the runtime's
+ * sentences ride in `notices` for update's parent, as a full refresh's do.
+ */
+function runtimeOnlyRefresh(ctx: CommandContext, rt: RuntimeSetup, home: string): CommandResult {
+  return {
+    data: {
+      plugin: null,
+      refresh: true,
+      scope: 'user',
+      notices: runtimeNotices(rt, home),
+      runtime: runtimeData(rt),
+      launcher: rt.launcher,
+    },
+    humanLines: [
+      `${paint(ctx.io, 'green', '✓')} Tenjin's runtime is up to date; no Claude Code plugin is registered here, so none was refreshed`,
+      ...runtimeLines(ctx, rt, home),
+    ],
+  };
 }
 
 /** GC of the runtime's unused versions: an optimisation that never holds install up or fails it. */
@@ -899,12 +945,17 @@ function refreshNotices(
   }
   const status = statusLineNotice(migration);
   if (status !== null) out.push(status);
-  if (rt !== null) {
-    const runs = runtimeSentence(rt, home);
-    if (runs !== null) out.push(`Tenjin ${runs.charAt(0).toLowerCase()}${runs.slice(1)}`);
-    for (const sentence of [fallbackSentence(rt), launcherSentence(rt.launcher, home)]) {
-      if (sentence !== null) out.push(sentence);
-    }
+  if (rt !== null) out.push(...runtimeNotices(rt, home));
+  return out;
+}
+
+/** The runtime's sentences among a refresh's notices: where it runs from, and what needs the person. */
+function runtimeNotices(rt: RuntimeSetup, home: string): string[] {
+  const out: string[] = [];
+  const runs = runtimeSentence(rt, home);
+  if (runs !== null) out.push(`Tenjin ${runs.charAt(0).toLowerCase()}${runs.slice(1)}`);
+  for (const sentence of [fallbackSentence(rt), launcherSentence(rt.launcher, home)]) {
+    if (sentence !== null) out.push(sentence);
   }
   return out;
 }

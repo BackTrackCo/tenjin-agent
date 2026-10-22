@@ -15,6 +15,7 @@ import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
 import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
 import { PLUGIN_ID } from '../router/names';
+import { runRouterInstall } from '../router/install';
 import { RECONNECT_FIX } from '../router/mcp-processes';
 import { nodeBinPath, versionEntry } from '../lib/runtime-layout';
 import type { NodePin } from '../lib/runtime';
@@ -1771,6 +1772,69 @@ describe('runUpdate: the runtime branch', () => {
     expect((err as CliError).fix).toMatch(/^Run `tenjin update` with TENJIN_DATA_DIR unset/);
     expect((err as CliError).message).not.toContain('project-local');
     expect(spawned.calls).toEqual([]);
+  });
+
+  /**
+   * `tenjin uninstall --harness claude` with Codex kept leaves the runtime and
+   * its launcher and no Claude Code install. The child is the real
+   * `install --refresh`, run in-process on that machine, with only the
+   * runtime step injected: it switches the runtime, as the new build's would.
+   */
+  it('updates a runtime Codex kept after Claude Code’s install was removed', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    const cfg = join(dir, 'claude-config');
+    const child: UpdateSpawn = async (_cmd, _args, o, onOutput) => {
+      const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+      const childCtx: CommandContext = {
+        flags: { json: true, timeout: 5000 },
+        dataDir: o.env?.TENJIN_DATA_DIR ?? '',
+        io: { stdout: sink, stderr: sink, isTTY: false },
+      };
+      try {
+        const out = await runRouterInstall({ refresh: true }, childCtx, {
+          homeDir: home,
+          cwd: home,
+          env: { CLAUDE_CONFIG_DIR: cfg },
+          findClaude: () => null,
+          listMcpProcesses: async () => [],
+          runtime: async () => {
+            await writeState('0.1.0-alpha.7', '0.1.0-alpha.6');
+            return {
+              state: 'active',
+              root,
+              cli: '0.1.0-alpha.7',
+              nodeVersion: PIN.version,
+              node: nodeBinPath(root, PIN.version),
+              entry: versionEntry(root, '0.1.0-alpha.7'),
+              hostsDir: join(root, 'claude'),
+              firstTime: false,
+              launcher: null,
+            };
+          },
+        });
+        onOutput(`${JSON.stringify(buildSuccessEnvelope('install', out.data), null, 2)}\n`);
+        return { kind: 'exit', code: 0 };
+      } catch (err) {
+        onOutput(`${JSON.stringify(buildFailureEnvelope('install', err as CliError), null, 2)}\n`);
+        return { kind: 'exit', code: (err as CliError).exitCode };
+      }
+    };
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ homeDir: home, spawnImpl: child, stage: s.stage, ensure: s.ensure }),
+    );
+    expect(result.data).toMatchObject({
+      current: '0.1.0-alpha.6',
+      latest: '0.1.0-alpha.7',
+      updated: true,
+    });
+    expect(result.humanLines?.[0]).toBe('Updated tenjin-cli 0.1.0-alpha.6 -> 0.1.0-alpha.7.');
+    // Nothing for Claude Code was created.
+    expect(existsSync(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
   });
 
   /**

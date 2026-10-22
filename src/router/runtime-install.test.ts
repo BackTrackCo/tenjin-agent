@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,7 @@ import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import type { LauncherResult, RuntimeSetup } from '../lib/runtime';
+import { readRuntimeState } from '../lib/runtime-layout';
 import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput } from './hook-tool';
@@ -410,6 +412,63 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     expect(pluginOf(result)).toMatchObject({ state: 'deferred' });
     expect(runtime).not.toHaveBeenCalled();
     expect(runtimeOf(result)).toBeNull();
+  });
+});
+
+/**
+ * `tenjin uninstall --harness claude` keeps the runtime and its launcher while
+ * Codex still runs them, and `tenjin update` refreshes that runtime through
+ * the new build's `install --refresh`. With no Claude Code install to refresh,
+ * the refresh runs the runtime step alone instead of refusing.
+ */
+describe('a refresh where only Tenjin’s runtime is left (Codex kept it)', () => {
+  const state = (cli: string, previous: string | null) =>
+    writeFile(
+      join(runtimeRoot, 'state.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        current: { cli, node: NODE_V },
+        previous: previous === null ? null : { cli: previous, node: NODE_V },
+        pending: null,
+      }),
+    );
+
+  it('switches the runtime and creates nothing for Claude Code', async () => {
+    await mkdir(runtimeRoot, { recursive: true });
+    await state('0.1.0-alpha.30', null);
+    const runtime = vi.fn(async () => {
+      await state(pkg.version, '0.1.0-alpha.30');
+      return setup({ firstTime: false });
+    });
+    const result = await runRouterInstall({ refresh: true }, ctx(), deps(runtime));
+    expect(runtime).toHaveBeenCalledWith(
+      expect.objectContaining({ dataDir: data, home, version: pkg.version, refresh: true }),
+    );
+    expect(readRuntimeState(runtimeRoot)?.current.cli).toBe(pkg.version);
+    expect(result.data).toMatchObject({
+      plugin: null,
+      refresh: true,
+      runtime: { state: 'active', cli: pkg.version, nodeVersion: NODE_V },
+      launcher: launcherOk,
+    });
+    // No plugin command, no plugin folder, no settings, no spend write.
+    const calls = await fake.calls();
+    expect(calls.filter((c) => /^plugin (marketplace add|install|update)/.test(c))).toEqual([]);
+    expect(existsSync(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+    expect(existsSync(join(cfg, 'settings.json'))).toBe(false);
+    expect(existsSync(join(data, 'config.json'))).toBe(false);
+  });
+
+  it('still refuses when there is no runtime either', async () => {
+    const runtime = vi.fn(async () => setup());
+    const out = await runRouterInstall({ refresh: true }, ctx(), deps(runtime)).catch(
+      (e: unknown) => e,
+    );
+    expect(out).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringMatching(/^Nothing to refresh/),
+    });
+    expect(runtime).not.toHaveBeenCalled();
   });
 });
 
