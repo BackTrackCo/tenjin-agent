@@ -74,7 +74,7 @@ import {
 } from '../router/settings';
 import { style } from '../lib/output';
 import { cachedDirectory } from '../router/directory';
-import { describeLimits, settingsReadback } from './config-readback';
+import { describeLimits, replacementSupport, settingsReadback } from './config-readback';
 
 /** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
@@ -311,6 +311,7 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     router,
     await cachedDirectory(ctx.dataDir),
     describeLimits(settings.maxAutoSpend.value, settings.sessionBudget.value),
+    await replacementSupport(ctx.dataDir),
   );
   return {
     data: { ...data, settings: readback.data },

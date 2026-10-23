@@ -41,7 +41,6 @@ import { persist } from './config';
 import {
   POLICY_INVALID_TEXT,
   REPLACEMENT_NAME,
-  REPLACEMENT_SUPPORT,
   SAVED_HERE,
   SAVED_PREFIX,
   blockedBy,
@@ -54,6 +53,7 @@ import {
   flagFor,
   onlyResetCommand,
   preferResetCommand,
+  replacementSupport,
   settingsReadback,
   shellWord,
   unblockCommand,
@@ -312,10 +312,13 @@ async function limitsOf(ctx: CommandContext) {
 }
 
 /** The line every saved rule change adds about automatic replacement. */
-function replacementNote(router: RouterSettings): string {
+async function replacementNote(router: RouterSettings, ctx: CommandContext): Promise<string> {
   if (router.nativeReplacement.mode === 'off')
     return `${REPLACEMENT_NAME} is off, and this doesn't turn it on.`;
-  return `${REPLACEMENT_NAME} is on; ${REPLACEMENT_SUPPORT.why}`;
+  const support = await replacementSupport(ctx.dataDir);
+  return support.supported
+    ? `${REPLACEMENT_NAME} is on, so this also holds for the searches and fetches Tenjin runs in place.`
+    : `${REPLACEMENT_NAME} is on. ${support.why}`;
 }
 
 interface Outcome {
@@ -343,7 +346,7 @@ async function answer(
 ): Promise<CommandResult> {
   const router = await readBack(ctx, deps);
   const limits = await limitsOf(ctx);
-  const settings = settingsReadback(router, listing, limits);
+  const settings = settingsReadback(router, listing, limits, await replacementSupport(ctx.dataDir));
   const unreadable =
     router.policy.status === 'invalid' ? [`${POLICY_INVALID_TEXT} ${router.policy.problem}.`] : [];
   const humanLines = [
@@ -448,7 +451,7 @@ export async function runConfigPrefer(
       operation: 'prefer',
       changed: true,
       scope: 'user',
-      explanation: [`${SAVED_PREFIX} ${said(effective)}`, replacementNote(router)],
+      explanation: [`${SAVED_PREFIX} ${said(effective)}`, await replacementNote(router, ctx)],
       rules: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
       reset: preferResetCommand(scope),
@@ -562,7 +565,7 @@ export async function runConfigOnly(
       operation: 'only',
       changed: true,
       scope: 'user',
-      explanation: [`${SAVED_PREFIX} ${said(effective)}`, replacementNote(router)],
+      explanation: [`${SAVED_PREFIX} ${said(effective)}`, await replacementNote(router, ctx)],
       rules: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
       reset: onlyResetCommand(rule),
@@ -1021,7 +1024,8 @@ export async function runConfigReplacement(
     return { ...existing, router };
   });
   const router = await readBack(ctx, deps);
-  const effective = describeReplacement(router.nativeReplacement, listing);
+  const support = await replacementSupport(ctx.dataDir);
+  const effective = describeReplacement(router.nativeReplacement, listing, support);
   const limits = await limitsOf(ctx);
   const explanation =
     args.state === 'off'
@@ -1031,9 +1035,9 @@ export async function runConfigReplacement(
       : [
           `${SAVED_PREFIX} ${REPLACEMENT_NAME} is on${scope !== undefined ? ` for ${new Intl.ListFormat('en', { type: 'disjunction' }).format(scope.map((target) => labelOf(target, listing)))}` : ' for any allowed provider'}.`,
           'When Tenjin picks a service for a web search or page fetch your agent is about to make, it runs that pick in place of the search or fetch instead of offering it first, so each one is a charge you are not asked about separately.',
-          `Your limits still apply (${limits.perCall} a call, ${limits.daily === null ? 'no daily limit' : `${limits.daily} a day`}, Tenjin balance), and a call over them still asks first.`,
+          `Your limits still apply (${limits.perCall} a call, ${limits.daily === null ? 'no daily limit' : `${limits.daily} a day`}, Tenjin balance): a call over them is not run in place, it is offered as usual and asks first.`,
           'This picks no provider ahead of another and changes nothing about what is allowed: add a preference or a rule for that.',
-          REPLACEMENT_SUPPORT.why,
+          support.why,
         ];
   return answer(
     {

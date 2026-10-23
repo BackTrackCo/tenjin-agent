@@ -685,6 +685,13 @@ export function parseDirectoryListing(value: unknown): DirectoryListing | undefi
   return parsed.success && 'categories' in parsed.data ? parsed.data : undefined;
 }
 
+/** A hook decision reread from disk (`decided.ts`), held to the same schema
+ *  as the router's answer: anything else reads as absent. */
+export function parseHookDecision(value: unknown): HookDecision | undefined {
+  const parsed = HookDecisionSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
 export type HookDecision = HookResponse['decision'];

@@ -18,6 +18,9 @@ import type {
   TargetKind,
 } from '../router/decision';
 import type { ReplacementSetting, RouterSettings } from '../router/settings';
+import { CLAUDE_CODE_FLOOR, meetsFloor } from '../router/claude-cli';
+import { pidAlive, readObservations, type RouterObservation } from '../router/router-observation';
+import pkg from '../../package.json';
 
 /**
  * WHAT A SAVED SETTING MEANS, IN THE USER'S WORDS. Every `tenjin config`
@@ -42,14 +45,59 @@ export const SAVED_PREFIX = 'Saved on this machine (not synced):';
 export const REPLACEMENT_NAME = "Run Tenjin's picks automatically";
 
 /**
- * Whether this build runs a pick in the agent's own search or fetch. Not yet:
- * the host adapter that would do it is not part of this build, so readback
- * says so instead of claiming the switch does something.
+ * WHETHER THE AGENT YOU RUN CAN RUN A PICK IN PLACE of its own search or
+ * fetch, from what the running routers saw (`router-observation.ts`): only
+ * Claude Code with the Tenjin plugin can, and only once a router has seen it.
+ * Never claimed from the switch alone: a host that cannot is named, and with
+ * no running session to check, readback says where it works.
  */
-export const REPLACEMENT_SUPPORT = {
-  supported: false,
-  why: "This version of Tenjin can't yet run a pick in your agent's own search or fetch, so it keeps making ordinary offers.",
-} as const;
+export interface ReplacementSupport {
+  supported: boolean;
+  why: string;
+}
+
+/** Where automatic use works, said when no running session shows it. */
+const WHERE_IT_WORKS = `It works in Claude Code ${CLAUDE_CODE_FLOOR} or later with the Tenjin plugin; other agents keep getting ordinary offers.`;
+
+export function replacementSupportOf(
+  observations: readonly RouterObservation[],
+): ReplacementSupport {
+  const newest = [...observations].sort((a, b) => b.at - a.at);
+  const claude = newest.find((o) => o.harness === 'claude' && o.servedSession);
+  if (claude !== undefined) {
+    const { client } = claude;
+    if (
+      claude.launchedByPlugin &&
+      client?.name === 'claude-code' &&
+      meetsFloor(client.version, CLAUDE_CODE_FLOOR)
+    ) {
+      return {
+        supported: true,
+        why: 'Your Claude Code runs it in place of its own web search or page fetch.',
+      };
+    }
+    return {
+      supported: false,
+      why: `Your running Claude Code can't run a pick in place of its own search or fetch, so it keeps getting ordinary offers. ${WHERE_IT_WORKS}`,
+    };
+  }
+  if (newest.some((o) => o.harness === 'codex')) {
+    return {
+      supported: false,
+      why: `Codex can't run a pick in place of its own search or fetch, so it keeps getting ordinary offers. ${WHERE_IT_WORKS}`,
+    };
+  }
+  return { supported: false, why: WHERE_IT_WORKS };
+}
+
+/** {@link replacementSupportOf} for the routers running on this machine now. */
+export async function replacementSupport(dataDir: string): Promise<ReplacementSupport> {
+  const live = (await readObservations(dataDir).catch(() => [])).filter((o) => pidAlive(o.pid));
+  return replacementSupportOf(live);
+}
+
+/** The build that enforces these settings: a Tenjin from before them ignores them. */
+export const ENFORCED_BY = `Enforced by this Tenjin (${pkg.version}); a version from before these settings ignores them.`;
 
 /** One saved rule, as JSON and as a sentence. */
 export interface RuleReadback {
@@ -356,13 +404,14 @@ export interface ReplacementReadback {
 export function describeReplacement(
   setting: ReplacementSetting,
   listing: DirectoryListing | undefined,
+  support: ReplacementSupport,
 ): ReplacementReadback {
   const providers = setting.providers?.map((target) => labelOf(target, listing));
   const base = {
     mode: setting.mode,
     ...(setting.providers !== undefined ? { providers: setting.providers } : {}),
     ...(setting.problem !== undefined ? { problem: setting.problem } : {}),
-    supported: REPLACEMENT_SUPPORT.supported,
+    supported: support.supported,
   };
   if (setting.problem !== undefined)
     return {
@@ -384,7 +433,7 @@ export function describeReplacement(
       : `only when Tenjin picks ${either.format(providers)}`;
   return {
     ...base,
-    text: `${REPLACEMENT_NAME}: on, ${scope}. ${REPLACEMENT_SUPPORT.why}`,
+    text: `${REPLACEMENT_NAME}: on, ${scope}. ${support.why}`,
     reset: 'tenjin config replacement off',
   };
 }
@@ -416,10 +465,11 @@ export function settingsReadback(
   router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement'>,
   listing: DirectoryListing | undefined,
   limits: LimitsReadback,
+  support: ReplacementSupport,
 ): { data: SettingsReadback; lines: string[] } {
   const { policy, enabled } = router;
   const rules = policy.status === 'ok' ? describeRules(policy.saved, listing) : [];
-  const replacement = describeReplacement(router.nativeReplacement, listing);
+  const replacement = describeReplacement(router.nativeReplacement, listing, support);
   const data: SettingsReadback = {
     saved: SAVED_HERE,
     scopes: scopesOf(),
@@ -457,6 +507,7 @@ export function settingsReadback(
     const inactive = rule.inactive !== undefined ? ` (${rule.inactive})` : '';
     lines.push(`  - ${rule.text}${inactive} Undo: \`${rule.reset}\``);
   }
+  if (rules.length > 0) lines.push(`  ${ENFORCED_BY}`);
   lines.push(`  ${replacement.text}`, `  ${limits.text}`);
   lines.push('  Change them with `tenjin config --help`.');
   return { data, lines };

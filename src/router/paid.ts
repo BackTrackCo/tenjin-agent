@@ -42,6 +42,8 @@ export interface PaidRecord {
   /** The route the user's settings held it to, when its spec or decision
    *  carried one: which service, source, providers and seller were paid. */
   identity?: Identity;
+  /** `swap`: the call answered a native search or fetch in place. */
+  via?: 'swap';
   url: string;
   /** The input or query sent, masked and cut to {@link MAX_SENT_CHARS}. */
   sent: string;

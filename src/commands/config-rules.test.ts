@@ -7,6 +7,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { CliError } from '../lib/errors';
 import { directoryCachePath } from '../lib/paths';
 import type { DirectoryListing, WirePolicy } from '../router/decision';
+import { writeObservation, type RouterObservation } from '../router/router-observation';
 import { routerSettings } from '../router/settings';
 import { runConfigList, runConfigSet } from './config';
 import {
@@ -551,11 +552,13 @@ describe('replacement', () => {
       "Saved on this machine (not synced): Run Tenjin's picks automatically is on for Exa.",
     );
     expect(text).toContain(
-      'Your limits still apply ($0.25 a call, $5.00 a day, Tenjin balance), and a call over them still asks first.',
+      'Your limits still apply ($0.25 a call, $5.00 a day, Tenjin balance): a call over them is not run in place, it is offered as usual and asks first.',
     );
+    // No running session to check: where it works, never that it is active.
     expect(text).toContain(
-      "This version of Tenjin can't yet run a pick in your agent's own search or fetch",
+      'It works in Claude Code 2.1.287 or later with the Tenjin plugin; other agents keep getting ordinary offers.',
     );
+    expect(data(on)).toMatchObject({ replacement: { supported: false } });
     expect(data(on)).toMatchObject({ scope: 'machine', reset: 'tenjin config replacement off' });
     const off = await runConfigReplacement({ state: 'off' }, makeCtx(), offline());
     expect(await personal()).toEqual({
@@ -565,6 +568,49 @@ describe('replacement', () => {
     expect(lines(off)).toContain(
       "Run Tenjin's picks automatically: off (its saved choice of Exa is kept for when it is turned on).",
     );
+  });
+
+  it('says it runs in place only where a running Claude Code with the plugin can', async () => {
+    const seen = (o: Partial<RouterObservation>) =>
+      writeObservation(dir, {
+        version: 1,
+        pid: process.pid,
+        startedAt: 1,
+        at: 2,
+        cliVersion: 'test',
+        harness: 'claude',
+        launchedByPlugin: true,
+        cwd: work,
+        address: null,
+        servedSession: true,
+        env: { passphraseSet: false, keySet: false },
+        sign: { status: 'ready' },
+        ...o,
+      });
+    await seen({ client: { name: 'claude-code', version: '2.1.309' } });
+    const on = await runConfigReplacement(
+      { state: 'on', allProviders: true },
+      makeCtx(),
+      offline(),
+    );
+    expect(lines(on)).toContain(
+      'Your Claude Code runs it in place of its own web search or page fetch.',
+    );
+    expect(data(on)).toMatchObject({ replacement: { supported: true } });
+    // A rule saved while it is on says it holds for the calls run in place.
+    const prefer = await runConfigPrefer(
+      { task: ['web research'], provider: ['exa'] },
+      makeCtx(),
+      router(),
+    );
+    expect(lines(prefer)).toContain(
+      "Run Tenjin's picks automatically is on, so this also holds for the searches and fetches Tenjin runs in place.",
+    );
+    // A host that cannot is named, and the switch is never called active there.
+    await seen({ harness: 'codex', servedSession: false, client: undefined });
+    const codex = await runConfigList(makeCtx());
+    expect(lines(codex)).toContain("Codex can't run a pick in place of its own search or fetch");
+    expect(data(codex)).toMatchObject({ settings: { replacement: { supported: false } } });
   });
 
   it('removes a saved provider choice for --all-providers, asking nothing', async () => {

@@ -254,6 +254,10 @@ export interface RequestToolDeps {
   /** What this execution's settings check established ({@link admitByPolicy}),
    *  for each of its call boundaries. Set inside one execution only. */
   policyRun?: PolicyRun;
+  /** The path that made the call, when not an ordinary request: `swap`, a
+   *  native search or fetch answered in place (`swap.ts`). Kept on its ledger
+   *  row and its outcome report, never on a default body. */
+  via?: 'swap';
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -720,6 +724,7 @@ async function requestTool(
     harness: deps.harness ?? 'claude',
     ...(local.wire !== undefined ? { policy: local.wire } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.via !== undefined ? { via: deps.via } : {}),
   };
 
   // EVERY OPTION OF A SET, each its own offer, checked, claimed and paid
@@ -1219,8 +1224,10 @@ export async function runningJob(dataDir: string, id: string): Promise<string | 
   return takes.some((take) => take.state === 'running') ? id : undefined;
 }
 
-/** Where a spec call's outcome report goes. */
-export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>;
+/** Where a spec call's outcome report goes, and the path that made the call. */
+export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'> & {
+  via?: 'swap';
+};
 
 /**
  * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
@@ -1235,7 +1242,12 @@ export function reportOutcome(
   startedAt: number,
 ): void {
   void reportSpecOutcome(
-    { id, ...outcome, ms: Date.now() - startedAt },
+    {
+      id,
+      ...outcome,
+      ms: Date.now() - startedAt,
+      ...(reportDeps.via !== undefined ? { via: reportDeps.via } : {}),
+    },
     {
       ctx: reportDeps.ctx,
       baseUrl: reportDeps.baseUrl,
@@ -1352,6 +1364,7 @@ export async function paySpec(
       provider: spec.provider,
       ...(spec.label !== undefined ? { label: spec.label } : {}),
       ...(spec.identity !== undefined ? { identity: spec.identity } : {}),
+      ...(deps.via !== undefined ? { via: deps.via } : {}),
       media: savesMedia(spec),
       request: built,
       terms: specTerms(spec),
@@ -1420,6 +1433,8 @@ export interface ProviderCall {
    *  held to the rules again at the call's boundary, and kept on its ledger
    *  row. Absent from a router or a spec older than identity. */
   identity?: Identity;
+  /** `swap`: the call answers a native search or fetch in place. */
+  via?: 'swap';
   /** A media service: a paid result's links and inline files are saved
    *  locally ({@link savesMedia}). */
   media: boolean;
@@ -2652,7 +2667,13 @@ export function failureOutcome(
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */
 function paidRecord(
-  decision: { capabilityId: string; provider: string; label?: string; identity?: Identity },
+  decision: {
+    capabilityId: string;
+    provider: string;
+    label?: string;
+    identity?: Identity;
+    via?: 'swap';
+  },
   url: string,
   sent: string,
   amountAtomic: bigint,
@@ -2670,6 +2691,7 @@ function paidRecord(
     provider: decision.provider,
     ...(decision.label !== undefined ? { label: decision.label } : {}),
     ...(decision.identity !== undefined ? { identity: decision.identity } : {}),
+    ...(decision.via !== undefined ? { via: decision.via } : {}),
     url,
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
