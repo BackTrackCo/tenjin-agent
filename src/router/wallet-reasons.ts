@@ -15,7 +15,7 @@ export {
 
 /** The model-facing fix for a saved passphrase that is gone or wrong. */
 export const ASK_FOR_REPAIR =
-  'Ask the person to run `tenjin wallet repair` in their own terminal, then restart Claude Code. Never ask for the passphrase.';
+  'Ask the person to run `tenjin wallet repair` in their own terminal, then start a new Claude Code session. Never ask for the passphrase.';
 
 /**
  * EVERY WORD TENJIN SAYS ABOUT A WALLET THAT CANNOT SIGN, in one place. Pure
@@ -57,27 +57,27 @@ export const WALLET_REASONS: Record<
   },
   env_key_invalid: {
     reason: 'TENJIN_WALLET_KEY is not a valid private key',
-    fix: 'Fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then restart Claude Code.',
+    fix: 'Fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then quit Claude Code fully and start a new session.',
     agentFix:
-      'Ask the person to fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then restart Claude Code. Never ask for the key.',
+      'Ask the person to fix or unset TENJIN_WALLET_KEY in the environment Claude Code starts from, then quit Claude Code fully and start a new session. Never ask for the key.',
   },
   passphrase_missing: {
     reason: 'no saved wallet passphrase can be reached',
-    fix: `${REPAIR_IN_TERMINAL} Then restart Claude Code.`,
+    fix: `${REPAIR_IN_TERMINAL} Then start a new Claude Code session.`,
     agentFix: ASK_FOR_REPAIR,
   },
   passphrase_wrong: {
     reason: 'the saved wallet passphrase does not open the wallet',
-    fix: `${REPAIR_IN_TERMINAL} Then restart Claude Code.`,
+    fix: `${REPAIR_IN_TERMINAL} Then start a new Claude Code session.`,
     agentFix: ASK_FOR_REPAIR,
   },
   env_passphrase_wrong: {
     reason: 'TENJIN_WALLET_PASSPHRASE is set but does not open the wallet',
     // Shown only when no saved passphrase opens the wallet either, so removing
     // the variable alone never unlocks it: repair first, then remove it.
-    fix: `Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}, then remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from and restart Claude Code.`,
+    fix: `Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}, then remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from, then quit Claude Code fully and start a new session.`,
     agentFix:
-      'Ask the person to run `tenjin wallet repair` in their own terminal, then to remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from and restart Claude Code. Never ask for the passphrase.',
+      'Ask the person to run `tenjin wallet repair` in their own terminal, then to remove TENJIN_WALLET_PASSPHRASE from the environment Claude Code starts from, then quit Claude Code fully and start a new session. Never ask for the passphrase.',
   },
   keychain_locked: {
     reason: 'the keychain holding the wallet passphrase is locked or did not answer',

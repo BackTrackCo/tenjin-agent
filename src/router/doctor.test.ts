@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
@@ -10,15 +10,19 @@ import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import {
   doctorLines,
+  findPathTenjin,
   pluginStart,
+  readPluginLaunch,
   routingFeeRow,
   runRouterDoctor,
   sessionRow,
   walletRow,
+  type PluginLaunch,
   type RouterDoctorDeps,
 } from './doctor';
 import { canPayRouting, canSign, type SignVerdict, type Verdict } from './eligibility';
 import { checkEligibility, type Eligibility } from './eligibility-check';
+import { LAUNCHER_MARKER, renderHostFiles } from './plugin-files';
 import type { RouterCheck } from './reachability';
 import type { RouterObservation } from './router-observation';
 import { KEYCHAIN_LOCKED_FIX, NO_SESSION_CHECKED, WALLET_REASONS } from './wallet-reasons';
@@ -31,6 +35,7 @@ import { KEYCHAIN_LOCKED_FIX, NO_SESSION_CHECKED, WALLET_REASONS } from './walle
 
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 const OTHER = '0x1111111111111111111111111111111111111111';
+const NODE_PIN = '24.14.0';
 
 const READY: SignVerdict = { status: 'ready', source: 'keychain' };
 
@@ -736,4 +741,569 @@ describe('runRouterDoctor, with its seams injected', () => {
     expect(by['claude session']?.detail).not.toContain('cannot unlock');
     expect(by['claude session']?.fix).toBeUndefined();
   }, 120_000);
+});
+
+describe('the runtime rows', () => {
+  let root: string;
+  let home: string;
+  let runtime: string;
+  let fake: FakeClaude;
+  const CLI = '0.1.0-alpha.32';
+  const NODE = '24.14.0';
+
+  const probe400 = (async () =>
+    new Response('{}', {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+
+  beforeEach(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'router-doctor-runtime-')));
+    home = join(root, 'home');
+    runtime = join(home, '.tenjin', 'runtime');
+    await mkdir(join(root, 'work', '.git'), { recursive: true });
+    await mkdir(home, { recursive: true });
+    fake = await fakeClaude(root);
+    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
+    vi.stubGlobal('fetch', probe400);
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const node = () => join(runtime, 'node', NODE, 'bin', 'node');
+  const entry = () => join(runtime, 'versions', CLI, 'dist', 'index.js');
+  const launcher = () => join(home, '.local', 'bin', 'tenjin');
+
+  /** A runtime on disk: its state, Node, entry and launcher. */
+  async function setUp(): Promise<void> {
+    await mkdir(runtime, { recursive: true });
+    await writeFile(
+      join(runtime, 'state.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        current: { cli: CLI, node: NODE },
+        previous: null,
+        pending: null,
+      }),
+    );
+    for (const file of [node(), entry(), launcher()]) {
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, '');
+    }
+  }
+
+  const inRuntime = (): PluginLaunch => ({
+    path: join(runtime, 'claude'),
+    source: 'marketplace',
+    command: node(),
+    entry: entry(),
+  });
+
+  function ctx(dataDir = join(home, '.tenjin')): CommandContext {
+    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+    return {
+      flags: { json: true, timeout: 5000 },
+      dataDir,
+      io: { stdout: sink(), stderr: sink(), isTTY: false },
+    };
+  }
+
+  async function run(over: Partial<RouterDoctorDeps> = {}, dataDir?: string) {
+    const out = await runRouterDoctor(ctx(dataDir), {
+      homeDir: home,
+      cwd: join(root, 'work'),
+      env: {
+        ...fake.env,
+        PATH: `${fake.pathDir}${delimiter}${join(home, '.local', 'bin')}`,
+        SHELL: '/bin/zsh',
+        CLAUDE_CONFIG_DIR: join(root, 'cfg'),
+      },
+      nodeVersion: 'v24.0.0',
+      fetchImpl: probe400,
+      listProcesses: async () => ({ routers: [], claude: [] }),
+      installedAt: async () => 1_000,
+      readObservations: async () => [],
+      eligibility: async () => eligibility(),
+      readLaunch: async () => inRuntime(),
+      runVersion: async () => ({ code: 0, stdout: `${CLI}\n`, stderr: '', timedOut: false }),
+      pathTenjin: async () => ({ path: launcher(), marked: true, version: null, handsOff: true }),
+      unpinnedPlatform: async () => null,
+      ...over,
+    }).catch((e: unknown) => e);
+    const checks =
+      out instanceof CliError
+        ? (out.details as { checks: RouterCheck[] }).checks
+        : (out as { data: { checks: RouterCheck[] } }).data.checks;
+    return { out, checks, by: Object.fromEntries(checks.map((c) => [c.name, c])) };
+  }
+
+  const FAIL_FIX = 'Run `npx -y tenjin-cli@latest install`, then start a new Claude Code session.';
+
+  it('passes an absolute Node and entry that run, between the plugin and router server rows', async () => {
+    await setUp();
+    const { by, checks } = await run();
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'ok',
+      required: true,
+      detail: `Claude Code starts tenjin ${CLI} on Node ${NODE} from ~/.tenjin/runtime; tenjin on PATH: ~/.local/bin/tenjin`,
+    });
+    const names = checks.map((c) => c.name);
+    expect(names.indexOf('plugin')).toBe(names.indexOf('runtime') - 1);
+    expect(names.indexOf('runtime')).toBeLessThan(names.indexOf('router server'));
+    expect(by['tenjin on PATH']).toBeUndefined();
+  });
+
+  it('says how the last background update ended, above the summary, information only', async () => {
+    await setUp();
+    const before = await run();
+    const lines = () => (before.out as { humanLines: string[] }).humanLines;
+    expect(lines().some((l) => l.startsWith('Auto-update:'))).toBe(false);
+    await writeFile(
+      join(runtime, 'auto-update.json'),
+      JSON.stringify({
+        finishedAt: '2026-10-21T08:00:00.000Z',
+        outcome: 'updated',
+        from: '0.1.0-alpha.31',
+        to: CLI,
+      }),
+    );
+    const after = await run();
+    const shown = (after.out as { humanLines: string[] }).humanLines;
+    expect(shown.at(-2)).toBe(`Auto-update: 2026-10-21 updated 0.1.0-alpha.31 -> ${CLI}`);
+    expect(after.checks).toEqual(before.checks);
+  });
+
+  it('warns for the PATH layout, with --project in the fix for a project install', async () => {
+    const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+    const fromPath: PluginLaunch = {
+      path: join(npm, 'hosts', 'claude'),
+      source: 'marketplace',
+      command: 'node',
+      entry: join(npm, 'index.js'),
+    };
+    const { by } = await run({ readLaunch: async () => fromPath });
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'warn',
+      required: false,
+      detail: `Claude Code starts Tenjin with the \`node\` on its PATH, from ${npm}, so a Node upgrade or \`npm rm -g tenjin-cli\` stops it`,
+      fix: "Run `tenjin install` to move it to Tenjin's own runtime.",
+    });
+    const project = await run({ readLaunch: async () => fromPath, project: true });
+    expect(project.by['runtime']?.fix).toBe(
+      "Run `tenjin install --project` to move it to Tenjin's own runtime.",
+    );
+  });
+
+  it('fails, as required, for an entry that is gone or a command that does not run', async () => {
+    await setUp();
+    await rm(entry());
+    const missing = await run();
+    expect(missing.out).toBeInstanceOf(CliError);
+    expect(missing.by['runtime']).toMatchObject({ status: 'fail', required: true, fix: FAIL_FIX });
+    expect((missing.out as CliError).message).toBe(missing.by['runtime']?.detail);
+    await writeFile(entry(), '');
+    const broken = await run({
+      runVersion: async () => ({ code: 1, stdout: '', stderr: 'SyntaxError', timedOut: false }),
+    });
+    expect(broken.by['runtime']).toMatchObject({ status: 'fail', required: true, fix: FAIL_FIX });
+    expect(broken.by['runtime']?.detail).toContain('exited 1: SyntaxError');
+    const project = await run({
+      project: true,
+      runVersion: async () => ({ code: 1, stdout: '', stderr: '', timedOut: false }),
+    });
+    expect(project.by['runtime']?.fix).toBe(
+      'Run `npx -y tenjin-cli@latest install --project`, then start a new Claude Code session.',
+    );
+  });
+
+  it('says not checked when the version run times out', async () => {
+    await setUp();
+    const { by } = await run({
+      runVersion: async () => ({ code: null, stdout: '', stderr: '', timedOut: true }),
+    });
+    expect(by['runtime']).toMatchObject({ status: 'warn', required: false, checked: false });
+  });
+
+  it('warns when an older build moved the marketplace out of the runtime', async () => {
+    await setUp();
+    const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+    const { by } = await run({
+      readLaunch: async () => ({
+        path: join(npm, 'hosts', 'claude'),
+        source: 'marketplace',
+        command: 'node',
+        entry: join(npm, 'index.js'),
+      }),
+    });
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'warn',
+      required: false,
+      detail: `Claude Code loads Tenjin from ${join(npm, 'hosts', 'claude')}, not Tenjin's runtime: an older tenjin-cli build registered it there`,
+      fix: 'Run `tenjin install`, then start a new Claude Code session.',
+    });
+  });
+
+  it('warns for a launcher that is missing, or whose folder is off PATH', async () => {
+    await setUp();
+    await rm(launcher());
+    const missing = await run();
+    expect(missing.by['runtime']).toMatchObject({
+      status: 'warn',
+      fix: 'Run `tenjin install` to write it.',
+    });
+    expect(missing.by['runtime']?.detail).toContain('~/.local/bin/tenjin is missing');
+    await writeFile(launcher(), '');
+    const offPath = {
+      env: { ...fake.env, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: join(root, 'cfg') },
+    };
+    const off = await run({ ...offPath, pathTenjin: async () => null });
+    expect(off.by['runtime']).toMatchObject({
+      status: 'warn',
+      fix: `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`,
+    });
+    // npm's copy still answers in a terminal and hands off, so off PATH is no finding.
+    const npmCopy = join(root, 'npm', 'bin', 'tenjin');
+    const viaNpm = await run({
+      ...offPath,
+      pathTenjin: async () => ({ path: npmCopy, marked: false, version: CLI, handsOff: true }),
+    });
+    expect(viaNpm.by['runtime']).toMatchObject({ status: 'ok' });
+  });
+
+  it('shows no runtime row under a non-default data dir', async () => {
+    await setUp();
+    const { by } = await run({}, join(root, 'profile'));
+    expect(by['runtime']).toBeUndefined();
+    expect(by['tenjin on PATH']).toBeUndefined();
+  });
+
+  it('names an older npm copy first on PATH, and nothing for one that hands off', async () => {
+    await setUp();
+    const old = join(root, 'npm', 'bin', 'tenjin');
+    const { by } = await run({
+      pathTenjin: async () => ({
+        path: old,
+        marked: false,
+        version: '0.1.0-alpha.30',
+        handsOff: false,
+      }),
+    });
+    expect(by['tenjin on PATH']).toEqual({
+      name: 'tenjin on PATH',
+      status: 'warn',
+      required: false,
+      detail: `\`tenjin\` in a terminal runs tenjin-cli 0.1.0-alpha.30 at ${old}, an older build that does not hand off to Tenjin's runtime`,
+      fix: 'Remove it with `npm uninstall -g tenjin-cli` using the Node that installed it, or upgrade it with `npm i -g tenjin-cli@latest`.',
+    });
+    const newer = await run({
+      pathTenjin: async () => ({ path: old, marked: false, version: CLI, handsOff: true }),
+    });
+    expect(newer.by['tenjin on PATH']).toBeUndefined();
+    const none = await run({ pathTenjin: async () => null });
+    expect(none.by['tenjin on PATH']).toBeUndefined();
+  });
+
+  /**
+   * `~/.tenjin/runtime` deleted: Claude Code still loads `runtime/claude`, now
+   * empty. The runtime row fails with the reinstall that rebuilds it, and no
+   * fix sends the person to the `node` on PATH or to `tenjin install`, which
+   * is the broken launcher now.
+   */
+  it('fails, with the npx reinstall, when the runtime folder Claude Code loads is gone', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const { by } = await run({
+      readLaunch: async () => ({
+        path: join(runtime, 'claude'),
+        source: 'marketplace',
+        command: null,
+        entry: null,
+      }),
+      listProcesses: async () => ({ routers: [], claude: [{ pid: 9, startedAt: 2_000 }] }),
+    });
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'fail',
+      required: true,
+      detail: `Claude Code loads Tenjin from ~/.tenjin/runtime/claude, which no longer holds its plugin, so the router cannot start`,
+      fix: FAIL_FIX,
+    });
+    const rest = [by['plugin']?.fix, by['router server']?.fix];
+    expect(rest).toEqual([
+      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+    ]);
+  });
+
+  /**
+   * PR 1 or alpha.30 registered npm's folder; a Node upgrade deleted that
+   * prefix, so Claude Code loads a folder that is gone, and no runtime exists
+   * yet. The runtime row fails with the npx reinstall, and nothing blames the
+   * `node` on Claude Code's PATH.
+   */
+  it('fails, with the npx reinstall, when the npm folder Claude Code loads is gone', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const npm = join(root, 'old-prefix', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+    const gone: PluginLaunch = {
+      path: join(npm, 'hosts', 'claude'),
+      source: 'marketplace',
+      command: null,
+      entry: null,
+      missing: true,
+    };
+    const over = {
+      readLaunch: async () => gone,
+      listProcesses: async () => ({ routers: [], claude: [{ pid: 9, startedAt: 2_000 }] }),
+    };
+    const { by, out } = await run(over);
+    expect(out).toBeInstanceOf(CliError);
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'fail',
+      required: true,
+      detail: `Claude Code loads Tenjin from ${join(npm, 'hosts', 'claude')}, which no longer holds its plugin, so the router cannot start`,
+      fix: FAIL_FIX,
+    });
+    for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
+      expect(fix).toBe(
+        'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+      );
+    }
+    const project = await run({ ...over, project: true });
+    expect(project.by['runtime']?.fix).toBe(
+      'Run `npx -y tenjin-cli@latest install --project`, then start a new Claude Code session.',
+    );
+  });
+
+  it('says a platform with no pinned Node runs npm’s copy by design, and never offers the move', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+    const unpinned = 'linux-x64 with musl, not glibc';
+    const { by } = await run({
+      readLaunch: async () => ({
+        path: join(npm, 'hosts', 'claude'),
+        source: 'marketplace',
+        command: 'node',
+        entry: join(npm, 'index.js'),
+      }),
+      unpinnedPlatform: async () => unpinned,
+      listProcesses: async () => ({ routers: [], claude: [{ pid: 9, startedAt: 2_000 }] }),
+    });
+    expect(by['runtime']).toEqual({
+      name: 'runtime',
+      status: 'warn',
+      required: false,
+      detail: `Tenjin pins no Node for this platform (${unpinned}), so it keeps running from npm's copy at ${npm} on the \`node\` on Claude Code's PATH, by design`,
+      fix: "Nothing to move. Keep Node 22 or newer on the PATH Claude Code starts with; after changing Node versions, reinstall with that Node's `npm i -g tenjin-cli`, then run `tenjin install`.",
+    });
+    for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
+      expect(fix).toContain('`node`');
+      expect(fix).not.toContain('own runtime');
+    }
+  });
+
+  it('offers no move to the runtime under a non-default data dir, where install sets none up', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
+    const fromPath: PluginLaunch = {
+      path: join(npm, 'hosts', 'claude'),
+      source: 'marketplace',
+      command: 'node',
+      entry: join(npm, 'index.js'),
+    };
+    const profile = await run(
+      { readLaunch: async () => fromPath, listProcesses: async () => null },
+      join(root, 'profile'),
+    );
+    expect(profile.by['plugin']?.fix).toContain('quit Claude Code fully');
+    expect(profile.by['router server']?.fix).toContain('Quit Claude Code fully');
+    for (const fix of [profile.by['plugin']?.fix, profile.by['router server']?.fix]) {
+      expect(fix).not.toContain('own runtime');
+    }
+    // The default data dir on a pinned platform still offers it.
+    const home = await run({ readLaunch: async () => fromPath, listProcesses: async () => null });
+    expect(home.by['router server']?.fix).toMatch(
+      /Or run `tenjin install` to move Tenjin to its own runtime\.$/,
+    );
+  });
+
+  it('names the first tenjin on PATH in the ok row, even one with no package identified', async () => {
+    await setUp();
+    const shim = join(root, 'volta', 'bin', 'tenjin');
+    const { by } = await run({
+      pathTenjin: async () => ({
+        path: shim,
+        marked: false,
+        version: null,
+        handsOff: false,
+        unknown: true,
+      }),
+    });
+    expect(by['runtime']).toMatchObject({ status: 'ok' });
+    expect(by['runtime']?.detail).toMatch(new RegExp(`; tenjin on PATH: ${shim}$`));
+    expect(by['tenjin on PATH']).toBeUndefined();
+  });
+
+  it('on the runtime layout, no fix blames the node on Claude Code’s PATH', async () => {
+    await setUp();
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const unknown = await run({ listProcesses: async () => null });
+    const started = await run({
+      listProcesses: async () => ({ routers: [], claude: [{ pid: 9, startedAt: 2_000 }] }),
+    });
+    const fixes = [
+      unknown.by['plugin']?.fix,
+      started.by['plugin']?.fix,
+      started.by['router server']?.fix,
+    ];
+    expect(fixes).toEqual([
+      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp.",
+      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+    ]);
+    for (const fix of fixes) expect(fix).not.toMatch(/node.{0,10}PATH|restart Claude Code/i);
+  });
+});
+
+describe('findPathTenjin', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'path-tenjin-')));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /** A global tenjin-cli package, as npm lays it out. */
+  async function npmPackage(dir: string, extra: Record<string, unknown> = {}): Promise<void> {
+    await mkdir(join(dir, 'dist'), { recursive: true });
+    await writeFile(join(dir, 'dist', 'index.js'), '');
+    await writeFile(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'tenjin-cli', version: '0.1.0-alpha.30', ...extra }),
+    );
+  }
+
+  it("follows npm's POSIX link to its package, and reads whether it hands off", async () => {
+    const pkgDir = join(root, 'lib', 'node_modules', 'tenjin-cli');
+    await npmPackage(pkgDir);
+    await mkdir(join(root, 'bin'));
+    await symlink(join(pkgDir, 'dist', 'index.js'), join(root, 'bin', 'tenjin'));
+    const env = { PATH: `${join(root, 'empty')}:${join(root, 'bin')}` };
+    expect(await findPathTenjin(env, 'darwin')).toEqual({
+      path: join(root, 'bin', 'tenjin'),
+      marked: false,
+      version: '0.1.0-alpha.30',
+      handsOff: false,
+    });
+    await npmPackage(pkgDir, { tenjinRuntime: { node: { version: NODE_PIN } } });
+    expect((await findPathTenjin(env, 'darwin'))?.handsOff).toBe(true);
+  });
+
+  it("reads npm's Windows shim from the package beside it", async () => {
+    const dir = join(root, 'npm');
+    await npmPackage(join(dir, 'node_modules', 'tenjin-cli'));
+    await writeFile(join(dir, 'tenjin.cmd'), '@"%~dp0\\node_modules\\tenjin-cli\\dist\\index.js"');
+    expect(await findPathTenjin({ Path: dir }, 'win32')).toMatchObject({
+      path: join(dir, 'tenjin.cmd'),
+      version: '0.1.0-alpha.30',
+      handsOff: false,
+    });
+  });
+
+  it('returns the first tenjin on PATH even when no package is behind it, ahead of a launcher', async () => {
+    await mkdir(join(root, 'volta'));
+    await writeFile(join(root, 'volta', 'tenjin'), '#!/bin/sh\nexec volta-shim "$@"\n');
+    await mkdir(join(root, 'bin'));
+    await writeFile(join(root, 'bin', 'tenjin'), `#!/bin/sh\n# ${LAUNCHER_MARKER}\n`);
+    expect(
+      await findPathTenjin({ PATH: `${join(root, 'volta')}:${join(root, 'bin')}` }, 'linux'),
+    ).toEqual({
+      path: join(root, 'volta', 'tenjin'),
+      marked: false,
+      version: null,
+      handsOff: false,
+      unknown: true,
+    });
+  });
+
+  it('takes a launcher as it is, and finds nothing on an empty PATH', async () => {
+    await mkdir(join(root, 'bin'));
+    await writeFile(join(root, 'bin', 'tenjin'), `#!/bin/sh\n# ${LAUNCHER_MARKER}\n`);
+    expect(await findPathTenjin({ PATH: join(root, 'bin') }, 'linux')).toMatchObject({
+      marked: true,
+      handsOff: true,
+    });
+    expect(await findPathTenjin({ PATH: '' }, 'linux')).toBeNull();
+  });
+});
+
+describe('readPluginLaunch', () => {
+  let root: string;
+  let fake: FakeClaude;
+  beforeEach(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'plugin-launch-')));
+    fake = await fakeClaude(root);
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function marketplaceAt(path: string, files: Record<string, string>): Promise<void> {
+    for (const [file, body] of Object.entries(files)) {
+      await mkdir(dirname(join(path, file)), { recursive: true });
+      await writeFile(join(path, file), body);
+    }
+    await fake.respond(
+      'mkt-list',
+      `${JSON.stringify([{ name: 'tenjin', source: 'directory', path }])}\n`,
+    );
+  }
+  const read = () =>
+    readPluginLaunch(
+      { path: fake.bin, source: 'path' },
+      { env: fake.env, home: root, cwd: root, scope: 'user' },
+    );
+
+  it("expands the package render's entry from the marketplace Claude Code lists", async () => {
+    const pkgDist = join(root, 'pkg', 'dist');
+    await marketplaceAt(join(pkgDist, 'hosts', 'claude'), renderHostFiles(pkg.version));
+    expect(await read()).toEqual({
+      path: join(pkgDist, 'hosts', 'claude'),
+      source: 'marketplace',
+      command: 'node',
+      entry: join(pkgDist, 'index.js'),
+    });
+  });
+
+  it('names the folder Claude Code loads with no router when its files are gone', async () => {
+    const gone = join(root, 'runtime', 'claude');
+    await fake.respond(
+      'mkt-list',
+      `${JSON.stringify([{ name: 'tenjin', source: 'directory', path: gone }])}\n`,
+    );
+    expect(await read()).toEqual({
+      path: gone,
+      source: 'marketplace',
+      command: null,
+      entry: null,
+      missing: true,
+    });
+  });
+
+  it('does not call a .mcp.json that is there but unreadable missing', async () => {
+    const path = join(root, 'pkg', 'dist', 'hosts', 'claude');
+    await marketplaceAt(path, { 'tenjin/.mcp.json': '{not json' });
+    expect(await read()).toEqual({ path, source: 'marketplace', command: null, entry: null });
+  });
+
+  it("reads the runtime render's absolute Node and entry", async () => {
+    const launch = { node: '/h/.tenjin/runtime/node/24.14.0/bin/node', entry: '/h/e/index.js' };
+    await marketplaceAt(join(root, 'runtime', 'claude'), renderHostFiles(pkg.version, { launch }));
+    expect(await read()).toMatchObject({ command: launch.node, entry: launch.entry });
+  });
 });

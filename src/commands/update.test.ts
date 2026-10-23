@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -15,6 +15,10 @@ import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
 import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
 import { PLUGIN_ID } from '../router/names';
+import { runRouterInstall } from '../router/install';
+import { RECONNECT_FIX } from '../router/mcp-processes';
+import { nodeBinPath, versionEntry } from '../lib/runtime-layout';
+import type { NodePin } from '../lib/runtime';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -1097,9 +1101,8 @@ describe('runUpdate: the post-swap refresh', () => {
     );
     const lines = result.humanLines?.join('\n') ?? '';
     expect(lines).toContain('1 running `tenjin mcp` process started before this install');
-    expect(lines).toContain(
-      'Type /reload-plugins in this Claude Code session, or start a new session.',
-    );
+    expect(lines).toContain(RECONNECT_FIX);
+    expect(lines).not.toContain('/reload-plugins');
     expect(result.data).toMatchObject({ mcpServer: { status: 'warn' } });
   });
 
@@ -1107,8 +1110,8 @@ describe('runUpdate: the post-swap refresh', () => {
    * A REFRESH THAT SUCCEEDED CAN STILL HAVE SOMETHING TO SAY: a plugin left for
    * a newer Claude Code, a status line the migration took out. The child puts
    * it in `data.notices` and update prints it, since it shows nothing else of a
-   * successful child. A settings install still here turns the stale-server fix
-   * into "start a new session", because /reload-plugins would run both.
+   * successful child. Either way the stale-server fix is a new session, since
+   * `/reload-plugins` does not run the plugin's `SessionStart`.
    */
   it("prints the refresh's notices and asks for a new session while a settings install stays", async () => {
     const { ctx } = makeCtx();
@@ -1139,7 +1142,7 @@ describe('runUpdate: the post-swap refresh', () => {
     );
     const text = lines.join('\n');
     expect(text).toContain('Start a new Claude Code session');
-    expect(text).not.toContain('/reload-plugins in this');
+    expect(text).not.toContain('/reload-plugins');
     expect(result.data).toMatchObject({
       refresh: { settingsInstallPending: true },
       mcpServer: { fix: expect.stringContaining('Start a new Claude Code session') },
@@ -1385,5 +1388,596 @@ describe('versionFreeEntry', () => {
     expect(data.updated).toBe(true);
     expect(data.refresh.failed.map((f) => f.dataDir)).toEqual([dir]);
     expect(result.humanLines?.join(' ')).toContain('tenjin install');
+  });
+});
+
+/**
+ * THE RUNTIME BRANCH. With Tenjin's runtime under the default data dir, this
+ * OLD build stages the release, ensures its Node and places it; the NEW build,
+ * spawned on that Node, checks and switches itself. No package manager runs,
+ * and the verdict is read back from `state.json`.
+ */
+describe('runUpdate: the runtime branch', () => {
+  const PIN: NodePin = { version: '24.15.0', sha256: { 'darwin-arm64': 'a'.repeat(64) } };
+  let home: string;
+  let dataDir: string;
+  let root: string;
+  beforeEach(async () => {
+    home = join(dir, 'home');
+    dataDir = join(home, '.tenjin');
+    root = join(dataDir, 'runtime');
+    await mkdir(root, { recursive: true });
+  });
+
+  const pointer = (cli: string) => ({ cli, node: PIN.version });
+  /** `state.json` as `activate` writes it. No node or entry files are made for
+   *  it: a runtime whose current is missing files still updates. */
+  const writeState = (current: string, previous: string | null = null) =>
+    writeFile(
+      join(root, 'state.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        current: pointer(current),
+        previous: previous === null ? null : pointer(previous),
+        pending: null,
+      }),
+    );
+  const readState = () => readFile(join(root, 'state.json'), 'utf8');
+
+  /** A release as `stageTarball` leaves it: a checked package in `tmp/`. */
+  async function stagedPackage(version: string, pin: NodePin | null = PIN): Promise<string> {
+    const stage = join(root, 'tmp', `stage-${version}-fixture`);
+    await mkdir(join(stage, 'dist'), { recursive: true });
+    await writeFile(join(stage, 'dist', 'index.js'), '');
+    await writeFile(
+      join(stage, 'package.json'),
+      JSON.stringify({
+        name: 'tenjin-cli',
+        version,
+        ...(pin === null ? {} : { tenjinRuntime: { node: pin } }),
+      }),
+    );
+    return stage;
+  }
+
+  /** The download and the Node, recorded; never the network. */
+  function seams(pin: NodePin | null = PIN) {
+    const staged: { root: string; version: string; timeoutMs: number }[] = [];
+    const ensured: { root: string; pin: NodePin; timeoutMs: number }[] = [];
+    const stage: UpdateDeps['stage'] = async (r, version, o) => {
+      staged.push({ root: r, version, timeoutMs: o.timeoutMs });
+      return stagedPackage(version, pin);
+    };
+    const ensure: UpdateDeps['ensure'] = async (r, p, o) => {
+      ensured.push({ root: r, pin: p, timeoutMs: o.timeoutMs });
+      return nodeBinPath(r, p.version);
+    };
+    return { stage, ensure, staged, ensured };
+  }
+
+  const forbiddenStage: UpdateDeps['stage'] = async () => {
+    throw new Error('this path must not download a release');
+  };
+  const forbiddenEnsure: UpdateDeps['ensure'] = async () => {
+    throw new Error('this path must not download a Node');
+  };
+
+  /** The new build's `install --refresh`, one answer per call. */
+  function children(
+    answer: (index: number) => Promise<{ result?: SpawnResult; output?: string } | void>,
+  ) {
+    const calls: { cmd: string; args: string[]; cwd: string; env?: Record<string, string> }[] = [];
+    const impl: UpdateSpawn = async (cmd, args, o, onOutput) => {
+      calls.push({ cmd, args, cwd: o.cwd, ...(o.env !== undefined ? { env: o.env } : {}) });
+      const said = (await answer(calls.length - 1)) ?? {};
+      if (said.output !== undefined) onOutput(said.output);
+      return said.result ?? { kind: 'exit', code: 0 };
+    };
+    return { impl, calls };
+  }
+
+  const envelope = (data: Record<string, unknown>): string =>
+    `${JSON.stringify(buildSuccessEnvelope('install', data), null, 2)}\n`;
+  const refusal = (message: string): string =>
+    `${JSON.stringify(buildFailureEnvelope('install', new CliError('REFUSED', message)), null, 2)}\n`;
+
+  it('updates with no package manager, from an npx run too, and holds no lock while the child runs', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx, stderr } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    let lockHeld: boolean | undefined;
+    const spawned = children(async () => {
+      lockHeld = existsSync(join(root, '.lock'));
+      await writeState('0.1.0-alpha.7', '0.1.0-alpha.6');
+    });
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        // The npx cache: the stage-2 refusal would stop the npm branch here.
+        moduleDir: await installedTree('_npx', 'f00d'),
+        currentVersion: '0.1.0-alpha.5',
+        homeDir: home,
+        spawnImpl: spawned.impl,
+        stage: s.stage,
+        ensure: s.ensure,
+        // A session still running the version just replaced.
+        listMcpProcesses: async () => [{ pid: 9044, startedAt: 1, version: '0.1.0-alpha.6' }],
+      }),
+    );
+
+    expect(s.staged).toEqual([{ root, version: '0.1.0-alpha.7', timeoutMs: 120_000 }]);
+    expect(s.ensured).toEqual([{ root, pin: PIN, timeoutMs: 300_000 }]);
+    // Placed for real: complete, and the stage moved in rather than copied.
+    expect(existsSync(join(root, 'versions', '0.1.0-alpha.7', '.complete'))).toBe(true);
+    expect(existsSync(join(root, 'tmp', 'stage-0.1.0-alpha.7-fixture'))).toBe(false);
+
+    // One child, the new build on the Node it pins, and no manager at all.
+    expect(spawned.calls).toEqual([
+      {
+        cmd: nodeBinPath(root, PIN.version),
+        args: [versionEntry(root, '0.1.0-alpha.7'), 'install', '--refresh'],
+        cwd: homedir(),
+        env: { TENJIN_DATA_DIR: dataDir, TENJIN_NO_UPDATE_CHECK: '1' },
+      },
+    ]);
+    expect(lockHeld).toBe(false);
+
+    expect(result.data).toMatchObject({
+      current: '0.1.0-alpha.6',
+      latest: '0.1.0-alpha.7',
+      updated: true,
+      mcpServer: { status: 'warn', fix: RECONNECT_FIX },
+    });
+    const lines = result.humanLines ?? [];
+    expect(lines.slice(0, 2)).toEqual([
+      'Updated tenjin-cli 0.1.0-alpha.6 -> 0.1.0-alpha.7.',
+      'The previous version (0.1.0-alpha.6) stays as the fallback.',
+    ]);
+    expect(lines.join('\n')).toContain(RECONNECT_FIX);
+    expect(stderr()).toContain(
+      'tenjin update: staged tenjin-cli 0.1.0-alpha.7 in ~/.tenjin/runtime',
+    );
+  });
+
+  it('names the proxy, and a Node that uses it, when the download skipped the shell’s proxy (#470)', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    const offline: UpdateDeps['ensure'] = async () => {
+      throw new CliError('NETWORK_ERROR', 'could not download https://nodejs.org/x: fetch failed');
+    };
+    vi.stubEnv('HTTPS_PROXY', 'http://proxy.corp:3128');
+    try {
+      const run = async (proxySupported: boolean) =>
+        runUpdate(
+          { check: false },
+          ctx,
+          await deps({
+            moduleDir: await installedTree('_npx', 'f00d'),
+            currentVersion: '0.1.0-alpha.5',
+            homeDir: home,
+            spawnImpl: children(async () => undefined).impl,
+            stage: s.stage,
+            ensure: offline,
+            proxySupported,
+          }),
+        ).catch((e: unknown) => e);
+      const err = await run(false);
+      expect(err).toMatchObject({
+        code: 'NETWORK_ERROR',
+        message: `could not download https://nodejs.org/x: fetch failed: this shell sets HTTPS_PROXY, which Node ${process.versions.node} cannot send downloads through`,
+        fix: "Run `tenjin update` once with Node 24.14 or newer, which uses the proxy; Tenjin's own Node does from then on.",
+      });
+      // The stage goes either way; nothing points at it.
+      expect(existsSync(join(root, 'tmp', 'stage-0.1.0-alpha.7-fixture'))).toBe(false);
+      expect(await run(true)).toMatchObject({
+        message: 'could not download https://nodejs.org/x: fetch failed',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('copies this npm build when it is the release, and downloads no tarball', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    const spawned = children(() => writeState('0.1.0-alpha.7', '0.1.0-alpha.6'));
+    // Built before the package is written: the default `deps` tree is this same folder.
+    const d = await deps({
+      currentVersion: '0.1.0-alpha.7',
+      homeDir: home,
+      spawnImpl: spawned.impl,
+      stage: forbiddenStage,
+      ensure: s.ensure,
+    });
+    const moduleDir = d.moduleDir!;
+    await writeFile(
+      join(moduleDir, '..', 'package.json'),
+      JSON.stringify({
+        name: 'tenjin-cli',
+        version: '0.1.0-alpha.7',
+        tenjinRuntime: { node: PIN },
+      }),
+    );
+    await writeFile(join(moduleDir, 'index.js'), '// this build');
+    await runUpdate({ check: false }, ctx, d);
+    expect(await readFile(versionEntry(root, '0.1.0-alpha.7'), 'utf8')).toBe('// this build');
+    expect(s.ensured.map((e) => e.pin)).toEqual([PIN]);
+    expect(spawned.calls[0]?.args[0]).toBe(versionEntry(root, '0.1.0-alpha.7'));
+  });
+
+  it('refuses a release that carries no Node pin, before any child or Node', async () => {
+    await writeState('0.1.0-alpha.6');
+    const before = await readState();
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        ctx,
+        await deps({
+          homeDir: home,
+          spawnImpl: forbiddenSpawn,
+          stage: seams(null).stage,
+          ensure: forbiddenEnsure,
+        }),
+      ),
+    );
+    expect(err.code).toBe('UPDATE_FAILED');
+    expect(err.message).toBe(
+      'tenjin-cli 0.1.0-alpha.7 carries no Node pin, so 0.1.0-alpha.6 stays',
+    );
+    expect(err.fix).toBeDefined();
+    expect(existsSync(join(root, 'tmp', 'stage-0.1.0-alpha.7-fixture'))).toBe(false);
+    expect(await readState()).toBe(before);
+  });
+
+  /**
+   * The child's exit code is not the verdict: a new build whose own checks
+   * failed keeps the previous version and can still exit 0. Either way the
+   * state did not move, so the update failed and says what stays.
+   */
+  it('fails naming what stays when the new build did not switch the runtime', async () => {
+    for (const [said, reason] of [
+      [
+        { result: { kind: 'exit', code: 3 }, output: refusal('the hooks did not answer') },
+        'the hooks did not answer',
+      ],
+      [
+        {
+          output: envelope({
+            refresh: true,
+            runtime: { state: 'kept', reason: 'the router did not answer initialize' },
+          }),
+        },
+        'the router did not answer initialize',
+      ],
+    ] as [{ result?: SpawnResult; output?: string }, string][]) {
+      await writeState('0.1.0-alpha.6');
+      const before = await readState();
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const s = seams();
+      const err = await caught(async () =>
+        runUpdate(
+          { check: false },
+          ctx,
+          await deps({
+            homeDir: home,
+            spawnImpl: children(async () => said).impl,
+            stage: s.stage,
+            ensure: s.ensure,
+          }),
+        ),
+      );
+      expect(err.code).toBe('UPDATE_FAILED');
+      expect(err.message).toBe(
+        'tenjin-cli 0.1.0-alpha.7 did not pass its checks, so 0.1.0-alpha.6 stays',
+      );
+      expect(err.fix).toBe('Run `tenjin update` again; if it fails again, run `tenjin doctor`');
+      expect(err.details).toMatchObject({ reason });
+      expect(await readState()).toBe(before);
+    }
+  });
+
+  it('answers --check and up to date against the runtime, not this copy', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const check = await runUpdate(
+      { check: true },
+      ctx,
+      await deps({
+        currentVersion: '0.1.0-alpha.4',
+        homeDir: home,
+        stage: forbiddenStage,
+        ensure: forbiddenEnsure,
+      }),
+    );
+    expect(check.data).toMatchObject({ current: '0.1.0-alpha.6', updateAvailable: true });
+    expect(check.humanLines?.[0]).toBe(
+      'tenjin-cli 0.1.0-alpha.7 is available (you have 0.1.0-alpha.6).',
+    );
+
+    // This copy is older than npm's latest, but the runtime already runs it.
+    const current = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        currentVersion: '0.1.0-alpha.4',
+        fetchImpl: registry({ latest: '0.1.0-alpha.6' }).fetchImpl,
+        homeDir: home,
+        stage: forbiddenStage,
+        ensure: forbiddenEnsure,
+      }),
+    );
+    expect(current.humanLines).toEqual(['tenjin-cli 0.1.0-alpha.6 is up to date']);
+  });
+
+  it('takes the npm branch under a non-default data dir, whatever the default holds', async () => {
+    await writeState('0.1.0-alpha.6');
+    const shelf = join(home, 'shelf');
+    await mkdir(shelf, { recursive: true });
+    const { ctx } = makeCtx();
+    ctx.dataDir = shelf;
+    const spawned = spawnRecorder();
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        homeDir: home,
+        spawnImpl: spawned.impl,
+        stage: forbiddenStage,
+        ensure: forbiddenEnsure,
+      }),
+    );
+    expect(spawned.calls[0]?.args).toContain('tenjin-cli@0.1.0-alpha.7');
+    expect(spawned.calls[1]).toMatchObject({
+      cmd: process.execPath,
+      args: [join(dir, 'bin', 'tenjin.js'), 'install', '--refresh'],
+    });
+  });
+
+  it('refuses a runtime build under a non-default data dir as that, not as a project-local copy', async () => {
+    await writeState('0.1.0-alpha.6');
+    const build = join(root, 'versions', '0.1.0-alpha.6', 'dist');
+    await mkdir(build, { recursive: true });
+    const shelf = join(home, 'shelf');
+    await mkdir(shelf, { recursive: true });
+    const { ctx } = makeCtx();
+    ctx.dataDir = shelf;
+    const spawned = spawnRecorder();
+    const err = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        moduleDir: build,
+        currentVersion: '0.1.0-alpha.6',
+        homeDir: home,
+        spawnImpl: spawned.impl,
+        stage: forbiddenStage,
+        ensure: forbiddenEnsure,
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message:
+        "This tenjin runs from Tenjin's runtime, which only the default data dir (~/.tenjin) uses, and TENJIN_DATA_DIR is ~/shelf, so nothing was updated",
+    });
+    expect((err as CliError).fix).toMatch(/^Run `tenjin update` with TENJIN_DATA_DIR unset/);
+    expect((err as CliError).message).not.toContain('project-local');
+    expect(spawned.calls).toEqual([]);
+  });
+
+  /**
+   * `tenjin uninstall --harness claude` with Codex kept leaves the runtime and
+   * its launcher and no Claude Code install. The child is the real
+   * `install --refresh`, run in-process on that machine, with only the
+   * runtime step injected: it switches the runtime, as the new build's would.
+   */
+  it('updates a runtime Codex kept after Claude Code’s install was removed', async () => {
+    await writeState('0.1.0-alpha.6');
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    const cfg = join(dir, 'claude-config');
+    const child: UpdateSpawn = async (_cmd, _args, o, onOutput) => {
+      const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+      const childCtx: CommandContext = {
+        flags: { json: true, timeout: 5000 },
+        dataDir: o.env?.TENJIN_DATA_DIR ?? '',
+        io: { stdout: sink, stderr: sink, isTTY: false },
+      };
+      try {
+        const out = await runRouterInstall({ refresh: true }, childCtx, {
+          homeDir: home,
+          cwd: home,
+          env: { CLAUDE_CONFIG_DIR: cfg },
+          findClaude: () => null,
+          listMcpProcesses: async () => [],
+          runtime: async () => {
+            await writeState('0.1.0-alpha.7', '0.1.0-alpha.6');
+            return {
+              state: 'active',
+              root,
+              cli: '0.1.0-alpha.7',
+              nodeVersion: PIN.version,
+              node: nodeBinPath(root, PIN.version),
+              entry: versionEntry(root, '0.1.0-alpha.7'),
+              hostsDir: join(root, 'claude'),
+              firstTime: false,
+              launcher: null,
+            };
+          },
+        });
+        onOutput(`${JSON.stringify(buildSuccessEnvelope('install', out.data), null, 2)}\n`);
+        return { kind: 'exit', code: 0 };
+      } catch (err) {
+        onOutput(`${JSON.stringify(buildFailureEnvelope('install', err as CliError), null, 2)}\n`);
+        return { kind: 'exit', code: (err as CliError).exitCode };
+      }
+    };
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ homeDir: home, spawnImpl: child, stage: s.stage, ensure: s.ensure }),
+    );
+    expect(result.data).toMatchObject({
+      current: '0.1.0-alpha.6',
+      latest: '0.1.0-alpha.7',
+      updated: true,
+    });
+    expect(result.humanLines?.[0]).toBe('Updated tenjin-cli 0.1.0-alpha.6 -> 0.1.0-alpha.7.');
+    // Nothing for Claude Code was created.
+    expect(existsSync(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+  });
+
+  /**
+   * The home child records Claude Code's project installs an older release
+   * never did, so the list is read after it; each project runs the same new
+   * build, from exactly its own folder.
+   */
+  it('refreshes a project the home child recorded, with the same launch', async () => {
+    await writeState('0.1.0-alpha.6');
+    const project = join(dir, 'app');
+    await mkdir(join(project, '.claude'), { recursive: true });
+    await writeFile(
+      join(project, '.claude', 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { [PLUGIN_ID]: true } }),
+    );
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const s = seams();
+    const spawned = children(async (i) => {
+      if (i > 0) return { output: envelope({ refresh: true, scope: 'local' }) };
+      await writeFile(
+        join(dataDir, 'config.json'),
+        JSON.stringify({ install: { routerProjects: [project] } }),
+      );
+      await writeState('0.1.0-alpha.7', '0.1.0-alpha.6');
+      return { output: envelope({ refresh: true, scope: 'user' }) };
+    });
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({ homeDir: home, spawnImpl: spawned.impl, stage: s.stage, ensure: s.ensure }),
+    );
+    expect(spawned.calls[1]).toEqual({
+      cmd: nodeBinPath(root, PIN.version),
+      args: [versionEntry(root, '0.1.0-alpha.7'), 'install', '--refresh', '--project'],
+      cwd: project,
+      env: { TENJIN_DATA_DIR: dataDir, TENJIN_NO_UPDATE_CHECK: '1' },
+    });
+    expect(result.humanLines).toContain(`Refreshed the project install in ${project}.`);
+  });
+
+  describe('--background, as lib/auto-update starts it', () => {
+    const record = async () =>
+      JSON.parse(await readFile(join(root, 'auto-update.json'), 'utf8')) as Record<string, unknown>;
+    const STARTED = '2026-10-01T00:00:00.000Z';
+    const started = () =>
+      writeFile(join(root, 'auto-update.json'), JSON.stringify({ startedAt: STARTED }));
+
+    it('with no runtime, never reaches npm and records skipped', async () => {
+      await started();
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const result = await runUpdate(
+        { check: false, background: true },
+        ctx,
+        await deps({
+          homeDir: home,
+          spawnImpl: forbiddenSpawn,
+          stage: forbiddenStage,
+          ensure: forbiddenEnsure,
+        }),
+      );
+      expect(result.data).toEqual({ skipped: 'no runtime' });
+      expect(await record()).toMatchObject({
+        startedAt: STARTED,
+        outcome: 'skipped',
+        reason: 'no runtime',
+      });
+    });
+
+    it('records updated after the runtime branch switched, keeping when it started', async () => {
+      await writeState('0.1.0-alpha.6');
+      await writeFile(
+        join(root, 'auto-update.json'),
+        JSON.stringify({ startedAt: STARTED, outcome: 'failed', reason: 'yesterday' }),
+      );
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const s = seams();
+      const spawned = children(() => writeState('0.1.0-alpha.7', '0.1.0-alpha.6'));
+      await runUpdate(
+        { check: false, background: true },
+        ctx,
+        await deps({ homeDir: home, spawnImpl: spawned.impl, stage: s.stage, ensure: s.ensure }),
+      );
+      // The same child the foreground update runs: the new build checks itself.
+      expect(spawned.calls.map((c) => c.args.slice(1))).toEqual([['install', '--refresh']]);
+      const r = await record();
+      expect(r).toMatchObject({
+        startedAt: STARTED,
+        outcome: 'updated',
+        from: '0.1.0-alpha.6',
+        to: '0.1.0-alpha.7',
+      });
+      expect(r.reason).toBeUndefined();
+      expect(typeof r.finishedAt).toBe('string');
+    });
+
+    it('records current when up to date, and never moves to an older version', async () => {
+      for (const running of ['0.1.0-alpha.7', '0.1.0-alpha.8']) {
+        await writeState(running);
+        const before = await readState();
+        const { ctx } = makeCtx();
+        ctx.dataDir = dataDir;
+        await runUpdate(
+          { check: false, background: true },
+          ctx,
+          await deps({
+            homeDir: home,
+            spawnImpl: forbiddenSpawn,
+            stage: forbiddenStage,
+            ensure: forbiddenEnsure,
+          }),
+        );
+        expect(await record()).toMatchObject({ outcome: 'current', to: running });
+        expect(await readState()).toBe(before);
+      }
+    });
+
+    it('records failed with the reason, rethrows, and keeps the current version', async () => {
+      await writeState('0.1.0-alpha.6');
+      const before = await readState();
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const err = await caught(async () =>
+        runUpdate(
+          { check: false, background: true },
+          ctx,
+          await deps({
+            homeDir: home,
+            spawnImpl: forbiddenSpawn,
+            stage: seams(null).stage,
+            ensure: forbiddenEnsure,
+          }),
+        ),
+      );
+      expect(err.code).toBe('UPDATE_FAILED');
+      expect(await record()).toMatchObject({
+        outcome: 'failed',
+        from: '0.1.0-alpha.6',
+        reason: 'tenjin-cli 0.1.0-alpha.7 carries no Node pin, so 0.1.0-alpha.6 stays',
+      });
+      expect(await readState()).toBe(before);
+    });
   });
 });

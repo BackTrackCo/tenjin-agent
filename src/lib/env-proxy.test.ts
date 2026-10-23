@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { envProxySupported, proxyVariable, useEnvProxy } from './env-proxy';
+import { envProxySupported, proxySkipped, proxyVariable, useEnvProxy } from './env-proxy';
 
 describe('useEnvProxy', () => {
   it('sets the global proxy when a proxy variable is set', () => {
@@ -43,4 +43,14 @@ describe('useEnvProxy', () => {
       expect(envProxySupported()).toBe(true);
     },
   );
+});
+
+describe('proxySkipped', () => {
+  it('names the variable and this Node only when this Node cannot use the proxy', () => {
+    expect(proxySkipped({ https_proxy: 'http://proxy:3128' }, false)).toBe(
+      `this shell sets https_proxy, which Node ${process.versions.node} cannot send downloads through`,
+    );
+    expect(proxySkipped({ https_proxy: 'http://proxy:3128' }, true)).toBeNull();
+    expect(proxySkipped({}, false)).toBeNull();
+  });
 });

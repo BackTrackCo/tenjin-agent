@@ -92,9 +92,12 @@ function isMcpLeg(hook: unknown): boolean {
   );
 }
 
-/** A routing leg an older build wrote as a command (`tenjin hook <kind> --harness codex`). */
+/** A routing leg an older build wrote as a command: `tenjin hook <kind> --harness codex`,
+ *  or the runtime launcher's quoted path in its place. */
 function isCommandLeg(hook: unknown): boolean {
-  return /\btenjin hook (prompt|native|shortfall)\b/.test(String(at(hook, 'command') ?? ''));
+  return /\btenjin(?:\.cmd)?['"]? hook (prompt|native|shortfall)\b/.test(
+    String(at(hook, 'command') ?? ''),
+  );
 }
 
 function routingOf(ours: unknown[]): CodexHookRows['routing'] {

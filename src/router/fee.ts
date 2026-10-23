@@ -27,6 +27,10 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  * hundred lookups. `tenjin wallet fund` sends it to the checkout as a preset.
  */
 export const SUGGESTED_FUND_USD = '5';
+/** The funding line a new wallet is told, after `tenjin wallet create`. */
+export const FUNDING_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`, or send USDC on Base.`;
+/** The funding line under a wallet at exactly $0, in `tenjin wallet balance` and `tenjin status`: the command alone. */
+export const FUND_COMMAND_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`;
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 

@@ -2,11 +2,13 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CliError } from '../lib/errors';
 import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
 import { readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { storeChoices, storeSpecs } from './specs';
+import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
 import { runApproveTool, runRequestTool } from './tool';
 
@@ -301,6 +303,75 @@ describe("approve, called through the host's own prompt", () => {
     // The wallet emptied after the quote: the fund command, nothing paid.
     expect(short.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
     expect(String(short.envelope.reason)).toContain('`tenjin wallet fund`');
+    expect(paidCalls()).toEqual([]);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+  });
+
+  /** THE WALLET OPENS BEFORE THE QUOTE IS USED UP: a saved passphrase that
+   *  is gone stops the yes with nothing paid, and the same quote runs once the
+   *  person has repaired it. */
+  it('a wallet that will not open leaves the quote for a second yes', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const { fetchImpl, paidCalls } = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
+    const locked = new CliError('PROVIDER_ERROR', 'The wallet passphrase could not be reached.', {
+      fix: 'Run `tenjin wallet repair`.',
+      details: { unlock: { reason: 'passphrase_missing' } },
+    });
+    const base = deps(fetchImpl);
+    const lockedDeps = {
+      ...base,
+      payDeps: {
+        ...base.payDeps,
+        provider: {
+          ...testWalletProvider(),
+          getSigner: async () => {
+            throw locked;
+          },
+        },
+      },
+      approves: true,
+    };
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const failed = await runApproveTool(args, lockedDeps);
+    expect(failed.envelope).toMatchObject({ status: 'failed' });
+    const reason = String(failed.envelope.reason);
+    expect(reason).toContain((await readQuote(dir, quote.id))!.sentence);
+    expect(reason).toContain(agentFixOf(locked));
+    expect(reason).toContain('No payment was signed.');
+    expect(paidCalls()).toEqual([]);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+
+    // Repaired: the same quote runs, once.
+    const paid = await runApproveTool(args, { ...deps(fetchImpl), approves: true });
+    expect(paid.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(paidCalls()).toHaveLength(1);
+    const again = await runApproveTool(args, { ...deps(fetchImpl), approves: true });
+    expect(String(again.envelope.reason)).toContain('already ran');
+    expect(paidCalls()).toHaveLength(1);
+  });
+
+  it('lets an error that is not a CliError from opening the wallet propagate', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const { fetchImpl, paidCalls } = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
+    const base = deps(fetchImpl);
+    const broken = {
+      ...base,
+      payDeps: {
+        ...base.payDeps,
+        provider: {
+          ...testWalletProvider(),
+          getSigner: async () => {
+            throw new TypeError('boom');
+          },
+        },
+      },
+      approves: true,
+    };
+    await expect(
+      runApproveTool({ quote: quote.id, total: quote.total, what: quote.what }, broken),
+    ).rejects.toThrow('boom');
     expect(paidCalls()).toEqual([]);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
   });

@@ -103,6 +103,25 @@ describe.skipIf(!existsSync(dist))('the hook chunk graph', () => {
     }
   });
 
+  /** Started from the alive leg and Codex's server: the layout and `node:*`
+   *  only, never the runtime's writer, the update command or the config schema. */
+  it('keeps the background auto-update light', () => {
+    const entry = chunkContaining('lib/auto-update');
+    expect(entry, 'the auto-update should have its own chunk').toBeDefined();
+    const sources = closure(entry!).flatMap(sourcesOf);
+    for (const { label, re } of [
+      ...FORBIDDEN,
+      { label: "the runtime's writer", re: /src[/\\]lib[/\\]runtime\.ts/ },
+      { label: 'the update command', re: /src[/\\]commands[/\\]update/ },
+      { label: 'zod', re: /[/\\]zod[@/\\]/ },
+    ]) {
+      expect(
+        sources.filter((s) => re.test(s)),
+        `${label} reached the auto-update`,
+      ).toEqual([]);
+    }
+  });
+
   it('keeps the redaction corpus out of the status line, which runs every second', () => {
     const entry = chunkContaining('router/status-line');
     expect(entry, 'the status line should have its own chunk').toBeDefined();

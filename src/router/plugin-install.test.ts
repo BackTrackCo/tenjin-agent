@@ -8,8 +8,9 @@ import type { CommandContext } from '../context';
 import { aliveDir, runAliveHook } from './alive';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput, type HookKind } from './hook-tool';
-import { runRouterInstall } from './install';
+import { NEW_SESSION_STEP, runRouterInstall } from './install';
 import { fileURLToPath } from 'node:url';
+import { RECONNECT_FIX } from './mcp-processes';
 import {
   MOD_FILES,
   PLUGIN_DIR,
@@ -59,7 +60,7 @@ beforeEach(async () => {
   mod = (await readModSources(
     join(fileURLToPath(new URL('../../hosts/claude', import.meta.url)), PLUGIN_DIR),
   ))!;
-  for (const [path, body] of Object.entries(renderHostFiles(pkg.version, mod))) {
+  for (const [path, body] of Object.entries(renderHostFiles(pkg.version, { mod }))) {
     await mkdir(dirname(join(hosts, path)), { recursive: true });
     await writeFile(join(hosts, path), body);
   }
@@ -192,7 +193,7 @@ describe('tenjin install registers the plugin through Claude Code', () => {
   it('ends with a step taken in the session, never a command run elsewhere', async () => {
     const result = await runRouterInstall({}, ctx(), deps());
     const next = (result.data as { next: string }).next;
-    expect(next).toContain('/reload-plugins');
+    expect(next).toBe(NEW_SESSION_STEP);
     const text = [next, ...(result.humanLines ?? [])].join('\n');
     expect(text).not.toMatch(/terminal|restart Claude Code|run the command above|by hand/i);
     expect(result.humanLines).toContain(
@@ -251,7 +252,7 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     });
     // Outside the package, so its commands carry the absolute entry install resolved.
     // The mod's files are copied from the package's own plugin folder.
-    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'), mod);
+    const files = renderPluginFiles(pkg.version, join(root, 'pkg', 'dist', 'index.js'), { mod });
     expect(JSON.parse(files['.mcp.json']!)).toEqual({
       mcpServers: {
         router: {
@@ -439,7 +440,7 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       plugin: { method: 'plugin' },
     });
     expect((result.data as { next: string }).next).toMatch(
-      /^run `claude update`, then type \/reload-plugins/,
+      /^run `claude update`, then start a new Claude Code session/,
     );
   });
 
@@ -594,10 +595,11 @@ describe('the settings install of an earlier release', () => {
   });
 
   /**
-   * /reload-plugins RECONNECTS PLUGIN SERVERS ONLY. In the session the upgrade
-   * ran in, the settings install's `x402` server still runs the old build,
-   * which knows no marker, so loading the plugin beside it would route every
-   * event twice. While a settings install stays, the step is a new session.
+   * /reload-plugins RECONNECTS PLUGIN SERVERS ONLY, and does not run the
+   * plugin's `SessionStart`. In the session the upgrade ran in, the settings
+   * install's `x402` server still runs the old build, which knows no marker,
+   * so loading the plugin beside it would route every event twice. The step
+   * is a new session, with or without a settings install.
    */
   it('asks for a new session, never /reload-plugins, while a settings install stays', async () => {
     await writeLegacy();
@@ -607,25 +609,25 @@ describe('the settings install of an earlier release', () => {
     };
     const install = await runRouterInstall({}, ctx(), deps(stale));
     const next = (install.data as { next: string }).next;
-    expect(next).toBe('start a new Claude Code session so Tenjin loads');
+    expect(next).toBe(NEW_SESSION_STEP);
     const text = [next, ...(install.humanLines ?? [])].join('\n');
     expect(text).not.toContain('/reload-plugins in this');
     expect(install.data).toMatchObject({
       mcpServer: {
         status: 'warn',
-        fix: 'Start a new Claude Code session: the earlier Tenjin setup is still in this one, and /reload-plugins would run both.',
+        fix: RECONNECT_FIX,
       },
     });
     const refresh = await runRouterInstall({ refresh: true }, ctx(), deps(stale));
     expect((refresh.data as { notices: string[] }).notices).toEqual([
       'Start a new Claude Code session so the Tenjin plugin loads; the earlier settings setup is removed by the next `tenjin update` or `tenjin install` after that.',
     ]);
-    // Once it is gone, /reload-plugins is safe again.
+    // Once it is gone, the step is still a new session.
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
     await runRouterInstall({ refresh: true }, ctx(), deps());
     const after = await runRouterInstall({}, ctx(), deps(stale));
-    expect((after.data as { next: string }).next).toContain('/reload-plugins');
+    expect((after.data as { next: string }).next).toBe(NEW_SESSION_STEP);
   });
 
   it('names the Tenjin status line it removes, in install and in the notices update prints', async () => {
@@ -668,7 +670,11 @@ describe('the settings install of an earlier release', () => {
     expect(result).not.toBeInstanceOf(Error);
     expect(await readFile(join(cfg, 'settings.json'), 'utf8')).toBe(settings);
     expect(await fake.calls()).not.toContain('mcp remove x402 -s user');
-    await runRouterUninstall({}, ctx(), { homeDir: home, cwd: work, env: env() });
+    await runRouterUninstall({ target: { kind: 'user' } }, ctx(), {
+      homeDir: home,
+      cwd: work,
+      env: env(),
+    });
     expect(await readFile(join(cfg, 'settings.json'), 'utf8')).toBe(settings);
   });
 
@@ -681,6 +687,9 @@ describe('the settings install of an earlier release', () => {
 });
 
 describe('tenjin uninstall', () => {
+  const user = { target: { kind: 'user' as const } };
+  const where = (cwd = work) => ({ homeDir: home, cwd, env: env() });
+
   it('removes the plugin and its marketplace through Claude Code, and the settings install, keeping the wallet', async () => {
     await writeLegacy();
     await writeFile(join(data, 'wallet.json'), '{"keep":true}');
@@ -689,7 +698,7 @@ describe('tenjin uninstall', () => {
       'mkt-list',
       `${JSON.stringify([{ name: 'tenjin', source: 'directory', path: hosts }])}\n`,
     );
-    const result = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: work, env: env() });
+    const result = await runRouterUninstall(user, ctx(), where());
     expect(await fake.calls()).toEqual([
       'plugin uninstall tenjin@tenjin --scope user --json',
       'plugin marketplace list --json',
@@ -697,8 +706,10 @@ describe('tenjin uninstall', () => {
       'mcp remove x402 -s user',
     ]);
     expect(result.data).toMatchObject({
-      plugin: { plugin: 'removed', marketplace: 'removed' },
-      settings: { found: true, removed: { allowRule: true, statusLine: 'removed' } },
+      removals: [{ scope: 'user', projectPath: null, state: 'removed' }],
+      remaining: [],
+      marketplace: 'removed',
+      settings: [{ found: true, removed: { allowRule: true, statusLine: 'removed' } }],
       aliveRemoved: true,
     });
     expect(await readFile(join(data, 'wallet.json'), 'utf8')).toBe('{"keep":true}');
@@ -710,28 +721,30 @@ describe('tenjin uninstall', () => {
       'mkt-list',
       `${JSON.stringify([{ name: 'tenjin', source: 'github', repo: 'someone/else' }])}\n`,
     );
-    const result = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: work, env: env() });
+    const result = await runRouterUninstall(user, ctx(), where());
     expect((await fake.calls()).some((c) => c.startsWith('plugin marketplace remove'))).toBe(false);
-    expect(result.data).toMatchObject({ plugin: { marketplace: 'kept' } });
+    expect(result.data).toMatchObject({ marketplace: 'kept' });
   });
 
-  it('says a bare uninstall left the project install here, with the command that removes it', async () => {
+  it("removes the project install of the folder it runs in, from a subfolder, and keeps the user's", async () => {
+    const { persistRouterProject } = await import('../commands/config');
+    const { resolveUninstallTarget } = await import('./uninstall');
     await mkdir(join(work, '.claude'), { recursive: true });
     await writeFile(
       join(work, '.claude', 'settings.local.json'),
       JSON.stringify({ enabledPlugins: { 'tenjin@tenjin': true } }),
     );
-    await fake.respond('uninstall', '{"outcome":"error","failureCode":"not_installed"}\n', 1);
-    const result = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: work, env: env() });
-    expect(result.data).toMatchObject({
-      plugin: { plugin: 'absent' },
-      projectInstallLeft: work,
-    });
-    expect(result.humanLines).toContain(
-      'This project has its own Tenjin install, which this left in place; `tenjin uninstall --project` here removes it.',
-    );
-    const clean = await runRouterUninstall({}, ctx(), { homeDir: home, cwd: root, env: env() });
-    expect(clean.data).not.toHaveProperty('projectInstallLeft');
+    await persistRouterProject(data, work);
+    const sub = join(work, 'src', 'deep');
+    await mkdir(sub, { recursive: true });
+    const target = await resolveUninstallTarget({}, ctx(), where(sub));
+    expect(target).toMatchObject({ kind: 'project' });
+    const result = await runRouterUninstall({ target }, ctx(), where(sub));
+    expect(await fake.calls()).toContain('plugin uninstall tenjin@tenjin --scope local --json');
+    expect(await fake.calls()).not.toContain('plugin uninstall tenjin@tenjin --scope user --json');
+    expect(result.data).toMatchObject({ removals: [{ scope: 'local', state: 'removed' }] });
+    // Away from the project, the bare run is the user's.
+    expect(await resolveUninstallTarget({}, ctx(), where(root))).toEqual({ kind: 'user' });
   });
 
   it("unlinks the plugin folder's listed files and keeps what is not Tenjin's", async () => {
@@ -739,13 +752,13 @@ describe('tenjin uninstall', () => {
     const folder = join(cfg, 'skills', 'tenjin-router');
     await mkdir(join(folder, 'commands'), { recursive: true });
     await writeFile(join(folder, 'commands', 'mine.md'), 'mine');
-    const result = await runRouterUninstall({}, ctx(), {
+    const result = await runRouterUninstall(user, ctx(), {
       homeDir: home,
       cwd: work,
       env: env({ PATH: await emptyPath() }),
     });
     expect(result.data).toMatchObject({
-      plugin: { folder: { removed: true, left: ['commands/mine.md'] } },
+      folders: [{ removed: true, left: ['commands/mine.md'] }],
     });
     expect(await readdir(folder)).toEqual(['commands']);
   });
@@ -823,10 +836,12 @@ describe('tenjin doctor', () => {
   });
 
   describe('whether a session has started the plugin, with a claude binary present', () => {
+    // The PATH layout's fixes: this data dir is not the default, so it has no
+    // runtime, and none offers a move `tenjin install` would not make here.
     const STAMP_FIX =
-      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. Restart Claude Code after installing or updating Node.";
+      "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp. If it still warns, run `node --version` in that session's shell: Claude Code starts the plugin with the Node on its own PATH, and it must be 22 or newer. After installing or updating Node, quit Claude Code fully, then start a new session.";
     const NODE_FIX =
-      'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then restart Claude Code.';
+      'Claude Code starts the plugin with the `node` on its own PATH, which must be 22 or newer: run `node --version` in the shell it starts from, then quit Claude Code fully and start a new session.';
     const INSTALLED = 1_800_000_000_000;
     /** A process list: Claude Code sessions and routers, started at these times. */
     const processes = (claude: number[], routers: { startedAt: number; kind?: string }[] = []) => ({
@@ -984,10 +999,10 @@ describe('tenjin doctor', () => {
       listMcpProcesses: async () => null,
     });
     expect(unknown['plugin']).toMatchObject({ status: 'warn', checked: false });
-    expect(unknown['plugin']?.fix).toContain('/reload-plugins');
+    expect(unknown['plugin']?.fix).toBe(`To load it, ${NEW_SESSION_STEP}.`);
   });
 
-  /** Leaving the session to run a command; restarting Claude Code is not that. */
+  /** Leaving the session to run a command; starting a new session is not that. */
   const OUT_OF_SESSION = /terminal|by hand/i;
 
   it('never sends anyone out of the session to fix a check', async () => {
@@ -1011,7 +1026,8 @@ describe('tenjin doctor', () => {
     expect(c['PATH']).toBeUndefined();
     expect(c['router server']?.status).toBe('fail');
     for (const row of ['plugin', 'router server']) {
-      expect(c[row]?.fix, row).toMatch(/restart Claude Code/i);
+      expect(c[row]?.fix, row).toMatch(/start a new (Claude Code )?session/i);
+      expect(c[row]?.fix, row).not.toMatch(/restart Claude Code/i);
       expect(c[row]?.fix, row).not.toMatch(OUT_OF_SESSION);
     }
   });

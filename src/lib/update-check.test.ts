@@ -595,7 +595,7 @@ describe('maybeUpdate', () => {
 
 // The agent-visible half of the daily check. The dim stderr line only ever
 // reaches a human at a terminal; this is what the harness driving the command
-// actually reads, and it is why there is no auto-install mode.
+// actually reads. `auto` installs elsewhere (lib/auto-update) and reports here.
 describe('readUpdateSignal', () => {
   it('reports a newer version from the cache, without fetching', async () => {
     await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.7' } });
@@ -609,6 +609,30 @@ describe('readUpdateSignal', () => {
     expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
     await seedCache({ latest: { checkedAtMs: NOW, latest: '0.1.0-alpha.6' } });
     expect(await readUpdateSignal(dir, '0.1.0-alpha.6')).toBeNull();
+  });
+
+  // `auto`, the default, installs in the background where the runtime is set
+  // up; the nudge and the signal behave exactly as under `nudge`.
+  it('reports under auto exactly as under nudge', async () => {
+    for (const mode of ['auto', 'nudge'] as const) {
+      await rm(updateCheckPath(dir), { force: true });
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ update: { mode } }));
+      const cap = captureIo(true);
+      await maybeUpdate({
+        dir,
+        io: cap.io,
+        json: false,
+        env: {},
+        now: () => NOW,
+        fetchImpl: registry({ latest: '0.1.0-alpha.7' }).fetchImpl,
+        currentVersion: '0.1.0-alpha.6',
+      });
+      expect(cap.stderr(), mode).toContain('tenjin-cli 0.1.0-alpha.7 is available');
+      expect(await readUpdateSignal(dir, '0.1.0-alpha.6'), mode).toEqual({
+        current: '0.1.0-alpha.6',
+        latest: '0.1.0-alpha.7',
+      });
+    }
   });
 
   // `off` silences BOTH surfaces, not just the line a human sees.

@@ -3,6 +3,7 @@ import {
   isClaudeCode,
   listMcpProcesses,
   mcpServersState,
+  NEW_SESSION_FIX,
   parsePs,
   readMcpServers,
   readProcessSnapshot,
@@ -44,6 +45,52 @@ describe('parsePs', () => {
       ],
       claude: [],
     });
+  });
+
+  it('reads the version of a router launched from Tenjin’s runtime, under a home with a space', () => {
+    const runtime = '/x/.tenjin/runtime';
+    const spaced = '/Users/Jane Doe/.tenjin/runtime';
+    const out = [
+      ps(
+        1,
+        0,
+        'S',
+        LATER,
+        `${runtime}/node/24.15.0/bin/node ${runtime}/versions/0.1.0-alpha.32/dist/index.js mcp --plugin`,
+      ),
+      ps(
+        2,
+        0,
+        'S',
+        LATER,
+        `${spaced}/node/24.15.0/bin/node ${spaced}/versions/0.1.0-alpha.33/dist/index.js mcp --plugin`,
+      ),
+      ps(
+        3,
+        0,
+        'S',
+        LATER,
+        `${runtime}/node/24.15.0/bin/node ${runtime}/versions/0.1.0-alpha.32/dist/index.js doctor`,
+      ),
+    ].join('\n');
+    expect(parsePs(out, 0).routers).toEqual([
+      {
+        pid: 1,
+        startedAt: AFTER,
+        ppid: 0,
+        kind: 'plugin',
+        underClaude: false,
+        version: '0.1.0-alpha.32',
+      },
+      {
+        pid: 2,
+        startedAt: AFTER,
+        ppid: 0,
+        kind: 'plugin',
+        underClaude: false,
+        version: '0.1.0-alpha.33',
+      },
+    ]);
   });
 
   it('skips a zombie router: it has exited', () => {
@@ -167,6 +214,35 @@ describe('mcpServersState', () => {
     });
   });
 
+  it('calls a runtime router stale by its version, whenever it started', () => {
+    const { stale, check } = mcpServersState(
+      [
+        { pid: 1, startedAt: AFTER, version: '0.1.0-alpha.32' },
+        { pid: 2, startedAt: BEFORE, version: '0.1.0-alpha.33' },
+        { pid: 3, startedAt: AFTER },
+      ],
+      INSTALLED,
+      '0.1.0-alpha.33',
+    );
+    expect(stale).toBe(1);
+    expect(check.fix).toBe(RECONNECT_FIX);
+    // A runtime router needs no install time to be judged.
+    expect(
+      mcpServersState(
+        [{ pid: 1, startedAt: null, version: '0.1.0-alpha.32' }],
+        null,
+        '0.1.0-alpha.33',
+      ).stale,
+    ).toBe(1);
+  });
+
+  it('names a new session as the fix, never /reload-plugins', () => {
+    expect(RECONNECT_FIX).toBe(
+      'Start a new Claude Code session: this one still runs the earlier Tenjin build.',
+    );
+    expect(NEW_SESSION_FIX).toBe(RECONNECT_FIX);
+  });
+
   it('passes with the count when every server started after the install', () => {
     expect(mcpServersState([{ pid: 3, startedAt: AFTER }], INSTALLED)).toEqual({
       stale: 0,
@@ -201,6 +277,17 @@ describe('mcpServersState', () => {
     });
     // A start time ps did not give is not called stale.
     expect(mcpServersState([{ pid: 1, startedAt: null }], INSTALLED).stale).toBe(0);
+  });
+
+  it('judges runtime routers against the version it is given', async () => {
+    const state = await readMcpServers(
+      {
+        listMcpProcesses: async () => [{ pid: 1, startedAt: AFTER, version: '0.1.0-alpha.32' }],
+        installedAt: async () => INSTALLED,
+      },
+      { version: '0.1.0-alpha.32' },
+    );
+    expect(state.stale).toBe(0);
   });
 
   it('reads through the injected sources, and a failing one reads as unknown', async () => {

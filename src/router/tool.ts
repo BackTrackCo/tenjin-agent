@@ -59,6 +59,7 @@ import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './
 import {
   approveCall,
   oneCall,
+  paymentProvider,
   planStop,
   quotedCall,
   quoteView,
@@ -354,8 +355,24 @@ export async function runApproveTool(
       { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
     );
   }
+  // THE WALLET OPENS BEFORE THE QUOTE IS USED UP. `admitQuote` spends the
+  // quote's one run, so a wallet that will not sign (a passphrase gone or
+  // wrong) must stop here, with the quote still open for a yes after the
+  // person repairs it. `runPay` reuses this provider and its opened signer.
+  const provider = paymentProvider(deps);
+  try {
+    await provider.getSigner();
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    return fail(
+      'failed',
+      `${quote.sentence} ${err.message} No payment was signed. ${agentFixOf(err)}`.trim(),
+      { nextStep: 'Tell the user. The quote waits for its ten minutes; nothing was paid.' },
+    );
+  }
   const call_: RequestToolDeps = {
     ...deps,
+    provider,
     startedAt: deps.startedAt ?? now(),
     downloads: deps.downloads ?? { leftBytes: MAX_CALL_DOWNLOAD_BYTES },
   };
