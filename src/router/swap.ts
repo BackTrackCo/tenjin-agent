@@ -1,6 +1,9 @@
+import { loadRawConfig } from '../lib/config';
+import { configPath } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { admitByPolicy } from './admit';
-import { decideSwap, type HookDeps } from './hooks';
+import { decideSwap, outsideAutomaticUse, type HookDeps } from './hooks';
+import { personalSettings, type ReplacementSetting } from './settings';
 import {
   costLines,
   routeOf,
@@ -28,7 +31,8 @@ import {
  * 3. The lead's providers fit the automatic scope (`replacementFits`).
  * 4. The user's rules admit it ({@link admitByPolicy}), read again now.
  * 5. It would run without approval within the limits and the balance.
- * 6. Nothing else holds this call's redirect claim (dedupe).
+ * 6. The switch and its scope, read again now, still let it.
+ * 7. Nothing else holds this call's redirect claim (dedupe).
  *
  * Then `request({id, input: bound})` runs through the ordinary executor,
  * unchanged: `bound` is never parsed, filled, edited or merged here. A
@@ -101,6 +105,11 @@ export async function runSwap(
     { stored: false },
   );
   if ('refused' in admitted) return handBack('your settings rule it out');
+  // THE SWITCH AND ITS SCOPE AS THEY ARE NOW: automatic use turned off, or
+  // narrowed past this pick, while the router decided stops it here, before
+  // anything is claimed or sent.
+  const outside = outsideAutomaticUse(await replacementNow(hookDeps.dataDir), spec.identity);
+  if (outside !== null) return handBack(outside);
   if (!(await decided.claim())) return handBack('already routed once');
   const ran = await runRequestTool(
     { id: offer.id, input: bound },
@@ -119,4 +128,10 @@ export async function runSwap(
     summary: notices.length > 0 ? `${ran.summary}\n${notices.join('\n')}` : ran.summary,
     envelope: { ...envelope, via: 'swap' },
   };
+}
+
+/** The automatic switch and its provider scope, from the global file now. */
+async function replacementNow(dataDir: string): Promise<ReplacementSetting> {
+  const config = await loadRawConfig(dataDir);
+  return personalSettings(config.router, configPath(dataDir)).nativeReplacement;
 }

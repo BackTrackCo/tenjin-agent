@@ -52,7 +52,7 @@ import {
   wasOffered,
   writeProgress,
 } from './progress';
-import { routerSettings, type RouterSettings } from './settings';
+import { routerSettings, type ReplacementSetting, type RouterSettings } from './settings';
 import { admitRoutes, replacementFits } from './access';
 
 /**
@@ -1323,6 +1323,27 @@ export type SwapDecision =
     };
 
 /**
+ * WHY THE AUTOMATIC SWITCH AND ITS SCOPE KEEP A PICK FROM RUNNING IN PLACE,
+ * or null when they let it: the switch off, or a narrowed provider scope the
+ * route does not fit, which a route with no known provider never does. After
+ * selection, never instead of it: a pick outside is an ordinary offer.
+ */
+export function outsideAutomaticUse(
+  replacement: ReplacementSetting,
+  identity: OfferSpec['identity'],
+): string | null {
+  if (replacement.mode !== 'when-routed') return 'automatic use is off';
+  const { providers } = replacement;
+  if (
+    providers !== undefined &&
+    (identity === undefined || !replacementFits(identity, providers))
+  ) {
+    return 'outside automatic use';
+  }
+  return null;
+}
+
+/**
  * THE SWAP'S DECISION, for a host that can answer a WebSearch or WebFetch in
  * place (`router.nativeReplacement: when-routed`, the Claude Code mod). The
  * same route the pre-call hook takes: the switch, the transcript, the hook
@@ -1383,16 +1404,10 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
     return back('no input to run in place');
   }
   if (withheldBySettings(outcome, router.settings) !== null) return back('settings rule it out');
-  // THE AUTOMATIC SCOPE, after selection and never instead of it: a pick
-  // outside it is an ordinary offer. Every provider the route names has to be
-  // in it, and a route with none named never fits a narrowed scope.
-  const { providers } = nativeReplacement;
-  if (
-    providers !== undefined &&
-    (spec.identity === undefined || !replacementFits(spec.identity, providers))
-  ) {
-    return back('outside automatic use');
-  }
+  // THE AUTOMATIC SCOPE, after selection and never instead of it. `runSwap`
+  // reads it again before anything runs.
+  const outside = outsideAutomaticUse(nativeReplacement, spec.identity);
+  if (outside !== null) return back(outside);
   // ONLY A CALL THAT WOULD RUN ON ITS OWN: over a limit, or a wallet that
   // cannot pay, goes back to the offer, whose request asks for approval.
   const vetted = await vetOffer(outcome, deps, deadline, false);

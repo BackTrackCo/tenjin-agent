@@ -241,6 +241,12 @@ function search(over: Record<string, unknown> = {}): Record<string, unknown> {
 const swap = (net: ReturnType<typeof network>, event = search()) =>
   runSwap(event, hookDeps(net.fetchImpl), requestDeps(net.fetchImpl));
 
+/** The global file, rewritten while the router decides: another process saving. */
+const savedWhileDeciding = (router: Record<string, unknown>) => () => {
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...LIMITS, router }));
+  return decision();
+};
+
 describe('a search run in place', () => {
   it('runs the bound input once through the executor, tagged on the ledger and the report', async () => {
     const net = network();
@@ -397,6 +403,32 @@ describe('a search handed back', () => {
     expect((await swap(net)).envelope).toMatchObject({ reason: 'your settings rule it out' });
     expect(net.providerCalls()).toEqual([]);
     // Never claimed: the native call runs as it would have.
+    expect(await redirectClaimed(dir, SESSION, undefined, `WebSearch ${QUERY}`)).toBe(false);
+  });
+
+  it('when automatic use is turned off while the router decides: nothing claimed or sent', async () => {
+    const net = network({ decide: savedWhileDeciding({}) });
+    expect((await swap(net)).envelope).toMatchObject({
+      swap: 'handback',
+      reason: 'automatic use is off',
+    });
+    expect(net.providerCalls()).toEqual([]);
+    expect(runPay).not.toHaveBeenCalled();
+    expect(await redirectClaimed(dir, SESSION, undefined, `WebSearch ${QUERY}`)).toBe(false);
+  });
+
+  it('when the scope is narrowed past the pick while the router decides', async () => {
+    const net = network({
+      decide: savedWhileDeciding({
+        nativeReplacement: 'when-routed',
+        nativeReplacementProviders: [provider('exa')],
+      }),
+    });
+    expect((await swap(net)).envelope).toMatchObject({
+      swap: 'handback',
+      reason: 'outside automatic use',
+    });
+    expect(net.providerCalls()).toEqual([]);
     expect(await redirectClaimed(dir, SESSION, undefined, `WebSearch ${QUERY}`)).toBe(false);
   });
 
