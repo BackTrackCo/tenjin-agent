@@ -197,7 +197,8 @@ docs `{query, id}` are exact and never ranked.
 Every form that offers, specs or lists a service applies them: the hook and
 the query offer only allowed services (a batch form, a compare option and the
 list's menu included), browse lists only allowed rows, and an open-Bazaar
-listing is dropped before its pick. A page read's reader is picked by the page
+listing is dropped before its pick, as is one at the endpoint of a catalog
+service the rules exclude. A page read's reader is picked by the page
 first: a rule against the reader a route or the user's message names refuses
 the page rather than move it, and a preference ranks only the readers serving
 the same need.
