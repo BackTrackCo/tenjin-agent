@@ -98,11 +98,12 @@ gate is offered only the tasks whose capabilities a client runs.
   `WebSearch` or `WebFetch`, no `nativeOutcome`), an `execute` or `discovered`
   answer whose lead has a spec and no `choices` may carry `bound`: the complete
   input for the spec under the decision's `id`, from that native call, pins
-  left out. The client runs it unchanged in the native call's place, through
-  its ordinary executor, or not at all; it never edits it. Never for the free
-  docs lookup or an `augment`. An account lead carries one only for a client
-  that also sends `mcp`, and only when Tenjin has checked its map
-  (`verified`).
+  left out; a required field the call does not carry (a result count) takes
+  the `default` the spec's schema declares. The client runs it unchanged in
+  the native call's place, through its ordinary executor, or not at all; it
+  never edits it. Never for the free docs lookup or an `augment`. An account
+  lead carries one only for a client that also sends `mcp`, and only when
+  Tenjin has checked its map (`verified`).
 - `mcp`: services on the user's connected accounts (Connected accounts,
   below): a spec whose call is an MCP tool call on that account, the
   `execute` that offers one with no `endpoint`, the `fallback` beside it, and
