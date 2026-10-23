@@ -49,8 +49,6 @@ export interface RouterObserver {
   takeNews: (sessionId: string) => Promise<WalletNews>;
   /** The MCP client's own name and version, once it has said them. */
   noteClient: (client: { name: string; version: string }) => void;
-  /** The plugin's mod asked to run a pick in place: it is loaded. */
-  noteSwap: () => void;
   /** Remove the exit handler and the observation (tests; the process exit does it otherwise). */
   dispose: () => void;
 }
@@ -163,12 +161,6 @@ export function createRouterObserver(o: {
         client: { name: client.name.slice(0, 200), version: client.version.slice(0, 200) },
         at: now(),
       };
-      write();
-    },
-
-    noteSwap() {
-      if (observation.swapAt !== undefined) return;
-      observation = { ...observation, swapAt: now(), at: now() };
       write();
     },
 

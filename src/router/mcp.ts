@@ -284,7 +284,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     },
     requestDeps: RequestToolDeps,
   ): Promise<RequestToolResult> => {
-    opts.observer?.noteSwap();
     const seen = sessions.get(decide.session_id);
     if (seen === undefined) return handBack('this session has not been seen by Tenjin yet');
     const event = await admitHookEvent(

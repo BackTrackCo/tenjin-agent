@@ -58,9 +58,6 @@ export interface RouterObservation {
   /** The host that started this router, as it named itself to the server:
    *  what readback reads to say whether picks can run in place there. */
   client?: { name: string; version: string };
-  /** When the plugin's mod first asked this router to run a pick in place
-   *  (`swap.ts`): proof the mod is loaded in that host. */
-  swapAt?: number;
 }
 
 export interface UnlockInputs {
@@ -117,7 +114,6 @@ const ObservationSchema = z.object({
     })
     .optional(),
   client: z.object({ name: z.string().max(200), version: z.string().max(200) }).optional(),
-  swapAt: z.number().optional(),
 });
 
 const UnlockRecordSchema = z.object({
