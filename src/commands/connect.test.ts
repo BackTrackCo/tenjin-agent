@@ -41,7 +41,10 @@ const APIFY_TOOLS: AccountTool[] = [
   { name: 'search-actors', arguments: ['keywords'] },
 ];
 const FIRECRAWL_TOOLS: AccountTool[] = [
-  { name: 'firecrawl_scrape', arguments: ['url', 'objective', 'formats', 'onlyMainContent'] },
+  {
+    name: 'firecrawl_scrape',
+    arguments: ['url', 'objective', 'formats', 'onlyMainContent', 'parsers', 'pdfOptions'],
+  },
   { name: 'firecrawl_search', arguments: ['query', 'objective', 'limit'] },
 ];
 const FAL_TOOLS: AccountTool[] = [
@@ -284,7 +287,7 @@ describe('tenjin connect', () => {
     expect(stderr.join('')).not.toContain('fc-secret-123');
     // Unchecked maps run only when named, and the readback says so.
     expect(lines(result)).toContain(
-      "Tenjin hasn't checked Firecrawl for read an exact page and web research yet, so those run only when you ask for Firecrawl by name.",
+      "Tenjin hasn't checked Firecrawl for read an exact page yet, so it runs only when you ask for Firecrawl by name.",
     );
     expect(lines(result)).toContain(
       'Tenjin can act on your Firecrawl account, and only runs the jobs above and the Firecrawl services you ask for by name.',

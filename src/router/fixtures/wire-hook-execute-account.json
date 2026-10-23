@@ -58,14 +58,14 @@
               },
               "failed": {
                 "path": "status",
-                "values": ["FAILED", "ABORTED", "TIMED-OUT"]
+                "values": ["FAILED", "TIMING-OUT", "TIMED-OUT", "ABORTING", "ABORTED"]
               },
               "everyS": 5,
               "maxWaitS": 300
             },
             "tool": "get-dataset-items",
             "args": {
-              "datasetId": "{result.datasetId}",
+              "datasetId": "{result.storages.datasets.default.id}",
               "limit": "{limit}",
               "fields": "title,address,phone,website,totalScore",
               "clean": true

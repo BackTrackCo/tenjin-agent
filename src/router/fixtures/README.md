@@ -7,9 +7,9 @@ validates is a contract only one side keeps. Three divergences so far
 round trip; copy these files rather than hand-writing an equivalent.
 
 Change them here, in the same commit as the `wire.ts` change that makes them
-valid, then copy them across. `harness/` is the exception: harness events
-(what Claude Code hands a router hook) that only this client reads, never
-copied. `ROUTER_VERSION` is `2026-10-23.2`.
+valid, then copy them across. `harness/`, in tenjin-agent alone, is the
+exception: harness events (what Claude Code hands a router hook) that only the
+client reads, never copied. `ROUTER_VERSION` is `2026-10-23.2`.
 
 ## The calls
 
@@ -303,7 +303,8 @@ trimmed to `outputSchema`, as on a paid spec.
 `{when?, poll?, tool, args, result}`:
 
 - Without `when` it always runs: Apify's `call-actor`, then
-  `get-dataset-items` with the run's `datasetId`. With `when: {path, values}`
+  `get-dataset-items` with the run's dataset,
+  `{result.storages.datasets.default.id}`. With `when: {path, values}`
   it runs only when the first result's value at `path` is one of `values`:
   fal's `run_model` answering `processing`.
 - `poll`, `{tool, args, result, running, failed?, everyS, maxWaitS}`, is a
@@ -311,7 +312,8 @@ trimmed to `outputSchema`, as on a paid spec.
   result is in `running` (`{path, values}`). `failed` stops the call; past
   `maxWaitS` seconds from the first call, it ends unfinished.
 - The call that bills is sent once, and never again because its job is still
-  running: only `poll` repeats.
+  running: only `poll` repeats. A spec whose `poll` or follow-up names the
+  first call's `tool` is refused.
 
 The final result is the follow-up's when it ran, else the first call's.
 
@@ -331,7 +333,10 @@ never a batch sibling, a compare option or on a `discovered` offer, and never
 with `bound`, so it never runs in place of a native call. Its `execute`
 carries no `endpoint`, a `providerPriceAtomic` of `"0"` and the lead spec's
 `identity`, and its line names the account by label with no price: `Apify
-Google Maps, your Apify account: …`.
+Google Maps, your Apify account: …`. So once a preference puts an account first
+for a native call its map holds (Firecrawl's scrape holds `WebFetch`), that call
+is denied and offered, and Tenjin's own pick no longer runs in its place
+automatically.
 
 Beside the lead, both answers carry `fallback`: Tenjin's own route for the
 same task, a paid spec with its `identity` (`source: "tenjin"`) and its price,
@@ -340,6 +345,11 @@ the call (its sign-in expired, its plan or rate limit ran out), the client
 stops, charges nothing, and offers the fallback as the next step. It runs the
 fallback only when the user picks it or has opted in for that account. There
 is none when the settings allow no Tenjin route for the task.
+
+An account call's outcome report keeps a broken map apart from an account
+that refused: a refusal (sign-in, plan or rate limit) is `unpaid` with
+`reason: "provider"`, a result that misses `resultSchema` is `unverified`, and
+a poll that reaches `failed` is `failed`.
 
 ### Connecting
 
@@ -364,8 +374,9 @@ Each connectable account is `{id, label, mcpUrl, signIn, key?, services}`:
 `revision` is the ETag of the answer the client gets, so an `mcp` client's
 covers `connectable`.
 
-Signing in uses Tenjin's OAuth client document, `oauth-client-metadata.json`,
-served at its own `client_id`, `https://tenjin.sh/oauth/client-metadata.json`.
+tenjin-cli signs in with Tenjin's OAuth client document, which is its alone,
+`oauth-client-metadata.json`, served at its own `client_id`,
+`https://tenjin.sh/oauth/client-metadata.json`.
 It is a public client: no secret, `token_endpoint_auth_method: "none"`, PKCE,
 `authorization_code` and `refresh_token`. Its `redirect_uris` are fixed
 loopback ports, `http://127.0.0.1:<port>/callback`, which `tenjin connect`
@@ -384,10 +395,12 @@ Both come as `native` with `policy_refused` and the `rule`:
   allow some service for the step, but every one they allow is an account
   service Tenjin hasn't checked and the request doesn't name. It names the
   first: "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it runs only
-  when you ask for it by name." A client refusing, unnamed, a tool of a
-  connected account that has no map uses the same rule on the account's
-  `source`: "Tenjin hasn't checked your <label> account yet, so it runs only
-  when you ask for it by name."
+  when you ask for it by name." When the rules leave nothing checked for any
+  step, the refusal made before the gate names the rule instead, which holds
+  whatever was asked: "Your Tenjin settings block Tenjin's tools." A client
+  refusing, unnamed, a tool of a connected account that has no map uses the
+  same rule on the account's `source`: "Tenjin hasn't checked your <label>
+  account yet, so it runs only when you ask for it by name."
 
 Text a user reads names an account by its label, never its id. The maps ship
 unchecked (catalog `fixtures/catalog/sources`, with no `verifiedAt`). The

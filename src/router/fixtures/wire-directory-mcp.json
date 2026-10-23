@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "routerVersion": "2026-10-23.2",
   "directory": {
-    "revision": "bbe48bb3345345f4",
+    "revision": "0985131ca8fdeeca",
     "categories": [
       {
         "id": "lookups",
@@ -347,19 +347,6 @@
           "categories": ["lookups"],
           "revision": "d230c04c739d1156"
         }
-      },
-      {
-        "id": "firecrawl.search",
-        "label": "Firecrawl search",
-        "identity": {
-          "service": "firecrawl.search",
-          "source": "firecrawl",
-          "providers": ["firecrawl"],
-          "seller": "firecrawl",
-          "task": "web research",
-          "categories": ["lookups"],
-          "revision": "4d91ee025b87f91d"
-        }
       }
     ],
     "retired": [],
@@ -437,17 +424,14 @@
             "tools": [
               {
                 "name": "firecrawl_scrape",
-                "arguments": ["url", "objective", "formats", "onlyMainContent"]
-              }
-            ]
-          },
-          {
-            "id": "firecrawl.search",
-            "verified": false,
-            "tools": [
-              {
-                "name": "firecrawl_search",
-                "arguments": ["query", "objective", "limit"]
+                "arguments": [
+                  "url",
+                  "objective",
+                  "formats",
+                  "onlyMainContent",
+                  "parsers",
+                  "pdfOptions"
+                ]
               }
             ]
           }

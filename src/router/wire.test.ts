@@ -1141,6 +1141,28 @@ describe('the answers about connected accounts', () => {
         return { ...d, specs: [{ ...spec, identity: { ...spec.identity, source: 'tenjin' } }] };
       },
     ],
+    [
+      'a poll that sends the billing call again',
+      (d: Decision) => {
+        const spec = d.specs[0] as {
+          mcp: { tool: string; next: { poll: Record<string, unknown> } };
+        };
+        const { mcp } = spec;
+        const next = { ...mcp.next, poll: { ...mcp.next.poll, tool: mcp.tool } };
+        return { ...d, specs: [{ ...spec, mcp: { ...mcp, next } }] };
+      },
+    ],
+    [
+      'a follow-up that sends the billing call again',
+      (d: Decision) => {
+        const spec = d.specs[0] as { mcp: { tool: string; next: Record<string, unknown> } };
+        const { mcp } = spec;
+        return {
+          ...d,
+          specs: [{ ...spec, mcp: { ...mcp, next: { ...mcp.next, tool: mcp.tool } } }],
+        };
+      },
+    ],
   ])('refuses an account lead with %s', (_, edit) => {
     const { payload, decision } = execute();
     expect(parseForTests('hook', withDecision(payload, edit(decision))).success).toBe(false);

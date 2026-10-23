@@ -265,7 +265,13 @@ const PLACES = {
  *  and its places. */
 function apifyScript(over: Record<string, Answer[]> = {}) {
   return account({
-    'call-actor': [structured({ runId: 'run-1', datasetId: 'ds-1', status: 'RUNNING' })],
+    'call-actor': [
+      structured({
+        runId: 'run-1',
+        storages: { datasets: { default: { id: 'ds-1' } } },
+        status: 'RUNNING',
+      }),
+    ],
     'get-actor-run': [structured({ status: 'RUNNING' }), structured({ status: 'SUCCEEDED' })],
     'get-dataset-items': [structured(PLACES)],
     ...over,
@@ -478,7 +484,11 @@ describe('when the account refuses', () => {
     const session = apifyScript({
       'call-actor': [
         new AccountRefused(401),
-        structured({ runId: 'run-1', datasetId: 'ds-1', status: 'SUCCEEDED' }),
+        structured({
+          runId: 'run-1',
+          storages: { datasets: { default: { id: 'ds-1' } } },
+          status: 'SUCCEEDED',
+        }),
       ],
       'get-actor-run': [structured({ status: 'SUCCEEDED' })],
     });

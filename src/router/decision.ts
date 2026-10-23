@@ -548,6 +548,11 @@ function accountSpecProblems(spec: z.infer<typeof AccountSpecFields>, ctx: z.Ref
   if (identity.task === undefined) issue('an account service does one task', ['identity']);
   if (Buffer.byteLength(JSON.stringify(mcp), 'utf8') > ACCOUNT_CALL_MAX_BYTES)
     issue(`the call must serialize to at most ${ACCOUNT_CALL_MAX_BYTES} bytes`, ['mcp']);
+  // The first call bills, so a poll or follow-up never sends it again.
+  if (mcp.next?.poll?.tool === mcp.tool)
+    issue('the poll never repeats the call that bills', ['mcp', 'next', 'poll', 'tool']);
+  if (mcp.next?.tool === mcp.tool)
+    issue('the follow-up never repeats the call that bills', ['mcp', 'next', 'tool']);
   const properties = spec.input.properties;
   const fields = new Set(
     properties && typeof properties === 'object' ? Object.keys(properties) : [],
