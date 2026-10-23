@@ -1,13 +1,18 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import pkg from '../../package.json';
 import { persistRouterDefaults } from '../commands/config';
 import { versionFreeEntry } from '../commands/update';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import { resolveCodex } from '../lib/codex-bin';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
+import { runtimeDir } from '../lib/paths';
+import type { RuntimeSetup, setupRuntime } from '../lib/runtime';
 import type { CommandContext, CommandResult } from '../context';
 import {
   at,
@@ -23,9 +28,14 @@ import {
 import { resolveContextSettings } from '../lib/settings';
 import {
   approveLimits,
+  defaultRuntime,
   effectiveLimits,
+  hasRuntime,
   namedLimits,
+  runtimeData,
+  runtimeLines,
   spendStepFor,
+  tilde,
   type QuestionStep,
   type RouterInstallDeps,
 } from './install';
@@ -34,9 +44,11 @@ import { shownLimits } from './spend-question';
 /**
  * `tenjin install|uninstall|doctor` for Codex. Codex's own commands do
  * every plugin write: `codex plugin marketplace add` and `codex plugin add`
- * copy the plugin from this package's `dist/hosts/codex`. The plugin's own
- * `PermissionRequest` hook allows the request tool, so install writes no Codex
- * config: the wallet, the spend defaults and the plugin. User scope only.
+ * copy the plugin from Tenjin's runtime, `~/.tenjin/runtime/codex`, which
+ * install sets up as the Claude install does, or from this package's
+ * `dist/hosts/codex` where there is none. The plugin's own `PermissionRequest`
+ * hook allows the request tool, so install writes no Codex config: the
+ * wallet, the spend defaults and the plugin. User scope only.
  */
 
 export interface CodexArgs {
@@ -64,9 +76,12 @@ export interface CodexSetupDeps
   /** Codex's hook list (`hooks/list`). */
   hooks?: () => Promise<unknown>;
   version?: () => Promise<string | null>;
-  /** The marketplace folder, by default this package's `dist/hosts/codex`. */
+  /** The marketplace folder without a runtime, by default this package's `dist/hosts/codex`. */
   hostsDir?: string | null;
   isInteractive?: boolean;
+  homeDir?: string;
+  /** Sets up Tenjin's runtime for this build; tests inject it, production runs `setupRuntime`. */
+  runtime?: (o: Parameters<typeof setupRuntime>[0]) => Promise<RuntimeSetup>;
 }
 
 const RUN_TIMEOUT_MS = 30_000;
@@ -106,9 +121,25 @@ function failed(step: string, out: CodexRun): CliError {
   });
 }
 
+/**
+ * The runtime's Codex marketplace, when the runtime has one: a `kept` older
+ * runtime may predate it.
+ */
+function runtimeHosts(rt: RuntimeSetup): string | null {
+  if (rt.state !== 'active' && rt.state !== 'current' && rt.state !== 'kept') return null;
+  const hosts = join(rt.root, 'codex');
+  return existsSync(join(hosts, '.agents', 'plugins', 'marketplace.json')) ? hosts : null;
+}
+
+/**
+ * `registered` is the folder Codex's config names for the `tenjin`
+ * marketplace. Codex keeps one marketplace by that name, so one added from
+ * another folder (the package's, before the runtime) is removed first.
+ */
 async function addPlugin(
   run: (args: string[]) => Promise<CodexRun>,
   hosts: string | null,
+  registered: unknown,
 ): Promise<void> {
   if (hosts === null) {
     throw new CliError(
@@ -118,6 +149,10 @@ async function addPlugin(
         fix: 'Reinstall a published build: npm i -g tenjin-cli',
       },
     );
+  }
+  if (typeof registered === 'string' && resolve(registered) !== resolve(hosts)) {
+    // Absent already is fine: the add then reports.
+    await run(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
   }
   const market = await run(['plugin', 'marketplace', 'add', hosts, '--json']);
   if (market.code !== 0) throw failed('plugin marketplace add', market);
@@ -141,7 +176,7 @@ export async function runCodexInstall(
 ): Promise<CommandResult> {
   userScopeOnly(args);
   const run = deps.run ?? runCodex;
-  const hosts = deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir;
+  const home = deps.homeDir ?? homedir();
   const config = await loadRawConfig(ctx.dataDir);
   const named = namedLimits(args);
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
@@ -169,7 +204,22 @@ export async function runCodexInstall(
     false,
   );
   const spend = await persistRouterDefaults(ctx.dataDir, false, limits, named.keys);
-  await addPlugin(run, hosts);
+  // TENJIN'S OWN RUNTIME, for a Codex-only machine too, so a Node upgrade
+  // cannot stop the plugin. A runtime that could not be set up, or a
+  // non-default data dir, keeps the package's folder.
+  const rt = await (deps.runtime ?? defaultRuntime)({
+    dataDir: ctx.dataDir,
+    home,
+    env: deps.env ?? process.env,
+    version: pkg.version,
+    moduleDir: dirname(fileURLToPath(import.meta.url)),
+    refresh: false,
+  });
+  const fromRuntime = runtimeHosts(rt);
+  const hosts =
+    fromRuntime ?? (deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir);
+  const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
+  await addPlugin(run, hosts, at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'));
 
   // Read back after the write, as the Claude install does.
   const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
@@ -186,12 +236,14 @@ export async function runCodexInstall(
       plugin: CODEX_PLUGIN,
       wallet,
       spend: { ...spend, effective },
+      runtime: runtimeData(rt),
       nextSteps: spendAsk !== undefined ? [spendAsk] : [],
       next: TRUST_STEP,
     },
     humanLines: [
       `Wallet: ${walletValue(wallet)}`,
-      `Codex plugin: ${CODEX_PLUGIN} added from the package`,
+      `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
+      ...runtimeLines(ctx, rt, home),
       `Automatic router: up to $${effective.maxAutoSpend} per call; daily limit ${daily}`,
       ...(spendAsk !== undefined
         ? [
@@ -233,10 +285,24 @@ const PLUGIN_LINE: Record<CodexHookRows['state'], string> = {
   unknown: "could not read Codex's hook list",
 };
 
+/**
+ * What the plugin's hooks and server run, from the folder Codex's config names
+ * for the marketplace: information only. Nothing when Codex names none, or
+ * names another folder on a machine with no runtime to move to.
+ */
+function runsFrom(ctx: CommandContext, deps: CodexSetupDeps, source: unknown): string | null {
+  if (typeof source !== 'string') return null;
+  const home = deps.homeDir ?? homedir();
+  const hosts = join(runtimeDir(ctx.dataDir), 'codex');
+  if (resolve(source) === resolve(hosts)) return `Tenjin's runtime (${tilde(hosts, home)})`;
+  if (!hasRuntime(ctx.dataDir, home)) return null;
+  return "`tenjin` from your PATH; run `tenjin install --harness codex` to move it to Tenjin's runtime";
+}
+
 /** Reads Codex's view of the plugin and writes nothing. */
 export async function runCodexDoctor(
   args: CodexArgs,
-  _ctx: CommandContext,
+  ctx: CommandContext,
   deps: CodexSetupDeps = {},
 ): Promise<CommandResult> {
   userScopeOnly(args);
@@ -249,10 +315,12 @@ export async function runCodexDoctor(
   // With its allow hook off, `approval_policy = "never"` refuses the tool.
   const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
   const ok = hooks.state === 'trusted' && !refused;
+  const runs = runsFrom(ctx, deps, at(config, 'marketplaces', CODEX_MARKETPLACE, 'source'));
   const lines = [
     `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
     `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
     `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
+    ...(runs !== null ? [`Codex plugin runs: ${runs}`] : []),
   ];
   const data = {
     plugin: CODEX_PLUGIN,

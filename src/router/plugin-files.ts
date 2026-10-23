@@ -448,25 +448,31 @@ function underHome(path: string, home: string): string | null {
 }
 
 /**
- * THE `tenjin.cmd` LAUNCHER, for a Windows terminal only (never a plugin
- * command). Both paths are `%USERPROFILE%` plus their part under the home
- * folder, which is ASCII by construction, so a non-ASCII user name never has to
- * survive cmd's code page. It throws when a path is outside `home`, or its part
+ * `path` as cmd reads it: `%USERPROFILE%` plus its part under `home`. It throws
+ * when `path` is outside `home`, or its part holds a non-ASCII character, `"`
+ * or `%`, which cmd would read.
+ */
+function cmdPath(path: string, home: string): string {
+  const part = underHome(path, home);
+  if (part === null) throw new Error(`${path} is not under ${home}`);
+  if (/[^\x20-\x7e]|["%]/.test(part)) {
+    throw new Error(`${path} holds a character a .cmd launcher cannot carry`);
+  }
+  return `%USERPROFILE%\\${part}`;
+}
+
+/**
+ * THE `tenjin.cmd` LAUNCHER, for a Windows terminal and the Codex runtime
+ * render's commands (never a Claude Code plugin command). Both paths are
+ * `%USERPROFILE%` plus their part under the home folder, which is ASCII by
+ * construction, so a non-ASCII user name never has to survive cmd's code page. It throws when a path is outside `home`, or its part
  * holds a non-ASCII character, `"` or `%`, which cmd would read. The run line is
  * one parenthesized block, so cmd parses it whole before Node starts and a
  * rewrite of the file mid-run cannot inject a stray line.
  */
 export function renderLauncherCmd(launch: RuntimeLaunch & { home: string }): string {
-  const rel = (path: string): string => {
-    const part = underHome(path, launch.home);
-    if (part === null) throw new Error(`${path} is not under ${launch.home}`);
-    if (/[^\x20-\x7e]|["%]/.test(part)) {
-      throw new Error(`${path} holds a character a .cmd launcher cannot carry`);
-    }
-    return `%USERPROFILE%\\${part}`;
-  };
-  const node = rel(launch.node);
-  const entry = rel(launch.entry);
+  const node = cmdPath(launch.node, launch.home);
+  const entry = cmdPath(launch.entry, launch.home);
   return [
     '@echo off',
     `rem ${LAUNCHER_MARKER}`,
@@ -498,13 +504,45 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  * prompt, and one web call before it runs and after (Codex has no
  * PostToolUseFailure). Nothing in it names a release, so `codex plugin add`
  * copies the same bytes from every build and the hooks' trust holds across a
- * `tenjin update`.
+ * `tenjin update`. The runtime render, `~/.tenjin/runtime/codex`, runs the
+ * `tenjin` launcher in its own `bin/` by absolute path instead of `tenjin` from
+ * PATH: the launcher's path never changes, so neither do the hooks Codex
+ * trusts, and `activate` rewrites only the launcher on each switch. Naming the
+ * versioned Node and entry would change the hooks with every update.
  */
 export const CODEX_WEB_MATCHER = 'webrun';
 export const CODEX_LEGS = ['prompt', 'native', 'shortfall'] as const;
 
-export function codexHookCommand(kind: (typeof CODEX_LEGS)[number]): string {
-  return `tenjin hook ${kind} --harness codex`;
+/** What the Codex runtime render runs: the launch its launchers bake, and the absolute folder they are in. */
+export interface CodexRuntime {
+  launch: RuntimeLaunch;
+  /** `<runtime>/codex/tenjin/bin`. */
+  binDir: string;
+}
+
+const onWindows = (o: CodexRuntime): boolean => (o.launch.platform ?? process.platform) === 'win32';
+
+/** The sh launcher's absolute path, with forward slashes on win32 for Git Bash. */
+function codexLauncherSh(o: CodexRuntime): string {
+  return `${onWindows(o) ? o.binDir.replaceAll('\\', '/') : o.binDir}/tenjin`;
+}
+
+/** The `.cmd` launcher's absolute path, for a process Codex spawns directly. */
+const codexLauncherCmd = (o: CodexRuntime): string => `${o.binDir}\\tenjin.cmd`;
+
+export function codexHookCommand(kind: (typeof CODEX_LEGS)[number], o?: CodexRuntime): string {
+  const tenjin = o === undefined ? 'tenjin' : shQuote(codexLauncherSh(o));
+  return `${tenjin} hook ${kind} --harness codex`;
+}
+
+/**
+ * The same leg under Windows' `cmd.exe /C`, through `commandWindows`: the
+ * `.cmd` launcher from `%USERPROFILE%`, as the launcher names its own paths, in
+ * the one pair of quotes cmd keeps.
+ */
+function codexHookCommandWindows(kind: (typeof CODEX_LEGS)[number], o: CodexRuntime): string {
+  if (o.launch.home === undefined) throw new Error('the .cmd launcher needs the home folder');
+  return `"${cmdPath(codexLauncherCmd(o), o.launch.home)}" hook ${kind} --harness codex`;
 }
 
 /**
@@ -530,17 +568,34 @@ export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
 /** Every hook the Codex plugin carries: the three legs and the allow answer. */
 export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 1;
 
-function codexLeg(kind: (typeof CODEX_LEGS)[number], timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
-  return [{ type: 'command', command: codexHookCommand(kind), timeout }];
+function codexLeg(
+  kind: (typeof CODEX_LEGS)[number],
+  o?: CodexRuntime,
+  timeout = ROUTE_HOOK_TIMEOUT_SECONDS,
+) {
+  return [
+    {
+      type: 'command',
+      command: codexHookCommand(kind, o),
+      ...(o !== undefined && onWindows(o)
+        ? { commandWindows: codexHookCommandWindows(kind, o) }
+        : {}),
+      timeout,
+    },
+  ];
 }
 
-export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
+/** `hooks/hooks.json`: `tenjin` from PATH, or with `o` the runtime's launcher. */
+export function renderCodexHooks(o?: CodexRuntime): { hooks: Record<string, unknown[]> } {
   return {
     hooks: {
-      UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
-      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') }],
+      UserPromptSubmit: [{ hooks: codexLeg('prompt', o) }],
+      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native', o) }],
       PostToolUse: [
-        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS) },
+        {
+          matcher: CODEX_WEB_MATCHER,
+          hooks: codexLeg('shortfall', o, AFTER_CALL_TIMEOUT_SECONDS),
+        },
       ],
       PermissionRequest: [
         {
@@ -561,8 +616,15 @@ export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
 
 export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
 
-export function renderCodexMcp(): { mcpServers: Record<string, unknown> } {
-  return { mcpServers: { [MCP_SERVER_NAME]: { command: 'tenjin', args: [...CODEX_MCP_ARGS] } } };
+/**
+ * `.mcp.json`. Codex spawns the server directly, with no shell: the runtime
+ * render names the sh launcher, or on win32 the `.cmd` one, which Codex starts
+ * through cmd.exe.
+ */
+export function renderCodexMcp(o?: CodexRuntime): { mcpServers: Record<string, unknown> } {
+  const command =
+    o === undefined ? 'tenjin' : onWindows(o) ? codexLauncherCmd(o) : codexLauncherSh(o);
+  return { mcpServers: { [MCP_SERVER_NAME]: { command, args: [...CODEX_MCP_ARGS] } } };
 }
 
 /** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */
@@ -594,12 +656,20 @@ export function renderCodexMarketplace(): Record<string, unknown> {
   };
 }
 
-/** The Codex marketplace folder's files: its catalog and the plugin under {@link PLUGIN_DIR}. */
-export function renderCodexHostFiles(): Record<string, string> {
+/**
+ * The Codex marketplace folder's files: its catalog and the plugin under
+ * {@link PLUGIN_DIR}. With no `o`, the package render; with one, the runtime
+ * render, whose commands run the launchers it carries in `bin/`.
+ */
+export function renderCodexHostFiles(o?: CodexRuntime): Record<string, string> {
+  const bin = o === undefined ? {} : renderPluginBin(o.launch);
   return {
     '.agents/plugins/marketplace.json': json(renderCodexMarketplace()),
-    [`${PLUGIN_DIR}/.mcp.json`]: json(renderCodexMcp()),
-    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
+    [`${PLUGIN_DIR}/.mcp.json`]: json(renderCodexMcp(o)),
+    ...Object.fromEntries(
+      Object.entries(bin).map(([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const),
+    ),
+    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks(o)),
     [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest()),
   };
 }

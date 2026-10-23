@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LockTimeoutError } from './lock';
-import { renderHostFiles, RUNTIME_MISSING_FIX } from '../router/plugin-files';
+import { renderCodexHostFiles, renderHostFiles, RUNTIME_MISSING_FIX } from '../router/plugin-files';
 import {
   activate,
   collect,
@@ -848,6 +848,22 @@ describe('activate', () => {
     expect(existsSync(join(home, '.local', 'bin', 'tenjin'))).toBe(true);
   });
 
+  it('renders runtime/codex beside it, its launchers at 0o755, and a restore of a first activation removes it', async () => {
+    placed('1.0.0', '24.0.0');
+    const act = await activate(root, { cli: '1.0.0', node: '24.0.0' }, actOpts());
+    const launch = {
+      node: nodeBinPath(root, '24.0.0', 'darwin'),
+      entry: versionEntry(root, '1.0.0'),
+      platform: 'darwin' as const,
+      home,
+    };
+    const binDir = join(root, 'codex', 'tenjin', 'bin');
+    expect(snapshot(join(root, 'codex'))).toEqual(renderCodexHostFiles({ launch, binDir }));
+    if (POSIX) expect(statSync(join(binDir, 'tenjin')).mode & 0o777).toBe(0o755);
+    await act.restore();
+    expect(snapshot(join(root, 'codex'))).toEqual({});
+  });
+
   it('keeps the earlier previous when the same version is activated again', async () => {
     placed('1.0.0', '24.0.0');
     placed('1.1.0', '24.0.0');
@@ -1235,6 +1251,13 @@ describe('setupRuntime', () => {
       expect((await run()).state).toBe('current');
     },
   );
+
+  it.skipIf(!POSIX)('re-renders a runtime set up before it carried runtime/codex', async () => {
+    await setup('0.1.0-alpha.32');
+    rmSync(join(root, 'codex'), { recursive: true });
+    expect((await setup('0.1.0-alpha.32')).state).toBe('active');
+    expect(existsSync(join(root, 'codex', '.agents', 'plugins', 'marketplace.json'))).toBe(true);
+  });
 
   it.skipIf(!POSIX)('re-renders when pending is left set by a crash', async () => {
     await setup('0.1.0-alpha.32');

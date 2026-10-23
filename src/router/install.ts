@@ -635,13 +635,13 @@ export async function runRouterInstall(
 }
 
 /** Loaded lazily: the status line shares this module's chunk and must not load the runtime. */
-async function defaultRuntime(o: Parameters<typeof setupRuntime>[0]): Promise<RuntimeSetup> {
+export async function defaultRuntime(o: Parameters<typeof setupRuntime>[0]): Promise<RuntimeSetup> {
   const { setupRuntime } = await import('../lib/runtime');
   return setupRuntime(o);
 }
 
 /** Is there a runtime here? Only the default data dir has one, and only once an install set it up. */
-function hasRuntime(dataDir: string, home: string): boolean {
+export function hasRuntime(dataDir: string, home: string): boolean {
   return (
     resolve(dataDir) === resolve(defaultDataDir(home)) &&
     existsSync(runtimeStatePath(runtimeDir(dataDir)))
@@ -757,7 +757,7 @@ function runtimeLaunch(
   return { version: rt.cli, hostsDir: rt.hostsDir, cliEntry: rt.entry, node: rt.node };
 }
 
-function runtimeData(rt: RuntimeSetup | null): Record<string, unknown> | null {
+export function runtimeData(rt: RuntimeSetup | null): Record<string, unknown> | null {
   if (rt === null) return null;
   return {
     state: rt.state,
@@ -794,7 +794,7 @@ async function recordClaudeProjects(
 }
 
 /** `path` with the home folder written as `~`. */
-function tilde(path: string, home: string): string {
+export function tilde(path: string, home: string): string {
   return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
@@ -848,7 +848,7 @@ function launcherSentence(launcher: LauncherResult | null, home: string): string
 }
 
 /** The runtime's lines under install's summary: where it runs from, or what needs the person. */
-function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home: string): string[] {
+export function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home: string): string[] {
   if (rt === null) return [];
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const runs = runtimeSentence(rt, home);

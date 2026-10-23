@@ -30,6 +30,7 @@ import { handlersIn } from '../router/hook-form';
 import {
   LAUNCHER_MARKER,
   PLUGIN_DIR,
+  renderCodexHostFiles,
   renderHostFiles,
   renderLauncherCmd,
   renderLauncherSh,
@@ -1064,16 +1065,19 @@ async function putBack(path: string, body: string | null, mode: number): Promise
 }
 
 /**
- * The marketplace's files in the order a reader can never see a half render:
+ * The marketplaces' files in the order a reader can never see a half render:
  * the parts (the mod's files before the hooks file that names its module), then
- * the manifest, then the catalog.
+ * the manifests, then both catalogs.
  */
 function renderOrder(files: Record<string, string>): string[] {
   const rank = (path: string): number => {
-    if (path === 'tenjin/hooks/hooks.json') return 1;
-    if (path.startsWith('tenjin/bin/')) return 2;
-    if (path === 'tenjin/.claude-plugin/plugin.json') return 3;
-    if (path === '.claude-plugin/marketplace.json') return 4;
+    const inHost = path.slice(path.indexOf('/') + 1);
+    if (inHost === 'tenjin/hooks/hooks.json') return 1;
+    if (inHost.startsWith('tenjin/bin/')) return 2;
+    if (/^tenjin\/\.(claude|codex)-plugin\/plugin\.json$/.test(inHost)) return 3;
+    if (['.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json'].includes(inHost)) {
+      return 4;
+    }
     return 0;
   };
   return Object.keys(files).sort((a, b) => rank(a) - rank(b));
@@ -1089,7 +1093,28 @@ function runtimeMod(launch: RuntimeLaunch): Promise<ModSources | undefined> {
   return readModSources(join(dirname(launch.entry), 'hosts', 'claude', PLUGIN_DIR));
 }
 
-const modeFor = (path: string): number => (path.startsWith('tenjin/bin/') ? 0o755 : 0o644);
+/**
+ * Everything the runtime renders for `launch`, by path under the root: the
+ * Claude Code marketplace in `claude/` and the Codex one in `codex/`.
+ */
+function runtimeHostFiles(
+  root: string,
+  version: string,
+  launch: RuntimeLaunch,
+  mod: ModSources | undefined,
+): Record<string, string> {
+  const under = (host: string, files: Record<string, string>) =>
+    Object.entries(files).map(([path, body]) => [`${host}/${path}`, body] as const);
+  return Object.fromEntries([
+    ...under('claude', renderHostFiles(version, { launch, mod })),
+    ...under(
+      'codex',
+      renderCodexHostFiles({ launch, binDir: join(root, 'codex', PLUGIN_DIR, 'bin') }),
+    ),
+  ]);
+}
+
+const modeFor = (path: string): number => (path.includes('/tenjin/bin/') ? 0o755 : 0o644);
 
 export interface Activation {
   previous: RuntimePointer | null;
@@ -1114,7 +1139,7 @@ export class NewerRuntime extends Error {
 
 /**
  * SWITCH THE RUNTIME TO `next`, under the lock: record it as `pending`, render
- * `runtime/claude` for it, write the launchers, then make it `current` and
+ * `runtime/claude` and `runtime/codex` for it, write the launchers, then make it `current` and
  * clear `pending` in one write. It throws {@link NewerRuntime}, writing
  * nothing, when `current` is already a newer build that runs. A crash in
  * between leaves `pending` set, which GC keeps and the next install
@@ -1129,7 +1154,6 @@ export async function activate(
   o: LockOptions & { home: string; env: NodeJS.ProcessEnv; platform?: NodeJS.Platform },
 ): Promise<Activation> {
   const platform = o.platform ?? process.platform;
-  const hosts = join(root, 'claude');
   const launch: RuntimeLaunch = {
     node: nodeBinPath(root, next.node, platform),
     entry: versionEntry(root, next.cli),
@@ -1168,18 +1192,18 @@ export async function activate(
       const oldStateText = await readOrNull(runtimeStatePath(root));
       await writeState(root, { ...old, pending: next });
 
-      const files = renderHostFiles(next.cli, { launch, mod: await runtimeMod(launch) });
+      const files = runtimeHostFiles(root, next.cli, launch, await runtimeMod(launch));
       const order = renderOrder(files);
       const oldBodies = new Map<string, string | null>();
       try {
         for (const path of order) {
-          const target = join(hosts, path);
+          const target = join(root, path);
           oldBodies.set(path, await readOrNull(target));
           await writeFileAtomic(target, files[path]!, { mode: modeFor(path) });
         }
       } catch (err) {
         for (const [path, body] of [...oldBodies].reverse()) {
-          await putBack(join(hosts, path), body, modeFor(path)).catch(() => undefined);
+          await putBack(join(root, path), body, modeFor(path)).catch(() => undefined);
         }
         throw err;
       }
@@ -1204,7 +1228,7 @@ export async function activate(
             // switch, or, on a first activation, delete its files.
             if (readRawState(root).activation !== activation) return;
             for (const path of [...order].reverse()) {
-              await putBack(join(hosts, path), oldBodies.get(path) ?? null, modeFor(path));
+              await putBack(join(root, path), oldBodies.get(path) ?? null, modeFor(path));
             }
             if (oldStateText === null) await rm(runtimeStatePath(root), { force: true });
             else await writeFileAtomic(runtimeStatePath(root), oldStateText);
@@ -1448,16 +1472,12 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
   }
 }
 
-/** Does `runtime/claude` hold, byte for byte, the runtime render for this launch? */
-async function hostsMatch(
-  hostsDir: string,
-  version: string,
-  launch: RuntimeLaunch,
-): Promise<boolean> {
+/** Do `runtime/claude` and `runtime/codex` hold, byte for byte, the runtime render for this launch? */
+async function hostsMatch(root: string, version: string, launch: RuntimeLaunch): Promise<boolean> {
   const mod = await runtimeMod(launch);
   try {
-    return Object.entries(renderHostFiles(version, { launch, mod })).every(
-      ([path, body]) => readFileSync(join(hostsDir, path), 'utf8') === body,
+    return Object.entries(runtimeHostFiles(root, version, launch, mod)).every(
+      ([path, body]) => readFileSync(join(root, path), 'utf8') === body,
     );
   } catch {
     return false;
@@ -1542,7 +1562,7 @@ export async function setupRuntime(o: {
     state.pending === null &&
     completeValid(versionDir(root, usable.cli)) &&
     completeValid(join(root, 'node', usable.node)) &&
-    (await hostsMatch(hostsDir, o.version, launchOf(usable)));
+    (await hostsMatch(root, o.version, launchOf(usable)));
 
   /**
    * THE LAUNCHERS OF A BUILD ALREADY CURRENT, written under the lock and only

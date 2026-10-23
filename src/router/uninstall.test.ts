@@ -8,7 +8,8 @@ import { CliError } from '../lib/errors';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { describeStoreLocation } from '../lib/wallet/passphrase';
 import type { ClaudeRun } from './claude-cli';
-import { uninstallEach, type SharedParts } from './hosts';
+import { runCodexUninstall } from './codex-install';
+import { recordInstalledHost, uninstallEach, type SharedParts } from './hosts';
 import { LAUNCHER_MARKER, renderPluginFiles } from './plugin-files';
 import { pluginFolderPath, writePluginFolder } from './plugin-folder';
 import { folderFor } from './plugin-registration';
@@ -555,6 +556,52 @@ describe('the kept line names the runtime only where there is one', () => {
     expect(runtimeKeptFor(dataDir, home, ['Codex'])).toBe(
       "Kept Tenjin's runtime and its launcher: still used by Codex.",
     );
+  });
+});
+
+describe('a Codex-only uninstall', () => {
+  it('removes the runtime, its Codex folder included, and the launcher with the last host', async () => {
+    const dataDir = join(home, '.tenjin');
+    const runtime = join(dataDir, 'runtime');
+    await mkdir(join(runtime, 'codex', 'tenjin', 'bin'), { recursive: true });
+    await writeFile(join(runtime, 'state.json'), '{}');
+    await writeFile(
+      join(runtime, 'codex', 'tenjin', 'bin', 'tenjin'),
+      `#!/bin/sh\n# ${LAUNCHER_MARKER}\n`,
+    );
+    const bin = join(home, '.local', 'bin');
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, 'tenjin'), `#!/bin/sh\n# ${LAUNCHER_MARKER}\n`);
+    await recordInstalledHost(dataDir, 'codex', async () => false);
+    const codex: string[] = [];
+    const out = await uninstallEach(
+      ['codex'],
+      dataDir,
+      { kind: 'user' },
+      () =>
+        runCodexUninstall(
+          {},
+          { ...ctx(), dataDir },
+          {
+            run: async (args) => {
+              codex.push(args.join(' '));
+              return { code: 0, stdout: '{}', stderr: '' };
+            },
+          },
+        ),
+      {
+        remove: () => removeRuntimeAndLaunchers(dataDir, home, { platform: 'darwin' }),
+        claudeLeft: async () => false,
+        keptFor: (users) => runtimeKeptFor(dataDir, home, users),
+      },
+    );
+    expect(codex).toEqual([
+      'plugin remove tenjin@tenjin --json',
+      'plugin marketplace remove tenjin',
+    ]);
+    expect(out.data).toMatchObject({ runtime: { root: runtime, removed: true } });
+    expect(await stat(runtime).catch(() => null)).toBeNull();
+    expect(await stat(join(bin, 'tenjin')).catch(() => null)).toBeNull();
   });
 });
 
