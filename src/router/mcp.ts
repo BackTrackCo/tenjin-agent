@@ -17,11 +17,19 @@ import type { CommandContext, GlobalFlags } from '../context';
 import type { RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
-import { admitHookEvent } from './hook-session';
-import { eventFromToolInput, HOOK_KINDS, HOOK_TOOL, HOOK_TOOL_FIELDS } from './hook-tool';
+import { admitCodexHookEvent, admitHookEvent } from './hook-session';
+import {
+  CODEX_HOOK_KINDS,
+  CODEX_HOOK_TOOL_FIELDS,
+  codexEventFromToolInput,
+  eventFromToolInput,
+  HOOK_KINDS,
+  HOOK_TOOL,
+  HOOK_TOOL_FIELDS,
+} from './hook-tool';
 import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
-import { chainReader, RoutingPayer } from './routing-payer';
+import { chainReader, RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import {
   runApproveTool,
   runRequestTool,
@@ -410,9 +418,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // is plain arguments, so each call must still carry its session's own
   // transcript (`admitHookEvent`); any other call answers "no opinion" with
   // nothing sent.
-  // Codex runs its legs as command hooks, so its server carries no hook tool
-  // for the model to see or forge.
-  if (opts.harness === 'codex') return server;
+  if (opts.harness === 'codex') return registerCodexHookTool(server, ctx, opts);
   const env = opts.env ?? process.env;
   const fromPlugin = launchedByPlugin(env);
   server.registerTool(
@@ -465,6 +471,63 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
 }
 
 /**
+ * THE CODEX HOOK LEGS' TOOL. The Codex plugin's routing legs are `mcp_tool`
+ * hooks into this server (Codex 0.148 and later), so each leg runs in this
+ * process and pays through its payer, as Claude Code's do. Codex keeps each
+ * field's JSON type, so the fields are not strings here. The plugin's own
+ * PreToolUse hook denies the tool to the model; the event is still plain
+ * arguments, so its transcript and thread are checked (`admitCodexHookEvent`).
+ */
+function registerCodexHookTool(
+  server: McpServer,
+  ctx: CommandContext,
+  opts: RouterMcpOptions,
+): McpServer {
+  server.registerTool(
+    HOOK_TOOL,
+    {
+      title: "Tenjin's routing hooks (called by your agent host, not by you)",
+      description:
+        "Called by the Tenjin plugin's hooks, once per routing leg, with the hook event. " +
+        'Never call it yourself: to make a lookup, call `request`.',
+      inputSchema: {
+        kind: z.enum(CODEX_HOOK_KINDS),
+        ...Object.fromEntries(
+          CODEX_HOOK_TOOL_FIELDS.map((field) => [field, z.unknown().optional()]),
+        ),
+      },
+    },
+    async (args, extra): Promise<CallToolResult> => {
+      let response: unknown = null;
+      try {
+        const event = await admitCodexHookEvent(codexEventFromToolInput(args), {
+          threadId: extra._meta?.['threadId'],
+          ...(opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {}),
+        });
+        if (event !== null) {
+          const { codexResponse } = await import('./codex-event');
+          response = codexResponse(
+            await runHookKind(args.kind, event, {
+              dataDir: ctx.dataDir,
+              harness: 'codex',
+              ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
+              ...(opts.payer !== undefined ? { route: opts.payer.routeFor.bind(opts.payer) } : {}),
+              ...opts.hookDeps,
+            }),
+          );
+        }
+      } catch {
+        response = null;
+      }
+      return {
+        content: [{ type: 'text', text: response === null ? '' : JSON.stringify(response) }],
+      };
+    },
+  );
+  return server;
+}
+
+/**
  * THE ENVELOPE, ONCE. These tools declare no `outputSchema`, and for such a
  * tool the MCP contract's result is `content`: it is what every host hands
  * the model. `structuredContent` beside it was a second full copy of the
@@ -487,9 +550,7 @@ function toolResult(result: RequestToolResult): CallToolResult {
  * process also watches stdin itself; without it the process would linger.
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
-  const ctx = buildContext(opts);
-  const payer = opts.payer ?? (await routingPayer(ctx));
-  const server = buildRouterMcpServer({ ...opts, payer });
+  const server = await createRouterMcpServer(opts);
   await server.connect(new StdioServerTransport());
   await new Promise<void>((resolve) => {
     server.server.onclose = () => resolve();
@@ -498,8 +559,24 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
   });
 }
 
+/**
+ * The server `tenjin mcp` runs, with the production payer unless one is
+ * passed. `payerDeps` overrides single payer seams (the network, the signer)
+ * and keeps the rest of the production wiring.
+ */
+export async function createRouterMcpServer(
+  opts: RouterMcpOptions & { payerDeps?: Partial<RoutingPayerDeps> } = {},
+): Promise<McpServer> {
+  const { payerDeps, ...rest } = opts;
+  const payer = rest.payer ?? (await routingPayer(buildContext(rest), payerDeps));
+  return buildRouterMcpServer({ ...rest, payer });
+}
+
 /** The production payer: this machine's wallet, spend policy and RPC. */
-async function routingPayer(ctx: CommandContext): Promise<RoutingPayer> {
+async function routingPayer(
+  ctx: CommandContext,
+  overrides: Partial<RoutingPayerDeps> = {},
+): Promise<RoutingPayer> {
   const settings = await resolveContextSettings(ctx);
   const provider: WalletProvider = resolveWalletProvider(ctx);
   return new RoutingPayer({
@@ -516,5 +593,6 @@ async function routingPayer(ctx: CommandContext): Promise<RoutingPayer> {
       }),
     walletBalance: (address, timeoutMs) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs }),
     readContract: chainReader(settings.rpcUrl),
+    ...overrides,
   });
 }

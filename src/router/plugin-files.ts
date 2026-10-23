@@ -1,6 +1,14 @@
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
-import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import {
+  CODEX_HOOK_KINDS,
+  codexHookToolInput,
+  HOOK_TOOL,
+  hookToolInput,
+  type CodexHookKind,
+  type HookKind,
+} from './hook-tool';
+import {
+  CODEX_HOOK_TOOL,
   CODEX_REQUEST_TOOL,
   MARKETPLACE_NAME,
   MCP_SERVER_NAME,
@@ -321,18 +329,58 @@ export function renderHostFiles(version?: string, mod?: ModSources): Record<stri
 
 /**
  * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
- * checked-in `hosts/codex/` by the same test. Its legs are command hooks: the
+ * checked-in `hosts/codex/` by the same test. Its legs are `mcp_tool` hooks
+ * into the plugin's own `router` server, as Claude Code's are, so each leg
+ * runs in the process that holds the wallet and pays the routing fee: the
  * prompt, and one web call before it runs and after (Codex has no
- * PostToolUseFailure). Nothing in it names a release, so `codex plugin add`
- * copies the same bytes from every build and the hooks' trust holds across a
- * `tenjin update`.
+ * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.148.0, and an older
+ * Codex rejects the file (`tenjin doctor --harness codex` checks the build).
+ * Nothing in it names a release, so `codex plugin add` copies the same bytes
+ * from every build and the hooks' trust holds across a `tenjin update`.
  */
 export const CODEX_WEB_MATCHER = 'webrun';
-export const CODEX_LEGS = ['prompt', 'native', 'shortfall'] as const;
+export const CODEX_LEGS = CODEX_HOOK_KINDS;
+/** The first Codex that runs `mcp_tool` hooks (openai/codex `rust-v0.148.0`). */
+export const CODEX_MCP_HOOKS_VERSION = '0.148.0';
 
-export function codexHookCommand(kind: (typeof CODEX_LEGS)[number]): string {
+/** The command form of a leg: what a plugin copy from an older build still runs. */
+export function codexHookCommand(kind: CodexHookKind): string {
   return `tenjin hook ${kind} --harness codex`;
 }
+
+/** One Codex routing leg: Codex calls the plugin server's `hook` tool. */
+function codexLeg(kind: CodexHookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
+  return [
+    {
+      type: 'mcp_tool',
+      server: MCP_SERVER_NAME,
+      tool: HOOK_TOOL,
+      input: codexHookToolInput(kind),
+      timeout,
+    },
+  ];
+}
+
+/** A fixed hook answer, echoed: `cmd.exe` takes the bare form, a POSIX shell the quoted one. */
+function echoed(answer: string): { command: string; commandWindows: string } {
+  return { command: `echo '${answer}'`, commandWindows: `echo ${answer}` };
+}
+
+/**
+ * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL, as {@link DENY_HOOK} is in
+ * Claude Code: a model call to it fires PreToolUse as `mcp__router__hook`,
+ * while Codex's own `mcp_tool` hook calls go straight to the server and fire
+ * no PreToolUse (openai/codex `core/src/hook_mcp_executor.rs`).
+ */
+export const CODEX_DENY_HOOK = echoed(
+  JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: `Only the Tenjin hooks call this tool. To make a lookup, call ${CODEX_REQUEST_TOOL}.`,
+    },
+  }),
+);
 
 /**
  * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link ALLOW_HOOK_COMMAND}
@@ -354,18 +402,20 @@ export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
  */
 export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
 
-/** Every hook the Codex plugin carries: the three legs and the allow answer. */
-export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 1;
-
-function codexLeg(kind: (typeof CODEX_LEGS)[number], timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
-  return [{ type: 'command', command: codexHookCommand(kind), timeout }];
-}
+/** Every hook the Codex plugin carries: the three legs, the deny and the allow answer. */
+export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 2;
 
 export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
   return {
     hooks: {
       UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
-      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') }],
+      PreToolUse: [
+        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') },
+        {
+          matcher: CODEX_HOOK_TOOL,
+          hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }],
+        },
+      ],
       PostToolUse: [
         { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS) },
       ],

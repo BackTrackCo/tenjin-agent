@@ -889,7 +889,14 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(
+    sealed,
+    deps,
+    router.config,
+    event.sessionId,
+    deadline,
+    footer.unpaid,
+  );
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1074,7 +1081,14 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(
+    sealed,
+    deps,
+    router.config,
+    event.sessionId,
+    deadline,
+    footer.unpaid,
+  );
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1462,7 +1476,14 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(
+    sealed,
+    deps,
+    router.config,
+    event.sessionId,
+    deadline,
+    footer.unpaid,
+  );
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1508,6 +1529,8 @@ async function openFooter(
   sessionId: string,
   operation: 'prompt' | 'search' | 'delegate',
 ): Promise<{
+  /** Why this call's routing fee was not paid, when it was not. */
+  unpaid: (why: string) => void;
   /** `withheld` is why an `execute` was not shown, in the footer's words. */
   close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
 }> {
@@ -1526,7 +1549,11 @@ async function openFooter(
   // The root, not just this session: a directory per session ever opened would
   // eventually be more than the resolver can scan.
   await pruneSessions(deps.dataDir, now());
+  let unpaid: string | undefined;
   return {
+    unpaid: (why) => {
+      unpaid = why;
+    },
     close: async (decision, opts) => {
       const withheld = opts?.withheld;
       await writeProgress(
@@ -1535,7 +1562,8 @@ async function openFooter(
         {
           phase: 'done',
           operation,
-          outcome: withheld !== undefined ? `native tools (${withheld})` : hookOutcome(decision),
+          outcome:
+            withheld !== undefined ? `native tools (${withheld})` : hookOutcome(decision, unpaid),
         },
         now(),
       );
@@ -1557,11 +1585,17 @@ async function openFooter(
 }
 
 /** What the gate decided, in the footer's own words. A silent backend is not a
- *  blank line: the turn runs on native tools and the footer says which. */
-function hookOutcome(decision: HookDecision | null): string {
-  if (decision === null) return 'native tools (router unavailable)';
+ *  blank line: the turn runs on native tools and the footer says which. A
+ *  routing fee that was not paid (`fee_required`, `wallet_low` and the rest)
+ *  is named as such, never passed off as the router choosing native tools. */
+export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
-  if (decision.action === 'native') return 'native tools (no x402 payment)';
+  if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
+    // `fee unpaid: <reason>` fits the record's 40 characters for every reason.
+    return `fee unpaid: ${unpaid}`;
+  }
+  if (decision === null) return 'native tools (router unavailable)';
+  if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }
 
@@ -1580,6 +1614,7 @@ async function decide(
   config: PartialConfig,
   sessionId: string,
   deadline: number,
+  unpaid?: (why: string) => void,
 ): Promise<HookDecision | null> {
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
@@ -1615,6 +1650,7 @@ async function decide(
         (outcome.status === 'decided' && isFeeRequired(outcome.decision)
           ? FEE_REQUIRED
           : undefined));
+  if (why !== undefined) unpaid?.(why);
   // A `fee_required` on a call the machine's "no paid path" memo sent to the
   // free path is stale news, not a fault: the memo is cleared below and the
   // next call pays. It does not use up the session's one notice.

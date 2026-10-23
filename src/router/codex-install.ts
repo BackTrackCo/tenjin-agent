@@ -29,6 +29,7 @@ import {
   type QuestionStep,
   type RouterInstallDeps,
 } from './install';
+import { CODEX_MCP_HOOKS_VERSION } from './plugin-files';
 import { shownLimits } from './spend-question';
 
 /**
@@ -126,7 +127,7 @@ async function addPlugin(
 }
 
 const TRUST_STEP =
-  'Open Codex, run /hooks and trust the four Tenjin hooks, then start a new session.';
+  'Open Codex, run /hooks and trust the five Tenjin hooks, then start a new session.';
 
 function userScopeOnly(args: CodexArgs): void {
   if (args.project === true) {
@@ -233,7 +234,34 @@ const PLUGIN_LINE: Record<CodexHookRows['state'], string> = {
   unknown: "could not read Codex's hook list",
 };
 
-/** Reads Codex's view of the plugin and writes nothing. */
+/** Whether `version` (`x.y.z`, any suffix ignored) is `floor` or later. */
+export function codexAtLeast(version: string, floor: string): boolean {
+  const parts = (v: string) =>
+    v
+      .split(/[-+]/)[0]!
+      .split('.')
+      .map((n) => Number.parseInt(n, 10));
+  const have = parts(version);
+  for (const [i, least] of parts(floor).entries()) {
+    const part = have[i] ?? 0;
+    if (!Number.isFinite(part)) return false;
+    if (part !== least) return part > least;
+  }
+  return true;
+}
+
+const ROUTING_LINE: Record<CodexHookRows['routing'], string> = {
+  paid: 'its routing hooks call the router MCP server, which pays the routing fee under your wallet spend limits',
+  free: 'its routing hooks are commands from an older build, which cannot pay the routing fee, so they offer nothing. Run `tenjin install --harness codex`, then trust the hooks in /hooks',
+  unknown: "could not read how Codex runs the plugin's routing hooks",
+};
+
+/**
+ * Reads Codex's view of the plugin and writes nothing. Routing compatibility
+ * is read the same way, with nothing paid or sent: the legs must be `mcp_tool`
+ * hooks into the plugin's server (`codexHookRows`), and the Codex build must
+ * run them ({@link CODEX_MCP_HOOKS_VERSION}).
+ */
 export async function runCodexDoctor(
   args: CodexArgs,
   _ctx: CommandContext,
@@ -248,16 +276,23 @@ export async function runCodexDoctor(
   const hooks = codexHookRows(list);
   // With its allow hook off, `approval_policy = "never"` refuses the tool.
   const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
-  const ok = hooks.state === 'trusted' && !refused;
+  // An unknown build is not failed on: only a known older one cannot run the legs.
+  const tooOld = version !== null && !codexAtLeast(version, CODEX_MCP_HOOKS_VERSION);
+  const routing = hooks.state === 'absent' ? null : hooks.routing;
+  const ok = hooks.state === 'trusted' && !refused && routing === 'paid' && !tooOld;
   const lines = [
     `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
     `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
-    `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
+    ...(routing !== null ? [`Routing: ${ROUTING_LINE[routing]}`] : []),
+    tooOld
+      ? `Codex build: ${version}, which cannot run the plugin's routing hooks. Update Codex to ${CODEX_MCP_HOOKS_VERSION} or later`
+      : `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
   ];
   const data = {
     plugin: CODEX_PLUGIN,
     hooks: hooks.state,
     allowOff: hooks.allowOff,
+    routing,
     version,
     ok,
   };

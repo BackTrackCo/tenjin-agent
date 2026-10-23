@@ -23,6 +23,7 @@ import {
   type ExecLaunch,
   CODEX_ALLOW_HOOK_COMMAND,
   CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+  CODEX_DENY_HOOK,
   renderCodexHooks,
   renderCodexHostFiles,
   renderCodexManifest,
@@ -265,15 +266,39 @@ describe('the checked-in hosts/codex templates', () => {
     }
   });
 
-  it('carry the prompt leg, one web search before and after, and the request tool allow', () => {
+  it('carry the prompt leg, one web search before and after, the hook deny and the request allow', () => {
     const { hooks } = renderCodexHooks();
-    const cmd = (kind: string, timeout = 5) => [
-      { type: 'command', command: `tenjin hook ${kind} --harness codex`, timeout },
+    const common = {
+      hook_event_name: '${hook_event_name}',
+      session_id: '${session_id}',
+      turn_id: '${turn_id}',
+      transcript_path: '${transcript_path}',
+      cwd: '${cwd}',
+    };
+    const call = {
+      ...common,
+      tool_name: '${tool_name}',
+      tool_input: '${tool_input}',
+      tool_use_id: '${tool_use_id}',
+    };
+    const leg = (input: Record<string, string>, timeout = 5) => [
+      { type: 'mcp_tool', server: 'router', tool: 'hook', input, timeout },
     ];
     expect(hooks).toEqual({
-      UserPromptSubmit: [{ hooks: cmd('prompt') }],
-      PreToolUse: [{ matcher: 'webrun', hooks: cmd('native') }],
-      PostToolUse: [{ matcher: 'webrun', hooks: cmd('shortfall', 15) }],
+      UserPromptSubmit: [{ hooks: leg({ kind: 'prompt', ...common, prompt: '${prompt}' }) }],
+      PreToolUse: [
+        { matcher: 'webrun', hooks: leg({ kind: 'native', ...call }) },
+        {
+          matcher: 'mcp__router__hook',
+          hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: 5 }],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: 'webrun',
+          hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
+        },
+      ],
       PermissionRequest: [
         {
           matcher: 'mcp__router__request',
@@ -294,6 +319,20 @@ describe('the checked-in hosts/codex templates', () => {
     expect(CODEX_ALLOW_HOOK_COMMAND).toBe(
       `echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'`,
     );
+  });
+
+  it('denies the hook tool to the model with a fixed PreToolUse answer, in both shells', () => {
+    const answer = JSON.parse(CODEX_DENY_HOOK.command.slice("echo '".length, -1)) as unknown;
+    expect(answer).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining('mcp__router__request'),
+      },
+    });
+    const printed = CODEX_DENY_HOOK.commandWindows.slice('echo '.length);
+    expect(JSON.parse(printed)).toEqual(answer);
+    expect(printed).not.toMatch(/[&|<>^%'!]/);
   });
 
   it('gives cmd.exe a bare echo, whose output is the same JSON answer', () => {

@@ -9,6 +9,7 @@ import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
+  codexAtLeast,
   runCodexDoctor,
   runCodexInstall,
   runCodexUninstall,
@@ -304,8 +305,18 @@ describe('Codex web events', () => {
       hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'free docs' },
     });
     expect(
-      codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, systemMessage: 'x' }),
+      codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, other: 1 }),
     ).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse' } });
+  });
+
+  it("keeps the user's line, alone or beside the hook's answer, in the field Codex shows", () => {
+    expect(codexResponse({ systemMessage: 'routing fee not paid' })).toEqual({
+      systemMessage: 'routing fee not paid',
+    });
+    expect(
+      codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, systemMessage: 'x' }),
+    ).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, systemMessage: 'x' });
+    expect(codexResponse({ systemMessage: 3 })).toBeNull();
   });
 });
 
@@ -555,7 +566,10 @@ const allowRow = (over: Record<string, unknown> = {}) =>
 const listed = (...rows: unknown[]) => ({
   data: [{ hooks: [{ key: 'theirs', pluginId: 'other@x', trustStatus: 'untrusted' }, ...rows] }],
 });
-const allRows = () => [row('a'), row('b'), row('c'), allowRow()];
+/** A routing leg as Codex 0.157 lists it: an `mcp_tool` hook into the plugin's server. */
+const legRow = (key: string, over: Record<string, unknown> = {}) =>
+  row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
+const allRows = () => [legRow('a'), legRow('b'), legRow('c'), row('deny'), allowRow()];
 
 describe('Codex install, uninstall and doctor', () => {
   it('writes the wallet, the spend limits and the plugin, and no Codex config', async () => {
@@ -570,7 +584,7 @@ describe('Codex install, uninstall and doctor', () => {
     ]);
     expect(out.data).not.toHaveProperty('grant');
     expect(out.data).not.toHaveProperty('approval');
-    expect(out.humanLines?.join('\n')).toContain('four Tenjin hooks');
+    expect(out.humanLines?.join('\n')).toContain('five Tenjin hooks');
   });
 
   it('keeps the defaults with no answer and hands the spend question back', async () => {
@@ -635,27 +649,86 @@ describe('Codex install, uninstall and doctor', () => {
   });
 
   it('reads the plugin from hooks/list rows: installed and trusted, absent, untrusted', () => {
-    expect(codexHookRows(listed(...allRows()))).toEqual({ state: 'trusted', allowOff: false });
-    expect(codexHookRows(listed())).toEqual({ state: 'absent', allowOff: false });
+    expect(codexHookRows(listed(...allRows()))).toEqual({
+      state: 'trusted',
+      allowOff: false,
+      routing: 'paid',
+    });
+    expect(codexHookRows(listed())).toEqual({
+      state: 'absent',
+      allowOff: false,
+      routing: 'unknown',
+    });
     expect(codexHookRows(listed(row('a'), row('b', { trustStatus: 'untrusted' })))).toMatchObject({
       state: 'review',
     });
     expect(
-      codexHookRows(listed(row('a'), row('b'), row('c', { enabled: false }), allowRow())),
+      codexHookRows(
+        listed(legRow('a'), legRow('b'), legRow('c', { enabled: false }), row('d'), allowRow()),
+      ),
     ).toMatchObject({ state: 'review' });
     expect(codexHookRows(listed(row('a'), row('b'), row('c')))).toMatchObject({ state: 'review' });
-    expect(codexHookRows(null)).toEqual({ state: 'unknown', allowOff: false });
+    expect(codexHookRows(null)).toEqual({ state: 'unknown', allowOff: false, routing: 'unknown' });
     // The allow hook off is the documented opt-out, so the plugin still counts as ready.
     expect(
       codexHookRows(
         listed(
-          row('a'),
-          row('b'),
-          row('c'),
+          legRow('a'),
+          legRow('b'),
+          legRow('c'),
+          row('d'),
           allowRow({ enabled: false, trustStatus: 'untrusted' }),
         ),
       ),
-    ).toEqual({ state: 'trusted', allowOff: true });
+    ).toEqual({ state: 'trusted', allowOff: true, routing: 'paid' });
+  });
+
+  it('tells command legs from an older build apart from the legs that pay the fee', () => {
+    const command = (kind: string) =>
+      row(kind, { handlerType: 'command', command: `tenjin hook ${kind} --harness codex` });
+    expect(
+      codexHookRows(listed(command('prompt'), command('native'), command('shortfall'), allowRow())),
+    ).toMatchObject({ routing: 'free' });
+    expect(codexHookRows(listed(legRow('a'), allowRow()))).toMatchObject({ routing: 'unknown' });
+  });
+
+  it('fails on command legs and on a Codex too old for mcp_tool hooks, and never pays', async () => {
+    const command = (kind: string) =>
+      row(kind, { handlerType: 'command', command: `tenjin hook ${kind} --harness codex` });
+    const stale = [
+      command('prompt'),
+      command('native'),
+      command('shortfall'),
+      row('d'),
+      allowRow(),
+    ];
+    const { steps, deps } = host();
+    await expect(
+      runCodexDoctor({}, ctx(), { ...deps, hooks: async () => listed(...stale) }),
+    ).rejects.toMatchObject({
+      details: { routing: 'free', ok: false },
+      fix: expect.stringContaining('cannot pay the routing fee'),
+    });
+    await expect(
+      runCodexDoctor({}, ctx(), {
+        ...deps,
+        hooks: async () => listed(...allRows()),
+        version: async () => '0.147.0',
+      }),
+    ).rejects.toMatchObject({
+      details: { routing: 'paid', version: '0.147.0', ok: false },
+      fix: expect.stringContaining('Update Codex to 0.148.0 or later'),
+    });
+    // Nothing ran: no codex command, and the only reads are the stand-ins above.
+    expect(steps).toEqual([]);
+  });
+
+  it('compares Codex builds by number, a suffix ignored', () => {
+    expect(codexAtLeast('0.157.1', '0.148.0')).toBe(true);
+    expect(codexAtLeast('0.148.0', '0.148.0')).toBe(true);
+    expect(codexAtLeast('0.148.0-alpha.2', '0.148.0')).toBe(true);
+    expect(codexAtLeast('0.147.9', '0.148.0')).toBe(false);
+    expect(codexAtLeast('1.0.0', '0.148.0')).toBe(true);
   });
 
   it('reads one hooks/list, runs no codex command, and never calls the build a gate', async () => {
@@ -694,7 +767,8 @@ describe('Codex install, uninstall and doctor', () => {
   });
 
   it('fails when the allow hook is off under approval_policy never, which refuses the tool', async () => {
-    const off = () => listed(row('a'), row('b'), row('c'), allowRow({ enabled: false }));
+    const off = () =>
+      listed(legRow('a'), legRow('b'), legRow('c'), row('d'), allowRow({ enabled: false }));
     const prompt = await runCodexDoctor({}, ctx(), { ...host().deps, hooks: async () => off() });
     expect(prompt.humanLines?.join('\n')).toContain('asks before each call');
     await expect(

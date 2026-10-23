@@ -1,0 +1,5 @@
+---
+'tenjin-cli': patch
+---
+
+Codex's automatic hooks route again now that the router charges its routing fee. The Codex plugin's three routing legs (the prompt, and a web call before and after it runs) are `mcp_tool` hooks into the plugin's `router` server, as Claude Code's are, so each leg pays the $0.003 fee from the wallet under the local spend limits, the same way a `request` does. They need Codex 0.148.0 or later. A fifth hook denies the server's `hook` tool to the assistant, so trust the five Tenjin hooks in `/hooks` after `tenjin install --harness codex`. When the fee cannot be paid, Codex shows why (a low wallet, a locked wallet, the daily limit) once per session, and the status line records `fee unpaid: <reason>` instead of a native choice. `tenjin doctor --harness codex` checks that the routing legs reach the server and that Codex is new enough to run them, with nothing paid or sent. A plugin copy from an earlier release keeps its command legs until `tenjin install --harness codex` replaces it, and until then each session's first prompt says the routing fee could not be paid.

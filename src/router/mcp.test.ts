@@ -130,7 +130,7 @@ describe('the router MCP server', () => {
     }
   });
 
-  it("names its host on the tool body, and as Codex's carries no hook tool", async () => {
+  it('names its host on the tool body, and carries the hook tool for either host', async () => {
     const bodies: Record<string, unknown>[] = [];
     const answer = await router({
       schemaVersion: 1,
@@ -162,7 +162,7 @@ describe('the router MCP server', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       try {
         const names = (await client.listTools()).tools.map((t) => t.name);
-        expect(names).toEqual(harness === 'codex' ? ['request'] : ['request', 'hook']);
+        expect(names).toEqual(['request', 'hook']);
         await client.callTool({ name: 'request', arguments: { query: 'weather' } });
         expect(bodies.at(-1)).toMatchObject({ harness: harness ?? 'claude' });
       } finally {

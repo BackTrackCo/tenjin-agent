@@ -68,3 +68,54 @@ export function eventFromToolInput(args: Record<string, unknown>): Record<string
   }
   return event;
 }
+
+/**
+ * THE SAME EVENT, CARRIED BY A CODEX `mcp_tool` ENTRY (Codex 0.148 and later).
+ * Codex substitutes `${field}` from the event too, with two differences
+ * (openai/codex `hooks/src/engine/mcp_runner.rs`): a whole placeholder keeps
+ * the field's JSON type, so `tool_input` arrives as an object and a null
+ * `transcript_path` as null; and a field the event lacks fails the hook. So
+ * each leg names only the fields Codex always sends for its event, and the
+ * optional `agent_id` is never one of them: the call's `threadId` metadata
+ * tells a subagent's leg apart instead (`admitCodexHookEvent`).
+ */
+export const CODEX_HOOK_KINDS = ['prompt', 'native', 'shortfall'] as const;
+export type CodexHookKind = (typeof CODEX_HOOK_KINDS)[number];
+
+const CODEX_COMMON = [
+  'hook_event_name',
+  'session_id',
+  'turn_id',
+  'transcript_path',
+  'cwd',
+] as const;
+const CODEX_CALL = ['tool_name', 'tool_input', 'tool_use_id'] as const;
+
+const CODEX_FIELDS: Record<CodexHookKind, readonly string[]> = {
+  prompt: [...CODEX_COMMON, 'prompt'],
+  native: [...CODEX_COMMON, ...CODEX_CALL],
+  shortfall: [...CODEX_COMMON, ...CODEX_CALL, 'tool_response'],
+};
+
+/** The `input` of one Codex leg's `mcp_tool` entry. */
+export function codexHookToolInput(kind: CodexHookKind): Record<string, string> {
+  return Object.fromEntries([
+    ['kind', kind],
+    ...CODEX_FIELDS[kind].map((field) => [field, `\${${field}}`]),
+  ]);
+}
+
+/** Every field any Codex leg sends, for the tool's input schema. */
+export const CODEX_HOOK_TOOL_FIELDS: readonly string[] = [
+  ...new Set(Object.values(CODEX_FIELDS).flat()),
+];
+
+/** The Codex event from the tool's arguments, each field as Codex typed it; nulls dropped. */
+export function codexEventFromToolInput(args: Record<string, unknown>): Record<string, unknown> {
+  const event: Record<string, unknown> = {};
+  for (const field of CODEX_HOOK_TOOL_FIELDS) {
+    const value = args[field];
+    if (value !== undefined && value !== null) event[field] = value;
+  }
+  return event;
+}

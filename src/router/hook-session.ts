@@ -1,6 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { codexHome } from '../lib/codex-home';
 
 /**
  * THE `hook` TOOL'S CALLER IS NOT PROVEN. Claude Code calls it from the hook
@@ -58,6 +59,52 @@ export async function admitHookEvent(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
     // Not written yet: routed on its own input, with no file to read.
+    if (!named(raw) || !roots.some((root) => under(resolve(raw), root))) return null;
+    const unread = { ...event };
+    delete unread['transcript_path'];
+    return unread;
+  }
+  if (!named(real) || !under(real, roots[1]!)) return null;
+  if (!(await stat(real).catch(() => null))?.isFile()) return null;
+  return { ...event, transcript_path: real };
+}
+
+export interface CodexAdmitOptions extends AdmitOptions {
+  /** The `threadId` Codex puts in the call's `_meta`: the thread whose hook this is. */
+  threadId?: unknown;
+}
+
+/** Codex's rollout file for a session: `rollout-<timestamp>-<session_id>.jsonl`. */
+const ROLLOUT_RE = /^rollout-[0-9T:-]{1,40}-([A-Za-z0-9_-]{1,200})\.jsonl$/;
+
+/**
+ * THE SAME CHECK FOR A CODEX LEG. A transcript is read only when its real
+ * path lies under `$CODEX_HOME/sessions` (else `~/.codex/sessions`) and is the
+ * session's own rollout file. Codex sends a null path for a session it does not
+ * record, and one not written yet is no history either: the leg then routes on
+ * its own input. A call whose `threadId` is not the session's own is a
+ * subagent's leg (Codex gives a subagent its root's `session_id`), which the
+ * command form never routed either: refused, with nothing read or sent.
+ */
+export async function admitCodexHookEvent(
+  event: Record<string, unknown>,
+  opts: CodexAdmitOptions = {},
+): Promise<Record<string, unknown> | null> {
+  const sessionId = event['session_id'];
+  if (typeof sessionId !== 'string' || !SEGMENT_RE.test(sessionId)) return null;
+  if (opts.threadId !== undefined && opts.threadId !== sessionId) return null;
+  const raw = event['transcript_path'];
+  if (raw === undefined) return event;
+  if (typeof raw !== 'string' || !isAbsolute(raw)) return null;
+  const named = (path: string) => ROLLOUT_RE.exec(basename(path))?.[1] === sessionId;
+  const sessions = join(codexHome(opts.homeDir ?? homedir(), opts.env ?? process.env), 'sessions');
+  const roots = [sessions, await realpath(sessions).catch(() => sessions)];
+  const under = (path: string, root: string) => path.startsWith(`${root}${sep}`);
+  let real: string;
+  try {
+    real = await realpath(raw);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
     if (!named(raw) || !roots.some((root) => under(resolve(raw), root))) return null;
     const unread = { ...event };
     delete unread['transcript_path'];
