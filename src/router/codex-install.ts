@@ -30,6 +30,7 @@ import { resolveContextSettings } from '../lib/settings';
 import {
   approveLimits,
   assertPluginInstallation,
+  continuationCommand,
   requireRuntime,
   defaultRuntime,
   effectiveLimits,
@@ -265,7 +266,10 @@ export async function runCodexInstall(
   // Read back after the write, as the Claude install does.
   const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
   // Run again by the agent in Codex, a bare install finds Codex itself.
-  const install = ['tenjin install', ...(args.noWallet ? ['--no-wallet'] : [])].join(' ');
+  const install = [
+    `${continuationCommand(rt)} install`,
+    ...(args.noWallet ? ['--no-wallet'] : []),
+  ].join(' ');
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
   const daily =

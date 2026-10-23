@@ -145,7 +145,7 @@ describe('runFund', () => {
       checkoutUrl: CHECKOUT,
       funded: false,
       pollStatus: 'skipped',
-      nextStep: expect.stringContaining('tenjin wallet balance'),
+      nextStep: expect.stringContaining('same Tenjin executable and shell'),
     });
     expect((res.data as { nextStep: string }).nextStep).toContain('return to this conversation');
     expect((res.data as { nextStep: string }).nextStep).toContain('Do not open another checkout');

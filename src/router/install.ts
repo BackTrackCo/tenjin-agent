@@ -71,6 +71,7 @@ import {
   FEE_APPROVAL,
   type SpendOption,
 } from './spend-question';
+import { shQuote } from './plugin-files';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -83,10 +84,9 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * runtime, `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
  * `~/.local/bin` (see `lib/runtime.ts`), and the plugin is registered from
  * the runtime's `claude` folder, whose commands run that Node and that copy,
- * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. A non-default
- * data dir, a source checkout, or a runtime that could not be set up keeps
- * the registration from this package's `dist/hosts/claude` folder, run by the
- * `node` on PATH. Either way the plugin goes through Claude Code's own `claude
+ * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. Unsupported
+ * profiles and runtime failures stop registration. Only source checkouts use
+ * this package's development plugin folder. The plugin goes through Claude Code's own `claude
  * plugin` commands (see `plugin-registration.ts`), or is written as a folder
  * under the config dir's `skills/` where no `claude` binary can be run. The
  * plugin carries the seven routing legs, the `router` MCP server, and the
@@ -562,7 +562,8 @@ export async function runRouterInstall(
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
   const effective = await resolveContextSettings(ctx);
-  const spendAsk = !canPrompt && !answered && unasked ? spendStep(args) : undefined;
+  const command = continuationCommand(rt);
+  const spendAsk = !canPrompt && !answered && unasked ? spendStep(args, command) : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
   const asksAgent = !canPrompt && underAgentHarness(env);
@@ -575,7 +576,7 @@ export async function runRouterInstall(
     // The spend question comes first, because its answer picks the install
     // command. The funding question rides on the install that follows it.
     asksAgent && spendAsk === undefined
-      ? fundStep(wallet, effective.rpcUrl, deps)
+      ? fundStep(wallet, effective.rpcUrl, deps, `${command} wallet fund ${SUGGESTED_FUND_USD}`)
       : Promise.resolve(undefined),
   ]);
   const fund = funding?.step;
@@ -600,7 +601,7 @@ export async function runRouterInstall(
     ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
     // The check for this scope, said outright; a bare doctor in the project
     // also finds it from what the project holds.
-    ...(project ? { doctor: 'tenjin doctor --project' } : {}),
+    ...(project ? { doctor: `${command} doctor --project` } : {}),
     spend: { ...spend, effective: effectiveLimits(effective.policy) },
     wallet,
     router: {
@@ -781,6 +782,25 @@ export function assertPluginInstallation(
         fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. Your existing setup was kept.',
       });
   }
+}
+
+/** Setup continuations must work before a reload adds the plugin's bin folder to PATH. */
+export function continuationCommand(
+  rt: RuntimeSetup | null,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (rt === null || rt.state === 'skipped' || rt.node === undefined || rt.entry === undefined)
+    return 'tenjin';
+  const launcher = rt.launcher;
+  const verifiedLauncher = launcher?.state === 'written' || launcher?.state === 'current';
+  if (verifiedLauncher && launcher.onPath) return 'tenjin';
+  const path = verifiedLauncher
+    ? launcher.paths.find((p) => platform !== 'win32' || p.endsWith('.cmd'))
+    : undefined;
+  const parts = path === undefined ? [rt.node, rt.entry] : [path];
+  return platform === 'win32'
+    ? `& ${parts.map((part) => `'${part.replaceAll("'", "''")}'`).join(' ')}`
+    : parts.map(shQuote).join(' ');
 }
 
 export function requireRuntime(rt: RuntimeSetup | null): void {
@@ -1070,8 +1090,8 @@ export const SHOW_NOT_RUN =
  * shape as the `request` tool's `needs_input` step. A script or CI ignores
  * it, and the defaults hold.
  */
-function spendStep(args: RouterInstallArgs): QuestionStep {
-  return spendStepFor(installCommand(args));
+function spendStep(args: RouterInstallArgs, command: string): QuestionStep {
+  return spendStepFor(installCommand(args, command));
 }
 
 /** The same question, for an install an agent runs again as `command`. */
@@ -1082,14 +1102,14 @@ export function spendStepFor(command: string): QuestionStep {
     id: 'spend',
     question: spendChoiceQuestion(),
     options,
-    next: `In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
+    next: `${process.platform === 'win32' ? 'Use PowerShell for these commands. ' : ''}In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
   };
 }
 
 /** The install this run was: what an agent runs again for the person's answer. */
-function installCommand(args: RouterInstallArgs): string {
+function installCommand(args: RouterInstallArgs, command: string): string {
   return [
-    'tenjin install',
+    `${command} install`,
     ...(args.project === true ? ['--project'] : []),
     ...(args.noWallet === true ? ['--no-wallet'] : []),
   ].join(' ');
@@ -1173,6 +1193,7 @@ async function fundStep(
   wallet: WalletOutcome,
   rpcUrl: string,
   deps: RouterInstallDeps,
+  command: string,
 ): Promise<{ step?: FundStep; warning?: string } | undefined> {
   const address = wallet.address;
   if (address === undefined || (wallet.status !== 'created' && wallet.status !== 'existing')) {
@@ -1203,11 +1224,11 @@ async function fundStep(
           id: 'fund',
           label: `Add $${SUGGESTED_FUND_USD}`,
           recommended: false,
-          command: FUND_COMMAND,
+          command,
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${FUND_COMMAND}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell for this command. ' : ''}The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${command}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${command}\` without this yes. ${SHOW_NOT_RUN}`,
       address,
       show,
     },
@@ -1224,7 +1245,7 @@ async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> 
 function fundLines(fund: FundStep): string[] {
   return [
     `  Ask the person: ${fund.question}`,
-    `  Add $${SUGGESTED_FUND_USD}: ${FUND_COMMAND}`,
+    `  Add $${SUGGESTED_FUND_USD}: ${fund.options[0]?.command ?? FUND_COMMAND}`,
     `  Not now: run nothing, show them: ${fund.show}`,
   ];
 }

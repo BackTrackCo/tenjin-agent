@@ -201,7 +201,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       nextStep:
         funded !== undefined
           ? 'Funds confirmed. Continue the original task; funding does not require another restart.'
-          : 'Ask the person to finish checkout and return to this conversation. When they return, run `tenjin wallet balance` to check funds, then continue their task if sufficient. Until the balance confirms funds, say "Funds not confirmed"; if the balance cannot be read, say you could not check it. Do not open another checkout unless they ask for a new link or the current link has expired. Run the check yourself, never ask the person to type a command.',
+          : 'Ask the person to finish checkout and return to this conversation. When they return, run `wallet balance` with the same Tenjin executable and shell used for this funding command to check funds, then continue their task if sufficient. Until the balance confirms funds, say "Funds not confirmed"; if the balance cannot be read, say you could not check it. Do not open another checkout unless they ask for a new link or the current link has expired. Run the check yourself, never ask the person to type a command.',
       ...(balanceAtomic !== undefined ? { balance: toMoney(balanceAtomic.toString()) } : {}),
     },
     humanLines:

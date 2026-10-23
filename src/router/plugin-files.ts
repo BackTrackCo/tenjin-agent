@@ -414,7 +414,7 @@ const missingSentence = (entry: string): string =>
   `tenjin: Tenjin's runtime is missing (${entry}). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session.`;
 
 /** A single-quoted sh word: everything literal, a `'` closed, escaped and reopened. */
-const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+export const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 /**
  * THE `tenjin` LAUNCHER, as sh, for `~/.local/bin` and the plugin's `bin/`.

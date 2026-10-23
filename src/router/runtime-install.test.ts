@@ -1,5 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,8 +12,8 @@ import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/
 import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput } from './hook-tool';
-import { runRouterInstall, runtimeOncePerRun } from './install';
-import { renderPluginFiles } from './plugin-files';
+import { continuationCommand, runRouterInstall, runtimeOncePerRun } from './install';
+import { renderLauncherSh, renderPluginFiles } from './plugin-files';
 
 /**
  * INSTALL ON TENJIN'S RUNTIME, through a fake `claude` and an injected
@@ -157,6 +158,77 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     ]);
     expect(runtime).toHaveBeenCalledWith(
       expect.objectContaining({ dataDir: data, home, version: pkg.version, refresh: false }),
+    );
+  });
+
+  it.each([
+    [{}, ['install', '--yes']],
+    [{ yes: true }, ['wallet', 'fund', '5']],
+  ] as const)('executes a continuation with a minimal parent PATH: %j', async (args, expected) => {
+    const entry = join(root, "runner's folder", 'index.mjs');
+    const receipt = join(root, 'continued.json');
+    const launcher = join(home, '.local', 'bin', 'tenjin');
+    await mkdir(dirname(entry), { recursive: true });
+    await mkdir(dirname(launcher), { recursive: true });
+    await writeFile(
+      entry,
+      `import { writeFileSync } from 'node:fs'; writeFileSync(process.env.CONTINUATION_RECEIPT, JSON.stringify(process.argv.slice(2)));`,
+    );
+    await writeFile(launcher, renderLauncherSh({ node: process.execPath, entry }), { mode: 0o755 });
+    const runtime = async () =>
+      setup({
+        node: process.execPath,
+        entry,
+        launcher: { paths: [launcher], state: 'written', onPath: false },
+      });
+    const env = { ...fake.env, CLAUDE_CONFIG_DIR: cfg, CLAUDECODE: '1', PATH: '/usr/bin:/bin' };
+    const run = async (args: { yes?: boolean }) =>
+      runRouterInstall(args, ctx(), deps(runtime, { env, walletBalance: async () => 0n }));
+    const result = await run(args);
+    const step = (result.data as { nextSteps: { options: { command: string | null }[] }[] })
+      .nextSteps[0]!;
+    const command = step.options[0]!.command!;
+    execFileSync('sh', ['-c', command], {
+      env: { PATH: '/usr/bin:/bin', CONTINUATION_RECEIPT: receipt },
+    });
+    expect(JSON.parse(await readFile(receipt, 'utf8'))).toEqual(expected);
+  });
+
+  it.each(['failed', 'foreign'] as const)(
+    'uses verified Node and entry when the launcher is %s',
+    async (state) => {
+      const entry = join(root, "runner's folder", 'index.mjs');
+      const receipt = join(root, 'continued.json');
+      await mkdir(dirname(entry), { recursive: true });
+      await writeFile(
+        entry,
+        `import { writeFileSync } from 'node:fs'; writeFileSync(process.env.CONTINUATION_RECEIPT, JSON.stringify(process.argv.slice(2)));`,
+      );
+      const runtime = async () =>
+        setup({
+          node: process.execPath,
+          entry,
+          launcher: { paths: ['/foreign/tenjin'], state, onPath: true },
+        });
+      const result = await runRouterInstall({}, ctx(), deps(runtime));
+      const command = (result.data as { nextSteps: { options: { command: string }[] }[] })
+        .nextSteps[0]!.options[0]!.command;
+      execFileSync('sh', ['-c', command], {
+        env: { PATH: '/usr/bin:/bin', CONTINUATION_RECEIPT: receipt },
+      });
+      expect(JSON.parse(await readFile(receipt, 'utf8'))).toEqual(['install', '--yes']);
+      expect(command).not.toContain('/foreign/tenjin');
+    },
+  );
+
+  it('quotes a Windows fallback as a literal PowerShell invocation', () => {
+    const rt = setup({
+      node: "C:\\Users\\O'Neil\\node.exe",
+      entry: "C:\\Users\\O'Neil\\index.js",
+      launcher: { paths: [], state: 'failed', onPath: false },
+    });
+    expect(continuationCommand(rt, 'win32')).toBe(
+      "& 'C:\\Users\\O''Neil\\node.exe' 'C:\\Users\\O''Neil\\index.js'",
     );
   });
 
