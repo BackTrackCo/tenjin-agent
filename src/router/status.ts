@@ -23,7 +23,7 @@ import { routerSettings } from './settings';
  * `tenjin status`: THE FOUR THINGS A USER SEES (tenjin-notes#37), led by
  * whether Tenjin is on: the balance, today's spend against the daily limit
  * and the per-call limit (both on the Tenjin balance only), the connected
- * accounts, and the settings. Nothing else is printed. What lookups cost,
+ * accounts and their jobs, and the settings. Nothing else is printed. What lookups cost,
  * the routing credit and the requests still open are in `--json` alone.
  *
  * ON OR PAUSED is read the way both hooks read it, from this directory, so a
@@ -209,12 +209,13 @@ export async function runRouterStatus(
   const config = await loadRawConfig(ctx.dataDir);
   const power = await onOrPaused(ctx.dataDir, config, deps.cwd ?? process.cwd());
   const retired = retiredPaymentKeys(config);
-  // THE USER'S OWN ACCOUNTS (#37), from the config and each vault's header:
-  // their plans pay, so the limits below never count them.
-  const accounts = await accountStatuses(ctx.dataDir, config.router);
+  // THE USER'S OWN ACCOUNTS (#37), from the config, each vault's header and
+  // the directory's copy: their plans pay, so the limits below never count them.
+  const listing = await cachedDirectory(ctx.dataDir);
+  const accounts = await accountStatuses(ctx.dataDir, config.router, listing);
   const saved = settingsPhrases(
     config.router,
-    await cachedDirectory(ctx.dataDir),
+    listing,
     new Map(accounts.map(({ id, label }) => [id, label])),
   );
   const warnings = retired.length
@@ -259,12 +260,13 @@ export async function runRouterStatus(
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
     },
     settings: saved.status === 'ok' ? { status: 'ok', phrases: saved.phrases } : saved,
-    accounts: accounts.map(({ id, label, preferred, signIn, onRefusal }) => ({
+    accounts: accounts.map(({ id, label, preferred, signIn, onRefusal, jobs }) => ({
       id,
       label,
       preferred,
       signIn,
       onRefusal,
+      ...(jobs !== undefined ? { jobs } : {}),
     })),
     inFlight: (ledger?.reservations ?? []).map((r) => ({
       amount: toMoney(r.amountAtomic),

@@ -137,7 +137,7 @@ Tell your agent what Tenjin may use. It runs `tenjin config`, and reports what w
 
 ## Your accounts
 
-Connect your own Apify, fal or Firecrawl account, and Tenjin uses it first for the jobs it does well there. Your own plan pays for those calls, and they don't count toward your Tenjin limits.
+Connect your own Apify, fal or Firecrawl account, and Tenjin can use it for every job it does there, first for the ones it does well. Your own plan pays for those calls, and they don't count toward your Tenjin limits.
 
 | You say                                | Your agent runs                                   |
 | -------------------------------------- | ------------------------------------------------- |

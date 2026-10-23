@@ -8,6 +8,7 @@ import { CliError } from '../lib/errors';
 import { sourceVaultPath, sourcesDir } from '../lib/paths';
 import type { DirectoryListing } from '../router/decision';
 import { routerSettings } from '../router/settings';
+import { runRouterStatus } from '../router/status';
 import {
   AccountRefused,
   type AccountTool,
@@ -191,8 +192,8 @@ describe('tenjin connect', () => {
     );
     expect(lines(result).slice(0, 5)).toEqual([
       'Apify connected on this machine.',
-      'Tenjin will use your Apify account first for local business search.',
-      'Calls on your Apify account are billed to your own plan, not counted in the limit on your Tenjin balance.',
+      'Tenjin will use it first for local business search.',
+      "Your Apify plan pays for these calls, which don't count toward your Tenjin limits.",
       "Apify's sign-in lets Tenjin act on your whole Apify account. Tenjin only runs the jobs above and the Apify services you ask for by name.",
       'Say "don\'t prefer Apify" to stop putting it first (`tenjin config reset --source apify --preference`), or "disconnect Apify" to remove it.',
     ]);
@@ -323,7 +324,7 @@ describe('tenjin connect', () => {
     );
     expect(data(quiet)).toMatchObject({ account: { preference: 'skipped' } });
     expect(lines(quiet)).toContain(
-      'Tenjin can use your Apify account for local business search, without putting it first.',
+      'Tenjin can use it for local business search, without putting it first.',
     );
     expect((await configJson()).router?.policy?.prefer).toBeUndefined();
   });
@@ -371,6 +372,109 @@ describe('tenjin connect', () => {
     expect((await configJson()).router?.sources).toEqual([
       expect.objectContaining({ id: 'apify', signIn: 'key', onRefusal: 'tenjin' }),
     ]);
+  });
+
+  it("names a few of an account's many jobs, first only where the catalog says, and status lists them all", async () => {
+    // Apify as the catalog maps it once it does many jobs: checked jobs it
+    // comes first for, one the catalog keeps out of the preference, one job
+    // with a map of each kind, and jobs no real call has checked yet.
+    const apify = DIRECTORY.directory.connectable!.find(({ id }) => id === 'apify')!;
+    const template = apify.services[0]!;
+    const maps = [
+      ['instagram', 'instagram accounts and posts', true, true],
+      ['tiktok', 'tiktok accounts and videos', true, true],
+      ['x', 'x post search', true, true],
+      ['reddit', 'reddit post search', true, true],
+      ['linkedin', 'linkedin profile', true, true],
+      ['people', 'people search', true, false],
+      ['web', 'web research', true, false],
+      ['local-2', 'local business search', true, false],
+      ['companies', 'company list search', false, true],
+      ['mail', 'send email', false, true],
+    ] as const;
+    const listing = structuredClone(DIRECTORY);
+    listing.directory.services.push(
+      ...maps.map(([key, task]) => ({
+        id: `apify.${key}`,
+        label: `Apify ${key}`,
+        identity: {
+          service: `apify.${key}`,
+          source: 'apify',
+          providers: ['apify'],
+          seller: 'apify',
+          task,
+          categories: [],
+          revision: '0123456789abcdef',
+        },
+      })),
+    );
+    listing.directory
+      .connectable!.find(({ id }) => id === 'apify')!
+      .services.push(
+        ...maps.map(([key, , verified, useFirst]) => ({
+          ...template,
+          id: `apify.${key}`,
+          verified,
+          useFirst,
+        })),
+      );
+    const routed = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url !== 'https://router.example.test/api/x402-router')
+        throw new Error(`unexpected request to ${url}`);
+      return new Response(JSON.stringify(listing), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const mcp = sessions(SESSIONS);
+    const result = await runConnect(
+      'apify',
+      { fromEnv: 'APIFY_TOKEN' },
+      makeCtx(),
+      deps({ fetchImpl: routed, openSession: mcp.open, env: { APIFY_TOKEN: 'apify_api_1' } }),
+    );
+    expect(lines(result).slice(0, 5)).toEqual([
+      'Apify connected on this machine.',
+      'Tenjin will use it first for local business search, instagram accounts and posts, tiktok accounts and videos, and 3 more (`tenjin status` lists them).',
+      "It's also available for people search and web research, without coming first.",
+      "Tenjin hasn't checked Apify for company list search and send email yet, so those run only when you ask for Apify by name.",
+      "Your Apify plan pays for these calls, which don't count toward your Tenjin limits.",
+    ]);
+    userWords(result);
+
+    const status = await runRouterStatus(makeCtx(), {
+      cwd: work,
+      routingCredit: async () => 0n,
+      wallet: async () => null,
+    });
+    expect(status.humanLines).toEqual(
+      expect.arrayContaining([
+        '  Apify is used first for local business search, instagram accounts and posts, tiktok accounts and videos, x post search, reddit post search, and linkedin profile.',
+        '  Apify is also available for people search and web research, without coming first.',
+        "  Apify runs for company list search and send email only when you ask for it by name: Tenjin hasn't checked those jobs yet.",
+      ]),
+    );
+    expect(status.data).toMatchObject({
+      accounts: [
+        {
+          id: 'apify',
+          jobs: {
+            first: [
+              'local business search',
+              'instagram accounts and posts',
+              'tiktok accounts and videos',
+              'x post search',
+              'reddit post search',
+              'linkedin profile',
+            ],
+            available: ['people search', 'web research'],
+            unchecked: ['company list search', 'send email'],
+            missing: [],
+          },
+        },
+      ],
+    });
   });
 
   it('leaves out a service whose tools this account lacks', async () => {
@@ -514,9 +618,11 @@ describe('tenjin connect', () => {
     );
     expect(lines(result).slice(0, 3)).toEqual([
       "Connected mcp.example.test on this machine. Tenjin doesn't know this service's jobs yet, so it won't pick it on its own. Ask for it by name and Tenjin will run it.",
-      'Calls on your mcp.example.test account are billed to your own plan, not counted in the limit on your Tenjin balance.',
+      "Your mcp.example.test account pays for its calls, which don't count toward your Tenjin limits.",
       'Nothing about this service was sent to Tenjin.',
     ]);
+    // It offers to send nothing: the network above answers only the directory.
+    expect(lines(result).join('\n')).not.toMatch(/support|send/i);
     expect(data(result)).toMatchObject({
       account: { id: 'mcp-example-test', mapped: false, preference: 'skipped' },
     });

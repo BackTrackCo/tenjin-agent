@@ -25,6 +25,7 @@ import {
 } from '../router/decision';
 import { cachedDirectory, fetchDirectory } from '../router/directory';
 import { accountIdForUrl, isAccountId } from '../router/accounts/ids';
+import { accountJobs } from '../router/accounts/readout';
 import { billingTools, savedAccountOf, type SavedAccount } from '../router/accounts/saved';
 import {
   AccountRefused,
@@ -421,13 +422,12 @@ function withDescriptor(existing: PartialConfig, descriptor: Descriptor): Partia
 
 const list = new Intl.ListFormat('en', { type: 'conjunction' });
 
-/** The jobs a set of services does, by task, each once, in order. */
-function tasksOf(ids: readonly string[], listing: DirectoryListing): string[] {
-  const task = new Map(listing.services.map(({ id, identity }) => [id, identity.task]));
-  return [...new Set(ids.flatMap((id) => (task.get(id) !== undefined ? [task.get(id)!] : [])))];
-}
+/** The most jobs one readback line names before it counts the rest. */
+const NAMED_JOBS = 4;
 
-/** What a connect says, in the user's words: no ids, no protocol terms. */
+/** What a connect says, in the user's words: no ids, no protocol terms. An
+ *  account that does many jobs gets a few named per line and the rest
+ *  counted; `tenjin status` lists them all. */
 function connectLines(
   account: Account,
   listing: DirectoryListing,
@@ -439,43 +439,52 @@ function connectLines(
   if (!account.mapped) {
     return [
       `Connected ${label} on this machine. Tenjin doesn't know this service's jobs yet, so it won't pick it on its own. Ask for it by name and Tenjin will run it.`,
-      `Calls on your ${label} account are billed to your own plan, not counted in the limit on your Tenjin balance.`,
+      `Your ${label} account pays for its calls, which don't count toward your Tenjin limits.`,
       'Nothing about this service was sent to Tenjin.',
     ];
   }
-  const verified = new Set(account.services.filter((s) => s.verified).map((s) => s.id));
-  const checkedJobs = tasksOf(
-    checked.ready.filter((id) => verified.has(id)),
+  const preferred = preference === 'added' || preference === 'kept';
+  const { first, available, unchecked, missing } = accountJobs(
+    account.services,
+    checked,
     listing,
+    preferred,
   );
-  const uncheckedJobs = tasksOf(
-    checked.ready.filter((id) => !verified.has(id)),
-    listing,
-  );
-  const missingJobs = tasksOf(checked.missing, listing);
+  let pointed = false;
+  const some = (jobs: readonly string[]) => {
+    if (jobs.length <= NAMED_JOBS) return list.format(jobs);
+    const named = list.format([
+      ...jobs.slice(0, NAMED_JOBS - 1),
+      `${jobs.length - NAMED_JOBS + 1} more`,
+    ]);
+    if (pointed) return named;
+    pointed = true;
+    return `${named} (\`tenjin status\` lists them)`;
+  };
   const lines = [`${label} connected on this machine.`];
-  if (checkedJobs.length > 0) {
+  if (first.length > 0) lines.push(`Tenjin will use it first for ${some(first)}.`);
+  if (available.length > 0) {
     lines.push(
-      preference === 'added' || preference === 'kept'
-        ? `Tenjin will use your ${label} account first for ${list.format(checkedJobs)}.`
-        : `Tenjin can use your ${label} account for ${list.format(checkedJobs)}, without putting it first.`,
+      first.length > 0
+        ? `It's also available for ${some(available)}, without coming first.`
+        : `Tenjin can use it for ${some(available)}, without putting it first.`,
     );
   }
-  if (uncheckedJobs.length > 0) {
+  if (unchecked.length > 0) {
     lines.push(
-      `Tenjin hasn't checked ${label} for ${list.format(uncheckedJobs)} yet, so ${uncheckedJobs.length === 1 ? 'it runs' : 'those run'} only when you ask for ${label} by name.`,
+      `Tenjin hasn't checked ${label} for ${some(unchecked)} yet, so ${unchecked.length === 1 ? 'it runs' : 'those run'} only when you ask for ${label} by name.`,
     );
   }
-  if (missingJobs.length > 0) {
+  if (missing.length > 0) {
     lines.push(
-      `This ${label} account can't do ${list.format(missingJobs)}, so Tenjin leaves ${missingJobs.length === 1 ? 'it' : 'them'} out here.`,
+      `This ${label} account can't do ${some(missing)}, so Tenjin leaves ${missing.length === 1 ? 'it' : 'them'} out here.`,
     );
   }
-  if (checkedJobs.length === 0 && uncheckedJobs.length === 0) {
+  if (first.length + available.length + unchecked.length === 0) {
     lines.push(`None of the jobs Tenjin knows for ${label} are available on this account yet.`);
   }
   lines.push(
-    `Calls on your ${label} account are billed to your own plan, not counted in the limit on your Tenjin balance.`,
+    `Your ${label} plan pays for these calls, which don't count toward your Tenjin limits.`,
   );
   lines.push(
     WHOLE_ACCOUNT.has(account.id) && !byKey

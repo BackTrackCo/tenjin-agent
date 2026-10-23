@@ -90,7 +90,7 @@ tenjin connect apify                               # approve the sign-in in your
 tenjin connect fal --paste                         # in your own terminal: a key at a hidden prompt
 tenjin config fallback on --source apify           # when Apify refuses, run Tenjin's tool in its place
 tenjin disconnect apify                            # sign out, and forget it on this machine
-tenjin status                                      # your accounts, beside your balance and limits
+tenjin status                                      # your accounts and their jobs, beside your balance and limits
 tenjin usage --since 7d                            # by day: your balance, and each account
 ```
 
