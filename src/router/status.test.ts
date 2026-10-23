@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,9 +8,9 @@ import { FUND_COMMAND_LINE } from './fee';
 import { runRouterStatus } from './status';
 
 /**
- * `tenjin status` LEADS WITH THE WALLET'S BALANCE: at $0 it says how to fund
- * it, a read the RPC did not answer says so, and no wallet means no line and
- * no read. The chain is a seam here; nothing goes on the network.
+ * `tenjin status` LEADS WITH THE BALANCE: at $0 it says how to fund it, a read
+ * the RPC did not answer says so, and no wallet means no line and no read. The
+ * chain is a seam here; nothing goes on the network.
  */
 
 const ADDRESS = '0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689';
@@ -37,11 +38,11 @@ const status = (atomic: bigint | null) =>
     wallet: async () => ({ address: ADDRESS, atomic }),
   });
 
-describe('status, the wallet line', () => {
+describe('status, the balance line', () => {
   it('says how to fund a wallet at exactly $0', async () => {
     const result = await status(0n);
     expect(result.humanLines?.slice(0, 3)).toEqual([
-      'wallet 0 USD',
+      'Balance $0.00',
       'Fund it with `tenjin wallet fund 5`.',
       'lookups 0 USD',
     ]);
@@ -52,14 +53,14 @@ describe('status, the wallet line', () => {
 
   it('shows a funded balance with no funding line', async () => {
     const result = await status(5_000_000n);
-    expect(result.humanLines?.slice(0, 2)).toEqual(['wallet 5 USD', 'lookups 0 USD']);
+    expect(result.humanLines?.slice(0, 2)).toEqual(['Balance $5.00', 'lookups 0 USD']);
     expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
   });
 
   it('says the balance is unknown when the RPC did not answer, without a funding line', async () => {
     const result = await status(null);
     expect(result.humanLines?.[0]).toBe(
-      'wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries',
+      "Balance unknown: it couldn't be read just now; `tenjin wallet balance` retries",
     );
     expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
     expect(result.data).toMatchObject({ wallet: { address: ADDRESS, balance: null } });
@@ -172,6 +173,68 @@ describe('status, the accounts', () => {
     const result = await runRouterStatus(ctx(), { routingCredit: async () => 0n });
     expect(result.humanLines).toContain(
       'Your accounts: none connected (`tenjin connect <name>` adds one)',
+    );
+  });
+});
+
+/**
+ * THE USER'S SETTINGS, ON ONE LINE: each saved rule as a short phrase, named
+ * from the directory's copy and the saved accounts, never by id, and the
+ * automatic switch when it is on. `tenjin config` reads them back in full.
+ */
+describe('status, the settings line', () => {
+  const run = () =>
+    runRouterStatus(ctx(), { routingCredit: async () => 0n, wallet: async () => null });
+
+  it('names each rule in a few words', async () => {
+    const directory = JSON.parse(
+      readFileSync(new URL('./fixtures/wire-directory-mcp.json', import.meta.url), 'utf8'),
+    ) as { directory: unknown };
+    await writeFile(join(dir, 'router-directory.json'), JSON.stringify(directory.directory));
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        router: {
+          nativeReplacement: 'when-routed',
+          policy: {
+            version: 1,
+            block: [{ kind: 'provider', id: 'firecrawl' }],
+            prefer: [
+              {
+                scope: { kind: 'task', id: 'web research' },
+                targets: [{ kind: 'provider', id: 'google' }],
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const result = await run();
+    expect(result.humanLines).toContain(
+      "Your settings: never use Firecrawl · prefer Google for web research · run Tenjin's picks automatically",
+    );
+    expect(result.data).toMatchObject({
+      settings: {
+        status: 'ok',
+        phrases: [
+          'never use Firecrawl',
+          'prefer Google for web research',
+          "run Tenjin's picks automatically",
+        ],
+      },
+    });
+  });
+
+  it('says when there are none, and when they cannot be read', async () => {
+    expect((await run()).humanLines).toContain(
+      "Your settings: Tenjin's defaults (`tenjin config` shows them)",
+    );
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ router: { policy: { version: 2 } } }),
+    );
+    expect((await run()).humanLines).toContain(
+      "Your settings: can't be read; `tenjin config` shows the problem",
     );
   });
 });
