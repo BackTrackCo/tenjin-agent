@@ -74,8 +74,12 @@ export interface CodexAdmitOptions extends AdmitOptions {
   threadId?: unknown;
 }
 
-/** Codex's rollout file for a session: `rollout-<timestamp>-<session_id>.jsonl`. */
-const ROLLOUT_RE = /^rollout-[0-9T:-]{1,40}-([A-Za-z0-9_-]{1,200})\.jsonl$/;
+/**
+ * Codex's rollout file for a session: `rollout-<timestamp>-<session_id>.jsonl`,
+ * the timestamp exactly `YYYY-MM-DDThh-mm-ss`, so a session id whose leading
+ * groups are all digits is never read as part of it.
+ */
+const ROLLOUT_RE = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([A-Za-z0-9_-]{1,200})\.jsonl$/;
 
 /**
  * THE SAME CHECK FOR A CODEX LEG. A transcript is read only when its real

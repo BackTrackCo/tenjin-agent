@@ -153,6 +153,13 @@ describe('a Codex leg', () => {
     expect(await admit(event(SESSION, 'relative.jsonl'))).toBeNull();
   });
 
+  it('reads the rollout file of a session id whose leading groups are all digits', async () => {
+    const digits = '01912345-6789-7123-8123-123456789abc';
+    const own = join(day, rollout(digits));
+    await writeFile(own, '{}\n');
+    expect(await admit(event(digits, own), digits)).toMatchObject({ transcript_path: own });
+  });
+
   it('routes on the leg alone when there is no transcript yet, or none at all', async () => {
     const unwritten = await admit(event(OTHER, join(day, rollout(OTHER))), OTHER);
     expect(unwritten).not.toHaveProperty('transcript_path');
