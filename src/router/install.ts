@@ -652,16 +652,32 @@ const sharedResults = new WeakSet<RuntimeSetup>();
  * ONE RUNTIME SETUP PER INSTALL RUN, however many hosts it installs. The first
  * host sets the runtime up; every later host gets that result rather than a
  * second setup, which would retry a failed Node download in full, and says
- * none of its lines again.
+ * none of its lines again. Only the activating host may roll that switch
+ * back: a later host shares folders the first may already have registered.
+ * If the first host does roll back, the next host must set the runtime up again.
  */
 export function runtimeOncePerRun(setup = defaultRuntime): typeof defaultRuntime {
   let first: Promise<RuntimeSetup> | undefined;
   return async (o) => {
     if (first === undefined) {
-      first = setup(o);
+      first = setup(o).then((rt) => {
+        const restore = rt.restore;
+        if (restore === undefined) return rt;
+        return {
+          ...rt,
+          restore: async () => {
+            try {
+              await restore();
+            } finally {
+              first = undefined;
+            }
+          },
+        };
+      });
       return first;
     }
     const rt = { ...(await first) };
+    delete rt.restore;
     sharedResults.add(rt);
     return rt;
   };

@@ -7,13 +7,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import type { LauncherResult, RuntimeSetup } from '../lib/runtime';
+import { activate, type LauncherResult, type RuntimeSetup } from '../lib/runtime';
 import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/runtime-layout';
 import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
+import { runCodexInstall } from './codex-install';
 import { hookToolInput } from './hook-tool';
-import { continuationCommand, runRouterInstall, runtimeOncePerRun } from './install';
-import { renderLauncherSh, renderPluginFiles } from './plugin-files';
+import {
+  continuationCommand,
+  runRouterInstall,
+  runtimeOncePerRun,
+  type RouterInstallDeps,
+} from './install';
+import { renderLauncherSh, renderPluginFiles, shQuote } from './plugin-files';
 
 /**
  * INSTALL ON TENJIN'S RUNTIME, through a fake `claude` and an injected
@@ -92,10 +98,7 @@ function setup(over: Partial<RuntimeSetup> = {}): RuntimeSetup {
   };
 }
 
-function deps(
-  runtime: ((o: unknown) => Promise<RuntimeSetup>) | undefined,
-  over: Record<string, unknown> = {},
-) {
+function deps(runtime: RouterInstallDeps['runtime'], over: Record<string, unknown> = {}) {
   return {
     homeDir: home,
     cwd: work,
@@ -701,6 +704,146 @@ describe('the launcher lines', () => {
 });
 
 describe('an install run over two hosts', () => {
+  /** Real activation over a staged, executable CLI fixture, with no download or wallet. */
+  async function stagedRuntime() {
+    const entry = versionEntry(runtimeRoot, pkg.version);
+    await mkdir(dirname(entry), { recursive: true });
+    await writeFile(
+      entry,
+      `process.stdout.write((process.argv[2] === '--version' ? '${pkg.version}' : process.argv.slice(2).join(' ')) + '\\n');\n`,
+    );
+    await writeFile(
+      join(versionDir(runtimeRoot, pkg.version), 'package.json'),
+      JSON.stringify({ name: 'tenjin-cli', version: pkg.version }),
+    );
+    await writeFile(
+      join(versionDir(runtimeRoot, pkg.version), '.complete'),
+      JSON.stringify({ version: pkg.version }),
+    );
+    const node = nodeBinPath(runtimeRoot, NODE_V);
+    await mkdir(dirname(node), { recursive: true });
+    await writeFile(node, `#!/bin/sh\nexec ${shQuote(process.execPath)} "$@"\n`, { mode: 0o755 });
+    await writeFile(
+      join(runtimeRoot, 'node', NODE_V, '.complete'),
+      JSON.stringify({ version: NODE_V }),
+    );
+    return vi.fn(async (): Promise<RuntimeSetup> => {
+      const activated = await activate(
+        runtimeRoot,
+        { cli: pkg.version, node: NODE_V },
+        { home, env: fake.env },
+      );
+      return setup({ launcher: activated.launcher, restore: activated.restore });
+    });
+  }
+
+  it.each(['marketplace', 'plugin'])(
+    'keeps the registered Claude runtime usable when Codex %s add fails',
+    async (failure) => {
+      const setUp = await stagedRuntime();
+      const runtime = runtimeOncePerRun(setUp);
+      const first = await runRouterInstall({ yes: true, noWallet: true }, ctx(), deps(runtime));
+      expect(pluginOf(first)).toMatchObject({ state: 'installed', method: 'plugin' });
+      expect(await fake.calls()).toContain(
+        `plugin marketplace add ${join(runtimeRoot, 'claude')} --json`,
+      );
+      expect(await fake.calls()).toContain('plugin install tenjin@tenjin --scope user --json');
+      const launcher = join(home, '.local', 'bin', 'tenjin');
+      const mcp = join(runtimeRoot, 'claude', 'tenjin', '.mcp.json');
+      const paths = [
+        join(runtimeRoot, 'state.json'),
+        join(runtimeRoot, 'claude', '.claude-plugin', 'marketplace.json'),
+        join(runtimeRoot, 'claude', 'tenjin', '.claude-plugin', 'plugin.json'),
+        join(runtimeRoot, 'claude', 'tenjin', 'hooks', 'hooks.json'),
+        mcp,
+        launcher,
+      ];
+      const before = await Promise.all(paths.map((path) => readFile(path, 'utf8')));
+      const steps: string[] = [];
+      await expect(
+        runCodexInstall({ yes: true, noWallet: true }, ctx(), {
+          homeDir: home,
+          env: fake.env,
+          runtime,
+          config: async () => ({}),
+          run: async (args) => {
+            steps.push(args.join(' '));
+            const failed =
+              failure === 'marketplace'
+                ? args[1] === 'marketplace' && args[2] === 'add'
+                : args[1] === 'add';
+            return { code: failed ? 1 : 0, stdout: '{}', stderr: 'Codex registration failed' };
+          },
+        }),
+      ).rejects.toThrow('Codex registration failed');
+      expect(setUp).toHaveBeenCalledTimes(1);
+      expect(await Promise.all(paths.map((path) => readFile(path, 'utf8')))).toEqual(before);
+      expect(readRuntimeState(runtimeRoot)?.current).toEqual({ cli: pkg.version, node: NODE_V });
+      expect(
+        execFileSync(launcher, ['--version'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }),
+      ).toBe(`${pkg.version}\n`);
+      const server = JSON.parse(await readFile(mcp, 'utf8')).mcpServers.router as {
+        command: string;
+        args: string[];
+      };
+      expect(
+        execFileSync(server.command, server.args, {
+          encoding: 'utf8',
+          env: { PATH: '/usr/bin:/bin' },
+        }),
+      ).toBe('mcp --plugin\n');
+      expect(steps).toEqual([
+        `plugin marketplace add ${join(runtimeRoot, 'codex')} --json`,
+        ...(failure === 'plugin'
+          ? ['plugin add tenjin@tenjin --json', 'plugin marketplace remove tenjin']
+          : []),
+      ]);
+    },
+  );
+
+  it('still rolls back a failed Codex-only activation', async () => {
+    const runtime = runtimeOncePerRun(await stagedRuntime());
+    await expect(
+      runCodexInstall({ yes: true, noWallet: true }, ctx(), {
+        homeDir: home,
+        env: fake.env,
+        runtime,
+        config: async () => ({}),
+        run: async () => ({ code: 1, stdout: '', stderr: 'Codex registration failed' }),
+      }),
+    ).rejects.toThrow('Codex registration failed');
+    expect(readRuntimeState(runtimeRoot)).toBeNull();
+    expect(existsSync(join(runtimeRoot, 'claude', '.claude-plugin', 'marketplace.json'))).toBe(
+      false,
+    );
+    expect(existsSync(join(home, '.local', 'bin', 'tenjin'))).toBe(false);
+  });
+
+  it('activates again for Codex after Claude actually rolled the first activation back', async () => {
+    const setUp = await stagedRuntime();
+    const runtime = runtimeOncePerRun(setUp);
+    await fake.respond('mkt-add', 'Claude registration failed', 1);
+    await fake.respond('list', listed('tenjin@tenjin', '0.0.1'));
+    const first = await runRouterInstall({ yes: true, noWallet: true }, ctx(), deps(runtime));
+    expect(pluginOf(first)).toMatchObject({ state: 'failed' });
+    expect(readRuntimeState(runtimeRoot)).toBeNull();
+    await runCodexInstall({ yes: true, noWallet: true }, ctx(), {
+      homeDir: home,
+      env: fake.env,
+      runtime,
+      config: async () => ({}),
+      run: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    });
+    expect(setUp).toHaveBeenCalledTimes(2);
+    expect(readRuntimeState(runtimeRoot)?.current).toEqual({ cli: pkg.version, node: NODE_V });
+    expect(
+      execFileSync(join(home, '.local', 'bin', 'tenjin'), ['--version'], {
+        encoding: 'utf8',
+        env: { PATH: '/usr/bin:/bin' },
+      }),
+    ).toBe(`${pkg.version}\n`);
+  });
+
   it('sets the runtime up once, and says its warnings under the first host only', async () => {
     const setUp = vi.fn(async (): Promise<RuntimeSetup> => ({
       state: 'current',
