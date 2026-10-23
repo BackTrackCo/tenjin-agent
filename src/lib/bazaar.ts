@@ -150,10 +150,10 @@ function client(registry: string) {
   return withBazaar(new HTTPFacilitatorClient({ url: registry }));
 }
 
-/** The SDK fetch carries no deadline; a registry that stalls loses its slot. */
 /** A `withTimeout` that ran out of time. */
 class DeadlineError extends Error {}
 
+/** The SDK fetch carries no deadline; a registry that stalls loses its slot. */
 async function withTimeout<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
