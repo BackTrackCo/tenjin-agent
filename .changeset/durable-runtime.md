@@ -8,6 +8,8 @@ The `tenjin` command is now a launcher in `~/.local/bin` (`tenjin.cmd` too on Wi
 
 `tenjin update` no longer needs npm. It downloads the new version from the npm registry, checks it against the registry's SHA-512, and has the new build check itself on its own Node before it switches anything; a failed check keeps the version you had. The previous version stays in the runtime, and older ones are removed only once nothing runs from them. An older build never replaces a newer one; to go back, run `tenjin uninstall`, then install the older version.
 
+Codex runs Tenjin from the same runtime: install adds the Codex plugin from `~/.tenjin/runtime/codex`, whose hooks and server run the runtime's launcher, so a Node upgrade no longer breaks Tenjin in Codex. Run `tenjin install` once in Codex to move an existing install; Codex asks you to review the changed hooks.
+
 `tenjin doctor` checks the runtime Claude Code starts, and names an older `tenjin` first on your PATH, or a plugin an older build moved back to its npm folder.
 
 Existing installs move to the runtime on their next `tenjin install` or `tenjin update`, project installs included. The wallet, the passphrase, the spend ledger and the config stay where they are.
