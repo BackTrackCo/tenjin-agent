@@ -339,7 +339,12 @@ never a batch sibling, a compare option or on a `discovered` offer, and never
 with `bound`, so it never runs in place of a native call. Its `execute`
 carries no `endpoint`, a `providerPriceAtomic` of `"0"` and the lead spec's
 `identity`, and its line names the account by label with no price: `Apify
-Google Maps, your Apify account: …`.
+Google Maps, your Apify account: …`. So once a preference puts an account first
+for a native call its map holds (Firecrawl's scrape holds `WebFetch`, its search
+`WebSearch`), that call is denied and offered, and Tenjin's own pick no longer
+runs in its place automatically. When the account maps the task more than once
+(fal's edit, background removal and upscale), the lead is the one of them the
+request needs, as the list's pick chooses.
 
 Beside the lead, both answers carry `fallback`: Tenjin's own route for the
 same task, a paid spec with its `identity` (`source: "tenjin"`) and its price,
