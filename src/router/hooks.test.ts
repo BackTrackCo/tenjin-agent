@@ -3904,7 +3904,7 @@ describe('an offer led by a connected account', () => {
     ),
   ) as { decision: { id: string; hint: string; fallback: { id: string } } };
 
-  async function connectApify(): Promise<void> {
+  async function connectApify(missing: string[] = []): Promise<void> {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({
@@ -3922,7 +3922,12 @@ describe('an offer led by a connected account', () => {
       }),
     );
     await mkdir(join(dir, 'sources'), { recursive: true });
-    await writeFile(join(dir, 'sources', 'apify.json'), '{}');
+    // The sign-in's plaintext header: the services the connect-time check
+    // found this account lacks.
+    await writeFile(
+      join(dir, 'sources', 'apify.json'),
+      JSON.stringify({ header: { id: 'apify', missing } }),
+    );
   }
 
   it('shows its line and keeps its spec with the fallback beside it', async () => {
@@ -3944,6 +3949,18 @@ describe('an offer led by a connected account', () => {
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · prompt: account lookup offered (Apify)',
     );
+  });
+
+  it('is withheld, with nothing kept, where the account was found to lack its service', async () => {
+    await connectApify(['apify.google-maps-places']);
+    const { fetchImpl } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
   });
 
   it('is withheld, with nothing kept, where that account is not connected', async () => {

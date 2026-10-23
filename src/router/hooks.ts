@@ -20,6 +20,7 @@ import {
   type Sealed,
 } from './context';
 import { storeAccountOffer, storeChoices, storeSpecs } from './specs';
+import { accountLacks } from './accounts/presence';
 import {
   isAccountSpec,
   requestDecision,
@@ -795,8 +796,16 @@ async function vetOffer<T extends OfferDecision>(
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
   // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend
-  // policy or the wallet to check, and it is offered alone.
-  if (isAccountOffer(offer)) return { offer };
+  // policy or the wallet to check, and it is offered alone. One whose service
+  // this account was found to lack when it was connected is left out, rather
+  // than leading its task and failing when called.
+  if (isAccountOffer(offer)) {
+    const lead = offer.specs.find(({ id }) => id === offer.id);
+    if (lead === undefined || !isAccountSpec(lead)) return { withheld: 'account lead unreadable' };
+    if (await accountLacks(deps.dataDir, lead.identity))
+      return { withheld: 'account lacks this job' };
+    return { offer };
+  }
   const terms = termsOf(offer);
   const shortfall =
     terms.endpoint === undefined

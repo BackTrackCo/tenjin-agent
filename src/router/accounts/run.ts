@@ -6,7 +6,13 @@ import { maskDeep } from '../paid';
 import { policyAtBoundary } from '../admit';
 import type { AccountOfferSpec, OfferSpec, SpecOutcome } from '../decision';
 import { mergedInput, specInputProblems, specText, uncheckedWarning } from '../spec-call';
-import { claimSpecPayment, readSpec, settleAccountRun } from '../specs';
+import {
+  claimSpecPayment,
+  readSpec,
+  settleAccountRun,
+  storeAccountOffer,
+  storeSpecs,
+} from '../specs';
 import { openLookupFooter, type LookupFooter } from '../progress';
 import {
   accountCost,
@@ -17,6 +23,7 @@ import {
   reportOutcome,
   routeOf,
   runSpec,
+  showSpec,
   type DeliverCall,
   type FailExtras,
   type FailStatus,
@@ -27,6 +34,7 @@ import {
 import { runAccountCall, type AccountRun, type AccountRunDeps, type Resume } from './call';
 import type { RefusalReason } from './credential';
 import { endAccountJob, keepAccountJob, readAccountJob, type AccountJob } from './jobs';
+import { accountLacks } from './presence';
 import { savedAccount } from './saved';
 import { readVaultHeader } from './vault';
 
@@ -250,6 +258,36 @@ export async function showAccountSpec(
       cost: ['nothing charged'],
     },
   };
+}
+
+/**
+ * AN ACCOUNT SERVICE A QUERY OR A TOOL ID PICKED, kept and shown, unless the
+ * connect-time check found this account lacks it: then it is left out, and
+ * Tenjin's own route for the task, when the settings allowed one, is kept and
+ * shown in its place, from the balance like any other. Nothing is sent.
+ */
+export async function offerAccountLead(
+  lead: AccountOfferSpec,
+  fallback: OfferSpec | undefined,
+  dataDir: string,
+  hint?: string,
+): Promise<RequestToolResult> {
+  if (!(await accountLacks(dataDir, lead.identity))) {
+    await storeAccountOffer(dataDir, lead, fallback);
+    return showAccountSpec(lead.id, lead, dataDir, hint);
+  }
+  const account = await accountOf(lead, dataDir);
+  const words = refusalWords('missing', account, undefined);
+  if (fallback === undefined) {
+    const reason = `${words.said} Nothing was sent, and your settings allow no other service for this.`;
+    return accountResult('native', reason, reason, account.label, {
+      nextStep: `Continue with your own tools. ${words.fix}`,
+    });
+  }
+  await storeSpecs(dataDir, [fallback]);
+  const shown = showSpec(fallback.id, fallback);
+  const note = `${words.said} Tenjin's own tool for this task is below, paid from the Tenjin balance.`;
+  return { ...shown, summary: `${note}\n${shown.summary}`, envelope: { ...shown.envelope, note } };
 }
 
 /** What one run carries to the end of it: the offer, the account, Tenjin's

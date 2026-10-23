@@ -2686,7 +2686,9 @@ describe('the tool list, read for free', () => {
  * and shown saying the account pays, with nothing run yet.
  */
 describe('a pick on a connected account', () => {
-  it('is kept and shown, saying who pays, before anything runs', async () => {
+  /** fal connected here: its descriptor, and a sign-in whose header lists the
+   *  services the connect-time check found it lacks. */
+  async function falConnected(missing: string[] = []): Promise<void> {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({
@@ -2706,7 +2708,14 @@ describe('a pick on a connected account', () => {
       }),
     );
     await mkdir(join(dir, 'sources'), { recursive: true });
-    await writeFile(join(dir, 'sources', 'fal.json'), '{}');
+    await writeFile(
+      join(dir, 'sources', 'fal.json'),
+      JSON.stringify({ header: { id: 'fal', missing } }),
+    );
+  }
+
+  it('is kept and shown, saying who pays, before anything runs', async () => {
+    await falConnected();
     const answer = JSON.parse(
       readFileSync(
         fileURLToPath(new URL('./fixtures/wire-lookup-spec-account.json', import.meta.url)),
@@ -2737,6 +2746,28 @@ describe('a pick on a connected account', () => {
       fallbackId: answer.decision.fallback.id,
     });
     expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await readSpec(dir, answer.decision.fallback.id)).not.toBeNull();
+  });
+
+  it("shows Tenjin's own tool in place of one this account was found to lack", async () => {
+    await falConnected(['fal.flux-pro-ultra']);
+    const answer = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-lookup-spec-account.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; fallback: { id: string } } };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'a photoreal image of a lighthouse at dusk, made with my fal account' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'spec', id: answer.decision.fallback.id });
+    expect(result.summary).toMatch(
+      /^This fal account doesn't have what this job needs: its tool was missing when it was connected\. Tenjin's own tool for this task is below, paid from the Tenjin balance\.\n/,
+    );
+    // The lead is never kept, so nothing can run it on the account.
+    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
     expect(await readSpec(dir, answer.decision.fallback.id)).not.toBeNull();
   });
 });

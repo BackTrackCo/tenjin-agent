@@ -35,7 +35,6 @@ import {
   claimSpecPayment,
   readKeptSpec,
   settleSpecPayment,
-  storeAccountOffer,
   storeChoices,
   storeFullResult,
   storeSpecs,
@@ -909,14 +908,11 @@ async function requestTool(
     // its job, which a refusal offers.
     if (isAccountSpec(decision.spec)) {
       const lead = { ...decision.spec, id: decision.id };
-      await storeAccountOffer(deps.ctx.dataDir, lead, decision.fallback);
+      const shown = await (
+        await import('./accounts/run')
+      ).offerAccountLead(lead, decision.fallback, deps.ctx.dataDir, decision.hint);
       await footer.done('service found');
-      return (await import('./accounts/run')).showAccountSpec(
-        lead.id,
-        lead,
-        deps.ctx.dataDir,
-        decision.hint,
-      );
+      return shown;
     }
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
@@ -1096,10 +1092,9 @@ async function readToolList(
     if ('refused' in admitted) return refusedByPolicy(admitted.refused);
     if (isAccountSpec(decision.spec)) {
       const lead = { ...decision.spec, id: decision.id };
-      await storeAccountOffer(deps.ctx.dataDir, lead, decision.fallback);
-      return (await import('./accounts/run')).showAccountSpec(
-        lead.id,
+      return (await import('./accounts/run')).offerAccountLead(
         lead,
+        decision.fallback,
         deps.ctx.dataDir,
         decision.hint,
       );
@@ -1174,7 +1169,7 @@ function showRows(rows: readonly BrowseRow[]): RequestToolResult {
  *  a query the server answered with one: the spec as text, any other service
  *  offered beside it one `request({id})` away, and nothing sent or paid. The
  *  server's `hint`, when it sent one, is the skeleton of the call to make. */
-function showSpec(
+export function showSpec(
   id: string,
   spec: OfferSpec,
   others: readonly OfferSpec[] = [],

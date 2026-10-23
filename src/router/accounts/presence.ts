@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { sourceVaultPath } from '../../lib/paths';
 import { isAccountId } from './ids';
 
@@ -15,4 +16,28 @@ import { isAccountId } from './ids';
  */
 export function connectedSourceIds(dataDir: string, descriptorIds: readonly string[]): string[] {
   return descriptorIds.filter((id) => isAccountId(id) && existsSync(sourceVaultPath(id, dataDir)));
+}
+
+/**
+ * WHETHER A SERVICE ON A CONNECTED ACCOUNT CANNOT RUN HERE: the connect-time
+ * check found this account lacks its tool (a higher plan, say), or there is no
+ * sign-in here whose header can be read. Either way it is left out of what is
+ * offered, rather than leading its task and failing when called. The vault's
+ * plaintext header alone: no key, no OS store, no network, so a hook may ask.
+ */
+export async function accountLacks(
+  dataDir: string,
+  identity: { source: string; service: string },
+): Promise<boolean> {
+  if (!isAccountId(identity.source)) return true;
+  try {
+    const file = JSON.parse(await readFile(sourceVaultPath(identity.source, dataDir), 'utf8')) as {
+      header?: { id?: unknown; missing?: unknown };
+    };
+    const missing = file.header?.missing;
+    if (file.header?.id !== identity.source || !Array.isArray(missing)) return true;
+    return missing.includes(identity.service);
+  } catch {
+    return true;
+  }
 }
