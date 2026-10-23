@@ -566,7 +566,7 @@ export async function runRouterInstall(
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
   const asksAgent = !canPrompt && underAgentHarness(env);
-  const [router, fund] = await Promise.all([
+  const [router, funding] = await Promise.all([
     probeRouter(effective.baseUrl, {
       timeoutMs: ctx.flags.timeout,
       env,
@@ -578,6 +578,7 @@ export async function runRouterInstall(
       ? fundStep(wallet, effective.rpcUrl, deps)
       : Promise.resolve(undefined),
   ]);
+  const fund = funding?.step;
   const nextSteps: QuestionStep[] = [
     ...(spendAsk !== undefined ? [spendAsk] : []),
     ...(fund !== undefined ? [fund] : []),
@@ -596,6 +597,7 @@ export async function runRouterInstall(
       ctx.io.isTTY,
     ),
     nextSteps,
+    ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
     // The check for this scope, said outright; a bare doctor in the project
     // also finds it from what the project holds.
     ...(project ? { doctor: 'tenjin doctor --project' } : {}),
@@ -621,6 +623,7 @@ export async function runRouterInstall(
         migration,
         wallet,
         ...(fund !== undefined ? { fund } : {}),
+        ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
         asks: asksAgent && nextSteps.length > 0,
         policy: effective.policy,
         ...(spendAsk !== undefined ? { spendAsk } : {}),
@@ -1170,7 +1173,7 @@ async function fundStep(
   wallet: WalletOutcome,
   rpcUrl: string,
   deps: RouterInstallDeps,
-): Promise<FundStep | undefined> {
+): Promise<{ step?: FundStep; warning?: string } | undefined> {
   const address = wallet.address;
   if (address === undefined || (wallet.status !== 'created' && wallet.status !== 'existing')) {
     return undefined;
@@ -1183,23 +1186,31 @@ async function fundStep(
           () => null,
         );
   if (funded === true) return undefined;
+  if (funded === null) {
+    return {
+      warning:
+        'Could not check your Tenjin funds. Your usual tools keep working. Ask your agent to check your funds later; this check failing does not mean you need to add money again.',
+    };
+  }
   const show =
     'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
   return {
-    id: 'fund',
-    question: FUND_QUESTION,
-    options: [
-      {
-        id: 'fund',
-        label: `Add $${SUGGESTED_FUND_USD}`,
-        recommended: false,
-        command: FUND_COMMAND,
-      },
-      { id: 'later', label: 'Not now', recommended: false, command: null },
-    ],
-    next: `The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${FUND_COMMAND}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
-    address,
-    show,
+    step: {
+      id: 'fund',
+      question: FUND_QUESTION,
+      options: [
+        {
+          id: 'fund',
+          label: `Add $${SUGGESTED_FUND_USD}`,
+          recommended: false,
+          command: FUND_COMMAND,
+        },
+        { id: 'later', label: 'Not now', recommended: false, command: null },
+      ],
+      next: `The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${FUND_COMMAND}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
+      address,
+      show,
+    },
   };
 }
 
@@ -1452,6 +1463,7 @@ function lines(
     migration: Migration;
     wallet: WalletOutcome;
     fund?: FundStep;
+    fundingWarning?: string;
     asks: boolean;
     policy: SpendPolicy;
     spendAsk?: QuestionStep;
@@ -1496,6 +1508,7 @@ function lines(
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...(s.fund !== undefined ? fundLines(s.fund) : []),
+    ...(s.fundingWarning !== undefined ? [warn(s.fundingWarning)] : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),
     ...migrationLines(ctx, s.migration),

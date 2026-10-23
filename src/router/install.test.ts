@@ -1222,7 +1222,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
   });
 
-  it('asks about an existing wallet whose balance cannot be read', async () => {
+  it('does not suggest adding money when an existing balance cannot be checked', async () => {
     const result = await runRouterInstall(
       { yes: true },
       ctx(),
@@ -1234,7 +1234,13 @@ describe('install run by an agent asks each question where its answer is needed'
         },
       }),
     );
-    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
+    expect(stepsOf(result)).toEqual([]);
+    expect(result.data).toMatchObject({
+      fundingWarning: expect.stringContaining('Could not check your Tenjin funds'),
+    });
+    expect(result.humanLines!.join(' ')).toContain('Your usual tools keep working');
+    expect(result.humanLines!.join(' ')).not.toContain('Add $5');
+    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
   });
 
   it('a person at a terminal gets what it always got: no questions handed over', async () => {
