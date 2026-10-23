@@ -14,6 +14,7 @@ import {
   normalizeForWire,
   ONLY_DIMENSIONS,
   POLICY_VERSION,
+  replacementFits,
   scopeKey,
   targetKey,
   type OnlyDimension,
@@ -1046,7 +1047,7 @@ export async function runConfigReplacement(
           `${SAVED_PREFIX} ${REPLACEMENT_NAME} is on${scope !== undefined ? ` for ${new Intl.ListFormat('en', { type: 'disjunction' }).format(scope.map((target) => labelOf(target, listing)))}` : ' for any allowed provider'}.`,
           'When Tenjin picks a service for a web search or page fetch your agent is about to make, it runs that pick in place of the search or fetch instead of offering it first, so each one is a charge you are not asked about separately.',
           `Your limits still apply (${limits.perCall} a call, ${limits.daily === null ? 'no daily limit' : `${limits.daily} a day`}, Tenjin balance): a call over them is not run in place, it is offered as usual and asks first.`,
-          accountsNote(router, scope !== undefined),
+          accountsNote(router, scope, listing),
           'This picks no provider ahead of another and changes nothing about what is allowed: add a preference or a rule for that.',
           support.why,
         ];
@@ -1068,20 +1069,33 @@ export async function runConfigReplacement(
 /**
  * WHAT AUTOMATIC USE DOES WITH THE USER'S CONNECTED ACCOUNTS (vraspar,
  * 2026-10-23): it runs them too, for the jobs Tenjin has checked, and their
- * own plans pay, outside the limits above. Named when some are connected.
+ * own plans pay, outside the limits above. Named when some are connected and,
+ * under a provider choice, only those with a job whose providers fit it, as
+ * the swap reads them (`replacementFits`).
  */
-function accountsNote(router: RouterSettings, scoped: boolean): string {
+function accountsNote(
+  router: RouterSettings,
+  scope: readonly Target[] | undefined,
+  listing: DirectoryListing | undefined,
+): string {
   const { sources } = router;
+  const fits = (id: string) =>
+    scope === undefined ||
+    (listing?.services ?? []).some(
+      ({ identity }) => identity.source === id && replacementFits(identity, scope),
+    );
   const names =
     sources.status === 'ok'
       ? sources.saved.flatMap((entry) => {
           const account = savedAccountOf(entry);
-          return account?.mapped === true && sources.connected.includes(account.id)
+          return account?.mapped === true &&
+            sources.connected.includes(account.id) &&
+            fits(account.id)
             ? [account.label]
             : [];
         })
       : [];
-  const within = scoped ? ' within the same provider choice' : '';
+  const within = scope !== undefined ? ' within the same provider choice' : '';
   if (names.length === 0)
     return `An account you connect with \`tenjin connect\` runs this way too${within}, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.`;
   const yours = `your ${new Intl.ListFormat('en', { type: 'conjunction' }).format(names)} ${names.length === 1 ? 'account' : 'accounts'}`;

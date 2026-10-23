@@ -34,6 +34,8 @@ const fixture = <T>(name: string): T =>
 const DIRECTORY = fixture<{ schemaVersion: 1; routerVersion: string; directory: DirectoryListing }>(
   'wire-directory.json',
 );
+/** The same directory with the accounts `tenjin connect` can connect. */
+const MCP_DIRECTORY = fixture<{ directory: DirectoryListing }>('wire-directory-mcp.json').directory;
 
 let dir: string;
 let work: string;
@@ -609,6 +611,47 @@ describe('replacement', () => {
       "It also runs your Apify account this way, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.",
     );
     expect(text).not.toMatch(/\bfal\b|mcp\.example\.com|mcp-example-com/);
+  });
+
+  it('names only the connected accounts whose jobs fit the provider choice', async () => {
+    // Apify, Firecrawl and fal connected with maps. fal's image job needs
+    // Black Forest Labs too, so naming fal alone leaves it out.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            {
+              id: 'firecrawl',
+              label: 'Firecrawl',
+              mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+              mapped: true,
+            },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    for (const id of ['apify', 'firecrawl', 'fal'])
+      await writeFile(join(dir, 'sources', `${id}.json`), '{}');
+    const net = router(MCP_DIRECTORY);
+    const firecrawl = lines(
+      await runConfigReplacement({ state: 'on', provider: ['firecrawl', 'fal'] }, makeCtx(), net),
+    );
+    expect(firecrawl).toContain(
+      "It also runs your Firecrawl account this way within the same provider choice, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.",
+    );
+    expect(firecrawl).not.toMatch(/\bApify\b/);
+    // None fits: no account is named as running automatically.
+    const google = lines(
+      await runConfigReplacement({ state: 'on', provider: ['google'] }, makeCtx(), net),
+    );
+    expect(google).toContain(
+      'An account you connect with `tenjin connect` runs this way too within the same provider choice, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.',
+    );
+    expect(google).not.toMatch(/\bApify\b|\bFirecrawl\b|\bfal\b/);
   });
 
   it('says it runs in place only where a running Claude Code with the plugin can', async () => {
