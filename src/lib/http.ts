@@ -344,6 +344,34 @@ export function isReservedRequestHeader(name: string): boolean {
   );
 }
 
+/** One header name, as RFC 9110 spells a token. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Names the transport or the body encoding own. */
+const TRANSPORT_HEADERS = new Set(['host', 'content-length', 'content-type', 'user-agent']);
+
+/**
+ * Why a request header someone else names (an operator's `-H`, a catalog
+ * spec) cannot ride a paid request, or null when it can: `name` for a name
+ * that is not a token or a value that is empty, `reserved` for a name this
+ * client signs or sets itself or the transport owns, `value` for a value over
+ * 1,024 characters or one that spans lines. `ownContentType` lets the caller
+ * name `content-type`, for a body this client does not encode.
+ */
+export function requestHeaderProblem(
+  name: string,
+  value: string,
+  ownContentType = false,
+): 'name' | 'reserved' | 'value' | null {
+  if (!HEADER_NAME.test(name) || value.length === 0) return 'name';
+  const lowered = name.toLowerCase();
+  const contentType = ownContentType && lowered === 'content-type';
+  if (isReservedRequestHeader(lowered) || (TRANSPORT_HEADERS.has(lowered) && !contentType)) {
+    return 'reserved';
+  }
+  if (value.length > 1_024 || /[\r\n]/.test(value)) return 'value';
+  return null;
+}
+
 export type FetchJsonResult = FetchJsonSuccess | FetchJsonFailure;
 
 export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<FetchJsonResult> {

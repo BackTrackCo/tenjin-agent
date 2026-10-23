@@ -18,9 +18,12 @@ provider's beta opt-in or an API version, on the probe and the paid leg alike,
 and it can send several. Every header the CLI signs or sets itself is refused
 before any request leaves: the payment signature, sign-in-with-x, the session
 delegation, the shelf bypass, the install id, the payment header namespace and
-the transport headers (host, content length, content type, user agent). The
-router's provider leg is unchanged: it still passes only the accept and content
-type headers from a decision.
+the transport headers (host, content length, content type, user agent). A
+routing decision still passes only the accept and content type headers. A
+catalog spec can now carry fixed request headers the catalog decides, such as a
+provider's beta opt-in. They ride the routed call's probe and paid leg under
+its own accept and content type, and a spec naming any header refused above is
+refused before anything is sent. The server does not send them yet.
 
 A paid call now takes GET, POST, PUT, PATCH or DELETE, and a body needs POST,
 PUT or PATCH. A body that is not JSON goes byte for byte under the content type

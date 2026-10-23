@@ -20,6 +20,8 @@ import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
+import { buildSpecRequest } from '../router/spec-call';
+import type { ToolSpec } from '../router/decision';
 import { DEFAULT_RPC_URL, FALLBACK_RPC_URLS, rememberingBalanceReader } from '../lib/usdc-balance';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -1048,6 +1050,76 @@ describe('runPay, operator headers (-H)', () => {
       const { fetch, calls } = scriptedFetch([]);
       await expect(
         runPay({ url: TENJIN_URL, header: lines }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+});
+
+describe("runPay, a catalog spec's fixed headers", () => {
+  const BETA = 'dynamic-highlights-2026-08-28';
+  const exa = (headers: Record<string, string>): ToolSpec => ({
+    capabilityId: 'catalog:exa-search',
+    provider: 'Exa',
+    description: 'Web search.',
+    priceAtomic: '10000',
+    priceVaries: false,
+    maxAmountAtomic: '10000',
+    payTo: '0x1111111111111111111111111111111111111111',
+    network: 'eip155:8453',
+    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    request: { method: 'POST', url: TENJIN_URL, fields: {}, location: 'body', headers },
+    input: { type: 'object', properties: { query: { type: 'string' } } },
+    pinned: {},
+  });
+
+  it("ride the probe and the paid leg, under the leg's own accept and content-type", async () => {
+    const built = buildSpecRequest(
+      exa({ 'Exa-Beta': BETA, Accept: 'text/plain', 'X-Trace': 't-1' }),
+      { query: 'x' },
+    );
+    if ('problem' in built) throw new Error(built.problem);
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, { error: 'payment required' }, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const result = await runPay(
+      {
+        url: built.url,
+        method: built.method,
+        headers: built.headers,
+        ...(built.specHeaders !== undefined ? { specHeaders: built.specHeaders } : {}),
+        ...(built.body !== undefined ? { rawBody: built.body } : {}),
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.headers['exa-beta']).toBe(BETA);
+      expect(call.headers['x-trace']).toBe('t-1');
+      expect(call.headers['accept']).toBe('application/json');
+      expect(call.headers['content-type']).toBe('application/json');
+    }
+    expect(calls[0]!.headers['payment-signature']).toBeUndefined();
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+  });
+
+  it('refuses a reserved name handed to the paid leg directly, before any network', async () => {
+    for (const name of ['Payment-Signature', 'Sign-In-With-X', 'Content-Type', 'Host']) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, specHeaders: { [name]: 'forged' } }, makeCtx(), {
+          ...PUBLIC_DNS,
+          fetchImpl: fetch,
+        }),
       ).rejects.toMatchObject({ code: 'USAGE' });
       expect(calls).toHaveLength(0);
     }

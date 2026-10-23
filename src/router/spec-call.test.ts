@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildSpecRequest, specInputProblems, specText, mergedInput } from './spec-call';
 import { readSpec, storeSpecs } from './specs';
-import type { OfferSpec, ToolSpec } from './decision';
+import { OfferSpecSchema, type OfferSpec, type ToolSpec } from './decision';
 
 const ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d01';
 
@@ -289,6 +289,48 @@ describe("a spec's request, filled from the input", () => {
       headers: { accept: 'application/json', 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'a plane', model: 'openai/gpt-image-2' }),
     });
+  });
+
+  it('accepts a spec that carries fixed request headers, up to eight', () => {
+    const base = spec();
+    const headers = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`X-H${i}`, 'v']));
+    const at = (n: number) => ({ ...base, request: { ...base.request, headers: headers(n) } });
+    expect(OfferSpecSchema.safeParse(at(1)).success).toBe(true);
+    expect(OfferSpecSchema.safeParse(at(8)).success).toBe(true);
+    expect(OfferSpecSchema.safeParse(at(9)).success).toBe(false);
+  });
+
+  it("keeps the spec's fixed headers apart from its own accept and content-type", () => {
+    const base = spec();
+    const withBeta = spec({ request: { ...base.request, headers: { 'Exa-Beta': 'on' } } });
+    expect(buildSpecRequest(withBeta, mergedInput(withBeta, { prompt: 'a plane' }))).toMatchObject({
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      specHeaders: { 'Exa-Beta': 'on' },
+    });
+    expect(buildSpecRequest(base, mergedInput(base, { prompt: 'a plane' }))).not.toHaveProperty(
+      'specHeaders',
+    );
+  });
+
+  it('refuses a spec that sets a payment, sign-in, transport or malformed header', () => {
+    const base = spec();
+    for (const [name, value] of [
+      ['Payment-Signature', 'forged'],
+      ['X-PAYMENT', 'forged'],
+      ['Sign-In-With-X', 'forged'],
+      ['Tenjin-Session-Delegation', 'forged'],
+      ['Tenjin-Install-Id', 'other'],
+      ['Content-Type', 'text/plain'],
+      ['Host', 'elsewhere.example'],
+      ['Bad Name', 'v'],
+      ['X-Split', 'a\r\nb'],
+    ] as const) {
+      const bad = spec({ request: { ...base.request, headers: { [name]: value } } });
+      expect(buildSpecRequest(bad, mergedInput(bad, { prompt: 'a plane' }))).toEqual({
+        problem: `the spec sets the header ${JSON.stringify(name)}, which this build will not send`,
+      });
+    }
   });
 
   it('puts a path field in its segment, encoded, and the rest in the query', () => {

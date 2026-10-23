@@ -7,7 +7,7 @@ import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-b
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
-import { fetchFailureToCliError, httpRequest, isReservedRequestHeader } from '../lib/http';
+import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
 import type { FetchJsonFailure, HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
@@ -116,6 +116,12 @@ export interface PayArgs {
    * payment header in beside the one this command signs.
    */
   headers?: Record<string, string>;
+  /**
+   * A catalog spec's fixed request headers, on the router's provider leg: the
+   * same bar as `-H`, checked again here, and set under `headers`, so a spec
+   * never replaces the leg's own `accept` or `content-type`.
+   */
+  specHeaders?: Record<string, string>;
   /**
    * `-H 'Name: value'` lines from the operator, for a header the endpoint
    * itself asks for (a beta opt-in, an API version). Manual lane only. Any
@@ -253,7 +259,11 @@ async function executePay(
   const method = resolveMethod(args);
   const operator = operatorHeaders(args.header, args.dataRaw !== undefined);
   const body = resolveBody(args, operator);
-  const headers = { ...operator, ...callerHeaders(args.headers) };
+  const headers = {
+    ...operator,
+    ...specHeaders(args.specHeaders),
+    ...callerHeaders(args.headers),
+  };
 
   const fetchOpts = {
     timeoutMs: ctx.flags.timeout,
@@ -714,7 +724,9 @@ async function assertBalanceCovers(
  * leg's own, with nothing sent but the probe and that re-read.
  */
 export async function quoteRouterCall(
-  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'rawBody'> & { terms: AdvertisedTerms },
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody'> & {
+    terms: AdvertisedTerms;
+  },
   ctx: CommandContext,
   deps: PayDeps = {},
 ): Promise<bigint> {
@@ -723,7 +735,7 @@ export async function quoteRouterCall(
   if (resolveLane(url, settings) === 'bazaar') {
     await assertPublicDestination(url, deps.destination ?? {});
   }
-  const headers = callerHeaders(args.headers);
+  const headers = { ...specHeaders(args.specHeaders), ...callerHeaders(args.headers) };
   const probe = await httpRequest(url, {
     timeoutMs: ctx.flags.timeout,
     blockRedirects: true,
@@ -873,11 +885,6 @@ function resolveBody(
   return args.rawBody !== undefined ? { rawBody: args.rawBody } : {};
 }
 
-/** One header name, as RFC 9110 spells a token. */
-const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-/** Names the transport or the body encoding own; `-H` may not restate them. */
-const TRANSPORT_HEADERS = new Set(['host', 'content-length', 'content-type', 'user-agent']);
-
 /**
  * The operator's `-H` lines, or a refusal. The opposite rule from
  * {@link callerHeaders}: a person typing the command may name any header the
@@ -893,19 +900,18 @@ function operatorHeaders(lines: string[] | undefined, rawBody: boolean): Record<
     const at = line.indexOf(':');
     const name = at > 0 ? line.slice(0, at).trim() : '';
     const value = at > 0 ? line.slice(at + 1).trim() : '';
-    if (!HEADER_NAME.test(name) || value.length === 0) {
+    const problem = requestHeaderProblem(name, value, rawBody);
+    if (problem === 'name') {
       throw new CliError('USAGE', `Not a request header: ${JSON.stringify(line)}`, {
         fix: "Pass -H 'Name: value'.",
       });
     }
-    const lowered = name.toLowerCase();
-    const ownContentType = rawBody && lowered === 'content-type';
-    if (isReservedRequestHeader(lowered) || (TRANSPORT_HEADERS.has(lowered) && !ownContentType)) {
+    if (problem === 'reserved') {
       throw new CliError('USAGE', `This command sets the header ${JSON.stringify(name)} itself.`, {
         fix: 'Payment, sign-in, bypass and transport headers are never taken from -H. --data is always application/json; only --data-raw takes a Content-Type from -H.',
       });
     }
-    if (value.length > 1_024 || /[\r\n]/.test(value)) {
+    if (problem === 'value') {
       throw new CliError(
         'USAGE',
         `The value of ${JSON.stringify(name)} is too long or spans lines.`,
@@ -914,6 +920,7 @@ function operatorHeaders(lines: string[] | undefined, rawBody: boolean): Record<
         },
       );
     }
+    const lowered = name.toLowerCase();
     if (lowered in out) {
       throw new CliError('USAGE', `The header ${JSON.stringify(name)} was given twice.`, {
         fix: 'Pass each header name once.',
@@ -946,6 +953,29 @@ function callerHeaders(headers: Record<string, string> | undefined): Record<stri
       );
     }
     out[lowered] = value;
+  }
+  return out;
+}
+
+/**
+ * A catalog spec's fixed headers, or a refusal. The spec was checked when its
+ * request was built; this is the last stop before the wire, so the same
+ * check runs again.
+ */
+function specHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  if (headers === undefined) return {};
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (requestHeaderProblem(name, value) !== null) {
+      throw new CliError(
+        'USAGE',
+        `This command will not send the header ${JSON.stringify(name)}.`,
+        {
+          fix: 'A spec header is a bounded, single-line value, and never a payment, sign-in, bypass or transport header.',
+        },
+      );
+    }
+    out[name.toLowerCase()] = value;
   }
   return out;
 }

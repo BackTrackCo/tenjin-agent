@@ -723,6 +723,7 @@ async function quoteTake(
         url: built.url,
         method: built.method,
         headers: built.headers,
+        ...(built.specHeaders !== undefined ? { specHeaders: built.specHeaders } : {}),
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms: specTerms(spec),
       },
