@@ -17,9 +17,18 @@ import { accountLines, accountStatuses } from './accounts/readout';
 import { BUILT_IN_SOURCE } from './access';
 import type { DirectoryListing, Target } from './decision';
 import { cachedDirectory, labelOf } from './directory';
+import { routerSettings } from './settings';
 
 /**
- * `tenjin status`: what this machine has spent and what it is still holding.
+ * `tenjin status`: THE FOUR THINGS A USER SEES (tenjin-notes#37), led by
+ * whether Tenjin is on: the balance, today's spend against the daily limit
+ * and the per-call limit (both on the Tenjin balance only), the connected
+ * accounts, and the settings. Nothing else is printed. What lookups cost,
+ * the routing credit and the requests still open are in `--json` alone.
+ *
+ * ON OR PAUSED is read the way both hooks read it, from this directory, so a
+ * project file that pauses Tenjin here shows here. A setting that can't be
+ * read is off, as the hooks treat it.
  *
  * IT READS `spend.json`, NOT THE BACKEND. The rolling window, the committed
  * total and the reservations still open are the local truth about money, and
@@ -28,15 +37,15 @@ import { cachedDirectory, labelOf } from './directory';
  * here is either in flight or a crash that has not yet aged out.
  *
  * A ROUTING DEPOSIT IS NOT A LOOKUP. It is prepaid credit the routing fee
- * draws from, so it is shown apart from what lookups cost, with what the
- * channel still holds. It still counts toward the daily limit, like any
+ * draws from, so `--json` keeps it apart from what lookups cost, with what
+ * the channel still holds. It still counts toward the daily limit, like any
  * automatic payment.
  *
  * THE USER'S OWN ACCOUNTS are listed with who pays for them: their own plans,
  * never counted in the limits on the Tenjin balance. Read from the config and
  * each sign-in's plaintext header, with no key, keychain or network.
  *
- * THE BALANCE LEADS, read from the chain with the same fallback a lookup
+ * THE BALANCE COMES NEXT, read from the chain with the same fallback a lookup
  * uses, because a balance at $0 is why nothing pays. A read that does not
  * answer says so rather than failing the readout, and no wallet means no read
  * at all.
@@ -49,6 +58,8 @@ import { cachedDirectory, labelOf } from './directory';
 
 export interface StatusDeps {
   now?: () => number;
+  /** The directory whose project files can pause Tenjin; the process's own by default. */
+  cwd?: string;
   /** Seam for the wallet's routing credit; production reads its channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
@@ -85,6 +96,31 @@ async function walletRoutingCredit(ctx: CommandContext): Promise<bigint> {
     return await channelCredit(ctx.dataDir, address);
   } catch {
     return 0n;
+  }
+}
+
+/** Whether Tenjin routes from here, and the line that says so. */
+async function onOrPaused(
+  dataDir: string,
+  config: Awaited<ReturnType<typeof loadRawConfig>>,
+  cwd: string,
+): Promise<{ enabled: boolean; line: string }> {
+  try {
+    const { enabled } = await routerSettings({ cwd, dataDir, config });
+    if (enabled.value) return { enabled: true, line: 'Tenjin is on.' };
+    return {
+      enabled: false,
+      line:
+        enabled.source === 'project' || enabled.source === 'local'
+          ? `Tenjin is paused here by ${enabled.path ?? 'a project file'}: set router.enabled to true there to turn it back on.`
+          : 'Tenjin is paused on this machine: `tenjin config set router.enabled true` turns it back on.',
+    };
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return {
+      enabled: false,
+      line: `Tenjin is off here: its on/off setting can't be read (${why}).`,
+    };
   }
 }
 
@@ -171,6 +207,7 @@ export async function runRouterStatus(
     0n,
   );
   const config = await loadRawConfig(ctx.dataDir);
+  const power = await onOrPaused(ctx.dataDir, config, deps.cwd ?? process.cwd());
   const retired = retiredPaymentKeys(config);
   // THE USER'S OWN ACCOUNTS (#37), from the config and each vault's header:
   // their plans pay, so the limits below never count them.
@@ -195,6 +232,7 @@ export async function runRouterStatus(
   ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const data = {
+    enabled: power.enabled,
     baseUrl: settings.baseUrl,
     warnings,
     wallet:
@@ -241,12 +279,11 @@ export async function runRouterStatus(
     budgetAtomic === null
       ? `Today ${automatic} spent automatically (Tenjin balance); no daily limit`
       : `Today ${automatic} of your $${formatUsdDisplay(budgetAtomic.toString())} daily limit (Tenjin balance, over the last 24 hours)`;
-  const credit = [
-    ...(depositedAtomic > 0n ? [`${toMoney(depositedAtomic.toString()).usd} USD prepaid`] : []),
-    ...(depositedAtomic > 0n || creditAtomic > 0n
-      ? [`${data.routingCredit.remaining.usd} USD left (~${data.routingCredit.calls} calls)`]
-      : []),
-  ];
+  const capAtomic = settings.policy.maxAutoSpendAtomic;
+  const perCallLine =
+    capAtomic === 0n
+      ? 'Per call: every call paid from the Tenjin balance asks you first.'
+      : `Per call: up to $${formatUsdDisplay(capAtomic.toString())} from the Tenjin balance runs on its own; a call above it asks you first.`;
   const walletLines =
     wallet === null
       ? []
@@ -259,14 +296,12 @@ export async function runRouterStatus(
   return {
     data,
     humanLines: [
+      power.line,
       ...walletLines,
-      `lookups ${toMoney(lookupsAtomic.toString()).usd} USD` +
-        (credit.length > 0 ? ` · routing credit ${credit.join(', ')}` : ''),
       budgetLine,
+      perCallLine,
       ...accountLines(accounts),
       settingsLine(saved),
-      `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
-      `automatic router up to $${formatUsdDisplay(settings.policy.maxAutoSpendAtomic.toString())} a call (Tenjin balance); manual pay always requires consent`,
       ...warnings,
     ],
   };

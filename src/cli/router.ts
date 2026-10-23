@@ -116,9 +116,9 @@ export function registerRouter(reg: Registration): void {
       await runStatusLine(io, { dataDir: ctx.dataDir });
     });
 
-  leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
+  leaf(SETUP, 'status', 'whether Tenjin is on, your balance, limits, accounts and settings')
     .description(
-      'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force; and your connected accounts, which their own plans pay for, outside those caps.',
+      "Whether Tenjin is on or paused here; your Tenjin balance; today's spending against your daily limit, and your per-call limit, both on the Tenjin balance only; your connected accounts, which their own plans pay for, outside those limits; and your settings. --json adds the detail: what lookups cost, the prepaid routing credit, and requests still in flight.",
     )
     .action(async function (this: Command) {
       await runCommand('status', this, async (ctx) => {

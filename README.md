@@ -155,7 +155,7 @@ Connect your own Apify, fal or Firecrawl account, and Tenjin uses it first for t
 ## Commands
 
 ```bash
-tenjin status                          # your balance, spent today, your limits and your accounts
+tenjin status                          # on or paused, your balance, limits, accounts and settings
 tenjin usage                           # what lookups cost, by day, from your balance and on your accounts
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine

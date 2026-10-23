@@ -33,7 +33,7 @@ Manual pay ignores both configured limits and always requires user consent. The 
 A router call whose total is over `maxAutoSpend` or what is left of the day's `sessionBudget` pays nothing, and returns `needs_approval` with one sentence your assistant repeats ("5 takes of AiSpace (Hailuo 3 Max) cost $0.775 in total ($0.155 each)."). In Claude Code 2.1.214 or later, the `router` server also offers the `approve` tool, and the result carries a quote and the call your assistant makes next, `approve({quote, total, what})`. Claude Code shows its own permission prompt for that tool, with the total and what it buys, on every call and in every permission mode; no allow rule or hook skips it, and where nobody can answer (`dontAsk`, or `-p` with a permission-prompt tool) the call is denied. Your yes to that prompt is the only approval: nothing on disk, and no command, approves a quote. It then runs the quoted call exactly, once. A quote lasts ten minutes. An approved call may pass both limits, and counts as your own payment, outside the automatic budget, as manual pay does; it never runs past the wallet's balance. Any other host, and an older Claude Code, gets no `approve` tool: the call is refused with what it would cost and nothing paid. Nothing raises a limit on your behalf: `tenjin config set` below changes them, and only you run it.
 
 ```bash
-tenjin status                          # spent, reserved, and the caps in force
+tenjin status                          # on or paused, your balance, limits, accounts and settings
 tenjin config set maxAutoSpend 0.25
 tenjin config set sessionBudget 2.00
 ```
