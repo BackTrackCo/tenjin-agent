@@ -102,7 +102,7 @@ Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin w
 Under an agent harness (Claude Code, Claude Desktop, Codex), `tenjin install` opens nothing and pays nothing. Each question comes at the point where its answer is needed, in `nextSteps`, with the one command every answer names:
 
 1. The spend question comes first, while the config file names neither limit, because the answer picks the install command: Use the defaults (`tenjin install --yes`) or Set my own limits (`--max-auto-spend <usd> --session-budget <usd|none>`), as above. The defaults already hold while the question waits.
-2. The funding question comes from the output of that install command, when the wallet is new or holds no USDC: "Do you want to add $5 to your Tenjin wallet now?" "Yes, open the funding page" runs `tenjin wallet fund 5`, which opens the fund page in your default browser with $5 filled in. "Not now" runs nothing: the agent shows you the wallet address (`nextSteps[].show`) for later. Install mints no link and does not unlock the wallet; a later yes runs `tenjin wallet fund 5`.
+2. The funding question comes from the output of that install command, when the wallet is new or has no confirmed funds: "Add $5 to Tenjin now?" "Add $5" runs `tenjin wallet fund 5`, which opens checkout in your default browser with $5 filled in. "Not now" runs nothing: the agent says you can ask it to add funds later. Your usual tools keep working; paid tools need funds. The address remains available if you choose a direct transfer. Install mints no link and does not unlock the wallet; a later yes runs `tenjin wallet fund 5`.
 
 So the agent asks the spend question, runs the one install command your answer names, asks the funding question from that command's output, and runs `tenjin wallet fund 5` alone only after your yes. It never runs it without that yes. It shows you the address, and never asks you to run a command. A person running `tenjin install` in a terminal answers the spend question there and gets no question handed over.
 
@@ -130,6 +130,8 @@ Claude Code 2.1.287 or later is required. `tenjin install` and `tenjin doctor` r
 Install then sends the router one empty, unsigned request to check that this machine can reach it. When it cannot, install still succeeds, and it names the layer that refused (a proxy, DNS, TLS, or the connection) with the fix. `tenjin doctor` runs the same check. Both also look for running `tenjin mcp` processes that started before this install: Claude Code keeps an MCP server for the whole session, so one of those still runs the old build, and the new hooks can fail there with "Tool hook not found". They name the count and the fix (start a new Claude Code session) and stop nothing.
 
 The installer installs no skills. Install/refresh removes only an owned obsolete `tenjin-pay/SKILL.md`, preserving adjacent user files and foreign skills.
+
+When an agent opens checkout, the funding command returns promptly with a `nextStep`: finish checkout and return to the same conversation. The agent runs `tenjin wallet balance` to confirm funds and continues the task when sufficient. An unconfirmed balance or failed balance read does not establish a failed payment or trigger another checkout. A confirmed balance check clears the hook balance cache, so eligible offers can resume without restarting.
 
 After install, start a new Claude Code session, and the plugin loads. `/reload-plugins` does not run the plugin's `SessionStart`, so it is not enough.
 

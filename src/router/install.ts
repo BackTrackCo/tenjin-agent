@@ -1114,7 +1114,7 @@ export function namedLimits(
 }
 
 /** The funding question an agent's completed install hands over: the checkout's $5 minimum. */
-export const FUND_QUESTION = `Do you want to add $${SUGGESTED_FUND_USD} to your Tenjin wallet now?`;
+export const FUND_QUESTION = `Add $${SUGGESTED_FUND_USD} to Tenjin now?`;
 /** Its yes: the agent runs this alone, in the turn the person answered. */
 export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
 
@@ -1136,11 +1136,11 @@ export interface QuestionStep {
   next: string;
 }
 
-/** The funding question, with the address the person needs to add funds later. */
+/** The funding question, keeping a transfer address available without making it the normal path. */
 export interface FundStep extends QuestionStep {
   id: 'fund';
   address: string;
-  /** The address, for the agent to show the person as written. */
+  /** What to tell the person when they choose to add funds later. */
   show: string;
 }
 
@@ -1148,8 +1148,8 @@ export interface FundStep extends QuestionStep {
  * THE QUESTION BEFORE THE ACTION. Under an agent harness, install opens no
  * browser and pays nothing: once the spend answer has picked the install, the
  * install hands the agent the funding question, so the page opens only after
- * an answer the person gave in the session. It mints no link: "Not now" shows
- * the address, and a later yes runs `tenjin wallet fund`. A wallet that
+ * an answer the person gave in the session. It mints no link: a later yes
+ * runs `tenjin wallet fund`. A wallet that
  * already holds USDC gets no question.
  */
 async function fundStep(
@@ -1169,20 +1169,21 @@ async function fundStep(
           () => null,
         );
   if (funded === true) return undefined;
-  const show = `To add funds, send USDC on Base to ${address}.`;
+  const show =
+    'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
   return {
     id: 'fund',
     question: FUND_QUESTION,
     options: [
       {
         id: 'fund',
-        label: 'Yes, open the funding page',
+        label: `Add $${SUGGESTED_FUND_USD}`,
         recommended: false,
         command: FUND_COMMAND,
       },
       { id: 'later', label: 'Not now', recommended: false, command: null },
     ],
-    next: `The install is done. Ask the person this question with your question tool. On "Yes, open the funding page", run \`${FUND_COMMAND}\` alone, in the same turn. On "Not now", run nothing and show the person this for later: ${show} Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
+    next: `The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${FUND_COMMAND}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
     address,
     show,
   };
@@ -1198,7 +1199,7 @@ async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> 
 function fundLines(fund: FundStep): string[] {
   return [
     `  Ask the person: ${fund.question}`,
-    `  Yes, open the funding page: ${FUND_COMMAND}`,
+    `  Add $${SUGGESTED_FUND_USD}: ${FUND_COMMAND}`,
     `  Not now: run nothing, show them: ${fund.show}`,
   ];
 }

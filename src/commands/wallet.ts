@@ -8,6 +8,7 @@ import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
+import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
@@ -645,6 +646,8 @@ export async function runWalletBalance(
       cause: err,
     });
   }
+
+  await forgetRememberedBalance(ctx.dataDir);
 
   const balance = toMoney(atomic.toString());
   // THE ROUTING CREDIT IS STILL THE USER'S: a deposit moved it off the wallet

@@ -1141,9 +1141,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
     expect(stepsOf(result)[0]).toMatchObject({ question: QUESTION });
     expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
-    expect(result.humanLines).not.toContain(
-      '  Ask the person: Do you want to add $5 to your Tenjin wallet now?',
-    );
+    expect(result.humanLines).not.toContain('  Ask the person: Add $5 to Tenjin now?');
     const { next } = result.data as { next: string };
     expect(next).toBe(
       `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
@@ -1168,11 +1166,12 @@ describe('install run by an agent asks each question where its answer is needed'
     const steps = stepsOf(result);
     expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
-    const show = `To add funds, send USDC on Base to ${ADDRESS}.`;
+    const show =
+      'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
     expect(fund).toMatchObject({
-      question: 'Do you want to add $5 to your Tenjin wallet now?',
+      question: 'Add $5 to Tenjin now?',
       options: [
-        { id: 'fund', label: 'Yes, open the funding page', command: 'tenjin wallet fund 5' },
+        { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5' },
         { id: 'later', label: 'Not now', command: null },
       ],
       address: ADDRESS,
@@ -1184,8 +1183,8 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(fund.next).toContain('never ask them to run a command');
     expect(result.humanLines).toEqual(
       expect.arrayContaining([
-        '  Ask the person: Do you want to add $5 to your Tenjin wallet now?',
-        '  Yes, open the funding page: tenjin wallet fund 5',
+        '  Ask the person: Add $5 to Tenjin now?',
+        '  Add $5: tenjin wallet fund 5',
         `  Not now: run nothing, show them: ${show}`,
       ]),
     );
@@ -1438,7 +1437,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',
-        question: 'Do you want to add $5 to your Tenjin wallet now?',
+        question: 'Add $5 to Tenjin now?',
       }),
     ]);
   });

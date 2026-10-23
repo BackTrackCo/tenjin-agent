@@ -7,6 +7,7 @@ import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { Address } from 'viem';
 import { CliError } from '../lib/errors';
 import { SESSION_CHAIN_ID } from '../lib/session-key';
+import { rememberingBalanceReader } from '../lib/usdc-balance';
 import type { CommandContext } from '../context';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 
@@ -144,7 +145,11 @@ describe('runFund', () => {
       checkoutUrl: CHECKOUT,
       funded: false,
       pollStatus: 'skipped',
+      nextStep: expect.stringContaining('tenjin wallet balance'),
     });
+    expect((res.data as { nextStep: string }).nextStep).toContain('return to this conversation');
+    expect((res.data as { nextStep: string }).nextStep).toContain('Do not open another checkout');
+    expect((res.data as { nextStep: string }).nextStep).toContain('Funds not confirmed');
     expect(mockedBalance).not.toHaveBeenCalled();
 
     // What the route's withAuth actually checks, not merely that a header exists:
@@ -526,7 +531,12 @@ describe('runFund', () => {
   });
 
   it('polls until the balance rises above the pre-mint baseline', async () => {
-    const { provider } = fakeProvider();
+    const { provider, address } = fakeProvider();
+    let onChain = 250_000n;
+    const read = rememberingBalanceReader(dataDir, { read: async () => onChain });
+    const check = () => read(address, 'https://rpc.example', { timeoutMs: 100 });
+    expect(await check()).toBe(250_000n);
+    onChain = 5_250_000n;
     mockedBalance
       .mockResolvedValueOnce(250000n) // baseline before mint
       .mockResolvedValueOnce(250000n) // first poll: nothing yet
@@ -547,6 +557,8 @@ describe('runFund', () => {
     });
     expect(sleep).toHaveBeenCalledTimes(2);
     expect(res.humanLines?.join(' ')).toContain('5.25');
+    expect(await check()).toBe(onChain);
+    expect((res.data as { nextStep: string }).nextStep).toContain('Continue the original task');
   });
 
   it('times out cleanly as a non-error after polling to the deadline', async () => {

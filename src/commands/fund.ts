@@ -10,6 +10,7 @@ import {
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import { getUsdcBalance } from '../lib/usdc';
+import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
 import { addressQrLines } from '../lib/qr';
@@ -57,7 +58,7 @@ const POLL_TIMEOUT_MS = 600_000;
  * Why the run is not reporting an arrival, kept distinct in the envelope because
  * three different outcomes otherwise collapse into `funded: false`: the run never
  * waited, it wanted to but could not read a baseline balance, or it waited and
- * the deadline won. Only `timed-out` says anything about the purchase.
+ * the deadline won. None establishes the checkout's payment status.
  */
 export type FundPollStatus = 'skipped' | 'unavailable' | 'timed-out' | 'arrived';
 
@@ -177,6 +178,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       ? await pollForFunds(ctx, desc, rpcUrl, startBalance, opts)
       : undefined;
   if (funded !== undefined) {
+    await forgetRememberedBalance(ctx.dataDir);
     emitWriteNotice(ctx.io, 'USDC arrived - you can close the checkout tab.');
   }
   const pollStatus: FundPollStatus = !shouldWait
@@ -196,6 +198,10 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       ...(preset !== undefined ? { presetAmount: preset } : {}),
       funded: funded !== undefined,
       pollStatus,
+      nextStep:
+        funded !== undefined
+          ? 'Funds confirmed. Continue the original task; funding does not require another restart.'
+          : 'Ask the person to finish checkout and return to this conversation. When they return, run `tenjin wallet balance` to check funds, then continue their task if sufficient. Until the balance confirms funds, say "Funds not confirmed"; if the balance cannot be read, say you could not check it. Do not open another checkout unless they ask for a new link or the current link has expired. Run the check yourself, never ask the person to type a command.',
       ...(balanceAtomic !== undefined ? { balance: toMoney(balanceAtomic.toString()) } : {}),
     },
     humanLines:
@@ -206,7 +212,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
             ...(pollStatus === 'unavailable'
               ? ['Could not read the balance to wait on it; the link is unaffected.']
               : []),
-            'Confirm arrival later with `tenjin wallet balance`.',
+            'Finish checkout, then return to your agent to confirm funds and continue your task.',
+            'Funds not confirmed. Check with `tenjin wallet balance` before adding funds again.',
           ],
   };
 }
