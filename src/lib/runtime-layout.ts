@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultDataDir, runtimeDir } from './paths';
 import { isNewer, parseVersion } from './version-order';
@@ -120,8 +120,10 @@ export function handoffTarget(
     if (dir !== fallback) return null;
     const root = runtimeDir(dir);
     const state = readRuntimeState(root);
-    if (state === null || (state.current.cli !== version && !isNewer(state.current.cli, version)))
-      return null;
+    if (state === null) return null;
+    const sameNpmBuild =
+      state.current.cli === version && fileURLToPath(moduleUrl).split(sep).includes('node_modules');
+    if (!sameNpmBuild && !isNewer(state.current.cli, version)) return null;
     const node = nodeBinPath(root, state.current.node);
     const entry = versionEntry(root, state.current.cli);
     if (!existsSync(node) || !existsSync(entry)) return null;

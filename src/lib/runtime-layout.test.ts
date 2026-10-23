@@ -126,6 +126,13 @@ describe('handoffTarget', () => {
     expect(handoffTarget(NPM_MODULE(), '0.1.0-alpha.34', {}, home)).toBeNull();
   });
 
+  it('keeps the source build running when its version equals the installed runtime', () => {
+    writeState({ schemaVersion: 1, current, previous: null, pending: null });
+    place(current.cli, current.node);
+    const checkout = pathToFileURL(join(home, 'checkout', 'dist', 'index.js')).href;
+    expect(handoffTarget(checkout, current.cli, {}, home)).toBeNull();
+  });
+
   it('is null when the node or the entry is missing, or there is no state', () => {
     expect(handoffTarget(NPM_MODULE(), '0.1.0-alpha.32', {}, home)).toBeNull();
     writeState({ schemaVersion: 1, current, previous: null, pending: null });
