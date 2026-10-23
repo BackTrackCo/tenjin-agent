@@ -11,8 +11,12 @@ try {
     if ($env:TENJIN_DATA_DIR -and [IO.Path]::GetFullPath($env:TENJIN_DATA_DIR) -ne [IO.Path]::Combine($HOME, '.tenjin')) {
         throw 'Plugin installation needs the default data directory. Run without TENJIN_DATA_DIR.'
     }
-    $Architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-    if ($Architecture -notin @('x64', 'arm64') -or [Environment]::OSVersion.Platform -ne 'Win32NT') {
+    $Architecture = $env:PROCESSOR_ARCHITEW6432
+    if (-not $Architecture) { $Architecture = $env:PROCESSOR_ARCHITECTURE }
+    if ($Architecture -in @('AMD64', 'x64')) { $Architecture = 'x64' }
+    elseif ($Architecture -eq 'ARM64') { $Architecture = 'arm64' }
+    else { $Architecture = 'unsupported' }
+    if ($Architecture -eq 'unsupported' -or [Environment]::OSVersion.Platform -ne 'Win32NT') {
         throw 'Tenjin supports Windows on x64 and arm64. Use the shell installer on macOS or Linux.'
     }
     $Key = "win-$Architecture"
