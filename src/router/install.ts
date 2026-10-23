@@ -379,13 +379,6 @@ export async function runRouterInstall(
   const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
   const paths = settingsInstallPaths(project, env, home, cwd);
   const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
-  // CLAUDE CODE'S OWN PROJECT INSTALLS ARE RECORDED, before a refresh can
-  // refuse: `tenjin update` refreshes every recorded project after its home
-  // child, so a project an older release installed without recording it
-  // moves to the runtime with the rest. A user-scope run only; never fatal.
-  if (!project) {
-    await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
-  }
 
   const setUpRuntime = () =>
     (deps.runtime ?? defaultRuntime)({
@@ -448,6 +441,14 @@ export async function runRouterInstall(
   const deferred = !claude.meetsFloor && legacy.present;
   const rt = deferred ? null : await setUpRuntime();
   requireRuntime(rt);
+  // CLAUDE CODE'S OWN PROJECT INSTALLS ARE RECORDED, before a refresh can
+  // refuse: `tenjin update` refreshes every recorded project after its home
+  // child, so a project an older release installed without recording it
+  // moves to the runtime with the rest. A user-scope run only; never fatal.
+  if (!project) {
+    await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
+  }
+
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
   const removedKeysLines =
     spend.removed.length > 0

@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { open, readFile, rm, stat } from 'node:fs/promises';
 import { join, posix, win32 } from 'node:path';
 import { CliError } from './errors';
+import { proxyVariable } from './env-proxy';
 
 /**
  * WHAT THE RUNTIME DOWNLOADS, AND HOW: Node's own release archive and the npm
@@ -194,6 +195,8 @@ export async function downloadViaCurl(
   },
 ): Promise<{ file: string; digest: Buffer }> {
   if (!isHttps(url)) throw new CliError('UPDATE_FAILED', 'Only HTTPS downloads are allowed.');
+  const proxy = proxyVariable(o.env);
+  const env = proxy === undefined ? o.env : { ...o.env, HTTPS_PROXY: o.env[proxy] };
   const file = join(o.dir, `dl-${randomBytes(6).toString('hex')}`);
   const handle = await open(file, 'wx', 0o600);
   await handle.close();
@@ -221,7 +224,7 @@ export async function downloadViaCurl(
           file,
           url,
         ],
-        { env: o.env, stdio: 'ignore', windowsHide: true, timeout: o.timeoutMs + 1000 },
+        { env, stdio: 'ignore', windowsHide: true, timeout: o.timeoutMs + 1000 },
       );
       child.once('error', () =>
         fail(

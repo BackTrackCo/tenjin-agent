@@ -440,10 +440,10 @@ export async function ensureNode(
         let got;
         try {
           if (o.archivePath !== undefined) {
-            const archive = await readFile(o.archivePath);
-            if (archive.byteLength > NODE_MAX_BYTES) {
+            if ((await stat(o.archivePath)).size > NODE_MAX_BYTES) {
               throw new CliError('UPDATE_FAILED', 'The bootstrap Node archive is too large.');
             }
+            const archive = await readFile(o.archivePath);
             const file = join(tmpOf(root), `dl-${rand()}`);
             await writeFile(file, archive, { mode: 0o600 });
             got = { file, digest: createHash('sha256').update(archive).digest() };

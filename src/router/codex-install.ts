@@ -172,7 +172,7 @@ async function addPlugin(
       if (added && (moved || typeof registered !== 'string')) {
         await restore(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
       }
-      if (removed && typeof registered === 'string') {
+      if (moved && (removed || added) && typeof registered === 'string') {
         await restore(['plugin', 'marketplace', 'add', registered, '--json']);
       }
       if (previousEnabled && (removed || added)) {

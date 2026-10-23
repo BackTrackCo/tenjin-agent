@@ -42,7 +42,7 @@ fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/tenjin-install.XXXXXXXX") || fail 'Could not create a temporary folder.'
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 fetch() {
-  curl --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --connect-timeout 30 --max-time 300 "$1" -o "$2" || fail 'A download failed. Check your connection or proxy settings.'
+  HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}" curl -q --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --connect-timeout 30 --max-time 300 "$1" -o "$2" || fail 'A download failed. Check your connection or proxy settings.'
 }
 printf 'Installing Tenjin %s…\n' "$CLI_VERSION" >&2
 archive="node-v$NODE_VERSION-$key"
