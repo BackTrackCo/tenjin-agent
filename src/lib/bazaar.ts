@@ -151,6 +151,9 @@ function client(registry: string) {
 }
 
 /** The SDK fetch carries no deadline; a registry that stalls loses its slot. */
+/** A `withTimeout` that ran out of time. */
+class DeadlineError extends Error {}
+
 async function withTimeout<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -158,7 +161,7 @@ async function withTimeout<T>(work: Promise<T>, timeoutMs: number, what: string)
       work,
       new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`${what} timed out after ${timeoutMs}ms`)),
+          () => reject(new DeadlineError(`${what} timed out after ${timeoutMs}ms`)),
           timeoutMs,
         );
       }),
@@ -474,6 +477,12 @@ export async function verifyAgainstRegistries(
       }
     } catch (err) {
       errors.push({ registry, message: err instanceof Error ? err.message : String(err) });
+      // Each lookup is given ALL the time left, so its timeout means the deadline
+      // is spent, even when a timer that fired a millisecond early leaves the
+      // clock reading 1 ms short of it.
+      if (err instanceof DeadlineError || (err instanceof Error && err.name === 'TimeoutError')) {
+        break;
+      }
     }
   }
   if (mismatch !== undefined) return { outcome: 'mismatch', ...mismatch };
