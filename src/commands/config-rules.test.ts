@@ -794,6 +794,10 @@ describe('the readback', () => {
     const settingsPart = text.slice(text.indexOf('Your settings'));
     expect(settingsPart).toContain('Undo: `tenjin config unblock --provider firecrawl`');
     expect(settingsPart).toContain('Limits: $0.25 a call, $5.00 a day (Tenjin balance).');
+    // Which build enforces them: one from before settings ignores them.
+    expect(settingsPart).toMatch(
+      /Enforced by this Tenjin \([^)]+\); a version from before these settings ignores them\./,
+    );
     expect(settingsPart).not.toMatch(/wallet|x402|USDC|\bJev\b/i);
     const rules = (listed as { settings: { rules: { kind: string; reset: string }[] } }).settings
       .rules;
