@@ -608,7 +608,7 @@ describe('replacement', () => {
     expect(text).toContain(
       "It also runs your Apify account this way, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.",
     );
-    expect(text).not.toMatch(/fal|mcp\.example\.com|mcp-example-com/);
+    expect(text).not.toMatch(/\bfal\b|mcp\.example\.com|mcp-example-com/);
   });
 
   it('says it runs in place only where a running Claude Code with the plugin can', async () => {
