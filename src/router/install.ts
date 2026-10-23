@@ -596,6 +596,7 @@ export async function runRouterInstall(
       migration,
       asksAgent && nextSteps.length > 0,
       ctx.io.isTTY,
+      command,
     ),
     nextSteps,
     ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
@@ -976,9 +977,10 @@ function nextStep(
   migration: Migration,
   asksQuestion: boolean,
   tty: boolean,
+  command: string,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion);
+  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -992,17 +994,18 @@ function todaysSteps(
   wallet: WalletOutcome,
   migration: Migration,
   asksQuestion: boolean,
+  command: string,
 ): string[] {
   const steps: string[] = [];
   if (asksQuestion) {
     steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
-    steps.push('fund the wallet with `tenjin wallet fund`');
+    steps.push(`fund the wallet with \`${command} wallet fund\``);
   }
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');
     steps.push(
-      'run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
+      `run \`${command} install\` again; until then the earlier Tenjin setup keeps routing as before`,
     );
     return steps;
   }
@@ -1522,7 +1525,7 @@ function lines(
         ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
         : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
     ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
-      ? ['  For this project only; check it with: tenjin doctor --project']
+      ? [`  For this project only; check it with: ${continuationCommand(s.rt)} doctor --project`]
       : []),
     ...runtimeLines(ctx, s.rt, s.home),
     ...walletLines(ctx, ok, s.wallet),
@@ -1534,7 +1537,7 @@ function lines(
     ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY)}`,
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY, continuationCommand(s.rt))}`,
   ];
 }
 

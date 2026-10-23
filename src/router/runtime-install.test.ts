@@ -204,6 +204,48 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     },
   );
 
+  it('executes terminal funding and project-check instructions with a minimal PATH', async () => {
+    const entry = join(root, 'terminal-entry.mjs');
+    const receipt = join(root, 'continued.json');
+    const launcher = join(home, '.local', 'bin', 'tenjin');
+    await mkdir(dirname(launcher), { recursive: true });
+    await writeFile(
+      entry,
+      `import { writeFileSync } from 'node:fs'; writeFileSync(process.env.CONTINUATION_RECEIPT, JSON.stringify(process.argv.slice(2)));`,
+    );
+    await writeFile(launcher, renderLauncherSh({ node: process.execPath, entry }), { mode: 0o755 });
+    const runtime = async () =>
+      setup({
+        node: process.execPath,
+        entry,
+        launcher: { paths: [launcher], state: 'written', onPath: false },
+      });
+    const context = ctx();
+    context.flags.json = false;
+    context.io.isTTY = true;
+    const result = await runRouterInstall(
+      { yes: true, project: true },
+      context,
+      deps(runtime, { isInteractive: true, walletExists: async () => false }),
+    );
+    const funding = (result.data as { next: string }).next.match(
+      /fund the wallet with `([^`]+)`/,
+    )?.[1];
+    const project = result
+      .humanLines!.find((line) => line.startsWith('  For this project only; check it with: '))
+      ?.split('check it with: ')[1];
+    for (const [command, expected] of [
+      [funding, ['wallet', 'fund']],
+      [project, ['doctor', '--project']],
+    ] as const) {
+      expect(command).toBeDefined();
+      execFileSync('sh', ['-c', command!], {
+        env: { PATH: '/usr/bin:/bin', CONTINUATION_RECEIPT: receipt },
+      });
+      expect(JSON.parse(await readFile(receipt, 'utf8'))).toEqual(expected);
+    }
+  });
+
   it.each(['failed', 'foreign'] as const)(
     'uses verified Node and entry when the launcher is %s',
     async (state) => {
