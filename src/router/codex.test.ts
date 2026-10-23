@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
+import { CliError } from '../lib/errors';
 import type { RuntimeSetup } from '../lib/runtime';
 import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
@@ -1080,9 +1081,12 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
     expect(old).toBe(CODEX_REFRESH_LINES.old);
   });
 
-  it("runs the Codex refresh even where Claude Code's refresh refuses", async () => {
+  it("runs the Codex refresh whatever Claude Code's refresh did, and keeps its real failures", async () => {
     const refused = async () => {
-      throw new Error('Nothing to refresh');
+      throw new CliError('REFUSED', 'Nothing to refresh: no Claude Code install here.');
+    };
+    const broken = async () => {
+      throw new CliError('REFUSED', 'Claude Code could not register the plugin.');
     };
     const line = CODEX_REFRESH_LINES.done;
     expect(await alongsideCodexRefresh(refused, async () => line)).toEqual({
@@ -1092,6 +1096,11 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
     await expect(alongsideCodexRefresh(refused, async () => undefined)).rejects.toThrow(
       'Nothing to refresh',
     );
+    let codexRan = false;
+    await expect(
+      alongsideCodexRefresh(broken, async () => ((codexRan = true), line)),
+    ).rejects.toThrow('could not register');
+    expect(codexRan).toBe(true);
     const ok = await alongsideCodexRefresh(
       async () => ({ data: {}, humanLines: ['refreshed'] }),
       async () => line,

@@ -33,6 +33,7 @@ import {
   effectiveLimits,
   hasRuntime,
   namedLimits,
+  NOTHING_TO_REFRESH,
   runtimeData,
   runtimeLines,
   spendStepFor,
@@ -235,9 +236,9 @@ export const CODEX_REFRESH_LINES = {
 
 /**
  * A bare `install --refresh` with the Codex refresh beside it: the Codex one
- * runs whether Claude Code's succeeded or refused ("nothing to refresh" on a
- * Codex-only machine), and Claude Code's refusal stands only when the Codex
- * refresh had nothing to say either.
+ * runs whatever Claude Code's did. Only Claude Code's "nothing to refresh"
+ * (a Codex-only machine) gives way to a Codex line; any other Claude Code
+ * failure stands, so `tenjin update` still reports it with its fix.
  */
 export async function alongsideCodexRefresh(
   claude: () => Promise<CommandResult>,
@@ -248,7 +249,8 @@ export async function alongsideCodexRefresh(
     out = await claude();
   } catch (err) {
     const line = await codex();
-    if (line === undefined) throw err;
+    const nothing = err instanceof CliError && err.message.startsWith(NOTHING_TO_REFRESH);
+    if (line === undefined || !nothing) throw err;
     return { data: { notices: [line] }, humanLines: [line] };
   }
   return withNote(out, await codex());
