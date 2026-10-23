@@ -1050,8 +1050,9 @@ describe('the settings answers', () => {
 
 /**
  * CONNECTED ACCOUNTS (#37), the server's own fixtures. An account lead is
- * offered alone, carries no URL and no balance price, never runs in place of a
- * native call, and its fallback is Tenjin's own route for the same task. Each
+ * offered alone, carries no URL and no balance price, runs in place of a native
+ * call only through `bound` as any lead does, and its fallback is Tenjin's own
+ * route for the same task. Each
  * rule below is one the server's schema runs, so a shape only one side takes
  * fails here first.
  */
@@ -1084,10 +1085,32 @@ describe('the answers about connected accounts', () => {
     ).toBe('unverified');
   });
 
+  it("parses a checked account lead bound to the native fetch, with Tenjin's route beside it", () => {
+    const payload = fixture('wire-hook-execute-account-bound.json');
+    const parsed = parseForTests('hook', payload);
+    expect(parsed.success).toBe(true);
+    const decision = payload.decision as Decision & { bound: Record<string, unknown> };
+    const [lead] = decision.specs as [{ verified: boolean; mcp: unknown; pinned: object }];
+    expect(lead.verified).toBe(true);
+    expect(lead).toHaveProperty('mcp');
+    const request = fixture('wire-hook-request-account-fetch.json');
+    expect(request.accepts).toEqual(expect.arrayContaining(['bound', 'mcp']));
+    const pending = (request.packet as { pendingCall: { url: string } }).pendingCall;
+    expect(decision.bound).toEqual({ url: pending.url });
+    expect(Object.keys(decision.bound).some((field) => field in lead.pinned)).toBe(false);
+    expect((decision.fallback?.identity as { source: string }).source).toBe('tenjin');
+    // The same lead, unchecked, is never offered by the hook, bound or not.
+    expect(
+      parseForTests(
+        'hook',
+        withDecision(payload, { ...decision, specs: [{ ...lead, verified: false }] }),
+      ).success,
+    ).toBe(false);
+  });
+
   it.each([
     ['an endpoint', (d: Decision) => ({ ...d, endpoint: 'https://mcp.apify.com' })],
     ['a balance price', (d: Decision) => ({ ...d, providerPriceAtomic: '1000' })],
-    ['a bound input', (d: Decision) => ({ ...d, bound: { query: 'coffee' } })],
     ['an augment delivery', (d: Decision) => ({ ...d, delivery: 'augment' })],
     ['an unchecked map', (d: Decision) => ({ ...d, specs: [{ ...d.specs[0], verified: false }] })],
     [

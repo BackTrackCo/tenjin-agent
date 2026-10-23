@@ -721,9 +721,9 @@ const DiscoveredSchema = z
 
 /**
  * AN ACCOUNT LEAD IS OFFERED ALONE, as a checked service this client runs on
- * its own connection: no endpoint, no balance price, never in place of a
- * native call, and its listing carries its spec's identity. Every other
- * `execute` is as it always was, with the URL it pays.
+ * its own connection: no endpoint, no balance price, in place of a native
+ * call only through `bound` as any lead, and its listing carries its spec's
+ * identity. Every other `execute` is as it always was, with the URL it pays.
  */
 function checkExecute(
   decision: {
@@ -735,7 +735,6 @@ function checkExecute(
     specs?: AnyOfferSpec[] | undefined;
     delivery?: 'offer' | 'augment' | undefined;
     augmentUrl?: string | undefined;
-    bound?: Record<string, unknown> | undefined;
     fallback?: OfferSpec | undefined;
   },
   ctx: z.RefinementCtx,
@@ -760,8 +759,6 @@ function checkExecute(
   if (decision.identity?.revision !== lead.identity.revision)
     issue("the listing carries the lead's identity", ['identity']);
   if (!lead.verified) issue('the hook offers only a checked account service', ['specs']);
-  if (decision.bound !== undefined)
-    issue('an account call never runs in place of a native one', ['bound']);
   if (decision.delivery === 'augment' || decision.augmentUrl !== undefined)
     issue('an account lead is an offer', ['delivery']);
   fallbackProblems(decision.fallback, decision.id, lead, ctx);

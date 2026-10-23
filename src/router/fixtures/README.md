@@ -9,7 +9,7 @@ round trip; copy these files rather than hand-writing an equivalent.
 Change them here, in the same commit as the `wire.ts` change that makes them
 valid, then copy them across. `harness/`, in tenjin-agent alone, is the
 exception: harness events (what Claude Code hands a router hook) that only the
-client reads, never copied. `ROUTER_VERSION` is `2026-10-23.3`.
+client reads, never copied. `ROUTER_VERSION` is `2026-10-23.4`.
 
 ## The calls
 
@@ -100,7 +100,9 @@ gate is offered only the tasks whose capabilities a client runs.
   input for the spec under the decision's `id`, from that native call, pins
   left out. The client runs it unchanged in the native call's place, through
   its ordinary executor, or not at all; it never edits it. Never for the free
-  docs lookup, an `augment` or an account lead.
+  docs lookup or an `augment`. An account lead carries one only for a client
+  that also sends `mcp`, and only when Tenjin has checked its map
+  (`verified`).
 - `mcp`: services on the user's connected accounts (Connected accounts,
   below): a spec whose call is an MCP tool call on that account, the
   `execute` that offers one with no `endpoint`, the `fallback` beside it, and
@@ -305,7 +307,9 @@ trimmed to `outputSchema`, as on a paid spec.
 
 - Without `when` it always runs: Apify's `call-actor`, then
   `get-dataset-items` with the run's dataset,
-  `{result.storages.datasets.default.id}`. With `when: {path, values}`
+  `{result.storages.datasets.default.id}`; Firecrawl's research agent,
+  `firecrawl_agent`, then `firecrawl_agent_status` with its job,
+  `{result.id}`. With `when: {path, values}`
   it runs only when the first result's value at `path` is one of `values`:
   fal's `run_model` answering `processing`.
 - `poll`, `{tool, args, result, running, failed?, everyS, maxWaitS}`, is a
@@ -335,16 +339,20 @@ names it, when no Tenjin route for the task is left (the rules block it, or
 this client does not run it), and when the user uses only their own accounts.
 
 An account lead goes out as the hook's `execute` or the tool's `spec`, alone:
-never a batch sibling, a compare option or on a `discovered` offer, and never
-with `bound`, so it never runs in place of a native call. Its `execute`
-carries no `endpoint`, a `providerPriceAtomic` of `"0"` and the lead spec's
-`identity`, and its line names the account by label with no price: `Apify
-Google Maps, your Apify account: …`. So once a preference puts an account first
-for a native call its map holds (Firecrawl's scrape holds `WebFetch`, its search
-`WebSearch`), that call is denied and offered, and Tenjin's own pick no longer
-runs in its place automatically. When the account maps the task more than once
-(fal's edit, background removal and upscale), the lead is the one of them the
-request needs, as the list's pick chooses.
+never a batch sibling, a compare option or on a `discovered` offer. Its
+`execute` carries no `endpoint`, a `providerPriceAtomic` of `"0"` and the lead
+spec's `identity`, and its line names the account by label with no price:
+`Apify Google Maps, your Apify account: …`. Before a native search or fetch its
+map holds (Firecrawl's scrape holds `WebFetch`, its search `WebSearch`), it
+carries `bound` as any lead does, the account's input built from that call, so
+a client that runs Tenjin's picks automatically runs it in the native call's
+place on the user's own plan, under the map's pinned bounds. A provider scope
+the user set on automatic use reads the spec's `identity.providers`, as for any
+lead (`firecrawl` for Firecrawl's maps). The hook leads
+with checked maps only, and an unchecked one never carries `bound`, since it
+runs only when the request names it. When the account maps the task more than
+once (fal's edit, background removal and upscale), the lead is the one of them
+the request needs, as the list's pick chooses.
 
 Beside the lead, both answers carry `fallback`: Tenjin's own route for the
 same task, a paid spec with its `identity` (`source: "tenjin"`) and its price,
@@ -418,11 +426,11 @@ Both come as `native` with `policy_refused` and the `rule`:
 
 Text a user reads names an account by its label, never its id. The maps ship
 unchecked (catalog `fixtures/catalog/sources`, with no `verifiedAt`). The
-account fixtures are the live route's answers with Apify's Google Maps map
-marked checked, as a real call will mark it, and, in the directory, Firecrawl's
-search kept out of the account-wide preference (`useFirst: false`), as a
-catalog edit would demote it; their Actor, model, tool and argument values
-stand in until those checks settle them.
+account fixtures are the live route's answers with Apify's Google Maps map, or
+for the bound one Firecrawl's scrape, marked checked, as a real call will mark
+it, and, in the directory, Firecrawl's search kept out of the account-wide
+preference (`useFirst: false`), as a catalog edit would demote it; their Actor,
+model, tool and argument values stand in until those checks settle them.
 
 ## Discovered services
 
@@ -642,6 +650,8 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-policy-cases.json`                   | `allowed` cases: `[{name, policy?, override?, identity, expect}]`, run by both sides      |
 | `wire-hook-request-mcp.json`               | the hook from an `mcp` client: its accounts in `sources`, Apify preferred                 |
 | `wire-hook-execute-account.json`           | hook answer: a checked account lead alone, no `endpoint`, and the `fallback`              |
+| `wire-hook-request-account-fetch.json`     | the hook before a fetch, from an `mcp` client with Firecrawl preferred                    |
+| `wire-hook-execute-account-bound.json`     | hook answer for it: the checked Firecrawl scrape, `bound` from the fetch, the `fallback`  |
 | `wire-tool-request-account.json`           | the tool call naming the user's fal account: `override.prefer` its source                 |
 | `wire-lookup-spec-account.json`            | tool answer: an unchecked account spec, its `when` follow-up, and the `fallback`          |
 | `wire-tool-request-only-accounts.json`     | the tool call with Tenjin's own tools blocked, naming no account                          |
