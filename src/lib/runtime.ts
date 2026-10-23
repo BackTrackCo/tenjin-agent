@@ -1630,6 +1630,7 @@ export async function setupRuntime(o: {
   // Set while the pinned Node downloads: a failure then, on a Node that skips
   // the shell's proxy, is the proxy's (#470), which no retry on that Node fixes.
   let downloading = false;
+  let usedProxyTransport = false;
   try {
     if (alreadyCurrent) {
       const current = await stillCurrent(usable);
@@ -1660,6 +1661,8 @@ export async function setupRuntime(o: {
     }
     const nodeMs = left(REFRESH_NODE_MS);
     downloading = true;
+    usedProxyTransport =
+      o.fetchImpl === undefined && proxySkipped(o.env, o.proxySupported) !== null;
     await within(
       ensureNode(root, pin, {
         ...lockOpts(),
@@ -1669,10 +1672,7 @@ export async function setupRuntime(o: {
         arch,
         glibc,
         archivePath: o.env.TENJIN_BOOTSTRAP_NODE_ARCHIVE,
-        proxyEnv:
-          o.fetchImpl === undefined && proxySkipped(o.env, o.proxySupported) !== null
-            ? o.env
-            : undefined,
+        proxyEnv: usedProxyTransport ? o.env : undefined,
       }),
       nodeMs,
     );
@@ -1707,7 +1707,8 @@ export async function setupRuntime(o: {
     const message = err instanceof Error ? err.message : String(err);
     const network =
       (err instanceof CliError && err.code === 'NETWORK_ERROR') || err instanceof BudgetGone;
-    const skipped = downloading && network ? proxySkipped(o.env, o.proxySupported) : null;
+    const skipped =
+      downloading && network && !usedProxyTransport ? proxySkipped(o.env, o.proxySupported) : null;
     if (skipped !== null) {
       return {
         ...failed(`${skipped}: ${message}`.slice(0, 200)),

@@ -103,10 +103,21 @@ try {
       writeFileSync(unavailable, '#!/bin/sh\necho System Node/npm must not be used >&2\nexit 1\n');
       chmodSync(unavailable, 0o755);
     }
+    for (const [name, variable] of [
+      ['uname', 'TENJIN_SMOKE_OS'],
+      ['getconf', 'TENJIN_SMOKE_LIBC'],
+    ]) {
+      const command = join(bin, name);
+      writeFileSync(
+        command,
+        `#!/bin/sh\nif [ -n "$${variable}" ]; then printf '%s\\n' "$${variable}"; else exec /usr/bin/${name} "$@"; fi\n`,
+      );
+      chmodSync(command, 0o755);
+    }
     const curl = join(bin, 'curl');
     writeFileSync(
       curl,
-      `#!/bin/sh\nfor arg do case "$arg" in https://*) url=$arg ;; esac; done\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then shift; dest=$1; fi; shift; done\ncase "$url" in *nodejs.org*) src=$TENJIN_SMOKE_NODE ;; *) src=$TENJIN_SMOKE_CLI ;; esac\ncp "$src" "$dest"\ncase "$url" in *"$TENJIN_SMOKE_CORRUPT"*) if [ -n "$TENJIN_SMOKE_CORRUPT" ]; then printf corrupt >> "$dest"; fi ;; esac\n`,
+      `#!/bin/sh\nif [ -n "$TENJIN_SMOKE_INTERRUPT" ]; then exit 56; fi\nfor arg do case "$arg" in https://*) url=$arg ;; esac; done\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then shift; dest=$1; fi; shift; done\ncase "$url" in *nodejs.org*) src=$TENJIN_SMOKE_NODE ;; *) src=$TENJIN_SMOKE_CLI ;; esac\ncp "$src" "$dest"\ncase "$url" in *"$TENJIN_SMOKE_CORRUPT"*) if [ -n "$TENJIN_SMOKE_CORRUPT" ]; then printf corrupt >> "$dest"; fi ;; esac\n`,
     );
     chmodSync(curl, 0o755);
     env.PATH = `${bin}:${process.env.PATH}`;
@@ -129,6 +140,16 @@ try {
     const failed = run({ TENJIN_SMOKE_CORRUPT: target });
     if (failed.status === 0 || existsSync(receipt))
       throw new Error(`Corrupt ${target} reached CLI`);
+  }
+  if (!windows) {
+    for (const libc of ['musl', 'glibc 2.17']) {
+      const failed = run({ TENJIN_SMOKE_OS: 'Linux', TENJIN_SMOKE_LIBC: libc });
+      if (failed.status === 0 || existsSync(receipt))
+        throw new Error(`Unsupported ${libc} reached CLI`);
+    }
+    const interrupted = run({ TENJIN_SMOKE_INTERRUPT: '1' });
+    if (interrupted.status === 0 || existsSync(receipt))
+      throw new Error('Interrupted download reached CLI');
   }
   const custom = run({ TENJIN_DATA_DIR: join(fixture, 'custom') });
   if (custom.status === 0 || existsSync(receipt) || existsSync(join(fixture, 'custom')))

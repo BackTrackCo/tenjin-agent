@@ -10,6 +10,8 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { defaultDataDir, runtimeDir } from '../lib/paths';
+import { isSourceCheckout } from '../lib/install-location';
+import { runningGlibc, unpinnedPlatform } from '../lib/runtime-fetch';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
@@ -366,7 +368,7 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
-  assertPluginDataDir(ctx.dataDir, home, env);
+  assertPluginInstallation(ctx.dataDir, home, env);
   const config = await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const named = namedLimits(args);
   const cwd = deps.cwd ?? process.cwd();
@@ -397,11 +399,14 @@ export async function runRouterInstall(
     if (!project && hasRuntime(ctx.dataDir, home)) {
       const rt = await setUpRuntime();
       requireRuntime(rt);
+      await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
       if (runtimeLaunch(rt) !== null) {
         await collectRuntime(rt.root, await fallbackFolders(ctx.dataDir, env, home, cwd, false));
       }
       return runtimeOnlyRefresh(ctx, rt, home);
     }
+    if (!project)
+      await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
     throw new CliError(
       'REFUSED',
       `Nothing to refresh: neither the ${PLUGIN_ID} plugin nor a settings install of Tenjin is registered here.`,
@@ -756,11 +761,22 @@ async function folderPointers(root: string, folders: readonly string[]): Promise
   return pointers;
 }
 
-export function assertPluginDataDir(dataDir: string, home: string, env: NodeJS.ProcessEnv): void {
+export function assertPluginInstallation(
+  dataDir: string,
+  home: string,
+  env: NodeJS.ProcessEnv,
+): void {
   if (env.TENJIN_DATA_DIR && resolve(dataDir) !== resolve(defaultDataDir(home))) {
     throw new CliError('REFUSED', 'Plugin installation needs the default data directory.', {
       fix: 'Run without TENJIN_DATA_DIR. Other CLI commands still support it.',
     });
+  }
+  if (!isSourceCheckout(dirname(fileURLToPath(import.meta.url)))) {
+    const unsupported = unpinnedPlatform(process.platform, process.arch, runningGlibc());
+    if (unsupported !== null)
+      throw new CliError('REFUSED', `Plugin installation is unsupported on ${unsupported}.`, {
+        fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. Your existing setup was kept.',
+      });
   }
 }
 

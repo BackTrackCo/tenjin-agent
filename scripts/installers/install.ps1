@@ -27,7 +27,8 @@ try {
         $ProxyUri = [Uri]$ProxyUrl
         if ($ProxyUri.UserInfo) {
             $Credentials = $ProxyUri.UserInfo.Split(':', 2)
-            $Client.Proxy.Credentials = New-Object Net.NetworkCredential([Uri]::UnescapeDataString($Credentials[0]), [Uri]::UnescapeDataString($Credentials[1]))
+            $Password = if ($Credentials.Length -gt 1) { [Uri]::UnescapeDataString($Credentials[1]) } else { '' }
+            $Client.Proxy.Credentials = New-Object Net.NetworkCredential([Uri]::UnescapeDataString($Credentials[0]), $Password)
         }
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

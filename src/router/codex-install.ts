@@ -29,7 +29,7 @@ import {
 import { resolveContextSettings } from '../lib/settings';
 import {
   approveLimits,
-  assertPluginDataDir,
+  assertPluginInstallation,
   requireRuntime,
   defaultRuntime,
   effectiveLimits,
@@ -209,7 +209,7 @@ export async function runCodexInstall(
   userScopeOnly(args);
   const run = deps.run ?? runCodex;
   const home = deps.homeDir ?? homedir();
-  assertPluginDataDir(ctx.dataDir, home, deps.env ?? process.env);
+  assertPluginInstallation(ctx.dataDir, home, deps.env ?? process.env);
   const config = await loadRawConfig(ctx.dataDir);
   const named = namedLimits(args);
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
