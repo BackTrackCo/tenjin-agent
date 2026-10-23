@@ -28,6 +28,9 @@ there. To move it, run `node scripts/pin-node.mjs <24.x.y>` and commit the
 result before the release PR. It needs `gpg` (for `gpgv`) and refuses, writing
 nothing, unless Node's `SHASUMS256.txt` signature verifies against the release
 keys it pins. It runs at release time only, never in CI or during install.
+Before each release, check nodejs.org for a newer Node 24 security release;
+when there is one, run `node scripts/pin-node.mjs <24.x.y>` and commit it
+before the release PR. Auto-update then delivers that Node with the release.
 
 To cut a release (two clicks):
 
