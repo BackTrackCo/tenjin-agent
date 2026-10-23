@@ -272,7 +272,23 @@ export async function runRouterDoctor(
     if (old !== null) checks.push(old);
   }
   if (plugin.registered && claude.binary !== null) {
-    checks.push(await serverCheck(claude.binary, env, cwd, layout));
+    const serving = live.find(
+      (o) =>
+        o.harness === 'claude' &&
+        o.launchedByPlugin &&
+        o.cliVersion === pkg.version &&
+        resolve(o.cwd) === resolve(cwd),
+    );
+    checks.push(
+      serving !== undefined
+        ? {
+            name: 'router server',
+            status: 'ok',
+            required: true,
+            detail: `${PLUGIN_SERVER} is serving a Claude Code session in this directory (pid ${serving.pid})`,
+          }
+        : await serverCheck(claude.binary, env, cwd, layout),
+    );
   }
   if (legacy.present || legacy.unreadable !== undefined) {
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));

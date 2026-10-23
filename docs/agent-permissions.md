@@ -133,7 +133,7 @@ The installer installs no skills. Install/refresh removes only an owned obsolete
 
 When an agent opens checkout, the funding command returns promptly with a `nextStep`: finish checkout and return to the same conversation. The agent runs `tenjin wallet balance` to confirm funds and continues the task when sufficient. An unconfirmed balance or failed balance read does not establish a failed payment or trigger another checkout. A confirmed balance check clears the hook balance cache, so eligible offers can resume without restarting.
 
-After install, start a new Claude Code session, and the plugin loads. `/reload-plugins` does not run the plugin's `SessionStart`, so it is not enough.
+After a fresh Claude Code install, run `/reload-plugins` in the same conversation, then continue your task. The next prompt hook records that the plugin serves this session; doctor uses that live observation, so a standalone MCP probe cannot contradict it. Reload does not run `SessionStart`; future sessions still do. Upgrades from the earlier settings-based installation need a new session to leave the old server behind. Codex also needs a new session; ask your agent for a short task handoff before switching.
 
 `tenjin update` needs no npm. It downloads the newest `tenjin-cli` from the npm registry and checks it against the registry's SHA-512, fetches the Node that version pins, and has the new build check itself on that Node before it switches anything; a version that fails the check is not used, and the current one keeps running. The version it replaces stays in the runtime, and an older version is removed only once nothing runs from it. An older build never replaces a newer one; to go back, run `tenjin uninstall`, then install the older version.
 

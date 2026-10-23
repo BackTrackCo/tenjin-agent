@@ -70,7 +70,8 @@ const ASK_LINES = [
 ];
 /** What Claude Code exports to the commands its agent runs. */
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
-const RELOAD = 'start a new Claude Code session so Tenjin loads';
+const RELOAD =
+  'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
@@ -297,18 +298,13 @@ describe('tenjin install', () => {
     expect(refreshed.humanLines!.join('\n')).toContain(RECONNECT_FIX);
   });
 
-  it('never names /reload-plugins as the step that loads Tenjin: only a new session runs SessionStart', () => {
-    for (const text of [
-      NEW_SESSION_STEP,
-      RELOAD_STEP,
-      RECONNECT_FIX,
-      NEW_SESSION_FIX,
-      loadStep(false),
-      loadStep(true),
-    ]) {
+  it('keeps the conversation for a fresh install and requires a new session for a settings upgrade', () => {
+    expect(loadStep(false)).toBe(RELOAD_STEP);
+    expect(loadStep(false)).toContain('/reload-plugins');
+    expect(loadStep(true)).toBe(NEW_SESSION_STEP);
+    for (const text of [NEW_SESSION_STEP, RECONNECT_FIX, NEW_SESSION_FIX]) {
       expect(text).not.toContain('/reload-plugins');
     }
-    expect(loadStep(false)).toBe(NEW_SESSION_STEP);
   });
 
   it('a refresh brings the plugin up to this build and changes no config', async () => {

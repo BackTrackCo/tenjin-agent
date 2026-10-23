@@ -629,6 +629,48 @@ describe('runRouterDoctor, with its seams injected', () => {
     );
   });
 
+  it('uses the real session after reload instead of a failing standalone MCP probe', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const live = observation({ cwd: work });
+    const { out, by } = await run({
+      eligibility: async () => eligibility(),
+      readObservations: async () => [live],
+      listProcesses: async () => ({
+        routers: [{ pid: live.pid, startedAt: live.startedAt, kind: 'plugin', underClaude: true }],
+        claude: [],
+      }),
+    });
+    expect(out).not.toBeInstanceOf(CliError);
+    expect(by['router server']).toMatchObject({ status: 'ok' });
+    expect(by['router server']?.detail).toContain('serving a Claude Code session');
+    expect((await fake.calls()).filter((c) => c.startsWith('mcp get'))).toEqual([]);
+  });
+
+  it.each([
+    { servedSession: false },
+    { cliVersion: '0.0.0' },
+    { cwd: '/another-project' },
+    { harness: 'codex' as const },
+  ])(
+    'still checks the server when a router cannot prove this install is active: %j',
+    async (over) => {
+      await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+      const live = observation({ cwd: work, ...over });
+      const { by } = await run({
+        eligibility: async () => eligibility(),
+        readObservations: async () => [live],
+        listProcesses: async () => ({
+          routers: [
+            { pid: live.pid, startedAt: live.startedAt, kind: 'plugin', underClaude: true },
+          ],
+          claude: [],
+        }),
+      });
+      expect(by['router server']).toMatchObject({ status: 'fail' });
+      expect((await fake.calls()).some((c) => c.startsWith('mcp get'))).toBe(true);
+    },
+  );
+
   it('never throws when the eligibility check rejects: the rows say not checked', async () => {
     const { out, by } = await run({
       eligibility: async () => {

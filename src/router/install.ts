@@ -97,8 +97,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * with the install its answer picks, the `claude`
  * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
  * plugin command falls back to the folder, and the one step after it is
- * starting a new Claude Code session: `/reload-plugins` does not run the
- * plugin's `SessionStart`, so only a new session loads Tenjin fully.
+ * reloading plugins in a fresh install's conversation. Settings-based
+ * upgrades still need a new session so the old server does not route twice.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -113,19 +113,17 @@ export const DISCLOSURE: readonly string[] = [
 ];
 
 /**
- * What the person does after a successful install: only a new session.
- * `/reload-plugins` does not run the plugin's `SessionStart`, and while a
- * settings install is still here it would load the plugin beside the
+ * While a settings install is still here, a reload would load the plugin beside the
  * pre-upgrade `x402` server that session is still running, so every event
  * would route twice.
  */
 export const NEW_SESSION_STEP = 'start a new Claude Code session so Tenjin loads';
-/** The same step; kept as its own export for its callers. */
-export const RELOAD_STEP = NEW_SESSION_STEP;
+export const RELOAD_STEP =
+  'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
 
-/** The step that loads the plugin: a new session, whether or not a settings install is still here. */
-export function loadStep(_settingsInstallPresent: boolean): string {
-  return NEW_SESSION_STEP;
+/** Fresh installs can keep their task; settings upgrades must leave their old server behind. */
+export function loadStep(settingsInstallPresent: boolean): string {
+  return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
 }
 
 export interface RouterInstallArgs {
@@ -971,7 +969,7 @@ function todaysSteps(
     return steps;
   }
   if (!claude.meetsFloor) steps.unshift('run `claude update`');
-  steps.push(loadStep(settingsInstallStays(migration)));
+  steps.push(loadStep(settingsInstallStays(migration) || !claude.meetsFloor));
   return steps;
 }
 
