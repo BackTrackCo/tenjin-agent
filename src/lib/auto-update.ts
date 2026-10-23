@@ -13,7 +13,9 @@ import { nodeBinPath, readRuntimeState, versionEntry } from './runtime-layout';
  * The child is `tenjin update`'s runtime branch unchanged (the release is
  * checked before the switch, the previous version stays, an older one is never
  * switched to, the runtime lock is held), so npm and PATH are never involved,
- * and the next session runs the new version while running ones keep theirs.
+ * and a running Claude Code session keeps its version until the next one. In
+ * Codex the hooks run the launcher, which the switch rewrites, so they move at
+ * once while the session's server moves at the next session.
  *
  * `node:*`, the paths and the runtime layout only: the `alive` leg and
  * `tenjin mcp` load this, and neither may pay for zod, the config schema or
