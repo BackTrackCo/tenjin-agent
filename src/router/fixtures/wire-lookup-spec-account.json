@@ -74,28 +74,6 @@
         "aspect_ratio": "16:9"
       },
       "returns": "one image, saved to a file",
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "images": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "url": {
-                  "type": "string"
-                },
-                "width": {
-                  "type": "integer"
-                },
-                "height": {
-                  "type": "integer"
-                }
-              }
-            }
-          }
-        }
-      },
       "identity": {
         "service": "fal.flux-pro-ultra",
         "source": "fal",

@@ -17,9 +17,10 @@ import { CliError } from '../../lib/errors';
  * the first free one of {@link REDIRECT_PORTS}, the ports that document lists.
  */
 
-/** The fixed ports Tenjin's client metadata document lists, in order. They
- *  stay clear of the ports Tenjin's own tooling uses (3000, 3917, 5433). */
-export const REDIRECT_PORTS: readonly number[] = [47613, 47614, 47615];
+/** The fixed ports Tenjin's client metadata document lists, in order
+ *  (`fixtures/oauth-client-metadata.json`, the server's copy). They stay
+ *  clear of the ports Tenjin's own tooling uses (3000, 3917, 5433). */
+export const REDIRECT_PORTS: readonly number[] = [28541, 28542, 28543];
 
 const CALLBACK_PATH = '/callback';
 

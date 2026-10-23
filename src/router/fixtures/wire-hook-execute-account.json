@@ -8,7 +8,7 @@
     "category": "local business search",
     "provider": "Apify",
     "label": "Apify Google Maps",
-    "capabilityDescription": "Google Maps places for a search in one area, each with its name, address, phone, website and rating",
+    "capabilityDescription": "Google Maps places for a search, each with its name, address, phone, website and rating",
     "providerPriceAtomic": "0",
     "identity": {
       "service": "apify.google-maps-places",
@@ -19,8 +19,8 @@
       "categories": ["social-and-local"],
       "revision": "83ad1ac731cc992f"
     },
-    "usage": "what to search for, and where",
-    "hint": "Apify Google Maps, your Apify account: Google Maps places for a search in one area, each with its name, address, phone, website and rating. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"query\":\"<what to search for>\",\"location\":\"<where to search>\",\"limit\":\"<how many places, e.g. 20>\"}}) alone and wait for its result.",
+    "usage": "the place search",
+    "hint": "Apify Google Maps, your Apify account: Google Maps places for a search, each with its name, address, phone, website and rating. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"query\":\"<what to search for>\",\"limit\":\"<how many places, e.g. 20>\"}}) alone and wait for its result.",
     "specs": [
       {
         "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
@@ -29,7 +29,7 @@
         "label": "Apify Google Maps",
         "holds": {},
         "output": "json",
-        "description": "Google Maps places for a search in one area, each with its name, address, phone, website and rating",
+        "description": "Google Maps places for a search, each with its name, address, phone, website and rating",
         "mcp": {
           "tool": "call-actor",
           "args": {
@@ -92,10 +92,10 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 50,
-              "description": "How many places to return, at most 50."
+              "description": "How many places, at most 50."
             }
           },
-          "required": ["query", "location", "limit"],
+          "required": ["query", "limit"],
           "additionalProperties": false
         },
         "pinned": {},
@@ -108,34 +108,6 @@
         "resultSchema": {
           "type": "object",
           "required": ["items"]
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "items": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "title": {
-                    "type": "string"
-                  },
-                  "address": {
-                    "type": "string"
-                  },
-                  "phone": {
-                    "type": "string"
-                  },
-                  "website": {
-                    "type": "string"
-                  },
-                  "totalScore": {
-                    "type": "number"
-                  }
-                }
-              }
-            }
-          }
         },
         "identity": {
           "service": "apify.google-maps-places",

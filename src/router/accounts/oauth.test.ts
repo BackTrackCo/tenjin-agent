@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CliError } from '../../lib/errors';
-import { revokeSignIn, signIn, type SignInDeps } from './oauth';
+import { REDIRECT_PORTS } from './loopback';
+import { CLIENT_METADATA_URL, revokeSignIn, signIn, type SignInDeps } from './oauth';
 import { fakeAccountServer } from './test-support';
 
 /**
@@ -31,6 +33,19 @@ function depsFor(
     ...over,
   };
 }
+
+describe("Tenjin's client document", () => {
+  it('lists exactly the redirects a sign-in by it can use, under the id it is sent as', () => {
+    const doc = JSON.parse(
+      readFileSync(new URL('../fixtures/oauth-client-metadata.json', import.meta.url), 'utf8'),
+    ) as { client_id: string; redirect_uris: string[]; token_endpoint_auth_method: string };
+    expect(doc.client_id).toBe(CLIENT_METADATA_URL);
+    expect(doc.redirect_uris).toEqual(
+      REDIRECT_PORTS.map((port) => `http://127.0.0.1:${port}/callback`),
+    );
+    expect(doc.token_endpoint_auth_method).toBe('none');
+  });
+});
 
 describe('signing in to an account', () => {
   it("uses Tenjin's client document, PKCE and its own state, and hands back the tokens", async () => {

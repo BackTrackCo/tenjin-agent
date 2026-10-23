@@ -320,7 +320,9 @@ An unchecked one runs only when the request names it: a `query` whose
 `override` prefers its source or the service, or only admits the service, or
 its id sent as `tool`. The hook carries no override, so it offers checked
 services alone. Browse lists checked ones, with `price` reading `your <label>
-account`.
+account` and `free` false. Among the services a request allows, an account's
+follow Tenjin's own in catalog order, so one leads only through a preference:
+the account-wide source preference connecting writes, or the request's own.
 
 An account lead goes out as the hook's `execute` or the tool's `spec`, alone:
 never a batch sibling, a compare option or on a `discovered` offer, and never
@@ -340,9 +342,11 @@ is none when the settings allow no Tenjin route for the task.
 ### Connecting
 
 The directory request's `accepts` is read for `mcp` alone. With it, the full
-answer adds `connectable`: every account a client can connect, which between
-them list every service not on `tenjin`. Each is `{id, label, mcpUrl, signIn,
-key?, services}`:
+answer adds every account to `sources`, their services to `services`, the
+providers and sellers only those name, and `connectable`: every account a
+client can connect, which between them list every service not on `tenjin`.
+Without it the answer is the one a client that cannot run them always got.
+Each connectable account is `{id, label, mcpUrl, signIn, key?, services}`:
 
 - `id`: the account's source id, under which the client keeps its credential:
   1 to 48 of `[a-z0-9-]`, starting with a letter or digit, never `tenjin`.
@@ -358,13 +362,22 @@ key?, services}`:
 `revision` is the ETag of the answer the client gets, so an `mcp` client's
 covers `connectable`.
 
+Signing in uses Tenjin's OAuth client document, `oauth-client-metadata.json`,
+served at its own `client_id`, `https://tenjin.sh/oauth/client-metadata.json`.
+It is a public client: no secret, `token_endpoint_auth_method: "none"`, PKCE,
+`authorization_code` and `refresh_token`. Its `redirect_uris` are fixed
+loopback ports, `http://127.0.0.1:<port>/callback`, which `tenjin connect`
+serves for one sign-in. A server that still wants dynamic registration gets the
+same fields. No token or code reaches Tenjin's server.
+
 ### Refusals on an account
 
 Both come as `native` with `policy_refused` and the `rule`:
 
 - `unavailable`, `{from: "saved", target: {kind: "source", id}}`: a route on
   an account that `sources` does not list. "Apify isn't connected on this
-  machine."
+  machine." The router offers no such route, so a client meets it rechecking a
+  saved offer.
 - `unverified`, `{from: "request", target: {kind: "service", id}}`: the rules
   allow some service for the step, but every one they allow is an account
   service Tenjin hasn't checked and the request doesn't name. It names the
@@ -374,9 +387,11 @@ Both come as `native` with `policy_refused` and the `rule`:
   `source`: "Tenjin hasn't checked your <label> account yet, so it runs only
   when you ask for it by name."
 
-Text a user reads names an account by its label, never its id. The fixtures
-show a checked Apify map and unchecked fal and Firecrawl maps; their Actor,
-model, tool and argument values stand in until those checks settle them.
+Text a user reads names an account by its label, never its id. The maps ship
+unchecked (catalog `fixtures/catalog/sources`, with no `verifiedAt`). The
+account fixtures are the live route's answers with Apify's Google Maps map
+marked checked, as a real call will mark it; their Actor, model, tool and
+argument values stand in until those checks settle them.
 
 ## Discovered services
 
@@ -602,6 +617,7 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-lookup-account-unverified.json`      | tool answer for it: `policy_refused` with the `unverified` rule                           |
 | `wire-directory-request-mcp.json`          | the directory from an `mcp` client                                                        |
 | `wire-directory-mcp.json`                  | its answer: `connectable`, trimmed to the services the account fixtures name              |
+| `oauth-client-metadata.json`               | Tenjin's OAuth client document, served at its `client_id` (Connecting, above)             |
 
 Two rules the fixtures exist to hold:
 
