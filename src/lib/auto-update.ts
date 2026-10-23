@@ -6,16 +6,17 @@ import { configPath, defaultDataDir, runtimeDir } from './paths';
 import { nodeBinPath, readRuntimeState, versionEntry } from './runtime-layout';
 
 /**
- * BACKGROUND AUTO-UPDATE, the way Claude Code's native installer does it. At
- * the start of a Claude Code or Codex session, at most once a day, this starts
- * `tenjin update --background` DETACHED on the runtime's own Node and current
- * entry, and returns: the hook that called it adds no latency and never waits.
+ * BACKGROUND AUTO-UPDATE, the way Claude Code's native installer does it:
+ * downloaded in the background, used from the next session. At most once a
+ * day, at the start of a Claude Code session or the end of a Codex one, this
+ * starts `tenjin update --background` DETACHED on the runtime's own Node and
+ * current entry, and returns: the caller adds no latency and never waits.
  * The child is `tenjin update`'s runtime branch unchanged (the release is
  * checked before the switch, the previous version stays, an older one is never
  * switched to, the runtime lock is held), so npm and PATH are never involved,
- * and a running Claude Code session keeps its version until the next one. In
- * Codex the hooks run the launcher, which the switch rewrites, so they move at
- * once while the session's server moves at the next session.
+ * and a running Claude Code session keeps its version until the next one.
+ * Codex's hooks run the launcher, which the switch rewrites, so Codex starts
+ * the update as its session ends and the next session starts on the new one.
  *
  * `node:*`, the paths and the runtime layout only: the `alive` leg and
  * `tenjin mcp` load this, and neither may pay for zod, the config schema or

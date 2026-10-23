@@ -87,20 +87,23 @@ export function registerRouter(reg: Registration): void {
     .action(async function (this: Command) {
       const ctx = buildContext(this);
       const harness = this.opts().harness as Harness;
-      // Codex has no SessionStart hook to start the daily background update
-      // from (adding one would change the hooks it trusts), so its server does.
-      if (harness === 'codex') {
-        (await import('../lib/auto-update')).maybeAutoUpdate({
-          dataDir: ctx.dataDir,
-          env: process.env,
-        });
-      }
       const { runRouterMcpServer } = await import('../router/mcp');
       await runRouterMcpServer({
         dataDir: ctx.dataDir,
         flags: ctx.flags,
         harness,
       });
+      // Codex has no SessionStart hook to start the daily background update
+      // from (adding one would change the hooks it trusts), so its server does,
+      // as the session ENDS: the switch rewrites the launcher its hooks run, so
+      // starting it any earlier would move them mid-session. Hooks and server
+      // then both start the next session on the new version.
+      if (harness === 'codex') {
+        (await import('../lib/auto-update')).maybeAutoUpdate({
+          dataDir: ctx.dataDir,
+          env: process.env,
+        });
+      }
     });
 
   leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")

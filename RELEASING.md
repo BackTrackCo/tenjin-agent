@@ -32,11 +32,12 @@ Before each release, check nodejs.org for a newer Node 24 security release;
 when there is one, run `node scripts/pin-node.mjs <24.x.y>` and commit it
 before the release PR. Auto-update then delivers that Node with the release.
 
-**Hooks and server across one version.** Auto-update switches Codex's hooks
-within a running session while its MCP server stays on the version it started
-on. Whatever a hook hands the server (offer files under the data dir, the
-`request` tool's fields the hook line tells the model to fill) must stay
-readable by the previous version, and the reverse.
+**Hooks and server across versions.** Codex starts its auto-update as a session
+ends, but with two Codex sessions open, the one still running sees its hooks
+move to the new version while its server stays on the old one. Whatever a hook
+hands the server (offer files under the data dir, the `request` tool's fields
+the hook line tells the model to fill) should stay readable across adjacent
+versions.
 
 To cut a release (two clicks):
 

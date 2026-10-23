@@ -159,8 +159,8 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
  * `auto` installs it in the background where Tenjin's runtime is set up for the
  * default data dir (see lib/auto-update), and elsewhere behaves as `nudge`: the
  * runtime is the deferred-activation window a self-update needs, since versions
- * sit side by side and a running Claude Code session keeps the one it started
- * on (Codex's hooks move at the switch, its server at the next session). `nudge`
+ * sit side by side and a running session keeps the one it started on (Codex
+ * starts the update as its session ends, so its hooks move with it). `nudge`
  * only reports it — one dim line for a human at a terminal, and an
  * `updateAvailable` field on the JSON envelope for everyone else, which is how
  * an agent learns to run `tenjin update` itself. `off` neither reports nor asks
