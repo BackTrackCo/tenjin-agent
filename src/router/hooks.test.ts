@@ -3893,8 +3893,10 @@ describe("the user's settings in the hooks", () => {
 /**
  * A SERVICE ON A CONNECTED ACCOUNT (#37): its line is shown like any offer's,
  * with no spend check (the user's own plan pays), and its spec is kept with
- * Tenjin's own route for the job, which a refusal offers. On a machine where
- * that account is not connected, it is withheld with nothing kept.
+ * Tenjin's own route for the job, which a refusal offers. Where this machine
+ * can't run it (the account was found to lack its tool, or isn't connected
+ * here), Tenjin's own route is offered in its place, under the settings and
+ * spend checks any paid offer meets; with none, nothing is offered.
  */
 describe('an offer led by a connected account', () => {
   const answer = JSON.parse(
@@ -3902,12 +3904,29 @@ describe('an offer led by a connected account', () => {
       fileURLToPath(new URL('./fixtures/wire-hook-execute-account.json', import.meta.url)),
       'utf8',
     ),
-  ) as { decision: { id: string; hint: string; fallback: { id: string } } };
+  ) as {
+    decision: { id: string; hint: string; fallback: { id: string } } & Record<string, unknown>;
+  };
+  /** The same answer with no Tenjin route beside the lead: the settings allow none. */
+  const alone = (() => {
+    const { fallback: _, ...decision } = answer.decision;
+    return { ...answer, decision };
+  })();
+  const fallbackId = answer.decision.fallback.id;
+  /** Tenjin's own route, as the host reads the line this client writes for it. */
+  const FALLBACK_LINE =
+    `${HINT_SOURCE}: Google Maps Places fits this, Tenjin's own tool: Find local businesses ` +
+    'from a text query with Google Maps (name, address, rating). $0.02 a call, paid from the ' +
+    `Tenjin balance. Call mcp__x402__request({id: "${fallbackId}"}) for its inputs, then ` +
+    `mcp__x402__request({id: "${fallbackId}", input: {...}}) alone and wait for its result; ` +
+    'native tools stay allowed for anything else.';
 
-  async function connectApify(missing: string[] = []): Promise<void> {
+  async function connectApify(missing: string[] = [], over: Record<string, unknown> = {}) {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({
+        ...ROUTER_POLICY,
+        ...over,
         router: {
           sources: [
             {
@@ -3951,26 +3970,82 @@ describe('an offer led by a connected account', () => {
     );
   });
 
-  it('is withheld, with nothing kept, where the account was found to lack its service', async () => {
-    await connectApify(['apify.google-maps-places']);
+  it.each([
+    ['the account was found to lack its service', () => connectApify(['apify.google-maps-places'])],
+    ['that account is not connected here', async () => undefined],
+  ])("offers Tenjin's own route in its place where %s", async (_, setup) => {
+    await setup();
     const { fetchImpl } = router(answer);
     const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(out).toEqual({
+      action: 'execute',
+      id: fallbackId,
+      response: {
+        hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: FALLBACK_LINE },
+      },
+    });
+    // The lead is never kept: the route `request` runs is Tenjin's own.
     expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
+    expect(await readSpec(dir, fallbackId)).toMatchObject({ id: fallbackId, priceAtomic: '20000' });
+    // The footer names who is paid, cut to fit the status line.
+    expect(await renderProgress(dir, 'sess-1')).toMatch(
+      /^x402 · prompt: paid lookup offered \(StableEnrich /,
+    );
   });
 
-  it('is withheld, with nothing kept, where that account is not connected', async () => {
+  it("redirects a search to Tenjin's own route where the account lacks the service", async () => {
+    await connectApify(['apify.google-maps-places']);
     const { fetchImpl } = router(answer);
-    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+    const out = await runNativeHook(await preCall('coffee shops in Austin', 'WebSearch'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
-    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
+    expect(out).toMatchObject({ action: 'execute', id: fallbackId });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${FALLBACK_LINE} ${ONE_BLOCK}`,
+      },
+    });
   });
+
+  it.each([
+    ['the settings allow no Tenjin route', alone, {}],
+    ['its price is over the per-call limit', answer, { maxAutoSpend: '10000' }],
+    [
+      'the settings block its provider',
+      answer,
+      { router: { policy: { version: 1, block: [{ kind: 'provider', id: 'google' }] } } },
+    ],
+  ])(
+    'offers nothing, with nothing kept, where the account lacks the service and %s',
+    async (_, body, over) => {
+      const { router: rules, ...limits } = over as { router?: Record<string, unknown> };
+      await connectApify(['apify.google-maps-places'], limits);
+      if (rules !== undefined) {
+        const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+          router: Record<string, unknown>;
+        };
+        await writeFile(
+          join(dir, 'config.json'),
+          JSON.stringify({ ...config, router: { ...config.router, ...rules } }),
+        );
+      }
+      const { fetchImpl } = router(body);
+      const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+      });
+      expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+      expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
+      expect(await readSpec(dir, fallbackId)).toBeNull();
+    },
+  );
 });

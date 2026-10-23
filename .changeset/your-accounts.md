@@ -2,7 +2,7 @@
 'tenjin-cli': patch
 ---
 
-Connect your own accounts. `tenjin connect apify` (or `fal`, `firecrawl`, or any MCP server by its https address) signs in through your browser; where no browser can open, `tenjin connect <name> --paste` takes a key at a hidden prompt in your own terminal, and `--from-env VAR` reads one from the environment once. Tenjin checks the account's tools for free, keeps the sign-in encrypted on this machine with its key in your OS keychain, and puts the account first for the jobs it has checked there; `--no-prefer` leaves that out, and `tenjin config reset --source apify --preference` undoes it.
+Connect your own accounts. `tenjin connect apify` (or `fal`, `firecrawl`, or any MCP server by its https address) signs in through your browser; where no browser can open, `tenjin connect <name> --paste` takes a key at a hidden prompt in your own terminal, and `--from-env VAR` reads one from the environment once. Tenjin checks the account's tools for free, keeps the sign-in encrypted on this machine with its key in your OS keychain, and puts the account first for the jobs it has checked there (a job your account can't do is left to Tenjin's own tool); `--no-prefer` leaves that out, and `tenjin config reset --source apify --preference` undoes it.
 
 Calls on your account are billed to your own plan, not to your Tenjin balance, and don't count toward its limits. Each one ends with a receipt such as "Apify · your account · 20 places", and shows in `tenjin payments`. A job your account is still working on is checked again with `request({job})`, and the call that bills is never sent twice.
 

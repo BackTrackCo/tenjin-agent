@@ -23,6 +23,7 @@ import { storeAccountOffer, storeChoices, storeSpecs } from './specs';
 import { accountLacks } from './accounts/presence';
 import {
   isAccountSpec,
+  parseHookDecision,
   requestDecision,
   ROUTER_PATH,
   type AnyOfferSpec,
@@ -798,7 +799,8 @@ async function vetOffer<T extends OfferDecision>(
   // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend
   // policy or the wallet to check, and it is offered alone. One whose service
   // this account was found to lack when it was connected is left out, rather
-  // than leading its task and failing when called.
+  // than leading its task and failing when called: by now it has no fallback
+  // to stand in for it ({@link servableHere}).
   if (isAccountOffer(offer)) {
     const lead = offer.specs.find(({ id }) => id === offer.id);
     if (lead === undefined || !isAccountSpec(lead)) return { withheld: 'account lead unreadable' };
@@ -819,6 +821,62 @@ async function vetOffer<T extends OfferDecision>(
     return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
   }
   return { withheld: shortfall.withheld };
+}
+
+/**
+ * AN ACCOUNT LEAD THIS MACHINE CANNOT RUN, SERVED BY TENJIN'S OWN ROUTE. The
+ * connect-time check found the account lacks the lead's tool (a higher plan,
+ * say), or there is no sign-in here to read, but the router never learns
+ * that: the account-wide preference keeps putting the account first for the
+ * task. So the fallback the server sends beside every account lead becomes
+ * the offer, as `offerAccountLead` does for a query: a paid `execute` on
+ * Tenjin's route, which the settings check, the spend check and the footer
+ * then treat like any other, and never `bound`, so it never runs in place of
+ * a native call. With no fallback (the settings allow no Tenjin route for
+ * the task) the lead is kept, and {@link vetOffer} withholds it.
+ *
+ * The line is this client's, since the server writes none for the fallback.
+ * A decision that would not parse as an answer keeps the lead too, so what
+ * is returned (and what the swap keeps for the pre-call arm) always does.
+ */
+async function servableHere(
+  decision: HookDecision | null,
+  dataDir: string,
+): Promise<HookDecision | null> {
+  if (!isAccountOffer(decision) || decision.fallback === undefined) return decision;
+  const lead = decision.specs.find(({ id }) => id === decision.id);
+  if (lead === undefined || !isAccountSpec(lead)) return decision;
+  if (!(await accountLacks(dataDir, lead.identity))) return decision;
+  return parseHookDecision(fallbackOffer(decision, decision.fallback)) ?? decision;
+}
+
+/** Tenjin's own route for an account lead's task, as an offer of its own. */
+function fallbackOffer(lead: AccountExecute, fallback: OfferSpec): ExecuteDecision {
+  const id = JSON.stringify(fallback.id);
+  const name = fallback.label ?? fallback.provider;
+  const price = fallback.priceVaries
+    ? `About $${toMoney(fallback.priceAtomic).usd} a call (up to $${toMoney(fallback.maxAmountAtomic).usd})`
+    : `$${toMoney(fallback.priceAtomic).usd} a call`;
+  const what = fallback.description.replace(/[\s.]+$/, '');
+  return {
+    action: 'execute',
+    id: fallback.id,
+    capabilityId: fallback.capabilityId,
+    category: lead.category,
+    provider: fallback.provider,
+    ...(fallback.label !== undefined ? { label: fallback.label } : {}),
+    capabilityDescription: fallback.description,
+    providerPriceAtomic: fallback.priceAtomic,
+    endpoint: fallback.request.url,
+    ...(fallback.identity !== undefined ? { identity: fallback.identity } : {}),
+    usage: lead.usage,
+    hint:
+      `${name} fits this, Tenjin's own tool: ${what}. ${price}, paid from the Tenjin balance. ` +
+      `Call request({id: ${id}}) for its inputs, then request({id: ${id}, input: {...}}) alone ` +
+      'and wait for its result; native tools stay allowed for anything else.',
+    specs: [fallback],
+    delivery: 'offer',
+  };
 }
 
 /** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
@@ -1970,7 +2028,7 @@ async function decide(
     warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
     return null;
   }
-  return outcome.decision.decision;
+  return servableHere(outcome.decision.decision, deps.dataDir);
 }
 
 /**

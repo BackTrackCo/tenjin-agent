@@ -344,7 +344,10 @@ under its own offer id. The line does not name it. When the account refuses
 the call (its sign-in expired, its plan or rate limit ran out), the client
 stops, charges nothing, and offers the fallback as the next step. It runs the
 fallback only when the user picks it or has opted in for that account. There
-is none when the settings allow no Tenjin route for the task.
+is none when the settings allow no Tenjin route for the task. A lead this
+machine cannot run (connecting found the account lacks its tool, or there is
+no sign-in here) is never shown: the client offers the fallback in its place,
+with a line of its own, under the checks any paid offer meets.
 
 An account call's outcome report keeps a broken map apart from an account
 that refused: a refusal (sign-in, plan or rate limit) is `unpaid` with
