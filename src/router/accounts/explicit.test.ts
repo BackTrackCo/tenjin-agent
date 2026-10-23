@@ -334,7 +334,9 @@ describe('an account Tenjin maps, named by the user', () => {
     const directory = JSON.parse(
       readFileSync(new URL('../fixtures/wire-directory-mcp.json', import.meta.url), 'utf8'),
     ) as { directory: unknown };
-    const { mappedTools: _, ...withoutTools } = APIFY;
+    // A descriptor that names no billing tool (written by hand, say).
+    const withoutTools: Record<string, unknown> = { ...APIFY };
+    delete withoutTools.mappedTools;
     await apify(withoutTools);
     const session = account();
     const unknown = await runRequestTool(
