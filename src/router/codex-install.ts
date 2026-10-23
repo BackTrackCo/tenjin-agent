@@ -41,7 +41,7 @@ import {
   type RouterInstallDeps,
 } from './install';
 import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/codex-trust';
-import { readInstalledHosts } from './hosts';
+import { readInstalledHosts, withNote } from './hosts';
 import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
 
@@ -232,6 +232,27 @@ export const CODEX_REFRESH_LINES = {
   failed:
     'Tenjin could not update its Codex hooks. Ask your agent to run the Tenjin doctor for Codex.',
 } as const;
+
+/**
+ * A bare `install --refresh` with the Codex refresh beside it: the Codex one
+ * runs whether Claude Code's succeeded or refused ("nothing to refresh" on a
+ * Codex-only machine), and Claude Code's refusal stands only when the Codex
+ * refresh had nothing to say either.
+ */
+export async function alongsideCodexRefresh(
+  claude: () => Promise<CommandResult>,
+  codex: () => Promise<string | undefined>,
+): Promise<CommandResult> {
+  let out: CommandResult;
+  try {
+    out = await claude();
+  } catch (err) {
+    const line = await codex();
+    if (line === undefined) throw err;
+    return { data: { notices: [line] }, humanLines: [line] };
+  }
+  return withNote(out, await codex());
+}
 
 /**
  * THE CODEX REFRESH `tenjin update` RUNS, in the new build (`install

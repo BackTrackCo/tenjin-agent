@@ -10,6 +10,7 @@ import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
+  alongsideCodexRefresh,
   CODEX_REFRESH_LINES,
   codexAtLeast,
   ownCodexRow,
@@ -1077,5 +1078,24 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       hooks: async () => ({ data: [{ hooks: stale() }] }),
     });
     expect(old).toBe(CODEX_REFRESH_LINES.old);
+  });
+
+  it("runs the Codex refresh even where Claude Code's refresh refuses", async () => {
+    const refused = async () => {
+      throw new Error('Nothing to refresh');
+    };
+    const line = CODEX_REFRESH_LINES.done;
+    expect(await alongsideCodexRefresh(refused, async () => line)).toEqual({
+      data: { notices: [line] },
+      humanLines: [line],
+    });
+    await expect(alongsideCodexRefresh(refused, async () => undefined)).rejects.toThrow(
+      'Nothing to refresh',
+    );
+    const ok = await alongsideCodexRefresh(
+      async () => ({ data: {}, humanLines: ['refreshed'] }),
+      async () => line,
+    );
+    expect(ok.humanLines).toEqual(['refreshed', line]);
   });
 });
