@@ -127,6 +127,43 @@ export function registerRouter(reg: Registration): void {
       });
     });
 
+  leaf(SETUP, 'connect <name>', 'connect your own account at a provider, such as Apify or fal')
+    .description(
+      "Connect your own account so Tenjin can run the jobs it knows for it on that account, which your own plan pays for (not your Tenjin balance, and not counted in its limits). <name> is an account Tenjin knows, such as Apify, fal or Firecrawl, or an MCP server's https address. You approve the sign-in in your browser; where that can't work, --paste reads a key at a hidden prompt in your own terminal, or --from-env reads one from an environment variable once. Tenjin checks the account's tools for free, keeps the sign-in encrypted on this machine with its key in your OS keychain, and puts the account first for its jobs unless you say --no-prefer. Never paste a key into a chat.",
+    )
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin connect apify
+  $ tenjin connect fal --paste
+  $ tenjin connect firecrawl --from-env FIRECRAWL_API_KEY
+  $ tenjin connect apify --no-prefer
+  $ tenjin connect https://mcp.example.com/mcp
+`,
+    )
+    .option('--paste', 'type or paste a key at a hidden prompt (needs your own terminal)')
+    .option('--from-env <var>', 'read the key from this environment variable, once')
+    .option('--no-prefer', 'connect without putting this account first for its jobs')
+    .action(async function (this: Command, name: string) {
+      await runCommand('connect', this, async (ctx) => {
+        const opts = this.opts() as { paste?: boolean; fromEnv?: string; prefer?: boolean };
+        const { runConnect } = await import('../commands/connect');
+        return runConnect(name, opts, ctx);
+      });
+    });
+
+  leaf(SETUP, 'disconnect <name>', 'sign out of a connected account and forget it here')
+    .description(
+      'Sign out of a connected account where it allows that, delete its sign-in from this machine, and take it out of your preferences. Your other settings and accounts stay as they are; `tenjin connect <name>` connects it again.',
+    )
+    .action(async function (this: Command, name: string) {
+      await runCommand('disconnect', this, async (ctx) => {
+        const { runDisconnect } = await import('../commands/connect');
+        return runDisconnect(name, ctx);
+      });
+    });
+
   const payments = leaf(SETUP, 'payments', 'the paid lookups this machine made').description(
     'The local record of paid router lookups, in `~/.tenjin/paid/ledger.jsonl`. A bare `tenjin payments` lists the newest: when, who was paid, how much, whether it settled, and the transaction.',
   );

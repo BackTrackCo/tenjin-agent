@@ -321,8 +321,9 @@ async function replacementNote(router: RouterSettings, ctx: CommandContext): Pro
     : `${REPLACEMENT_NAME} is on. ${support.why}`;
 }
 
-interface Outcome {
-  operation: 'prefer' | 'only' | 'block' | 'unblock' | 'reset' | 'replacement';
+export interface Outcome {
+  operation:
+    'prefer' | 'only' | 'block' | 'unblock' | 'reset' | 'replacement' | 'connect' | 'disconnect';
   changed: boolean;
   scope: SettingScope;
   /** The sentences a person reads first. */
@@ -338,7 +339,7 @@ interface Outcome {
  * what is now in effect, why, and how to undo it, from the file as it reads
  * back after the write rather than from what the operation meant to write.
  */
-async function answer(
+export async function answer(
   outcome: Outcome,
   ctx: CommandContext,
   deps: ConfigRulesDeps,
