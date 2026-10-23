@@ -718,6 +718,39 @@ describe('fallback', () => {
     expect(net.bodies).toEqual([]);
   });
 
+  it('names every connected account in "What have I changed?", with who pays and its undo', async () => {
+    // Connected with --no-prefer, and by its address: no rule names either.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', signIn: 'oauth' },
+            {
+              id: 'mcp-example-com',
+              label: 'mcp.example.com',
+              mcpUrl: 'https://mcp.example.com/mcp',
+              signIn: 'key',
+            },
+          ],
+          policy: {
+            version: 1,
+            prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] }],
+          },
+        },
+      }),
+    );
+    const list = await runConfigList(makeCtx());
+    expect(lines(list)).toContain(
+      'Your Apify account, used first for the jobs it can do: its own plan pays, outside your limits on the Tenjin balance.',
+    );
+    expect(lines(list)).toContain('Disconnect: `tenjin disconnect apify`');
+    expect(lines(list)).toContain(
+      'Your mcp.example.com account: its own plan pays, outside your limits on the Tenjin balance.',
+    );
+    expect(lines(list)).toContain('Disconnect: `tenjin disconnect mcp-example-com`');
+  });
+
   it('refuses an account that is not connected, and saves nothing', async () => {
     await apifySaved();
     const error = await caught(() =>

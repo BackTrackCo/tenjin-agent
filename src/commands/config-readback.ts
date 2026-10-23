@@ -464,30 +464,40 @@ export interface SettingsReadback {
 export interface AccountReadback {
   label: string;
   connected: boolean;
+  /** In the account-wide preference: used first for the jobs it can do. */
+  preferred: boolean;
   /** `tenjin`: Tenjin's own tool runs in its place; `ask`: the call stops
    *  and offers it. */
   onRefusal: 'tenjin' | 'ask';
   text: string;
+  /** Turns the fallback off again, when it is on. */
   reset?: string;
+  /** Signs out and forgets the account here. */
+  disconnect: string;
 }
 
-/** What an account does when it refuses a call, in the user's words. */
-export function describeAccount(account: SavedAccount, connected: boolean): AccountReadback {
+/** A connected account in the user's words: whether it comes first, that
+ *  its own plan pays outside the limits, and what it does when it refuses. */
+export function describeAccount(
+  account: SavedAccount,
+  connected: boolean,
+  preferred = false,
+): AccountReadback {
   const { label, id } = account;
   const here = connected ? '' : ` It isn't signed in on this machine: \`tenjin connect ${id}\`.`;
+  const who = `Your ${label} account${preferred ? ', used first for the jobs it can do' : ''}: its own plan pays, outside your limits on the Tenjin balance.`;
+  const common = { label, connected, preferred, disconnect: `tenjin disconnect ${id}` };
   return account.onRefusal === 'tenjin'
     ? {
-        label,
-        connected,
+        ...common,
         onRefusal: 'tenjin',
-        text: `When your ${label} account refuses a call, Tenjin's own tool for that job runs in its place, from your Tenjin balance within your limits.${here}`,
+        text: `${who} When your ${label} account refuses a call, Tenjin's own tool for that job runs in its place, from your Tenjin balance within your limits.${here}`,
         reset: `tenjin config fallback off --source ${id}`,
       }
     : {
-        label,
-        connected,
+        ...common,
         onRefusal: 'ask',
-        text: `When your ${label} account refuses a call, Tenjin stops and offers its own tool.${here}`,
+        text: `${who} When your ${label} account refuses a call, Tenjin stops and offers its own tool.${here}`,
       };
 }
 
@@ -505,13 +515,27 @@ export function settingsReadback(
   const { policy, enabled, sources } = router;
   const rules = policy.status === 'ok' ? describeRules(policy.saved, listing) : [];
   const replacement = describeReplacement(router.nativeReplacement, listing, support);
+  const first = new Set(
+    policy.status === 'ok'
+      ? (policy.saved.prefer ?? [])
+          .filter(({ scope }) => scope.kind === 'global')
+          .flatMap(({ targets }) => targets.filter(({ kind }) => kind === 'source'))
+          .map(({ id }) => id)
+      : [],
+  );
   const accounts =
     sources?.status === 'ok'
       ? sources.saved.flatMap((entry) => {
           const account = savedAccountOf(entry);
           return account === undefined
             ? []
-            : [describeAccount(account, sources.connected.includes(account.id))];
+            : [
+                describeAccount(
+                  account,
+                  sources.connected.includes(account.id),
+                  first.has(account.id),
+                ),
+              ];
         })
       : [];
   const data: SettingsReadback = {
@@ -553,8 +577,12 @@ export function settingsReadback(
     lines.push(`  - ${rule.text}${inactive} Undo: \`${rule.reset}\``);
   }
   if (rules.length > 0) lines.push(`  ${ENFORCED_BY}`);
-  for (const account of accounts.filter(({ reset }) => reset !== undefined))
-    lines.push(`  - ${account.text} Undo: \`${account.reset}\``);
+  // EVERY CONNECTED ACCOUNT, with who pays and how to remove it: connecting
+  // is a setting like any other, and "What have I changed?" names it.
+  for (const account of accounts)
+    lines.push(
+      `  - ${account.text}${account.reset !== undefined ? ` Undo: \`${account.reset}\`;` : ''} Disconnect: \`${account.disconnect}\``,
+    );
   lines.push(`  ${replacement.text}`, `  ${limits.text}`);
   lines.push('  Change them with `tenjin config --help`.');
   return { data, lines };
