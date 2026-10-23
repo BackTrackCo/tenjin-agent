@@ -21,7 +21,7 @@ The allow is a tool grant, not a spending grant. Every payment the tool makes st
 
 Router on/off controls automatic routing. The spending controls and ledger are local; the router cannot read or raise them:
 
-- **`sessionBudget`**, the daily budget, is the control. It caps automatic spending over a rolling 24 hours, $5 by default. Zero blocks automatic spending; `none` removes the daily ceiling.
+- **`sessionBudget`**, the daily budget, is the control. It caps automatic spending within a 24-hour budget window across agent sessions, $5 by default. Zero blocks automatic spending; `none` removes the daily ceiling.
 - **`maxAutoSpend`**, the per-call ceiling, is the runaway guard. It caps what one router call pays on its own: all its payments together, so several takes of one call or every option of a compare count as one total. It is $0.25 by default, and it cannot be set below $0.25, the routing deposit, because below that routing cannot pay at all: `tenjin install` and `tenjin config set` refuse a lower amount and say why, and `tenjin doctor` flags one an earlier release left. A service priced above it (today two video models at $0.42 and $0.45, hosting at $0.50 and research at $0.60) is approved once, for that call (below).
 - **The wallet balance** is the hard stop. Nothing pays past it.
 - **`spend.json`** records all payments, with separate automatic exposure and reservation modes. Only automatic exposure and pending automatic reservations consume the daily budget. Manual payments remain in total reporting. Older records without a mode/counter conservatively count as automatic until their window expires. Both modes retain the keyed duplicate guard, including under `none`.
