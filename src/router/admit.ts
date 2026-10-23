@@ -334,10 +334,11 @@ export async function admitByPolicy(
 
 /**
  * ONE CALL BOUNDARY: the rules reread from the file, no network, right before
- * the call is sent and its payment signed (or a group's members are probed
- * for their live prices, which is provider HTTP too). A run that was admitted with no
- * rule reading identity, and now meets one, has an identity nobody checked
- * against the catalog: it stops, rather than trust it. Null: the call may go.
+ * the call is sent and its payment signed, or before a group's members are
+ * probed for their live prices, which is provider HTTP too. A run admitted
+ * with no rule reading identity that now meets one holds an identity nobody
+ * checked against the catalog: it stops rather than trust it. Null: the call
+ * may go.
  */
 export async function policyAtBoundary(
   routes: readonly Route[],
