@@ -118,12 +118,25 @@ export function registerRouter(reg: Registration): void {
 
   leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
     .description(
-      'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force.',
+      'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force; and your connected accounts, which their own plans pay for, outside those caps.',
     )
     .action(async function (this: Command) {
       await runCommand('status', this, async (ctx) => {
         const { runRouterStatus } = await import('../router/status');
         return runRouterStatus(ctx);
+      });
+    });
+
+  leaf(SETUP, 'usage', 'what lookups cost, by day and by who ran them')
+    .description(
+      "Totals from this machine's own record, by day: Tenjin's tools, paid from your Tenjin balance, and each of your connected accounts, billed to that account's own plan. --since takes 24h, 7d (the default), 30d or a date. Routing fees aren't in it: `tenjin status` shows today's.",
+    )
+    .option('--since <window>', 'how far back: 24h, 7d, 30d or a date such as 2026-10-01')
+    .action(async function (this: Command) {
+      await runCommand('usage', this, async (ctx) => {
+        const opts = this.opts() as { since?: string };
+        const { runRouterUsage } = await import('../router/usage');
+        return runRouterUsage(ctx, opts.since !== undefined ? { since: opts.since } : {});
       });
     });
 

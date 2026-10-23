@@ -8,6 +8,7 @@ import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { channelCredit } from './channel-credit';
 import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
+import { accountLines, accountStatuses } from './accounts/readout';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -22,6 +23,10 @@ import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fe
  * draws from, so it is shown apart from what lookups cost, with what the
  * channel still holds. It still counts toward the daily limit, like any
  * automatic payment.
+ *
+ * THE USER'S OWN ACCOUNTS are listed with who pays for them: their own plans,
+ * never counted in the limits on the Tenjin balance. Read from the config and
+ * each sign-in's plaintext header, with no key, keychain or network.
  *
  * THE WALLET'S BALANCE LEADS, read from the chain with the same fallback a
  * lookup uses, because a wallet at $0 is why nothing pays. A read that does
@@ -84,7 +89,11 @@ export async function runRouterStatus(
     (sum, r) => sum + BigInt(r.amountAtomic),
     0n,
   );
-  const retired = retiredPaymentKeys(await loadRawConfig(ctx.dataDir));
+  const config = await loadRawConfig(ctx.dataDir);
+  const retired = retiredPaymentKeys(config);
+  // THE USER'S OWN ACCOUNTS (#37), from the config and each vault's header:
+  // their plans pay, so the limits below never count them.
+  const accounts = await accountStatuses(ctx.dataDir, config.router);
   const warnings = retired.length
     ? [`Ignored retired keys: ${retired.join(', ')}. ${RETIRED_PAYMENT_GUIDANCE}`]
     : [];
@@ -125,6 +134,13 @@ export async function runRouterStatus(
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
     },
+    accounts: accounts.map(({ id, label, preferred, signIn, onRefusal }) => ({
+      id,
+      label,
+      preferred,
+      signIn,
+      onRefusal,
+    })),
     inFlight: (ledger?.reservations ?? []).map((r) => ({
       amount: toMoney(r.amountAtomic),
       ageSeconds: Math.max(0, Math.round((now() - r.atMs) / 1000)),
@@ -160,6 +176,7 @@ export async function runRouterStatus(
       `lookups ${toMoney(lookupsAtomic.toString()).usd} USD` +
         (credit.length > 0 ? ` · routing credit ${credit.join(', ')}` : ''),
       budgetLine,
+      ...accountLines(accounts),
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
       `automatic router up to $${formatUsdDisplay(settings.policy.maxAutoSpendAtomic.toString())} a call (Tenjin balance); manual pay always requires consent`,
       ...warnings,

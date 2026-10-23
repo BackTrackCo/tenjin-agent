@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -94,5 +94,84 @@ describe('status, the wallet line', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * THE USER'S OWN ACCOUNTS, read from the config and each sign-in's header:
+ * who comes first, that their plans pay outside the limits, and what needs
+ * the user (an expired sign-in, one missing here). No key and no network.
+ */
+describe('status, the accounts', () => {
+  const header = (state: 'ok' | 'expired') => ({
+    version: 1,
+    header: {
+      version: 1,
+      id: 'apify',
+      kind: 'oauth',
+      store: 'keychain',
+      mcpUrl: 'https://mcp.apify.com',
+      connectedAt: '2026-10-23T10:00:00.000Z',
+      state,
+      ready: [],
+      missing: [],
+    },
+    iv: 'x',
+    tag: 'x',
+    data: 'x',
+  });
+
+  it('names each account, who pays, and what needs the user', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', signIn: 'oauth' },
+            {
+              id: 'fal',
+              label: 'fal',
+              mcpUrl: 'https://mcp.fal.ai/mcp-relay',
+              signIn: 'key',
+              onRefusal: 'tenjin',
+            },
+          ],
+          policy: {
+            version: 1,
+            prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] }],
+          },
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    await writeFile(join(dir, 'sources', 'apify.json'), JSON.stringify(header('expired')));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no network'));
+    try {
+      const result = await runRouterStatus(ctx(), { routingCredit: async () => 0n });
+      expect(result.humanLines).toEqual(
+        expect.arrayContaining([
+          'Your accounts: Apify (used first for jobs they can do); fal (not put first). Billed to your own plans, not counted in the limit.',
+          "  Apify's sign-in has expired: `tenjin connect apify` reconnects it.",
+          "  fal isn't signed in on this machine: `tenjin connect fal`.",
+          "  When fal refuses a call, Tenjin's own tool runs in its place.",
+        ]),
+      );
+      expect(result.data).toMatchObject({
+        accounts: [
+          { id: 'apify', label: 'Apify', preferred: true, signIn: 'expired', onRefusal: 'ask' },
+          { id: 'fal', label: 'fal', preferred: false, signIn: 'signed_out', onRefusal: 'tenjin' },
+        ],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('says how to add one when none is connected', async () => {
+    const result = await runRouterStatus(ctx(), { routingCredit: async () => 0n });
+    expect(result.humanLines).toContain(
+      'Your accounts: none connected (`tenjin connect <name>` adds one)',
+    );
   });
 });
