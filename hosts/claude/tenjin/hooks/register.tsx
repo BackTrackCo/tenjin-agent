@@ -71,7 +71,7 @@ const SECRET_NAME = /(api[_-]?key|token|secret|passw|authorization|cookie|privat
 const HIDDEN = new Set(['spec', 'discovered', 'native', 'browse', 'needs_input', 'needs_approval']);
 /** Endings drawn with no state word. */
 const PLAIN = new Set(['fulfilled', 'running']);
-const ERRORS = new Set(['failed', 'interrupted', 'partial']);
+const ERRORS = new Set(['failed', 'interrupted', 'partial', 'refused']);
 
 type Dollar = EngineInterface;
 type Json = Record<string, unknown>;
@@ -310,9 +310,12 @@ async function swap($: Dollar, e: Json): Promise<ToolCallResult | null> {
   const envelope = envelopeOf(text);
   if (text === undefined || envelope?.via !== 'swap') return null;
   // THE LOOKUP RAN: from here the answer is its result, whatever the drawing
-  // makes of it, and the native call never runs as well.
-  const ended = endOf(envelope);
-  await drawSwap($, e.tool_use_id, tool, e, ended).catch(() => undefined);
+  // makes of it, and the native call never runs as well. A connected account
+  // that refused before anything ran is drawn as refused, never as a lookup
+  // that ran; its words, and Tenjin's own tool, are the call's refusal.
+  const refused = asRecord(envelope.refused) !== undefined;
+  const ended = refused ? { ...endOf(envelope), status: 'refused' } : endOf(envelope);
+  await drawSwap($, e.tool_use_id, tool, e, ended, onAccount(envelope.cost)).catch(() => undefined);
   const status = String(envelope.status);
   if (status !== 'fulfilled' && status !== 'running') return { deny: text };
   const elapsed = Math.max(0, (await $.clock.now().catch(() => startedAt)) - startedAt);
@@ -330,19 +333,22 @@ async function swap($: Dollar, e: Json): Promise<ToolCallResult | null> {
       };
 }
 
-/** The row, its state and the one transcript line for a call answered in place. */
+/** The row, its state and the one transcript line for a call answered in
+ *  place. `account`: the user's own plan paid, which the row says. */
 async function drawSwap(
   $: Dollar,
   id: string,
   tool: 'WebSearch' | 'WebFetch',
   e: Json,
   ended: Partial<TenjinRow>,
+  account: boolean,
 ): Promise<void> {
   const key = nativeKey(tool, e);
   const held = await offerRecord($, id, key);
   const label = ended.label ?? held?.label ?? 'Tenjin lookup';
   const asked = nativeArgument(e);
-  const price = held?.price !== undefined ? { price: held.price } : {};
+  const shown = held?.price ?? (account ? 'your account' : undefined);
+  const price = shown !== undefined ? { price: shown } : {};
   await $.state.set(
     { ...HELD, id },
     { offerId: held?.offerId ?? id, key: key ?? '', label, swap: true, ...price },
@@ -351,11 +357,19 @@ async function drawSwap(
     { ...ROWS, id },
     { ...price, ...ended, label, ...(asked !== undefined ? { argument: asked } : {}) },
   );
-  const cost = ended.paid ?? held?.price;
+  const native = NATIVE_NAMES[tool] as string;
+  const cost = ended.paid ?? shown;
   $.ui.log(
-    `Tenjin ran ${label} in place of ${NATIVE_NAMES[tool] as string}${cost !== undefined ? ` · ${cost}` : ''}`,
+    ended.status === 'refused'
+      ? `Your account refused ${label}, so ${native} did not run`
+      : `Tenjin ran ${label} in place of ${native}${cost !== undefined ? ` · ${cost}` : ''}`,
   );
   $.ui.invalidate('ui.render');
+}
+
+/** A cost line saying the user's own account was billed, not the balance. */
+function onAccount(cost: unknown): boolean {
+  return Array.isArray(cost) && /^billed to your .+ account\b/.test(String(cost[0]));
 }
 
 function hasEntries(value: unknown): boolean {

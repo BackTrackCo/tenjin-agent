@@ -19,6 +19,7 @@ import {
   admitExecution,
   deliverResult,
   fail,
+  ranNothing,
   refusedByPolicy,
   reportOutcome,
   routeOf,
@@ -535,6 +536,8 @@ async function delivered(
     provider: spec.provider,
     ...(spec.label !== undefined ? { label: spec.label } : {}),
     identity: spec.identity,
+    // In a native call's place (`swap.ts`): kept on its ledger row.
+    ...(at.deps.via !== undefined ? { via: at.deps.via } : {}),
     media: spec.output === 'media',
     parameters: sentInput,
     sent: JSON.stringify(sentInput),
@@ -583,6 +586,10 @@ async function delivered(
  * receipt that says so. `sent`: the billing call went out. `answered`: the
  * account's own error answered it, so its job may have started; Tenjin's tool
  * then never stands in automatically, which could bill the job twice.
+ *
+ * IN A NATIVE CALL'S PLACE (`deps.standIn`, the swap), Tenjin's tool stands in
+ * only past the swap's own checks, the limits included, and one that then
+ * runs nothing leaves the refusal and its offer as the answer.
  */
 async function refusal(
   at: Run,
@@ -604,27 +611,33 @@ async function refusal(
   const switchable =
     !answered && SWITCHABLE.has(reason) && account.onRefusal === 'tenjin' && fallback !== null;
   const fitted = switchable ? fittedInput(at.input, fallback) : undefined;
-  if (switchable && fitted !== undefined) {
+  const { standIn } = at.deps;
+  if (switchable && fitted !== undefined && (standIn === undefined || (await standIn(fallback)))) {
     // THE USER'S OWN CHOICE FOR THIS ACCOUNT: Tenjin's tool, in its place,
     // admitted, limited and claimed on its own.
     const deps: RequestToolDeps = { ...at.deps };
     delete deps.policyRun;
+    delete deps.standIn;
     const switched = await runSpec(fallback.id, fallback, fitted, deps, footer, at.reportDeps);
-    const note = `${words.said} Tenjin ran its own tool for this job instead, as you set for ${account.label}.`;
-    return {
-      ...switched,
-      summary: `${note}\n${switched.summary}`,
-      envelope: {
-        ...switched.envelope,
-        switched: { from: account.label, to: fallback.label ?? fallback.provider, reason },
-        note,
-      },
-    };
+    // In a native call's place, one that ran nothing (an approval to ask
+    // for, a rule, a claim) leaves the refusal and its offer as the answer.
+    if (standIn === undefined || !ranNothing(switched)) {
+      const note = `${words.said} Tenjin ran its own tool for this job instead, as you set for ${account.label}.`;
+      return {
+        ...switched,
+        summary: `${note}\n${switched.summary}`,
+        envelope: {
+          ...switched.envelope,
+          switched: { from: account.label, to: fallback.label ?? fallback.provider, reason },
+          note,
+        },
+      };
+    }
   }
   await footer.done('needs_input', shownOf(at));
   const offer = fallback !== null ? fallbackOffer(fallback) : undefined;
   const text = `${words.said} ${nothing}`;
-  if (switchable) {
+  if (switchable && fitted === undefined) {
     // OPTED IN, BUT TENJIN'S TOOL TAKES OTHER INPUTS: the agent fills them
     // from its spec and runs it now, with no question for the user.
     const fid = JSON.stringify(fallback.id);

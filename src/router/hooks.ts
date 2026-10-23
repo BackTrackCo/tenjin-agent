@@ -1106,8 +1106,8 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }> & {
  * AN OFFER LED BY A SERVICE ON THE USER'S CONNECTED ACCOUNT (#37): no URL,
  * nothing the balance pays, and Tenjin's own route for the job beside it,
  * which a refusal offers. The server sends one only for an account this
- * machine says is connected, alone, checked, and never to run in place of a
- * native call.
+ * machine says is connected, alone and checked, with `bound` when it can run
+ * in place of the native call it holds.
  */
 type AccountExecute = Extract<HookDecision, { action: 'execute' }> & {
   endpoint?: undefined;
@@ -1422,9 +1422,12 @@ export type SwapDecision =
   | { handback: string }
   | {
       offer: OfferDecision;
-      /** The lead's spec, which `bound` fills. */
-      spec: OfferSpec;
+      /** The lead's spec, which `bound` fills: a paid one, or a service on
+       *  the user's connected account. */
+      spec: AnyOfferSpec;
       bound: Record<string, unknown>;
+      /** The native call it runs in place of, for the receipt. */
+      tool: 'WebSearch' | 'WebFetch';
       /**
        * Claims every search or URL of the call for the main agent, as a
        * redirect does, and marks the call answered in place. False when a
@@ -1478,7 +1481,12 @@ export function outsideAutomaticUse(
 export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDecision> {
   if (hostOf(deps) !== 'claude') return { handback: 'this host cannot run a pick in place' };
   const event = decodeEvent(raw);
-  if (event?.kind !== 'native' || event.pending === null || event.toolUseId === undefined) {
+  if (
+    event?.kind !== 'native' ||
+    event.pending === null ||
+    event.pending.tool === 'AskUserQuestion' ||
+    event.toolUseId === undefined
+  ) {
     return { handback: 'not a search or fetch Tenjin routes' };
   }
   if (event.agentId !== undefined) return { handback: 'a subagent call' };
@@ -1511,12 +1519,12 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   if (!isOffer(outcome)) return back('no paid lookup fits');
   const spec = outcome.specs?.find(({ id }) => id === outcome.id);
   // NOTHING TO RUN AS IT STANDS: no `bound` (an older router, a free docs
-  // lookup, a choice to make) or no spec for it to fill. A service on the
-  // user's own account never runs in place of a native call.
+  // lookup, a choice to make, a map Tenjin has not checked) or no spec for it
+  // to fill. A checked map on the user's own account runs in place like any
+  // pick, and its own plan pays.
   if (
     outcome.bound === undefined ||
     spec === undefined ||
-    isAccountSpec(spec) ||
     isFree(outcome) ||
     (outcome.action === 'discovered' && outcome.choices !== undefined)
   ) {
@@ -1528,7 +1536,8 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   const outside = outsideAutomaticUse(nativeReplacement, spec.identity);
   if (outside !== null) return back(outside);
   // ONLY A CALL THAT WOULD RUN ON ITS OWN: over a limit, or a wallet that
-  // cannot pay, goes back to the offer, whose request asks for approval.
+  // cannot pay, goes back to the offer, whose request asks for approval. An
+  // account's call meets no limit, and only needs the job on this account.
   const vetted = await vetOffer(outcome, deps, deadline, false);
   if (vetted.withheld !== undefined) return back(vetted.withheld);
   // Kept like a shown offer's: the spec `request({id, input})` runs.
@@ -1539,6 +1548,7 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
     offer: outcome,
     spec,
     bound: outcome.bound,
+    tool: pending.tool,
     claim: async () => {
       if (!(await claimRedirect(deps.dataDir, session, undefined, target, now()))) return false;
       await Promise.all(

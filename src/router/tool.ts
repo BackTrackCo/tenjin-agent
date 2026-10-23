@@ -268,6 +268,13 @@ export interface RequestToolDeps {
    *  native search or fetch answered in place (`swap.ts`). Kept on its ledger
    *  row and its outcome report, never on a default body. */
   via?: 'swap';
+  /**
+   * THE SWAP'S OWN CHECK on Tenjin's tool standing in for a connected account
+   * that refused before anything ran, for an account the user opted in for
+   * (`swap.ts`): whether it may run in the native call's place now. Set by the
+   * swap alone; elsewhere the opt-in runs Tenjin's tool as an ordinary call.
+   */
+  standIn?: (fallback: OfferSpec) => Promise<boolean>;
   /** Seams for a call on the user's own account (#37): the OS store its
    *  vault key is read from, and its MCP session. Tests pass them; production
    *  uses the platform's. */
@@ -1938,6 +1945,7 @@ export type DeliverCall = Pick<
   | 'sent'
   | 'note'
   | 'project'
+  | 'via'
 > & { request: { url: string } };
 
 /**
@@ -3009,6 +3017,28 @@ export function accountReceipt(
     parts.push(items.length === 1 ? '1 result' : `${items.length} ${noun ?? 'results'}`);
   }
   return parts.join(' · ');
+}
+
+/** Answers that ran nothing: a routine stop before anything was sent. */
+const RAN_NOTHING: ReadonlySet<string> = new Set(['native', 'needs_input', 'needs_approval']);
+/** The user's settings stopped it, before anything was sent. */
+const SETTINGS_CODES: ReadonlySet<string> = new Set([
+  'policy_invalid',
+  'policy_unverified',
+  'offer_stale',
+  'policy_refused',
+]);
+
+/**
+ * WHETHER A RESULT RAN NOTHING: refused by the user's settings, or a routine
+ * stop (no input, an approval to give) before anything was sent or paid. The
+ * swap hands such a call back, so the native call can still run.
+ */
+export function ranNothing({ envelope }: RequestToolResult): boolean {
+  return (
+    RAN_NOTHING.has(String(envelope.status)) ||
+    (typeof envelope.reasonCode === 'string' && SETTINGS_CODES.has(envelope.reasonCode))
+  );
 }
 
 /**
