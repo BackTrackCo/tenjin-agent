@@ -1127,3 +1127,59 @@ describe('a free answer on a machine with no wallet', () => {
     }
   });
 });
+
+/**
+ * SETTINGS APPLY TO THE NEXT CALL OF A SERVER ALREADY RUNNING: `tenjin config`
+ * in another terminal writes the global file, and the long-lived `tenjin mcp`
+ * reads it on every call. This request's own `override` rides beside its query.
+ */
+describe('settings a running server reads per call', () => {
+  it('sends a block saved after the server started, and an override beside a query', async () => {
+    const sent: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          routerVersion: '2026-10-23.1',
+          decision: {
+            action: 'native',
+            reason: 'Your own tools cover this.',
+            diagnostics: {
+              reasonCode: 'native_sufficient',
+              stage: 'capability',
+              missing: [],
+              nextAction: '',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: { cwd: dir, authorizer: authorizer(), fetchImpl },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const override = { prefer: [{ kind: 'provider', id: 'exa' }] };
+      await client.callTool({ name: 'request', arguments: { query: 'weather', override } });
+      expect(sent[0]).not.toHaveProperty('policy');
+      expect(sent[0]!.override).toEqual(override);
+
+      const block = [{ kind: 'provider', id: 'firecrawl' }];
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ router: { policy: { version: 1, block } } }),
+      );
+      await client.callTool({ name: 'request', arguments: { query: 'weather' } });
+      expect(sent[1]!.policy).toMatchObject({ version: 1, block });
+      expect(sent[1]).not.toHaveProperty('override');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});

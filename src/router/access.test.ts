@@ -1,11 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  admitRoutes,
   allowed,
   blockCoverage,
   normalizeForWire,
   onlyCoverage,
   policyProblems,
+  readsIdentity,
   replacementFits,
   revisionOf,
   stableJson,
@@ -126,6 +128,69 @@ describe('the policy this client sends', () => {
     expect(
       policyProblems(fixture<{ policy: WirePolicy }>('wire-hook-request-policy.json').policy),
     ).toEqual([]);
+  });
+});
+
+describe('every route of one execution, against the rules at once', () => {
+  const exa: Identity = {
+    service: 'exa-search',
+    source: 'tenjin',
+    providers: ['exa'],
+    seller: 'exa',
+    task: 'web research',
+    categories: ['lookups'],
+    revision: 'ff5de4ab6c4af412',
+  };
+  const firecrawl: Identity = {
+    ...exa,
+    service: 'munition-scrape',
+    providers: ['firecrawl'],
+    seller: 'munition',
+    revision: '62c0b5d305f4373c',
+  };
+  const block = (id: string) => ({ block: [{ kind: 'provider' as const, id }] });
+
+  it('reads identity only for a block or an only rule, saved or for this request', () => {
+    expect(readsIdentity(undefined)).toBe(false);
+    expect(readsIdentity({}, undefined)).toBe(false);
+    expect(readsIdentity(block('exa'))).toBe(true);
+    expect(
+      readsIdentity(
+        {},
+        { only: [{ dimension: 'provider', targets: [{ kind: 'provider', id: 'exa' }] }] },
+      ),
+    ).toBe(true);
+  });
+
+  it('names the first route a rule refuses, by its place', () => {
+    expect(admitRoutes([exa, firecrawl], block('firecrawl'))).toEqual({
+      ok: false,
+      index: 1,
+      rule: { from: 'saved', kind: 'block', target: { kind: 'provider', id: 'firecrawl' } },
+    });
+    expect(admitRoutes([exa, firecrawl], block('tavily'))).toEqual({ ok: true });
+  });
+
+  it('refuses a route with no identity only under a rule that reads it', () => {
+    expect(admitRoutes([exa, undefined], block('tavily'))).toEqual({
+      ok: false,
+      index: 1,
+      unverified: true,
+    });
+    expect(admitRoutes([undefined])).toEqual({ ok: true });
+    // A refused route outranks an unverified one: its rule is the better answer.
+    expect(admitRoutes([undefined, firecrawl], block('firecrawl'))).toMatchObject({
+      ok: false,
+      index: 1,
+      rule: { kind: 'block' },
+    });
+  });
+
+  it('still holds a route with no rules at all to its own source', () => {
+    expect(admitRoutes([{ ...exa, source: 'apify' }])).toMatchObject({
+      ok: false,
+      rule: { kind: 'unavailable', target: { kind: 'source', id: 'apify' } },
+    });
   });
 });
 

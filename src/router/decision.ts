@@ -938,6 +938,9 @@ export type DecisionOutcome<T> =
       unreachable?: true;
       /** No answer came back at all: a transport failure or a timeout. */
       noAnswer?: true;
+      /** The router's own non-2xx status. A 400 to a body carrying `policy`
+       *  or `override` is a router that cannot apply the user's settings. */
+      httpStatus?: number;
     }
   /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
    *  for the free path: the native tool runs. */
@@ -1022,6 +1025,7 @@ export async function requestDecision(
         status: 'failed',
         reason: free.reason,
         ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
+        ...(free.httpStatus !== undefined ? { httpStatus: free.httpStatus } : {}),
         // Still no answer, which must not end another call's backoff.
         ...(free.noAnswer === true ? { noAnswer: true as const } : {}),
         freePath: err.why,
@@ -1192,6 +1196,7 @@ function readDecision<T extends z.ZodTypeAny>(
           ? `The router endpoint answered ${response.status}.`
           : `The router endpoint answered ${response.status} (${named.code}): ${named.message}`,
       ...(named !== null ? { errorCode: named.code } : {}),
+      httpStatus: response.status,
     };
   }
   const parsed = schema.safeParse(response.json);

@@ -310,10 +310,23 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             'The `job` a result named when the provider was still working. Alone, it checks ' +
               'that job again and returns its result; nothing more is paid.',
           ),
+        // THIS REQUEST ONLY, and only beside a query: the user's own words for
+        // one lookup ("only Exa for this one"). It narrows or re-ranks; it
+        // never widens a saved setting. Checked in the handler, so a shape the
+        // router would refuse is answered with what to fix and nothing sent.
+        override: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            'Only when the user limits this one request, sent with `query`: ' +
+              '`{only: [{dimension, targets: [{kind, id}]}], prefer: [{kind, id}]}`. It ' +
+              "narrows or re-ranks this request only and never widens the user's settings. " +
+              'Leave it out otherwise.',
+          ),
       },
     },
     async (
-      { query, id, input, choice, browse, tool, count, job },
+      { query, id, input, choice, browse, tool, count, job, override },
       extra,
     ): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: a policy frozen at the
@@ -334,6 +347,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(tool !== undefined ? { tool } : {}),
           ...(count !== undefined ? { count } : {}),
           ...(job !== undefined ? { job } : {}),
+          ...(override !== undefined ? { override } : {}),
         },
         {
           ctx,

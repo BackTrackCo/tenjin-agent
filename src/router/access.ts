@@ -311,6 +311,58 @@ export function allowed(
 }
 
 /**
+ * WHETHER ANY RULE READS A ROUTE'S IDENTITY: a block or an only rule, saved or
+ * for this one request. A preference only ranks, so a user whose rules are all
+ * preferences runs as one with none, and an answer with no identity still
+ * runs for them.
+ */
+export function readsIdentity(
+  policy?: Pick<WirePolicy, 'block' | 'only'>,
+  override?: Pick<WireOverride, 'only'>,
+): boolean {
+  return (
+    (policy?.block?.length ?? 0) > 0 ||
+    (policy?.only?.length ?? 0) > 0 ||
+    (override?.only?.length ?? 0) > 0
+  );
+}
+
+/** What the rules say about every route of one execution: all may run, or
+ *  the first that may not, by its place in the list. */
+export type RoutesVerdict =
+  | { ok: true }
+  | { ok: false; index: number; rule: AccessRule }
+  | { ok: false; index: number; unverified: true };
+
+/**
+ * EVERY ROUTE ONE EXECUTION WOULD TAKE, AGAINST THE RULES AT ONCE: one offer,
+ * every service a line names, or every member of a group. A route the rules
+ * refuse names its rule. Under a rule that reads identity, a route that came
+ * with none is unverified: nothing shows it is not the blocked party, so it
+ * does not run (`undefined` is a spec stored before the upgrade, or an answer
+ * from a router that predates identity). With no such rule, a missing
+ * identity is no reason to stop, and a present one is still held to its
+ * source. Hook-safe: the hooks withhold an offer on it, and the request tool
+ * refuses one before anything is sent or paid.
+ */
+export function admitRoutes(
+  identities: readonly (RouteIdentity | undefined)[],
+  policy?: Pick<WirePolicy, 'sources' | 'block' | 'only'>,
+  override?: Pick<WireOverride, 'only'>,
+): RoutesVerdict {
+  for (const [index, identity] of identities.entries()) {
+    if (identity === undefined) continue;
+    const access = allowed(identity, policy, override);
+    if (!access.ok) return { ok: false, index, rule: access.rule };
+  }
+  if (readsIdentity(policy, override)) {
+    const index = identities.findIndex((identity) => identity === undefined);
+    if (index >= 0) return { ok: false, index, unverified: true };
+  }
+  return { ok: true };
+}
+
+/**
  * WHETHER AUTOMATIC REPLACEMENT MAY TAKE THIS ROUTE. No saved provider scope
  * means every allowed provider. A saved one needs every upstream party of the
  * route in it, and a route of unknown upstream never fits. It narrows only
