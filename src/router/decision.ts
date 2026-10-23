@@ -911,7 +911,7 @@ export function isAccountUrl(value: string): boolean {
   );
 }
 
-const ArgumentName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/);
+export const ArgumentName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/);
 const twice = (keys: readonly string[]) => new Set(keys).size !== keys.length;
 
 /**

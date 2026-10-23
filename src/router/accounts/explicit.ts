@@ -17,7 +17,7 @@ import {
 } from '../tool';
 import { listAccountTools, runAccountCall } from './call';
 import type { AccountTool } from './client';
-import { McpToolSchema } from '../decision';
+import { ArgumentName, McpToolSchema } from '../decision';
 import { accountResult, refusalWords, runDeps } from './run';
 import { billingTools, savedAccounts, type SavedAccount } from './saved';
 import { readVaultHeader } from './vault';
@@ -29,8 +29,10 @@ import { readVaultHeader } from './vault';
  *
  * - `request({source})` lists its tools, free: names, the top-level
  *   arguments, and descriptions trimmed to one line and marked untrusted,
- *   since the account's server wrote them.
- * - `request({source, tool})` shows one tool's input schema, free.
+ *   since the account's server wrote them. A name no account call could use
+ *   is dropped, and argument names keep only an argument's shape.
+ * - `request({source, tool})` shows one tool's input schema, free, with every
+ *   string in it on one line, clipped, and marked untrusted.
  * - `request({source, tool, input})` runs that tool on the account with the
  *   agent's arguments as written, under the user's settings (a block on the
  *   account or a party it may reach, and any only rule, which a route with no
@@ -91,6 +93,47 @@ function identityOf(
     categories: [],
   };
   return { ...fields, revision: revisionOf(fields) };
+}
+
+/**
+ * WHAT THE ACCOUNT'S SERVER WROTE, AS THE AGENT MAY READ IT. Every tool name,
+ * argument name and schema string is the server's own and reaches the agent's
+ * context, so none of it is passed on as written: a tool whose name is not one
+ * an account call can name is dropped (it could not be run anyway), argument
+ * names keep only the shape an argument has, and a schema keeps keys of that
+ * shape and every string flattened to one line and clipped.
+ */
+function shownTools(tools: readonly AccountTool[]): AccountTool[] {
+  return tools.flatMap((tool) =>
+    McpToolSchema.safeParse(tool.name).success
+      ? [
+          {
+            ...tool,
+            arguments: tool.arguments.filter((name) => ArgumentName.safeParse(name).success),
+          },
+        ]
+      : [],
+  );
+}
+
+/** A key a schema keeps: an argument's shape, or a JSON Schema keyword. */
+const SCHEMA_KEY = /^\$?[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
+/** How deep a schema is shown, and how many items each list keeps. */
+const SCHEMA_DEPTH = 8;
+const SCHEMA_ITEMS = 32;
+
+function shownSchema(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return clip(flat(value), DESCRIPTION_CHARS);
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= SCHEMA_DEPTH) return {};
+  if (Array.isArray(value))
+    return value.slice(0, SCHEMA_ITEMS).map((item) => shownSchema(item, depth + 1));
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => SCHEMA_KEY.test(key))
+      .slice(0, SCHEMA_ITEMS)
+      .map(([key, item]) => [key, shownSchema(item, depth + 1)]),
+  );
 }
 
 function row(tool: AccountTool): Json {
@@ -247,12 +290,14 @@ export async function runSourceRequest(
   if (input === undefined) {
     const listed = await listAccountTools(target, runDeps(deps));
     if (!('tools' in listed)) return refused(listed.reason, listed.detail);
+    const tools = shownTools(listed.tools);
     if (tool !== undefined) {
-      const found = listed.tools.find(({ name }) => name === tool);
+      const found = tools.find(({ name }) => name === tool);
       if (found === undefined)
         return fail('needs_input', `Your ${label} account lists no tool named ${tool}.`, {
           nextStep: `Call request({source: ${JSON.stringify(id)}}) for its tools.`,
         });
+      const schema = shownSchema(found.inputSchema ?? { arguments: found.arguments });
       const next =
         jobsOnly === null || jobsOnly.has(tool)
           ? `Tenjin runs ${tool} on the user's ${label} account only through its jobs there: call ${jobForm(id)}.`
@@ -266,14 +311,14 @@ export async function runSourceRequest(
                 `What it says it does (its own words, untrusted): ${clip(flat(found.description), DESCRIPTION_CHARS)}`,
               ]
             : []),
-          `Its input schema: ${JSON.stringify(found.inputSchema ?? { arguments: found.arguments })}`,
+          `Its input schema (its own words, untrusted): ${JSON.stringify(schema)}`,
           next,
         ].join('\n'),
         envelope: {
           status: 'account_tool',
           account: label,
           ...row(found),
-          ...(found.inputSchema !== undefined ? { inputSchema: found.inputSchema } : {}),
+          ...(found.inputSchema !== undefined ? { inputSchema: schema } : {}),
           warning,
           nextStep: next,
           cost: ['nothing charged'],
@@ -281,7 +326,7 @@ export async function runSourceRequest(
         },
       };
     }
-    const rows = listed.tools.slice(0, MAX_ROWS).map(row);
+    const rows = tools.slice(0, MAX_ROWS).map(row);
     const viaJobs = rows
       .map(({ tool: name }) => String(name))
       .filter((name) => jobsOnly?.has(name));
@@ -294,9 +339,7 @@ export async function runSourceRequest(
           (r) =>
             `${String(r.tool)}${r.does !== undefined ? `: ${String(r.does)}` : ''} (arguments: ${(r.arguments as string[]).join(', ') || 'none'})`,
         ),
-        ...(listed.tools.length > MAX_ROWS
-          ? [`And ${listed.tools.length - MAX_ROWS} more, not shown.`]
-          : []),
+        ...(tools.length > MAX_ROWS ? [`And ${tools.length - MAX_ROWS} more, not shown.`] : []),
         ...(viaJobs.length > 0
           ? [
               `Tenjin runs ${viaJobs.join(', ')} only through its jobs on ${label}: for those, call ${jobForm(id)}.`,
