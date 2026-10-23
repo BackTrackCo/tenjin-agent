@@ -151,12 +151,22 @@ export async function runSourceRequest(
 
   const warning = uncheckedWarning(label);
   const target = { id, label };
-  const refused = (reason: Parameters<typeof refusalWords>[0], detail?: string) => {
+  // `answered`: the account's own error answered the call, which does not
+  // show that nothing ran, so the agent is told not to send it again.
+  const refused = (
+    reason: Parameters<typeof refusalWords>[0],
+    detail?: string,
+    answered = false,
+  ) => {
     const words = refusalWords(reason, { id, label }, detail);
-    const text = `${words.said} Nothing ran on your ${label} account.`;
+    const text = answered
+      ? `${words.said} It may have run on your ${label} account; nothing was charged to your Tenjin balance.`
+      : `${words.said} Nothing ran on your ${label} account.`;
     return accountResult('needs_input', `${text} ${words.fix}`, text, label, {
-      nextStep: `Tell the user: ${words.fix}`,
-      ...(reason === 'declined' && detail !== undefined ? { providerError: detail } : {}),
+      nextStep: answered
+        ? `Tell the user: ${words.fix} Don't send it again unless they ask: it may have run.`
+        : `Tell the user: ${words.fix}`,
+      ...(answered && detail !== undefined ? { providerError: detail } : {}),
       extra: { refused: { account: label, reason, reconnect: `tenjin connect ${id}` } },
     });
   };
@@ -242,7 +252,7 @@ export async function runSourceRequest(
       return refused(run.reason, run.detail);
     case 'declined':
       await footer.done('needs_input', named);
-      return refused('declined', run.detail);
+      return refused(run.reason ?? 'declined', run.detail, true);
     case 'input':
       await footer.done('needs_input', named);
       return accountResult(

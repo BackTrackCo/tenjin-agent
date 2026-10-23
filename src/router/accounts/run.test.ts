@@ -355,7 +355,7 @@ describe('a mapped job on the user’s own account', () => {
     await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     const again = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(again.envelope).toMatchObject({ status: 'needs_input' });
-    expect(again.summary).toContain('already ran on your Apify account');
+    expect(again.summary).toContain('already sent to your Apify account');
     expect(session.tools().filter((t) => t === 'call-actor')).toHaveLength(1);
   });
 
@@ -525,6 +525,31 @@ describe('when the account refuses', () => {
       providerError: 'Actor not found',
       fallback: { id: APIFY.fallback.id },
     });
+  });
+
+  it('keeps the offer claimed after an error answer, and never switches on one', async () => {
+    // The account's own words read as its plan running out, and the user
+    // opted in to Tenjin's tool: an error answer may still have started the
+    // job, so the call is not sent again and nothing runs in its place.
+    await apifyConnected({ onRefusal: 'tenjin' });
+    const session = apifyScript({
+      'call-actor': [
+        { isError: true, content: [{ type: 'text', text: 'Monthly usage limit exceeded' }] },
+      ],
+    });
+    const { fetchImpl, other } = network();
+    const first = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(first.envelope).toMatchObject({
+      refused: { reason: 'credit' },
+      providerError: 'Monthly usage limit exceeded',
+      fallback: { id: APIFY.fallback.id },
+    });
+    expect(first.envelope).not.toHaveProperty('switched');
+    expect(first.envelope).not.toHaveProperty('switching');
+    const again = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(again.summary).toContain('already sent to your Apify account');
+    expect(session.tools()).toEqual(['call-actor']);
+    expect(other).toEqual([]);
   });
 
   it('with the opt-in, runs Tenjin’s tool in its place and says so on the receipt', async () => {

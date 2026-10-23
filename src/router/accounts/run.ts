@@ -115,14 +115,15 @@ export function refusalWords(
       };
     case 'declined':
       return {
-        said: `Your ${label} account didn't run this; its answer is in providerError.`,
+        said: `Your ${label} account answered with an error; its answer is in providerError.`,
         fix: 'Check the input, or the account itself.',
       };
   }
 }
 
-/** Refusals where nothing ran and Tenjin's tool may stand in automatically,
- *  for an account the user opted in for. */
+/** Refusals Tenjin's tool may stand in for automatically, for an account the
+ *  user opted in for, when nothing ran: never one the account's own answer
+ *  gave, which may have. */
 const SWITCHABLE: ReadonlySet<string> = new Set(['signin_expired', 'credit', 'rate_limited']);
 
 /** A result in this module's own words: its headline and cost line, never the
@@ -360,7 +361,7 @@ export async function runAccountSpec(
       job !== null
         ? `This offer is still running on your ${account.label} account, so nothing was sent again.`
         : earlier.state === 'account'
-          ? `This offer already ran on your ${account.label} account at ${earlier.at}, so nothing was sent again. Its result is in the earlier request result for this id.`
+          ? `This offer was already sent to your ${account.label} account at ${earlier.at}, so nothing was sent again. Its answer is in the earlier request result for this id.`
           : earlier.state === 'unrecorded'
             ? `This machine could not record this call, so nothing was sent to your ${account.label} account.`
             : "A call for this offer already started, so nothing was sent again. Use that call's result.";
@@ -390,13 +391,10 @@ export async function runAccountSpec(
     merged,
     runDeps(deps),
   );
-  // THE CLAIM STAYS for anything that went out to the account; a refusal of
-  // a call that never ran frees the id for a retry after the fix.
-  await settleAccountRun(
-    dataDir,
-    id,
-    run.kind === 'done' || run.kind === 'failed' || run.kind === 'running',
-  );
+  // THE CLAIM STAYS for anything the account may have run, its own error
+  // answer included; only a refusal of a call that never ran (or arguments
+  // it would not take) frees the id for a retry after the fix.
+  await settleAccountRun(dataDir, id, run.kind !== 'refused' && run.kind !== 'input');
   return finish(run, at);
 }
 
@@ -408,7 +406,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
     case 'refused':
       return refusal(at, run.reason, run.sent, run.detail);
     case 'declined':
-      return refusal(at, 'declined', true, run.detail);
+      return refusal(at, run.reason ?? 'declined', true, run.detail, { answered: true });
     case 'input': {
       report(at, { status: 'unpaid', reason: 'input' });
       await footer.done('needs_input', shownOf(at));
@@ -540,18 +538,20 @@ async function delivered(
 }
 
 /**
- * THE ACCOUNT REFUSED, AND NOTHING RAN ON IT. The call stops with the reason
- * and the fix, and offers Tenjin's own tool for the job with its price, which
- * runs only when the user picks it, or, for an account they opted in for, in
- * its place now: through the ordinary spec path, with the user's settings,
- * limits and claim, and a receipt that says so. `sent`: the billing call went
- * out and the account refused it.
+ * THE ACCOUNT REFUSED. The call stops with the reason and the fix, and offers
+ * Tenjin's own tool for the job with its price, which runs only when the user
+ * picks it, or, for an account they opted in for, in its place now: through
+ * the ordinary spec path, with the user's settings, limits and claim, and a
+ * receipt that says so. `sent`: the billing call went out. `answered`: the
+ * account's own error answered it, so its job may have started; Tenjin's tool
+ * then never stands in automatically, which could bill the job twice.
  */
 async function refusal(
   at: Run,
   reason: RefusalReason | 'missing' | 'declined',
   sent: boolean,
   detail?: string,
+  opts: { answered?: boolean } = {},
 ): Promise<RequestToolResult> {
   const { account, fallback, footer } = at;
   report(at, {
@@ -562,7 +562,9 @@ async function refusal(
   const nothing = sent
     ? 'Nothing was charged to your Tenjin balance.'
     : `Nothing was sent to your ${account.label} account, and nothing was charged.`;
-  const switchable = SWITCHABLE.has(reason) && account.onRefusal === 'tenjin' && fallback !== null;
+  const answered = opts.answered === true;
+  const switchable =
+    !answered && SWITCHABLE.has(reason) && account.onRefusal === 'tenjin' && fallback !== null;
   const fitted = switchable ? fittedInput(at.input, fallback) : undefined;
   if (switchable && fitted !== undefined) {
     // THE USER'S OWN CHOICE FOR THIS ACCOUNT: Tenjin's tool, in its place,
@@ -615,7 +617,7 @@ async function refusal(
           ? `Ask the user whether to fix it (${words.fix.replace(/\.$/, '')}) or use Tenjin's tool instead. ${offer.next}`
           : `Tell the user: ${words.fix} Otherwise continue with your own tools.`,
       parameters: at.sentInput,
-      ...(reason === 'declined' && detail !== undefined ? { providerError: detail } : {}),
+      ...(answered && detail !== undefined ? { providerError: detail } : {}),
       extra: {
         refused: { account: account.label, reason, reconnect: `tenjin connect ${account.id}` },
         ...(offer?.envelope ?? {}),

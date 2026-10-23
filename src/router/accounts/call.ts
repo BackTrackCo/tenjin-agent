@@ -36,9 +36,11 @@ import {
  *
  * THE CREDENTIAL RIDES IN THE HEADERS (`credential.ts`), to the server its
  * vault sealed it for and to no address a caller names, and a 401 is retried
- * once, after a refresh. Everything before the billing call is answered, and
- * every refusal of the billing call itself, ran nothing on the account, which
- * `sent: false` says; a failure after it may have billed the user's plan.
+ * once, after a refresh. A refusal before the billing call, or the HTTP
+ * refusal of the billing call itself (a 401 after the refresh, a 402 or a
+ * 429), ran nothing on the account. An answer to the billing call, an error
+ * one included, may have: the account's own error text does not say whether
+ * its job started, so it is never read as "nothing ran".
  */
 
 type Json = Record<string, unknown>;
@@ -202,13 +204,17 @@ export interface AccountRunDeps extends CredentialDeps {
 export type AccountRun =
   | { kind: 'done'; value: unknown; text: string; media: AccountMedia[] }
   /** Refused before anything ran on the account: nothing to undo. `sent`:
-   *  the billing call went out and the account refused it; otherwise nothing
-   *  reached the account at all. */
+   *  the billing call went out and the transport refused it by its HTTP
+   *  status, before the server ran anything; otherwise nothing reached the
+   *  account at all. */
   | { kind: 'refused'; reason: RefusalReason; detail?: string; sent: boolean }
   /** The account would not take the arguments: nothing ran. */
   | { kind: 'input'; detail: string }
-  /** The account's own error, on the billing call: nothing ran. */
-  | { kind: 'declined'; detail: string }
+  /** The account answered the billing call with its own error. That does not
+   *  show its job never ran, so the call is not sent again for this offer and
+   *  nothing stands in for it automatically. `reason`: what its words say,
+   *  when they say it plainly. */
+  | { kind: 'declined'; detail: string; reason?: RefusalReason }
   /** It ran, or may have, and ended without a result. */
   | { kind: 'failed'; why: string; detail?: string }
   /** It ran and is still working, or this process lost sight of it (the
@@ -398,9 +404,7 @@ export async function runAccountCall(
       if (result.isError === true) {
         const detail = errorText(result);
         const reason = refusalIn(detail);
-        return reason !== undefined
-          ? { kind: 'refused', reason, detail, sent: true }
-          : { kind: 'declined', detail };
+        return { kind: 'declined', detail, ...(reason !== undefined ? { reason } : {}) };
       }
       const read = readResult(result, call.result);
       if ('problem' in read) return { kind: 'failed', why: read.problem };
