@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.1",
+  "decision": {
+    "action": "native",
+    "reason": "Your Tenjin settings allow Tenjin only for Images and web research.",
+    "diagnostics": {
+      "reasonCode": "policy_refused",
+      "stage": "policy",
+      "missing": [],
+      "nextAction": "Continue with your own tools for this step. The user's Tenjin settings rule out every service for it: tell the user which setting applied and that they can change it with `tenjin config`. Do not change the settings yourself.",
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "capability"
+      }
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 220
+  }
+}

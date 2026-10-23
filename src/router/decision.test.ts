@@ -147,6 +147,8 @@ describe('one free decision', () => {
       'label',
       'fields',
       'jobs',
+      'identity',
+      'bound',
     ]);
   });
 
@@ -169,6 +171,8 @@ describe('one free decision', () => {
         'label',
         'fields',
         'jobs',
+        'identity',
+        'bound',
         'bazaar',
       ]);
     }

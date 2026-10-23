@@ -1,0 +1,1425 @@
+[
+  {
+    "name": "no rules allow a catalog route",
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a provider block covers the provider's own route",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "provider",
+          "id": "exa"
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "provider",
+          "id": "exa"
+        }
+      }
+    }
+  },
+  {
+    "name": "a provider block covers a reseller's route of that provider",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "provider",
+          "id": "exa"
+        }
+      ]
+    },
+    "identity": {
+      "service": "stableenrich-exa-answer",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "stableenrich",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "af7d5ab14e2bfaa9"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "provider",
+          "id": "exa"
+        }
+      }
+    }
+  },
+  {
+    "name": "a seller block leaves another seller's route of the same provider",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "seller",
+          "id": "stableenrich"
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a seller block covers that seller's route",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "seller",
+          "id": "stableenrich"
+        }
+      ]
+    },
+    "identity": {
+      "service": "stableenrich-exa-answer",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "stableenrich",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "af7d5ab14e2bfaa9"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "seller",
+          "id": "stableenrich"
+        }
+      }
+    }
+  },
+  {
+    "name": "a service block covers that one service",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "service",
+          "id": "munition-scrape"
+        }
+      ]
+    },
+    "identity": {
+      "service": "munition-scrape",
+      "source": "tenjin",
+      "providers": ["firecrawl"],
+      "seller": "munition",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "62c0b5d305f4373c"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "service",
+          "id": "munition-scrape"
+        }
+      }
+    }
+  },
+  {
+    "name": "a category block covers the tasks it holds",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "category",
+          "id": "images"
+        }
+      ]
+    },
+    "identity": {
+      "service": "aispace-nano-banana-2.1",
+      "source": "tenjin",
+      "providers": ["google", "venice"],
+      "seller": "aispace",
+      "task": "photoreal image",
+      "categories": ["images"],
+      "revision": "ab0cd7b94addd984"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "category",
+          "id": "images"
+        }
+      }
+    }
+  },
+  {
+    "name": "a task block covers that task",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "task",
+          "id": "web research"
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "task",
+          "id": "web research"
+        }
+      }
+    }
+  },
+  {
+    "name": "a block on an unknown or retired id matches nothing",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "provider",
+          "id": "tavily"
+        },
+        {
+          "kind": "service",
+          "id": "retired-search"
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "the first block that matches is the one reported",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "service",
+          "id": "munition-scrape"
+        },
+        {
+          "kind": "provider",
+          "id": "firecrawl"
+        }
+      ]
+    },
+    "identity": {
+      "service": "munition-scrape",
+      "source": "tenjin",
+      "providers": ["firecrawl"],
+      "seller": "munition",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "62c0b5d305f4373c"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "service",
+          "id": "munition-scrape"
+        }
+      }
+    }
+  },
+  {
+    "name": "a block on any named party covers a route through several",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "provider",
+          "id": "venice"
+        }
+      ]
+    },
+    "identity": {
+      "service": "aispace-nano-banana-2.1",
+      "source": "tenjin",
+      "providers": ["google", "venice"],
+      "seller": "aispace",
+      "task": "photoreal image",
+      "categories": ["images"],
+      "revision": "ab0cd7b94addd984"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "provider",
+          "id": "venice"
+        }
+      }
+    }
+  },
+  {
+    "name": "a provider only refuses a route through a party it does not name",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "google"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "aispace-nano-banana-2.1",
+      "source": "tenjin",
+      "providers": ["google", "venice"],
+      "seller": "aispace",
+      "task": "photoreal image",
+      "categories": ["images"],
+      "revision": "ab0cd7b94addd984"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "provider"
+      }
+    }
+  },
+  {
+    "name": "a provider only admits a route when it names every party",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "google"
+            },
+            {
+              "kind": "provider",
+              "id": "venice"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "aispace-nano-banana-2.1",
+      "source": "tenjin",
+      "providers": ["google", "venice"],
+      "seller": "aispace",
+      "task": "photoreal image",
+      "categories": ["images"],
+      "revision": "ab0cd7b94addd984"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a global capability only admits a task in a named category",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "capability",
+          "targets": [
+            {
+              "kind": "category",
+              "id": "images"
+            },
+            {
+              "kind": "task",
+              "id": "web research"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "aispace-nano-banana-2.1",
+      "source": "tenjin",
+      "providers": ["google", "venice"],
+      "seller": "aispace",
+      "task": "photoreal image",
+      "categories": ["images"],
+      "revision": "ab0cd7b94addd984"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a global capability only admits a named task",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "capability",
+          "targets": [
+            {
+              "kind": "category",
+              "id": "images"
+            },
+            {
+              "kind": "task",
+              "id": "web research"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a global capability only refuses every other task",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "capability",
+          "targets": [
+            {
+              "kind": "category",
+              "id": "images"
+            },
+            {
+              "kind": "task",
+              "id": "web research"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "munition-scrape",
+      "source": "tenjin",
+      "providers": ["firecrawl"],
+      "seller": "munition",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "62c0b5d305f4373c"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "capability"
+      }
+    }
+  },
+  {
+    "name": "a task's only rule leaves other tasks alone",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "web research"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "munition-scrape",
+      "source": "tenjin",
+      "providers": ["firecrawl"],
+      "seller": "munition",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "62c0b5d305f4373c"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a task's only rule refuses a route of that task outside it",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "read an exact page"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "munition-scrape",
+      "source": "tenjin",
+      "providers": ["firecrawl"],
+      "seller": "munition",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "62c0b5d305f4373c"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "task",
+          "id": "read an exact page"
+        },
+        "dimension": "provider"
+      }
+    }
+  },
+  {
+    "name": "a seller only admits that seller",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "seller",
+          "targets": [
+            {
+              "kind": "seller",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a seller only refuses another seller of the same provider",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "seller",
+          "targets": [
+            {
+              "kind": "seller",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "stableenrich-exa-answer",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "stableenrich",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "af7d5ab14e2bfaa9"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "seller"
+      }
+    }
+  },
+  {
+    "name": "a service only refuses every other service",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "web research"
+          },
+          "dimension": "service",
+          "targets": [
+            {
+              "kind": "service",
+              "id": "exa-search"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "stableenrich-exa-answer",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "stableenrich",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "af7d5ab14e2bfaa9"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "task",
+          "id": "web research"
+        },
+        "dimension": "service"
+      }
+    }
+  },
+  {
+    "name": "an only on an unknown or retired id admits nothing",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "service",
+          "targets": [
+            {
+              "kind": "service",
+              "id": "retired-search"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "service"
+      }
+    }
+  },
+  {
+    "name": "only rules on two dimensions must both admit the route",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "capability",
+          "targets": [
+            {
+              "kind": "category",
+              "id": "lookups"
+            }
+          ]
+        },
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "seller",
+          "targets": [
+            {
+              "kind": "seller",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "stableenrich-exa-answer",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "stableenrich",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "af7d5ab14e2bfaa9"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "seller"
+      }
+    }
+  },
+  {
+    "name": "a block wins over an only that names the same route",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "service",
+          "id": "exa-search"
+        }
+      ],
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "service",
+          "targets": [
+            {
+              "kind": "service",
+              "id": "exa-search"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "service",
+          "id": "exa-search"
+        }
+      }
+    }
+  },
+  {
+    "name": "the saved only rules are checked before the request's",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "firecrawl"
+            }
+          ]
+        }
+      ]
+    },
+    "override": {
+      "only": [
+        {
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "provider"
+      }
+    }
+  },
+  {
+    "name": "a request's only rule narrows what the saved rules allow",
+    "override": {
+      "only": [
+        {
+          "dimension": "service",
+          "targets": [
+            {
+              "kind": "service",
+              "id": "stableenrich-exa-answer"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "request",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "service"
+      }
+    }
+  },
+  {
+    "name": "a request's only rule admits a route it names",
+    "override": {
+      "only": [
+        {
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "stableenrich-exa-answer",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "stableenrich",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "af7d5ab14e2bfaa9"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a request's capability only refuses another task",
+    "override": {
+      "only": [
+        {
+          "dimension": "capability",
+          "targets": [
+            {
+              "kind": "category",
+              "id": "images"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "request",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "capability"
+      }
+    }
+  },
+  {
+    "name": "a preference never refuses a route",
+    "policy": {
+      "version": 1,
+      "prefer": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "web research"
+          },
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "tavily"
+            }
+          ]
+        }
+      ]
+    },
+    "override": {
+      "prefer": [
+        {
+          "kind": "service",
+          "id": "stableenrich-exa-answer"
+        }
+      ]
+    },
+    "identity": {
+      "service": "exa-search",
+      "source": "tenjin",
+      "providers": ["exa"],
+      "seller": "exa",
+      "task": "web research",
+      "categories": ["lookups"],
+      "revision": "ff5de4ab6c4af412"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a provider block covers a listing of unknown upstream",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "provider",
+          "id": "exa"
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "provider",
+          "id": "exa"
+        }
+      }
+    }
+  },
+  {
+    "name": "a seller block covers a listing of unknown seller",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "seller",
+          "id": "orthogonal"
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "seller",
+          "id": "orthogonal"
+        }
+      }
+    }
+  },
+  {
+    "name": "a listing of unknown upstream satisfies no provider only",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "provider"
+      }
+    }
+  },
+  {
+    "name": "a listing of unknown seller satisfies no seller only",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "seller",
+          "targets": [
+            {
+              "kind": "seller",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "seller"
+      }
+    }
+  },
+  {
+    "name": "a listing with no task satisfies no capability only",
+    "policy": {
+      "version": 1,
+      "only": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "dimension": "capability",
+          "targets": [
+            {
+              "kind": "category",
+              "id": "lookups"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "only",
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "capability"
+      }
+    }
+  },
+  {
+    "name": "a listing with no task is outside every task's rules",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "task",
+          "id": "web research"
+        },
+        {
+          "kind": "service",
+          "id": "exa-search"
+        }
+      ],
+      "only": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "web research"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "blocking the built-in source covers a Bazaar listing",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "source",
+          "id": "tenjin"
+        }
+      ]
+    },
+    "identity": {
+      "service": "discovered:bazaar:3f9a1c2e",
+      "source": "tenjin",
+      "providers": [],
+      "categories": [],
+      "revision": "722e0d0a03499f9d"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "source",
+          "id": "tenjin"
+        }
+      }
+    }
+  },
+  {
+    "name": "blocking the built-in source covers every catalog route, free ones too",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "source",
+          "id": "tenjin"
+        }
+      ]
+    },
+    "identity": {
+      "service": "context7-docs",
+      "source": "tenjin",
+      "providers": ["context7"],
+      "seller": "tenjin",
+      "task": "library or API documentation",
+      "categories": ["lookups"],
+      "revision": "ed0bca47b11b6d56"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "source",
+          "id": "tenjin"
+        }
+      }
+    }
+  },
+  {
+    "name": "a route from a source not connected here is unavailable",
+    "identity": {
+      "service": "apify-rag-web-browser",
+      "source": "apify",
+      "providers": ["apify"],
+      "seller": "apify",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "b987fde3221a7163"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "unavailable",
+        "target": {
+          "kind": "source",
+          "id": "apify"
+        }
+      }
+    }
+  },
+  {
+    "name": "unavailability is reported before any block",
+    "policy": {
+      "version": 1,
+      "block": [
+        {
+          "kind": "provider",
+          "id": "apify"
+        }
+      ]
+    },
+    "identity": {
+      "service": "apify-rag-web-browser",
+      "source": "apify",
+      "providers": ["apify"],
+      "seller": "apify",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "b987fde3221a7163"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "unavailable",
+        "target": {
+          "kind": "source",
+          "id": "apify"
+        }
+      }
+    }
+  },
+  {
+    "name": "a connected source's route is available",
+    "policy": {
+      "version": 1,
+      "sources": ["apify"]
+    },
+    "identity": {
+      "service": "apify-rag-web-browser",
+      "source": "apify",
+      "providers": ["apify"],
+      "seller": "apify",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "b987fde3221a7163"
+    },
+    "expect": {
+      "ok": true
+    }
+  },
+  {
+    "name": "a connected source's route still meets the blocks",
+    "policy": {
+      "version": 1,
+      "sources": ["apify"],
+      "block": [
+        {
+          "kind": "source",
+          "id": "apify"
+        }
+      ]
+    },
+    "identity": {
+      "service": "apify-rag-web-browser",
+      "source": "apify",
+      "providers": ["apify"],
+      "seller": "apify",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "b987fde3221a7163"
+    },
+    "expect": {
+      "ok": false,
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "source",
+          "id": "apify"
+        }
+      }
+    }
+  }
+]
