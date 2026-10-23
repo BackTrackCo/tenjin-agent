@@ -5,10 +5,15 @@ import {
   CONFIG_DEFAULTS,
   loadRawConfig,
   parseRouterLayer,
+  readPersonalRouter,
+  type NativeReplacementMode,
   type PartialConfig,
   type RouterContext,
   type RouterLayer,
+  type SourceDescriptor,
 } from '../lib/config';
+import { normalizeForWire, type SavedPolicy } from './access';
+import { WirePolicySchema, type Target, type WirePolicy } from './decision';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
 import {
@@ -42,6 +47,13 @@ import {
  *
  * ONE PARSER. The global block is the one `loadRawConfig` already validated,
  * and a project file goes through `parseRouterLayer` from the same schema.
+ *
+ * THE PERSONAL SETTINGS COME FROM THE GLOBAL FILE ONLY: the routing rules
+ * (`router.policy`), saved accounts (`router.sources`) and automatic
+ * replacement with its provider scope. A project file cannot add a rule or
+ * turn replacement on, so a cloned repository can never change what Tenjin
+ * may use or run on this machine. Each is reread on every call, never cached,
+ * so a change from another process applies to the next call.
  */
 
 /** The committed project file and the personal one beside it. */
@@ -57,9 +69,45 @@ export interface RouterSetting<T> {
   path?: string;
 }
 
+/**
+ * The saved routing rules, and what this client sends for them. `wire` is
+ * absent when there are no rules, so the body is the one it always was.
+ * `invalid` (a hand edit this build cannot read, another version, or a policy
+ * past the wire's bounds) is fail-closed: what reads rules refuses, and
+ * nothing is sent unrestricted.
+ */
+export type PolicySetting =
+  | { status: 'none'; path: string }
+  | {
+      status: 'ok';
+      saved: SavedPolicy;
+      wire?: WirePolicy;
+      /** The wire policy's revision: logged and shown, never authority. */
+      revision?: string;
+      path: string;
+    }
+  | { status: 'invalid'; problem: string; path: string };
+
+/** Saved account descriptors (#37). A descriptor alone connects nothing. */
+export type SourcesSetting =
+  | { status: 'ok'; saved: SourceDescriptor[]; connected: string[] }
+  | { status: 'invalid'; problem: string };
+
+/** Automatic replacement: off unless the global file says `when-routed`. An
+ *  absent provider scope means every allowed provider. */
+export interface ReplacementSetting {
+  mode: NativeReplacementMode;
+  providers?: Target[];
+  /** Why the saved value could not be read; the mode then reads off. */
+  problem?: string;
+}
+
 export interface RouterSettings {
   enabled: RouterSetting<boolean>;
   context: RouterSetting<RouterContext>;
+  policy: PolicySetting;
+  sources: SourcesSetting;
+  nativeReplacement: ReplacementSetting;
 }
 
 export interface RouterSettingsInput {
@@ -101,7 +149,59 @@ export async function routerSettings(
       context = { value: layer.context, source, path };
     }
   }
-  return { enabled, context };
+  return { enabled, context, ...personalSettings(global, globalPath) };
+}
+
+/**
+ * The personal settings, from the global file's router block alone. No source
+ * is connected until #37 adds connection state: a saved descriptor names an
+ * account, it does not sign this machine in.
+ */
+export function personalSettings(
+  router: unknown,
+  path: string,
+): Pick<RouterSettings, 'policy' | 'sources' | 'nativeReplacement'> {
+  const personal = readPersonalRouter(router);
+  const sources: SourcesSetting =
+    personal.sources.status === 'ok'
+      ? { status: 'ok', saved: personal.sources.saved, connected: [] }
+      : personal.sources;
+  return {
+    policy: policySetting(personal.policy, sources, path),
+    sources,
+    nativeReplacement: personal.nativeReplacement,
+  };
+}
+
+function policySetting(
+  saved: ReturnType<typeof readPersonalRouter>['policy'],
+  sources: SourcesSetting,
+  path: string,
+): PolicySetting {
+  if (saved.status === 'invalid') return { ...saved, path };
+  // The sources ride inside the policy that is sent, so saved accounts this
+  // build cannot read make the rules unreadable too: fail closed.
+  if (sources.status === 'invalid') return { status: 'invalid', problem: sources.problem, path };
+  if (saved.status === 'none') return { status: 'none', path };
+  const wire = normalizeForWire(saved.saved, sources.connected);
+  if (wire === undefined) return { status: 'ok', saved: saved.saved, path };
+  // The bounds a single rule cannot break: the whole policy's serialized size.
+  const checked = WirePolicySchema.safeParse(wire);
+  if (!checked.success) {
+    const [issue] = checked.error.issues;
+    return {
+      status: 'invalid',
+      problem: `router.policy: ${issue?.message ?? 'not a policy the router takes'}`,
+      path,
+    };
+  }
+  return {
+    status: 'ok',
+    saved: saved.saved,
+    wire,
+    ...(wire.revision !== undefined ? { revision: wire.revision } : {}),
+    path,
+  };
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];

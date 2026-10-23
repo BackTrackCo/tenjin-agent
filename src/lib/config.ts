@@ -7,6 +7,15 @@ import { HARNESSES } from '../adapters/types';
 import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
 import { DEFAULT_RPC_URL } from './usdc-balance';
+import {
+  BUILT_IN_SOURCE,
+  OnlyRuleSchema,
+  PreferRuleSchema,
+  TargetIdSchema,
+  TargetSchema,
+  type Target,
+} from '../router/decision';
+import { POLICY_VERSION, policyProblems, type SavedPolicy } from '../router/access';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -150,6 +159,141 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
   return {
     ...(enabled !== undefined ? { enabled } : {}),
     ...(context !== undefined ? { context } : {}),
+  };
+}
+
+/** `router.nativeReplacement`: off by default; `when-routed` lets a host that
+ *  supports it run Tenjin's pick in a native search's or fetch's place. */
+export const NATIVE_REPLACEMENT_MODES = ['off', 'when-routed'] as const;
+export type NativeReplacementMode = (typeof NATIVE_REPLACEMENT_MODES)[number];
+
+const noDuplicates = <T>(key: (value: T) => string, message: string) =>
+  [(values: readonly T[]) => new Set(values.map(key)).size === values.length, message] as const;
+
+/**
+ * THE SAVED `router.policy`: the wire's rules (decision.ts) with the version
+ * this build reads, and an emptied collection allowed, since a reset can leave
+ * one and it means no rules. The checks are the server's own
+ * (`policyProblems`), so a saved policy is one the server takes; the bound on
+ * the whole serialized policy is checked on the form that is sent. The shape
+ * alone is what a reset reads, so a rule can still be removed from a policy
+ * whose other rules break a check.
+ */
+export const SavedPolicyShapeSchema = z.strictObject({
+  version: z.number().int(),
+  block: z.array(TargetSchema).max(128).optional(),
+  only: z.array(OnlyRuleSchema).max(32).optional(),
+  prefer: z.array(PreferRuleSchema).max(64).optional(),
+});
+export const SavedPolicySchema = SavedPolicyShapeSchema.superRefine((policy, ctx) => {
+  if (policy.version !== POLICY_VERSION) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['version'],
+      message: `version ${policy.version} is not one this build reads (${POLICY_VERSION})`,
+    });
+  }
+  for (const { message, path } of policyProblems(policy))
+    ctx.addIssue({ code: 'custom', message, path });
+});
+
+/**
+ * One saved account descriptor (`router.sources`, #37): a safe id and
+ * endpoints, never a credential. A descriptor alone connects nothing: whether
+ * a source is available is machine-local connection state, which #37 adds.
+ * Unknown fields ride along for #37 and are never sent anywhere.
+ */
+export const SourceDescriptorSchema = z.looseObject({ id: TargetIdSchema });
+export type SourceDescriptor = z.infer<typeof SourceDescriptorSchema>;
+
+const SourcesSchema = z
+  .array(SourceDescriptorSchema)
+  .max(16)
+  .refine((sources) => sources.every(({ id }) => id !== BUILT_IN_SOURCE), {
+    message: `${BUILT_IN_SOURCE} is built in, never a saved source`,
+  })
+  .refine(...noDuplicates<SourceDescriptor>(({ id }) => id, 'a source is saved twice'));
+
+/** The providers automatic replacement may take, when narrowed: never empty
+ *  (turn it off instead), provider targets only, each once. */
+const ReplacementProvidersSchema = z
+  .array(TargetSchema.refine(({ kind }) => kind === 'provider', 'a provider target'))
+  .min(1)
+  .max(16)
+  .refine(...noDuplicates<Target>(({ id }) => id, 'a provider is named twice'));
+
+/**
+ * THE GLOBAL FILE'S OWN ROUTER BLOCK: the project layer's two keys plus the
+ * personal settings no repository can grant (routing rules, saved accounts,
+ * automatic replacement and its provider scope). A project file goes through
+ * {@link parseRouterLayer} and never reads any of these.
+ *
+ * NOT PART OF {@link RawConfigSchema}. Each personal key is parsed on its own
+ * by {@link readPersonalRouter}, so a hand-edited rule this build cannot read
+ * fails only what reads rules (fail closed: affected calls refuse), while
+ * `tenjin config`, pause and reset keep working on the rest of the file.
+ */
+export const RouterGlobalSchema = RouterLayerSchema.extend({
+  policy: SavedPolicySchema.optional(),
+  sources: SourcesSchema.optional(),
+  nativeReplacement: z.enum(NATIVE_REPLACEMENT_MODES).optional(),
+  nativeReplacementProviders: ReplacementProvidersSchema.optional(),
+});
+
+/** The personal router keys, each read on its own. */
+export interface PersonalRouter {
+  policy:
+    | { status: 'none' }
+    | { status: 'ok'; saved: SavedPolicy }
+    | { status: 'invalid'; problem: string };
+  sources: { status: 'ok'; saved: SourceDescriptor[] } | { status: 'invalid'; problem: string };
+  /** An unreadable mode or scope reads as off: never on by accident. */
+  nativeReplacement: {
+    mode: NativeReplacementMode;
+    providers?: Target[];
+    problem?: string;
+  };
+}
+
+function firstProblem(key: string, error: z.ZodError): string {
+  const [issue] = error.issues;
+  const path = [key, ...(issue?.path ?? []).map(String)].join('.');
+  return `${path}: ${issue?.message ?? 'invalid'}`;
+}
+
+/**
+ * Read the global file's personal router keys, each apart from the others and
+ * from the rest of the file: a key that fails says why and stands alone.
+ */
+export function readPersonalRouter(router: unknown): PersonalRouter {
+  const block =
+    router !== null && typeof router === 'object' ? (router as Record<string, unknown>) : {};
+  const shape = RouterGlobalSchema.shape;
+  const policy = shape.policy.safeParse(block.policy);
+  const sources = shape.sources.safeParse(block.sources);
+  const mode = shape.nativeReplacement.safeParse(block.nativeReplacement);
+  const providers = shape.nativeReplacementProviders.safeParse(block.nativeReplacementProviders);
+  const replacementProblem = !mode.success
+    ? firstProblem('router.nativeReplacement', mode.error)
+    : !providers.success
+      ? firstProblem('router.nativeReplacementProviders', providers.error)
+      : undefined;
+  return {
+    policy: !policy.success
+      ? { status: 'invalid', problem: firstProblem('router.policy', policy.error) }
+      : policy.data === undefined
+        ? { status: 'none' }
+        : { status: 'ok', saved: policy.data },
+    sources: sources.success
+      ? { status: 'ok', saved: sources.data ?? [] }
+      : { status: 'invalid', problem: firstProblem('router.sources', sources.error) },
+    nativeReplacement:
+      replacementProblem !== undefined
+        ? { mode: 'off', problem: replacementProblem }
+        : {
+            mode: mode.data ?? 'off',
+            ...(providers.data !== undefined ? { providers: providers.data } : {}),
+          },
   };
 }
 
@@ -402,7 +546,17 @@ export const RawConfigSchema = ConfigSchema.partial()
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
-    router: RouterLayerSchema.passthrough().optional(),
+    // The personal keys ride as data here and are read by
+    // `readPersonalRouter`, so one this build cannot read never makes the
+    // whole file unreadable.
+    router: RouterLayerSchema.extend({
+      policy: z.unknown().optional(),
+      sources: z.unknown().optional(),
+      nativeReplacement: z.unknown().optional(),
+      nativeReplacementProviders: z.unknown().optional(),
+    })
+      .passthrough()
+      .optional(),
     experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
@@ -563,9 +717,43 @@ export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
 export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
 export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
-/** The dotted keys `config get/set` accept for the router block. */
+/** The dotted keys `config get/set` accept for the router block. The personal
+ *  rule and replacement keys are not among them: they change only through
+ *  their own operations (`tenjin config prefer|only|block|unblock|reset|
+ *  replacement`), which validate what they couple. */
 export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
+
+/**
+ * WHERE A SETTING BELONGS, declared once rather than labelled on each saved
+ * value. Everything is local today: `user` is the person's intent, which a
+ * later sync could carry between machines (none exists; readback says "not
+ * synced"); `machine` is this machine's own (automatic replacement, spending
+ * from this machine's Tenjin balance, pause); `project` is a repository's
+ * `.tenjin/config.json` or `config.local.json`, which can only tighten.
+ * Credentials are none of these: they never enter config.json.
+ */
+export type SettingScope = 'user' | 'machine' | 'project';
+
+export const SETTING_SCOPES = {
+  'router.policy': { scope: 'user' },
+  'router.sources': { scope: 'user' },
+  'router.nativeReplacement': { scope: 'machine' },
+  'router.nativeReplacementProviders': { scope: 'machine' },
+  // The personal value is this machine's; a project file may tighten it.
+  'router.enabled': { scope: 'machine', project: true },
+  'router.context': { scope: 'machine', project: true },
+  maxAutoSpend: { scope: 'machine' },
+  sessionBudget: { scope: 'machine' },
+  allowlistCreators: { scope: 'machine' },
+} as const satisfies Record<string, { scope: SettingScope; project?: true }>;
+
+/** The router keys a project file may carry: the floors, nothing personal. */
+export const PROJECT_ROUTER_KEYS = (
+  Object.entries(SETTING_SCOPES) as [string, { project?: true }][]
+)
+  .filter(([key, entry]) => key.startsWith('router.') && entry.project === true)
+  .map(([key]) => key.slice('router.'.length));
 
 export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
 export const RETIRED_PAYMENT_GUIDANCE =

@@ -14,6 +14,8 @@ import {
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
+  SETTING_SCOPES,
+  readPersonalRouter,
   parseLoopValue,
   parsePublicFallbackFlag,
   resolveLoopConfig,
@@ -490,4 +492,106 @@ describe('router block: the switch and the context', () => {
       expect((err as CliError).code).toBe('CONFIG_INVALID');
     },
   );
+});
+
+/**
+ * THE PERSONAL ROUTER KEYS ARE READ APART FROM THE FILE. A rule this build
+ * cannot read must not make `config.json` unreadable: pause, show and reset
+ * read the same file, and an unreadable file turns the whole router off.
+ */
+describe('router block: the personal settings', () => {
+  const policy = {
+    version: 1,
+    block: [{ kind: 'provider', id: 'firecrawl' }],
+  };
+
+  it('loads a file whose rules are unreadable, keeping them as they are', async () => {
+    const odd = { version: 9, block: 'everything' };
+    await writeFile(
+      configFile(),
+      JSON.stringify({ router: { enabled: false, policy: odd, nativeReplacement: 'always' } }),
+    );
+    const raw = await loadRawConfig(dir);
+    expect(raw.router).toEqual({ enabled: false, policy: odd, nativeReplacement: 'always' });
+    const personal = readPersonalRouter(raw.router);
+    expect(personal.policy.status).toBe('invalid');
+    expect(personal.nativeReplacement.mode).toBe('off');
+    expect(personal.nativeReplacement.problem).toContain('router.nativeReplacement');
+  });
+
+  it('reads each personal key on its own', () => {
+    expect(readPersonalRouter(undefined)).toEqual({
+      policy: { status: 'none' },
+      sources: { status: 'ok', saved: [] },
+      nativeReplacement: { mode: 'off' },
+    });
+    expect(
+      readPersonalRouter({
+        policy,
+        sources: [{ id: 'apify', mcpUrl: 'https://mcp.apify.com' }],
+        nativeReplacement: 'when-routed',
+      }),
+    ).toEqual({
+      policy: { status: 'ok', saved: policy },
+      sources: { status: 'ok', saved: [{ id: 'apify', mcpUrl: 'https://mcp.apify.com' }] },
+      nativeReplacement: { mode: 'when-routed' },
+    });
+  });
+
+  it.each([
+    ['a duplicate block', { ...policy, block: [...policy.block, ...policy.block] }],
+    [
+      'two preferences for one task',
+      {
+        version: 1,
+        prefer: [
+          { scope: { kind: 'task', id: 'x' }, targets: [{ kind: 'provider', id: 'exa' }] },
+          { scope: { kind: 'task', id: 'x' }, targets: [{ kind: 'provider', id: 'tavily' }] },
+        ],
+      },
+    ],
+    [
+      'an empty target list',
+      { version: 1, only: [{ scope: { kind: 'global' }, dimension: 'provider', targets: [] }] },
+    ],
+    ['a field the policy does not have', { ...policy, revision: '0123456789abcdef' }],
+    ['another version', { ...policy, version: 2 }],
+  ])('names the problem with %s', (_, saved) => {
+    const read = readPersonalRouter({ policy: saved }).policy;
+    expect(read.status).toBe('invalid');
+    expect(read.status === 'invalid' && read.problem).toMatch(/^router\.policy/);
+  });
+
+  it('keeps an emptied collection as no rules, and refuses an empty replacement scope', () => {
+    expect(readPersonalRouter({ policy: { version: 1, block: [] } }).policy.status).toBe('ok');
+    expect(
+      readPersonalRouter({ nativeReplacement: 'when-routed', nativeReplacementProviders: [] })
+        .nativeReplacement,
+    ).toMatchObject({ mode: 'off' });
+    expect(
+      readPersonalRouter({
+        nativeReplacement: 'when-routed',
+        nativeReplacementProviders: [{ kind: 'service', id: 'exa-search' }],
+      }).nativeReplacement,
+    ).toMatchObject({ mode: 'off' });
+  });
+
+  it('never saves the built-in source or one account twice', () => {
+    expect(readPersonalRouter({ sources: [{ id: 'tenjin' }] }).sources.status).toBe('invalid');
+    expect(readPersonalRouter({ sources: [{ id: 'a' }, { id: 'a' }] }).sources.status).toBe(
+      'invalid',
+    );
+  });
+
+  it("declares where each setting belongs, rules as the user's and replacement as the machine's", () => {
+    expect(SETTING_SCOPES['router.policy'].scope).toBe('user');
+    expect(SETTING_SCOPES['router.sources'].scope).toBe('user');
+    expect(SETTING_SCOPES['router.nativeReplacement'].scope).toBe('machine');
+    expect(SETTING_SCOPES['router.nativeReplacementProviders'].scope).toBe('machine');
+    expect(SETTING_SCOPES.maxAutoSpend.scope).toBe('machine');
+    // `config set` cannot reach the coupled keys: they change only through
+    // their own operations.
+    expect(ROUTER_CONFIG_KEYS as readonly string[]).not.toContain('router.policy');
+    expect(ROUTER_CONFIG_KEYS as readonly string[]).not.toContain('router.nativeReplacement');
+  });
 });
