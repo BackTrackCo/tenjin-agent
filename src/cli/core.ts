@@ -652,7 +652,7 @@ Examples:
   addGlobalFlags(config.command('replacement <state>'))
     .summary("turn Run Tenjin's picks automatically on or off")
     .description(
-      "Run Tenjin's picks automatically: on lets a host that supports it run Tenjin's pick in place of your agent's web search or page fetch, within your limits, instead of offering it first. on needs --provider (repeatable) or --all-providers; off keeps a saved provider choice. It never changes what is allowed or which service is picked first.",
+      "Run Tenjin's picks automatically: on lets a host that supports it run Tenjin's pick in place of your agent's web search or page fetch, within your limits, instead of offering it first. A pick on an account you connected runs that way too, for the jobs Tenjin has checked, billed to that account's own plan. on needs --provider (repeatable) or --all-providers; off keeps a saved provider choice. It never changes what is allowed or which service is picked first.",
     )
     .option('--provider <name>', 'only when Tenjin picks this provider (repeatable)', collect)
     .option('--all-providers', 'for any allowed provider')

@@ -130,7 +130,7 @@ Tell your agent what Tenjin may use. It runs `tenjin config`, and reports what w
 | "Reset my web research preference."         | `tenjin config reset --task "web research" --preference`    |
 
 - Settings stay on this machine. A project's files can't add a rule.
-- "Run Tenjin's picks automatically" is off by default. On, Claude Code with the Tenjin plugin runs Tenjin's pick in place of a web search or page fetch, within your limits.
+- "Run Tenjin's picks automatically" is off by default. On, Claude Code with the Tenjin plugin runs Tenjin's pick in place of a web search or page fetch, within your limits. A pick on an account you connected runs that way too, for the jobs Tenjin has checked, and your own plan pays for it.
 - `tenjin config --help` lists every operation.
 
 [What your settings cover, and the permissions to grant →](./docs/agent-permissions.md#your-settings-what-tenjin-may-use)

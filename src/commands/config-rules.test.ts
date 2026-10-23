@@ -560,6 +560,10 @@ describe('replacement', () => {
     expect(text).toContain(
       'It works in Claude Code 2.1.287 or later with the Tenjin plugin; other agents keep getting ordinary offers.',
     );
+    // No account connected: what one would do, and who pays for it.
+    expect(text).toContain(
+      'An account you connect with `tenjin connect` runs this way too within the same provider choice, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.',
+    );
     expect(data(on)).toMatchObject({ replacement: { supported: false } });
     expect(data(on)).toMatchObject({ scope: 'machine', reset: 'tenjin config replacement off' });
     const off = await runConfigReplacement({ state: 'off' }, makeCtx(), offline());
@@ -570,6 +574,41 @@ describe('replacement', () => {
     expect(lines(off)).toContain(
       "Run Tenjin's picks automatically: off (its saved choice of Exa is kept for when it is turned on).",
     );
+  });
+
+  it("names the connected accounts it also runs, which bill their own plans, never one that isn't", async () => {
+    // Apify connected here with a map; fal saved but not signed in on this
+    // machine; an address with no map runs only when named.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
+            {
+              id: 'mcp-example-com',
+              label: 'mcp.example.com',
+              mcpUrl: 'https://mcp.example.com/mcp',
+              signIn: 'key',
+            },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    for (const id of ['apify', 'mcp-example-com'])
+      await writeFile(join(dir, 'sources', `${id}.json`), '{}');
+    const on = await runConfigReplacement(
+      { state: 'on', allProviders: true },
+      makeCtx(),
+      offline(),
+    );
+    const text = lines(on);
+    expect(text).toContain(
+      "It also runs your Apify account this way, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.",
+    );
+    expect(text).not.toMatch(/fal|mcp\.example\.com|mcp-example-com/);
   });
 
   it('says it runs in place only where a running Claude Code with the plugin can', async () => {
