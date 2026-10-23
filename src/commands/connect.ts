@@ -25,6 +25,7 @@ import {
 } from '../router/decision';
 import { cachedDirectory, fetchDirectory } from '../router/directory';
 import { accountIdForUrl, isAccountId } from '../router/accounts/ids';
+import { savedAccountOf, type SavedAccount } from '../router/accounts/saved';
 import {
   AccountRefused,
   openAccountSession,
@@ -120,13 +121,7 @@ const ACCOUNT_CHECKS: Record<string, { tool: string; args: Record<string, unknow
 const WHOLE_ACCOUNT = new Set(['apify']);
 
 /** What a saved account descriptor holds: never a credential. */
-interface Descriptor {
-  id: string;
-  label: string;
-  mcpUrl: string;
-  signIn: 'oauth' | 'key';
-  keyScheme?: KeyScheme;
-}
+type Descriptor = SavedAccount;
 
 /** The account being connected. `services` is empty for an unmapped one. */
 interface Account {
@@ -168,19 +163,7 @@ function savedAccounts(config: PartialConfig): SourceDescriptor[] {
   return sources.saved;
 }
 
-function descriptorOf(saved: SourceDescriptor): Descriptor | undefined {
-  const { id, label, mcpUrl, signIn } = saved as Record<string, unknown>;
-  if (typeof id !== 'string' || !isAccountId(id)) return undefined;
-  if (typeof mcpUrl !== 'string' || !isAccountUrl(mcpUrl)) return undefined;
-  const scheme = (saved as { keyScheme?: unknown }).keyScheme;
-  return {
-    id,
-    label: typeof label === 'string' && label.length > 0 ? label : id,
-    mcpUrl,
-    signIn: signIn === 'key' ? 'key' : 'oauth',
-    ...(scheme === 'Bearer' || scheme === 'Key' ? { keyScheme: scheme } : {}),
-  };
-}
+const descriptorOf = (saved: SourceDescriptor): Descriptor | undefined => savedAccountOf(saved);
 
 /** The account a name or address means, from the router's directory. */
 function resolveAccount(
@@ -424,12 +407,16 @@ function withPreference(
   };
 }
 
-/** The descriptor list with this account's entry put in place of any old one. */
+/** The descriptor list with this account's entry put in place of any old one.
+ *  A choice the user made about the account (what happens when it refuses)
+ *  stays across a reconnect. */
 function withDescriptor(existing: PartialConfig, descriptor: Descriptor): PartialConfig {
   const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
   const saved = Array.isArray(router.sources) ? (router.sources as SourceDescriptor[]) : [];
+  const before = savedAccountOf(saved.find((entry) => entry.id === descriptor.id));
   const others = saved.filter((entry) => entry.id !== descriptor.id);
-  return { ...existing, router: { ...router, sources: [...others, { ...descriptor }] } };
+  const kept = before?.onRefusal !== undefined ? { onRefusal: before.onRefusal } : {};
+  return { ...existing, router: { ...router, sources: [...others, { ...descriptor, ...kept }] } };
 }
 
 const list = new Intl.ListFormat('en', { type: 'conjunction' });

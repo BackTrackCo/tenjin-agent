@@ -21,6 +21,8 @@ import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
+import type { ExecFn } from '../lib/os-store';
+import type { OpenAccountSession } from './accounts/client';
 import {
   buildSpecRequest,
   specInputProblems,
@@ -28,10 +30,12 @@ import {
   mergedInput,
   type SpecRequest,
 } from './spec-call';
+import { readAccountJob } from './accounts/jobs';
 import {
   claimSpecPayment,
-  readSpec,
+  readKeptSpec,
   settleSpecPayment,
+  storeAccountOffer,
   storeChoices,
   storeFullResult,
   storeSpecs,
@@ -39,6 +43,7 @@ import {
   type KeptChoices,
 } from './specs';
 import {
+  BUILT_IN_SOURCE,
   DEADLINE_AFTER_PAYMENT_SENT,
   isAccountSpec,
   reportSpecOutcome,
@@ -259,6 +264,15 @@ export interface RequestToolDeps {
    *  native search or fetch answered in place (`swap.ts`). Kept on its ledger
    *  row and its outcome report, never on a default body. */
   via?: 'swap';
+  /** Seams for a call on the user's own account (#37): the OS store its
+   *  vault key is read from, and its MCP session. Tests pass them; production
+   *  uses the platform's. */
+  accounts?: {
+    exec?: ExecFn;
+    platform?: NodeJS.Platform;
+    openSession?: OpenAccountSession;
+    lockTimeoutMs?: number;
+  };
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -630,7 +644,22 @@ async function requestTool(
   // THE OFFER'S SPEC, when the hook kept one for this id: its id alone shows
   // the spec, with no network call and nothing paid, so the agent sees the
   // real inputs before it builds any.
-  const spec = id !== undefined && set === undefined ? await readSpec(deps.ctx.dataDir, id) : null;
+  const kept =
+    id !== undefined && set === undefined ? await readKeptSpec(deps.ctx.dataDir, id) : null;
+  // A SERVICE ON THE USER'S OWN ACCOUNT (#37): one call at a time, which their
+  // plan pays, so never several takes.
+  if (kept?.account === true) {
+    if (count !== undefined) {
+      return fail(
+        'needs_input',
+        `${kept.spec.provider} runs one call at a time on your own account, so count was not used; nothing was sent.`,
+        { nextStep: `Call request({id: ${JSON.stringify(id)}, input: {...}}) without count.` },
+      );
+    }
+    if (input === undefined)
+      return (await import('./accounts/run')).showAccountSpec(id!, kept.spec, deps.ctx.dataDir);
+  }
+  const spec = kept !== null && kept.account !== true ? kept.spec : null;
   if (spec !== null && input === undefined) return showSpec(id!, spec);
   // Takes only where the spec says its service runs them, and no more of
   // them than it allows: a count is several payments, and one service's
@@ -690,7 +719,7 @@ async function requestTool(
     // NO SPEC KEPT FOR THE ID: it expired or was pruned, and nobody else builds
     // the call. Answered here, with no server call: one more call costs less
     // than a guess. A set reads each option's spec itself.
-    if (spec === null && set === undefined) {
+    if (kept === null && set === undefined) {
       return fail(
         'needs_input',
         'The spec for that offer is no longer kept on this machine (it expired or was pruned), so nothing was sent or paid.',
@@ -732,6 +761,13 @@ async function requestTool(
   // through the same steps as one, after one spend check for them all.
   if (set !== undefined && input !== undefined) {
     return runChoiceSet(id!, set, input, deps, footer, decisionDeps, settings);
+  }
+
+  // AN ACCOUNT SERVICE'S SPEC AND AN INPUT: run on the user's own account,
+  // which their plan pays (`accounts/run.ts`).
+  if (kept?.account === true && input !== undefined) {
+    const { runAccountSpec } = await import('./accounts/run');
+    return runAccountSpec(id!, kept.spec, kept.fallbackId, input, deps, footer, decisionDeps);
   }
 
   // A SPEC AND AN INPUT: the agent filled the spec's request itself, so it is
@@ -845,9 +881,18 @@ async function requestTool(
   // shown with the skeleton of the next call, `request({id, input})`. Nothing
   // is paid on this answer: only a filled spec pays.
   if (decision.action === 'spec') {
+    // A SERVICE ON THE USER'S OWN ACCOUNT, kept with Tenjin's own route for
+    // its job, which a refusal offers.
     if (isAccountSpec(decision.spec)) {
-      await footer.done('native');
-      return accountNotRun();
+      const lead = { ...decision.spec, id: decision.id };
+      await storeAccountOffer(deps.ctx.dataDir, lead, decision.fallback);
+      await footer.done('service found');
+      return (await import('./accounts/run')).showAccountSpec(
+        lead.id,
+        lead,
+        deps.ctx.dataDir,
+        decision.hint,
+      );
     }
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
@@ -1025,7 +1070,16 @@ async function readToolList(
       { stored: false },
     );
     if ('refused' in admitted) return refusedByPolicy(admitted.refused);
-    if (isAccountSpec(decision.spec)) return accountNotRun();
+    if (isAccountSpec(decision.spec)) {
+      const lead = { ...decision.spec, id: decision.id };
+      await storeAccountOffer(deps.ctx.dataDir, lead, decision.fallback);
+      return (await import('./accounts/run')).showAccountSpec(
+        lead.id,
+        lead,
+        deps.ctx.dataDir,
+        decision.hint,
+      );
+    }
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
     return showSpec(picked.id, picked, [], decision.hint);
@@ -1039,19 +1093,6 @@ async function readToolList(
     'needs_input',
     'The router answered that tool id with no spec, so nothing was kept or paid.',
     { nextStep: 'Call request({query}) with the task instead.' },
-  );
-}
-
-/**
- * A SERVICE ON THE USER'S CONNECTED ACCOUNT (#37), which this build parses and
- * does not run yet: nothing is kept for it, and nothing is sent to the account
- * or paid from the balance.
- */
-function accountNotRun(): RequestToolResult {
-  return fail(
-    'native',
-    "Tenjin picked a service on the user's connected account, which this build can't run yet. Nothing was sent or charged.",
-    { nextStep: 'Use your own tools for this one.' },
   );
 }
 
@@ -1178,7 +1219,7 @@ export function alreadyPaid(
  * and the payment. The payment is a plan of one at its live price, or the
  * one slot of a quote the user approved (`approved`).
  */
-async function runSpec(
+export async function runSpec(
   id: string,
   spec: OfferSpec,
   input: Record<string, unknown>,
@@ -1840,28 +1881,34 @@ async function payAndDeliver(
 }
 
 /** What came back on the answer that delivered a result. */
-interface Delivered {
+export interface Delivered {
   status?: number;
   bodyText?: string;
   bodyBytes?: Uint8Array;
   contentType?: string;
+  /** Media an account's tool answered with inline, each saved as a file. */
+  files?: { bytes: Uint8Array; contentType: string }[];
   /** The body missed its success rule, or the rule never ran. */
   resultUnverified?: boolean;
   resultCaveat?: string;
 }
 
 /** The money behind a delivered result, and where its ledger row goes. */
-interface DeliveredMoney {
+export interface DeliveredMoney {
   providerAtomic: bigint;
   txHash?: string;
   authorization?: SignedAuthorization;
   /** Append the call's row; finish the row a job wrote when it was paid,
    *  found by its nonce; or leave the ledger alone. */
   ledger: 'append' | { update: string } | 'none';
+  /** A call on the user's own account (#37): their plan paid, nothing left
+   *  the balance. Its files are saved and its row kept all the same, and the
+   *  receipt names the account. `returns` is what the spec says comes back. */
+  account?: { label: string; returns?: string };
 }
 
 /** What delivering needs of a call: a provider call, or a job's record of one. */
-type DeliverCall = Pick<
+export type DeliverCall = Pick<
   ProviderCall,
   | 'capabilityId'
   | 'provider'
@@ -1879,7 +1926,7 @@ type DeliverCall = Pick<
  * written, and the envelope the host reads. The same for a call that answered
  * inline and a job's last poll.
  */
-async function deliverResult(
+export async function deliverResult(
   call: DeliverCall,
   deps: RequestToolDeps,
   footer: LookupFooter,
@@ -1910,12 +1957,25 @@ async function deliverResult(
         })
       : null;
   let unsaved = binary?.saveError;
+  // MEDIA AN ACCOUNT'S TOOL ANSWERED WITH INLINE, each its own file.
+  const files: string[] = [];
+  for (const file of got.files ?? []) {
+    const saved = await saveBinary(deps.ctx.dataDir, call.capabilityId, file.bytes, {
+      contentType: file.contentType,
+      ...now,
+      ...(budget !== undefined ? { budget } : {}),
+    });
+    unsaved ??= saved.saveError;
+    if (saved.savedTo !== undefined) files.push(saved.savedTo);
+  }
+  const account = money.account;
   // AND A PAID MEDIA RESULT THAT LINKS TO ITS FILES brings them home: the
   // links can expire, and the user paid for what is behind them. Only a
   // media service (every discovered one, where generated images, audio and
   // video come from) does this: a curated page read or search links whatever
-  // the page links, on hosts the page picked. Best effort only.
-  const media = providerAtomic > 0n && binary === null && call.media;
+  // the page links, on hosts the page picked. Best effort only. A call on the
+  // user's own account paid too, from their plan.
+  const media = (providerAtomic > 0n || account !== undefined) && binary === null && call.media;
   // ONE CARRYING ITS FILES INLINE, as base64 in its JSON, has them saved
   // the same way, each replaced by a note naming its file: megabytes of
   // base64 are no use to the agent as text. The rewritten body is the one
@@ -1945,6 +2005,7 @@ async function deliverResult(
   if (linked.failed) unsaved ??= DOWNLOAD_FAILED;
   const savedFiles = [
     ...(binary?.savedTo !== undefined ? [binary.savedTo] : []),
+    ...files,
     ...(inline?.savedFiles ?? []),
     ...linked.saved,
   ];
@@ -1952,13 +2013,14 @@ async function deliverResult(
     binary === null && call.project !== undefined && bodyText !== undefined
       ? await projected(deps.ctx.dataDir, call.project, bodyText)
       : null;
-  if (providerAtomic > 0n && money.ledger === 'append') {
+  if ((providerAtomic > 0n || account !== undefined) && money.ledger === 'append') {
     await appendPaidRecord(
       deps.ctx.dataDir,
       paidRecord(call, built.url, call.sent, providerAtomic, {
         ...(money.txHash !== undefined ? { txHash: money.txHash } : {}),
         ...(money.authorization !== undefined ? { authorization: money.authorization } : {}),
         savedFiles,
+        ...(account !== undefined ? { account: true } : {}),
         ...now,
       }),
     );
@@ -1973,7 +2035,7 @@ async function deliverResult(
     // The service's display name, which the plugin's mod draws its row from.
     ...(call.label !== undefined ? { label: call.label } : {}),
     ...parameters,
-    cost: costLines(providerAtomic),
+    cost: account !== undefined ? accountCost(account.label) : costLines(providerAtomic),
     ...(money.txHash !== undefined ? { settlementTxHash: money.txHash } : {}),
     ...(call.note !== undefined ? { note: call.note } : {}),
     result: binary ?? cut?.result ?? bodyText ?? '',
@@ -1993,8 +2055,13 @@ async function deliverResult(
     provider: built.url,
     ...(call.label !== undefined ? { label: call.label } : {}),
     ...parameters,
-    price: `$${toMoney(providerAtomic.toString()).usd}`,
+    price: account !== undefined ? 'your account' : `$${toMoney(providerAtomic.toString()).usd}`,
   };
+  // THE RECEIPT: "Apify · your account · 20 places".
+  const receipt =
+    account !== undefined
+      ? accountReceipt(account, binary === null ? (cut?.result ?? bodyText) : undefined, savedFiles)
+      : `${base.supplier} · ${base.cost.join(' · ')}`;
   if (got.resultUnverified === true) {
     await footer.done('unverified', shown);
     return {
@@ -2003,7 +2070,7 @@ async function deliverResult(
       ...(unsaved !== undefined ? { unsaved } : {}),
       result: {
         isError: true,
-        summary: `Unverified result from ${base.supplier} · ${base.cost.join(' · ')}`,
+        summary: `Unverified result from ${receipt}`,
         envelope: {
           status: 'unverified',
           ...base,
@@ -2019,8 +2086,8 @@ async function deliverResult(
     ...(unsaved !== undefined ? { unsaved } : {}),
     result: {
       isError: false,
-      summary: `Fulfilled by ${base.supplier} · ${base.cost.join(' · ')}`,
-      envelope: { status: 'fulfilled', ...base },
+      summary: account !== undefined ? receipt : `Fulfilled by ${receipt}`,
+      envelope: { status: 'fulfilled', ...base, ...(account !== undefined ? { receipt } : {}) },
     },
   };
 }
@@ -2500,6 +2567,17 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
  */
 async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
+  // A JOB ON THE USER'S OWN ACCOUNT (#37): its follow-up only.
+  const accountJob = await readAccountJob(dataDir, offerId);
+  if (accountJob !== null) {
+    const settings = await resolveContextSettings(deps.ctx);
+    return (await import('./accounts/run')).resumeAccountJob(accountJob, deps, {
+      ctx: deps.ctx,
+      baseUrl: settings.baseUrl,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
+    });
+  }
   const takes = await readTakes(dataDir, offerId);
   if (takes.length === 0) {
     return fail(
@@ -2700,6 +2778,8 @@ function paidRecord(
     txHash?: string;
     authorization?: SignedAuthorization;
     savedFiles: string[];
+    /** Run on the user's own account: their plan paid, not the balance. */
+    account?: true;
     now?: () => number;
   },
 ): PaidRecord {
@@ -2709,13 +2789,16 @@ function paidRecord(
     capabilityId: decision.capabilityId,
     provider: decision.provider,
     ...(decision.label !== undefined ? { label: decision.label } : {}),
+    // Who the call ran through: Tenjin's own tools, or a connected account.
+    source: decision.identity?.source ?? BUILT_IN_SOURCE,
     ...(decision.identity !== undefined ? { identity: decision.identity } : {}),
     ...(decision.via !== undefined ? { via: decision.via } : {}),
     url,
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
     ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
-    settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
+    settlement:
+      opts.account === true ? 'account' : opts.txHash !== undefined ? 'settled' : 'unknown',
     savedFiles: opts.savedFiles,
     ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
   };
@@ -2865,6 +2948,48 @@ function supplierOf(url: string): string {
 /** ONE COST LINE, because there is one payment: the provider's. */
 export function costLines(providerAtomic: bigint): string[] {
   return [`provider price ${toMoney(providerAtomic.toString()).usd} USD`];
+}
+
+/** The cost line of a call on the user's own account: their plan, never the
+ *  balance, and not counted in its limits. */
+export function accountCost(label: string): string[] {
+  return [`billed to your ${label} account, not the Tenjin balance`];
+}
+
+/**
+ * A RECEIPT FOR A CALL ON THE USER'S ACCOUNT: the account, who paid, and how
+ * much came back, counted where the result says (its saved files, or the one
+ * list it holds) and named from the spec's own words where they name it ("the
+ * places found" is places).
+ */
+export function accountReceipt(
+  account: { label: string; returns?: string },
+  body: unknown,
+  savedFiles: readonly string[],
+): string {
+  const parts = [account.label, 'your account'];
+  if (savedFiles.length > 0) {
+    parts.push(`${savedFiles.length} ${savedFiles.length === 1 ? 'file' : 'files'} saved`);
+    return parts.join(' · ');
+  }
+  let value: unknown = body;
+  if (typeof body === 'string') {
+    try {
+      value = JSON.parse(body);
+    } catch {
+      return parts.join(' · ');
+    }
+  }
+  const lists =
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.values(value).filter(Array.isArray)
+      : [];
+  const items = Array.isArray(value) ? value : lists.length === 1 ? lists[0]! : undefined;
+  if (items !== undefined) {
+    const noun = /^the ([a-z]+s)\b/.exec(account.returns ?? '')?.[1];
+    parts.push(items.length === 1 ? '1 result' : `${items.length} ${noun ?? 'results'}`);
+  }
+  return parts.join(' · ');
 }
 
 /**

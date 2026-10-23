@@ -14,7 +14,7 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { readSpec, storeChoices, storeSpecs } from './specs';
+import { readKeptSpec, readSpec, storeChoices, storeSpecs } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTER_PATH,
@@ -2682,11 +2682,11 @@ describe('the tool list, read for free', () => {
 
 /**
  * A SPEC ON A CONNECTED ACCOUNT (#37), answered to a query from a machine
- * where that account is connected: this build parses it and runs nothing on
- * the account yet, so it keeps nothing and sends nothing past the router.
+ * where that account is connected: kept with Tenjin's own route for its job,
+ * and shown saying the account pays, with nothing run yet.
  */
 describe('a pick on a connected account', () => {
-  it('is refused before anything is kept, sent or paid', async () => {
+  it('is kept and shown, saying who pays, before anything runs', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({
@@ -2706,21 +2706,31 @@ describe('a pick on a connected account', () => {
         fileURLToPath(new URL('./fixtures/wire-lookup-spec-account.json', import.meta.url)),
         'utf8',
       ),
-    ) as { decision: { id: string } };
+    ) as { decision: { id: string; fallback: { id: string } } };
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool(
       { query: 'a photoreal image of a lighthouse at dusk, made with my fal account' },
       deps(fetchImpl),
     );
     expect(result.envelope).toMatchObject({
-      status: 'native',
-      reason:
-        "Tenjin picked a service on the user's connected account, which this build can't run yet. Nothing was sent or charged.",
-      nextStep: 'Use your own tools for this one.',
+      status: 'spec',
+      id: answer.decision.id,
+      cost: ['nothing charged'],
     });
+    expect(result.summary).toContain(
+      "Price: billed to your fal account's own plan, not the Tenjin balance",
+    );
+    // Unchecked: named by the user, and said so.
+    expect(result.summary).toContain("Tenjin hasn't checked this service yet.");
+    expect(result.summary).not.toMatch(/wallet|x402|USDC/);
     // The connected account rode in the settings the router was sent.
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({ policy: { sources: ['fal'] } });
+    expect(await readKeptSpec(dir, answer.decision.id)).toMatchObject({
+      account: true,
+      fallbackId: answer.decision.fallback.id,
+    });
     expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await readSpec(dir, answer.decision.fallback.id)).not.toBeNull();
   });
 });

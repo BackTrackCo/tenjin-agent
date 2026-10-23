@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -21,7 +21,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookCommand } from './hook-command';
-import { readChoices, readSpec } from './specs';
+import { readChoices, readKeptSpec, readSpec } from './specs';
 import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -3891,18 +3891,36 @@ describe("the user's settings in the hooks", () => {
 });
 
 /**
- * A SERVICE ON A CONNECTED ACCOUNT (#37) is parsed, and this build's hooks do
- * not show it yet: the turn runs on the agent's own tools and the footer says
- * why, with nothing kept to run.
+ * A SERVICE ON A CONNECTED ACCOUNT (#37): its line is shown like any offer's,
+ * with no spend check (the user's own plan pays), and its spec is kept with
+ * Tenjin's own route for the job, which a refusal offers. On a machine where
+ * that account is not connected, it is withheld with nothing kept.
  */
 describe('an offer led by a connected account', () => {
-  it('shows no line and keeps no spec', async () => {
-    const answer = JSON.parse(
-      readFileSync(
-        fileURLToPath(new URL('./fixtures/wire-hook-execute-account.json', import.meta.url)),
-        'utf8',
-      ),
-    ) as { decision: { id: string } };
+  const answer = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-execute-account.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string; fallback: { id: string } } };
+
+  async function connectApify(): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', signIn: 'oauth' },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    await writeFile(join(dir, 'sources', 'apify.json'), '{}');
+  }
+
+  it('shows its line and keeps its spec with the fallback beside it', async () => {
+    await connectApify();
     const { fetchImpl, calls } = router(answer);
     const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
       dataDir: dir,
@@ -3910,10 +3928,26 @@ describe('an offer led by a connected account', () => {
       fetchImpl,
     });
     expect(calls).toHaveLength(1);
-    expect(out).toEqual({ response: null, action: 'execute' });
+    expect(out).toMatchObject({ action: 'execute', id: answer.decision.id });
+    expect(JSON.stringify(out.response)).toContain('your Apify account');
+    const kept = await readKeptSpec(dir, answer.decision.id);
+    expect(kept).toMatchObject({ account: true, fallbackId: answer.decision.fallback.id });
+    // Never a spec the balance pays, for a reader that runs only those.
     expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await readSpec(dir, answer.decision.fallback.id)).not.toBeNull();
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · prompt: native tools (account offer not shown)',
+      'x402 · prompt: account lookup offered (Apify)',
     );
+  });
+
+  it('is withheld, with nothing kept, where that account is not connected', async () => {
+    const { fetchImpl } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
   });
 });

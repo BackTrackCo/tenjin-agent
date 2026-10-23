@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AccountRefused, openAccountSession } from './client';
+import { AccountBadInput, AccountLimited, AccountRefused, openAccountSession } from './client';
 
 /**
  * A SESSION WITH AN ACCOUNT'S MCP SERVER through the SDK's own client, against
@@ -10,7 +10,7 @@ import { AccountRefused, openAccountSession } from './client';
 
 const MCP = 'https://mcp.example.test/mcp';
 
-function scriptedServer(opts: { refuse?: boolean } = {}) {
+function scriptedServer(opts: { refuse?: boolean; status?: number; badArgs?: boolean } = {}) {
   const seen: { method: string; rpc?: string; authorization?: string }[] = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -58,6 +58,16 @@ function scriptedServer(opts: { refuse?: boolean } = {}) {
           : reply({ tools: [{ name: 'get-dataset-items', inputSchema: { type: 'object' } }] });
       }
       case 'tools/call':
+        if (opts.status !== undefined) return new Response('{}', { status: opts.status });
+        if (opts.badArgs === true)
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: body.id,
+              error: { code: -32602, message: 'actor is required' },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
         return reply({ content: [{ type: 'text', text: '{"ok":true}' }], isError: false });
       default:
         return reply({});
@@ -75,8 +85,13 @@ describe('a session with an account', () => {
       { fetchImpl: server.fetchImpl },
     );
     expect(await session.listTools()).toEqual([
-      { name: 'call-actor', description: 'Run an Actor', arguments: ['actor', 'input'] },
-      { name: 'get-dataset-items', arguments: [] },
+      {
+        name: 'call-actor',
+        description: 'Run an Actor',
+        arguments: ['actor', 'input'],
+        inputSchema: { type: 'object', properties: { actor: {}, input: {} } },
+      },
+      { name: 'get-dataset-items', arguments: [], inputSchema: { type: 'object' } },
     ]);
     expect(await session.callTool('call-actor', { actor: 'a/b', input: {} })).toMatchObject({
       isError: false,
@@ -102,5 +117,21 @@ describe('a session with an account', () => {
     ).catch((err: unknown) => err);
     expect(error).toBeInstanceOf(AccountRefused);
     expect((error as AccountRefused).status).toBe(401);
+  });
+
+  it('reads a plan or rate limit, and arguments the server refused, as what they are', async () => {
+    for (const status of [402, 429] as const) {
+      const server = scriptedServer({ status });
+      const session = await openAccountSession(MCP, {}, { fetchImpl: server.fetchImpl });
+      const error = await session.callTool('call-actor', {}).catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(AccountLimited);
+      expect((error as AccountLimited).status).toBe(status);
+      await session.close();
+    }
+    const server = scriptedServer({ badArgs: true });
+    const session = await openAccountSession(MCP, {}, { fetchImpl: server.fetchImpl });
+    const error = await session.callTool('call-actor', {}).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(AccountBadInput);
+    await session.close();
   });
 });

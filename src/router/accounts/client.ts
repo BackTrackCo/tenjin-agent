@@ -8,17 +8,21 @@ import pkg from '../../../package.json';
  * The credential goes in the request headers and nowhere else. No
  * `authProvider` is given to the transport: it would refresh outside Tenjin's
  * lock and could start a browser sign-in from inside `tenjin mcp`. A 401 comes
- * back to the caller as {@link AccountRefused}, which decides what it means.
+ * back to the caller as {@link AccountRefused}, which decides what it means;
+ * a 402 or 429 as {@link AccountLimited}, and arguments the server refused as
+ * {@link AccountBadInput}.
  * The transport refuses a redirect to another origin, so a server cannot send
  * the credential elsewhere.
  */
 
-/** One tool a server lists: its name, its untrusted description, and the
- *  top-level arguments its input schema names. */
+/** One tool a server lists: its name, its untrusted description, the
+ *  top-level arguments its input schema names, and that schema while it is
+ *  small enough to show. */
 export interface AccountTool {
   name: string;
   description?: string;
   arguments: string[];
+  inputSchema?: Record<string, unknown>;
 }
 
 /** What one tool call answered, as the SDK parsed it. */
@@ -46,6 +50,23 @@ export class AccountRefused extends Error {
   }
 }
 
+/** The account's plan or rate limit stopped the request: HTTP 402 or 429. */
+export class AccountLimited extends Error {
+  constructor(readonly status: 402 | 429) {
+    super(`the server stopped the request (${status})`);
+    this.name = 'AccountLimited';
+  }
+}
+
+/** The server would not take the tool's arguments (JSON-RPC invalid params):
+ *  the call did not run. `message` is the server's, untrusted. */
+export class AccountBadInput extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AccountBadInput';
+  }
+}
+
 export interface SessionDeps {
   /** The transport's fetch; tests pass a scripted one. */
   fetchImpl?: typeof fetch;
@@ -64,15 +85,28 @@ export type OpenAccountSession = (
 const MAX_TOOL_PAGES = 10;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-function refusedStatus(err: unknown): number | undefined {
+/** JSON-RPC's invalid params. */
+const INVALID_PARAMS = -32602;
+/** A schema past this many bytes is not kept: the agent reads the arguments. */
+const MAX_SCHEMA_BYTES = 8 * 1024;
+
+/** The SDK's error, as the one this module's callers read: an HTTP status
+ *  (the transport's error carries it as `code`) or a JSON-RPC error code. */
+function translated(err: unknown): unknown {
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'number' && (code === 401 || code === 403) ? code : undefined;
+  if (code === 401 || code === 403) return new AccountRefused(code);
+  if (code === 402 || code === 429) return new AccountLimited(code);
+  if (code === INVALID_PARAMS)
+    return new AccountBadInput(err instanceof Error ? err.message : 'invalid arguments');
+  return err;
 }
 
-/** The SDK error for a refused credential, as {@link AccountRefused}. */
-function translated(err: unknown): unknown {
-  const status = refusedStatus(err);
-  return status !== undefined ? new AccountRefused(status) : err;
+function smallSchema(schema: unknown): Record<string, unknown> | undefined {
+  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return undefined;
+  const text = JSON.stringify(schema);
+  return Buffer.byteLength(text, 'utf8') <= MAX_SCHEMA_BYTES
+    ? (schema as Record<string, unknown>)
+    : undefined;
 }
 
 export const openAccountSession: OpenAccountSession = async (mcpUrl, headers, deps = {}) => {
@@ -104,11 +138,13 @@ export const openAccountSession: OpenAccountSession = async (mcpUrl, headers, de
           });
         for (const tool of listed.tools) {
           const properties = (tool.inputSchema as { properties?: unknown } | undefined)?.properties;
+          const schema = smallSchema(tool.inputSchema);
           tools.push({
             name: tool.name,
             ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
             arguments:
               properties !== null && typeof properties === 'object' ? Object.keys(properties) : [],
+            ...(schema !== undefined ? { inputSchema: schema } : {}),
           });
         }
         cursor = listed.nextCursor;

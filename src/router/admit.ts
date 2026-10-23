@@ -17,6 +17,7 @@ import type {
 } from './decision';
 import { cachedDirectory, fetchDirectory, labelOf } from './directory';
 import { personalSettings } from './settings';
+import { savedAccounts } from './accounts/saved';
 import type { FailStatus } from './tool';
 
 /**
@@ -166,13 +167,30 @@ const isBazaar = (identity: Identity) => identity.service.startsWith('discovered
 const list = new Intl.ListFormat('en', { type: 'conjunction' });
 const either = new Intl.ListFormat('en', { type: 'disjunction' });
 
+/** Saved accounts' names by id, for an account the directory does not name
+ *  (one connected by its address): readback never shows an id. */
+type AccountNames = ReadonlyMap<string, string>;
+
+async function accountNames(dataDir: string): Promise<AccountNames> {
+  return new Map((await savedAccounts(dataDir)).map(({ id, label }) => [id, label]));
+}
+
+/** A target's name: the directory's, else a saved account's. */
+function nameOf(target: Target, listing: DirectoryListing | undefined, names: AccountNames) {
+  const label = labelOf(target, listing);
+  return target.kind === 'source' && label === target.id ? (names.get(target.id) ?? label) : label;
+}
+
 /** The rule, as the user reads it: "your settings block Firecrawl". */
 function ruleWords(
   rule: AccessRule,
   policy: WirePolicy | undefined,
   override: WireOverride | undefined,
   listing: DirectoryListing | undefined,
+  names: AccountNames,
 ): string {
+  const labelOf = (target: Target, from: DirectoryListing | undefined) =>
+    nameOf(target, from, names);
   const named = (targets: readonly Target[]) =>
     list.format(targets.map((target) => labelOf(target, listing)));
   if (rule.kind === 'block' && rule.target !== undefined)
@@ -205,8 +223,9 @@ function refused(
   policy: WirePolicy | undefined,
   override: WireOverride | undefined,
   listing: DirectoryListing | undefined,
+  names: AccountNames,
 ): PolicyRefusal {
-  const words = ruleWords(verdict.rule, policy, override, listing);
+  const words = ruleWords(verdict.rule, policy, override, listing, names);
   const change =
     verdict.rule.from === 'request'
       ? 'Send the request without that limit if the user agrees.'
@@ -266,6 +285,7 @@ async function refusalOf(
     policy,
     override,
     listing ?? (await cachedDirectory(dataDir)),
+    await accountNames(dataDir),
   );
 }
 
@@ -377,5 +397,13 @@ export async function knownRefused(
         ? { ok: false, index: 0, rule: { from: 'saved', kind: 'block', target: blocked } }
         : { ok: true };
   if (verdict.ok || 'unverified' in verdict) return null;
-  return refused(verdict, [{}], [known], local.wire, undefined, listing);
+  return refused(
+    verdict,
+    [{}],
+    [known],
+    local.wire,
+    undefined,
+    listing,
+    await accountNames(dataDir),
+  );
 }

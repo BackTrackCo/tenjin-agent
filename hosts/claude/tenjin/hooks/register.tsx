@@ -414,8 +414,11 @@ async function describeCall($: Dollar, e: Json): Promise<TenjinRow | null> {
   return { label, offerId: id, ...priced([spec], takes), ...shownOf([spec], input) };
 }
 
-/** What the specs cost together, `takes` times each: `$0.04`, or `up to $0.05`. */
+/** What the specs cost together, `takes` times each: `$0.04`, or `up to $0.05`.
+ *  A service on the user's own account costs the balance nothing: its own
+ *  plan pays, and the row says so. */
 function priced(specs: (Json | null)[], takes: bigint): { price?: string } {
+  if (specs.length === 1 && asRecord(specs[0]?.mcp) !== undefined) return { price: 'your account' };
   let total = 0n;
   let varies = false;
   for (const spec of specs) {
