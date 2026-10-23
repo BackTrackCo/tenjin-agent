@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code';
+import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
 
 import type { TenjinHeld, TenjinRow } from '../types';
 
@@ -13,6 +13,10 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * - A LOOKUP THAT REPLACED A NATIVE CALL draws where that call stood:
  *   `⏺ ~~Web Search~~("q") · Tenjin offered Exa search` while held, then in
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
+ * - A LOOKUP RUN IN A NATIVE CALL'S PLACE (the swap, only when the user turned
+ *   on "Run Tenjin's picks automatically") draws on that call's row:
+ *   `⏺ Calling Exa search… · $0.007`, then `⏺ Exa search("q") · $0.007`, with
+ *   `in place of Web Search` under it, and one transcript line says so.
  *
  * An over-limit answer draws nothing, and the `approve` call that runs its
  * quote draws as the lookup's own row. Free router calls and `needs_input`
@@ -25,9 +29,12 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * here included. Its title there is the tool's static one. A row of a run
  * this mod unfolded in the normal view stays compact.
  *
- * READ ONLY: the spec file, the choice set and the offer record (`src/router/mod-state.ts`),
- * and the request tool's own envelope. The mod writes nothing under the data
- * dir and decides nothing about routing or payment.
+ * READ ONLY: the spec file, the choice set, the offer record and the
+ * automatic-use switch in the config (`src/router/mod-state.ts`), and the
+ * request tool's own envelope. The mod writes nothing under the data dir and
+ * decides nothing about routing or payment: with the switch on it asks the
+ * request tool's `decide` form, which decides, checks and runs everything,
+ * and the mod only answers the native call with what came back.
  */
 
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
@@ -78,6 +85,8 @@ type Elements = ReturnType<Dollar['ui']['resolve']>;
 
 export const register: Register = (on) => {
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {
+    // The swap's own `decide` call is drawn on the native call's row.
+    if (e.decide !== undefined) return next(e);
     const row = await describeCall($, e);
     const ref = { ...ROWS, id: e.tool_use_id };
     if (row !== null) {
@@ -133,7 +142,10 @@ export const register: Register = (on) => {
 
   // A native call the router held: its offer, from the CLI's record. One the
   // router let run, for a held call with the same search to give way to.
+  // FIRST, with automatic use on, the swap: answered in place, or passed on.
   on('tool.call', { tool: ['WebSearch', 'WebFetch'] }, async ($, e, next) => {
+    const swapped = await swap($, e);
+    if (swapped !== null) return swapped;
     const ran = await next(e);
     const key = nativeKey(e.tool, e);
     const held = await offerRecord($, e.tool_use_id, key);
@@ -191,6 +203,7 @@ export const register: Register = (on) => {
       if (held === null) return next(e);
       const ui = $.ui.resolve(e);
       const asked = nativeArgument(input);
+      if (held.swap === true) return swapRow(ui, tool, held, await row($, tool_use_id), asked);
       const takerId = await link($, `take:${held.offerId}`);
       const taker = takerId === undefined ? undefined : await row($, takerId);
       if (
@@ -240,9 +253,136 @@ export const register: Register = (on) => {
     }
     if (!(e.props.tool in NATIVE_NAMES)) return next(e);
     const held = await heldOf($, e.props.tool_use_id, undefined);
+    // A call answered in place shows its result wherever rows show in full.
+    if (held?.swap === true && e.props.isExpanded === true) return next(e);
     return held === null ? next(e) : <Box display="none" />;
   });
 };
+
+/** How often a native call being answered in place is redrawn, so its row
+ *  names the pick once the CLI has recorded it. */
+const SWAP_REDRAW_MS = 500;
+
+/**
+ * THE SWAP, ONLY WHEN THE USER TURNED IT ON (`router.nativeReplacement:
+ * when-routed` in the global config the CLI writes): the request tool's
+ * `decide` form is asked about this native call before it runs. It answers
+ * with the lookup it ran in the call's place (`via: "swap"`), or hands the
+ * call back, and then null: the call takes the host's ordinary route. The mod
+ * builds no input, reads no hint and decides nothing; it only answers the
+ * native call with what came back. A fulfilled lookup is the native tool's
+ * own result shape carrying the request tool's whole text; anything else
+ * that ran is a refusal of the call carrying that text, so a failure is never
+ * read as a page or a search that worked, and nothing runs again natively.
+ */
+async function swap($: Dollar, e: Json): Promise<ToolCallResult | null> {
+  const tool = e.tool === 'WebSearch' || e.tool === 'WebFetch' ? e.tool : undefined;
+  if (tool === undefined || e.agentId !== undefined || typeof e.tool_use_id !== 'string') {
+    return null;
+  }
+  // A SEARCH LIMITED TO SOME DOMAINS keeps its own tool: the pick would not be.
+  if (hasEntries(e.allowed_domains) || hasEntries(e.blocked_domains)) return null;
+  const target = tool === 'WebSearch' ? e.query : e.url;
+  if (typeof target !== 'string' || target.length === 0) return null;
+  const dataDir = await tenjinDataDir($);
+  if (dataDir === null) return null;
+  const router = asRecord((await readJson($, `${dataDir}/config.json`))?.router);
+  if (router?.nativeReplacement !== 'when-routed' || router.enabled === false) return null;
+  const startedAt = await $.clock.now();
+  const redraw = $.clock.every(SWAP_REDRAW_MS, () => $.ui.invalidate('ui.render'));
+  let answer: ToolCallResult;
+  try {
+    answer = await $.tool.call({
+      tool: REQUEST_TOOL,
+      decide: {
+        tool,
+        input: tool === 'WebSearch' ? { query: target } : { url: target },
+        tool_use_id: e.tool_use_id,
+        session_id: await $.session.id(),
+      },
+    });
+  } catch {
+    return null;
+  } finally {
+    redraw.cancel();
+  }
+  const text = answer.text;
+  const envelope = envelopeOf(text);
+  if (text === undefined || envelope?.via !== 'swap') return null;
+  // THE LOOKUP RAN: from here the answer is its result, whatever the drawing
+  // makes of it, and the native call never runs as well.
+  const ended = endOf(envelope);
+  await drawSwap($, e.tool_use_id, tool, e, ended).catch(() => undefined);
+  const status = String(envelope.status);
+  if (status !== 'fulfilled' && status !== 'running') return { deny: text };
+  const elapsed = Math.max(0, (await $.clock.now().catch(() => startedAt)) - startedAt);
+  return tool === 'WebSearch'
+    ? { result: { query: target, results: [text], durationSeconds: elapsed / 1000 } }
+    : {
+        result: {
+          url: target,
+          code: status === 'fulfilled' ? 200 : 202,
+          codeText: status === 'fulfilled' ? 'OK' : 'Accepted',
+          bytes: new TextEncoder().encode(text).length,
+          result: text,
+          durationMs: elapsed,
+        },
+      };
+}
+
+/** The row, its state and the one transcript line for a call answered in place. */
+async function drawSwap(
+  $: Dollar,
+  id: string,
+  tool: 'WebSearch' | 'WebFetch',
+  e: Json,
+  ended: Partial<TenjinRow>,
+): Promise<void> {
+  const key = nativeKey(tool, e);
+  const held = await offerRecord($, id, key);
+  const label = ended.label ?? held?.label ?? 'Tenjin lookup';
+  const asked = nativeArgument(e);
+  const price = held?.price !== undefined ? { price: held.price } : {};
+  await $.state.set(
+    { ...HELD, id },
+    { offerId: held?.offerId ?? id, key: key ?? '', label, swap: true, ...price },
+  );
+  await $.state.set(
+    { ...ROWS, id },
+    { ...price, ...ended, label, ...(asked !== undefined ? { argument: asked } : {}) },
+  );
+  const cost = ended.paid ?? held?.price;
+  $.ui.log(
+    `Tenjin ran ${label} in place of ${NATIVE_NAMES[tool] as string}${cost !== undefined ? ` · ${cost}` : ''}`,
+  );
+  $.ui.invalidate('ui.render');
+}
+
+function hasEntries(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+/** A native call answered in place: the pick's own row where the call stood,
+ *  and the one line saying what did not run. */
+function swapRow(
+  ui: Elements,
+  tool: string,
+  held: TenjinHeld,
+  ended: TenjinRow | undefined,
+  asked: string | undefined,
+) {
+  const name = ended?.label ?? held.label ?? (NATIVE_NAMES[tool] as string);
+  const shape: Shape =
+    ended?.status !== undefined
+      ? { ...shapeOf(ended), name }
+      : {
+          state: 'running',
+          name: `Calling ${name}…`,
+          ...(held.price !== undefined ? { tail: ` · ${held.price}` } : {}),
+        };
+  const head = line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
+  return block(ui, head, [`in place of ${NATIVE_NAMES[tool] as string}`]);
+}
 
 /** A paid call before it runs: `{id, input}` with a kept spec, or `{id,
  *  choice, input}` with the choice set kept beside the line's id. Null for the
@@ -320,8 +460,9 @@ async function rowOf(
   call: { input: unknown; output?: unknown; isInterrupted: boolean },
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
-  // A JOB POLL repeats the result and the cost of the call that started it.
-  if (isJobPoll(asRecord(call.input))) return null;
+  // A JOB POLL repeats the result and the cost of the call that started it,
+  // and the swap's `decide` call is drawn on the native call's own row.
+  if (isJobPoll(asRecord(call.input)) || asRecord(call.input)?.decide !== undefined) return null;
   const envelope = envelopeOf(textOf(call.output));
   const ended =
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
@@ -435,7 +576,14 @@ async function offerRecord(
   );
   if (record?.version !== 1 || typeof record.offerId !== 'string') return null;
   const label = labelOf(record.label);
-  return { offerId: record.offerId, key: key ?? '', ...(label !== undefined ? { label } : {}) };
+  const price = atomicOf(record.priceAtomic);
+  return {
+    offerId: record.offerId,
+    key: key ?? '',
+    ...(label !== undefined ? { label } : {}),
+    ...(record.swap === true ? { swap: true as const } : {}),
+    ...(price !== undefined ? { price: `$${usd(BigInt(price))}` } : {}),
+  };
 }
 
 const row = async ($: Dollar, id: string) => (await $.state.get({ ...ROWS, id })).value;

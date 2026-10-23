@@ -7,6 +7,17 @@ import type { OfferSpec } from './decision';
 import { MOD_STATE_FILES } from './mod-state';
 import { markOffered, sessionDir } from './progress';
 import { storeChoices, storeSpecs } from './specs';
+import { runConfigReplacement } from '../commands/config-rules';
+import type { CommandContext } from '../context';
+
+function ctx(): CommandContext {
+  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+  return {
+    flags: { json: true, timeout: 5000 },
+    dataDir: dir,
+    io: { stdout: sink(), stderr: sink(), isTTY: false },
+  };
+}
 
 /**
  * THE FILES THE MOD READS, written by the CLI's own writers, with the fields
@@ -100,7 +111,26 @@ describe('the state contract between the CLI and the mod', () => {
     });
   });
 
-  it('names exactly these three files', () => {
-    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'offer']);
+  it('marks a call answered in place, for the mod to draw it as the swap', async () => {
+    await markOffered(
+      dir,
+      'sess-1',
+      'toolu_swap',
+      { offerId: ID, label: 'Exa search', priceAtomic: '7000', swap: true },
+      1,
+    );
+    const path = join(sessionDir(dir, 'sess-1'), `offer-${sha256('toolu_swap')}.json`);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ version: 1, swap: true });
+  });
+
+  it('keeps the automatic-use switch where the mod reads it, in the global config', async () => {
+    await runConfigReplacement({ state: 'on', allProviders: true }, ctx(), { cwd: dir });
+    expect(await json('config.json')).toMatchObject({
+      router: { nativeReplacement: 'when-routed' },
+    });
+  });
+
+  it('names exactly these four files', () => {
+    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'offer', 'config']);
   });
 });
