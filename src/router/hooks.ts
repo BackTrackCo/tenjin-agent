@@ -1503,7 +1503,8 @@ function offeredTerms(offer: OfferDecision): OfferedTerms {
   return {
     offerId: offer.id,
     ...(label !== undefined ? { label } : {}),
-    priceAtomic: termsOf(offer).providerPriceAtomic,
+    // An account's call costs the balance nothing: no price to show.
+    ...(isAccountOffer(offer) ? {} : { priceAtomic: termsOf(offer).providerPriceAtomic }),
   };
 }
 

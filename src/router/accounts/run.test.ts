@@ -191,6 +191,20 @@ function network(signIn?: ReturnType<typeof fakeAccountServer>) {
   return { fetchImpl, outcomes, other };
 }
 
+/** The router's free directory too, for a rule that reads identity. */
+function withDirectory(fetchImpl: typeof fetch): typeof fetch {
+  const directory = read<unknown>('wire-directory-mcp.json');
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { directory?: unknown };
+    if (body.directory !== undefined)
+      return new Response(JSON.stringify(directory), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    return fetchImpl(input, init);
+  }) as typeof fetch;
+}
+
 function authorizer(): SpendAuthorizer {
   return {
     policyEnforcement: 'client-only',
@@ -571,6 +585,21 @@ describe('when the account refuses', () => {
     expect(String(result.envelope.nextStep)).toContain('without asking');
   });
 
+  it("never offers Tenjin's tool when the user's settings rule it out", async () => {
+    // "Only use my accounts."
+    await settings([APIFY_ACCOUNT], { version: 1, block: [{ kind: 'source', id: 'tenjin' }] });
+    await signedIn(APIFY_ACCOUNT, { state: 'expired' });
+    await storeAccountOffer(dir, LEAD, APIFY.fallback);
+    const { fetchImpl } = network();
+    const result = await runRequestTool(
+      { id: LEAD.id, input: INPUT },
+      deps(withDirectory(fetchImpl), apifyScript()),
+    );
+    expect(result.envelope).toMatchObject({ refused: { reason: 'signin_expired' } });
+    expect(result.envelope).not.toHaveProperty('fallback');
+    expect(result.summary).not.toContain("Tenjin's own tool");
+  });
+
   it('refuses a job this account was found to lack, with nothing sent', async () => {
     await settings([APIFY_ACCOUNT]);
     await signedIn(APIFY_ACCOUNT, { missing: [LEAD.identity.service] });
@@ -588,19 +617,9 @@ describe("the user's settings, before the account", () => {
     await apifyConnected({}, { version: 1, block: [{ kind: 'source', id: 'apify' }] });
     const session = apifyScript();
     const { fetchImpl, other } = network();
-    const directory = read<unknown>('wire-directory-mcp.json');
-    const withDirectory = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { directory?: unknown };
-      if (body.directory !== undefined)
-        return new Response(JSON.stringify(directory), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
-      return fetchImpl(input, init);
-    }) as typeof fetch;
     const result = await runRequestTool(
       { id: LEAD.id, input: INPUT },
-      deps(withDirectory, session),
+      deps(withDirectory(fetchImpl), session),
     );
     expect(result.envelope).toMatchObject({ reasonCode: 'policy_refused' });
     expect(result.summary).toContain('your settings block Apify');

@@ -212,6 +212,22 @@ async function accountOf(
   };
 }
 
+/**
+ * Tenjin's own route for the job, kept beside the lead, while the user's
+ * settings as they are now allow it: a refusal never offers what "only use
+ * my accounts" or a block rules out. Local, with no network.
+ */
+async function allowedFallback(
+  dataDir: string,
+  fallbackId: string | undefined,
+): Promise<OfferSpec | null> {
+  if (fallbackId === undefined) return null;
+  const fallback = await readSpec(dataDir, fallbackId);
+  if (fallback === null) return null;
+  const refused = await policyAtBoundary([routeOf(fallback.identity)], { current: true }, dataDir);
+  return refused === null ? fallback : null;
+}
+
 /** `request({id})` for an account service: its spec, with who pays. */
 export async function showAccountSpec(
   id: string,
@@ -285,7 +301,7 @@ export async function runAccountSpec(
     id,
     spec,
     account: await accountOf(spec, dataDir),
-    fallback: fallbackId !== undefined ? await readSpec(dataDir, fallbackId) : null,
+    fallback: await allowedFallback(dataDir, fallbackId),
     ...(fallbackId !== undefined ? { fallbackId } : {}),
     input,
     merged,
@@ -625,7 +641,7 @@ export async function resumeAccountJob(
     id: job.offerId,
     spec,
     account: await accountOf(spec, dataDir),
-    fallback: job.fallbackId !== undefined ? await readSpec(dataDir, job.fallbackId) : null,
+    fallback: await allowedFallback(dataDir, job.fallbackId),
     ...(job.fallbackId !== undefined ? { fallbackId: job.fallbackId } : {}),
     input: job.input,
     merged: job.input,

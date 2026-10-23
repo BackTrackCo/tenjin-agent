@@ -137,7 +137,8 @@ interface SavedOffer extends Stamp {
 export interface OfferedTerms {
   offerId?: string;
   label?: string;
-  priceAtomic: string;
+  /** Absent for an offer on the user's own account, which their plan pays. */
+  priceAtomic?: string;
   swap?: true;
 }
 
@@ -263,7 +264,9 @@ export async function markOffered(
       ? { offerId: offer.offerId }
       : {}),
     ...(offer.label !== undefined ? { label: sanitize(offer.label, 32) } : {}),
-    ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
+    ...(offer.priceAtomic !== undefined && /^\d{1,78}$/.test(offer.priceAtomic)
+      ? { priceAtomic: offer.priceAtomic }
+      : {}),
     ...(offer.swap === true ? { swap: true as const } : {}),
   };
   await write(
