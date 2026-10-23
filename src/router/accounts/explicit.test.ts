@@ -192,7 +192,7 @@ describe('an account the user names, with no map', () => {
       source: 'mcp-example-com',
       settlement: 'account',
       amountAtomic: '0',
-      identity: { source: 'mcp-example-com', providers: [] },
+      identity: { source: 'mcp-example-com', providers: ['mcp-example-com'] },
     });
   });
 
@@ -226,6 +226,17 @@ describe('an account the user names, with no map', () => {
     );
     expect(limited.envelope).toMatchObject({ reasonCode: 'policy_refused' });
     expect(session.opened).toEqual([]);
+  });
+
+  it('runs under a block on an unrelated provider, which never names the account', async () => {
+    await connected({ version: 1, block: [{ kind: 'provider', id: 'firecrawl' }] });
+    const session = account();
+    const result = await runRequestTool(
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+      deps(session).run,
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(session.called).toEqual([{ tool: 'lookup', args: { query: 'x' } }]);
   });
 
   it('never sends the credential to an address the config names in place of the signed-in one', async () => {

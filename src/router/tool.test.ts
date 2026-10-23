@@ -2694,7 +2694,13 @@ describe('a pick on a connected account', () => {
         sessionBudget: '5000000',
         router: {
           sources: [
-            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', signIn: 'oauth' },
+            {
+              id: 'fal',
+              label: 'fal',
+              mcpUrl: 'https://mcp.fal.ai/mcp-relay',
+              signIn: 'oauth',
+              mapped: true,
+            },
           ],
         },
       }),

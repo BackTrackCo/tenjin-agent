@@ -216,7 +216,13 @@ describe('tenjin connect', () => {
     // The descriptor and the preference, and no credential, in the config.
     const config = await configJson();
     expect(config.router?.sources).toEqual([
-      { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', signIn: 'oauth' },
+      {
+        id: 'apify',
+        label: 'Apify',
+        mcpUrl: 'https://mcp.apify.com',
+        signIn: 'oauth',
+        mapped: true,
+      },
     ]);
     expect(config.router?.policy?.prefer).toEqual([
       { scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] },
@@ -518,6 +524,11 @@ describe('tenjin connect', () => {
         keyScheme: 'Bearer',
       },
     ]);
+    // Connected here, and never named to the router: its id comes from the
+    // address's hostname, which no lookup carries.
+    const settings = await routerSettings({ cwd: work, dataDir: dir });
+    expect(settings.sources).toMatchObject({ status: 'ok', connected: ['mcp-example-test'] });
+    expect(settings.policy).toEqual({ status: 'none', path: join(dir, 'config.json') });
     // An address that could carry anything else is refused before any request.
     for (const bad of [
       'http://mcp.example.test/mcp',

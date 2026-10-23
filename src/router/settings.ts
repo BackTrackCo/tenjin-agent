@@ -14,6 +14,7 @@ import {
 } from '../lib/config';
 import { normalizeForWire, POLICY_VERSION, type SavedPolicy } from './access';
 import { connectedSourceIds } from './accounts/presence';
+import { isMappedDescriptor } from './accounts/saved';
 import { WirePolicySchema, type Target, type WirePolicy } from './decision';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
@@ -192,11 +193,17 @@ function policySetting(
   // The sources ride inside the policy that is sent, so saved accounts this
   // build cannot read make the rules unreadable too: fail closed.
   if (sources.status === 'invalid') return { status: 'invalid', problem: sources.problem, path };
-  // A connected account rides in `sources` with no rule at all: without it the
-  // router reads every route on that account as unavailable.
-  if (saved.status === 'none' && sources.connected.length === 0) return { status: 'none', path };
+  // A connected account the router has jobs for rides in `sources` with no
+  // rule at all: without it the router reads every route on that account as
+  // unavailable. One connected by its address alone is never named to the
+  // router (its id comes from a private hostname, and the router has nothing
+  // for it); it runs only when the user names it, which is checked here.
+  const routed = sources.connected.filter((id) =>
+    sources.saved.some((entry) => entry.id === id && isMappedDescriptor(entry)),
+  );
+  if (saved.status === 'none' && routed.length === 0) return { status: 'none', path };
   const rules: SavedPolicy = saved.status === 'ok' ? saved.saved : { version: POLICY_VERSION };
-  const wire = normalizeForWire(rules, sources.connected);
+  const wire = normalizeForWire(rules, routed);
   if (wire === undefined) return { status: 'ok', saved: rules, path };
   // The bounds a single rule cannot break: the whole policy's serialized size.
   const checked = WirePolicySchema.safeParse(wire);

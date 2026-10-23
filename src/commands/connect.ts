@@ -612,6 +612,9 @@ export async function runConnect(
     mcpUrl: account.mcpUrl,
     signIn: byKey ? 'key' : 'oauth',
     ...(byKey ? { keyScheme: account.keyScheme } : {}),
+    // Only an account the directory listed is named to the router, on every
+    // lookup; one connected by its address alone stays on this machine.
+    ...(account.mapped ? { mapped: true as const } : {}),
   };
   let preference = 'skipped' as PreferenceOutcome;
   let rule: PreferRule | undefined;

@@ -377,6 +377,27 @@ describe('the personal settings', () => {
     expect(ok.policy.status === 'ok' && ok.policy.wire).not.toHaveProperty('sources');
   });
 
+  it('names only connected accounts the router has jobs for, never one connected by its address', async () => {
+    const internal = {
+      id: 'mcp-internal-acme-com',
+      label: 'mcp.internal-acme.com',
+      mcpUrl: 'https://mcp.internal-acme.com/mcp',
+    };
+    const apify = { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true };
+    // Both signed in on this machine.
+    await put(join(data, 'sources', 'apify.json'), {});
+    await put(join(data, 'sources', 'mcp-internal-acme-com.json'), {});
+    await put(join(data, 'config.json'), { router: { sources: [internal] } });
+    const alone = await resolve(repo);
+    expect(alone.sources).toMatchObject({ connected: ['mcp-internal-acme-com'] });
+    // The private hostname's id never rides on a lookup.
+    expect(alone.policy).toEqual({ status: 'none', path: join(data, 'config.json') });
+    await put(join(data, 'config.json'), { router: { sources: [internal, apify], policy: rules } });
+    const both = await resolve(repo);
+    expect(both.sources).toMatchObject({ connected: ['mcp-internal-acme-com', 'apify'] });
+    expect(both.policy.status === 'ok' && both.policy.wire?.sources).toEqual(['apify']);
+  });
+
   it('reads replacement off unless the global file says when-routed, and an odd value as off', async () => {
     await put(join(data, 'config.json'), {
       router: {

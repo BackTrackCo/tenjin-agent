@@ -94,7 +94,7 @@ tenjin status                                      # your accounts, beside your 
 tenjin usage --since 7d                            # by day: your balance, and each account
 ```
 
-- The sign-in is sealed with AES-256-GCM in `~/.tenjin/sources/<name>.json`, and the key that opens it is in your OS keychain under `tenjin-cli`. No token, key or code reaches Tenjin's server; the router only learns which accounts are connected here.
+- The sign-in is sealed with AES-256-GCM in `~/.tenjin/sources/<name>.json`, and the key that opens it is in your OS keychain under `tenjin-cli`. No token, key or code reaches Tenjin's server; the router only learns which of the accounts it lists (Apify, fal, Firecrawl) are connected here. An account you connect by its address is never named to it.
 - A call sends the credential to the account's own server, in its request headers, and nowhere else. An expiring sign-in is refreshed first, one process at a time.
 - When the account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops with the reason and offers its own tool for the job with its price, and nothing is charged until you pick. `tenjin config fallback on` makes that switch automatic for one account, and the receipt says so. A call the account ran and then failed is never switched: your plan may already have paid for it.
 - `tenjin status` and `tenjin usage` only read this machine's files. `connect`, `disconnect` and `config fallback` stay behind Claude Code's normal permission prompt, because each changes what can be called and who pays.

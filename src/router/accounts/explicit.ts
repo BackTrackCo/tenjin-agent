@@ -1,7 +1,8 @@
 import { resolveContextSettings } from '../../lib/settings';
 import { revisionOf } from '../access';
 import { admitByPolicy } from '../admit';
-import type { Identity } from '../decision';
+import type { DirectoryListing, Identity } from '../decision';
+import { cachedDirectory } from '../directory';
 import { maskDeep } from '../paid';
 import { openLookupFooter } from '../progress';
 import { uncheckedWarning } from '../spec-call';
@@ -32,9 +33,10 @@ import { readVaultHeader } from './vault';
  * - `request({source, tool})` shows one tool's input schema, free.
  * - `request({source, tool, input})` runs that tool on the account with the
  *   agent's arguments as written, under the user's settings (a block on the
- *   account, and any only rule, which a route of unknown provider never meets),
- *   with a receipt, a ledger row, and the warning: "Tenjin hasn't checked this
- *   service yet. Results may vary, and your <name> account pays."
+ *   account or a party it may reach, and any only rule, which a route with no
+ *   task Tenjin vouches for never meets), with a receipt, a ledger row, and
+ *   the warning: "Tenjin hasn't checked this service yet. Results may vary,
+ *   and your <name> account pays."
  *
  * Nothing here is a lookup: no routing decision, nothing from the Tenjin
  * balance. The account's own plan pays for what its tool does.
@@ -56,13 +58,30 @@ const flat = (text: string): string =>
 const clip = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
 
-/** The route a named tool takes, as the user's settings read it: the account,
- *  and no provider, task or category Tenjin could vouch for. */
-function identityOf(account: SavedAccount, tool: string | undefined): Identity {
+/**
+ * The route a named tool takes, as the user's settings read it: the account,
+ * and no task or category Tenjin could vouch for. Its providers are the
+ * account itself and, for one the directory maps, every provider its mapped
+ * services name: an unchecked tool there may reach any of them. So a block on
+ * an unrelated provider leaves the account's own tools alone (an unknown
+ * upstream would read as every provider), a block on any of those parties
+ * covers them, and an only rule must name them all.
+ */
+function identityOf(
+  account: SavedAccount,
+  tool: string | undefined,
+  listing: DirectoryListing | undefined,
+): Identity {
+  const mapped = (listing?.services ?? []).filter(({ identity }) => identity.source === account.id);
+  const providers = [
+    ...new Set([account.id, ...mapped.flatMap(({ identity }) => identity.providers)]),
+  ]
+    .sort()
+    .slice(0, 8);
   const fields = {
     service: `${account.id}:${tool ?? 'tools'}`.slice(0, 64),
     source: account.id,
-    providers: [],
+    providers,
     categories: [],
   };
   return { ...fields, revision: revisionOf(fields) };
@@ -134,10 +153,10 @@ export async function runSourceRequest(
       return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
   }
 
-  // THE USER'S SETTINGS: a block on the account, and every only rule, which a
-  // route Tenjin cannot vouch for never meets.
+  // THE USER'S SETTINGS: a block on the account or a party it may reach, and
+  // every only rule, which a route Tenjin cannot vouch for rarely meets.
   const settings = await resolveContextSettings(deps.ctx);
-  const identity = identityOf(account, tool);
+  const identity = identityOf(account, tool, await cachedDirectory(dataDir));
   const admitted = await admitByPolicy(
     [routeOf(identity)],
     {
@@ -145,7 +164,9 @@ export async function runSourceRequest(
       baseUrl: settings.baseUrl,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     },
-    { stored: false },
+    // Connected here, as checked above: an account the router is never told
+    // of (one connected by its address) is still available to its own user.
+    { stored: false, account: id },
   );
   if ('refused' in admitted) return refusedByPolicy(admitted.refused);
 

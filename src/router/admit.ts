@@ -2,6 +2,7 @@ import { loadRawConfig } from '../lib/config';
 import { configPath } from '../lib/paths';
 import {
   admitRoutes,
+  POLICY_VERSION,
   readsIdentity,
   scopeKey,
   type AccessRule,
@@ -289,22 +290,38 @@ async function refusalOf(
   );
 }
 
+/** The rules with one more source available: an account the user named,
+ *  which the caller found connected on this machine. The router is never told
+ *  of an account it has no jobs for, so the rules it is sent leave it out. */
+function withAccount(wire: WirePolicy | undefined, account: string | undefined) {
+  if (account === undefined) return wire;
+  const sources = [...new Set([...(wire?.sources ?? []), account])];
+  return { ...(wire ?? { version: POLICY_VERSION }), sources } as WirePolicy;
+}
+
 /**
  * ONE EXECUTION, ADMITTED OR REFUSED, before anything is claimed, probed,
  * reserved or signed. `stored`: what runs was kept from an earlier answer (a
  * spec, a quote, a group), so a rule that reads identity needs the catalog's
  * word that the identity still holds. A fresh answer from this same call
- * needs none.
+ * needs none. `account`: an account the user named, connected here, which
+ * counts as available whether or not the rules sent to the router name it.
  */
 export async function admitByPolicy(
   routes: readonly Route[],
   deps: AdmitDeps,
-  opts: { stored: boolean; override?: WireOverride },
+  opts: { stored: boolean; override?: WireOverride; account?: string },
 ): Promise<{ run: PolicyRun } | { refused: PolicyRefusal }> {
   const { dataDir } = deps.ctx;
   const { override } = opts;
   const withOverride = override !== undefined ? { override } : {};
-  const before = await readLocalPolicy(dataDir);
+  const read = async (): Promise<LocalPolicy> => {
+    const local = await readLocalPolicy(dataDir);
+    return local.status === 'ok'
+      ? { ...local, wire: withAccount(local.wire, opts.account) }
+      : local;
+  };
+  const before = await read();
   if (before.status === 'invalid') return { refused: policyInvalid() };
   const identities = routes.map(({ identity }) => identity);
   if (!readsIdentity(before.wire, override)) {
@@ -342,7 +359,7 @@ export async function admitByPolicy(
   }
   // The rules as they are NOW, after the network call: a block saved while
   // the directory answered is the one that counts.
-  const after = await readLocalPolicy(dataDir);
+  const after = await read();
   if (after.status === 'invalid') return { refused: policyInvalid() };
   const verdict = admitRoutes(current, after.wire, override);
   if (!verdict.ok)

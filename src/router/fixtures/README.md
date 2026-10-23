@@ -167,9 +167,11 @@ only?, prefer?}`:
 - `prefer`: `{scope, targets}`, ordered, all of one kind: `source` for the
   global scope, `provider`, `service` or `source` for a task.
 - `sources`: the connected accounts this machine holds both a description and
-  a credential of. `tenjin`, the source of every catalog service and
-  open-Bazaar listing, is implied and never listed. A route on any other
-  source is `unavailable` (Connected accounts, below).
+  a credential of, among those the directory listed as `connectable` when
+  they were connected. An account connected by its address alone is never
+  listed: the router has no service on it. `tenjin`, the source of every
+  catalog service and open-Bazaar listing, is implied and never listed. A
+  route on any other source is `unavailable` (Connected accounts, below).
 - `revision`: the first 16 hex of sha256 over the rest, its keys sorted at
   every level and no whitespace (`contractHash` in `contract.ts`). Logged,
   never authority.

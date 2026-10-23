@@ -3910,7 +3910,13 @@ describe('an offer led by a connected account', () => {
       JSON.stringify({
         router: {
           sources: [
-            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', signIn: 'oauth' },
+            {
+              id: 'apify',
+              label: 'Apify',
+              mcpUrl: 'https://mcp.apify.com',
+              signIn: 'oauth',
+              mapped: true,
+            },
           ],
         },
       }),

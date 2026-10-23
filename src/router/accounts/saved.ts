@@ -22,12 +22,23 @@ export interface SavedAccount {
    *  same job runs in its place, and the receipt says so. Absent: the call
    *  stops and offers it. */
   onRefusal?: 'tenjin';
+  /** The router's directory listed it as connectable when it was connected:
+   *  Tenjin has jobs mapped to it. Only such an account is named to the
+   *  router; one connected by an address alone stays on this machine. */
+  mapped?: true;
 }
+
+/** Whether a saved descriptor, as the config holds it, is a mapped account. */
+export const isMappedDescriptor = (entry: unknown): boolean =>
+  entry !== null && typeof entry === 'object' && (entry as { mapped?: unknown }).mapped === true;
 
 /** One saved descriptor, or undefined when this build cannot use it. */
 export function savedAccountOf(entry: unknown): SavedAccount | undefined {
   if (entry === null || typeof entry !== 'object') return undefined;
-  const { id, label, mcpUrl, signIn, keyScheme, onRefusal } = entry as Record<string, unknown>;
+  const { id, label, mcpUrl, signIn, keyScheme, onRefusal, mapped } = entry as Record<
+    string,
+    unknown
+  >;
   if (typeof id !== 'string' || !isAccountId(id)) return undefined;
   if (typeof mcpUrl !== 'string' || !isAccountUrl(mcpUrl)) return undefined;
   return {
@@ -37,6 +48,7 @@ export function savedAccountOf(entry: unknown): SavedAccount | undefined {
     signIn: signIn === 'key' ? 'key' : 'oauth',
     ...(keyScheme === 'Bearer' || keyScheme === 'Key' ? { keyScheme } : {}),
     ...(onRefusal === 'tenjin' ? { onRefusal } : {}),
+    ...(mapped === true ? { mapped } : {}),
   };
 }
 

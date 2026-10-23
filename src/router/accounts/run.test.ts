@@ -96,7 +96,8 @@ async function settings(accounts: Saved[], policy?: unknown): Promise<void> {
       maxAutoSpend: '250000',
       sessionBudget: '5000000',
       router: {
-        sources: accounts.map((a) => ({ ...a, signIn: 'oauth' })),
+        // Each listed by the router's directory when connected.
+        sources: accounts.map((a) => ({ ...a, signIn: 'oauth', mapped: true })),
         ...(policy !== undefined ? { policy } : {}),
       },
     }),
