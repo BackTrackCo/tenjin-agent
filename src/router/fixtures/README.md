@@ -194,6 +194,14 @@ Allowed routes rank by the request's preference, else the task's saved one;
 then the global source preference; then catalog order. A `tool` id and a free
 docs `{query, id}` are exact and never ranked.
 
+Every form that offers, specs or lists a service applies them: the hook and
+the query offer only allowed services (a batch form, a compare option and the
+list's menu included), browse lists only allowed rows, and an open-Bazaar
+listing is dropped before its pick. A page read's reader is picked by the page
+first: a rule against the reader a route or the user's message names refuses
+the page rather than move it, and a preference ranks only the readers serving
+the same need.
+
 When no allowed service serves the step, the answer is `native` with
 `policy_refused` (stage `policy`): the gate's task is never relabelled, and
 `diagnostics.rule`, `{from, kind, target?, scope?, dimension?}`, names the rule
@@ -495,7 +503,8 @@ Take these from here; do not re-derive them.
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first; a discovery run's search text (built from the user's words) is cleared at the same expiry.
 
-The enumerated values live in code: the task ids in `fixtures/catalog/tasks.json`,
-`DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`, `TARGET_KINDS` and
-`ONLY_DIMENSIONS` in `wire.ts`.
+The enumerated values live in code: the task ids and categories in
+`fixtures/catalog/tasks.json`, the provider, seller and retired ids in
+`fixtures/catalog/services.json`, `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in
+`diagnostics.ts`, `TARGET_KINDS` and `ONLY_DIMENSIONS` in `wire.ts`.
 `docs/ENVIRONMENTS.md` covers the kill switch and the rate limits.
