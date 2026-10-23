@@ -1,0 +1,297 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.2",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
+    "capabilityId": "apify.google-maps-places",
+    "category": "local business search",
+    "provider": "Apify",
+    "label": "Apify Google Maps",
+    "capabilityDescription": "Google Maps places for a search in one area, each with its name, address, phone, website and rating",
+    "providerPriceAtomic": "0",
+    "identity": {
+      "service": "apify.google-maps-places",
+      "source": "apify",
+      "providers": ["apify"],
+      "seller": "apify",
+      "task": "local business search",
+      "categories": ["social-and-local"],
+      "revision": "83ad1ac731cc992f"
+    },
+    "usage": "what to search for, and where",
+    "hint": "Apify Google Maps, your Apify account: Google Maps places for a search in one area, each with its name, address, phone, website and rating. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"query\":\"<what to search for>\",\"location\":\"<where to search>\",\"limit\":\"<how many places, e.g. 20>\"}}) alone and wait for its result.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
+        "capabilityId": "apify.google-maps-places",
+        "provider": "Apify",
+        "label": "Apify Google Maps",
+        "holds": {},
+        "output": "json",
+        "description": "Google Maps places for a search in one area, each with its name, address, phone, website and rating",
+        "mcp": {
+          "tool": "call-actor",
+          "args": {
+            "actor": "compass/crawler-google-places",
+            "input": {
+              "searchStringsArray": ["{query}"],
+              "locationQuery": "{location}",
+              "maxCrawledPlacesPerSearch": "{limit}",
+              "language": "en"
+            },
+            "callOptions": {
+              "maxTotalChargeUsd": 0.5
+            }
+          },
+          "result": "structured",
+          "next": {
+            "poll": {
+              "tool": "get-actor-run",
+              "args": {
+                "runId": "{result.runId}"
+              },
+              "result": "structured",
+              "running": {
+                "path": "status",
+                "values": ["READY", "RUNNING"]
+              },
+              "failed": {
+                "path": "status",
+                "values": ["FAILED", "ABORTED", "TIMED-OUT"]
+              },
+              "everyS": 5,
+              "maxWaitS": 300
+            },
+            "tool": "get-dataset-items",
+            "args": {
+              "datasetId": "{result.datasetId}",
+              "limit": "{limit}",
+              "fields": "title,address,phone,website,totalScore",
+              "clean": true
+            },
+            "result": "structured"
+          }
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "What to search for, such as coffee shops."
+            },
+            "location": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "Where to search: a city, region or address."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "How many places to return, at most 50."
+            }
+          },
+          "required": ["query", "location", "limit"],
+          "additionalProperties": false
+        },
+        "pinned": {},
+        "example": {
+          "query": "coffee shops",
+          "location": "Austin, TX",
+          "limit": 20
+        },
+        "returns": "the places found, each with its name, address, phone, website and rating",
+        "resultSchema": {
+          "type": "object",
+          "required": ["items"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "address": {
+                    "type": "string"
+                  },
+                  "phone": {
+                    "type": "string"
+                  },
+                  "website": {
+                    "type": "string"
+                  },
+                  "totalScore": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "identity": {
+          "service": "apify.google-maps-places",
+          "source": "apify",
+          "providers": ["apify"],
+          "seller": "apify",
+          "task": "local business search",
+          "categories": ["social-and-local"],
+          "revision": "83ad1ac731cc992f"
+        },
+        "verified": true
+      }
+    ],
+    "delivery": "offer",
+    "fallback": {
+      "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41",
+      "capabilityId": "stableenrich-maps-text",
+      "provider": "StableEnrich (Google Maps Places)",
+      "label": "Google Maps Places",
+      "holds": {},
+      "output": "media",
+      "description": "Find local businesses from a text query with Google Maps (name, address, rating).",
+      "priceAtomic": "20000",
+      "priceVaries": false,
+      "maxAmountAtomic": "20000",
+      "payTo": "0x325bdF6F7efAB24a2210c48c1b64cAb2eAe1d430",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://stableenrich.dev/api/google-maps/text-search/partial",
+        "fields": {
+          "textQuery": "body",
+          "excludeFields": "body",
+          "pageToken": "body",
+          "locationBias": "body",
+          "includedType": "body",
+          "maxResultCount": "body",
+          "languageCode": "body",
+          "openNow": "body",
+          "minRating": "body",
+          "priceLevels": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "textQuery": {
+            "type": "string",
+            "minLength": 1
+          },
+          "excludeFields": {
+            "default": ["photos"],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pageToken": {
+            "type": "string"
+          },
+          "locationBias": {
+            "type": "object",
+            "properties": {
+              "circle": {
+                "type": "object",
+                "properties": {
+                  "center": {
+                    "type": "object",
+                    "properties": {
+                      "latitude": {
+                        "type": "number"
+                      },
+                      "longitude": {
+                        "type": "number"
+                      }
+                    },
+                    "required": ["latitude", "longitude"],
+                    "additionalProperties": false,
+                    "description": "Latitude/longitude center point for the nearby search circle."
+                  },
+                  "radius": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 50000,
+                    "description": "Radius in meters. Google Places caps this at 50000."
+                  }
+                },
+                "required": ["center", "radius"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["circle"],
+            "additionalProperties": false
+          },
+          "includedType": {
+            "type": "string"
+          },
+          "maxResultCount": {
+            "default": 5,
+            "type": "number",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "languageCode": {
+            "default": "en",
+            "type": "string"
+          },
+          "openNow": {
+            "type": "boolean"
+          },
+          "minRating": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "priceLevels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "PRICE_LEVEL_FREE",
+                "PRICE_LEVEL_INEXPENSIVE",
+                "PRICE_LEVEL_MODERATE",
+                "PRICE_LEVEL_EXPENSIVE",
+                "PRICE_LEVEL_VERY_EXPENSIVE"
+              ]
+            }
+          }
+        },
+        "required": ["textQuery", "excludeFields", "maxResultCount", "languageCode"],
+        "additionalProperties": false
+      },
+      "pinned": {},
+      "example": {
+        "textQuery": "coffee shops in Austin",
+        "excludeFields": ["photos"],
+        "maxResultCount": 5,
+        "languageCode": "en"
+      },
+      "returns": "JSON {places[], nextPageToken}: basic info per place only (name, address, coordinates, types, rating), the partial tier",
+      "identity": {
+        "service": "stableenrich-maps-text",
+        "source": "tenjin",
+        "providers": ["google"],
+        "seller": "stableenrich",
+        "task": "local business search",
+        "categories": ["social-and-local"],
+        "revision": "3cb32565796f1267"
+      }
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 640
+  }
+}

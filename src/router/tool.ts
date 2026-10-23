@@ -40,6 +40,7 @@ import {
 } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
+  isAccountSpec,
   reportSpecOutcome,
   requestBrowse,
   requestDecision,
@@ -844,6 +845,10 @@ async function requestTool(
   // shown with the skeleton of the next call, `request({id, input})`. Nothing
   // is paid on this answer: only a filled spec pays.
   if (decision.action === 'spec') {
+    if (isAccountSpec(decision.spec)) {
+      await footer.done('native');
+      return accountNotRun();
+    }
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
     await footer.done('service found');
@@ -1020,6 +1025,7 @@ async function readToolList(
       { stored: false },
     );
     if ('refused' in admitted) return refusedByPolicy(admitted.refused);
+    if (isAccountSpec(decision.spec)) return accountNotRun();
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
     return showSpec(picked.id, picked, [], decision.hint);
@@ -1033,6 +1039,19 @@ async function readToolList(
     'needs_input',
     'The router answered that tool id with no spec, so nothing was kept or paid.',
     { nextStep: 'Call request({query}) with the task instead.' },
+  );
+}
+
+/**
+ * A SERVICE ON THE USER'S CONNECTED ACCOUNT (#37), which this build parses and
+ * does not run yet: nothing is kept for it, and nothing is sent to the account
+ * or paid from the balance.
+ */
+function accountNotRun(): RequestToolResult {
+  return fail(
+    'native',
+    "Tenjin picked a service on the user's connected account, which this build can't run yet. Nothing was sent or charged.",
+    { nextStep: 'Use your own tools for this one.' },
   );
 }
 

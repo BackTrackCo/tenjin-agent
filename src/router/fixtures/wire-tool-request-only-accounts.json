@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "query": "a photoreal image of a lighthouse at dusk",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound", "mcp"],
+  "policy": {
+    "version": 1,
+    "revision": "4dbaf952411bf74f",
+    "sources": ["apify", "fal"],
+    "block": [
+      {
+        "kind": "source",
+        "id": "tenjin"
+      }
+    ],
+    "prefer": [
+      {
+        "scope": {
+          "kind": "global"
+        },
+        "targets": [
+          {
+            "kind": "source",
+            "id": "apify"
+          }
+        ]
+      }
+    ]
+  }
+}

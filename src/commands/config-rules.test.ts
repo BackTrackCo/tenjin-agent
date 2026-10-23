@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext, CommandResult } from '../context';
 import { CliError } from '../lib/errors';
 import { directoryCachePath } from '../lib/paths';
-import type { DirectoryListing, WirePolicy } from '../router/decision';
+import { acceptsFor, type DirectoryListing, type WirePolicy } from '../router/decision';
 import { writeObservation, type RouterObservation } from '../router/router-observation';
 import { routerSettings } from '../router/settings';
 import { runConfigList, runConfigSet } from './config';
@@ -147,7 +147,7 @@ describe('prefer', () => {
       reset: 'tenjin config reset --task "web research" --preference',
     });
     // One free directory call, nothing else asked.
-    expect(net.bodies).toEqual([{ schemaVersion: 1, directory: {} }]);
+    expect(net.bodies).toEqual([{ schemaVersion: 1, directory: {}, accepts: acceptsFor(false) }]);
   });
 
   it('replaces the list at its scope and leaves every other rule alone', async () => {
@@ -179,6 +179,7 @@ describe('prefer', () => {
     expect(net.bodies.at(-1)).toEqual({
       schemaVersion: 1,
       directory: { ifRevision: DIRECTORY.directory.revision },
+      accepts: acceptsFor(false),
     });
   });
 

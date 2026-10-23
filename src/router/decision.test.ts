@@ -149,6 +149,7 @@ describe('one free decision', () => {
       'jobs',
       'identity',
       'bound',
+      'mcp',
     ]);
   });
 
@@ -173,6 +174,7 @@ describe('one free decision', () => {
         'jobs',
         'identity',
         'bound',
+        'mcp',
         'bazaar',
       ]);
     }

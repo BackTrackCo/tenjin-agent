@@ -20,7 +20,13 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
-import { requestDecision, ROUTER_PATH, type HookDecision, type OfferSpec } from './decision';
+import {
+  isAccountSpec,
+  requestDecision,
+  ROUTER_PATH,
+  type HookDecision,
+  type OfferSpec,
+} from './decision';
 import { keepDecided, takeDecided } from './decided';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
@@ -1013,7 +1019,13 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
   savedPdf?: true;
 }
 
-type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
+/** An `execute` the balance pays: it names its URL, and every spec on it is
+ *  a paid one. The schema holds every `execute` that does not lead with an
+ *  account service to exactly this. */
+type ExecuteDecision = Extract<HookDecision, { action: 'execute' }> & {
+  endpoint: string;
+  specs?: OfferSpec[];
+};
 
 /**
  * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), or a
@@ -1021,10 +1033,20 @@ type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
  * (`discovered`). Both carry an id and a finished line, and every hook shows
  * them in the same place, under the same spend and one-block rules.
  */
-type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' }>;
+type OfferDecision = ExecuteDecision | Extract<HookDecision, { action: 'discovered' }>;
+
+/** An offer led by a service on a connected account (#37). This build's hooks
+ *  do not show one yet: it is answered like no offer, and the turn runs on the
+ *  agent's own tools. */
+function isAccountOffer(decision: HookDecision | null): boolean {
+  return decision?.action === 'execute' && (decision.specs ?? []).some(isAccountSpec);
+}
 
 function isOffer(decision: HookDecision | null): decision is OfferDecision {
-  return decision?.action === 'execute' || decision?.action === 'discovered';
+  if (decision?.action === 'discovered') return true;
+  return (
+    decision?.action === 'execute' && decision.endpoint !== undefined && !isAccountOffer(decision)
+  );
 }
 
 /** What the spend check and the footer read, for either kind of offer. */
@@ -1804,6 +1826,7 @@ async function openFooter(
 function hookOutcome(decision: HookDecision | null): string {
   if (decision === null) return 'native tools (router unavailable)';
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
+  if (isAccountOffer(decision)) return 'native tools (account offer not shown)';
   if (decision.action === 'native') return 'native tools (no x402 payment)';
   return 'needs input';
 }

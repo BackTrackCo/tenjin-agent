@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "directory": {},
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound", "mcp"]
+}

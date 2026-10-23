@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.2",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42",
+    "spec": {
+      "capabilityId": "fal.flux-pro-ultra",
+      "provider": "fal",
+      "label": "fal FLUX1.1 Pro Ultra",
+      "holds": {},
+      "output": "media",
+      "description": "one photoreal image from a text prompt, made by FLUX1.1 [pro] ultra",
+      "mcp": {
+        "tool": "run_model",
+        "args": {
+          "endpoint_id": "fal-ai/flux-pro/v1.1-ultra",
+          "input": {
+            "prompt": "{prompt}",
+            "aspect_ratio": "{aspect_ratio}",
+            "num_images": 1,
+            "output_format": "jpeg"
+          }
+        },
+        "result": "json-text",
+        "next": {
+          "when": {
+            "path": "status",
+            "values": ["processing"]
+          },
+          "poll": {
+            "tool": "check_job",
+            "args": {
+              "endpoint_id": "fal-ai/flux-pro/v1.1-ultra",
+              "request_id": "{result.request_id}"
+            },
+            "result": "json-text",
+            "running": {
+              "path": "status",
+              "values": ["IN_QUEUE", "IN_PROGRESS"]
+            },
+            "everyS": 3,
+            "maxWaitS": 180
+          },
+          "tool": "get_job_result",
+          "args": {
+            "endpoint_id": "fal-ai/flux-pro/v1.1-ultra",
+            "request_id": "{result.request_id}"
+          },
+          "result": "json-text"
+        }
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "What the image shows."
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "enum": ["1:1", "4:3", "3:4", "16:9", "9:16"],
+            "description": "The shape of the image."
+          }
+        },
+        "required": ["prompt"],
+        "additionalProperties": false
+      },
+      "pinned": {},
+      "example": {
+        "prompt": "a lighthouse at dusk, 35mm photo",
+        "aspect_ratio": "16:9"
+      },
+      "returns": "one image, saved to a file",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "width": {
+                  "type": "integer"
+                },
+                "height": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "identity": {
+        "service": "fal.flux-pro-ultra",
+        "source": "fal",
+        "providers": ["black-forest-labs", "fal"],
+        "seller": "fal",
+        "task": "photoreal image",
+        "categories": ["images"],
+        "revision": "ed3484d2b66e6901"
+      },
+      "verified": false
+    },
+    "hint": "fal FLUX1.1 Pro Ultra, your fal account: one photoreal image from a text prompt, made by FLUX1.1 [pro] ultra. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42\", input: {\"prompt\":\"<what the image shows>\"}}) alone and wait for its result.",
+    "fallback": {
+      "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d43",
+      "capabilityId": "aispace-nano-banana-2.1",
+      "provider": "AiSpace (Venice) (Google Nano Banana 2.1)",
+      "label": "Google Nano Banana 2.1",
+      "holds": {},
+      "output": "media",
+      "description": "Photoreal images of scenes, products and people, keeping one subject consistent across images; Google's current image model (model=\"nano-banana-2-1\").",
+      "priceAtomic": "50000",
+      "priceVaries": false,
+      "maxAmountAtomic": "50000",
+      "payTo": "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://x402.aispace.bot/api/v1/image/generate",
+        "fields": {
+          "model": "body",
+          "prompt": "body",
+          "resolution": "body",
+          "return_binary": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "venice-sd35",
+            "description": "Venice image model id. See GET /api/v1/models?type=image (e.g. flux-2-pro, venice-sd35, gpt-image-2).",
+            "enum": ["nano-banana-2-1"],
+            "default": "nano-banana-2-1"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Image description. Up to ~2000 chars."
+          },
+          "resolution": {
+            "type": "string",
+            "description": "Output size, pinned to 1K: the price listed here. Unpinned, the seller quotes 4K.",
+            "enum": ["1K"]
+          },
+          "return_binary": {
+            "type": "boolean",
+            "description": "Gateway-owned. true = the image file as raw bytes instead of JSON { id, images: [base64] }. Stripped before Venice.",
+            "enum": [true]
+          }
+        },
+        "required": ["model", "prompt"]
+      },
+      "pinned": {
+        "model": "nano-banana-2-1",
+        "resolution": "1K",
+        "return_binary": true
+      },
+      "example": {
+        "prompt": "A storefront sign that reads \"OPEN LATE\" in warm neon letters"
+      },
+      "returns": "the image as raw bytes (WebP), saved to disk by the client",
+      "takes": {
+        "max": 5
+      },
+      "identity": {
+        "service": "aispace-nano-banana-2.1",
+        "source": "tenjin",
+        "providers": ["google", "venice"],
+        "seller": "aispace",
+        "task": "photoreal image",
+        "categories": ["images"],
+        "revision": "ab0cd7b94addd984"
+      }
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 702
+  }
+}

@@ -171,6 +171,7 @@ describe('the request bodies', () => {
       'jobs',
       'identity',
       'bound',
+      'mcp',
     ]);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
@@ -179,9 +180,22 @@ describe('the request bodies', () => {
       'jobs',
       'identity',
       'bound',
+      'mcp',
     ]);
-    // The server's own request from a client that sends both settings tokens.
-    expect(acceptsFor(false)).toEqual(fixture('wire-hook-request-policy.json').accepts);
+    // The server's own requests from a client that sends both settings tokens
+    // and, since #37, `mcp`: the hook's, a query's and the directory's.
+    expect([...acceptsFor(false)]).toEqual([
+      ...(fixture('wire-hook-request-policy.json').accepts as string[]),
+      'mcp',
+    ]);
+    for (const name of [
+      'wire-hook-request-mcp.json',
+      'wire-tool-request-account.json',
+      'wire-tool-request-only-accounts.json',
+      'wire-directory-request-mcp.json',
+    ]) {
+      expect(acceptsFor(false), name).toEqual(fixture(name).accepts);
+    }
     expect(acceptsFor(true)).toEqual([
       'catalog',
       'spec',
@@ -190,6 +204,7 @@ describe('the request bodies', () => {
       'jobs',
       'identity',
       'bound',
+      'mcp',
       'bazaar',
     ]);
     const read = [
@@ -200,6 +215,7 @@ describe('the request bodies', () => {
       'jobs',
       'identity',
       'bound',
+      'mcp',
       'discovered',
       'bazaar',
       'choices',
@@ -526,6 +542,15 @@ describe('the request bodies', () => {
     const ifRevision = (canonical.directory as { ifRevision: string }).ifRevision;
     expect(JSON.stringify(buildDirectoryBody({ ifRevision }))).toBe(JSON.stringify(canonical));
     expect(buildDirectoryBody()).toEqual({ schemaVersion: 1, directory: {} });
+  });
+
+  /** THE DIRECTORY READS `mcp` ALONE from what this build accepts, which adds
+   *  the accounts it can connect; the body is the server's, byte for byte. */
+  it('asks for the directory with what this build accepts, byte for byte', () => {
+    const canonical = fixture('wire-directory-request-mcp.json');
+    expect(JSON.stringify(buildDirectoryBody({ accepts: acceptsFor(false) }))).toBe(
+      JSON.stringify(canonical),
+    );
   });
 
   it('reports a swapped call with via, and only that one', () => {
@@ -1019,6 +1044,167 @@ describe('the settings answers', () => {
         ...full,
         directory: { ...listing, services: [{ ...first, identity: undefined }] },
       }).success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * CONNECTED ACCOUNTS (#37), the server's own fixtures. An account lead is
+ * offered alone, carries no URL and no balance price, never runs in place of a
+ * native call, and its fallback is Tenjin's own route for the same task. Each
+ * rule below is one the server's schema runs, so a shape only one side takes
+ * fails here first.
+ */
+describe('the answers about connected accounts', () => {
+  type Decision = Record<string, unknown> & {
+    specs: Record<string, unknown>[];
+    fallback?: Record<string, unknown>;
+  };
+  const execute = () => {
+    const payload = fixture('wire-hook-execute-account.json');
+    return { payload, decision: payload.decision as Decision };
+  };
+  const withDecision = (payload: Record<string, unknown>, decision: Record<string, unknown>) => ({
+    ...payload,
+    decision,
+  });
+
+  it('parses the account lead, its spec answer and the unchecked refusal', () => {
+    const { payload, decision } = execute();
+    expect(parseForTests('hook', payload).success).toBe(true);
+    expect(decision).not.toHaveProperty('endpoint');
+    expect(decision.providerPriceAtomic).toBe('0');
+    expect(decision.specs[0]).toHaveProperty('mcp');
+    expect((decision.fallback?.identity as { source: string }).source).toBe('tenjin');
+    expect(parseForTests('tool', fixture('wire-lookup-spec-account.json')).success).toBe(true);
+    const refused = fixture('wire-lookup-account-unverified.json');
+    expect(parseForTests('tool', refused).success).toBe(true);
+    expect(
+      (refused.decision as { diagnostics: { rule: { kind: string } } }).diagnostics.rule.kind,
+    ).toBe('unverified');
+  });
+
+  it.each([
+    ['an endpoint', (d: Decision) => ({ ...d, endpoint: 'https://mcp.apify.com' })],
+    ['a balance price', (d: Decision) => ({ ...d, providerPriceAtomic: '1000' })],
+    ['a bound input', (d: Decision) => ({ ...d, bound: { query: 'coffee' } })],
+    ['an augment delivery', (d: Decision) => ({ ...d, delivery: 'augment' })],
+    ['an unchecked map', (d: Decision) => ({ ...d, specs: [{ ...d.specs[0], verified: false }] })],
+    [
+      'a sibling spec',
+      (d: Decision) => ({ ...d, specs: [...d.specs, { ...d.fallback, id: 'x'.repeat(16) }] }),
+    ],
+    [
+      'a fallback on another account',
+      (d: Decision) => ({
+        ...d,
+        fallback: {
+          ...d.fallback,
+          identity: { ...(d.fallback?.identity as object), source: 'fal' },
+        },
+      }),
+    ],
+    [
+      'a fallback for another task',
+      (d: Decision) => ({
+        ...d,
+        fallback: {
+          ...d.fallback,
+          identity: { ...(d.fallback?.identity as object), task: 'web research' },
+        },
+      }),
+    ],
+    [
+      'a first call that reads a result',
+      (d: Decision) => {
+        const spec = d.specs[0] as { mcp: Record<string, unknown> };
+        return {
+          ...d,
+          specs: [{ ...spec, mcp: { ...spec.mcp, args: { runId: '{result.runId}' } } }],
+        };
+      },
+    ],
+    [
+      'a placeholder for no input field',
+      (d: Decision) => {
+        const spec = d.specs[0] as { mcp: Record<string, unknown> };
+        return {
+          ...d,
+          specs: [{ ...spec, mcp: { ...spec.mcp, args: { actor: '{nowhere}' } } }],
+        };
+      },
+    ],
+    [
+      'a spec on the built-in source',
+      (d: Decision) => {
+        const spec = d.specs[0] as { identity: Record<string, unknown> };
+        return { ...d, specs: [{ ...spec, identity: { ...spec.identity, source: 'tenjin' } }] };
+      },
+    ],
+  ])('refuses an account lead with %s', (_, edit) => {
+    const { payload, decision } = execute();
+    expect(parseForTests('hook', withDecision(payload, edit(decision))).success).toBe(false);
+  });
+
+  it('refuses a fallback beside a paid lead, and an account spec beside one', () => {
+    const { decision } = execute();
+    const paid = fixture('wire-hook-execute-identity.json');
+    const lead = paid.decision as Decision;
+    expect(parseForTests('hook', paid).success).toBe(true);
+    expect(
+      parseForTests('hook', withDecision(paid, { ...lead, fallback: decision.fallback })).success,
+    ).toBe(false);
+    if (lead.specs !== undefined) {
+      expect(
+        parseForTests(
+          'hook',
+          withDecision(paid, {
+            ...lead,
+            specs: [...lead.specs, { ...decision.specs[0], id: 'y'.repeat(16) }],
+          }),
+        ).success,
+      ).toBe(false);
+    }
+    const spec = fixture('wire-lookup-spec-identity.json');
+    expect(
+      parseForTests(
+        'tool',
+        withDecision(spec, {
+          ...(spec.decision as object),
+          fallback: decision.fallback,
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it('parses the directory with the accounts it can connect, under the same rules', () => {
+    const full = fixture('wire-directory-mcp.json');
+    expect(parseForTests('directory', full).success).toBe(true);
+    type Account = Record<string, unknown> & { services: { id: string }[] };
+    const listing = full.directory as Record<string, unknown> & { connectable: Account[] };
+    const [apify, ...rest] = listing.connectable;
+    const edited = (account: Record<string, unknown>) => ({
+      ...full,
+      directory: { ...listing, connectable: [account, ...rest] },
+    });
+    expect(parseForTests('directory', edited(apify!)).success).toBe(true);
+    for (const account of [
+      { ...apify, id: 'tenjin' },
+      { ...apify, id: 'Apify' },
+      { ...apify, mcpUrl: 'http://mcp.apify.com' },
+      { ...apify, mcpUrl: 'https://mcp.apify.com?tools=actors' },
+      { ...apify, mcpUrl: 'https://user:pass@mcp.apify.com' },
+      { ...apify, key: undefined },
+      { ...apify, signIn: ['oauth'] },
+      { ...apify, services: [{ ...apify!.services[0], id: 'fal.flux-pro-ultra' }] },
+    ]) {
+      expect(parseForTests('directory', edited(account)).success, JSON.stringify(account)).toBe(
+        false,
+      );
+    }
+    // Every service off the built-in source is listed by an account.
+    expect(
+      parseForTests('directory', { ...full, directory: { ...listing, connectable: rest } }).success,
     ).toBe(false);
   });
 });
