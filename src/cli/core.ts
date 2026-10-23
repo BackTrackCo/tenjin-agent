@@ -201,7 +201,9 @@ Examples:
     });
 
   const config = leaf(SETUP, 'config', 'read and set config values').description(
-    'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default).',
+    'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default). ' +
+      'maxAutoSpend caps automatic router spending per call; sessionBudget caps it over a rolling 24 hours, across agent sessions. ' +
+      'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends.',
   );
   config.addHelpText(
     'after',
