@@ -80,9 +80,6 @@ export interface ConnectFlags {
   fromEnv?: string;
   /** `--no-prefer`: connect without the account-wide preference. */
   prefer?: boolean;
-  /** `--request-support`: connect nothing; send Tenjin only the address of a
-   *  service it has no map for, as a request to support it. */
-  requestSupport?: boolean;
 }
 
 /** Every seam: tests pass all of them, so no real keychain, browser or network is touched. */
@@ -444,7 +441,6 @@ function connectLines(
       `Connected ${label} on this machine. Tenjin doesn't know this service's jobs yet, so it won't pick it on its own. Ask for it by name and Tenjin will run it.`,
       `Calls on your ${label} account are billed to your own plan, not counted in the limit on your Tenjin balance.`,
       'Nothing about this service was sent to Tenjin.',
-      `Want Tenjin to support ${label}? Only if you say yes, \`tenjin connect ${account.id} --request-support\` sends Tenjin its address and nothing else.`,
     ];
   }
   const verified = new Set(account.services.filter((s) => s.verified).map((s) => s.id));
@@ -513,11 +509,6 @@ export async function runConnect(
   const name = target.trim();
   if (name.length === 0)
     usage('Say which account to connect: tenjin connect <name or https address>.');
-  if (flags.requestSupport === true) {
-    if (flags.paste === true || flags.fromEnv !== undefined || flags.prefer === false)
-      usage('--request-support connects nothing, so it takes no other option.');
-    return requestSupport(name, ctx, deps);
-  }
   const config = await loadRawConfig(ctx.dataDir);
   const saved = savedAccounts(config).flatMap((entry) => descriptorOf(entry) ?? []);
 
@@ -684,93 +675,6 @@ export async function runConnect(
     },
     listing,
   );
-}
-
-/** Where a support request goes: Tenjin's public feedback drop. */
-const SUPPORT_REQUEST_PATH = '/api/feedback';
-
-/**
- * `tenjin connect <name | url> --request-support`: THE OPT-IN AFTER CONNECTING
- * A SERVICE TENJIN HAS NO MAP FOR. The readback offers it, and only the user's
- * yes runs it: the one request it makes carries the service's address in a
- * fixed sentence and nothing else (no sign-in, key, tool list, account id or
- * this machine's identity). It connects nothing, and a service Tenjin
- * already knows sends nothing at all. Read from the saved accounts and the
- * directory's copy on disk, so nothing else is asked first.
- */
-async function requestSupport(
-  target: string,
-  ctx: CommandContext,
-  deps: ConnectDeps,
-): Promise<CommandResult> {
-  const saved = savedAccounts(await loadRawConfig(ctx.dataDir)).flatMap(
-    (entry) => descriptorOf(entry) ?? [],
-  );
-  const listing = await cachedDirectory(ctx.dataDir);
-  const connectable = listing?.connectable ?? [];
-  let address: URL;
-  if (looksLikeUrl(target)) {
-    if (!isAccountUrl(target)) {
-      usage(
-        'A support request takes an https address with no user name, password, query or fragment. Nothing was sent.',
-        'tenjin connect https://mcp.example.com/mcp --request-support',
-      );
-    }
-    address = new URL(target);
-  } else {
-    const wanted = folded(target);
-    const named = connectable.find(
-      (account) => account.id === wanted || folded(account.label) === wanted,
-    );
-    if (named !== undefined) return alreadySupported(named.label, named.id);
-    const own = saved.find((account) => account.id === wanted || folded(account.label) === wanted);
-    if (own === undefined) {
-      usage(
-        `No account called "${target}" is connected here, so nothing was sent.`,
-        'Name an account you connected by its address, or give the address: tenjin connect https://mcp.example.com/mcp --request-support',
-      );
-    }
-    if (own.mapped === true) return alreadySupported(own.label, own.id);
-    address = new URL(own.mcpUrl);
-  }
-  const known = connectable.find((account) => new URL(account.mcpUrl).href === address.href);
-  if (known !== undefined) return alreadySupported(known.label, known.id);
-
-  const sent = await (deps.fetchImpl ?? fetch)(
-    new URL(SUPPORT_REQUEST_PATH, await baseUrlOf(ctx)),
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        category: 'idea',
-        message: `Request to support an MCP service in Tenjin: ${address.href}`,
-      }),
-      signal: AbortSignal.timeout(ctx.flags.timeout),
-    },
-  ).catch(() => null);
-  if (sent === null || !sent.ok) {
-    throw new CliError(
-      sent?.status === 429 ? 'RATE_LIMITED' : 'NETWORK_ERROR',
-      `Tenjin didn't take the request to support ${address.hostname} just now.`,
-      { fix: 'Try again in a moment. Only its address is sent.' },
-    );
-  }
-  return {
-    data: { operation: 'request-support', sent: true, address: address.href },
-    humanLines: [
-      `Sent Tenjin ${address.hostname}'s address as a request to support it. Nothing else was sent: no sign-in, no key and nothing about your account.`,
-    ],
-  };
-}
-
-/** A service Tenjin already has jobs for: nothing to request, nothing sent. */
-function alreadySupported(label: string, id: string): CommandResult {
-  return {
-    data: { operation: 'request-support', sent: false, known: true },
-    humanLines: [
-      `Tenjin already knows ${label}, so nothing was sent. \`tenjin connect ${id}\` connects it with the jobs Tenjin has for it.`,
-    ],
-  };
 }
 
 /** Every preference with this account taken out, an emptied one dropped. */

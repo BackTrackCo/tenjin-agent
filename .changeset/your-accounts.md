@@ -8,6 +8,6 @@ Calls on your account are billed to your own plan, not to your Tenjin balance, a
 
 When your account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops, says why and how to fix it, and offers its own tool for the job with its price; nothing is charged until you pick. `tenjin config fallback on --source apify` runs Tenjin's tool in its place instead, and the receipt says so.
 
-An account Tenjin has no map for runs only when you ask for it by name: your agent lists its tools for free and runs the one you need, with a note that Tenjin hasn't checked it and that your account pays. Connecting one offers to ask Tenjin to support it: only on your yes, `tenjin connect <name> --request-support` sends Tenjin its address and nothing else.
+An account Tenjin has no map for runs only when you ask for it by name: your agent lists its tools for free and runs the one you need, with a note that Tenjin hasn't checked it and that your account pays.
 
 `tenjin status` lists your accounts, and `tenjin usage [--since 7d]` totals what lookups cost by day, from your balance and on each account. `tenjin disconnect apify` signs out where the account allows it and removes it from your preferences.
