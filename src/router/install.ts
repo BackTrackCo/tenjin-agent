@@ -793,7 +793,6 @@ export function continuationCommand(
     return 'tenjin';
   const launcher = rt.launcher;
   const verifiedLauncher = launcher?.state === 'written' || launcher?.state === 'current';
-  if (verifiedLauncher && launcher.onPath) return 'tenjin';
   const path = verifiedLauncher
     ? launcher.paths.find((p) => platform !== 'win32' || p.endsWith('.cmd'))
     : undefined;

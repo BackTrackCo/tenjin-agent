@@ -162,37 +162,47 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
   });
 
   it.each([
-    [{}, ['install', '--yes']],
-    [{ yes: true }, ['wallet', 'fund', '5']],
-  ] as const)('executes a continuation with a minimal parent PATH: %j', async (args, expected) => {
-    const entry = join(root, "runner's folder", 'index.mjs');
-    const receipt = join(root, 'continued.json');
-    const launcher = join(home, '.local', 'bin', 'tenjin');
-    await mkdir(dirname(entry), { recursive: true });
-    await mkdir(dirname(launcher), { recursive: true });
-    await writeFile(
-      entry,
-      `import { writeFileSync } from 'node:fs'; writeFileSync(process.env.CONTINUATION_RECEIPT, JSON.stringify(process.argv.slice(2)));`,
-    );
-    await writeFile(launcher, renderLauncherSh({ node: process.execPath, entry }), { mode: 0o755 });
-    const runtime = async () =>
-      setup({
-        node: process.execPath,
+    [{}, ['install', '--yes'], false],
+    [{ yes: true }, ['wallet', 'fund', '5'], false],
+    [{}, ['install', '--yes'], true],
+  ] as const)(
+    'executes a continuation with a minimal or shadowed PATH: %j %j %j',
+    async (args, expected, onPath) => {
+      const entry = join(root, "runner's folder", 'index.mjs');
+      const receipt = join(root, 'continued.json');
+      const launcher = join(home, '.local', 'bin', 'tenjin');
+      await mkdir(dirname(entry), { recursive: true });
+      await mkdir(dirname(launcher), { recursive: true });
+      await writeFile(
         entry,
-        launcher: { paths: [launcher], state: 'written', onPath: false },
+        `import { writeFileSync } from 'node:fs'; writeFileSync(process.env.CONTINUATION_RECEIPT, JSON.stringify(process.argv.slice(2)));`,
+      );
+      await writeFile(launcher, renderLauncherSh({ node: process.execPath, entry }), {
+        mode: 0o755,
       });
-    const env = { ...fake.env, CLAUDE_CONFIG_DIR: cfg, CLAUDECODE: '1', PATH: '/usr/bin:/bin' };
-    const run = async (args: { yes?: boolean }) =>
-      runRouterInstall(args, ctx(), deps(runtime, { env, walletBalance: async () => 0n }));
-    const result = await run(args);
-    const step = (result.data as { nextSteps: { options: { command: string | null }[] }[] })
-      .nextSteps[0]!;
-    const command = step.options[0]!.command!;
-    execFileSync('sh', ['-c', command], {
-      env: { PATH: '/usr/bin:/bin', CONTINUATION_RECEIPT: receipt },
-    });
-    expect(JSON.parse(await readFile(receipt, 'utf8'))).toEqual(expected);
-  });
+      const runtime = async () =>
+        setup({
+          node: process.execPath,
+          entry,
+          launcher: { paths: [launcher], state: 'written', onPath },
+        });
+      const foreignBin = join(root, 'earlier-bin');
+      await mkdir(foreignBin);
+      await writeFile(join(foreignBin, 'tenjin'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+      const path = onPath ? `${foreignBin}:${dirname(launcher)}:/usr/bin:/bin` : '/usr/bin:/bin';
+      const env = { ...fake.env, CLAUDE_CONFIG_DIR: cfg, CLAUDECODE: '1', PATH: path };
+      const run = async (args: { yes?: boolean }) =>
+        runRouterInstall(args, ctx(), deps(runtime, { env, walletBalance: async () => 0n }));
+      const result = await run(args);
+      const step = (result.data as { nextSteps: { options: { command: string | null }[] }[] })
+        .nextSteps[0]!;
+      const command = step.options[0]!.command!;
+      execFileSync('sh', ['-c', command], {
+        env: { PATH: path, CONTINUATION_RECEIPT: receipt },
+      });
+      expect(JSON.parse(await readFile(receipt, 'utf8'))).toEqual(expected);
+    },
+  );
 
   it.each(['failed', 'foreign'] as const)(
     'uses verified Node and entry when the launcher is %s',
