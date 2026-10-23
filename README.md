@@ -121,7 +121,7 @@ tenjin status                          # your balance, spent today, and your lim
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine
 tenjin doctor                          # check that a lookup can run
-tenjin update                          # newest version now (it also updates itself daily)
+tenjin update                          # newest version now (it also updates itself daily; `tenjin config set update.mode off` stops that)
 tenjin config set router.enabled false # pause the router
 tenjin uninstall                       # run before `npm uninstall -g`; your wallet stays
 ```
