@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -271,5 +272,120 @@ describe('an account the user names, with no map', () => {
     const signedOut = await runRequestTool({ source: 'mcp-example-com' }, deps(session).run);
     expect(signedOut.summary).toContain("mcp.example.com isn't signed in on this machine");
     expect(session.opened).toEqual([]);
+  });
+});
+
+/**
+ * A MAPPED ACCOUNT, NAMED: the tool its jobs bill through runs only through
+ * those jobs, whose map pins what they may cost, never with the agent's own
+ * arguments; the agent is handed the form that runs the job. Its other tools
+ * run as they would on any account.
+ */
+describe('an account Tenjin maps, named by the user', () => {
+  const APIFY = {
+    id: 'apify',
+    label: 'Apify',
+    mcpUrl: 'https://mcp.apify.com',
+    signIn: 'oauth',
+    mapped: true,
+    mappedTools: ['call-actor'],
+  };
+
+  async function apify(descriptor: Record<string, unknown> = APIFY): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ router: { sources: [descriptor] } }),
+    );
+    await writeVault(
+      'apify',
+      'Apify',
+      {
+        kind: 'key',
+        mcpUrl: APIFY.mcpUrl,
+        connectedAt: '2026-10-23T10:00:00.000Z',
+        state: 'ok',
+        ready: ['apify.google-maps-places'],
+        missing: [],
+      },
+      { apiKey: 'apify_api_1', keyScheme: 'Bearer' },
+      { dataDir: dir, platform: 'darwin', exec: keychain.exec },
+    );
+  }
+
+  const FORM =
+    'request({query: "<the task>", override: {prefer: [{kind: "source", id: "apify"}]}})';
+
+  it('refuses the billing tool with the arguments as written, and hands back the job form', async () => {
+    await apify();
+    const session = account();
+    const result = await runRequestTool(
+      { source: 'Apify', tool: 'call-actor', input: { actor: 'any/actor', input: {} } },
+      deps(session).run,
+    );
+    expect(result.summary).toContain(
+      'Tenjin runs call-actor on your Apify account only through the jobs it maps it to',
+    );
+    expect(String(result.envelope.nextStep)).toContain(FORM);
+    expect(session.opened).toEqual([]);
+    expect(session.called).toEqual([]);
+  });
+
+  it('reads the billing tools from the directory copy too, and refuses every tool when it knows none', async () => {
+    const directory = JSON.parse(
+      readFileSync(new URL('../fixtures/wire-directory-mcp.json', import.meta.url), 'utf8'),
+    ) as { directory: unknown };
+    const { mappedTools: _, ...withoutTools } = APIFY;
+    await apify(withoutTools);
+    const session = account();
+    const unknown = await runRequestTool(
+      { source: 'apify', tool: 'lookup', input: { query: 'x' } },
+      deps(session).run,
+    );
+    expect(unknown.summary).toContain("Tenjin can't tell which of your Apify account's tools");
+    await writeFile(join(dir, 'router-directory.json'), JSON.stringify(directory.directory));
+    const viaCopy = await runRequestTool(
+      { source: 'apify', tool: 'call-actor', input: { actor: 'any/actor' } },
+      deps(session).run,
+    );
+    expect(String(viaCopy.envelope.nextStep)).toContain(FORM);
+    expect(session.called).toEqual([]);
+  });
+
+  it('runs a tool its jobs leave out, and lists the billing tool with the job form', async () => {
+    await apify();
+    const session = account();
+    const listing = account();
+    const withActor: typeof listing.openSession = async (url, headers) => ({
+      ...(await listing.openSession(url, headers)),
+      listTools: async () => [
+        ...TOOLS,
+        { name: 'call-actor', arguments: ['actor', 'input', 'callOptions'] },
+      ],
+    });
+    const listed = await runRequestTool(
+      { source: 'apify' },
+      {
+        ...deps(listing).run,
+        accounts: { exec: keychain.exec, platform: 'darwin', openSession: withActor },
+      },
+    );
+    expect(listed.envelope).toMatchObject({ jobsOnly: ['call-actor'], jobForm: FORM });
+    expect(listed.summary).toContain(
+      `Tenjin runs call-actor only through its jobs on Apify: for those, call ${FORM}.`,
+    );
+    const shown = await runRequestTool(
+      { source: 'apify', tool: 'call-actor' },
+      {
+        ...deps(listing).run,
+        accounts: { exec: keychain.exec, platform: 'darwin', openSession: withActor },
+      },
+    );
+    expect(String(shown.envelope.nextStep)).toContain(FORM);
+    const ran = await runRequestTool(
+      { source: 'apify', tool: 'lookup', input: { query: 'x' } },
+      deps(session).run,
+    );
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(session.called).toEqual([{ tool: 'lookup', args: { query: 'x' } }]);
   });
 });

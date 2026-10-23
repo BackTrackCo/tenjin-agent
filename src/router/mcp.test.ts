@@ -1175,6 +1175,15 @@ describe('what the tool tells the model to send', () => {
       );
       expect(ACCOUNT_RULE).toContain('about 5 minutes');
       expect(ACCOUNT_RULE).toContain('Never ask for a key or token in chat.');
+      // A TASK ON A NAMED ACCOUNT runs through Tenjin's map, with its cost
+      // pins; a tool by name only where Tenjin has no task.
+      expect(ACCOUNT_RULE).toContain(
+        'When the user asks for a task on one of their connected accounts, send `{query, override: {prefer: [{kind: "source", id}]}}`',
+      );
+      expect(ACCOUNT_RULE).toContain('Only for an account or a tool Tenjin has no task for');
+      const props = request.inputSchema.properties as Record<string, { description?: string }>;
+      expect(props.override?.description).toContain('`prefer: [{kind: "source", id: "<its id>"}]`');
+      expect(props.source?.description).toContain('`override` runs the tasks it has');
     } finally {
       await client.close();
       await server.close();

@@ -25,7 +25,7 @@ import {
 } from '../router/decision';
 import { cachedDirectory, fetchDirectory } from '../router/directory';
 import { accountIdForUrl, isAccountId } from '../router/accounts/ids';
-import { savedAccountOf, type SavedAccount } from '../router/accounts/saved';
+import { billingTools, savedAccountOf, type SavedAccount } from '../router/accounts/saved';
 import {
   AccountRefused,
   openAccountSession,
@@ -613,8 +613,11 @@ export async function runConnect(
     signIn: byKey ? 'key' : 'oauth',
     ...(byKey ? { keyScheme: account.keyScheme } : {}),
     // Only an account the directory listed is named to the router, on every
-    // lookup; one connected by its address alone stays on this machine.
-    ...(account.mapped ? { mapped: true as const } : {}),
+    // lookup; one connected by its address alone stays on this machine. The
+    // tool each mapped job bills through runs only through that job.
+    ...(account.mapped
+      ? { mapped: true as const, mappedTools: billingTools(account.services) }
+      : {}),
   };
   let preference = 'skipped' as PreferenceOutcome;
   let rule: PreferRule | undefined;

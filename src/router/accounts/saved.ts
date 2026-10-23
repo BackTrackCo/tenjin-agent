@@ -1,5 +1,5 @@
 import { loadRawConfig, readPersonalRouter } from '../../lib/config';
-import { isAccountUrl, type KeyScheme } from '../decision';
+import { isAccountUrl, type Connectable, type KeyScheme } from '../decision';
 import { isAccountId } from './ids';
 
 /**
@@ -26,6 +26,21 @@ export interface SavedAccount {
    *  Tenjin has jobs mapped to it. Only such an account is named to the
    *  router; one connected by an address alone stays on this machine. */
   mapped?: true;
+  /** The tools a mapped job's billing call goes through on this account
+   *  (Apify's `call-actor`): run only through that job, with the map's cost
+   *  pins, never as a tool the user names. */
+  mappedTools?: string[];
+}
+
+/** The most billing tools a descriptor keeps: one per mapped service. */
+const MAX_MAPPED_TOOLS = 64;
+
+/** The tool each mapped service's billing call goes through: the first of
+ *  the calls its spec makes (the call, then its poll and follow-up). */
+export function billingTools(services: Connectable['services']): string[] {
+  return [
+    ...new Set(services.flatMap(({ tools }) => (tools[0] !== undefined ? [tools[0].name] : []))),
+  ];
 }
 
 /** Whether a saved descriptor, as the config holds it, is a mapped account. */
@@ -35,7 +50,7 @@ export const isMappedDescriptor = (entry: unknown): boolean =>
 /** One saved descriptor, or undefined when this build cannot use it. */
 export function savedAccountOf(entry: unknown): SavedAccount | undefined {
   if (entry === null || typeof entry !== 'object') return undefined;
-  const { id, label, mcpUrl, signIn, keyScheme, onRefusal, mapped } = entry as Record<
+  const { id, label, mcpUrl, signIn, keyScheme, onRefusal, mapped, mappedTools } = entry as Record<
     string,
     unknown
   >;
@@ -49,6 +64,13 @@ export function savedAccountOf(entry: unknown): SavedAccount | undefined {
     ...(keyScheme === 'Bearer' || keyScheme === 'Key' ? { keyScheme } : {}),
     ...(onRefusal === 'tenjin' ? { onRefusal } : {}),
     ...(mapped === true ? { mapped } : {}),
+    ...(Array.isArray(mappedTools)
+      ? {
+          mappedTools: mappedTools
+            .filter((name): name is string => typeof name === 'string')
+            .slice(0, MAX_MAPPED_TOOLS),
+        }
+      : {}),
   };
 }
 

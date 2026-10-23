@@ -19,7 +19,7 @@ import { listAccountTools, runAccountCall } from './call';
 import type { AccountTool } from './client';
 import { McpToolSchema } from '../decision';
 import { accountResult, refusalWords, runDeps } from './run';
-import { savedAccounts, type SavedAccount } from './saved';
+import { billingTools, savedAccounts, type SavedAccount } from './saved';
 import { readVaultHeader } from './vault';
 
 /**
@@ -37,6 +37,12 @@ import { readVaultHeader } from './vault';
  *   task Tenjin vouches for never meets), with a receipt, a ledger row, and
  *   the warning: "Tenjin hasn't checked this service yet. Results may vary,
  *   and your <name> account pays."
+ *
+ * ON AN ACCOUNT TENJIN MAPS, the tool a mapped job bills through (Apify's
+ * `call-actor`, fal's `run_model`) runs only through that job, which pins its
+ * cost: a named call for it is refused with the form that runs the job,
+ * `request({query, override: {prefer: [{kind: "source", id}]}})`. The
+ * account's other tools run here as they would on any account.
  *
  * Nothing here is a lookup: no routing decision, nothing from the Tenjin
  * balance. The account's own plan pays for what its tool does.
@@ -97,6 +103,32 @@ function row(tool: AccountTool): Json {
   };
 }
 
+/** The call that runs a task on the user's account through Tenjin's map. */
+export function jobForm(id: string): string {
+  return `request({query: "<the task>", override: {prefer: [{kind: "source", id: ${JSON.stringify(id)}}]}})`;
+}
+
+/**
+ * THE TOOLS A MAPPED ACCOUNT'S JOBS BILL THROUGH, which a named call never
+ * runs: the map pins their cost (Apify's `callOptions.maxTotalChargeUsd`, one
+ * fal image, a Firecrawl result limit) and the agent's own arguments would
+ * not. From the descriptor connect wrote and the directory's copy on disk.
+ * Empty for an account with no map; null for a mapped one neither names,
+ * which runs no tool by name until it is reconnected.
+ */
+function jobsOnlyTools(
+  account: SavedAccount,
+  listing: DirectoryListing | undefined,
+): Set<string> | null {
+  const listed = listing?.connectable?.find(({ id }) => id === account.id);
+  if (account.mapped !== true && listed === undefined) return new Set();
+  if (account.mappedTools === undefined && listed === undefined) return null;
+  return new Set([
+    ...(account.mappedTools ?? []),
+    ...(listed !== undefined ? billingTools(listed.services) : []),
+  ]);
+}
+
 /** `request({source, tool?, input?})`. */
 export async function runSourceRequest(
   args: { source: string; tool?: string; input?: Json },
@@ -153,10 +185,29 @@ export async function runSourceRequest(
       return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
   }
 
+  // A MAPPED JOB'S BILLING TOOL runs only through that job, with the map's
+  // cost pins: never with the agent's own arguments.
+  const listing = await cachedDirectory(dataDir);
+  const jobsOnly = jobsOnlyTools(account, listing);
+  if (input !== undefined && (jobsOnly === null || jobsOnly.has(tool!))) {
+    return fail(
+      'needs_input',
+      jobsOnly === null
+        ? `Tenjin can't tell which of your ${label} account's tools its jobs use, so nothing was sent.`
+        : `Tenjin runs ${tool} on your ${label} account only through the jobs it maps it to, with their spending caps, so nothing was sent.`,
+      {
+        nextStep:
+          jobsOnly === null
+            ? `The user can reconnect with \`tenjin connect ${id}\`.`
+            : `For a task Tenjin has a job for on ${label}, call ${jobForm(id)}: it runs there with Tenjin's settings for that job. Otherwise continue with your own tools.`,
+      },
+    );
+  }
+
   // THE USER'S SETTINGS: a block on the account or a party it may reach, and
   // every only rule, which a route Tenjin cannot vouch for rarely meets.
   const settings = await resolveContextSettings(deps.ctx);
-  const identity = identityOf(account, tool, await cachedDirectory(dataDir));
+  const identity = identityOf(account, tool, listing);
   const admitted = await admitByPolicy(
     [routeOf(identity)],
     {
@@ -202,7 +253,10 @@ export async function runSourceRequest(
         return fail('needs_input', `Your ${label} account lists no tool named ${tool}.`, {
           nextStep: `Call request({source: ${JSON.stringify(id)}}) for its tools.`,
         });
-      const next = `To run it on the user's ${label} account, call request({source: ${JSON.stringify(id)}, tool: ${JSON.stringify(tool)}, input: {...}}).`;
+      const next =
+        jobsOnly === null || jobsOnly.has(tool)
+          ? `Tenjin runs ${tool} on the user's ${label} account only through its jobs there: call ${jobForm(id)}.`
+          : `To run it on the user's ${label} account, call request({source: ${JSON.stringify(id)}, tool: ${JSON.stringify(tool)}, input: {...}}).`;
       return {
         isError: false,
         summary: [
@@ -228,6 +282,9 @@ export async function runSourceRequest(
       };
     }
     const rows = listed.tools.slice(0, MAX_ROWS).map(row);
+    const viaJobs = rows
+      .map(({ tool: name }) => String(name))
+      .filter((name) => jobsOnly?.has(name));
     const next = `Pick the tool the user's request needs and call request({source: ${JSON.stringify(id)}, tool: "<name>"}) for its inputs, free.`;
     return {
       isError: false,
@@ -240,12 +297,18 @@ export async function runSourceRequest(
         ...(listed.tools.length > MAX_ROWS
           ? [`And ${listed.tools.length - MAX_ROWS} more, not shown.`]
           : []),
+        ...(viaJobs.length > 0
+          ? [
+              `Tenjin runs ${viaJobs.join(', ')} only through its jobs on ${label}: for those, call ${jobForm(id)}.`,
+            ]
+          : []),
         next,
       ].join('\n'),
       envelope: {
         status: 'account_tools',
         account: label,
         tools: rows,
+        ...(viaJobs.length > 0 ? { jobsOnly: viaJobs, jobForm: jobForm(id) } : {}),
         warning,
         nextStep: next,
         cost: ['nothing charged'],

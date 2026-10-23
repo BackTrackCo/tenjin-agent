@@ -88,7 +88,12 @@ export const ACCOUNT_RULE =
   'about 5 minutes: the user approves the sign-in in their browser. If it says no ' +
   'browser could open, ask the user to run `tenjin connect <name>`, or ' +
   '`tenjin connect <name> --paste` with a key, in their own terminal. Never ask for a ' +
-  'key or token in chat.';
+  'key or token in chat. ' +
+  'When the user asks for a task on one of their connected accounts, send ' +
+  '`{query, override: {prefer: [{kind: "source", id}]}}` with the account\'s id (`apify`, ' +
+  'as `tenjin status --json` lists it): Tenjin runs the task there with its own settings ' +
+  'for it. Only for an account or a tool Tenjin has no task for, `{source}` lists the ' +
+  "account's tools and `{source, tool, input}` runs one there.";
 
 /**
  * ONE SENTENCE, AND THE SERVER OWNS THE REST. Naming the services here, or
@@ -114,8 +119,6 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  'When the user names one of their connected accounts for a task no line offered, ' +
-  '`{source}` lists its tools and `{source, tool, input}` runs one there. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free, or a flat $0.003 routing fee; a wallet on ' +
   'THIS machine pays it and the provider under the local spend ' +
@@ -411,7 +414,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            'Only when the user names one of their own connected accounts for a task no line offered: ' +
+            'Only when the user names one of their own connected accounts for something Tenjin ' +
+              'has no task for there (`override` runs the tasks it has): ' +
               "alone, it lists that account's tools, free; with `tool`, it shows that tool's " +
               'inputs; with `tool` and `input`, it runs it on their account, which their own plan pays.',
           ),
@@ -423,8 +427,11 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .record(z.string(), z.unknown())
           .optional()
           .describe(
-            'Only when the user limits this one request, sent with `query`: ' +
-              '`{only: [{dimension, targets: [{kind, id}]}], prefer: [{kind, id}]}`. It ' +
+            'Only when the user limits this one request, or names one of their connected ' +
+              'accounts for it, sent with `query`: ' +
+              '`{only: [{dimension, targets: [{kind, id}]}], prefer: [{kind, id}]}`. For an ' +
+              'account, `prefer: [{kind: "source", id: "<its id>"}]` runs the task on it, with ' +
+              "Tenjin's settings for that task. It " +
               "narrows or re-ranks this request only and never widens the user's settings. " +
               'Leave it out otherwise.',
           ),

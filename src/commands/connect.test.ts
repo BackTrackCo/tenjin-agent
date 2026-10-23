@@ -222,6 +222,8 @@ describe('tenjin connect', () => {
         mcpUrl: 'https://mcp.apify.com',
         signIn: 'oauth',
         mapped: true,
+        // Its jobs' billing tool, which runs only through those jobs.
+        mappedTools: ['call-actor'],
       },
     ]);
     expect(config.router?.policy?.prefer).toEqual([
