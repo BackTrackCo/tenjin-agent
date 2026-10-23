@@ -1175,4 +1175,25 @@ describe('runWalletBalance', () => {
     expect(res.humanLines).toEqual(['Balance: 1 USDC on Base']);
     expect(getSigner).not.toHaveBeenCalled();
   });
+
+  it('says how to fund the wallet at exactly $0, and only then', async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    mockedBalance.mockResolvedValue(0n);
+    const empty = await runWalletBalance(makeCtx(), { provider });
+    expect(empty.humanLines).toEqual([
+      'Balance: 0 USDC on Base',
+      'Fund it with `tenjin wallet fund 5`.',
+    ]);
+    expect(empty.data).toMatchObject({ balance: { atomic: '0' } });
+    mockedBalance.mockResolvedValue(5_000_000n);
+    const funded = await runWalletBalance(makeCtx(), { provider });
+    expect(funded.humanLines).toEqual(['Balance: 5 USDC on Base']);
+  });
+});
+
+describe('REPAIR_DONE_LINE', () => {
+  it('says to start a new Claude Code session, the one restart instruction', () => {
+    expect(REPAIR_DONE_LINE).toBe('Passphrase saved; start a new Claude Code session to verify.');
+  });
 });

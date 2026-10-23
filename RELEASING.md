@@ -22,6 +22,23 @@ the two-job `workflow_dispatch`-only `.github/workflows/release.yml`, adapted fr
 the house template (`BackTrackCo/x402r-sdk`). Nothing auto-fires from a push or a
 tag: a maintainer clicks Run workflow at each step.
 
+**Moving the Node pin.** Tenjin's runtime downloads the Node that
+`package.json` `tenjinRuntime.node` pins, checked against the sha256 recorded
+there. To move it, run `node scripts/pin-node.mjs <24.x.y>` and commit the
+result before the release PR. It needs `gpg` (for `gpgv`) and refuses, writing
+nothing, unless Node's `SHASUMS256.txt` signature verifies against the release
+keys it pins. It runs at release time only, never in CI or during install.
+Before each release, check nodejs.org for a newer Node 24 security release;
+when there is one, run `node scripts/pin-node.mjs <24.x.y>` and commit it
+before the release PR. Auto-update then delivers that Node with the release.
+
+**Hooks and server across versions.** Codex starts its auto-update as a session
+ends, but with two Codex sessions open, the one still running sees its hooks
+move to the new version while its server stays on the old one. Whatever a hook
+hands the server (offer files under the data dir, the `request` tool's fields
+the hook line tells the model to fill) should stay readable across adjacent
+versions.
+
 To cut a release (two clicks):
 
 1. **Dispatch (click 1)**: Actions -> Release -> Run workflow -> `main`. The

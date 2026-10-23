@@ -26,7 +26,7 @@ function writeHosts(): void {
       readFileSync(join('hosts', 'claude', PLUGIN_DIR, path), 'utf8'),
     ]),
   ) as Record<(typeof MOD_FILES)[number], string>;
-  const hosts = { claude: renderHostFiles(version, mod), codex: renderCodexHostFiles() };
+  const hosts = { claude: renderHostFiles(version, { mod }), codex: renderCodexHostFiles() };
   for (const [host, files] of Object.entries(hosts)) {
     for (const [path, body] of Object.entries(files)) {
       const target = join('dist', 'hosts', host, path);

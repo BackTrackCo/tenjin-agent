@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { runRouterInstall } from './install';
+import { loadStep, NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
+import { NEW_SESSION_FIX, RECONNECT_FIX } from './mcp-processes';
+import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import type { CommandContext } from '../context';
 
 /**
@@ -68,8 +70,7 @@ const ASK_LINES = [
 ];
 /** What Claude Code exports to the commands its agent runs. */
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
-const RELOAD =
-  'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
+const RELOAD = 'start a new Claude Code session so Tenjin loads';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
@@ -286,16 +287,28 @@ describe('tenjin install', () => {
     );
     expect(result.data).toMatchObject({ mcpServer: { name: 'mcp server', status: 'warn' } });
     expect(result.humanLines!.join('\n')).toContain('started before this install');
-    expect(result.humanLines!.join('\n')).toContain(
-      'Type /reload-plugins in this Claude Code session, or start a new session.',
-    );
+    expect(result.humanLines!.join('\n')).toContain(RECONNECT_FIX);
     // The refresh `tenjin update` runs says it too.
     const refreshed = await runRouterInstall(
       { refresh: true },
       ctx(),
       deps({ listMcpProcesses, installedAt: async () => 2 }),
     );
-    expect(refreshed.humanLines!.join('\n')).toContain('Type /reload-plugins');
+    expect(refreshed.humanLines!.join('\n')).toContain(RECONNECT_FIX);
+  });
+
+  it('never names /reload-plugins as the step that loads Tenjin: only a new session runs SessionStart', () => {
+    for (const text of [
+      NEW_SESSION_STEP,
+      RELOAD_STEP,
+      RECONNECT_FIX,
+      NEW_SESSION_FIX,
+      loadStep(false),
+      loadStep(true),
+    ]) {
+      expect(text).not.toContain('/reload-plugins');
+    }
+    expect(loadStep(false)).toBe(NEW_SESSION_STEP);
   });
 
   it('a refresh brings the plugin up to this build and changes no config', async () => {
@@ -866,18 +879,18 @@ describe('the install readout and the status window', () => {
       },
     });
     await auth.authorize({ amountAtomic: 10_000n, creator: 's', requestKey: 'k' });
-    const fresh = await runRouterStatus(ctx());
+    const fresh = await runRouterStatus(ctx(), { wallet: async () => null });
     expect((fresh.data as { inFlight: unknown[] }).inFlight).toHaveLength(1);
 
     // Eleven minutes on, that reservation is past its TTL and an authorization
     // would not count it; the readout must not either.
     const later = Date.now() + 11 * 60 * 1000;
-    const aged = await runRouterStatus(ctx(), { now: () => later });
+    const aged = await runRouterStatus(ctx(), { wallet: async () => null, now: () => later });
     expect((aged.data as { inFlight: unknown[] }).inFlight).toHaveLength(0);
 
     // A day on, the whole window has rolled over.
     const nextDay = Date.now() + 25 * 60 * 60 * 1000;
-    const rolled = await runRouterStatus(ctx(), { now: () => nextDay });
+    const rolled = await runRouterStatus(ctx(), { wallet: async () => null, now: () => nextDay });
     expect(
       (rolled.data as { window: { committed: { atomic: string } } }).window.committed.atomic,
     ).toBe('0');
@@ -946,7 +959,7 @@ describe('daily limit readouts', () => {
     async (sessionBudget) => {
       await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget }));
       const { runRouterStatus } = await import('./status');
-      const result = await runRouterStatus(ctx());
+      const result = await runRouterStatus(ctx(), { wallet: async () => null });
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
@@ -973,7 +986,10 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
     }),
   );
   const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), { routingCredit: async () => 240_000n });
+  const result = await runRouterStatus(ctx(), {
+    wallet: async () => null,
+    routingCredit: async () => 240_000n,
+  });
   expect(result.data).toMatchObject({
     window: {
       committed: { atomic: '300000' },
@@ -991,7 +1007,10 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
 
 it('status shows no routing credit before any deposit', async () => {
   const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), { routingCredit: async () => 0n });
+  const result = await runRouterStatus(ctx(), {
+    wallet: async () => null,
+    routingCredit: async () => 0n,
+  });
   expect(result.humanLines?.[0]).toBe('lookups 0 USD');
 });
 
@@ -1011,7 +1030,7 @@ it('status warns about ignored retired keys and reports automatic exposure separ
     }),
   );
   const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx());
+  const result = await runRouterStatus(ctx(), { wallet: async () => null });
   expect(result.data).toMatchObject({
     warnings: [expect.stringContaining('bazaarPay, confirm')],
     window: {
@@ -1246,10 +1265,7 @@ describe('install run by an agent asks each question where its answer is needed'
 });
 
 describe('the wallet line: can Claude Code unlock it', () => {
-  const REPAIR_CLAUSE = '(it asks for the passphrase in your terminal; never paste it into chat)';
-  const PERSON_REPAIR_FIX = `Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}. Then restart Claude Code.`;
-  const ASK_FOR_REPAIR =
-    'Ask the person to run `tenjin wallet repair` in their own terminal, then restart Claude Code. Never ask for the passphrase.';
+  const PERSON_REPAIR_FIX = WALLET_REASONS.passphrase_missing.fix;
   const blocked = {
     signing: {
       status: 'blocked',

@@ -9,12 +9,17 @@ import { commandForm, handlersIn, shellDependence } from './hook-form';
 import {
   ALIVE_ARGS,
   ALLOW_HOOK,
+  cliLaunch,
   DENY_HOOK,
   MOD_FILES,
   PLUGIN_DIR,
   PLUGIN_FILES,
   PLUGIN_ROOT_ENTRY,
+  LAUNCHER_MARKER,
+  RUNTIME_MISSING_FIX,
   renderHostFiles,
+  renderLauncherCmd,
+  renderLauncherSh,
   renderMarketplace,
   renderPluginFiles,
   renderPluginHooks,
@@ -28,6 +33,9 @@ import {
   renderCodexManifest,
   renderCodexMarketplace,
   renderCodexMcp,
+  codexHookCommand,
+  renderPluginBin,
+  type CodexRuntime,
   type ModSources,
 } from './plugin-files';
 import { readModSources } from './plugin-folder';
@@ -75,7 +83,7 @@ const command = (launch: ExecLaunch) => [{ type: 'command', ...launch, timeout: 
 
 describe('the checked-in hosts/claude templates', () => {
   it('are exactly what the renderer writes, file for file', async () => {
-    const rendered = renderHostFiles(undefined, await checkedInMod());
+    const rendered = renderHostFiles(undefined, { mod: await checkedInMod() });
     const shipped = filesUnder(HOSTS).filter((path) => !NOT_SHIPPED.test(path));
     expect(shipped).toEqual(Object.keys(rendered).sort());
     for (const [path, body] of Object.entries(rendered)) {
@@ -105,7 +113,7 @@ describe('the checked-in hosts/claude templates', () => {
 describe('the mod', () => {
   it('is named by the hooks file and its contract by the manifest, only when shipped', async () => {
     const mod = await checkedInMod();
-    const withMod = renderPluginFiles('1.2.3', undefined, mod);
+    const withMod = renderPluginFiles('1.2.3', undefined, { mod });
     expect(JSON.parse(withMod['hooks/hooks.json']!)).toMatchObject({
       modules: ['./register.tsx'],
     });
@@ -237,6 +245,143 @@ describe('every command the plugin carries', () => {
   }
 });
 
+/**
+ * THE RUNTIME RENDER: the same plugin, with every command naming the runtime's
+ * absolute Node and entry, and the `bin/` launchers beside it.
+ */
+describe('the runtime render', () => {
+  const node = '/h/Jane Doe/.tenjin/runtime/node/24.0.0/bin/node';
+  const entry = '/h/Jane Doe/.tenjin/runtime/versions/1.2.3/dist/index.js';
+  const files = renderHostFiles('1.2.3', { launch: { node, entry, platform: 'linux' } });
+
+  it('leaves the package render as it was when no launch is given', () => {
+    expect(renderHostFiles('1.2.3', {})).toEqual(renderHostFiles('1.2.3'));
+    expect(renderPluginFiles('1.2.3', undefined, {})).toEqual(renderPluginFiles('1.2.3'));
+    expect(Object.keys(renderHostFiles('1.2.3')).some((p) => p.includes('/bin/'))).toBe(false);
+    expect(DENY_HOOK.command).toBe('node');
+    expect(ALLOW_HOOK.command).toBe('node');
+  });
+
+  /** One trailing options object, so another render option joins it rather than a new position. */
+  it('takes the Node as an option of the last argument, on every render', () => {
+    const folder = renderPluginFiles('1.2.3', entry, { node });
+    expect(JSON.parse(folder['hooks/hooks.json']!)).toEqual(renderPluginHooks(entry, { node }));
+    expect(JSON.parse(folder['.mcp.json']!)).toEqual(renderPluginMcp(entry, { node }));
+    expect(cliLaunch(['hook', 'alive'], entry, { node })).toEqual({
+      command: node,
+      args: [entry, 'hook', 'alive'],
+    });
+    for (const [path, body] of Object.entries(folder)) {
+      expect(files[`${PLUGIN_DIR}/${path}`], path).toBe(body);
+    }
+  });
+
+  it('runs every command with the absolute node, the permission answers included', () => {
+    const hooks = JSON.parse(files[`${PLUGIN_DIR}/hooks/hooks.json`]!) as unknown;
+    const commands = handlersIn(hooks).filter((h) => commandForm(h) !== null) as ExecLaunch[];
+    expect(commands).toHaveLength(3);
+    for (const handler of commands) {
+      expect(handler.command).toBe(node);
+      expect(shellDependence(handler)).toBeNull();
+    }
+    expect(commands[0]!.args).toEqual([entry, 'hook', 'alive']);
+    const mcp = JSON.parse(files[`${PLUGIN_DIR}/.mcp.json`]!) as {
+      mcpServers: { router: ExecLaunch };
+    };
+    expect(mcp.mcpServers.router).toEqual({ command: node, args: [entry, 'mcp', '--plugin'] });
+    expect(shellDependence(mcp.mcpServers.router)).toBeNull();
+    const text = Object.values(files).join('');
+    expect(text).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+    expect(text).not.toMatch(/"command": "node"/);
+  });
+
+  it('keeps every other byte of the package render', () => {
+    const swap = (body: string) =>
+      body.replaceAll(JSON.stringify(node), '"node"').replaceAll(entry, PLUGIN_ROOT_ENTRY);
+    const plain = renderHostFiles('1.2.3');
+    for (const [path, body] of Object.entries(plain)) expect(swap(files[path]!), path).toBe(body);
+  });
+
+  it('carries the mod as the package render does, beside the absolute Node', async () => {
+    const mod = await checkedInMod();
+    const withMod = renderHostFiles('1.2.3', { launch: { node, entry, platform: 'linux' }, mod });
+    const swap = (body: string) =>
+      body.replaceAll(JSON.stringify(node), '"node"').replaceAll(entry, PLUGIN_ROOT_ENTRY);
+    const plain = renderHostFiles('1.2.3', { mod });
+    expect(plain[`${PLUGIN_DIR}/hooks/register.tsx`]).toBe(mod['hooks/register.tsx']);
+    for (const [path, body] of Object.entries(plain)) expect(swap(withMod[path]!), path).toBe(body);
+    expect(withMod[`${PLUGIN_DIR}/bin/tenjin`]).toBe(files[`${PLUGIN_DIR}/bin/tenjin`]);
+  });
+
+  it('carries the sh launcher in bin/ and no .cmd off Windows', () => {
+    expect(files[`${PLUGIN_DIR}/bin/tenjin`]).toBe(renderLauncherSh({ node, entry }));
+    expect(files[`${PLUGIN_DIR}/bin/tenjin.cmd`]).toBeUndefined();
+  });
+
+  it('writes the sh launcher with both paths quoted and the missing-runtime sentence', () => {
+    const sh = renderLauncherSh({ node: "/h/o'b/node", entry: '/h/e.js', platform: 'linux' });
+    expect(sh.split('\n')).toEqual([
+      '#!/bin/sh',
+      `# ${LAUNCHER_MARKER}`,
+      `node='/h/o'\\''b/node'`,
+      `entry='/h/e.js'`,
+      'if [ -x "$node" ] && [ -f "$entry" ]; then exec "$node" "$entry" "$@"; fi',
+      `echo "tenjin: Tenjin's runtime is missing ($entry). Reinstall it with \\\`${RUNTIME_MISSING_FIX}\\\`, then start a new Claude Code session." >&2`,
+      'exit 1',
+      '',
+    ]);
+  });
+
+  describe('on win32', () => {
+    const home = 'C:\\Users\\Zoë';
+    const winNode = `${home}\\.tenjin\\runtime\\node\\24.0.0\\node.exe`;
+    const winEntry = `${home}\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js`;
+    const win = renderHostFiles('1.2.3', {
+      launch: { node: winNode, entry: winEntry, platform: 'win32', home },
+    });
+
+    it('runs node.exe and carries a CRLF, ASCII .cmd built from %USERPROFILE%', () => {
+      const mcp = JSON.parse(win[`${PLUGIN_DIR}/.mcp.json`]!) as {
+        mcpServers: { router: ExecLaunch };
+      };
+      expect(mcp.mcpServers.router.command).toBe(winNode);
+      expect(shellDependence(mcp.mcpServers.router)).toBeNull();
+      const cmd = win[`${PLUGIN_DIR}/bin/tenjin.cmd`]!;
+      expect([...cmd].every((c) => c.charCodeAt(0) < 0x80)).toBe(true);
+      const lines = cmd.split('\r\n');
+      expect(lines.join('')).not.toContain('\n');
+      expect(lines).toEqual([
+        '@echo off',
+        `rem ${LAUNCHER_MARKER}`,
+        'if exist "%USERPROFILE%\\.tenjin\\runtime\\node\\24.0.0\\node.exe" if exist "%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js" ( "%USERPROFILE%\\.tenjin\\runtime\\node\\24.0.0\\node.exe" "%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js" %* & exit /b )',
+        `echo tenjin: Tenjin's runtime is missing (%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session. 1>&2`,
+        'exit /b 1',
+        '',
+      ]);
+      const paths = cmd.match(/%USERPROFILE%[^"\s)]*/g)!;
+      for (const p of paths) expect(p.startsWith('%USERPROFILE%\\.tenjin\\runtime\\')).toBe(true);
+    });
+
+    it('writes the sh launcher with forward slashes for Git Bash', () => {
+      const sh = win[`${PLUGIN_DIR}/bin/tenjin`]!;
+      expect(sh).toContain(`node='C:/Users/Zoë/.tenjin/runtime/node/24.0.0/node.exe'`);
+      expect(sh).toContain(`entry='C:/Users/Zoë/.tenjin/runtime/versions/1.2.3/dist/index.js'`);
+    });
+
+    it('refuses a path with % or ", one outside home, and a launch with no home', () => {
+      const launch = { node: winNode, entry: winEntry, platform: 'win32' as const, home };
+      expect(() => renderLauncherCmd({ ...launch, entry: `${home}\\100%\\index.js` })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, entry: `${home}\\a"b\\index.js` })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, entry: `${home}\\é\\index.js` })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, node: 'D:\\node\\node.exe' })).toThrow();
+      expect(() => renderLauncherCmd({ ...launch, node: 'C:\\Users\\Zoëx\\node.exe' })).toThrow();
+      expect(() =>
+        renderHostFiles('1.2.3', { launch: { node: winNode, entry: winEntry, platform: 'win32' } }),
+      ).toThrow();
+    });
+  });
+});
+
 describe('the manifest and the marketplace', () => {
   it('stamp the CLI version at build time and carry the ownership marker', () => {
     expect(renderPluginManifest('1.2.3')).toMatchObject({
@@ -323,5 +468,111 @@ describe('the checked-in hosts/codex templates', () => {
     expect(manifest).toMatchObject({ name: 'tenjin', mcpServers: './.mcp.json' });
     expect(manifest).not.toHaveProperty('version');
     expect(renderCodexManifest()).not.toHaveProperty('version');
+  });
+});
+
+/**
+ * THE CODEX RUNTIME RENDER: every leg and the server run the launcher in the
+ * runtime's own `bin/` by absolute path, so the hooks Codex trusts stay the
+ * same bytes across updates.
+ */
+describe('the Codex runtime render', () => {
+  const binDir = "/h/Jane O'Doe/.tenjin/runtime/codex/tenjin/bin";
+  const at = (cli: string): CodexRuntime => ({
+    launch: {
+      node: '/h/n/node',
+      entry: `/h/.tenjin/runtime/versions/${cli}/dist/index.js`,
+      platform: 'linux',
+    },
+    binDir,
+  });
+  const files = renderCodexHostFiles(at('1.2.3'));
+  const quoted = `'/h/Jane O'\\''Doe/.tenjin/runtime/codex/tenjin/bin/tenjin'`;
+
+  it('runs each leg through the quoted launcher and keeps the allow hook', () => {
+    const { hooks } = JSON.parse(files['tenjin/hooks/hooks.json']!) as {
+      hooks: Record<string, { hooks: { command: string }[] }[]>;
+    };
+    expect(hooks.UserPromptSubmit![0]!.hooks[0]!.command).toBe(
+      `${quoted} hook prompt --harness codex`,
+    );
+    expect(hooks.PreToolUse![0]!.hooks[0]!.command).toBe(`${quoted} hook native --harness codex`);
+    expect(hooks.PostToolUse![0]!.hooks[0]!.command).toBe(
+      `${quoted} hook shortfall --harness codex`,
+    );
+    expect(hooks.PermissionRequest).toEqual(renderCodexHooks().hooks.PermissionRequest);
+    for (const event of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse']) {
+      expect(hooks[event]![0]!.hooks[0], event).not.toHaveProperty('commandWindows');
+    }
+    // sh reads the quoted word back as the path itself.
+    if (process.platform !== 'win32') {
+      const echoed = execFileSync('sh', ['-c', `printf %s ${quoted}`], { encoding: 'utf8' });
+      expect(echoed).toBe(`${binDir}/tenjin`);
+    }
+  });
+
+  it('starts the server as the launcher and carries the launchers in bin/', () => {
+    expect(JSON.parse(files['tenjin/.mcp.json']!)).toEqual({
+      mcpServers: { router: { command: `${binDir}/tenjin`, args: ['mcp', '--harness', 'codex'] } },
+    });
+    expect(files['tenjin/bin/tenjin']).toBe(renderPluginBin(at('1.2.3').launch)['bin/tenjin']);
+    const plain = renderCodexHostFiles();
+    for (const path of ['.agents/plugins/marketplace.json', 'tenjin/.codex-plugin/plugin.json']) {
+      expect(files[path], path).toBe(plain[path]);
+    }
+  });
+
+  it('keeps the hooks and the server the same bytes from one version to the next', () => {
+    const next = renderCodexHostFiles(at('1.3.0'));
+    expect(next['tenjin/hooks/hooks.json']).toBe(files['tenjin/hooks/hooks.json']);
+    expect(next['tenjin/.mcp.json']).toBe(files['tenjin/.mcp.json']);
+    expect(next['tenjin/bin/tenjin']).not.toBe(files['tenjin/bin/tenjin']);
+  });
+
+  it('leaves the package render as it was', () => {
+    expect(codexHookCommand('prompt')).toBe('tenjin hook prompt --harness codex');
+    expect(Object.keys(renderCodexHostFiles()).some((p) => p.includes('/bin/'))).toBe(false);
+  });
+
+  describe('on win32', () => {
+    const home = 'C:\\Users\\Zoë Doe';
+    const win: CodexRuntime = {
+      launch: {
+        node: `${home}\\.tenjin\\runtime\\node\\24.0.0\\node.exe`,
+        entry: `${home}\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js`,
+        platform: 'win32',
+        home,
+      },
+      binDir: `${home}\\.tenjin\\runtime\\codex\\tenjin\\bin`,
+    };
+
+    it('gives cmd the .cmd launcher from %USERPROFILE%, and the server its absolute path', () => {
+      const rendered = renderCodexHostFiles(win);
+      const { hooks } = JSON.parse(rendered['tenjin/hooks/hooks.json']!) as {
+        hooks: Record<string, { hooks: { command: string; commandWindows?: string }[] }[]>;
+      };
+      expect(hooks.UserPromptSubmit![0]!.hooks[0]).toMatchObject({
+        command: `'C:/Users/Zoë Doe/.tenjin/runtime/codex/tenjin/bin/tenjin' hook prompt --harness codex`,
+        commandWindows:
+          '"%USERPROFILE%\\.tenjin\\runtime\\codex\\tenjin\\bin\\tenjin.cmd" hook prompt --harness codex',
+      });
+      for (const leg of [...hooks.PreToolUse!, ...hooks.PostToolUse!]) {
+        const windows = leg.hooks[0]!.commandWindows!;
+        expect(windows.split('"')).toHaveLength(3);
+        expect([...windows].every((c) => c.charCodeAt(0) < 0x80)).toBe(true);
+      }
+      expect(hooks.PermissionRequest).toEqual(renderCodexHooks().hooks.PermissionRequest);
+      expect(JSON.parse(rendered['tenjin/.mcp.json']!)).toEqual({
+        mcpServers: {
+          router: { command: `${win.binDir}\\tenjin.cmd`, args: ['mcp', '--harness', 'codex'] },
+        },
+      });
+      expect(rendered['tenjin/bin/tenjin.cmd']).toBe(renderPluginBin(win.launch)['bin/tenjin.cmd']);
+    });
+
+    it('refuses a launcher folder cmd cannot carry, as the .cmd launcher does', () => {
+      expect(() => renderCodexHooks({ ...win, binDir: `${home}\\é\\tenjin\\bin` })).toThrow();
+      expect(() => renderCodexHooks({ ...win, binDir: 'D:\\tenjin\\bin' })).toThrow();
+    });
   });
 });

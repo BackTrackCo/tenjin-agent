@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
+import { proxyNodeStep, proxySkipped } from '../lib/env-proxy';
 import { CliError } from '../lib/errors';
 import { MANAGERS, classifyManager, refuse, resolveManagerScript } from '../lib/install-location';
 import type { Delegable } from '../lib/install-location';
@@ -16,16 +18,29 @@ import {
   resolveTarget,
 } from '../lib/update-check';
 import { loadRawConfig } from '../lib/config';
-import { defaultDataDir } from '../lib/paths';
+import { defaultDataDir, runtimeDir } from '../lib/paths';
+import type { ensureNode, placeVersion, stageTarball } from '../lib/runtime';
 import type { CommandContext, CommandResult } from '../context';
 import { persistRouterProject } from './config';
 import { projectInstallAt } from '../router/install';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../router/mcp-processes';
 
 /**
- * `tenjin update`: replace this install with the newest version npm offers it,
- * by spawning the package manager that OWNS the install rather than
- * reimplementing one. Four invariants:
+ * `tenjin update`: move this machine to the newest version npm's `latest` tag
+ * names. Which way depends on whether Tenjin's runtime (`~/.tenjin/runtime`,
+ * the default data dir only) is here.
+ *
+ * THE RUNTIME BRANCH needs no npm. This OLD build downloads the release (the
+ * registry tarball, checked against its sha512, or a copy of itself when it IS
+ * that release), ensures the Node the release pins, and places it beside the
+ * current version. The NEW build, spawned on that Node as `install --refresh`,
+ * checks itself (`verifyBuild`), and only then switches the runtime to itself
+ * and registers it. The parent reads the switch back from `state.json`: a
+ * release that did not switch leaves the previous version current, and the
+ * update fails saying so. The parent holds no runtime lock while a child runs.
+ *
+ * THE NPM BRANCH is kept for an install with no runtime. It spawns the package
+ * manager that OWNS the install rather than reimplementing one:
  *
  * - The argv pins the EXACT version the registry just named, never the tag, so
  *   the check and the install cannot disagree about what ships, and the version
@@ -38,20 +53,31 @@ import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../rout
  *   at: a source checkout updates by git, an npx run has nothing installed to
  *   replace, a project-local copy updates where it is declared, and yarn's
  *   global install exists only in yarn 1. See lib/install-location.
- * - The child is a binary or `node <script>`, never a shell. That is what makes
- *   the pinned argv worth pinning, and it is the only form that works on win32.
  * - The manager's chatter goes to stderr (live, human mode only, sanitized) and
  *   its failure into the error envelope; stdout stays the one envelope every
  *   command emits.
+ *
+ * On both, every child is a binary or `node <script>`, never a shell. That is
+ * what makes a pinned argv worth pinning, and it is the only form that works on
+ * win32, where the runtime's child is its absolute `node.exe`.
  */
 
 /** How long the npm child gets before it is killed. npm's own retry budget runs
  *  into minutes, and an agent's turn should not hang on a wedged registry. */
 const INSTALL_TIMEOUT_MS = 300_000;
 
+/** How long the release's tarball, and the Node it pins, may take to download. */
+const STAGE_TIMEOUT_MS = 120_000;
+const NODE_TIMEOUT_MS = 300_000;
+
 export interface UpdateOptions {
   /** Report whether a newer version exists; never install. */
   check: boolean;
+  /**
+   * The detached run lib/auto-update starts: the runtime branch only, never
+   * npm, with how it ended recorded in `<runtime>/auto-update.json`.
+   */
+  background?: boolean;
 }
 
 /**
@@ -106,10 +132,11 @@ export interface UpdateDeps {
   /** The owning manager's entry script, or null when it has none to find.
    *  Injectable so the argv shape is asserted without depending on the runner. */
   managerScript?: string | null;
-  /** Home whose manual-fix command the report names. Defaults to os.homedir(). */
+  /** Home whose manual-fix command the report names, and whose `.tenjin` is the
+   *  default data dir the runtime belongs to. Defaults to os.homedir(). */
   homeDir?: string;
   /**
-   * The CLI entry the refresh child runs. Defaults to `process.argv[1]`, which
+   * The CLI entry the npm branch's refresh child runs. Defaults to `process.argv[1]`, which
    * after the swap resolves to the NEWLY installed script — that is the whole
    * point of spawning rather than calling.
    */
@@ -118,6 +145,14 @@ export interface UpdateDeps {
   listMcpProcesses?: ListMcpProcesses;
   /** When the new build was installed; tests inject it. */
   installedAt?: InstalledAt;
+  /** Tenjin's runtime folder; defaults to the one under the data dir. */
+  runtimeRoot?: string;
+  /** The runtime branch's download, Node and placement; tests inject them. */
+  stage?: typeof stageTarball;
+  ensure?: typeof ensureNode;
+  place?: typeof placeVersion;
+  /** Test seam; production asks this Node whether it can use the shell's proxy. */
+  proxySupported?: boolean;
 }
 
 interface UpdateData {
@@ -131,6 +166,51 @@ export async function runUpdate(
   opts: UpdateOptions,
   ctx: CommandContext,
   deps: UpdateDeps = {},
+): Promise<CommandResult> {
+  if (opts.background !== true) return update(opts, ctx, deps);
+  // THE BACKGROUND RUN records how it ended for doctor, then answers as any
+  // update does: its envelope goes to the log. Only where the runtime folder
+  // already is, so a run with no runtime creates nothing.
+  const root = deps.runtimeRoot ?? runtimeDir(ctx.dataDir);
+  const [{ recordAutoUpdate }, { readRuntimeState }] = await Promise.all([
+    import('../lib/auto-update'),
+    import('../lib/runtime-layout'),
+  ]);
+  const from = readRuntimeState(root)?.current.cli;
+  const record = (r: Parameters<typeof recordAutoUpdate>[1]): void => {
+    if (!existsSync(root)) return;
+    try {
+      recordAutoUpdate(root, { finishedAt: new Date().toISOString(), ...r });
+    } catch {
+      // The update itself is the result; a record that cannot be written is not.
+    }
+  };
+  try {
+    const result = await update(opts, ctx, deps);
+    const d = result.data as Partial<UpdateData> & { skipped?: string };
+    record(
+      d.skipped !== undefined
+        ? { outcome: 'skipped', reason: d.skipped }
+        : d.updated === true
+          ? { outcome: 'updated', from: d.current, to: d.latest }
+          : { outcome: 'current', from: d.current, to: d.current },
+    );
+    return result;
+  } catch (err) {
+    const reason = sanitizeForTerminal(err instanceof Error ? err.message : String(err)).trim();
+    record({
+      outcome: 'failed',
+      ...(from !== undefined ? { from } : {}),
+      reason: reason.slice(0, REASON_LIMIT),
+    });
+    throw err;
+  }
+}
+
+async function update(
+  opts: UpdateOptions,
+  ctx: CommandContext,
+  deps: UpdateDeps,
 ): Promise<CommandResult> {
   const current = deps.currentVersion ?? pkg.version;
   const channel = channelTag(current);
@@ -159,7 +239,19 @@ export async function runUpdate(
       fix: 'Check access to registry.npmjs.org and retry',
     });
   }
-  const latest = resolveTarget(current, tags);
+  // THE RUNTIME'S VERSION IS THE ONE THAT RUNS, so it is what the answer is
+  // about: an npm copy older than the runtime still moves the runtime forward,
+  // and "up to date" or `--check` speak of what Claude Code starts.
+  const runtime = await runtimeHere(ctx, deps, moduleDir);
+  // The background run never reaches npm: with no runtime it has nothing to do.
+  if (opts.background === true && runtime === null) {
+    return {
+      data: { skipped: 'no runtime' },
+      humanLines: ["Nothing to update in the background: Tenjin's runtime is not set up here."],
+    };
+  }
+  const base = runtime?.current ?? current;
+  const latest = resolveTarget(base, tags);
   // Not a NETWORK_ERROR: nothing about the connection is wrong, and telling the
   // user to check their access sends them after a fault that is not there.
   if (latest === null) {
@@ -178,9 +270,9 @@ export async function runUpdate(
         );
   }
 
-  const updateAvailable = isNewer(latest, current);
+  const updateAvailable = isNewer(latest, base);
   const data = (updated: boolean): UpdateData => ({
-    current,
+    current: base,
     latest,
     updateAvailable,
     updated,
@@ -189,18 +281,26 @@ export async function runUpdate(
   if (!updateAvailable) {
     return {
       data: data(false),
-      humanLines: [`tenjin-cli ${current} is up to date`],
+      humanLines: [`tenjin-cli ${base} is up to date`],
     };
   }
   if (opts.check) {
     return {
       data: data(false),
       humanLines: [
-        `tenjin-cli ${latest} is available (you have ${current}).`,
+        `tenjin-cli ${latest} is available (you have ${base}).`,
         'Run tenjin update to install it.',
       ],
     };
   }
+
+  // No manager below this line is asked, so none of the stage-2 refusals about
+  // how npm's copy was installed apply: an npx run updates the runtime too.
+  if (runtime !== null) {
+    return runtimeUpdate(ctx, deps, { ...runtime, base, latest, current, moduleDir, data });
+  }
+
+  await refuseRuntimeElsewhere(ctx, moduleDir, deps.homeDir ?? homedir());
 
   // `latest` is argv-safe here: isNewer returned true, so it matched VERSION_RE.
   const spec = `tenjin-cli@${latest}`;
@@ -269,17 +369,32 @@ export async function runUpdate(
     `tenjin update: replaced the global tenjin-cli with ${latest} via ${manager}`,
   );
 
-  const refresh = await refreshProfiles(ctx, deps);
-  // The refresh child's output is captured, so the warning it would print about
-  // a `tenjin mcp` still running the old build is checked again here, with the
-  // fix the child's migration state calls for.
+  const { refresh } = await refreshProfiles(ctx, deps, npmLaunch(deps));
+  return updated(deps, data(true), refresh, [`Updated tenjin-cli ${current} -> ${latest}.`]);
+}
+
+/**
+ * The report of an update that happened, on either branch. The refresh child's
+ * output is captured, so the warning it would print about a `tenjin mcp` still
+ * running the old build is checked again here, with the fix the child's
+ * migration state calls for. `version` is the build the runtime now runs: a
+ * router launched from the runtime is stale when it runs any other.
+ */
+async function updated(
+  deps: UpdateDeps,
+  data: UpdateData,
+  refresh: RefreshOutcome,
+  head: string[],
+  version?: string,
+): Promise<CommandResult> {
   const servers = await readMcpServers(deps, {
     settingsInstallPending: refresh.settingsInstallPending,
+    ...(version !== undefined ? { version } : {}),
   });
   return {
-    data: { ...data(true), refresh, mcpServer: servers.check },
+    data: { ...data, refresh, mcpServer: servers.check },
     humanLines: [
-      `Updated tenjin-cli ${current} -> ${latest}.`,
+      ...head,
       ...refreshLines(refresh),
       ...projectLines(refresh),
       ...refresh.notices,
@@ -288,6 +403,187 @@ export async function runUpdate(
         : []),
     ],
   };
+}
+
+/** Tenjin's runtime as this update sees it. */
+interface RuntimeHere {
+  root: string;
+  /** Its current version, or null when only this build's own location says it is one. */
+  current: string | null;
+  /** This build runs from the runtime itself. */
+  inRuntime: boolean;
+}
+
+/**
+ * The runtime to update, or null for the npm branch: the default data dir
+ * only (a QA profile keeps npm's layout), and only where a runtime state
+ * exists or this build runs from one. The runtime modules are imported
+ * lazily: `router/plugin-registration` imports this module, and it sits in the
+ * status line's chunk, which must not load them.
+ */
+async function runtimeHere(
+  ctx: CommandContext,
+  deps: UpdateDeps,
+  moduleDir: string,
+): Promise<RuntimeHere | null> {
+  if (resolve(ctx.dataDir) !== resolve(defaultDataDir(deps.homeDir ?? homedir()))) return null;
+  const { readRuntimeState, runtimeBuild } = await import('../lib/runtime-layout');
+  const root = deps.runtimeRoot ?? runtimeDir(ctx.dataDir);
+  const state = readRuntimeState(root);
+  const inRuntime = runtimeBuild(moduleDir) !== null;
+  if (state === null && !inRuntime) return null;
+  return { root, current: state?.current.cli ?? null, inRuntime };
+}
+
+/**
+ * A RUNTIME BUILD UNDER ANOTHER DATA DIR has no npm install to update: it is
+ * `~/.local/bin/tenjin` run with `TENJIN_DATA_DIR` set, and the runtime belongs
+ * to the default data dir alone. Said as that, before the npm branch's
+ * refusals would call it a project-local dependency.
+ */
+async function refuseRuntimeElsewhere(
+  ctx: CommandContext,
+  moduleDir: string,
+  home: string,
+): Promise<void> {
+  const { runtimeBuild } = await import('../lib/runtime-layout');
+  if (runtimeBuild(moduleDir) === null) return;
+  throw new CliError(
+    'REFUSED',
+    `This tenjin runs from Tenjin's runtime, which only the default data dir (${tilde(defaultDataDir(home), home)}) uses, and TENJIN_DATA_DIR is ${tilde(ctx.dataDir, home)}, so nothing was updated`,
+    {
+      fix: 'Run `tenjin update` with TENJIN_DATA_DIR unset: the runtime belongs to the default data dir. Another data dir runs on an npm copy, updated with `npm i -g tenjin-cli@latest`.',
+    },
+  );
+}
+
+/**
+ * THE RUNTIME BRANCH (see the header). Everything up to the spawn is this OLD
+ * build's: download, Node, placement, each under the runtime lock and released
+ * before the child starts. The switch is the NEW build's, so the verdict is read
+ * back from `state.json` rather than trusted from an exit code: a child that
+ * exits 0 having kept the previous version (its own checks failed) did not
+ * update anything.
+ */
+async function runtimeUpdate(
+  ctx: CommandContext,
+  deps: UpdateDeps,
+  o: RuntimeHere & {
+    base: string;
+    latest: string;
+    current: string;
+    moduleDir: string;
+    data: (updated: boolean) => UpdateData;
+  },
+): Promise<CommandResult> {
+  const { root, base, latest } = o;
+  const [rt, layout] = await Promise.all([
+    import('../lib/runtime'),
+    import('../lib/runtime-layout'),
+  ]);
+  const stays = `so ${base} stays`;
+
+  // An npm copy that IS the release copies itself: the bytes are already here
+  // and were installed by npm, with nothing to fetch. Anything else is fetched.
+  let stage: string;
+  if (latest === o.current && !o.inRuntime) {
+    const packageRoot = rt.packageRootOf(o.moduleDir);
+    if (packageRoot === null) {
+      throw new CliError(
+        'UPDATE_FAILED',
+        `tenjin-cli ${latest} cannot find its own package, ${stays}`,
+        {
+          fix: 'Run `npx -y tenjin-cli@latest install`.',
+        },
+      );
+    }
+    stage = await rt.stageSelf(root, packageRoot);
+  } else {
+    stage = await (deps.stage ?? rt.stageTarball)(root, latest, {
+      timeoutMs: STAGE_TIMEOUT_MS,
+      fetchImpl: deps.fetchImpl,
+    }).catch((err: unknown) => {
+      throw proxyNamed(err, deps);
+    });
+  }
+
+  let node: string;
+  try {
+    // The NEW version's pin, read as data from the package just checked.
+    const pin = rt.readNodePin(stage);
+    if (pin === null) {
+      throw new CliError('UPDATE_FAILED', `tenjin-cli ${latest} carries no Node pin, ${stays}`, {
+        fix: `Nothing to do: ${base} keeps running. Run \`tenjin update\` again after the next release.`,
+      });
+    }
+    node = await (deps.ensure ?? rt.ensureNode)(root, pin, {
+      timeoutMs: NODE_TIMEOUT_MS,
+      fetchImpl: deps.fetchImpl,
+    });
+    await (deps.place ?? rt.placeVersion)(root, stage, latest);
+  } catch (err) {
+    await rm(stage, { recursive: true, force: true }).catch(() => undefined);
+    throw proxyNamed(err, deps);
+  }
+  const home = deps.homeDir ?? homedir();
+  emitWriteNotice(ctx.io, `tenjin update: staged tenjin-cli ${latest} in ${tilde(root, home)}`);
+
+  const { refresh, homeTail } = await refreshProfiles(ctx, deps, {
+    node,
+    entry: layout.versionEntry(root, latest),
+  });
+  if (layout.readRuntimeState(root)?.current.cli !== latest) {
+    // `versions/<latest>` is left for the next collect(): nothing points at it.
+    throw new CliError('UPDATE_FAILED', `tenjin-cli ${latest} did not pass its checks, ${stays}`, {
+      fix: 'Run `tenjin update` again; if it fails again, run `tenjin doctor`',
+      details: {
+        reason:
+          refresh.failed[0]?.reason ??
+          runtimeReason(envelopeData(homeTail)) ??
+          'The new version did not switch the runtime to itself.',
+        output: homeTail.slice(-2000),
+      },
+    });
+  }
+  return updated(
+    deps,
+    o.data(true),
+    refresh,
+    [
+      `Updated tenjin-cli ${base} -> ${latest}.`,
+      `The previous version (${base}) stays as the fallback.`,
+    ],
+    latest,
+  );
+}
+
+/**
+ * A download in the runtime branch that failed on a Node which skips the
+ * shell's proxy (#470), said as that with the step that works: `tenjin update`
+ * again on the same Node fails the same way.
+ */
+function proxyNamed(err: unknown, deps: UpdateDeps): unknown {
+  if (!(err instanceof CliError) || err.code !== 'NETWORK_ERROR') return err;
+  const skipped = proxySkipped(process.env, deps.proxySupported);
+  if (skipped === null) return err;
+  const step = proxyNodeStep('tenjin update');
+  return new CliError('NETWORK_ERROR', `${err.message}: ${skipped}`, {
+    fix: `${step.charAt(0).toUpperCase()}${step.slice(1)}.`,
+    cause: err,
+  });
+}
+
+/** Why the child kept the previous runtime, from its `data.runtime.reason`. */
+function runtimeReason(data: Record<string, unknown> | null): string | undefined {
+  const reason = (data?.runtime as { reason?: unknown } | undefined)?.reason;
+  if (typeof reason !== 'string') return undefined;
+  const text = sanitizeForTerminal(reason).trim();
+  return text.length > 0 ? text.slice(0, REASON_LIMIT) : undefined;
+}
+
+/** `path` with the home folder written as `~`. */
+function tilde(path: string, home: string): string {
+  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
 /** How long one `install --refresh` child gets. Local file writes only, no
@@ -346,9 +642,11 @@ export interface RefreshOutcome {
  *
  * SPAWNED, NOT CALLED. This process is the OLD build; it cannot render the new
  * version's copies, and re-exec is the only way to reach code that can. The
- * child is the freshly installed entry, and what it runs is
+ * child is the freshly installed entry (`launch`: npm's, on this Node, or the
+ * runtime's new version, on the Node it pins), and what it runs is
  * `install --refresh` — a mode that converges existing surfaces and creates
- * none, which is the only kind of write an unattended upgrade may make.
+ * none but the runtime and its launcher, which is the only kind of write an
+ * unattended upgrade may make.
  *
  * ONCE PER HOOK-OWNER PROFILE. `install` bakes its data dir into the scripts it
  * generates, so a machine whose hooks were installed under `TENJIN_DATA_DIR`
@@ -372,7 +670,11 @@ export interface RefreshOutcome {
  * and its `error.message` reported per profile rather than collapsed into one
  * parent line.
  */
-async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<RefreshOutcome> {
+async function refreshProfiles(
+  ctx: CommandContext,
+  deps: UpdateDeps,
+  launch: ChildLaunch | null,
+): Promise<{ refresh: RefreshOutcome; homeTail: string }> {
   const home = deps.homeDir ?? homedir();
   // THE INVOKING PROFILE, AND ONLY IT. The pre-daemon installer baked its data
   // dir into eight generated scripts, so an upgrade had to find every profile
@@ -395,21 +697,22 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
     else unrun.push({ dataDir, reason: 'It is not a directory.', fix: fixFor(dataDir) });
   }
 
-  const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
-  // Nothing safe to re-exec: no argv (an embedder, a stripped argv), or a path
-  // that names the version being replaced (see versionFreeEntry). Report the
-  // profiles as unrefreshed rather than guessing, since guessing is how a hook
-  // script gets rewritten by the wrong binary — and a refresh that ran the OLD
-  // build would report success while writing the bytes the update just left.
-  if (entry === null) {
+  // Nothing safe to re-exec (see npmLaunch): report the profiles as
+  // unrefreshed rather than guessing, since guessing is how a hook script gets
+  // rewritten by the wrong binary — and a refresh that ran the OLD build would
+  // report success while writing the bytes the update just left.
+  if (launch === null) {
     const reason = 'This build has no entry the update could safely re-execute.';
     return {
-      profiles: [],
-      failed: candidates.map((d) => ({ dataDir: d, reason, fix: fixFor(d) })),
-      notices: [],
-      settingsInstallPending: false,
-      projects: [],
-      projectsFailed: [],
+      refresh: {
+        profiles: [],
+        failed: candidates.map((d) => ({ dataDir: d, reason, fix: fixFor(d) })),
+        notices: [],
+        settingsInstallPending: false,
+        projects: [],
+        projectsFailed: [],
+      },
+      homeTail: '',
     };
   }
 
@@ -423,8 +726,10 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
       settingsInstallPending = true;
     }
   };
+  let homeTail = '';
   for (const dataDir of profiles) {
-    const { outcome, tail } = await refreshChild(entry, homedir(), dataDir, deps);
+    const { outcome, tail } = await refreshChild(launch, homedir(), dataDir, deps);
+    homeTail = tail;
     // The child's exit code IS the verdict: `install --refresh` exits non-zero
     // when it refused or found nothing to converge, so a machine that never ran
     // `install` warns here instead of being told its hooks were refreshed. The
@@ -453,7 +758,7 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
       await forget();
       continue;
     }
-    const { outcome, tail } = await refreshChild(entry, project, ctx.dataDir, deps, ['--project']);
+    const { outcome, tail } = await refreshChild(launch, project, ctx.dataDir, deps, ['--project']);
     if (outcome.kind !== 'exit' || outcome.code !== 0) {
       projectsFailed.push({
         project,
@@ -465,12 +770,32 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
     projects.push(project);
     heard(envelopeData(tail));
   }
-  return { profiles, failed, notices, settingsInstallPending, projects, projectsFailed };
+  return {
+    refresh: { profiles, failed, notices, settingsInstallPending, projects, projectsFailed },
+    homeTail,
+  };
+}
+
+/** The new build a refresh child runs: its Node and its entry script. */
+interface ChildLaunch {
+  node: string;
+  entry: string;
+}
+
+/**
+ * The npm branch's child: the version-free entry npm just replaced, on this
+ * Node. Null when there is no argv to re-exec (an embedder, a stripped argv),
+ * or only a path that names the version being replaced (see versionFreeEntry).
+ */
+function npmLaunch(deps: UpdateDeps): ChildLaunch | null {
+  const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
+  return entry === null ? null : { node: process.execPath, entry };
 }
 
 /**
  * One `install --refresh` child of the new build, from `cwd`, for `dataDir`:
- * how it ended and the end of what it printed.
+ * how it ended and the end of what it printed. Spawned as `<node> <entry>` by
+ * absolute path, never through a shell or a `.cmd`.
  *
  * A BOUNDED COLLECTOR, not the manager's live echo. npm's chatter is minutes
  * of progress a human wants to see; this child emits one envelope on a pipe,
@@ -478,7 +803,7 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
  * because the envelope is where the child says WHICH refusal this was.
  */
 async function refreshChild(
-  entry: string,
+  launch: ChildLaunch,
   cwd: string,
   dataDir: string,
   deps: UpdateDeps,
@@ -486,8 +811,8 @@ async function refreshChild(
 ): Promise<{ outcome: SpawnResult; tail: string }> {
   let tail = '';
   const outcome = await (deps.spawnImpl ?? spawnCapture)(
-    process.execPath,
-    [entry, 'install', '--refresh', ...flags],
+    launch.node,
+    [launch.entry, 'install', '--refresh', ...flags],
     {
       cwd,
       timeoutMs: REFRESH_TIMEOUT_MS,

@@ -127,7 +127,8 @@ export async function admitPlan(
  * `approve` call, which reaches this process only after the host's own
  * prompt put it to a person; nothing on disk says anyone approved anything.
  * The wallet must still hold the total: a short wallet leaves the quote open,
- * for the user to fund and approve again.
+ * for the user to fund and approve again. The caller opens the wallet first,
+ * so a wallet that will not open leaves the quote open, as a short one does.
  */
 export async function admitQuote(
   dataDir: string,
