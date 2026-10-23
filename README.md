@@ -41,10 +41,10 @@ With Tenjin, you install once and keep working. The router suggests the right to
 Paste this into Claude Code:
 
 ```text
-Install Tenjin using https://tenjin.sh/llms.txt. Ask me once to confirm downloading and running its official installer.
+Install Tenjin from tenjin.sh
 ```
 
-Your agent confirms installation, handles setup, and asks about spending limits and adding funds. Follow its final activation instruction, then continue your task.
+Your install request gives the agent permission to handle setup. It briefly explains task-context sharing before activation and asks about spending limits and adding funds. Follow its final activation instruction, then continue your task.
 
 Or from a terminal (Node and npm are not required):
 
