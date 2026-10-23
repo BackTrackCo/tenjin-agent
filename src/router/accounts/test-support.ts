@@ -74,6 +74,9 @@ export interface FakeAccountServerOptions {
   revocation?: boolean;
   /** The `initialize` with no credential answers this instead of 401. */
   openStatus?: number;
+  /** How a refresh grant is answered: new tokens (the default), a grant the
+   *  server will never take again, or a server error. */
+  refresh?: 'ok' | 'invalid_grant' | 'server_error';
 }
 
 /**
@@ -87,6 +90,8 @@ export function fakeAccountServer(opts: FakeAccountServerOptions): {
   fetchImpl: typeof fetch;
   seen: SeenRequest[];
   approvals: URL[];
+  /** The refresh token each refresh grant sent, in order. */
+  refreshes: string[];
   browser: (url: string) => Promise<boolean>;
   decline: (url: string) => Promise<boolean>;
 } {
@@ -95,6 +100,7 @@ export function fakeAccountServer(opts: FakeAccountServerOptions): {
   const prm = `${mcp.origin}/.well-known/oauth-protected-resource${mcp.pathname === '/' ? '' : mcp.pathname}`;
   const seen: SeenRequest[] = [];
   const approvals: URL[] = [];
+  const refreshes: string[] = [];
   const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), {
       status,
@@ -146,6 +152,18 @@ export function fakeAccountServer(opts: FakeAccountServerOptions): {
     }
     if (url === `${issuer}/token` && method === 'POST') {
       const form = new URLSearchParams(body ?? '');
+      if (form.get('grant_type') === 'refresh_token') {
+        refreshes.push(form.get('refresh_token') ?? '');
+        if (opts.refresh === 'invalid_grant') return json(400, { error: 'invalid_grant' });
+        if (opts.refresh === 'server_error') return json(503, { error: 'temporarily_unavailable' });
+        const n = refreshes.length + 1;
+        return json(200, {
+          access_token: `access-${n}`,
+          refresh_token: `refresh-${n}`,
+          token_type: 'Bearer',
+          expires_in: 3600,
+        });
+      }
       if (form.get('grant_type') !== 'authorization_code' || form.get('code') !== 'code-1')
         return json(400, { error: 'invalid_grant' });
       if ((form.get('code_verifier') ?? '').length < 43)
@@ -176,6 +194,7 @@ export function fakeAccountServer(opts: FakeAccountServerOptions): {
     fetchImpl,
     seen,
     approvals,
+    refreshes,
     browser: (url) => redirectFrom(url, 'code=code-1'),
     decline: (url) => redirectFrom(url, 'error=access_denied'),
   };
