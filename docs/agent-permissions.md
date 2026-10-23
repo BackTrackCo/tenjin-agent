@@ -83,7 +83,7 @@ Bash(tenjin config prefer:*)
 
 ## Your own accounts
 
-`tenjin connect <name>` connects your own account at a provider, such as Apify, fal or Firecrawl, or any MCP server by its https address. Tenjin then uses it for the jobs it has checked there, first when you said so (connecting says so unless you pass `--no-prefer`), and your own plan pays: those calls don't count toward `maxAutoSpend` or the daily budget, which cap your Tenjin balance only. An address Tenjin has no map for runs only when you ask for it by name, with a warning that Tenjin hasn't checked it.
+`tenjin connect <name>` connects your own account at a provider, such as Apify, fal or Firecrawl, or any MCP server by its https address. Tenjin then uses it for the jobs it has checked there, first when you said so (connecting says so unless you pass `--no-prefer`), and your own plan pays: those calls don't count toward `maxAutoSpend` or the daily budget, which cap your Tenjin balance only. An address Tenjin has no map for runs only when you ask for it by name, with a warning that Tenjin hasn't checked it; `tenjin connect <name> --request-support` sends Tenjin only its address, as a request to support it, when you say yes.
 
 ```bash
 tenjin connect apify                               # approve the sign-in in your browser

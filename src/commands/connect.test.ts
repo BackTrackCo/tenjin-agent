@@ -512,10 +512,13 @@ describe('tenjin connect', () => {
       makeCtx(),
       deps({ fetchImpl: network(), openSession: mcp.open, env: { EX_KEY: 'ex-1' } }),
     );
-    expect(lines(result).slice(0, 3)).toEqual([
+    // Nothing is sent to Tenjin (the network answers only the directory),
+    // and asking it to support the service is offered, for the user's yes.
+    expect(lines(result).slice(0, 4)).toEqual([
       "Connected mcp.example.test on this machine. Tenjin doesn't know this service's jobs yet, so it won't pick it on its own. Ask for it by name and Tenjin will run it.",
       'Calls on your mcp.example.test account are billed to your own plan, not counted in the limit on your Tenjin balance.',
       'Nothing about this service was sent to Tenjin.',
+      'Want Tenjin to support mcp.example.test? Only if you say yes, `tenjin connect mcp-example-test --request-support` sends Tenjin its address and nothing else.',
     ]);
     expect(data(result)).toMatchObject({
       account: { id: 'mcp-example-test', mapped: false, preference: 'skipped' },
@@ -544,6 +547,100 @@ describe('tenjin connect', () => {
         (await caught(() => runConnect(bad, {}, makeCtx(), deps({ fetchImpl: network() })))).code,
       ).toBe('USAGE');
     }
+  });
+
+  /**
+   * THE OPT-IN THE READBACK OFFERS: one request to Tenjin's feedback drop with
+   * the address in a fixed sentence and nothing else, connecting nothing. A
+   * service Tenjin already knows sends nothing at all.
+   */
+  describe('--request-support', () => {
+    const EXAMPLE = {
+      id: 'mcp-example-test',
+      label: 'mcp.example.test',
+      mcpUrl: 'https://mcp.example.test/mcp',
+      signIn: 'key',
+      keyScheme: 'Bearer',
+    };
+    function feedback(status = 201) {
+      const sent: { url: string; init: RequestInit | undefined }[] = [];
+      const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        sent.push({ url: String(input), init });
+        return new Response(JSON.stringify({ id: 'f-1' }), { status });
+      }) as typeof fetch;
+      return { fetchImpl, sent };
+    }
+    beforeEach(async () => {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ router: { sources: [EXAMPLE] } }));
+      await writeFile(join(dir, 'router-directory.json'), JSON.stringify(DIRECTORY.directory));
+    });
+
+    it.each([
+      ['an account connected by its address', 'mcp-example-test', EXAMPLE.mcpUrl],
+      ['an address', 'https://tools.example.test/mcp', 'https://tools.example.test/mcp'],
+    ])('sends Tenjin only the address of %s, and connects nothing', async (_, target, address) => {
+      const before = await readFile(join(dir, 'config.json'), 'utf8');
+      const { fetchImpl, sent } = feedback();
+      const result = await runConnect(
+        target,
+        { requestSupport: true },
+        makeCtx(),
+        deps({ fetchImpl }),
+      );
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.url).toBe('https://router.example.test/api/feedback');
+      expect(sent[0]?.init?.method).toBe('POST');
+      expect(sent[0]?.init?.headers).toEqual({ 'content-type': 'application/json' });
+      expect(JSON.parse(String(sent[0]?.init?.body))).toEqual({
+        category: 'idea',
+        message: `Request to support an MCP service in Tenjin: ${address}`,
+      });
+      const host = new URL(address).hostname;
+      expect(lines(result)).toEqual([
+        `Sent Tenjin ${host}'s address as a request to support it. Nothing else was sent: no sign-in, no key and nothing about your account.`,
+      ]);
+      expect(data(result)).toEqual({ operation: 'request-support', sent: true, address });
+      expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
+      expect(keychain.entries.size).toBe(0);
+    });
+
+    it.each([
+      ['by name', 'apify'],
+      ['by address', 'https://mcp.apify.com'],
+    ])('sends nothing for a service Tenjin already knows, %s', async (_, target) => {
+      const { fetchImpl, sent } = feedback();
+      const result = await runConnect(
+        target,
+        { requestSupport: true },
+        makeCtx(),
+        deps({ fetchImpl }),
+      );
+      expect(sent).toEqual([]);
+      expect(lines(result)).toEqual([
+        'Tenjin already knows Apify, so nothing was sent. `tenjin connect apify` connects it with the jobs Tenjin has for it.',
+      ]);
+    });
+
+    it('takes no other option, and says so when Tenjin does not take it', async () => {
+      const { fetchImpl, sent } = feedback(503);
+      for (const flags of [{ paste: true }, { fromEnv: 'X' }, { prefer: false }]) {
+        const error = await caught(() =>
+          runConnect(
+            'mcp-example-test',
+            { ...flags, requestSupport: true },
+            makeCtx(),
+            deps({ fetchImpl }),
+          ),
+        );
+        expect(error.code).toBe('USAGE');
+      }
+      expect(sent).toEqual([]);
+      const error = await caught(() =>
+        runConnect('mcp-example-test', { requestSupport: true }, makeCtx(), deps({ fetchImpl })),
+      );
+      expect(error.code).toBe('NETWORK_ERROR');
+      expect(sent).toHaveLength(1);
+    });
   });
 
   it('names what it can connect when a name is unknown', async () => {

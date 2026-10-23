@@ -153,14 +153,24 @@ Examples:
   $ tenjin connect firecrawl --from-env FIRECRAWL_API_KEY
   $ tenjin connect apify --no-prefer
   $ tenjin connect https://mcp.example.com/mcp
+  $ tenjin connect mcp-example-com --request-support
 `,
     )
     .option('--paste', 'type or paste a key at a hidden prompt (needs your own terminal)')
     .option('--from-env <var>', 'read the key from this environment variable, once')
     .option('--no-prefer', 'connect without putting this account first for its jobs')
+    .option(
+      '--request-support',
+      "connect nothing; send Tenjin only the address of a service it doesn't know yet, as a request to support it (only on the user's yes)",
+    )
     .action(async function (this: Command, name: string) {
       await runCommand('connect', this, async (ctx) => {
-        const opts = this.opts() as { paste?: boolean; fromEnv?: string; prefer?: boolean };
+        const opts = this.opts() as {
+          paste?: boolean;
+          fromEnv?: string;
+          prefer?: boolean;
+          requestSupport?: boolean;
+        };
         const { runConnect } = await import('../commands/connect');
         return runConnect(name, opts, ctx);
       });

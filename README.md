@@ -150,7 +150,7 @@ Connect your own Apify, fal or Firecrawl account, and Tenjin uses it first for t
 - You approve the sign-in in your browser. Where no browser can open, run `tenjin connect <name> --paste` in your own terminal and type the key at its hidden prompt. Never paste a key into a chat.
 - The sign-in stays encrypted on this machine, with its key in your OS keychain.
 - When your account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops, says why, and offers its own tool for the job with its price.
-- Any MCP server connects by its address: `tenjin connect https://mcp.example.com/mcp`. Tenjin runs it only when you ask for it by name, and says it hasn't checked it.
+- Any MCP server connects by its address: `tenjin connect https://mcp.example.com/mcp`. Tenjin runs it only when you ask for it by name, and says it hasn't checked it. Only if you say yes, `--request-support` sends Tenjin its address as a request to support it, and nothing else.
 
 ## Commands
 
