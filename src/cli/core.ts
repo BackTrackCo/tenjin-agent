@@ -112,7 +112,7 @@ Learn more:
 
   leaf(SETUP, 'doctor', 'check this machine can run a lookup')
     .description(
-      "Check everything a lookup needs, for each agent `tenjin install` set up. For Claude Code: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, the wallet, and the router endpoint answering its 402. For Codex: Codex's hook list for the plugin and its hook trust. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails.",
+      "Check everything a lookup needs, for each agent `tenjin install` set up. For Claude Code: the Node floor, Claude Code's version, the Tenjin plugin and its router server, any settings install an earlier release left, the spend limits, whether the wallet can sign without a prompt, as the router Claude Code is running sees it when one is live, and the router endpoint answering its 402. For Codex: Codex's hook list for the plugin and its hook trust. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails; a check it cannot answer is a warning, never ok.",
     )
     .addOption(hostOverride())
     .option('--project', 'check the project-only install, as --project registered it')
@@ -212,7 +212,7 @@ Examples:
   const wallet = leaf(
     WALLET,
     'wallet',
-    'create, show, fund and send from the local wallet',
+    'create, show, fund, repair and send from the local wallet',
   ).description(
     'Manage the local x402 payment wallet used for paid reads and publishing. The private key is generated on this machine, stored encrypted, and never printed.',
   );
@@ -225,11 +225,34 @@ Examples:
       '--replace',
       'archive the existing wallet beside the new one, passphrase preserved, then create a new active wallet',
     )
+    .option(
+      '--insecure-storage',
+      'save the passphrase to a file only you can read, even where an OS keychain exists',
+    )
     .action(async function (this: Command) {
       await runCommand('wallet.create', this, async (ctx) => {
         const o = this.opts();
         const { runWalletCreate } = await import('../commands/wallet');
-        return runWalletCreate(ctx, o.replace === true ? { replace: true } : {});
+        return runWalletCreate(ctx, {
+          ...(o.replace === true ? { replace: true } : {}),
+          ...(o.insecureStorage === true ? { insecureStorage: true } : {}),
+        });
+      });
+    });
+  addGlobalFlags(wallet.command('repair'))
+    .summary('save the wallet passphrase so Claude Code can unlock it')
+    .description(
+      'For a wallet Claude Code cannot unlock. Asks for the passphrase at the terminal (or uses TENJIN_WALLET_PASSPHRASE when that opens the wallet), checks it opens this wallet (the address does not change), saves it in the OS keychain, or in a file only you can read where there is none, and names a TENJIN_WALLET_PASSPHRASE in this shell that conflicts with it. Restart Claude Code afterwards: the next session confirms the unlock.',
+    )
+    .option(
+      '--insecure-storage',
+      'save the passphrase to a file only you can read, even where an OS keychain exists',
+    )
+    .action(async function (this: Command) {
+      await runCommand('wallet.repair', this, async (ctx) => {
+        const o = this.opts();
+        const { runWalletRepair } = await import('../commands/wallet');
+        return runWalletRepair(ctx, o.insecureStorage === true ? { insecureStorage: true } : {});
       });
     });
   addGlobalFlags(wallet.command('show'))

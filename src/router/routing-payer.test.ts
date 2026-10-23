@@ -8,18 +8,24 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliError } from '../lib/errors';
 import type { SpendPolicy } from '../lib/policy';
+import type { TenjinSigner } from '../lib/wallet/provider';
 import { readSpendSummary } from '../lib/wallet/spend';
+import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
 import { CHANNEL_DEPOSIT_ATOMIC, payerDir, ROUTING_FEE_ATOMIC } from './fee';
-import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
+import { BASE, FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
+import { WALLET_REASONS } from './wallet-reasons';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
+  FREE_PATH_RESERVE_MS,
   RoutingPayer,
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
+  SIGNER_RECHECK_MS,
+  type PayerObservation,
   type RoutingPayerDeps,
 } from './routing-payer';
 
@@ -132,6 +138,15 @@ function tookFreePath(outcome: Awaited<ReturnType<typeof routeOnce>>, router: Fa
 
 async function channelFiles(): Promise<string[]> {
   return (await readdir(join(payerDir(dir, wallet.address), 'client')).catch(() => [])).sort();
+}
+
+/** A getSigner that fails the way the wallet layer classifies it: a CliError carrying `details.unlock`. */
+function unlockFails(reason: UnlockReason): () => Promise<never> {
+  return async () => {
+    throw new CliError('REFUSED', `the wallet cannot sign (${reason})`, {
+      details: unlockDetails(reason),
+    });
+  };
 }
 
 describe('RoutingPayer', () => {
@@ -565,14 +580,36 @@ describe('RoutingPayer', () => {
     ]);
   });
 
-  it('pays nothing when the wallet cannot be unlocked', async () => {
+  it('pays nothing when the wallet cannot be unlocked, and an unclassified failure is wallet_locked', async () => {
     const router = new FakeRouter();
+    const warned: string[] = [];
     const p = payer(router, {
       getSigner: async () => {
         throw new Error('passphrase needed');
       },
+      warn: (line) => warned.push(line),
     });
     expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_locked');
+    expect(router.paidRequests()).toBe(0);
+    // The error's own message is still the one diagnostic line.
+    expect(warned.join('\n')).toContain('passphrase needed');
+    // The fallback is unknown, never a block.
+    expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'wallet_locked' });
+  });
+
+  it.each<UnlockReason>([
+    'no_wallet',
+    'wallet_corrupt',
+    'env_key_invalid',
+    'passphrase_missing',
+    'passphrase_wrong',
+    'env_passphrase_wrong',
+    'keychain_locked',
+    'unlock_timeout',
+  ])('skips with the classified reason when the unlock fails with %s', async (reason) => {
+    const router = new FakeRouter();
+    const p = payer(router, { getSigner: unlockFails(reason) });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe(reason);
     expect(router.paidRequests()).toBe(0);
   });
 
@@ -761,4 +798,251 @@ describe('RoutingPayer and the call budget', () => {
       await new Promise((resolve) => server.close(resolve));
     }
   }, 4_000);
+});
+
+describe('RoutingPayer and the wallet verdict', () => {
+  /** One call on its own budget, in real time. */
+  async function callWith(p: RoutingPayer, router: FakeRouter, timeoutMs: number) {
+    const route = (await p.routeFor(BASE))!;
+    return requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs, route },
+    );
+  }
+
+  /** The paid-path requests the router saw since `from`. */
+  const paidPathSince = (router: FakeRouter, from: number) =>
+    router.log.slice(from).filter((l) => l.startsWith('POST /api/x402-router/route'));
+
+  it('stops waiting for an unlock that never answers at the call deadline', async () => {
+    const router = new FakeRouter();
+    const getSigner = vi.fn(() => new Promise<TenjinSigner>(() => undefined));
+    const p = payer(router, { now: () => Date.now(), getSigner });
+    const started = Date.now();
+    expect(unpaidWhy(await callWith(p, router, 300))).toBe('unlock_timeout');
+    expect(Date.now() - started).toBeLessThan(300 + 400);
+    expect(router.paidRequests()).toBe(0);
+    // Still running, so nothing is known yet: never a block.
+    expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'not_checked' });
+  });
+
+  it('leaves the free path its share of the budget while an unlock never answers', async () => {
+    const router = new FakeRouter();
+    const getSigner = vi.fn(() => new Promise<TenjinSigner>(() => undefined));
+    const p = payer(router, { now: () => Date.now(), getSigner });
+    void p.prewarm();
+    const started = Date.now();
+    const outcome = await callWith(p, router, FREE_PATH_RESERVE_MS + 300);
+    expect(tookFreePath(outcome, router)).toBe('unlock_timeout');
+    expect(Date.now() - started).toBeLessThan(FREE_PATH_RESERVE_MS + 300);
+    expect(getSigner).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs one unlock for the prewarm and every call waiting on it', async () => {
+    const router = new FakeRouter();
+    const getSigner = vi.fn(() => new Promise<TenjinSigner>(() => undefined));
+    const p = payer(router, { now: () => Date.now(), getSigner });
+    void p.prewarm();
+    const outcomes = await Promise.all([callWith(p, router, 300), callWith(p, router, 300)]);
+    expect(outcomes.map(unpaidWhy)).toContain('unlock_timeout');
+    expect(getSigner).toHaveBeenCalledTimes(1);
+  });
+
+  it('never cancels an unlock the call stopped waiting for, and the next call signs with it (B3)', async () => {
+    const router = new FakeRouter();
+    let answer!: (signer: TenjinSigner) => void;
+    const getSigner = vi.fn(
+      () =>
+        new Promise<TenjinSigner>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const p = payer(router, { now: () => Date.now(), getSigner });
+    expect(unpaidWhy(await callWith(p, router, 200))).toBe('unlock_timeout');
+    // The person answers the unlock dialog after the call took the free path.
+    answer(testSigner(wallet));
+    await vi.waitFor(() => expect(p.signVerdict().status).toBe('ready'));
+    const next = await callWith(p, router, 3_500);
+    expect(next.status).toBe('decided');
+    expect(unpaidWhy(next)).toBeUndefined();
+    expect(router.settledFees).toBe(1);
+    // One unlock in all, handed no abort signal or anything else to cancel it by.
+    expect(getSigner).toHaveBeenCalledTimes(1);
+    expect(getSigner).toHaveBeenCalledWith();
+  });
+
+  it('remembers a definite block: no unlock and no request until the wallet changes or a minute passes', async () => {
+    const router = new FakeRouter();
+    let stamp = '1:1';
+    let unlocks = 0;
+    const fail = unlockFails('passphrase_wrong');
+    const p = payer(router, {
+      getSigner: () => ((unlocks += 1), fail()),
+      unlockStamp: async () => stamp,
+    });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(unlocks).toBe(1);
+
+    // After the 402 and the block: nothing is sent on the paid path, nothing unlocked.
+    let from = router.log.length;
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(paidPathSince(router, from)).toEqual([]);
+    expect(unlocks).toBe(1);
+    clock += SIGNER_RECHECK_MS - 1;
+    from = router.log.length;
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(paidPathSince(router, from)).toEqual([]);
+    expect(unlocks).toBe(1);
+
+    // A repair rewrites the sidecar: the next call checks again at once.
+    stamp = '1:2';
+    from = router.log.length;
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
+    expect(unlocks).toBe(2);
+
+    // A minute later, too.
+    clock += SIGNER_RECHECK_MS;
+    from = router.log.length;
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
+    expect(unlocks).toBe(3);
+  });
+
+  it('stops reporting a definite block a minute on, and unlocks again with no call asking', async () => {
+    const router = new FakeRouter();
+    let created = false;
+    const fail = unlockFails('no_wallet');
+    const getSigner = vi.fn(() => (created ? Promise.resolve(testSigner(wallet)) : fail()));
+    const p = payer(router, { getSigner });
+    await p.prewarm();
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'no_wallet' });
+    // `tenjin wallet create` mid-session, and no routing call ever asks for the fee.
+    created = true;
+    clock += SIGNER_RECHECK_MS - 1;
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'no_wallet' });
+    clock += 1;
+    // Stale: it gates nothing while the unlock it started runs.
+    expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'not_checked' });
+    await vi.waitFor(() => expect(p.signVerdict()).toEqual({ status: 'ready' }));
+    expect(getSigner).toHaveBeenCalledTimes(2);
+    expect(router.log).toEqual([]);
+  });
+
+  it('unlocks again at once when the wallet changes under a definite block', async () => {
+    const router = new FakeRouter();
+    let stamp = '1:1';
+    let repaired = false;
+    const fail = unlockFails('passphrase_wrong');
+    const getSigner = vi.fn(() => (repaired ? Promise.resolve(testSigner(wallet)) : fail()));
+    const p = payer(router, { getSigner, unlockStamp: async () => stamp });
+    await p.prewarm();
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'passphrase_wrong' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(getSigner).toHaveBeenCalledTimes(1);
+    repaired = true;
+    stamp = '1:2';
+    p.signVerdict();
+    await vi.waitFor(() => expect(p.signVerdict()).toEqual({ status: 'ready' }));
+    expect(getSigner).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks the server first while this process has seen no 402, even over a known block', async () => {
+    const router = new FakeRouter();
+    let unlocks = 0;
+    const fail = unlockFails('passphrase_missing');
+    const p = payer(router, { getSigner: () => ((unlocks += 1), fail()) });
+    await p.prewarm();
+    expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'passphrase_missing' });
+    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_missing');
+    expect(router.log[0]).toBe('POST /api/x402-router/route unpaid');
+    // The 402 met the memo: the block skipped the unlock, not the request.
+    expect(unlocks).toBe(1);
+  });
+
+  it.each<UnlockReason>(['keychain_locked', 'unlock_timeout'])(
+    'never short-circuits on %s: every call asks and unlocks again',
+    async (reason) => {
+      const router = new FakeRouter();
+      let unlocks = 0;
+      const fail = unlockFails(reason);
+      const p = payer(router, { getSigner: () => ((unlocks += 1), fail()) });
+      for (let n = 1; n <= 3; n += 1) {
+        const from = router.log.length;
+        expect(tookFreePath(await routeOnce(p, router), router)).toBe(reason);
+        expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
+        expect(unlocks).toBe(n);
+      }
+      expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason });
+    },
+  );
+
+  it('sets the sign verdict from the prewarm, and reports it with the address', async () => {
+    const router = new FakeRouter();
+    const seen: PayerObservation[] = [];
+    const p = payer(router, { observe: (u) => seen.push(u) });
+    expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'not_checked' });
+    await p.prewarm();
+    expect(p.signVerdict()).toEqual({ status: 'ready' });
+    expect(seen).toEqual([{ sign: { status: 'ready' }, address: wallet.address.toLowerCase() }]);
+    // Nothing was asked of the server.
+    expect(router.log).toEqual([]);
+  });
+
+  it('reports each sign and routing verdict once, when it changes', async () => {
+    const router = new FakeRouter();
+    const seen: PayerObservation[] = [];
+    let stamp = '1:1';
+    let broken = true;
+    const fail = unlockFails('passphrase_wrong');
+    const p = payer(router, {
+      getSigner: () => (broken ? fail() : Promise.resolve(testSigner(wallet))),
+      unlockStamp: async () => stamp,
+      observe: (u) => seen.push(u),
+    });
+    const r = WALLET_REASONS.passphrase_wrong;
+    await routeOnce(p, router);
+    expect(seen).toEqual([
+      { sign: { status: 'blocked', reason: 'passphrase_wrong', detail: r.reason, fix: r.fix } },
+      { routing: { status: 'blocked', reason: 'passphrase_wrong', at: clock } },
+    ]);
+    // A repeat from the memo, and a re-check that says the same: nothing new.
+    await routeOnce(p, router);
+    clock += SIGNER_RECHECK_MS;
+    await routeOnce(p, router);
+    expect(seen).toHaveLength(2);
+
+    // Repaired: the wallet signs, and the fee is paid.
+    broken = false;
+    stamp = '1:2';
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(seen.slice(2)).toEqual([
+      { sign: { status: 'ready' }, address: wallet.address.toLowerCase() },
+      { routing: { status: 'ready', at: clock } },
+    ]);
+    await routeOnce(p, router);
+    expect(seen).toHaveLength(4);
+  });
+
+  it('reports a money refusal as blocked and a failed payment as unknown, and contention not at all', async () => {
+    const low = new FakeRouter();
+    const lowSeen: PayerObservation[] = [];
+    await routeOnce(payer(low, { walletAtomic: 100_000n, observe: (u) => lowSeen.push(u) }), low);
+    expect(lowSeen.map((u) => u.routing).filter(Boolean)).toEqual([
+      { status: 'blocked', reason: 'wallet_low', at: clock },
+    ]);
+
+    const greedy = new FakeRouter({ amount: '30000' });
+    const greedySeen: PayerObservation[] = [];
+    await routeOnce(payer(greedy, { observe: (u) => greedySeen.push(u) }), greedy);
+    expect(greedySeen.map((u) => u.routing).filter(Boolean)).toEqual([
+      { status: 'unknown', reason: 'payment_failed', at: clock },
+    ]);
+
+    const absent = new FakeRouter({ paid: false });
+    const absentSeen: PayerObservation[] = [];
+    await routeOnce(payer(absent, { observe: (u) => absentSeen.push(u) }), absent);
+    expect(absentSeen).toEqual([]);
+  });
 });

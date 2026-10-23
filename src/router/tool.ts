@@ -68,6 +68,7 @@ import {
 } from './plan';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { clearRouterMemo } from './router-memo';
+import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
@@ -633,7 +634,7 @@ async function requestTool(
       'native',
       fresh.why === DEADLINE_AFTER_PAYMENT_SENT
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
-        : `${unpaidSentence(fresh.why) ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
+        : `${unpaidSentence(fresh.why, 'agent') ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
       { nextStep: 'Use your own tools for this one.' },
     );
   }
@@ -654,7 +655,7 @@ async function requestTool(
     await footer.done('native');
     return fail(
       'native',
-      unpaidSentence(fresh.freePath ?? FEE_REQUIRED) ?? unpaidSentence(FEE_REQUIRED)!,
+      unpaidSentence(fresh.freePath ?? FEE_REQUIRED, 'agent') ?? unpaidSentence(FEE_REQUIRED)!,
       { nextStep: 'Tell the user this once, and use your own tools for now.' },
     );
   }
@@ -1468,7 +1469,7 @@ async function payAndDeliver(
       : rejectedInput
         ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
         : cli !== undefined
-          ? `${cli.message} ${cli.fix ?? ''}`.trim()
+          ? `${cli.message} ${agentFixOf(cli)}`.trim()
           : String(err);
     await footer.done(status, {
       provider: built.url,

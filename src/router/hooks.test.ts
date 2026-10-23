@@ -16,6 +16,7 @@ import {
   runPromptHook,
   runShortfallHook,
   shortfallOf,
+  spendShortfall,
   toolNamed,
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
@@ -30,6 +31,9 @@ import {
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
+import type { SignVerdict } from './eligibility';
+import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
+import { writePassphraseRecord } from '../lib/passphrase-record';
 import { FALLBACK_RPC_URLS } from '../lib/usdc-balance';
 import type { PrefetchJob } from './augment';
 
@@ -1260,7 +1264,9 @@ describe('a wallet that cannot cover the lookup', () => {
     expect(rpcCalls).toHaveLength(0);
   });
 
-  it('reads nothing, and leaves the policy to decide, with no wallet file', async () => {
+  /** No wallet file and no key is a wallet that definitely cannot sign: the
+   *  free call runs rather than a redirect to a call that cannot pay. */
+  it('withholds, and reads nothing, with no wallet file and no key', async () => {
     const fs = await import('node:fs/promises');
     await fs.rm(join(dir, 'wallet.json'));
     const { fetchImpl } = router(EXECUTE);
@@ -1268,8 +1274,10 @@ describe('a wallet that cannot cover the lookup', () => {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
+      env: {},
     });
-    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toContain('native tools (wallet cannot sign)');
     expect(rpcCalls).toHaveLength(0);
   });
 
@@ -1286,6 +1294,226 @@ describe('a wallet that cannot cover the lookup', () => {
     });
     expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
     expect(rpcCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * A WALLET THAT DEFINITELY CANNOT SIGN withholds every offer, a discovered one
+ * where the user could be asked included (Q3): approval cannot unlock a wallet
+ * mid-session. An unknown signer still offers: only `blocked` gates.
+ */
+describe('a wallet that cannot sign', () => {
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string } };
+  const blocked: SignVerdict = {
+    status: 'blocked',
+    reason: 'passphrase_missing',
+    detail: WALLET_REASONS.passphrase_missing.reason,
+    fix: WALLET_REASONS.passphrase_missing.fix,
+  };
+  const unknown: SignVerdict = {
+    status: 'unknown',
+    reason: 'keychain_locked',
+    detail: 'the keychain holding the passphrase did not answer',
+  };
+
+  it("withholds a curated offer on the payer's blocked verdict, and the footer says why", async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toContain('native tools (wallet cannot sign)');
+    // A blocked signer is never asked for its balance.
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  it('withholds a discovered offer too, though the user could be asked', async () => {
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
+  });
+
+  /** Approving an over-cap call cannot unlock the wallet either: the blocked
+   *  signer wins over the policy's `needs_approval`. */
+  it('withholds a discovered offer priced over the cap too, and shows it on an unknown verdict', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '50000', confirm: 'above:50000' }),
+    );
+    const terms = { providerPriceAtomic: '53501', endpoint: 'https://example.test/spec' };
+    expect(
+      await spendShortfall(
+        terms,
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+        Date.now() + 3_000,
+      ),
+    ).toMatchObject({ withheld: 'wallet cannot sign', signBlocked: true });
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
+
+    expect(
+      await spendShortfall(
+        terms,
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => unknown },
+        Date.now() + 3_000,
+      ),
+    ).toMatchObject({ withheld: 'offer needs approval' });
+    const shown = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(shown).toMatchObject({ action: 'discovered', id: DISCOVERED.decision.id });
+    expect(JSON.stringify(shown.response)).toContain('needs_approval');
+  });
+
+  it('offers on an unknown verdict', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    const discovered = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(discovered).toMatchObject({ action: 'discovered', id: DISCOVERED.decision.id });
+    expect(discovered.response).not.toBeNull();
+  });
+
+  /** S13: the sidecar names the file store and its file is gone. Without the
+   *  variable nothing can open the wallet; with it, the variable is a source. */
+  it('withholds when the saved passphrase file is gone and the variable is unset, and offers when it is set', async () => {
+    await writePassphraseRecord(dir, WALLET, { store: 'file', by: 'create' });
+    const without = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      env: {},
+    });
+    expect(without).toMatchObject({ response: null, withheld: true });
+    const withVar = await runNativeHook(await preCall('https://example.test/spec2'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      env: { TENJIN_WALLET_PASSPHRASE: 'set-but-unchecked' },
+    });
+    expect(withVar.response).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
+  });
+
+  /** A free call pays nothing: no wallet at all (`--no-wallet`), or one that
+   *  cannot sign, never withholds it, on any leg. */
+  it('offers a free curated call with no wallet, on the prompt and delegation legs', async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(join(dir, 'wallet.json'));
+    const FREE = { ...EXECUTE, decision: { ...EXECUTE.decision, providerPriceAtomic: '0' } };
+    expect(
+      await spendShortfall(
+        { providerPriceAtomic: '0', endpoint: 'https://example.test/spec' },
+        { dataDir: dir, baseUrl: BASE, env: {} },
+        Date.now() + 3_000,
+      ),
+    ).toBeNull();
+    expect(
+      await spendShortfall(
+        { providerPriceAtomic: '0', endpoint: 'https://example.test/spec' },
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+        Date.now() + 3_000,
+      ),
+    ).toBeNull();
+    const prompt = await runPromptHook(promptEvent('what does the next.js matcher do'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(FREE).fetchImpl,
+      env: {},
+    });
+    expect(prompt).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
+    expect(prompt.response).not.toBeNull();
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'Read the spec.' } },
+    ]);
+    const task = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: {
+          description: 'read the spec',
+          prompt: 'Read https://example.test/spec and summarize the auth section.',
+          subagent_type: 'general-purpose',
+        },
+      },
+      {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(FREE).fetchImpl,
+        env: {},
+        signer: () => blocked,
+      },
+    );
+    expect(task).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
+    expect(task.response).not.toBeNull();
+  });
+
+  /** The note rides in a hook's `additionalContext`, so its reader is the
+   *  model: it asks the person to repair, and never names the variable (B1). */
+  it("words a blocked signer's note for the model", async () => {
+    const shortfall = await spendShortfall(
+      { providerPriceAtomic: '15000', endpoint: 'https://example.test/spec' },
+      { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+      Date.now() + 3_000,
+    );
+    expect(shortfall).toEqual({
+      withheld: 'wallet cannot sign',
+      note: `Note: Tenjin's wallet cannot pay for this (${WALLET_REASONS.passphrase_missing.reason}); ${ASK_FOR_REPAIR}`,
+      signBlocked: true,
+    });
+    expect(shortfall!.note).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+    expect(shortfall!.note).not.toContain(REPAIR_CLAUSE);
+  });
+
+  it('words a malformed key from the files alone, for the model', async () => {
+    const shortfall = await spendShortfall(
+      { providerPriceAtomic: '15000', endpoint: 'https://example.test/spec' },
+      { dataDir: dir, baseUrl: BASE, env: { TENJIN_WALLET_KEY: '0xnotakey' } },
+      Date.now() + 3_000,
+    );
+    expect(shortfall).toMatchObject({ withheld: 'wallet cannot sign', signBlocked: true });
+    expect(shortfall!.note).toContain(WALLET_REASONS.env_key_invalid.agentFix);
   });
 });
 

@@ -70,9 +70,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
+import type { WalletDeps } from './install-wallet';
 import type { InstallDeps, PromptHarnessesFn, PromptPublishModeFn } from './install';
 import type { PublishMode } from '../lib/config';
-import type { ExecFn } from '../lib/wallet/passphrase';
+import { StoreExecError, type ExecFn } from '../lib/wallet/passphrase';
 import {
   PACKAGED_SKILL_NAMES,
   resolveSkillsSource,
@@ -189,6 +190,11 @@ interface HookEntry {
   hooks: { type: string; url?: string; command?: string; timeout?: number }[];
 }
 
+/** The wallet step's signing seam: a wallet the keychain unlocks. */
+const SIGNING_SEAM: Pick<WalletDeps, 'walletSigning'> = {
+  walletSigning: async () => ({ signing: { status: 'ready', source: 'keychain' } }),
+};
+
 /** The address the stubbed creator reports; never a real key. */
 const STUB_ADDRESS = '0x00000000000000000000000000000000deadbeef';
 
@@ -230,9 +236,12 @@ function fakeKeychain(): { exec: ExecFn; entries: Map<string, string> } {
     }
     if (args[0] === 'find-generic-password') {
       const value = entries.get(args[args.indexOf('-a') + 1] as string);
-      if (value === undefined) throw new Error('could not be found');
+      // `security`'s "no such item" exit, which the store reads as a miss.
+      if (value === undefined) throw new StoreExecError('security', { code: 44 });
       return { stdout: `${value}\n`, stderr: '' };
     }
+    // Create probes the store before it encrypts anything.
+    if (args[0] === 'default-keychain') return { stdout: '"login.keychain-db"\n', stderr: '' };
     throw new Error(`unexpected security call: ${args.join(' ')}`);
   };
   return { exec, entries };
@@ -281,6 +290,10 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // decision-specific tests override them.
     walletExists: async () => false,
     confirmWallet: async () => false,
+    // A wallet the keychain unlocks: the signing check would otherwise verify
+    // a wallet the stubbed creator never wrote. The wallet step reads it from
+    // these deps; the legacy InstallDeps type does not name it.
+    ...SIGNING_SEAM,
     // Stubbed by default so the ~140 tests that are not about the wallet do not
     // each pay for a real scrypt key derivation. The wallet tests below opt into
     // the real creator with `realWalletCreate()`, which still goes through the
@@ -3446,6 +3459,7 @@ describe('runInstall: harness hooks', () => {
     expect((res.data as { wallet: { status: string; address?: string } }).wallet).toEqual({
       status: 'created',
       address: STUB_ADDRESS,
+      signing: { status: 'ready', source: 'keychain' },
     });
     const hooks = (res.data as HooksData).hooks;
     expect(hooks.find((h) => h.harness === 'claude')).toMatchObject({ entries: 11 });
@@ -3518,7 +3532,11 @@ describe('runInstall: the wallet decision is visible even when it is skipped', (
   // The loop this command sets up needs a key, so the headless path creates one.
   it('a machine run creates a wallet and reports its address', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    expect(walletOf(res.data)).toEqual({ status: 'created', address: STUB_ADDRESS });
+    expect(walletOf(res.data)).toEqual({
+      status: 'created',
+      address: STUB_ADDRESS,
+      signing: { status: 'ready', source: 'keychain' },
+    });
   });
 
   it('a dry run creates nothing and says why', async () => {
@@ -3599,7 +3617,7 @@ describe('runInstall: wallet creation is the default', () => {
   // to steer this is what made it flake under the parallel runner, and the
   // passphrase layer already takes its env as an argument.
   it(
-    'uses TENJIN_WALLET_PASSPHRASE when it is set, touching no store at all',
+    'uses TENJIN_WALLET_PASSPHRASE when it is set, and creates even when no store can save it',
     async () => {
       const touched: string[] = [];
       const spyExec: ExecFn = async (file, args) => {
@@ -3614,9 +3632,14 @@ describe('runInstall: wallet creation is the default', () => {
           env: { TENJIN_WALLET_PASSPHRASE: 'a-passphrase-the-operator-supplied' },
         }),
       );
-      expect(walletOf(res.data).status).toBe('created');
-      // The env value settles it, so no credential store is consulted at all.
-      expect(touched).toEqual([]);
+      // The env value is the secret, so the wallet is created; Q2 saves it
+      // durably too, and with no store answering it is said not durable.
+      expect(walletOf(res.data)).toMatchObject({
+        status: 'created',
+        passphrase: { store: 'env', durable: false },
+        shellOnly: 'passphrase',
+      });
+      expect(touched.every((t) => t.startsWith('security '))).toBe(true);
     },
     SCRYPT_TIMEOUT_MS,
   );
@@ -3641,21 +3664,33 @@ describe('runInstall: wallet creation is the default', () => {
     SCRYPT_TIMEOUT_MS,
   );
 
-  // The one case with no safe answer. No plaintext fallback exists, by design.
-  it('creates nothing and skips LOUDLY with no store and no env passphrase', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx({ json: true }),
-      deps(realWalletCreate(noKeychain)),
-    );
-    const wallet = walletOf(res.data);
-    expect(wallet).toMatchObject({ status: 'skipped', reason: 'no-passphrase-store' });
-    expect(wallet.address).toBeUndefined();
-    // Both remedies are named, and neither is "we wrote it to a file".
-    expect(wallet.fix).toContain('TENJIN_WALLET_PASSPHRASE');
-    expect(wallet.fix).toContain('tenjin wallet create');
-    expect(existsSync(join(data, 'wallet.json'))).toBe(false);
-  });
+  // A machine with no OS store (headless Linux, no Secret Service) saves the
+  // passphrase to the 0600 file, as the GitHub CLI does, and creates the wallet.
+  it(
+    'creates the wallet with its passphrase in the 0600 file where there is no store',
+    async () => {
+      const res = await runInstall(
+        { harness: ['claude'] },
+        makeCtx({ json: true }),
+        deps({
+          createWallet: undefined,
+          walletPassphrase: {
+            platform: 'linux',
+            isTTY: false,
+            exec: async (file) => {
+              throw new StoreExecError(file, { code: 'ENOENT', enoent: true });
+            },
+          },
+        }),
+      );
+      expect(walletOf(res.data)).toMatchObject({
+        status: 'created',
+        passphrase: { store: 'file', durable: true },
+      });
+      expect(existsSync(join(data, 'wallet.json'))).toBe(true);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
 
   it('still succeeds, and still wires everything else, when the wallet is skipped', async () => {
     const res = await runInstall(

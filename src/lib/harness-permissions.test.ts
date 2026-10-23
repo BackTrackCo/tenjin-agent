@@ -265,6 +265,12 @@ describe('FREE_VERB_RULES: what the writer is allowed to write', () => {
     }
   });
 
+  // `repair` saves the passphrase a person types; neither tier may ever carry it.
+  it('names tenjin wallet repair on both forbidden-fragment rails', () => {
+    expect(FORBIDDEN_VERB_FRAGMENTS).toContain('tenjin wallet repair');
+    expect(MODE_GATED_FORBIDDEN_FRAGMENTS).toContain('tenjin wallet repair');
+  });
+
   it('is never a broad wildcard over the whole CLI', () => {
     expect(FREE_VERB_RULES).not.toContain('Bash(tenjin:*)');
     expect(FREE_VERB_RULES.every((r) => r.startsWith('Bash(tenjin '))).toBe(true);

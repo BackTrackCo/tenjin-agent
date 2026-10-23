@@ -9,6 +9,8 @@ export interface RouterCheck {
   required: boolean;
   detail: string;
   fix?: string;
+  /** false only when the check could not run: rendered warn, never ok, never counted "to act on". */
+  checked?: false;
 }
 
 /**

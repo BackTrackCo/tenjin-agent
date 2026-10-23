@@ -12,6 +12,7 @@ import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/ht
 import type { SpendPolicy } from '../lib/policy';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
+import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
 import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
   CHANNEL_BUSY,
@@ -22,7 +23,7 @@ import {
   RouteSkipped,
   type DecisionRoute,
 } from './decision';
-import { CliError } from '../lib/errors';
+import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
@@ -34,6 +35,8 @@ import {
   ROUTING_FEE_ATOMIC,
 } from './fee';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
+import type { RouterObservation } from './router-observation';
+import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
@@ -80,11 +83,33 @@ import { readRouterMemo, writeRouterMemo } from './router-memo';
  *   unlock and no notice; it is remembered in the machine's `router-memo`
  *   for an hour, or until the free path answers `fee_required`, so each call
  *   is not a wasted round trip.
+ * - A WALLET THAT CANNOT SIGN skips with its classified reason
+ *   (`classifyUnlockError`): a definite one (no wallet, a wrong or missing
+ *   passphrase, a corrupt file) or an unknown one (a keychain that did not
+ *   answer, an unlock still running at the call's deadline, an unclassified
+ *   failure). A definite block is remembered for {@link SIGNER_RECHECK_MS}, or
+ *   until `wallet.json` or the passphrase sidecar changes, so a known-wrong
+ *   passphrase costs no scrypt on every prompt; once this process has seen
+ *   the server ask for the fee, the call is not even sent. An unknown answer
+ *   is never remembered as a block: the next call tries again.
+ * - THE UNLOCK IS ONE FLIGHT, BOUNDED IN ITS WAIT, NEVER IN ITS READ. Every
+ *   caller (and the prewarm) awaits the same unlock, each only up to its own
+ *   call's budget less the free path's reserve (`unlock_timeout`), so the
+ *   call still routes unpaid. Nothing here aborts the unlock or the
+ *   store read under it, so an OS unlock dialog stays up, and whatever it
+ *   answers is the next call's (B3).
  *
  * Left upstream, as cent-level papercuts: the SDK exports `ErrChannelBusy`
  * only from its server entry, and its fetch wrapper rewraps a hook's error as
  * a plain `Error`, so the reason rides on the call instead.
  */
+
+/** The sign verdict before any unlock has settled, or while one runs over a stale block. */
+const NOT_CHECKED: SignVerdict = {
+  status: 'unknown',
+  reason: 'not_checked',
+  detail: UNKNOWN_DETAIL['not_checked']!,
+};
 
 /**
  * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
@@ -103,6 +128,18 @@ export const DETACHED_CEILING_MS = 15_000;
 
 /** A server that answers no paid path is asked again after an hour. */
 const ABSENT_TTL_MS = 60 * 60_000;
+/**
+ * HOW LONG A DEFINITE SIGN BLOCK IS BELIEVED without unlocking again, unless
+ * the wallet file or the passphrase sidecar changes first (`unlockStamp`): a
+ * `tenjin wallet repair` is picked up at once, anything else within a minute.
+ */
+export const SIGNER_RECHECK_MS = 60_000;
+/**
+ * THE FREE PATH'S SHARE OF A CALL'S BUDGET: a call waiting on an unlock stops
+ * waiting this long before its budget ends, so the unpaid route still fits
+ * in what is left (an unknown verdict never skips a routing attempt).
+ */
+export const FREE_PATH_RESERVE_MS = 1_000;
 /** The wallet balance read before a deposit, inside the caller's budget.
  *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
 export const BALANCE_TIMEOUT_MS = 1_000;
@@ -149,7 +186,48 @@ export interface RoutingPayerDeps {
   /** The timer functions the payer arms; the globals unless a test injects its own. */
   timers?: Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'>;
   warn?: (line: string) => void;
+  /** Called only when the sign or routing verdict changes (status+reason). */
+  observe?: (u: PayerObservation) => void;
+  /** wallet.json + sidecar mtimes (`unlockStamp(readWalletFacts(...))`); a change re-checks a memoized block at once. */
+  unlockStamp?: () => Promise<string>;
 }
+
+/**
+ * WHAT THE PAYER LEARNED, for `tenjin mcp`'s live observation (P4): the
+ * latest sign verdict (with the address once one unlocked) and the latest
+ * routing outcome. Never a passphrase, a key or a store's output.
+ */
+export interface PayerObservation {
+  sign?: RouterObservation['sign'];
+  routing?: RouterObservation['routing'];
+  address?: string;
+}
+
+/** The last settled unlock's verdict, when it settled, and the stamp it saw. */
+interface SignMemo {
+  verdict: SignVerdict;
+  at: number;
+  stamp: string | null;
+  address?: string;
+}
+
+/** Money and policy refusals that are definite until a person acts. */
+const ROUTING_BLOCKED: ReadonlySet<string> = new Set([
+  'wallet_low',
+  'limit_below_deposit',
+  'budget_reached',
+  'not_allowlisted',
+]);
+
+/** Skips that say nothing about whether routing can pay: contention, a server
+ *  with no paid path, a payment already out, a callback outside a call. */
+const ROUTING_SILENT: ReadonlySet<string> = new Set([
+  CHANNEL_BUSY,
+  PAID_PATH_ABSENT,
+  'busy',
+  DEADLINE_AFTER_PAYMENT_SENT,
+  'no_call',
+]);
 
 interface Channel {
   payer: `0x${string}`;
@@ -215,8 +293,56 @@ export class RoutingPayer {
   private queue: Promise<unknown> = Promise.resolve();
   /** A detached request still finishing; the next call waits for it. */
   private tail: Promise<void> = Promise.resolve();
+  /** The one unlock in flight, which every caller and the prewarm await. */
+  private unlocking: Promise<TenjinSigner> | null = null;
+  /** Calls waiting on `unlocking` right now (the prewarm is not one). */
+  private waiters = 0;
+  /** A signer an unlock settled with after every call waiting on it gave up:
+   *  the next call signs with it rather than unlocking again (B3). */
+  private handoff: TenjinSigner | null = null;
+  /** The last settled unlock's verdict (decision 16). */
+  private memo: SignMemo | null = null;
+  /** When this process last saw the server ask for the fee. */
+  private paidPathSeenAt: number | null = null;
+  /** The sign and routing verdicts last reported to `observe`, as status:reason. */
+  private reported: { sign?: string; routing?: string } = {};
 
   constructor(private readonly deps: RoutingPayerDeps) {}
+
+  /**
+   * THE UNLOCK, ahead of any call: `tenjin mcp` starts it when it starts, so
+   * the first prompt finds a verdict (and usually a signer) waiting. The same
+   * single flight as a call's, with no budget; its answer goes to the memo and
+   * to `observe`, and nothing else. Never rejects.
+   */
+  async prewarm(): Promise<void> {
+    await this.unlock().catch(() => undefined);
+  }
+
+  /**
+   * What the last settled unlock said, with no waiting; unknown `not_checked`
+   * before any. A definite block is believed only as the pay path believes it
+   * (decision 16): within {@link SIGNER_RECHECK_MS}, with no unlock running
+   * and nothing it was read from changed. Past that it reads unknown, which
+   * gates nothing, and an unlock starts in the background, so a wallet created
+   * or repaired mid-session is picked up although no call asks for the fee.
+   * The stamp is read in the background too: a change starts the unlock, and
+   * the next caller reads its answer.
+   */
+  signVerdict(): SignVerdict {
+    const memo = this.memo;
+    if (memo === null) return NOT_CHECKED;
+    if (!isDefiniteBlock(memo.verdict)) return memo.verdict;
+    if (this.unlocking !== null) return NOT_CHECKED;
+    if (this.now() - memo.at >= SIGNER_RECHECK_MS) {
+      void this.prewarm();
+      return NOT_CHECKED;
+    }
+    void this.stamp().then((stamp) => {
+      if (this.memo === memo && stamp !== memo.stamp) void this.prewarm();
+    });
+    return memo.verdict;
+  }
 
   /**
    * The paid path for one call, or null for the free path for an hour after
@@ -302,6 +428,7 @@ export class RoutingPayer {
       // Set by `run`, which the narrowing above cannot see.
       const call = this.last as Call | null;
       if (err instanceof RouteSkipped && call?.detached !== true) this.note(err.why, call, sent);
+      if (err instanceof RouteSkipped) this.reportRouting(err.why);
       throw err;
     }
   }
@@ -431,6 +558,18 @@ export class RoutingPayer {
     };
     // The route's own record, which its `deposited` reads once the call ends.
     calls.push(call);
+    // A WALLET KNOWN NOT TO SIGN, ON A SERVER KNOWN TO CHARGE: the 402 is
+    // certain and nothing could answer it, so nothing is sent. Before this
+    // process has seen a 402, the server is asked first as always (a fee that
+    // is off costs no unlock), and an unknown verdict never gets here.
+    if (this.paidPathSeenAt !== null && this.now() - this.paidPathSeenAt < ABSENT_TTL_MS) {
+      const blocked = await this.freshBlock();
+      if (blocked !== null) {
+        this.last = call;
+        call.skipped = blocked.reason;
+        throw new RouteSkipped(blocked.reason);
+      }
+    }
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
@@ -441,12 +580,13 @@ export class RoutingPayer {
       let asked: Response | undefined = await base(request.clone(), { signal });
       call.answered = true;
       if (asked.status !== 402) return asked;
+      this.paidPathSeenAt = this.now();
       try {
         // Each fee gets the per-payment checks (`feeRefusal`) before the
         // wallet is even unlocked, a voucher from a funded channel included.
         const refused = feeRefusal(await this.deps.policy(), call.host);
         if (refused !== null) throw new RouteSkipped(refused);
-        call.channel = this.channelFor(await this.signer());
+        call.channel = this.channelFor(await this.signer(call));
         if (until - this.now() <= 0) throw new RouteSkipped('busy');
       } catch (err) {
         if (err instanceof RouteSkipped) call.skipped = err.why;
@@ -520,6 +660,9 @@ export class RoutingPayer {
       );
     }
     if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED);
+    // A fee paid and answered: routing works, whatever was said before.
+    if (call.paid && response.status < 400)
+      this.report({ routing: { status: 'ready', at: this.now() } });
     return response;
   }
 
@@ -598,17 +741,41 @@ export class RoutingPayer {
   }
 
   /**
-   * THE WALLET, unlocked without a prompt. One that cannot be (no passphrase
-   * in the environment or the OS credential store) pays nothing.
+   * THE WALLET, unlocked without a prompt, for `call`. One that cannot be pays
+   * nothing, and the call skips with WHY, as `classifyUnlockError` names it: a
+   * definite reason (`no_wallet`, `passphrase_wrong`, ...), `keychain_locked`,
+   * `unlock_timeout`, or `wallet_locked` for a failure nobody classified.
+   *
+   * A definite block the memo still believes skips before any unlock
+   * ({@link freshBlock}). Otherwise the call joins the one unlock in flight
+   * (or starts it) and waits for it only until {@link FREE_PATH_RESERVE_MS}
+   * before its own budget ends, then skips with `unlock_timeout`, leaving the
+   * free path its time. THE BUDGET BOUNDS THE WAIT, NEVER THE READ
+   * (B3): the unlock runs on, unaborted, its store read under no deadline, so
+   * an OS unlock dialog stays up; its answer lands in the memo, and a signer
+   * nobody was left waiting for is the next call's.
+   *
+   * The warned line is the classified error's message, which never carries a
+   * store's output (S2).
    */
-  private async signer(): Promise<ClientEvmSigner> {
+  private async signer(call: Call): Promise<ClientEvmSigner> {
+    const blocked = await this.freshBlock();
+    if (blocked !== null) throw new RouteSkipped(blocked.reason);
     let signer: TenjinSigner;
-    try {
-      signer = await this.deps.getSigner();
-    } catch (err) {
-      this.warn(err instanceof Error ? err.message : String(err));
-      const missing = err instanceof CliError && err.code === 'WALLET_MISSING';
-      throw new RouteSkipped(missing ? 'no_wallet' : 'wallet_locked');
+    const held = this.handoff;
+    this.handoff = null;
+    if (held !== null && (await this.freshReady())) signer = held;
+    else {
+      this.waiters += 1;
+      try {
+        signer = await this.waitFor(this.unlock(), call.until - FREE_PATH_RESERVE_MS);
+      } catch (err) {
+        if (err instanceof RouteSkipped) throw err;
+        this.warn(err instanceof Error ? err.message : String(err));
+        throw new RouteSkipped(classifyUnlockError(err).reason);
+      } finally {
+        this.waiters -= 1;
+      }
     }
     return toClientEvmSigner(
       {
@@ -624,6 +791,129 @@ export class RoutingPayer {
         ? { readContract: (args) => this.chainRead(this.deps.readContract!, args) }
         : undefined,
     );
+  }
+
+  /**
+   * THE ONE UNLOCK IN FLIGHT, joined or started. Its settlement, whoever is
+   * still waiting, sets the memo (with the stamp read as it started, so a
+   * repair that lands mid-unlock still reads as a change) and reports the
+   * sign verdict, and clears the flight. A success no call is waiting for is
+   * kept for the next call. Nothing here can abort it.
+   */
+  private unlock(): Promise<TenjinSigner> {
+    if (this.unlocking !== null) return this.unlocking;
+    const stamp = this.stamp();
+    const flight = (async () => {
+      try {
+        const signer = await this.deps.getSigner();
+        const address = signer.address.toLowerCase();
+        this.settle({ status: 'ready' }, await stamp, address);
+        if (this.waiters === 0) this.handoff = signer;
+        return signer;
+      } catch (err) {
+        this.settle(verdictOf(err), await stamp);
+        throw err;
+      } finally {
+        this.unlocking = null;
+      }
+    })();
+    // A flight every waiter gave up on still settles; its rejection is the memo's.
+    flight.catch(() => undefined);
+    this.unlocking = flight;
+    return flight;
+  }
+
+  /** `unlock` raced against `until`: `unlock_timeout` when the budget ends
+   *  first, and the unlock is left running. */
+  private async waitFor(unlock: Promise<TenjinSigner>, until: number): Promise<TenjinSigner> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = this.timers.setTimeout(
+        () => reject(new RouteSkipped('unlock_timeout')),
+        Math.max(0, until - this.now()),
+      );
+    });
+    try {
+      return await Promise.race([unlock, deadline]);
+    } finally {
+      this.timers.clearTimeout(timer);
+    }
+  }
+
+  /** The memo, set from a settled unlock, and its verdict reported. */
+  private settle(verdict: SignVerdict, stamp: string | null, address?: string): void {
+    this.memo = {
+      verdict,
+      at: this.now(),
+      stamp,
+      ...(address !== undefined ? { address } : {}),
+    };
+    this.report({ sign: signObservation(verdict), ...(address !== undefined ? { address } : {}) });
+  }
+
+  /** The wallet's unlock stamp, or null when there is none to read. */
+  private async stamp(): Promise<string | null> {
+    try {
+      return (await this.deps.unlockStamp?.()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether the memo was set within {@link SIGNER_RECHECK_MS} and nothing it
+   *  was read from has changed since. */
+  private async freshMemo(memo: SignMemo): Promise<boolean> {
+    return this.now() - memo.at < SIGNER_RECHECK_MS && (await this.stamp()) === memo.stamp;
+  }
+
+  /** The memo's definite block while it is fresh; null otherwise, an unknown
+   *  verdict always (decision 16: only a definite block may skip anything). */
+  private async freshBlock(): Promise<Extract<SignVerdict, { status: 'blocked' }> | null> {
+    const memo = this.memo;
+    if (memo === null || !isDefiniteBlock(memo.verdict)) return null;
+    return (await this.freshMemo(memo)) ? memo.verdict : null;
+  }
+
+  /** Whether the memo is a fresh ready, so a handed-off signer is still this wallet's. */
+  private async freshReady(): Promise<boolean> {
+    const memo = this.memo;
+    return memo !== null && memo.verdict.status === 'ready' && (await this.freshMemo(memo));
+  }
+
+  /** A routing outcome, reported when it says something (see {@link ROUTING_SILENT}). */
+  private reportRouting(why: string): void {
+    if (ROUTING_SILENT.has(why)) return;
+    const blocked = DEFINITE_UNLOCK.has(why as UnlockReason) || ROUTING_BLOCKED.has(why);
+    this.report({
+      routing: { status: blocked ? 'blocked' : 'unknown', reason: why, at: this.now() },
+    });
+  }
+
+  /** `deps.observe`, with only the parts whose status or reason changed; not
+   *  called at all on a repeat. An observer that throws is ignored. */
+  private report(u: PayerObservation): void {
+    const out: PayerObservation = {};
+    if (u.sign !== undefined) {
+      const key = `${u.sign.status}:${u.sign.reason ?? ''}`;
+      if (key !== this.reported.sign) {
+        this.reported.sign = key;
+        out.sign = u.sign;
+        if (u.address !== undefined) out.address = u.address;
+      }
+    }
+    if (u.routing !== undefined) {
+      const key = `${u.routing.status}:${u.routing.reason ?? ''}`;
+      if (key !== this.reported.routing) {
+        this.reported.routing = key;
+        out.routing = u.routing;
+      }
+    }
+    if (out.sign === undefined && out.routing === undefined) return;
+    try {
+      this.deps.observe?.(out);
+    } catch {
+      // Advisory: an observation never fails a call.
+    }
   }
 
   /**
@@ -690,6 +980,36 @@ function bounded(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+/**
+ * A failed unlock as a sign verdict: a definite reason is blocked, worded from
+ * WALLET_REASONS with the PERSON fix (model-facing callers swap in
+ * `agentFixFor`, decision 15); anything else is unknown. Never the error's own
+ * message, which may predate B1.
+ */
+function verdictOf(err: unknown): SignVerdict {
+  const c = classifyUnlockError(err);
+  if (c.definite && c.reason !== 'wallet_locked' && c.reason !== 'unlock_timeout') {
+    const r = WALLET_REASONS[c.reason];
+    return { status: 'blocked', reason: c.reason, detail: r.reason, fix: r.fix };
+  }
+  return {
+    status: 'unknown',
+    reason: c.reason,
+    detail: UNKNOWN_DETAIL[c.reason] ?? UNKNOWN_DETAIL['check_failed']!,
+  };
+}
+
+/** A sign verdict in the live observation's shape. */
+function signObservation(v: SignVerdict): RouterObservation['sign'] {
+  if (v.status === 'ready') {
+    return { status: 'ready', ...(v.source !== undefined ? { source: v.source } : {}) };
+  }
+  if (v.status === 'blocked') {
+    return { status: 'blocked', reason: v.reason, detail: v.detail, fix: v.fix };
+  }
+  return { status: 'unknown', reason: v.reason, detail: v.detail };
 }
 
 /** The `error` a 402's payment-required header carries, if any. */

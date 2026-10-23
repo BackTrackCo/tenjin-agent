@@ -29,6 +29,7 @@ import {
 } from './hook-tool';
 import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
+import { createRouterObserver, type RouterObserver } from './router-observer';
 import { chainReader, RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import {
   runApproveTool,
@@ -190,6 +191,12 @@ export interface RouterMcpOptions {
   hookDeps?: Partial<HookDeps>;
   /** The routing fee's payer; both tools route through it. */
   payer?: RoutingPayer;
+  /**
+   * What this router saw, for doctor and install, and the one-time wallet
+   * lines it owes the session it serves (`router-observer.ts`). Built with the
+   * payer in {@link runRouterMcpServer}; the hook tool hands it each leg.
+   */
+  observer?: RouterObserver;
   /** Test seam: the home whose `.claude/projects` holds the session transcripts
    *  (`CLAUDE_CONFIG_DIR` is then not read). */
   homeDir?: string;
@@ -214,8 +221,14 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
   // session is idle so a paid lookup does not wait 2.3 s for it, and its
   // rejection is swallowed: a machine with no wallet still routes, because
-  // deciding is free and only the paying leg needs a key.
-  if (opts.handlerDeps?.provider === undefined) {
+  // deciding is free and only the paying leg needs a key. With a payer it is
+  // the payer's: the same single-flight unlock its calls await, whose verdict
+  // the hooks gate on and the observer records. The request tool's provider is
+  // not unlocked a second time beside it: both share the wallet layer's signer
+  // cache, so the payer's unlock serves a paid lookup too.
+  if (opts.payer !== undefined) {
+    void opts.payer.prewarm();
+  } else if (opts.handlerDeps?.provider === undefined) {
     void provider.getSigner().catch(() => undefined);
   }
   const server = new McpServer(
@@ -453,7 +466,15 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         response = await runHookKind(args.kind, event, {
           dataDir: ctx.dataDir,
           ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
-          ...(opts.payer !== undefined ? { route: opts.payer.routeFor.bind(opts.payer) } : {}),
+          ...(opts.payer !== undefined
+            ? {
+                route: opts.payer.routeFor.bind(opts.payer),
+                signer: opts.payer.signVerdict.bind(opts.payer),
+              }
+            : {}),
+          ...(opts.observer !== undefined
+            ? { walletNews: opts.observer.takeNews.bind(opts.observer) }
+            : {}),
           ...opts.hookDeps,
         });
       } catch {
@@ -511,7 +532,15 @@ function registerCodexHookTool(
               dataDir: ctx.dataDir,
               harness: 'codex',
               ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
-              ...(opts.payer !== undefined ? { route: opts.payer.routeFor.bind(opts.payer) } : {}),
+              ...(opts.payer !== undefined
+                ? {
+                    route: opts.payer.routeFor.bind(opts.payer),
+                    signer: opts.payer.signVerdict.bind(opts.payer),
+                  }
+                : {}),
+              ...(opts.observer !== undefined
+                ? { walletNews: opts.observer.takeNews.bind(opts.observer) }
+                : {}),
               ...opts.hookDeps,
             }),
           );
@@ -560,25 +589,47 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
 }
 
 /**
- * The server `tenjin mcp` runs, with the production payer unless one is
- * passed. `payerDeps` overrides single payer seams (the network, the signer)
- * and keeps the rest of the production wiring.
+ * The server `tenjin mcp` runs, with the production observer and payer unless
+ * they are passed. `payerDeps` overrides single payer seams (the network, the
+ * signer) and keeps the rest of the production wiring.
  */
 export async function createRouterMcpServer(
   opts: RouterMcpOptions & { payerDeps?: Partial<RoutingPayerDeps> } = {},
 ): Promise<McpServer> {
   const { payerDeps, ...rest } = opts;
-  const payer = rest.payer ?? (await routingPayer(buildContext(rest), payerDeps));
-  return buildRouterMcpServer({ ...rest, payer });
+  const ctx = buildContext(rest);
+  const env = rest.env ?? process.env;
+  const observer =
+    rest.observer ??
+    createRouterObserver({
+      dataDir: ctx.dataDir,
+      pid: process.pid,
+      startedAt: Date.now() - process.uptime() * 1000,
+      cliVersion: pkg.version,
+      harness: rest.harness ?? 'claude',
+      launchedByPlugin: launchedByPlugin(env),
+      cwd: process.cwd(),
+      env,
+    });
+  const payer = rest.payer ?? (await routingPayer(ctx, observer, payerDeps));
+  return buildRouterMcpServer({ ...rest, payer, observer });
 }
 
-/** The production payer: this machine's wallet, spend policy and RPC. */
+/**
+ * The production payer: this machine's wallet, spend policy and RPC. Its
+ * verdicts go to the observer, and its provider's one-time warning (a set but
+ * wrong TENJIN_WALLET_PASSPHRASE that a saved passphrase overrode) is queued
+ * as wallet news for the session, not written to a stderr nobody reads.
+ */
 async function routingPayer(
   ctx: CommandContext,
+  observer: RouterObserver,
   overrides: Partial<RoutingPayerDeps> = {},
 ): Promise<RoutingPayer> {
   const settings = await resolveContextSettings(ctx);
-  const provider: WalletProvider = resolveWalletProvider(ctx);
+  const provider: WalletProvider = resolveWalletProvider(ctx, {
+    onWarning: (w) => observer.queueNews(w.message),
+  });
   return new RoutingPayer({
     dataDir: ctx.dataDir,
     // Never a prompt: the context is not a TTY, because the stdio transport owns stdin.
@@ -593,6 +644,8 @@ async function routingPayer(
       }),
     walletBalance: (address, timeoutMs) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs }),
     readContract: chainReader(settings.rpcUrl),
+    observe: observer.observe,
+    unlockStamp: observer.unlockStamp,
     ...overrides,
   });
 }

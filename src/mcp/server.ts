@@ -25,6 +25,9 @@ import { z } from 'zod';
 import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { buildFailureEnvelope, buildSuccessEnvelope, normalizeError } from '../lib/output';
+import { CliError } from '../lib/errors';
+import { unlockReasonOf } from '../lib/wallet-unlock';
+import { agentFixFor } from '../router/wallet-reasons';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult, GlobalFlags } from '../context';
 import { runSearch, type SearchArgs, type SearchDeps } from '../commands/search';
@@ -271,6 +274,7 @@ const deleteInput = {
 // in kind and IS a tool: minting moves nothing, the destination is pinned to
 // this wallet server-side, and the human gate (paying on pay.coinbase.com) is
 // enforced by Coinbase, not by a harness dialog.
+// `repair` takes a passphrase a person types, so it is never an MCP action.
 const walletInput = {
   action: z.enum(['show', 'balance', 'create']).describe('show | balance | create'),
 } satisfies Record<'action', z.ZodTypeAny>;
@@ -649,9 +653,20 @@ function ok(command: string, result: CommandResult): CallToolResult {
   };
 }
 
-/** Shape a thrown CliError: isError + the CLI failure envelope (details intact). */
+/**
+ * Shape a thrown CliError: isError + the CLI failure envelope (details intact).
+ *
+ * Everything here reaches the MODEL, the envelope's `fix` as much as the text,
+ * so a wallet error's person-facing fix ("run `tenjin wallet repair` yourself
+ * ...") is swapped for its `agentFix`, which tells the model to ask the person
+ * to run it in their own terminal and never to ask for the passphrase (B1).
+ * The swap is gated on `unlockReasonOf`, i.e. on the error carrying
+ * `details.unlock`, and on nothing looser: `classifyUnlockError` would call
+ * every undetailed error `wallet_locked`, and a `REGISTRY_MISMATCH` or an HTTP
+ * failure must keep its own fix byte for byte.
+ */
 function fail(command: string, err: unknown): CallToolResult {
-  const cliErr = normalizeError(err);
+  const cliErr = forModel(normalizeError(err));
   const envelope = buildFailureEnvelope(command, cliErr);
   const text = cliErr.fix !== undefined ? `${cliErr.message}\nfix: ${cliErr.fix}` : cliErr.message;
   return {
@@ -659,6 +674,22 @@ function fail(command: string, err: unknown): CallToolResult {
     isError: true,
     structuredContent: envelope as unknown as Record<string, unknown>,
   };
+}
+
+/**
+ * `err` with its fix swapped for the model-facing `agentFix` when it carries an
+ * unlock reason; `err` itself otherwise. A copy, so the thrower's error is not
+ * mutated, with code, message, exit code and `details` carried over intact.
+ */
+function forModel(err: CliError): CliError {
+  const why = unlockReasonOf(err);
+  if (why === null) return err;
+  return new CliError(err.code, err.message, {
+    fix: agentFixFor(why, err.fix ?? ''),
+    details: err.details,
+    exitCode: err.exitCode,
+    cause: err,
+  });
 }
 
 /** A discard-only Io: stdout must stay clean (the transport owns it), stderr is dropped. */

@@ -76,6 +76,11 @@ beforeEach(async () => {
     join(dir, 'config.json'),
     JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
+  // A wallet for the offer to pay from: with none, a paid offer is withheld.
+  await writeFile(
+    join(dir, 'wallet.json'),
+    JSON.stringify({ schemaVersion: 2, address: '0x1234567890AbcdEF1234567890aBcdef12345678' }),
+  );
   transcript = join(dir, 'rollout.jsonl');
   await writeFile(transcript, history(meta, item('u', 'Find recent reports on example search.')));
 });
@@ -83,11 +88,19 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** A router stub that records each body and answers `answer`. */
+/**
+ * A router stub that records each router body and answers `answer`. The
+ * wallet's balance reads (JSON-RPC) share the fetch seam; they are not router
+ * calls, so they are answered with a balance and left out of `bodies`.
+ */
 function router(answer: unknown) {
   const bodies: Record<string, unknown>[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
-    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (body.jsonrpc !== undefined) {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0xf4240' }));
+    }
+    bodies.push(body);
     return new Response(JSON.stringify(answer));
   }) as typeof fetch;
   return { bodies, fetchImpl };

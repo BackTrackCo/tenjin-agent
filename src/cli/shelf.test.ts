@@ -253,6 +253,16 @@ describe('the deleted verbs and their replacements', () => {
     expect(cap.stdout()).toContain('send [options] <amount> <token> <to>');
   });
 
+  it('`tenjin wallet --help` lists repair', async () => {
+    const cap = captureIo();
+    expect(await main(['wallet', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toMatch(/\n\s+repair \[options\]/);
+    // Help wraps at the terminal width; compare with whitespace collapsed.
+    expect(cap.stdout().replace(/\s+/g, ' ')).toContain(
+      'save the wallet passphrase so Claude Code can unlock it',
+    );
+  });
+
   it('`tenjin hooks` carries list, enable and disable', async () => {
     const cap = captureIo();
     expect(await main(['hooks', '--help'], cap.io)).toBe(0);

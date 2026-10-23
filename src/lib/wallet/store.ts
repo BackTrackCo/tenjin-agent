@@ -5,9 +5,14 @@ import { CliError } from '../errors';
 import { writeFileAtomicExclusive } from '../atomic-json';
 import { hasCode } from '../errno';
 import { walletPath } from '../paths';
+import { unlockDetails } from '../wallet-unlock';
 
-/** A 0x-prefixed 32-byte hex private key (case-insensitive). */
-export const PRIVATE_KEY_RE = /^0x[0-9a-f]{64}$/i;
+/**
+ * A 0x-prefixed 32-byte hex private key (case-insensitive). Defined once, in the
+ * hook-safe `wallet-unlock.ts`, so the hooks' wallet facts and `loadCredential`
+ * test exactly the same thing (S12); re-exported here for the wallet layer.
+ */
+export { PRIVATE_KEY_RE } from '../wallet-unlock';
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 /**
@@ -82,6 +87,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
     throw new CliError('WALLET_INVALID_KEY', `Could not read the wallet file at ${path}.`, {
       fix: `Check file permissions on ${path}.`,
       cause: err,
+      details: unlockDetails('wallet_corrupt'),
     });
   }
   let json: unknown;
@@ -91,6 +97,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
     throw new CliError('WALLET_INVALID_KEY', `The wallet file at ${path} is not valid JSON.`, {
       fix: `Move ${path} aside, then run \`tenjin wallet create\`.`,
       cause: err,
+      details: unlockDetails('wallet_corrupt'),
     });
   }
   // A pre-encryption record (schema v1 stored the raw key). There is no in-place
@@ -101,6 +108,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
       `The wallet file at ${path} predates encrypted storage.`,
       {
         fix: `Move ${path} aside and run \`tenjin wallet create\`; sweep any funds from the old address first.`,
+        details: unlockDetails('wallet_corrupt'),
       },
     );
   }

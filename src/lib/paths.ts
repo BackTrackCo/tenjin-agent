@@ -118,6 +118,29 @@ export function passphraseBlobPathFor(account: string, dir: string = dataDir()):
 }
 
 /**
+ * The sidecar that records WHERE each wallet's passphrase was saved
+ * (`src/lib/passphrase-record.ts`), keyed by lowercase address. A separate
+ * file rather than a field in wallet.json, so the funded key file is never
+ * rewritten and an older CLI still reads it. No sidecar means today's lookup
+ * order, unchanged.
+ */
+export function passphraseRecordPath(dir: string = dataDir()): string {
+  return join(dir, 'passphrase-store.json');
+}
+
+/**
+ * The per-wallet passphrase FILE store: the plaintext passphrase, mode 0600 in
+ * a 0700 directory, no trailing newline. Not encrypted; the same trade-off the
+ * GitHub CLI makes with its `hosts.yml` token. Used only where no OS credential
+ * store exists (headless Linux, WSL, a sandbox) or when the user chose
+ * `--insecure-storage`; never as the fallback for a keychain that is merely
+ * locked. One file per wallet address (lowercase), like the DPAPI blob above.
+ */
+export function passphraseFilePathFor(account: string, dir: string = dataDir()): string {
+  return join(dir, `passphrase.${account}.plain`);
+}
+
+/**
  * Where `wallet create --replace` parks the outgoing wallet's keystore, keyed by
  * its lowercase address so successive replaces can never collide. Together with
  * the wallet's per-address passphrase entry in the OS store, this file keeps the

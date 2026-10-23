@@ -10,10 +10,18 @@ import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
-import { FakeRouter, payerDeps } from './fee-test-utils';
+import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
+import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
+import {
+  ASK_FOR_REPAIR,
+  REPAIR_CLAUSE,
+  WALLET_FUNDED,
+  WALLET_REASONS,
+  WALLET_UNLOCKED,
+} from './wallet-reasons';
 
 /**
  * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
@@ -64,7 +72,8 @@ const OFFER = {
     hint: 'CoinMarketCap fits this: live crypto quotes. Call request({query: "ETH in USD", id: "k3f9-abcd"}) alone and wait for its result.',
   },
 };
-const wallet = privateKeyToAccount(generatePrivateKey());
+const KEY = generatePrivateKey();
+const wallet = privateKeyToAccount(KEY);
 
 let dir: string;
 beforeEach(async () => {
@@ -122,6 +131,9 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
     fetchImpl,
     now: () => NOW,
     warn: () => undefined,
+    // A key the hooks' file facts call valid, so an offer is gated on the fee
+    // alone here; the signer's own gating is `hooks.test.ts`'s.
+    env: { TENJIN_WALLET_KEY: KEY },
     ...(p !== undefined ? { route: p.routeFor.bind(p) } : {}),
   };
 }
@@ -220,7 +232,8 @@ describe('the hook legs and the routing fee', () => {
           throw new Error('passphrase needed');
         },
       },
-      'TENJIN_WALLET_PASSPHRASE',
+      // Unclassified: the person is pointed at doctor, never at the variable.
+      '`tenjin doctor`',
     ],
     [
       'the machine has no wallet',
@@ -253,6 +266,7 @@ describe('the hook legs and the routing fee', () => {
       expect(contextOf(first)).toContain('CoinMarketCap fits this');
       expect(systemMessageOf(first)).toContain('could not pay its $0.003 fee');
       expect(systemMessageOf(first)).toContain(fix);
+      expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
       expect(fake.paidRequests()).toBe(0);
       expect(fake.log.at(-1)).toBe('POST /api/x402-router unpaid');
       // Not again in this session, though the free path keeps routing.
@@ -457,4 +471,76 @@ describe('the hook legs and the routing fee', () => {
     // It went out and no answer came, so it may have landed: it counts.
     expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
   }, 15_000);
+});
+
+/**
+ * WALLET NOTICES, once per (session, reason), with a clear line (decision 15).
+ * They go in `systemMessage`, which the person reads, so they carry the PERSON
+ * fix, never the model's `agentFix`.
+ */
+describe('wallet notices', () => {
+  /** A signer that fails with `reason` while `state.reason` is set, else signs. */
+  function switchable(state: { reason: UnlockReason | 'abort' | null }) {
+    return {
+      getSigner: async () => {
+        const reason = state.reason;
+        if (reason === null) return testSigner(wallet);
+        if (reason === 'abort') throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        throw new CliError('PROVIDER_ERROR', 'cannot unlock', { details: unlockDetails(reason) });
+      },
+    };
+  }
+
+  it('tells a second notice when the reason changes, and none for the same reason', async () => {
+    const fake = new FakeRouter();
+    const state: { reason: UnlockReason | 'abort' | null } = { reason: 'keychain_locked' };
+    const p = payer(fake, switchable(state));
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(first)).toContain(WALLET_REASONS.keychain_locked.reason);
+    expect(systemMessageOf(first)).toContain(KEYCHAIN_LOCKED_FIX);
+    expect(systemMessageOf(first)).not.toContain('--insecure-storage');
+    const again = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(again)).toBeUndefined();
+    state.reason = 'passphrase_missing';
+    const changed = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(changed)).toContain(WALLET_REASONS.passphrase_missing.reason);
+    // The person's fix, with the clause; never the model's.
+    expect(systemMessageOf(changed)).toContain(REPAIR_CLAUSE);
+    expect(systemMessageOf(changed)).not.toContain(ASK_FOR_REPAIR);
+    expect(systemMessageOf(changed)).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+    const repeat = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(repeat)).toBeUndefined();
+  });
+
+  it('says the wallet is unlocked once, after a paid decided call', async () => {
+    const fake = new FakeRouter();
+    const state: { reason: UnlockReason | 'abort' | null } = { reason: 'keychain_locked' };
+    const p = payer(fake, switchable(state));
+    const locked = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(locked)).toContain(KEYCHAIN_LOCKED_FIX);
+    state.reason = null;
+    const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(fake.paidRequests()).toBeGreaterThan(0);
+    expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_UNLOCKED);
+    const next = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(next)).toBeUndefined();
+  });
+
+  it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
+    const fake = new FakeRouter();
+    let balance = 50_000n;
+    const p = payer(fake, { walletBalance: async () => balance });
+    const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(low)).toContain('`tenjin wallet fund 5`');
+    balance = 10_000_000n;
+    const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
+  });
+
+  it('says nothing for an unlock that ran out of time', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake, switchable({ reason: 'abort' }));
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(answer)).toBeUndefined();
+  });
 });
