@@ -45,7 +45,7 @@ Learn more:
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
         const harness = o.harness as Harness | undefined;
-        // Nothing in the Codex plugin changes between builds, so nothing to refresh.
+        // A bare `--refresh` refreshes the Codex plugin (`refreshCodexPlugin`).
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
@@ -86,7 +86,13 @@ Learn more:
           if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
           return one;
         });
-        return withNote(out, await note);
+        // `tenjin update` runs this refresh in the new build: a Codex that
+        // already has the plugin gets the new hooks too, turned on.
+        const codex =
+          o.refresh === true && harness === undefined
+            ? await (await import('../router/codex-install')).refreshCodexPlugin(ctx)
+            : undefined;
+        return withNote(withNote(out, await note), codex);
       });
     });
 

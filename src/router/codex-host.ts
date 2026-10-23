@@ -132,9 +132,12 @@ export function codexHookRows(list: unknown): CodexHookRows {
       (at(hook, 'enabled') === true &&
         ['trusted', 'managed'].includes(String(at(hook, 'trustStatus')))),
   );
+  const routing = routingOf(ours);
+  // An older build's copy carries one hook fewer; its legs are a routing warning.
+  const complete = ours.length === CODEX_HOOK_COUNT || routing === 'free';
   return {
-    state: ours.length === CODEX_HOOK_COUNT && ready ? 'trusted' : 'review',
+    state: complete && ready ? 'trusted' : 'review',
     allowOff: ours.some(optedOut),
-    routing: routingOf(ours),
+    routing,
   };
 }

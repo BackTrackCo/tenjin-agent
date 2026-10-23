@@ -10,7 +10,10 @@ import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
+  CODEX_REFRESH_LINES,
   codexAtLeast,
+  ownCodexRow,
+  refreshCodexPlugin,
   runCodexDoctor,
   runCodexInstall,
   runCodexUninstall,
@@ -18,7 +21,8 @@ import {
   type CodexSetupDeps,
 } from './codex-install';
 import { runHookCommand } from './hook-command';
-import { CODEX_ALLOW_HOOK_COMMAND } from './plugin-files';
+import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
+import { trustCodexHooks } from '../lib/codex-trust';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
 import { CODEX_REQUEST_TOOL, requestToolName } from './names';
 import { resolveProgressSession, sessionDir } from './progress';
@@ -849,23 +853,17 @@ describe('Codex install, uninstall and doctor', () => {
     expect(codexHookRows(listed(legRow('a'), allowRow()))).toMatchObject({ routing: 'unknown' });
   });
 
-  it('fails on command legs and on a Codex too old for mcp_tool hooks, and never pays', async () => {
+  it('warns on command legs, fails on a Codex too old for mcp_tool hooks, and never pays', async () => {
     const command = (kind: string) =>
       row(kind, { handlerType: 'command', command: `tenjin hook ${kind} --harness codex` });
-    const stale = [
-      command('prompt'),
-      command('native'),
-      command('shortfall'),
-      row('d'),
-      allowRow(),
-    ];
+    const stale = [command('prompt'), command('native'), command('shortfall'), allowRow()];
     const { steps, deps } = host();
-    await expect(
-      runCodexDoctor({}, ctx(), { ...deps, hooks: async () => listed(...stale) }),
-    ).rejects.toMatchObject({
-      details: { routing: 'free', ok: false },
-      fix: expect.stringContaining('cannot pay the routing fee'),
+    const warned = await runCodexDoctor({}, ctx(), {
+      ...deps,
+      hooks: async () => listed(...stale),
     });
+    expect(warned.data).toMatchObject({ routing: 'free', ok: true });
+    expect(warned.humanLines?.join('\n')).toContain('! Routing: its routing hooks are commands');
     await expect(
       runCodexDoctor({}, ctx(), {
         ...deps,
@@ -934,5 +932,150 @@ describe('Codex install, uninstall and doctor', () => {
         hooks: async () => off(),
       }),
     ).rejects.toMatchObject({ details: { allowOff: true, ok: false } });
+  });
+});
+
+describe('turning the Codex plugin hooks on, and the update refresh', () => {
+  const source = '/c/plugins/cache/tenjin/tenjin/local/hooks/hooks.json';
+  const SNAKE: Record<string, string> = {
+    UserPromptSubmit: 'user_prompt_submit',
+    PreToolUse: 'pre_tool_use',
+    PostToolUse: 'post_tool_use',
+    PermissionRequest: 'permission_request',
+  };
+  /** Every handler the plugin renders, as Codex 0.157 lists it. */
+  const ownRows = (over: Record<string, unknown> = {}) =>
+    Object.entries(renderCodexHooks().hooks).flatMap(([event, groups]) =>
+      (groups as { matcher?: string; hooks: Record<string, unknown>[] }[]).flatMap((g, gi) =>
+        g.hooks.map((h, hi) => ({
+          key: `${source}:${SNAKE[event]}:${gi}:${hi}`,
+          sourcePath: source,
+          pluginId: CODEX_PLUGIN,
+          matcher: g.matcher ?? null,
+          enabled: true,
+          trustStatus: 'untrusted',
+          currentHash: `sha256:${event}${gi}${hi}`,
+          ...(h.type === 'mcp_tool'
+            ? { handlerType: 'mcpTool', server: h.server, tool: h.tool }
+            : { handlerType: 'command', command: h.command }),
+          ...over,
+        })),
+      ),
+    );
+  const foreign = {
+    ...ownRows()[0]!,
+    key: `${source}:user_prompt_submit:0:1`,
+    handlerType: 'command',
+    command: 'curl evil',
+  };
+
+  /** An app server that records the batch write and answers the rows it holds. */
+  function appServer(rows: Record<string, unknown>[], applies = true) {
+    const writes: unknown[] = [];
+    let current = rows;
+    const connect = async (method: string, params: unknown) => {
+      if (method === 'hooks/list') return { data: [{ hooks: current }] };
+      writes.push(params);
+      const value = (params as { edits: { value: Record<string, unknown> }[] }).edits[0]!.value;
+      if (applies) {
+        current = current.map((r) =>
+          typeof r.key === 'string' && r.key in value ? { ...r, trustStatus: 'trusted' } : r,
+        );
+      }
+      return {};
+    };
+    return { connect, writes };
+  }
+
+  it("trusts exactly the plugin's own legs, deny and allow, and no foreign row", async () => {
+    const rows = [...ownRows(), foreign];
+    expect(rows.filter(ownCodexRow)).toHaveLength(5);
+    expect(ownCodexRow(foreign)).toBe(false);
+    expect(ownCodexRow({ ...ownRows()[0]!, pluginId: 'other@x' })).toBe(false);
+    expect(ownCodexRow({ ...ownRows()[0]!, server: 'elsewhere' })).toBe(false);
+    const server = appServer(rows);
+    const keys = rows.filter(ownCodexRow).map((r) => r.key);
+    const result = await trustCodexHooks('/h', keys, ownCodexRow, { connect: server.connect });
+    expect(result.ok).toBe(true);
+    const written = Object.keys(
+      (server.writes[0] as { edits: { value: Record<string, unknown> }[] }).edits[0]!.value,
+    );
+    expect(written.sort()).toEqual([...keys].sort());
+    expect(written).not.toContain(foreign.key);
+  });
+
+  it('refuses a result where Codex trusted only some of the rows', async () => {
+    const server = appServer(ownRows(), false);
+    const keys = ownRows().map((r) => r.key);
+    const result = await trustCodexHooks('/h', keys, ownCodexRow, { connect: server.connect });
+    expect(result).toMatchObject({ ok: false, failedAt: 'verify' });
+  });
+
+  it('turns the hooks on at install, and names /hooks only when that fails', async () => {
+    const { deps } = host();
+    const trusted = await runCodexInstall({ yes: true }, ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: ownRows() }] }),
+      trust: async (_home, keys) => ({ ok: true, trusted: [...keys] }),
+    });
+    expect(trusted.data).toMatchObject({ next: expect.stringContaining('new Codex session') });
+    const refused = await runCodexInstall({ yes: true }, ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: ownRows() }] }),
+      trust: async () => ({ ok: false, trusted: [], failedAt: 'write' }),
+    });
+    expect(refused.data).toMatchObject({ next: expect.stringContaining('/hooks') });
+  });
+
+  const stale = () =>
+    ownRows({ trustStatus: 'trusted' }).map((r, i) =>
+      i < 3 ? { ...r, handlerType: 'command', command: `tenjin hook prompt --harness codex` } : r,
+    );
+
+  it('does nothing where Codex is absent or does not have the plugin', async () => {
+    const { steps, deps } = host();
+    expect(await refreshCodexPlugin(ctx(), { ...deps, version: async () => null })).toBeUndefined();
+    expect(await refreshCodexPlugin(ctx(), deps)).toBeUndefined();
+    expect(steps).toEqual([]);
+  });
+
+  it('re-adds an older copy, turns its new hooks on, and says so in one line', async () => {
+    const { steps, deps } = host();
+    let lists = 0;
+    let trustedKeys: readonly string[] = [];
+    const line = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: lists++ === 0 ? stale() : ownRows() }] }),
+      trust: async (_home, keys) => ((trustedKeys = keys), { ok: true, trusted: [...keys] }),
+    });
+    expect(steps).toEqual([
+      'codex plugin marketplace add /package/dist/hosts/codex',
+      'codex plugin add tenjin@tenjin',
+    ]);
+    expect(trustedKeys).toHaveLength(5);
+    expect(line).toBe(CODEX_REFRESH_LINES.done);
+  });
+
+  it('falls back to the /hooks line, or one failure line, and never throws', async () => {
+    const { deps } = host();
+    const review = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: stale() }] }),
+      trust: async () => ({ ok: false, trusted: [], failedAt: 'verify' }),
+    });
+    expect(review).toBe(CODEX_REFRESH_LINES.review);
+    expect(review).not.toMatch(/tenjin |`/);
+    const failed = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: stale() }] }),
+      run: async () => ({ code: 1, stdout: '', stderr: 'boom' }),
+    });
+    expect(failed).toBe(CODEX_REFRESH_LINES.failed);
+    const old = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      version: async () => '0.147.0',
+      hooks: async () => ({ data: [{ hooks: stale() }] }),
+    });
+    expect(old).toBe(CODEX_REFRESH_LINES.old);
   });
 });
