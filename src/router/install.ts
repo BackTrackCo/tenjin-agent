@@ -10,6 +10,8 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { defaultDataDir, runtimeDir } from '../lib/paths';
+import { isSourceCheckout } from '../lib/install-location';
+import { runningGlibc, unpinnedPlatform } from '../lib/runtime-fetch';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
@@ -69,6 +71,7 @@ import {
   FEE_APPROVAL,
   type SpendOption,
 } from './spend-question';
+import { shQuote } from './plugin-files';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -81,10 +84,9 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * runtime, `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
  * `~/.local/bin` (see `lib/runtime.ts`), and the plugin is registered from
  * the runtime's `claude` folder, whose commands run that Node and that copy,
- * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. A non-default
- * data dir, a source checkout, or a runtime that could not be set up keeps
- * the registration from this package's `dist/hosts/claude` folder, run by the
- * `node` on PATH. Either way the plugin goes through Claude Code's own `claude
+ * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. Unsupported
+ * profiles and runtime failures stop registration. Only source checkouts use
+ * this package's development plugin folder. The plugin goes through Claude Code's own `claude
  * plugin` commands (see `plugin-registration.ts`), or is written as a folder
  * under the config dir's `skills/` where no `claude` binary can be run. The
  * plugin carries the seven routing legs, the `router` MCP server, and the
@@ -97,8 +99,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * with the install its answer picks, the `claude`
  * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
  * plugin command falls back to the folder, and the one step after it is
- * starting a new Claude Code session: `/reload-plugins` does not run the
- * plugin's `SessionStart`, so only a new session loads Tenjin fully.
+ * reloading plugins in a fresh install's conversation. Settings-based
+ * upgrades still need a new session so the old server does not route twice.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -113,19 +115,17 @@ export const DISCLOSURE: readonly string[] = [
 ];
 
 /**
- * What the person does after a successful install: only a new session.
- * `/reload-plugins` does not run the plugin's `SessionStart`, and while a
- * settings install is still here it would load the plugin beside the
+ * While a settings install is still here, a reload would load the plugin beside the
  * pre-upgrade `x402` server that session is still running, so every event
  * would route twice.
  */
 export const NEW_SESSION_STEP = 'start a new Claude Code session so Tenjin loads';
-/** The same step; kept as its own export for its callers. */
-export const RELOAD_STEP = NEW_SESSION_STEP;
+export const RELOAD_STEP =
+  'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
 
-/** The step that loads the plugin: a new session, whether or not a settings install is still here. */
-export function loadStep(_settingsInstallPresent: boolean): string {
-  return NEW_SESSION_STEP;
+/** Fresh installs can keep their task; settings upgrades must leave their old server behind. */
+export function loadStep(settingsInstallPresent: boolean): string {
+  return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
 }
 
 export interface RouterInstallArgs {
@@ -368,6 +368,7 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
+  assertPluginInstallation(ctx.dataDir, home, env);
   const config = await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const named = namedLimits(args);
   const cwd = deps.cwd ?? process.cwd();
@@ -378,13 +379,6 @@ export async function runRouterInstall(
   const claude = await readClaudeCode(env, cwd, deps.findClaude ?? findClaudeBinary);
   const paths = settingsInstallPaths(project, env, home, cwd);
   const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
-  // CLAUDE CODE'S OWN PROJECT INSTALLS ARE RECORDED, before a refresh can
-  // refuse: `tenjin update` refreshes every recorded project after its home
-  // child, so a project an older release installed without recording it
-  // moves to the runtime with the rest. A user-scope run only; never fatal.
-  if (!project) {
-    await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
-  }
 
   const setUpRuntime = () =>
     (deps.runtime ?? defaultRuntime)({
@@ -404,11 +398,15 @@ export async function runRouterInstall(
     // registered, written or migrated.
     if (!project && hasRuntime(ctx.dataDir, home)) {
       const rt = await setUpRuntime();
+      requireRuntime(rt);
+      await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
       if (runtimeLaunch(rt) !== null) {
         await collectRuntime(rt.root, await fallbackFolders(ctx.dataDir, env, home, cwd, false));
       }
       return runtimeOnlyRefresh(ctx, rt, home);
     }
+    if (!project)
+      await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
     throw new CliError(
       'REFUSED',
       `Nothing to refresh: neither the ${PLUGIN_ID} plugin nor a settings install of Tenjin is registered here.`,
@@ -438,6 +436,22 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
+  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
+  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
+  // on any version and would silence the settings install in every session,
+  // leaving the machine unrouted. So nothing is registered until `claude
+  // update`, and the settings install keeps routing, and no runtime is set up.
+  const deferred = !claude.meetsFloor && legacy.present;
+  const rt = deferred ? null : await setUpRuntime();
+  requireRuntime(rt);
+  // CLAUDE CODE'S OWN PROJECT INSTALLS ARE RECORDED, before a refresh can
+  // refuse: `tenjin update` refreshes every recorded project after its home
+  // child, so a project an older release installed without recording it
+  // moves to the runtime with the rest. A user-scope run only; never fatal.
+  if (!project) {
+    await recordClaudeProjects(ctx.dataDir, config.install?.routerProjects ?? [], env, home);
+  }
+
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
   const removedKeysLines =
     spend.removed.length > 0
@@ -446,20 +460,6 @@ export async function runRouterInstall(
         ]
       : [];
   const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
-  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
-  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
-  // on any version and would silence the settings install in every session,
-  // leaving the machine unrouted. So nothing is registered until `claude
-  // update`, and the settings install keeps routing, and no runtime is set up.
-  const deferred = !claude.meetsFloor && legacy.present;
-  // TENJIN'S OWN RUNTIME, set up before the plugin is registered from it. Only
-  // a folder rendered from a build that passed its checks is registered;
-  // anything else keeps today's registration from this package (`fallback`,
-  // `skipped`). A `kept` runtime (newer, or this build failed its checks)
-  // registers that runtime's own version. One user-scope `marketplace add`
-  // repoints every project install too, since Claude Code keeps one global
-  // `tenjin` row; a `--project` run repoints the same row to the same folder.
-  const rt = deferred ? null : await setUpRuntime();
   const launch = runtimeLaunch(rt);
   const plugin: PluginRegistration = deferred
     ? deferredRegistration(scope, claude)
@@ -562,11 +562,12 @@ export async function runRouterInstall(
   // keeps them, and a readout quoting the defaults would describe limits this
   // run did not set.
   const effective = await resolveContextSettings(ctx);
-  const spendAsk = !canPrompt && !answered && unasked ? spendStep(args) : undefined;
+  const command = continuationCommand(rt);
+  const spendAsk = !canPrompt && !answered && unasked ? spendStep(args, command) : undefined;
   // A warning, never a failure: everything above is written and correct, and
   // the network this machine is on now may not be the one it uses later.
   const asksAgent = !canPrompt && underAgentHarness(env);
-  const [router, fund] = await Promise.all([
+  const [router, funding] = await Promise.all([
     probeRouter(effective.baseUrl, {
       timeoutMs: ctx.flags.timeout,
       env,
@@ -575,9 +576,10 @@ export async function runRouterInstall(
     // The spend question comes first, because its answer picks the install
     // command. The funding question rides on the install that follows it.
     asksAgent && spendAsk === undefined
-      ? fundStep(wallet, effective.rpcUrl, deps)
+      ? fundStep(wallet, effective.rpcUrl, deps, `${command} wallet fund ${SUGGESTED_FUND_USD}`)
       : Promise.resolve(undefined),
   ]);
+  const fund = funding?.step;
   const nextSteps: QuestionStep[] = [
     ...(spendAsk !== undefined ? [spendAsk] : []),
     ...(fund !== undefined ? [fund] : []),
@@ -594,11 +596,13 @@ export async function runRouterInstall(
       migration,
       asksAgent && nextSteps.length > 0,
       ctx.io.isTTY,
+      command,
     ),
     nextSteps,
+    ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
     // The check for this scope, said outright; a bare doctor in the project
     // also finds it from what the project holds.
-    ...(project ? { doctor: 'tenjin doctor --project' } : {}),
+    ...(project ? { doctor: `${command} doctor --project` } : {}),
     spend: { ...spend, effective: effectiveLimits(effective.policy) },
     wallet,
     router: {
@@ -621,6 +625,7 @@ export async function runRouterInstall(
         migration,
         wallet,
         ...(fund !== undefined ? { fund } : {}),
+        ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
         asks: asksAgent && nextSteps.length > 0,
         policy: effective.policy,
         ...(spendAsk !== undefined ? { spendAsk } : {}),
@@ -647,16 +652,32 @@ const sharedResults = new WeakSet<RuntimeSetup>();
  * ONE RUNTIME SETUP PER INSTALL RUN, however many hosts it installs. The first
  * host sets the runtime up; every later host gets that result rather than a
  * second setup, which would retry a failed Node download in full, and says
- * none of its lines again.
+ * none of its lines again. Only the activating host may roll that switch
+ * back: a later host shares folders the first may already have registered.
+ * If the first host does roll back, the next host must set the runtime up again.
  */
 export function runtimeOncePerRun(setup = defaultRuntime): typeof defaultRuntime {
   let first: Promise<RuntimeSetup> | undefined;
   return async (o) => {
     if (first === undefined) {
-      first = setup(o);
+      first = setup(o).then((rt) => {
+        const restore = rt.restore;
+        if (restore === undefined) return rt;
+        return {
+          ...rt,
+          restore: async () => {
+            try {
+              await restore();
+            } finally {
+              first = undefined;
+            }
+          },
+        };
+      });
       return first;
     }
     const rt = { ...(await first) };
+    delete rt.restore;
     sharedResults.add(rt);
     return rt;
   };
@@ -761,7 +782,64 @@ async function folderPointers(root: string, folders: readonly string[]): Promise
   return pointers;
 }
 
-/** What the plugin is registered from when the runtime has a build for it, or null for this package. */
+export function assertPluginInstallation(
+  dataDir: string,
+  home: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (env.TENJIN_DATA_DIR && resolve(dataDir) !== resolve(defaultDataDir(home))) {
+    throw new CliError('REFUSED', 'Plugin installation needs the default data directory.', {
+      fix: 'Run without TENJIN_DATA_DIR. Other CLI commands still support it.',
+    });
+  }
+  if (!isSourceCheckout(dirname(fileURLToPath(import.meta.url)))) {
+    const unsupported = unpinnedPlatform(process.platform, process.arch, runningGlibc());
+    if (unsupported !== null)
+      throw new CliError('REFUSED', `Plugin installation is unsupported on ${unsupported}.`, {
+        fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. Your existing setup was kept.',
+      });
+  }
+}
+
+/** Setup continuations must work before a reload adds the plugin's bin folder to PATH. */
+export function continuationCommand(
+  rt: RuntimeSetup | null,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (rt === null || rt.state === 'skipped' || rt.node === undefined || rt.entry === undefined)
+    return 'tenjin';
+  const launcher = rt.launcher;
+  const verifiedLauncher = launcher?.state === 'written' || launcher?.state === 'current';
+  const path = verifiedLauncher
+    ? launcher.paths.find((p) => platform !== 'win32' || p.endsWith('.cmd'))
+    : undefined;
+  const parts = path === undefined ? [rt.node, rt.entry] : [path];
+  return platform === 'win32'
+    ? `& ${parts.map((part) => `'${part.replaceAll("'", "''")}'`).join(' ')}`
+    : parts.map(shQuote).join(' ');
+}
+
+export function requireRuntime(rt: RuntimeSetup | null): void {
+  if (rt === null || rt.state === 'skipped') return;
+  if (
+    rt.state === 'failed' ||
+    (rt.state === 'kept' && rt.reason !== undefined && rt.newer !== true)
+  ) {
+    throw new CliError(
+      'UPDATE_FAILED',
+      `Tenjin could not finish installation: ${rt.reason ?? 'runtime setup failed'}. Your existing plugin registration was kept.`,
+      {
+        fix:
+          rt.fix ??
+          (rt.unpinned
+            ? 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64.'
+            : 'Check your connection and run tenjin install again.'),
+      },
+    );
+  }
+}
+
+/** A verified runtime launch, or the explicit source-checkout development path. */
 function runtimeLaunch(
   rt: RuntimeSetup | null,
 ): { version: string; hostsDir: string; cliEntry: string; node: string } | null {
@@ -827,28 +905,6 @@ function runtimeSentence(rt: RuntimeSetup, home: string): string | null {
 }
 
 /**
- * Why the plugin still runs on the Node on PATH, or on an older runtime build
- * than this one. A platform Tenjin pins no Node for is said as it is, with no
- * retry: no install here can set the runtime up. A failure with a step that
- * works (a download that skipped the shell's proxy) names that step instead. A refresh that found a newer
- * runtime tried nothing, so it says nothing.
- */
-function fallbackSentence(rt: RuntimeSetup): string | null {
-  if (rt.state === 'fallback' && rt.unpinned !== undefined) {
-    return `Tenjin pins no Node for this platform (${rt.unpinned}), so the plugin runs from npm's copy on the Node on your PATH, as before.`;
-  }
-  const next = rt.fix ?? 'run `tenjin install` again to retry';
-  if (rt.state === 'fallback') {
-    return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; ${next}.`;
-  }
-  if (rt.state === 'kept' && rt.reason !== undefined && rt.newer !== true) {
-    const retry = rt.unpinned === undefined ? `; ${next}` : '';
-    return `tenjin-cli ${pkg.version} could not be set up (${rt.reason}), so Tenjin keeps running ${rt.cli ?? 'the runtime it has'}${retry}.`;
-  }
-  return null;
-}
-
-/**
  * What the person needs to know about the `tenjin` launcher: only a file in
  * its place that is not Tenjin's, a write that failed, or a launcher folder
  * off PATH. npm's own link there (npm prefix `~/.local`) says nothing.
@@ -874,13 +930,8 @@ export function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home:
   if (rt === null || sharedResults.has(rt)) return [];
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const runs = runtimeSentence(rt, home);
-  const fallback = fallbackSentence(rt);
   const launcher = launcherSentence(rt.launcher, home);
-  return [
-    ...(runs !== null ? [`  ${runs}`] : []),
-    ...(fallback !== null ? [warn(fallback)] : []),
-    ...(launcher !== null ? [warn(launcher)] : []),
-  ];
+  return [...(runs !== null ? [`  ${runs}`] : []), ...(launcher !== null ? [warn(launcher)] : [])];
 }
 
 function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
@@ -942,9 +993,10 @@ function nextStep(
   migration: Migration,
   asksQuestion: boolean,
   tty: boolean,
+  command: string,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion);
+  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -958,22 +1010,23 @@ function todaysSteps(
   wallet: WalletOutcome,
   migration: Migration,
   asksQuestion: boolean,
+  command: string,
 ): string[] {
   const steps: string[] = [];
   if (asksQuestion) {
     steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
-    steps.push('fund the wallet with `tenjin wallet fund`');
+    steps.push(`fund the wallet with \`${command} wallet fund\``);
   }
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');
     steps.push(
-      'run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
+      `run \`${command} install\` again; until then the earlier Tenjin setup keeps routing as before`,
     );
     return steps;
   }
   if (!claude.meetsFloor) steps.unshift('run `claude update`');
-  steps.push(loadStep(settingsInstallStays(migration)));
+  steps.push(loadStep(settingsInstallStays(migration) || !claude.meetsFloor));
   return steps;
 }
 
@@ -1039,9 +1092,8 @@ function runtimeNotices(rt: RuntimeSetup, home: string): string[] {
   const out: string[] = [];
   const runs = runtimeSentence(rt, home);
   if (runs !== null) out.push(`Tenjin ${runs.charAt(0).toLowerCase()}${runs.slice(1)}`);
-  for (const sentence of [fallbackSentence(rt), launcherSentence(rt.launcher, home)]) {
-    if (sentence !== null) out.push(sentence);
-  }
+  const launcher = launcherSentence(rt.launcher, home);
+  if (launcher !== null) out.push(launcher);
   return out;
 }
 
@@ -1056,8 +1108,8 @@ export const SHOW_NOT_RUN =
  * shape as the `request` tool's `needs_input` step. A script or CI ignores
  * it, and the defaults hold.
  */
-function spendStep(args: RouterInstallArgs): QuestionStep {
-  return spendStepFor(installCommand(args));
+function spendStep(args: RouterInstallArgs, command: string): QuestionStep {
+  return spendStepFor(installCommand(args, command));
 }
 
 /** The same question, for an install an agent runs again as `command`. */
@@ -1068,14 +1120,14 @@ export function spendStepFor(command: string): QuestionStep {
     id: 'spend',
     question: spendChoiceQuestion(),
     options,
-    next: `In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
+    next: `${process.platform === 'win32' ? 'Use PowerShell for these commands. ' : ''}In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
   };
 }
 
 /** The install this run was: what an agent runs again for the person's answer. */
-function installCommand(args: RouterInstallArgs): string {
+function installCommand(args: RouterInstallArgs, command: string): string {
   return [
-    'tenjin install',
+    `${command} install`,
     ...(args.project === true ? ['--project'] : []),
     ...(args.noWallet === true ? ['--no-wallet'] : []),
   ].join(' ');
@@ -1117,7 +1169,7 @@ export function namedLimits(
 }
 
 /** The funding question an agent's completed install hands over: the checkout's $5 minimum. */
-export const FUND_QUESTION = `Do you want to add $${SUGGESTED_FUND_USD} to your Tenjin wallet now?`;
+export const FUND_QUESTION = `Add $${SUGGESTED_FUND_USD} to Tenjin now?`;
 /** Its yes: the agent runs this alone, in the turn the person answered. */
 export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
 
@@ -1139,11 +1191,11 @@ export interface QuestionStep {
   next: string;
 }
 
-/** The funding question, with the address the person needs to add funds later. */
+/** The funding question, keeping a transfer address available without making it the normal path. */
 export interface FundStep extends QuestionStep {
   id: 'fund';
   address: string;
-  /** The address, for the agent to show the person as written. */
+  /** What to tell the person when they choose to add funds later. */
   show: string;
 }
 
@@ -1151,15 +1203,16 @@ export interface FundStep extends QuestionStep {
  * THE QUESTION BEFORE THE ACTION. Under an agent harness, install opens no
  * browser and pays nothing: once the spend answer has picked the install, the
  * install hands the agent the funding question, so the page opens only after
- * an answer the person gave in the session. It mints no link: "Not now" shows
- * the address, and a later yes runs `tenjin wallet fund`. A wallet that
+ * an answer the person gave in the session. It mints no link: a later yes
+ * runs `tenjin wallet fund`. A wallet that
  * already holds USDC gets no question.
  */
 async function fundStep(
   wallet: WalletOutcome,
   rpcUrl: string,
   deps: RouterInstallDeps,
-): Promise<FundStep | undefined> {
+  command: string,
+): Promise<{ step?: FundStep; warning?: string } | undefined> {
   const address = wallet.address;
   if (address === undefined || (wallet.status !== 'created' && wallet.status !== 'existing')) {
     return undefined;
@@ -1172,22 +1225,31 @@ async function fundStep(
           () => null,
         );
   if (funded === true) return undefined;
-  const show = `To add funds, send USDC on Base to ${address}.`;
+  if (funded === null) {
+    return {
+      warning:
+        'Could not check your Tenjin funds. Your usual tools keep working. Ask your agent to check your funds later; this check failing does not mean you need to add money again.',
+    };
+  }
+  const show =
+    'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
   return {
-    id: 'fund',
-    question: FUND_QUESTION,
-    options: [
-      {
-        id: 'fund',
-        label: 'Yes, open the funding page',
-        recommended: false,
-        command: FUND_COMMAND,
-      },
-      { id: 'later', label: 'Not now', recommended: false, command: null },
-    ],
-    next: `The install is done. Ask the person this question with your question tool. On "Yes, open the funding page", run \`${FUND_COMMAND}\` alone, in the same turn. On "Not now", run nothing and show the person this for later: ${show} Never run \`${FUND_COMMAND}\` without this yes. ${SHOW_NOT_RUN}`,
-    address,
-    show,
+    step: {
+      id: 'fund',
+      question: FUND_QUESTION,
+      options: [
+        {
+          id: 'fund',
+          label: `Add $${SUGGESTED_FUND_USD}`,
+          recommended: false,
+          command,
+        },
+        { id: 'later', label: 'Not now', recommended: false, command: null },
+      ],
+      next: `${process.platform === 'win32' ? 'Use PowerShell for this command. ' : ''}The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${command}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${command}\` without this yes. ${SHOW_NOT_RUN}`,
+      address,
+      show,
+    },
   };
 }
 
@@ -1201,7 +1263,7 @@ async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> 
 function fundLines(fund: FundStep): string[] {
   return [
     `  Ask the person: ${fund.question}`,
-    `  Yes, open the funding page: ${FUND_COMMAND}`,
+    `  Add $${SUGGESTED_FUND_USD}: ${fund.options[0]?.command ?? FUND_COMMAND}`,
     `  Not now: run nothing, show them: ${fund.show}`,
   ];
 }
@@ -1440,6 +1502,7 @@ function lines(
     migration: Migration;
     wallet: WalletOutcome;
     fund?: FundStep;
+    fundingWarning?: string;
     asks: boolean;
     policy: SpendPolicy;
     spendAsk?: QuestionStep;
@@ -1478,18 +1541,19 @@ function lines(
         ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
         : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
     ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
-      ? ['  For this project only; check it with: tenjin doctor --project']
+      ? [`  For this project only; check it with: ${continuationCommand(s.rt)} doctor --project`]
       : []),
     ...runtimeLines(ctx, s.rt, s.home),
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...(s.fund !== undefined ? fundLines(s.fund) : []),
+    ...(s.fundingWarning !== undefined ? [warn(s.fundingWarning)] : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),
     ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY)}`,
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY, continuationCommand(s.rt))}`,
   ];
 }
 

@@ -167,3 +167,8 @@ jobs:
           publish-script: pnpm exec changeset publish
           create-github-releases: true
           github-token: ${{ steps.app-token.outputs.token }}
+
+      - name: Publish verified installer assets
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: node scripts/release-installers.mjs

@@ -70,7 +70,8 @@ const ASK_LINES = [
 ];
 /** What Claude Code exports to the commands its agent runs. */
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
-const RELOAD = 'start a new Claude Code session so Tenjin loads';
+const RELOAD =
+  'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
@@ -297,18 +298,13 @@ describe('tenjin install', () => {
     expect(refreshed.humanLines!.join('\n')).toContain(RECONNECT_FIX);
   });
 
-  it('never names /reload-plugins as the step that loads Tenjin: only a new session runs SessionStart', () => {
-    for (const text of [
-      NEW_SESSION_STEP,
-      RELOAD_STEP,
-      RECONNECT_FIX,
-      NEW_SESSION_FIX,
-      loadStep(false),
-      loadStep(true),
-    ]) {
+  it('keeps the conversation for a fresh install and requires a new session for a settings upgrade', () => {
+    expect(loadStep(false)).toBe(RELOAD_STEP);
+    expect(loadStep(false)).toContain('/reload-plugins');
+    expect(loadStep(true)).toBe(NEW_SESSION_STEP);
+    for (const text of [NEW_SESSION_STEP, RECONNECT_FIX, NEW_SESSION_FIX]) {
       expect(text).not.toContain('/reload-plugins');
     }
-    expect(loadStep(false)).toBe(NEW_SESSION_STEP);
   });
 
   it('a refresh brings the plugin up to this build and changes no config', async () => {
@@ -1141,9 +1137,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
     expect(stepsOf(result)[0]).toMatchObject({ question: QUESTION });
     expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
-    expect(result.humanLines).not.toContain(
-      '  Ask the person: Do you want to add $5 to your Tenjin wallet now?',
-    );
+    expect(result.humanLines).not.toContain('  Ask the person: Add $5 to Tenjin now?');
     const { next } = result.data as { next: string };
     expect(next).toBe(
       `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
@@ -1168,11 +1162,12 @@ describe('install run by an agent asks each question where its answer is needed'
     const steps = stepsOf(result);
     expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
-    const show = `To add funds, send USDC on Base to ${ADDRESS}.`;
+    const show =
+      'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
     expect(fund).toMatchObject({
-      question: 'Do you want to add $5 to your Tenjin wallet now?',
+      question: 'Add $5 to Tenjin now?',
       options: [
-        { id: 'fund', label: 'Yes, open the funding page', command: 'tenjin wallet fund 5' },
+        { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5' },
         { id: 'later', label: 'Not now', command: null },
       ],
       address: ADDRESS,
@@ -1184,8 +1179,8 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(fund.next).toContain('never ask them to run a command');
     expect(result.humanLines).toEqual(
       expect.arrayContaining([
-        '  Ask the person: Do you want to add $5 to your Tenjin wallet now?',
-        '  Yes, open the funding page: tenjin wallet fund 5',
+        '  Ask the person: Add $5 to Tenjin now?',
+        '  Add $5: tenjin wallet fund 5',
         `  Not now: run nothing, show them: ${show}`,
       ]),
     );
@@ -1227,7 +1222,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
   });
 
-  it('asks about an existing wallet whose balance cannot be read', async () => {
+  it('does not suggest adding money when an existing balance cannot be checked', async () => {
     const result = await runRouterInstall(
       { yes: true },
       ctx(),
@@ -1239,7 +1234,13 @@ describe('install run by an agent asks each question where its answer is needed'
         },
       }),
     );
-    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
+    expect(stepsOf(result)).toEqual([]);
+    expect(result.data).toMatchObject({
+      fundingWarning: expect.stringContaining('Could not check your Tenjin funds'),
+    });
+    expect(result.humanLines!.join(' ')).toContain('Your usual tools keep working');
+    expect(result.humanLines!.join(' ')).not.toContain('Add $5');
+    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
   });
 
   it('a person at a terminal gets what it always got: no questions handed over', async () => {
@@ -1438,7 +1439,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',
-        question: 'Do you want to add $5 to your Tenjin wallet now?',
+        question: 'Add $5 to Tenjin now?',
       }),
     ]);
   });

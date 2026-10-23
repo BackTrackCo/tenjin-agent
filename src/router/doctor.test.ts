@@ -629,6 +629,48 @@ describe('runRouterDoctor, with its seams injected', () => {
     );
   });
 
+  it('uses the real session after reload instead of a failing standalone MCP probe', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const live = observation({ cwd: work });
+    const { out, by } = await run({
+      eligibility: async () => eligibility(),
+      readObservations: async () => [live],
+      listProcesses: async () => ({
+        routers: [{ pid: live.pid, startedAt: live.startedAt, kind: 'plugin', underClaude: true }],
+        claude: [],
+      }),
+    });
+    expect(out).not.toBeInstanceOf(CliError);
+    expect(by['router server']).toMatchObject({ status: 'ok' });
+    expect(by['router server']?.detail).toContain('serving a Claude Code session');
+    expect((await fake.calls()).filter((c) => c.startsWith('mcp get'))).toEqual([]);
+  });
+
+  it.each([
+    { servedSession: false },
+    { cliVersion: '0.0.0' },
+    { cwd: '/another-project' },
+    { harness: 'codex' as const },
+  ])(
+    'still checks the server when a router cannot prove this install is active: %j',
+    async (over) => {
+      await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+      const live = observation({ cwd: work, ...over });
+      const { by } = await run({
+        eligibility: async () => eligibility(),
+        readObservations: async () => [live],
+        listProcesses: async () => ({
+          routers: [
+            { pid: live.pid, startedAt: live.startedAt, kind: 'plugin', underClaude: true },
+          ],
+          claude: [],
+        }),
+      });
+      expect(by['router server']).toMatchObject({ status: 'fail' });
+      expect((await fake.calls()).some((c) => c.startsWith('mcp get'))).toBe(true);
+    },
+  );
+
   it('never throws when the eligibility check rejects: the rows say not checked', async () => {
     const { out, by } = await run({
       eligibility: async () => {
@@ -1079,7 +1121,7 @@ describe('the runtime rows', () => {
     );
   });
 
-  it('says a platform with no pinned Node runs npm’s copy by design, and never offers the move', async () => {
+  it('reports an older npm install on an unsupported platform without recommending another unsupported install', async () => {
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
     const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
     const unpinned = 'linux-x64 with musl, not glibc';
@@ -1097,8 +1139,8 @@ describe('the runtime rows', () => {
       name: 'runtime',
       status: 'warn',
       required: false,
-      detail: `Tenjin pins no Node for this platform (${unpinned}), so it keeps running from npm's copy at ${npm} on the \`node\` on Claude Code's PATH, by design`,
-      fix: "Nothing to move. Keep Node 22 or newer on the PATH Claude Code starts with; after changing Node versions, reinstall with that Node's `npm i -g tenjin-cli`, then run `tenjin install`.",
+      detail: `This older installation runs from npm's copy at ${npm}; this platform (${unpinned}) does not support Tenjin's private runtime`,
+      fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. This installation was left unchanged.',
     });
     for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
       expect(fix).toContain('`node`');
