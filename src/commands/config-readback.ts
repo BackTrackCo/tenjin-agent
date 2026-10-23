@@ -18,6 +18,7 @@ import type {
   TargetKind,
 } from '../router/decision';
 import type { ReplacementSetting, RouterSettings } from '../router/settings';
+import { savedAccountOf, type SavedAccount } from '../router/accounts/saved';
 import { CLAUDE_CODE_FLOOR, meetsFloor } from '../router/claude-cli';
 import { pidAlive, readObservations, type RouterObservation } from '../router/router-observation';
 import pkg from '../../package.json';
@@ -455,6 +456,39 @@ export interface SettingsReadback {
   limits: LimitsReadback;
   /** Removes every saved routing rule, readable or not. */
   reset: string;
+  /** The saved accounts (#37), when there are any: their names, whether this
+   *  machine holds their sign-in, and what happens when one refuses. */
+  accounts?: AccountReadback[];
+}
+
+export interface AccountReadback {
+  label: string;
+  connected: boolean;
+  /** `tenjin`: Tenjin's own tool runs in its place; `ask`: the call stops
+   *  and offers it. */
+  onRefusal: 'tenjin' | 'ask';
+  text: string;
+  reset?: string;
+}
+
+/** What an account does when it refuses a call, in the user's words. */
+export function describeAccount(account: SavedAccount, connected: boolean): AccountReadback {
+  const { label, id } = account;
+  const here = connected ? '' : ` It isn't signed in on this machine: \`tenjin connect ${id}\`.`;
+  return account.onRefusal === 'tenjin'
+    ? {
+        label,
+        connected,
+        onRefusal: 'tenjin',
+        text: `When your ${label} account refuses a call, Tenjin's own tool for that job runs in its place, from your Tenjin balance within your limits.${here}`,
+        reset: `tenjin config fallback off --source ${id}`,
+      }
+    : {
+        label,
+        connected,
+        onRefusal: 'ask',
+        text: `When your ${label} account refuses a call, Tenjin stops and offers its own tool.${here}`,
+      };
 }
 
 /** The fix a policy this build cannot read gets: said wherever it shows. */
@@ -462,14 +496,24 @@ export const POLICY_INVALID_TEXT =
   "Your Tenjin settings can't be read, so Tenjin won't run services until they're fixed.";
 
 export function settingsReadback(
-  router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement'>,
+  router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement'> &
+    Partial<Pick<RouterSettings, 'sources'>>,
   listing: DirectoryListing | undefined,
   limits: LimitsReadback,
   support: ReplacementSupport,
 ): { data: SettingsReadback; lines: string[] } {
-  const { policy, enabled } = router;
+  const { policy, enabled, sources } = router;
   const rules = policy.status === 'ok' ? describeRules(policy.saved, listing) : [];
   const replacement = describeReplacement(router.nativeReplacement, listing, support);
+  const accounts =
+    sources?.status === 'ok'
+      ? sources.saved.flatMap((entry) => {
+          const account = savedAccountOf(entry);
+          return account === undefined
+            ? []
+            : [describeAccount(account, sources.connected.includes(account.id))];
+        })
+      : [];
   const data: SettingsReadback = {
     saved: SAVED_HERE,
     scopes: scopesOf(),
@@ -485,6 +529,7 @@ export function settingsReadback(
     replacement,
     limits,
     reset: 'tenjin config reset --all',
+    ...(accounts.length > 0 ? { accounts } : {}),
   };
   const lines = [`Your settings (${SAVED_HERE.replace(/\.$/, '').toLowerCase()}):`];
   if (!enabled.value) {
@@ -508,6 +553,8 @@ export function settingsReadback(
     lines.push(`  - ${rule.text}${inactive} Undo: \`${rule.reset}\``);
   }
   if (rules.length > 0) lines.push(`  ${ENFORCED_BY}`);
+  for (const account of accounts.filter(({ reset }) => reset !== undefined))
+    lines.push(`  - ${account.text} Undo: \`${account.reset}\``);
   lines.push(`  ${replacement.text}`, `  ${limits.text}`);
   lines.push('  Change them with `tenjin config --help`.');
   return { data, lines };

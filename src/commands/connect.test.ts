@@ -333,6 +333,35 @@ describe('tenjin connect', () => {
     });
   });
 
+  it("keeps what the user chose for the account's refusals across a reconnect", async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        router: {
+          sources: [
+            {
+              id: 'apify',
+              label: 'Apify',
+              mcpUrl: 'https://mcp.apify.com',
+              signIn: 'oauth',
+              onRefusal: 'tenjin',
+            },
+          ],
+        },
+      }),
+    );
+    const mcp = sessions(SESSIONS);
+    await runConnect(
+      'apify',
+      { fromEnv: 'APIFY_TOKEN', prefer: false },
+      makeCtx(),
+      deps({ fetchImpl: network(), openSession: mcp.open, env: { APIFY_TOKEN: 'apify_api_1' } }),
+    );
+    expect((await configJson()).router?.sources).toEqual([
+      expect.objectContaining({ id: 'apify', signIn: 'key', onRefusal: 'tenjin' }),
+    ]);
+  });
+
   it('leaves out a service whose tools this account lacks', async () => {
     const mcp = sessions({
       'https://mcp.apify.com': APIFY_TOOLS.filter(({ name }) => name !== 'get-actor-run'),

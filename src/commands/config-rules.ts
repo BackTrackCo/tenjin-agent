@@ -37,6 +37,7 @@ import {
   type Named,
 } from '../router/directory';
 import { routerSettings, type RouterSettings } from '../router/settings';
+import { savedAccountsIn } from '../router/accounts/saved';
 import { persist } from './config';
 import {
   POLICY_INVALID_TEXT,
@@ -323,7 +324,15 @@ async function replacementNote(router: RouterSettings, ctx: CommandContext): Pro
 
 export interface Outcome {
   operation:
-    'prefer' | 'only' | 'block' | 'unblock' | 'reset' | 'replacement' | 'connect' | 'disconnect';
+    | 'prefer'
+    | 'only'
+    | 'block'
+    | 'unblock'
+    | 'reset'
+    | 'replacement'
+    | 'fallback'
+    | 'connect'
+    | 'disconnect';
   changed: boolean;
   scope: SettingScope;
   /** The sentences a person reads first. */
@@ -1052,5 +1061,81 @@ export async function runConfigReplacement(
     ctx,
     deps,
     listing,
+  );
+}
+
+/* ---------------------------------------------------------------- fallback */
+
+/**
+ * `tenjin config fallback on|off --source <account>`: what happens when one
+ * of the user's connected accounts refuses a call (its sign-in expired, or its
+ * plan or rate limit ran out). Off, the default: the call stops and offers
+ * Tenjin's own tool for the job with its price, which runs only when the user
+ * picks it. On: that tool runs in its place, from the Tenjin balance within
+ * its limits, and the receipt says so. Saved on the account's own entry, so it
+ * stays across a reconnect and goes with a disconnect. Works offline.
+ */
+export async function runConfigFallback(
+  args: { state: string; source?: string[] },
+  ctx: CommandContext,
+  deps: ConfigRulesDeps = {},
+): Promise<CommandResult> {
+  if (args.state !== 'on' && args.state !== 'off')
+    usage(
+      `fallback takes on or off; got "${args.state}".`,
+      'tenjin config fallback on --source apify',
+    );
+  const names = (args.source ?? []).map((name) => name.trim()).filter((name) => name.length > 0);
+  if (names.length !== 1)
+    usage('Name one connected account with --source.', 'tenjin config fallback on --source apify');
+  const wanted = names[0]!.toLowerCase();
+  const find = (router: unknown) =>
+    savedAccountsIn(router).find(
+      (account) => account.id === wanted || account.label.toLowerCase() === wanted,
+    );
+  const before = find((await loadRawConfig(ctx.dataDir)).router);
+  if (before === undefined) {
+    usage(
+      `"${names[0]}" isn't one of your connected accounts, so nothing was saved.`,
+      'Connect it first with `tenjin connect <name>`.',
+    );
+  }
+  const on = args.state === 'on';
+  await persist(ctx.dataDir, (existing) => {
+    const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
+    const saved = Array.isArray(router.sources)
+      ? (router.sources as Record<string, unknown>[])
+      : [];
+    router.sources = saved.map((entry) => {
+      if (entry.id !== before.id) return entry;
+      const next = { ...entry };
+      if (on) next.onRefusal = 'tenjin';
+      else delete next.onRefusal;
+      return next;
+    });
+    return { ...existing, router };
+  });
+  const after = find((await loadRawConfig(ctx.dataDir)).router) ?? before;
+  const { label, id } = after;
+  const explanation = on
+    ? [
+        `${SAVED_PREFIX} when your ${label} account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin runs its own tool for the same job instead. It is paid from your Tenjin balance within your limits, and the receipt says so.`,
+        `A call your ${label} account ran and then failed is never run again on Tenjin's tool: your ${label} plan may already have paid for it.`,
+      ]
+    : [
+        `${SAVED_PREFIX} when your ${label} account refuses a call, Tenjin stops and offers its own tool for the job with its price, and runs it only when you say so.`,
+      ];
+  return answer(
+    {
+      operation: 'fallback',
+      changed: (before.onRefusal === 'tenjin') !== on,
+      scope: 'user',
+      explanation,
+      ...(on ? { reset: `tenjin config fallback off --source ${id}` } : {}),
+      extra: { account: { id, label, onRefusal: on ? 'tenjin' : 'ask' } },
+    },
+    ctx,
+    deps,
+    await cachedDirectory(ctx.dataDir),
   );
 }

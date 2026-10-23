@@ -230,6 +230,7 @@ What Tenjin may use (saved on this machine, not synced):
   $ tenjin config replacement on --provider exa
   $ tenjin config replacement on --all-providers
   $ tenjin config replacement off
+  $ tenjin config fallback on --source apify
 
 A name is the catalog's name or id ("Exa" or exa). An unclear or unknown name
 saves nothing and lists what it could mean. To pause Tenjin:
@@ -673,6 +674,30 @@ Examples:
             ...(Array.isArray(o.provider) ? { provider: o.provider as string[] } : {}),
             ...(o.allProviders === true ? { allProviders: true } : {}),
           },
+          ctx,
+        ),
+      );
+    });
+
+  addGlobalFlags(config.command('fallback <state>'))
+    .summary("whether Tenjin's own tool runs when one of your accounts refuses")
+    .description(
+      "When a connected account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops and offers its own tool for the job with its price. on runs that tool in the account's place instead, from your Tenjin balance within your limits, and the receipt says so; off goes back to asking. --source names the account.",
+    )
+    .option('--source <account>', 'the connected account, such as apify', collect)
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config fallback on --source apify
+  $ tenjin config fallback off --source apify
+`,
+    )
+    .action(async function (this: Command, state: string) {
+      const o = this.opts();
+      await runCommand('config.fallback', this, async (ctx) =>
+        (await rules()).runConfigFallback(
+          { state, ...(Array.isArray(o.source) ? { source: o.source as string[] } : {}) },
           ctx,
         ),
       );

@@ -12,6 +12,7 @@ import { routerSettings } from '../router/settings';
 import { runConfigList, runConfigSet } from './config';
 import {
   runConfigBlock,
+  runConfigFallback,
   runConfigOnly,
   runConfigPrefer,
   runConfigReplacement,
@@ -656,6 +657,77 @@ describe('replacement', () => {
     );
     expect(err.code).toBe('REFUSED');
     expect((await personal()).nativeReplacement).toBeUndefined();
+  });
+});
+
+/**
+ * WHAT HAPPENS WHEN ONE OF THE USER'S ACCOUNTS REFUSES A CALL (#37): stop and
+ * offer Tenjin's own tool (the default), or run it in the account's place.
+ * Saved on the account's own entry, offline, and read back with its undo.
+ */
+describe('fallback', () => {
+  async function apifySaved(extra: Record<string, unknown> = {}): Promise<void> {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            {
+              id: 'apify',
+              label: 'Apify',
+              mcpUrl: 'https://mcp.apify.com',
+              signIn: 'oauth',
+              ...extra,
+            },
+          ],
+        },
+      }),
+    );
+  }
+  const saved = async () =>
+    ((await readFileJson())?.router as { sources: Record<string, unknown>[] }).sources[0];
+
+  it('runs Tenjin’s tool when the account refuses, by its name, offline, and undoes', async () => {
+    await apifySaved();
+    const net = offline();
+    const on = await runConfigFallback({ state: 'on', source: ['Apify'] }, makeCtx(), {
+      fetchImpl: net.fetchImpl,
+    });
+    expect(await saved()).toMatchObject({ id: 'apify', onRefusal: 'tenjin' });
+    expect(data(on)).toMatchObject({
+      operation: 'fallback',
+      changed: true,
+      scope: 'user',
+      reset: 'tenjin config fallback off --source apify',
+      account: { label: 'Apify', onRefusal: 'tenjin' },
+    });
+    expect(lines(on)).toContain(
+      'when your Apify account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin runs its own tool for the same job instead.',
+    );
+    // "What have I changed?" names it, with its undo.
+    const list = await runConfigList(makeCtx());
+    expect(lines(list)).toContain(
+      "When your Apify account refuses a call, Tenjin's own tool for that job runs in its place",
+    );
+    expect(lines(list)).toContain('Undo: `tenjin config fallback off --source apify`');
+    const off = await runConfigFallback({ state: 'off', source: ['apify'] }, makeCtx(), {
+      fetchImpl: net.fetchImpl,
+    });
+    expect(await saved()).not.toHaveProperty('onRefusal');
+    expect(data(off)).toMatchObject({ changed: true, account: { onRefusal: 'ask' } });
+    expect(net.bodies).toEqual([]);
+  });
+
+  it('refuses an account that is not connected, and saves nothing', async () => {
+    await apifySaved();
+    const error = await caught(() =>
+      runConfigFallback({ state: 'on', source: ['fal'] }, makeCtx(), offline()),
+    );
+    expect(error.code).toBe('USAGE');
+    expect(error.message).toBe(
+      '"fal" isn\'t one of your connected accounts, so nothing was saved.',
+    );
+    expect(await saved()).not.toHaveProperty('onRefusal');
   });
 });
 
