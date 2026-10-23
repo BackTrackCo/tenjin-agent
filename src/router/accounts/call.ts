@@ -6,6 +6,7 @@ import {
   openAccountSession,
   type AccountCallResult,
   type AccountSession,
+  type AccountTool,
   type OpenAccountSession,
 } from './client';
 import {
@@ -276,6 +277,17 @@ class Connection {
     }
   }
 
+  async list(): Promise<AccountTool[]> {
+    for (;;) {
+      const session = await this.open();
+      try {
+        return await session.listTools();
+      } catch (err) {
+        await this.#retry(err);
+      }
+    }
+  }
+
   /** A refused credential once more, fresh; anything else is the caller's. */
   async #retry(err: unknown): Promise<void> {
     if (err instanceof AccountRefused) {
@@ -296,6 +308,21 @@ class Connection {
     const session = this.#session;
     this.#session = undefined;
     await session?.close().catch(() => undefined);
+  }
+}
+
+/** The tools an account lists, free, or why it would not list them. */
+export async function listAccountTools(
+  account: { id: string; label: string; mcpUrl: string },
+  deps: AccountRunDeps,
+): Promise<{ tools: AccountTool[] } | Extract<AccountRun, { kind: 'refused' }>> {
+  const connection = new Connection(account, deps);
+  try {
+    return { tools: await connection.list() };
+  } catch (err) {
+    return refusedBy(err, false) as Extract<AccountRun, { kind: 'refused' }>;
+  } finally {
+    await connection.close();
   }
 }
 
@@ -328,6 +355,7 @@ export async function runAccountCall(
   input: Json,
   deps: AccountRunDeps,
   resume?: Resume,
+  opts: { literal?: boolean } = {},
 ): Promise<AccountRun> {
   const now = () => deps.now?.() ?? Date.now();
   const connection = new Connection(account, deps);
@@ -337,7 +365,9 @@ export async function runAccountCall(
     if (resume !== undefined) {
       ({ first, firstAt } = resume);
     } else {
-      const args = fillArgs(call.args, input);
+      // A TOOL THE USER NAMED takes the agent's arguments as written: no map,
+      // so nothing in them is a placeholder.
+      const args = opts.literal === true ? { value: call.args } : fillArgs(call.args, input);
       if ('missing' in args)
         return { kind: 'failed', why: 'its map reads a result before there is one' };
       // THE SESSION FIRST: a refused credential or a server that does not

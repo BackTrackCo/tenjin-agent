@@ -114,6 +114,8 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
+  'When the user names one of their connected accounts for a task no line offered, ' +
+  '`{source}` lists its tools and `{source, tool, input}` runs one there. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free, or a flat $0.003 routing fee; a wallet on ' +
   'THIS machine pays it and the provider under the local spend ' +
@@ -405,6 +407,14 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
             'The `job` a result named when the provider was still working. Alone, it checks ' +
               'that job again and returns its result; nothing more is paid.',
           ),
+        source: z
+          .string()
+          .optional()
+          .describe(
+            'Only when the user names one of their own connected accounts for a task no line offered: ' +
+              "alone, it lists that account's tools, free; with `tool`, it shows that tool's " +
+              'inputs; with `tool` and `input`, it runs it on their account, which their own plan pays.',
+          ),
         // THIS REQUEST ONLY, and only beside a query: the user's own words for
         // one lookup ("only Exa for this one"). It narrows or re-ranks; it
         // never widens a saved setting. Checked in the handler, so a shape the
@@ -436,7 +446,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async (
-      { query, id, input, choice, browse, tool, count, job, override, decide },
+      { query, id, input, choice, browse, tool, count, job, override, source, decide },
       extra,
     ): Promise<CallToolResult> => {
       // Resolved per call, from settings read now: a policy frozen at the
@@ -463,7 +473,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         harness: opts.harness ?? 'claude',
       };
       if (decide !== undefined) {
-        const others = { query, id, input, choice, browse, tool, count, job, override };
+        const others = { query, id, input, choice, browse, tool, count, job, override, source };
         if (Object.values(others).some((value) => value !== undefined)) {
           return toolResult(
             fail('needs_input', '`decide` is sent alone; nothing was sent or paid.'),
@@ -482,6 +492,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(count !== undefined ? { count } : {}),
           ...(job !== undefined ? { job } : {}),
           ...(override !== undefined ? { override } : {}),
+          ...(source !== undefined ? { source } : {}),
         },
         // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's. Routing
         // is free, so a missing or locked wallet must not stop a `native` or

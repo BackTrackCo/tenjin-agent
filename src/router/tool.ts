@@ -205,6 +205,11 @@ export interface RequestToolArgs {
    *  settings, connects an account, raises a limit or turns on replacement.
    *  Checked here; one that does not parse sends nothing. */
   override?: Record<string, unknown>;
+  /** One of the user's connected accounts, by name, when the user asks for
+   *  it by name: alone it lists the account's tools, with `tool` it shows
+   *  one, and with `tool` and `input` it runs that tool on the account
+   *  (`accounts/explicit.ts`). Never routed, never from the balance. */
+  source?: string;
 }
 
 /** The server's own cap on `input`, serialized. */
@@ -563,6 +568,25 @@ async function requestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  // AN ACCOUNT THE USER NAMED (#37): its own tools, never a lookup.
+  if (args.source !== undefined) {
+    const others = (
+      ['query', 'id', 'choice', 'browse', 'count', 'job', 'override'] as const
+    ).filter((key) => args[key] !== undefined);
+    if (others.length > 0) {
+      return fail('needs_input', '`source` goes with `tool` and `input` alone; nothing was sent.', {
+        nextStep: "Call request({source}) for the account's tools.",
+      });
+    }
+    return (await import('./accounts/explicit')).runSourceRequest(
+      {
+        source: args.source,
+        ...(args.tool !== undefined ? { tool: args.tool } : {}),
+        ...(args.input !== undefined ? { input: args.input } : {}),
+      },
+      deps,
+    );
+  }
   if (args.browse !== undefined || args.tool !== undefined) return readToolList(args, deps);
   // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
   // its record, with nothing built and nothing paid.

@@ -65,7 +65,7 @@ interface Named {
 }
 
 /** What a refusal says, and the user's own way out of it. */
-function refusalWords(
+export function refusalWords(
   reason: RefusalReason | 'missing' | 'declined',
   account: Named,
   detail: string | undefined,
@@ -127,7 +127,7 @@ const SWITCHABLE: ReadonlySet<string> = new Set(['signin_expired', 'credit', 'ra
 
 /** A result in this module's own words: its headline and cost line, never the
  *  generic ones a paid call's failure carries. */
-function accountResult(
+export function accountResult(
   status: FailStatus,
   summary: string,
   reason: string,
@@ -175,7 +175,7 @@ function fittedInput(input: Json, fallback: OfferSpec): Json | undefined {
 
 /** Where the account's own seams come from: the deps in tests, the platform
  *  otherwise. */
-function runDeps(deps: RequestToolDeps): AccountRunDeps {
+export function runDeps(deps: RequestToolDeps): AccountRunDeps {
   const now = deps.now ?? Date.now;
   const started = deps.startedAt ?? now();
   const seams = deps.accounts ?? {};
