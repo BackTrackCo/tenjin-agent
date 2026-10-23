@@ -59,6 +59,21 @@ To cut a release (two clicks):
    `latest` alone, so publish tagging and `src/lib/update-check.ts` must change
    together.
 
+The same publish job downloads the exact published tarball from npm, verifies
+its registry SHA512 integrity, and runs `scripts/build-installers.mjs` to create
+`install.sh` and `install.ps1`. The scripts embed that tarball's SHA512 and its
+signature-checked Node pins. They are immutable assets on the matching GitHub
+release tag `v<version>`. Re-running the workflow skips identical assets and
+refuses to replace different bytes. The website resolves npm's latest version,
+loads that exact release (including prereleases), and verifies each asset
+against GitHub's SHA256 digest before serving it unchanged.
+
+To inspect a candidate locally, build, pack, then run
+`node scripts/build-installers.mjs <candidate.tgz> <output-dir>`. Candidate
+packages are fixtures; do not serve their scripts as an already-published npm
+version. `node scripts/installer-smoke.mjs` exercises generated scripts with
+isolated download fixtures, including corrupt downloads and profile refusal.
+
 Auth is npm Trusted Publishing (OIDC): each publish mints a short-lived, per-run
 token, so there is **no `NPM_TOKEN`** to store or rotate.
 

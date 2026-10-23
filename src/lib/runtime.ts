@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -49,6 +49,7 @@ import { LockTimeoutError } from './lock';
 import { defaultDataDir, launcherDir, runtimeDir } from './paths';
 import {
   download,
+  downloadViaCurl,
   extract,
   nodeArtifact,
   nodeKey,
@@ -407,6 +408,8 @@ export async function ensureNode(
     platform?: NodeJS.Platform;
     arch?: string;
     glibc?: string | null;
+    archivePath?: string;
+    proxyEnv?: NodeJS.ProcessEnv;
   },
 ): Promise<string> {
   const platform = o.platform ?? process.platform;
@@ -436,13 +439,30 @@ export async function ensureNode(
         const artifact = nodeArtifact(pin.version, key);
         let got;
         try {
-          got = await download(artifact.url, {
-            dir: tmpOf(root),
-            maxBytes: NODE_MAX_BYTES,
-            timeoutMs: o.timeoutMs,
-            hash: 'sha256',
-            fetchImpl: o.fetchImpl,
-          });
+          if (o.archivePath !== undefined) {
+            const archive = await readFile(o.archivePath);
+            if (archive.byteLength > NODE_MAX_BYTES) {
+              throw new CliError('UPDATE_FAILED', 'The bootstrap Node archive is too large.');
+            }
+            const file = join(tmpOf(root), `dl-${rand()}`);
+            await writeFile(file, archive, { mode: 0o600 });
+            got = { file, digest: createHash('sha256').update(archive).digest() };
+          } else if (o.proxyEnv !== undefined) {
+            got = await downloadViaCurl(artifact.url, {
+              dir: tmpOf(root),
+              maxBytes: NODE_MAX_BYTES,
+              timeoutMs: o.timeoutMs,
+              env: o.proxyEnv,
+            });
+          } else {
+            got = await download(artifact.url, {
+              dir: tmpOf(root),
+              maxBytes: NODE_MAX_BYTES,
+              timeoutMs: o.timeoutMs,
+              hash: 'sha256',
+              fetchImpl: o.fetchImpl,
+            });
+          }
         } catch (err) {
           if (err instanceof CliError && err.code === 'NETWORK_ERROR') {
             throw new CliError('NETWORK_ERROR', err.message, { fix: NODE_FIX, cause: err });
@@ -1415,7 +1435,7 @@ export async function removeRuntime(
 // ---------------------------------------------------------------------------
 
 export interface RuntimeSetup {
-  state: 'active' | 'current' | 'kept' | 'fallback' | 'skipped';
+  state: 'active' | 'current' | 'kept' | 'failed' | 'skipped';
   root: string;
   cli?: string;
   nodeVersion?: string;
@@ -1486,11 +1506,11 @@ async function hostsMatch(root: string, version: string, launch: RuntimeLaunch):
 
 /**
  * SET UP TENJIN'S RUNTIME FOR THIS BUILD, as install runs it. `skipped` for a
- * source checkout or a non-default data dir (today's registration, unchanged).
+ * source checkout. Non-default plugin data directories are refused.
  * Otherwise: `current` when this version is already in place, `active` once it
  * was placed, verified and switched to, `kept` when it could not be and a
  * usable runtime stays (or, under `refresh`, a newer one is already there),
- * and `fallback` when there is no runtime to register. Only `active` changed
+ * and `failed` when there is no runtime to register. Only `active` changed
  * anything Claude Code reads, and only after `verify` passed.
  */
 export async function setupRuntime(o: {
@@ -1508,8 +1528,18 @@ export async function setupRuntime(o: {
   proxySupported?: boolean;
 }): Promise<RuntimeSetup> {
   const root = runtimeDir(o.dataDir);
-  if (isSourceCheckout(o.moduleDir) || resolve(o.dataDir) !== resolve(defaultDataDir(o.home))) {
+  if (isSourceCheckout(o.moduleDir)) {
     return { state: 'skipped', root, firstTime: false, launcher: null };
+  }
+  if (resolve(o.dataDir) !== resolve(defaultDataDir(o.home))) {
+    return {
+      state: 'failed',
+      root,
+      firstTime: false,
+      launcher: null,
+      reason: 'Plugin installation needs the default data directory.',
+      fix: 'Run without TENJIN_DATA_DIR.',
+    };
   }
   const platform = o.platform ?? process.platform;
   const arch = o.arch ?? process.arch;
@@ -1595,7 +1625,7 @@ export async function setupRuntime(o: {
   const failed = (reason: string): RuntimeSetup =>
     usable !== null
       ? { ...runs(usable), reason }
-      : { state: 'fallback', root, firstTime, launcher: null, reason };
+      : { state: 'failed', root, firstTime, launcher: null, reason };
 
   // Set while the pinned Node downloads: a failure then, on a Node that skips
   // the shell's proxy, is the proxy's (#470), which no retry on that Node fixes.
@@ -1638,6 +1668,11 @@ export async function setupRuntime(o: {
         platform,
         arch,
         glibc,
+        archivePath: o.env.TENJIN_BOOTSTRAP_NODE_ARCHIVE,
+        proxyEnv:
+          o.fetchImpl === undefined && proxySkipped(o.env, o.proxySupported) !== null
+            ? o.env
+            : undefined,
       }),
       nodeMs,
     );

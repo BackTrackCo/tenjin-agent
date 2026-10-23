@@ -119,9 +119,6 @@ const runtimeOf = (result: { data: unknown }) =>
 const pluginOf = (result: { data: unknown }) =>
   (result.data as { plugin: Record<string, unknown> }).plugin;
 const runsLines = (lines: string[]) => lines.filter((l) => l.startsWith('  Runs from '));
-const FALLBACK = (reason: string) =>
-  `Tenjin's own runtime could not be set up (${reason}), so the plugin still runs on the Node on your PATH; run \`tenjin install\` again to retry.`;
-
 /** Claude Code's `installed_plugins.json`, with these `tenjin@tenjin` entries. */
 async function recordInstalls(entries: Record<string, unknown>[] | string): Promise<void> {
   await mkdir(join(cfg, 'plugins'), { recursive: true });
@@ -175,94 +172,42 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     }
   });
 
-  it('fallback: registers this package’s folder, with one ! line and the refresh notice', async () => {
-    const reason = 'no pinned Node for linux-ia32';
-    const fallback = async () =>
-      ({ state: 'fallback', root: runtimeRoot, firstTime: true, launcher: null, reason }) as const;
-    const result = await runRouterInstall({}, ctx(), deps(fallback));
-    expect(await fake.calls()).toContain(`plugin marketplace add ${hosts} --json`);
-    expect(result.humanLines!.filter((l) => l.includes('could not be set up'))).toEqual([
-      `! ${FALLBACK(reason)}`,
-    ]);
-    // A refresh with a fallback still succeeds, and update's parent prints the sentence.
-    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
-    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(fallback));
-    expect((refreshed.data as { notices: string[] }).notices).toContain(FALLBACK(reason));
-    expect(runtimeOf(refreshed)).toMatchObject({ state: 'fallback', reason });
-  });
+  it.each([
+    { state: 'failed' as const, reason: 'download checksum mismatch' },
+    { state: 'failed' as const, reason: 'unsupported Linux', unpinned: 'musl' },
+    { state: 'kept' as const, reason: 'new build failed verification' },
+  ])(
+    'keeps registration and settings untouched when runtime is $state: $reason',
+    async (outcome) => {
+      const before = await loadRawConfig(data);
+      await expect(
+        runRouterInstall(
+          {},
+          ctx(),
+          deps(async () => setup(outcome)),
+        ),
+      ).rejects.toThrow(outcome.reason);
+      expect(await fake.calls()).not.toContainEqual(
+        expect.stringContaining('plugin marketplace add'),
+      );
+      expect(await loadRawConfig(data)).toEqual(before);
+    },
+  );
 
-  it('a platform with no pinned Node says so once, with no retry that cannot work', async () => {
-    const unpinned = 'linux-x64 with musl, not glibc';
-    const fallback = async () =>
-      ({
-        state: 'fallback',
-        root: runtimeRoot,
-        firstTime: true,
-        launcher: null,
-        reason: `no pinned Node for this platform, ${unpinned}`,
-        unpinned,
-      }) as const;
-    const result = await runRouterInstall({}, ctx(), deps(fallback));
-    const line = `Tenjin pins no Node for this platform (${unpinned}), so the plugin runs from npm's copy on the Node on your PATH, as before.`;
-    expect(result.humanLines!.filter((l) => l.includes('pins no Node'))).toEqual([`! ${line}`]);
-    expect(result.humanLines!.join('\n')).not.toContain('again to retry');
-    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
-    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(fallback));
-    expect((refreshed.data as { notices: string[] }).notices).toContain(line);
-  });
-
-  it('fallback with a step that works: names that step, never the retry, in lines and notices', async () => {
-    const reason = 'this shell sets HTTPS_PROXY, which Node 22.12.0 cannot send downloads through';
-    const fix =
-      "run `tenjin install` once with Node 24.14 or newer, which uses the proxy; Tenjin's own Node does from then on";
-    const fallback = async () =>
-      ({
-        state: 'fallback',
-        root: runtimeRoot,
-        firstTime: true,
-        launcher: null,
-        reason,
-        fix,
-      }) as const;
-    const line = `Tenjin's own runtime could not be set up (${reason}), so the plugin still runs on the Node on your PATH; ${fix}.`;
-    const result = await runRouterInstall({}, ctx(), deps(fallback));
-    expect(result.humanLines!.filter((l) => l.includes('could not be set up'))).toEqual([
-      `! ${line}`,
-    ]);
-    expect(result.humanLines!.join('\n')).not.toContain('again to retry');
-    expect(runtimeOf(result)).toMatchObject({ reason, fix });
-    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
-    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(fallback));
-    expect((refreshed.data as { notices: string[] }).notices).toContain(line);
-  });
-
-  it('kept after this build failed its checks: names both versions and the retry, in lines and notices', async () => {
-    const reason = 'tenjin --version printed nothing';
-    const kept = async () =>
-      setup({ state: 'kept', cli: '0.1.0-alpha.31', launcher: null, reason });
-    const line = `tenjin-cli ${pkg.version} could not be set up (${reason}), so Tenjin keeps running 0.1.0-alpha.31; run \`tenjin install\` again to retry.`;
-    const result = await runRouterInstall({}, ctx(), deps(kept));
-    expect(result.humanLines!.filter((l) => l.includes('could not be set up'))).toEqual([
-      `! ${line}`,
-    ]);
-    await fake.respond('list', listed('tenjin@tenjin', pkg.version));
-    const refreshed = await runRouterInstall({ refresh: true }, ctx(), deps(kept));
-    expect((refreshed.data as { notices: string[] }).notices).toContain(line);
-    // A refresh that found a newer runtime tried nothing, so there is nothing to say.
-    const newer = await runRouterInstall(
-      { refresh: true },
-      ctx(),
-      deps(async () =>
-        setup({
-          state: 'kept',
-          cli: '0.1.0-alpha.99',
-          launcher: null,
-          reason: `Tenjin 0.1.0-alpha.99 is already set up here; this ${pkg.version} did not replace it`,
-          newer: true,
+  it('refuses a custom data directory before invoking the runtime or changing registration', async () => {
+    const runtime = vi.fn(async () => setup());
+    await expect(
+      runRouterInstall(
+        {},
+        ctx(),
+        deps(runtime, {
+          env: { ...fake.env, TENJIN_DATA_DIR: join(root, 'profile') },
+          homeDir: join(root, 'different-home'),
         }),
       ),
-    );
-    expect((newer.data as { notices: string[] }).notices).toEqual([]);
+    ).rejects.toThrow('default data directory');
+    expect(runtime).not.toHaveBeenCalled();
+    expect(await fake.calls()).toEqual([]);
   });
 
   it('skipped: the same lines as today’s install, from this package’s folder', async () => {
@@ -634,11 +579,10 @@ describe('the launcher lines', () => {
 describe('an install run over two hosts', () => {
   it('sets the runtime up once, and says its warnings under the first host only', async () => {
     const setUp = vi.fn(async (): Promise<RuntimeSetup> => ({
-      state: 'fallback',
+      state: 'current',
       root: runtimeRoot,
       firstTime: true,
       launcher: { ...launcherOk, onPath: false, pathLine: 'fish_add_path ~/.local/bin' },
-      reason: 'download timed out',
     }));
     const once = runtimeOncePerRun(setUp);
     const runtime = (o: unknown) => once(o as Parameters<typeof once>[0]);
@@ -646,7 +590,7 @@ describe('an install run over two hosts', () => {
     const first = await runRouterInstall({}, ctx(), deps(runtime));
     const second = await runRouterInstall({}, ctx(), deps(runtime));
     expect(setUp).toHaveBeenCalledTimes(1);
-    expect(warnings(first.humanLines!)).toHaveLength(2);
+    expect(warnings(first.humanLines!)).toHaveLength(1);
     expect(warnings(second.humanLines!)).toEqual([]);
     expect(runtimeOf(second)).toEqual(runtimeOf(first));
   });

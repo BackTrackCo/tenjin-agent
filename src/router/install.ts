@@ -368,6 +368,7 @@ export async function runRouterInstall(
       fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.',
     });
   }
+  assertPluginDataDir(ctx.dataDir, home, env);
   const config = await loadRawConfig(ctx.dataDir); // Validate before any install writes; retired keys remain readable.
   const named = namedLimits(args);
   const cwd = deps.cwd ?? process.cwd();
@@ -404,6 +405,7 @@ export async function runRouterInstall(
     // registered, written or migrated.
     if (!project && hasRuntime(ctx.dataDir, home)) {
       const rt = await setUpRuntime();
+      requireRuntime(rt);
       if (runtimeLaunch(rt) !== null) {
         await collectRuntime(rt.root, await fallbackFolders(ctx.dataDir, env, home, cwd, false));
       }
@@ -438,6 +440,14 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
+  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
+  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
+  // on any version and would silence the settings install in every session,
+  // leaving the machine unrouted. So nothing is registered until `claude
+  // update`, and the settings install keeps routing, and no runtime is set up.
+  const deferred = !claude.meetsFloor && legacy.present;
+  const rt = deferred ? null : await setUpRuntime();
+  requireRuntime(rt);
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
   const removedKeysLines =
     spend.removed.length > 0
@@ -446,20 +456,6 @@ export async function runRouterInstall(
         ]
       : [];
   const removedSkills = await removeRetiredSkills(home, project ? cwd : undefined);
-  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
-  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
-  // on any version and would silence the settings install in every session,
-  // leaving the machine unrouted. So nothing is registered until `claude
-  // update`, and the settings install keeps routing, and no runtime is set up.
-  const deferred = !claude.meetsFloor && legacy.present;
-  // TENJIN'S OWN RUNTIME, set up before the plugin is registered from it. Only
-  // a folder rendered from a build that passed its checks is registered;
-  // anything else keeps today's registration from this package (`fallback`,
-  // `skipped`). A `kept` runtime (newer, or this build failed its checks)
-  // registers that runtime's own version. One user-scope `marketplace add`
-  // repoints every project install too, since Claude Code keeps one global
-  // `tenjin` row; a `--project` run repoints the same row to the same folder.
-  const rt = deferred ? null : await setUpRuntime();
   const launch = runtimeLaunch(rt);
   const plugin: PluginRegistration = deferred
     ? deferredRegistration(scope, claude)
@@ -761,7 +757,35 @@ async function folderPointers(root: string, folders: readonly string[]): Promise
   return pointers;
 }
 
-/** What the plugin is registered from when the runtime has a build for it, or null for this package. */
+export function assertPluginDataDir(dataDir: string, home: string, env: NodeJS.ProcessEnv): void {
+  if (env.TENJIN_DATA_DIR && resolve(dataDir) !== resolve(defaultDataDir(home))) {
+    throw new CliError('REFUSED', 'Plugin installation needs the default data directory.', {
+      fix: 'Run without TENJIN_DATA_DIR. Other CLI commands still support it.',
+    });
+  }
+}
+
+export function requireRuntime(rt: RuntimeSetup | null): void {
+  if (rt === null || rt.state === 'skipped') return;
+  if (
+    rt.state === 'failed' ||
+    (rt.state === 'kept' && rt.reason !== undefined && rt.newer !== true)
+  ) {
+    throw new CliError(
+      'UPDATE_FAILED',
+      `Tenjin could not finish installation: ${rt.reason ?? 'runtime setup failed'}. Your existing plugin registration was kept.`,
+      {
+        fix:
+          rt.fix ??
+          (rt.unpinned
+            ? 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64.'
+            : 'Check your connection and run tenjin install again.'),
+      },
+    );
+  }
+}
+
+/** A verified runtime launch, or the explicit source-checkout development path. */
 function runtimeLaunch(
   rt: RuntimeSetup | null,
 ): { version: string; hostsDir: string; cliEntry: string; node: string } | null {
@@ -827,28 +851,6 @@ function runtimeSentence(rt: RuntimeSetup, home: string): string | null {
 }
 
 /**
- * Why the plugin still runs on the Node on PATH, or on an older runtime build
- * than this one. A platform Tenjin pins no Node for is said as it is, with no
- * retry: no install here can set the runtime up. A failure with a step that
- * works (a download that skipped the shell's proxy) names that step instead. A refresh that found a newer
- * runtime tried nothing, so it says nothing.
- */
-function fallbackSentence(rt: RuntimeSetup): string | null {
-  if (rt.state === 'fallback' && rt.unpinned !== undefined) {
-    return `Tenjin pins no Node for this platform (${rt.unpinned}), so the plugin runs from npm's copy on the Node on your PATH, as before.`;
-  }
-  const next = rt.fix ?? 'run `tenjin install` again to retry';
-  if (rt.state === 'fallback') {
-    return `Tenjin's own runtime could not be set up (${rt.reason ?? 'unknown reason'}), so the plugin still runs on the Node on your PATH; ${next}.`;
-  }
-  if (rt.state === 'kept' && rt.reason !== undefined && rt.newer !== true) {
-    const retry = rt.unpinned === undefined ? `; ${next}` : '';
-    return `tenjin-cli ${pkg.version} could not be set up (${rt.reason}), so Tenjin keeps running ${rt.cli ?? 'the runtime it has'}${retry}.`;
-  }
-  return null;
-}
-
-/**
  * What the person needs to know about the `tenjin` launcher: only a file in
  * its place that is not Tenjin's, a write that failed, or a launcher folder
  * off PATH. npm's own link there (npm prefix `~/.local`) says nothing.
@@ -874,13 +876,8 @@ export function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home:
   if (rt === null || sharedResults.has(rt)) return [];
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const runs = runtimeSentence(rt, home);
-  const fallback = fallbackSentence(rt);
   const launcher = launcherSentence(rt.launcher, home);
-  return [
-    ...(runs !== null ? [`  ${runs}`] : []),
-    ...(fallback !== null ? [warn(fallback)] : []),
-    ...(launcher !== null ? [warn(launcher)] : []),
-  ];
+  return [...(runs !== null ? [`  ${runs}`] : []), ...(launcher !== null ? [warn(launcher)] : [])];
 }
 
 function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
@@ -1039,9 +1036,8 @@ function runtimeNotices(rt: RuntimeSetup, home: string): string[] {
   const out: string[] = [];
   const runs = runtimeSentence(rt, home);
   if (runs !== null) out.push(`Tenjin ${runs.charAt(0).toLowerCase()}${runs.slice(1)}`);
-  for (const sentence of [fallbackSentence(rt), launcherSentence(rt.launcher, home)]) {
-    if (sentence !== null) out.push(sentence);
-  }
+  const launcher = launcherSentence(rt.launcher, home);
+  if (launcher !== null) out.push(launcher);
   return out;
 }
 

@@ -100,10 +100,10 @@ export function runtimeBuild(moduleDir: string): { root: string; cli: string } |
 /**
  * THE RUNTIME TO HAND A COMMAND TO, or null to run this build. A copy of the
  * CLI outside the runtime (npm's, typically, found first on PATH) defers to the
- * runtime's current version when that one is strictly newer, so an old npm copy
+ * runtime's current version when that one is the same or newer, so an old npm copy
  * never answers for a machine that has moved on. Null for a runtime build
  * itself, a non-default data dir (the runtime belongs to `~/.tenjin` alone), no
- * state, a current that is not newer, or a current whose files are gone; any
+ * state, a current older than this build, or a current whose files are gone; any
  * error is null too, and this build runs.
  */
 export function handoffTarget(
@@ -120,7 +120,8 @@ export function handoffTarget(
     if (dir !== fallback) return null;
     const root = runtimeDir(dir);
     const state = readRuntimeState(root);
-    if (state === null || !isNewer(state.current.cli, version)) return null;
+    if (state === null || (state.current.cli !== version && !isNewer(state.current.cli, version)))
+      return null;
     const node = nodeBinPath(root, state.current.node);
     const entry = versionEntry(root, state.current.cli);
     if (!existsSync(node) || !existsSync(entry)) return null;

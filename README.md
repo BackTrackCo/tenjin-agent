@@ -46,15 +46,29 @@ Install Tenjin from tenjin.sh
 
 Your agent asks before it installs or spends anything, then sets everything up. Start a new Claude Code session, and the router is on.
 
-Or from a terminal:
+Or from a terminal (Node and npm are not required):
 
-```bash
-npm i -g tenjin-cli
-tenjin install          # adds the plugin and creates your wallet
-tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
+```sh
+curl -fsSL https://tenjin.sh/install.sh | sh
 ```
 
-Needs Claude Code 2.1.287+, and Node.js 22+ with npm to install. Install copies Tenjin, with its own Node, into `~/.tenjin/runtime` and puts the `tenjin` command in `~/.local/bin`, so switching or removing Node later doesn't stop it. Add `--project` to set it up for one project only.
+On Windows, in PowerShell:
+
+```powershell
+irm https://tenjin.sh/install.ps1 | iex
+```
+
+The installer downloads a pinned Node and Tenjin, verifies both, and sets up
+the plugin. Supports macOS, Windows and glibc Linux 2.28+ on x64/arm64.
+Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
+Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
+later does not stop it. Add `--project` to `tenjin install` for one project.
+Plugin installation uses the default data directory; run without
+`TENJIN_DATA_DIR`. Other CLI commands can still use a custom data directory.
+
+Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`. It sets up
+the same private runtime. An installation failure keeps your existing plugin
+registration. Check the reported cause, then retry the install.
 
 **Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 

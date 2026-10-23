@@ -1079,7 +1079,7 @@ describe('the runtime rows', () => {
     );
   });
 
-  it('says a platform with no pinned Node runs npm’s copy by design, and never offers the move', async () => {
+  it('reports an older npm install on an unsupported platform without recommending another unsupported install', async () => {
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
     const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
     const unpinned = 'linux-x64 with musl, not glibc';
@@ -1097,8 +1097,8 @@ describe('the runtime rows', () => {
       name: 'runtime',
       status: 'warn',
       required: false,
-      detail: `Tenjin pins no Node for this platform (${unpinned}), so it keeps running from npm's copy at ${npm} on the \`node\` on Claude Code's PATH, by design`,
-      fix: "Nothing to move. Keep Node 22 or newer on the PATH Claude Code starts with; after changing Node versions, reinstall with that Node's `npm i -g tenjin-cli`, then run `tenjin install`.",
+      detail: `This older installation runs from npm's copy at ${npm}; this platform (${unpinned}) does not support Tenjin's private runtime`,
+      fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. This installation was left unchanged.',
     });
     for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
       expect(fix).toContain('`node`');
