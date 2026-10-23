@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "routerVersion": "2026-10-23.2",
+  "routerVersion": "2026-10-23.3",
   "decision": {
     "action": "native",
     "reason": "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it runs only when you ask for it by name.",

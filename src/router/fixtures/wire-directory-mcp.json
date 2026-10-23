@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "routerVersion": "2026-10-23.2",
+  "routerVersion": "2026-10-23.3",
   "directory": {
-    "revision": "0985131ca8fdeeca",
+    "revision": "62f9a77b90fd4d07",
     "categories": [
       {
         "id": "lookups",
@@ -347,6 +347,19 @@
           "categories": ["lookups"],
           "revision": "d230c04c739d1156"
         }
+      },
+      {
+        "id": "firecrawl.search",
+        "label": "Firecrawl search",
+        "identity": {
+          "service": "firecrawl.search",
+          "source": "firecrawl",
+          "providers": ["firecrawl"],
+          "seller": "firecrawl",
+          "task": "web research",
+          "categories": ["lookups"],
+          "revision": "4d91ee025b87f91d"
+        }
       }
     ],
     "retired": [],
@@ -363,6 +376,7 @@
           {
             "id": "apify.google-maps-places",
             "verified": true,
+            "useFirst": true,
             "tools": [
               {
                 "name": "call-actor",
@@ -392,6 +406,7 @@
           {
             "id": "fal.flux-pro-ultra",
             "verified": false,
+            "useFirst": true,
             "tools": [
               {
                 "name": "run_model",
@@ -421,6 +436,7 @@
           {
             "id": "firecrawl.scrape",
             "verified": false,
+            "useFirst": true,
             "tools": [
               {
                 "name": "firecrawl_scrape",
@@ -432,6 +448,17 @@
                   "parsers",
                   "pdfOptions"
                 ]
+              }
+            ]
+          },
+          {
+            "id": "firecrawl.search",
+            "verified": false,
+            "useFirst": false,
+            "tools": [
+              {
+                "name": "firecrawl_search",
+                "arguments": ["query", "objective", "limit"]
               }
             ]
           }

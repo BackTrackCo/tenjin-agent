@@ -9,7 +9,7 @@ round trip; copy these files rather than hand-writing an equivalent.
 Change them here, in the same commit as the `wire.ts` change that makes them
 valid, then copy them across. `harness/`, in tenjin-agent alone, is the
 exception: harness events (what Claude Code hands a router hook) that only the
-client reads, never copied. `ROUTER_VERSION` is `2026-10-23.2`.
+client reads, never copied. `ROUTER_VERSION` is `2026-10-23.3`.
 
 ## The calls
 
@@ -253,10 +253,11 @@ Firecrawl. Its mapped services do catalog tasks on that account, and the
 user's own plan pays for them: the balance pays none of it, and the daily and
 per-call limits do not cover it. An account service's `identity.source` is the
 account's id (`apify`), never `tenjin`, and it runs only where
-`policy.sources` lists that id. Connecting makes a service eligible, never
-first: it ranks first only through the visible source preference that
-connecting writes. Only a client that sends `mcp` beside `identity` is offered
-one.
+`policy.sources` lists that id. An account maps every task its tools can do,
+and connecting makes all of them eligible, never first: a service ranks first
+only through the visible source preference that connecting writes, and that
+preference covers only the services the catalog marks `useFirst`. Only a
+client that sends `mcp` beside `identity` is offered one.
 
 ### The account spec
 
@@ -326,17 +327,19 @@ its id sent as `tool`. The hook carries no override, so it offers checked
 services alone. Browse lists checked ones, with `price` reading `your <label>
 account` and `free` false. Among the services a request allows, an account's
 follow Tenjin's own in catalog order, so one leads only through a preference:
-the account-wide source preference connecting writes, or the request's own.
+the account-wide source preference connecting writes, a task's own, or the
+request's. The account-wide one covers only the services the catalog marks
+`useFirst`; it passes over the rest, which keep their catalog place, after
+Tenjin's own. Such a service still runs when a request or a task's preference
+names it, when no Tenjin route for the task is left (the rules block it, or
+this client does not run it), and when the user uses only their own accounts.
 
 An account lead goes out as the hook's `execute` or the tool's `spec`, alone:
 never a batch sibling, a compare option or on a `discovered` offer, and never
 with `bound`, so it never runs in place of a native call. Its `execute`
 carries no `endpoint`, a `providerPriceAtomic` of `"0"` and the lead spec's
 `identity`, and its line names the account by label with no price: `Apify
-Google Maps, your Apify account: …`. So once a preference puts an account first
-for a native call its map holds (Firecrawl's scrape holds `WebFetch`), that call
-is denied and offered, and Tenjin's own pick no longer runs in its place
-automatically.
+Google Maps, your Apify account: …`.
 
 Beside the lead, both answers carry `fallback`: Tenjin's own route for the
 same task, a paid spec with its `identity` (`source: "tenjin"`) and its price,
@@ -369,7 +372,10 @@ Each connectable account is `{id, label, mcpUrl, signIn, key?, services}`:
 - `signIn`: `oauth` (MCP sign-in), `key`, or both. With `key`, `key: {scheme}`
   says how a pasted key is sent, `Authorization: <scheme> <key>`: `Bearer`
   for Apify and Firecrawl, `Key` for fal, whose key is `<key_id>:<key_secret>`.
-- `services`: `{id, verified, tools}` for each mapped service. `tools` lists
+- `services`: `{id, verified, useFirst, tools}` for each mapped service.
+  `useFirst` says whether the account-wide preference puts it first, so the
+  connect readback can name the jobs the account is used first for; a catalog
+  edit sets it false to demote a service without removing it. `tools` lists
   each call its spec makes (the call, the poll, the follow-up), each with the
   top-level `arguments` it sends. A connect-time `tools/list` that lacks one
   leaves that service out on this machine.
@@ -408,8 +414,10 @@ Both come as `native` with `policy_refused` and the `rule`:
 Text a user reads names an account by its label, never its id. The maps ship
 unchecked (catalog `fixtures/catalog/sources`, with no `verifiedAt`). The
 account fixtures are the live route's answers with Apify's Google Maps map
-marked checked, as a real call will mark it; their Actor, model, tool and
-argument values stand in until those checks settle them.
+marked checked, as a real call will mark it, and, in the directory, Firecrawl's
+search kept out of the account-wide preference (`useFirst: false`), as a
+catalog edit would demote it; their Actor, model, tool and argument values
+stand in until those checks settle them.
 
 ## Discovered services
 
@@ -634,7 +642,7 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-tool-request-only-accounts.json`     | the tool call with Tenjin's own tools blocked, naming no account                          |
 | `wire-lookup-account-unverified.json`      | tool answer for it: `policy_refused` with the `unverified` rule                           |
 | `wire-directory-request-mcp.json`          | the directory from an `mcp` client                                                        |
-| `wire-directory-mcp.json`                  | its answer: `connectable`, trimmed to the services the account fixtures name              |
+| `wire-directory-mcp.json`                  | its answer: `connectable`, trimmed to the account fixtures' services, one not `useFirst`  |
 | `oauth-client-metadata.json`               | Tenjin's OAuth client document, served at its `client_id` (Connecting, above)             |
 
 Two rules the fixtures exist to hold:

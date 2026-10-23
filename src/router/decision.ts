@@ -922,8 +922,9 @@ const twice = (keys: readonly string[]) => new Set(keys).size !== keys.length;
 /**
  * ONE ACCOUNT THIS CLIENT CAN CONNECT, from the directory because this build
  * lists `mcp`: where its MCP server is, how it signs in, and for each mapped
- * service whether Tenjin has checked it and the tools, with the top-level
- * arguments, its call makes. `tenjin connect` lists the account's tools (free)
+ * service whether Tenjin has checked it, whether the account-wide preference
+ * puts it first (`useFirst`), and the tools, with the top-level arguments,
+ * its call makes. `tenjin connect` lists the account's tools (free)
  * and leaves out, on this machine, a service whose tool is missing.
  */
 export const ConnectableSchema = z
@@ -941,6 +942,9 @@ export const ConnectableSchema = z
         z.strictObject({
           id: TargetIdSchema,
           verified: z.boolean(),
+          /** The account-wide preference puts it first; without it, it runs
+           *  when named, when Tenjin's own route is ruled out, or alone. */
+          useFirst: z.boolean(),
           tools: z
             .array(
               z.strictObject({ name: McpToolSchema, arguments: z.array(ArgumentName).max(32) }),
