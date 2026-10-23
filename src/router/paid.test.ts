@@ -661,6 +661,20 @@ describe('resolving a settlement left unknown', () => {
     ]);
   });
 
+  it('marks a lookup run in place of a native search or fetch', async () => {
+    await ledger([JSON.stringify(record(1, { ts: '2027-01-15T09:30:00.000Z', via: 'swap' }))]);
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    const result = await runPaymentsList({
+      flags: { json: false, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink, stderr: sink, isTTY: true },
+    });
+    expect(result.data).toMatchObject({ payments: [{ service: 'cap-1', via: 'swap' }] });
+    expect(result.humanLines?.[1]).toBe(
+      '2027-01-15 09:30  Seller    cap-1 (in place)  $0.01   unknown',
+    );
+  });
+
   it('says so when this machine has paid for nothing', async () => {
     const sink = { write: () => true } as unknown as NodeJS.WritableStream;
     const result = await runPaymentsList({

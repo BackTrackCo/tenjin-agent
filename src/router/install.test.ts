@@ -1001,7 +1001,7 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
   });
   expect(result.humanLines?.slice(0, 2)).toEqual([
     'lookups 0.05 USD · routing credit 0.25 USD prepaid, 0.24 USD left (~80 calls)',
-    'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
+    'Today $0.30 of your $5.00 daily limit (Tenjin balance, over the last 24 hours)',
   ]);
 });
 
