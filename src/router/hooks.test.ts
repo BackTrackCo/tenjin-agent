@@ -3908,10 +3908,12 @@ describe('an offer led by a connected account', () => {
     decision: { id: string; hint: string; fallback: { id: string } } & Record<string, unknown>;
   };
   /** The same answer with no Tenjin route beside the lead: the settings allow none. */
-  const alone = (() => {
-    const { fallback: _, ...decision } = answer.decision;
-    return { ...answer, decision };
-  })();
+  const alone = {
+    ...answer,
+    decision: Object.fromEntries(
+      Object.entries(answer.decision).filter(([key]) => key !== 'fallback'),
+    ),
+  };
   const fallbackId = answer.decision.fallback.id;
   /** Tenjin's own route, as the host reads the line this client writes for it. */
   const FALLBACK_LINE =
