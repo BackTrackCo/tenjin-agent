@@ -87,6 +87,15 @@ try {
     TENJIN_SMOKE_CLI: cliArchive,
     HTTPS_PROXY: 'http://fixture.invalid:8080',
   };
+  // Node inherits the runner's PowerShell 7 module path; the child tests Windows PowerShell 5.1.
+  if (windows)
+    env.PSModulePath = join(
+      env.SystemRoot ?? 'C:\\Windows',
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'Modules',
+    );
   let command;
   let args;
   if (windows) {
