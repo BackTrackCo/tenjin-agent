@@ -52,6 +52,7 @@ import {
   writeProgress,
 } from './progress';
 import { routerSettings, type RouterSettings } from './settings';
+import { admitRoutes } from './access';
 
 /**
  * The six hook handlers. Between them they do exactly three things: build and
@@ -947,10 +948,15 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  const ruledOut = withheldBySettings(outcome, router.settings);
+  if (ruledOut !== null) {
+    await footer.close(outcome, { withheld: ruledOut });
+    return { response: null, action: outcome.action, withheld: true };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
@@ -1132,13 +1138,21 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
       offer: null,
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
+  }
+  // BEFORE THE FREE PASS TOO: the free docs lookup is still a call to a
+  // provider, and its prefetch starts the moment it passes, so an offer the
+  // user's rules refuse neither redirects nor fetches anything.
+  const ruledOut = withheldBySettings(outcome, router.settings);
+  if (ruledOut !== null) {
+    await footer.close(outcome, { withheld: ruledOut });
+    return { offer: null, outcome: { response: null, action: outcome.action, withheld: true } };
   }
   if (opts.passFree === true && isFree(outcome)) {
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
@@ -1520,10 +1534,15 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  const ruledOut = withheldBySettings(outcome, router.settings);
+  if (ruledOut !== null) {
+    await footer.close(outcome, { withheld: ruledOut });
+    return { response: null, action: outcome.action, withheld: true };
   }
   // The subagent will make the call and cannot ask the user, so nothing it
   // could not pay for alone is offered to it.
@@ -1635,10 +1654,14 @@ function hookOutcome(decision: HookDecision | null): string {
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
-  config: PartialConfig,
+  router: { settings: RouterSettings; config: PartialConfig },
   sessionId: string,
   deadline: number,
 ): Promise<HookDecision | null> {
+  const { config } = router;
+  // THE SAVED RULES RIDE BESIDE THE PACKET, never in it: the packet is what
+  // the server's model reads. Absent with no rules, so the body is unchanged.
+  const policy = router.settings.policy.status === 'ok' ? router.settings.policy.wire : undefined;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1658,6 +1681,7 @@ async function decide(
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
       harness: hostOf(deps),
       timeoutMs: Math.max(0, deadline - now),
+      ...(policy !== undefined ? { policy } : {}),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== null ? { route } : {}),
     },
@@ -1788,11 +1812,43 @@ async function routerFor(
       { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir, config },
       { warn: (line) => warn(`tenjin hook: ${line}`) },
     );
-    return settings.enabled.value ? { settings, config } : null;
+    if (!settings.enabled.value) return null;
+    // RULES THIS BUILD CANNOT READ OFFER NOTHING: no rule is guessed, and no
+    // turn is routed without them. `tenjin config` shows the problem.
+    if (settings.policy.status === 'invalid') {
+      warn(
+        `tenjin hook: your Tenjin settings can't be read (${settings.policy.problem}), so no lookup is offered`,
+      );
+      return null;
+    }
+    return { settings, config };
   } catch (err) {
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;
   }
+}
+
+/**
+ * AN OFFER THE USER'S RULES REFUSE IS NEVER SHOWN, in the footer's words why,
+ * or null when it may be. Every service the line names is held to the rules
+ * read for this event: the offer's own identity, and each spec's. Under a
+ * rule that reads identity, an offer with none (a router from before it) is
+ * withheld too. Local only: no directory call fits a hook's budget, and the
+ * request tool checks again before anything runs. The server applied the
+ * same rules first; this is the same check on this side of the wire.
+ */
+function withheldBySettings(offer: OfferDecision, settings: RouterSettings): string | null {
+  const policy = settings.policy.status === 'ok' ? settings.policy.wire : undefined;
+  const specs = offer.specs?.map((spec) => spec.identity) ?? [];
+  const identities =
+    offer.action === 'execute'
+      ? [offer.identity, ...specs]
+      : specs.length > 0
+        ? specs
+        : [undefined];
+  const verdict = admitRoutes(identities, policy);
+  if (verdict.ok) return null;
+  return 'unverified' in verdict ? "can't check settings" : 'settings rule it out';
 }
 
 /**
