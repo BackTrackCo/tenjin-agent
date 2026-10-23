@@ -63,6 +63,15 @@ async function keepSwap(files: Map<string, string>, toolUseId: string) {
   );
 }
 
+/** What the CLI leaves when it claimed the call and then handed it back
+ *  (`markHandedBack`): the stamp alone, with no pick and no swap mark. */
+async function keepHandedBack(files: Map<string, string>, toolUseId: string) {
+  files.set(
+    `${DATA}/progress/${await sha256Hex(SESSION)}/offer-${await sha256Hex(toolUseId)}.json`,
+    JSON.stringify({ version: 1, at: 1 }),
+  );
+}
+
 /** The request tool beneath the mod: what `decide` asked, and its answer. */
 function requestTool(on: On, answer: string, onDecide?: () => Promise<void>) {
   const asked: Record<string, unknown>[] = [];
@@ -208,6 +217,43 @@ test('on, a handed-back search runs natively, as it would have', async ($, on) =
   // The engine's own row: nothing of ours on it.
   expect(await shownLines(ui)).toEqual(['engine row']);
   await ui.unmount();
+});
+
+test('on, a search handed back after the CLI claimed it is the engine row and result', async ($, on) => {
+  const { files } = machine(on);
+  switchOn(files);
+  requestTool(on, HANDED_BACK, async () => {
+    await keepSwap(files, 'toolu_late');
+    await keepHandedBack(files, 'toolu_late');
+  });
+  const ran = nativeTool(on);
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine row'] });
+  });
+  on('ui.render', { component: 'ToolResult' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine result'] });
+  });
+  await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_late', ...SEARCH });
+  expect(ran).toEqual(['toolu_late']);
+  const row = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('toolu_late', 'WebSearch', SEARCH, 'done'),
+  });
+  // Nothing says Tenjin ran, or charged, in the search's place.
+  expect(await shownLines(row)).toEqual(['engine row']);
+  await row.unmount();
+  const result = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: { tool_use_id: 'toolu_late', tool: 'WebSearch', output: 'results', isErrored: false },
+  });
+  expect(await shownLines(result)).toEqual(['engine result']);
+  await result.unmount();
 });
 
 test('on, a lookup that failed after it started is the call refused with what it cost, never a search that worked', async ($, on) => {

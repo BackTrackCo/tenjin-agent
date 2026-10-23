@@ -120,7 +120,9 @@ interface SavedAugment extends Stamp {
  * it to draw the redirected row and to find the `request` call that takes the
  * offer up by its id; it never parses the reason the model read. Version 1
  * grows by optional fields only, so a reader ignores one it does not know, and
- * an older CLI's prune still reads it as a record.
+ * an older CLI's prune still reads it as a record. A record with no offer id
+ * is a call the swap claimed and then handed back ({@link markHandedBack}):
+ * the native call ran, and the mod draws nothing of its own on it.
  */
 interface SavedOffer extends Stamp {
   offerId?: string;
@@ -264,6 +266,25 @@ export async function markOffered(
     ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
     ...(offer.swap === true ? { swap: true as const } : {}),
   };
+  await write(
+    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
+    saved,
+  );
+}
+
+/**
+ * THE SWAP HANDED A CLAIMED CALL BACK, so the native call runs after all: its
+ * offer record keeps only its stamp. The after-call arm still reads one
+ * routing answer for the call, and the mod, finding no offer in it, draws the
+ * native call and its result as the engine does, never as a lookup that ran.
+ */
+export async function markHandedBack(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<void> {
+  const saved: SavedOffer = { version: 1, at: now };
   await write(
     join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
     saved,

@@ -41,6 +41,7 @@ import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } fr
 import {
   bindDecision,
   claimRedirect,
+  markHandedBack,
   markOffered,
   type OfferedTerms,
   newCallId,
@@ -1320,6 +1321,12 @@ export type SwapDecision =
        * claim is already held: the call then goes back, and runs natively.
        */
       claim: () => Promise<boolean>;
+      /**
+       * After a claim, the call goes back after all: its mark no longer says
+       * it was answered in place, or names the pick, so the mod draws the
+       * native call that runs. The claim and the one routing answer stay.
+       */
+      unmark: () => Promise<void>;
     };
 
 /**
@@ -1430,6 +1437,7 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
       await markOffered(deps.dataDir, session, toolUseId, terms, now());
       return true;
     },
+    unmark: () => markHandedBack(deps.dataDir, session, toolUseId, now()),
   };
 }
 

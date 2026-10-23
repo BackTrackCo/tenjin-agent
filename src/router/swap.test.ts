@@ -241,6 +241,13 @@ function search(over: Record<string, unknown> = {}): Record<string, unknown> {
 const swap = (net: ReturnType<typeof network>, event = search()) =>
   runSwap(event, hookDeps(net.fetchImpl), requestDeps(net.fetchImpl));
 
+/** The one offer record the session holds, as the mod reads it. */
+async function offerRecord(): Promise<Record<string, unknown>> {
+  const names = await readdir(sessionDir(dir, SESSION));
+  const offer = names.find((name) => name.startsWith('offer-'))!;
+  return JSON.parse(readFileSync(join(sessionDir(dir, SESSION), offer), 'utf8'));
+}
+
 /** The global file, rewritten while the router decides: another process saving. */
 const savedWhileDeciding = (router: Record<string, unknown>) => () => {
   writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...LIMITS, router }));
@@ -300,10 +307,11 @@ describe('a search run in place', () => {
 
   it('marks the call as answered in place for the mod, never as held', async () => {
     await swap(network());
-    const names = await readdir(sessionDir(dir, SESSION));
-    const offer = names.find((name) => name.startsWith('offer-'))!;
-    const record = JSON.parse(readFileSync(join(sessionDir(dir, SESSION), offer), 'utf8'));
-    expect(record).toMatchObject({ offerId: SPEC_ID, label: 'CMC quotes', swap: true });
+    expect(await offerRecord()).toMatchObject({
+      offerId: SPEC_ID,
+      label: 'CMC quotes',
+      swap: true,
+    });
   });
 
   it('returns a failure after the provider call started, with what was paid, never a hand-back', async () => {
@@ -430,6 +438,20 @@ describe('a search handed back', () => {
     });
     expect(net.providerCalls()).toEqual([]);
     expect(await redirectClaimed(dir, SESSION, undefined, `WebSearch ${QUERY}`)).toBe(false);
+  });
+
+  it('after the claim, keeps the claim but never says the call ran in place', async () => {
+    // Paused while the router decides: the executor refuses once the call is
+    // claimed, before anything is sent, and the native call runs instead.
+    const net = network({
+      decide: savedWhileDeciding({ nativeReplacement: 'when-routed', enabled: false }),
+    });
+    expect((await swap(net)).envelope).toMatchObject({ status: 'native', swap: 'handback' });
+    expect(net.providerCalls()).toEqual([]);
+    expect(await redirectClaimed(dir, SESSION, undefined, `WebSearch ${QUERY}`)).toBe(true);
+    // No pick and no swap mark for the mod to draw; the stamp stays, so the
+    // after-call arm reads the one routing answer this call had.
+    expect(await offerRecord()).toEqual({ version: 1, at: expect.any(Number) });
   });
 
   it('when the rules already refuse the pick', async () => {

@@ -37,8 +37,9 @@ import {
  * Then `request({id, input: bound})` runs through the ordinary executor,
  * unchanged: `bound` is never parsed, filled, edited or merged here. A
  * hand-back after the claim (the executor refused before anything was sent)
- * lets the native call run; once the provider call has started, its result or
- * error is the answer, with its real payment state, and nothing is replayed.
+ * lets the native call run, and its mark no longer says it was answered in
+ * place; once the provider call has started, its result or error is the
+ * answer, with its real payment state, and nothing is replayed.
  */
 
 /** What the plugin's mod sends: the native call as the host is about to run it. */
@@ -111,16 +112,24 @@ export async function runSwap(
   const outside = outsideAutomaticUse(await replacementNow(hookDeps.dataDir), spec.identity);
   if (outside !== null) return handBack(outside);
   if (!(await decided.claim())) return handBack('already routed once');
-  const ran = await runRequestTool(
-    { id: offer.id, input: bound },
-    { ...deps, policyRun: admitted.run, via: 'swap' },
-  );
+  let ran: RequestToolResult;
+  try {
+    ran = await runRequestTool(
+      { id: offer.id, input: bound },
+      { ...deps, policyRun: admitted.run, via: 'swap' },
+    );
+  } catch (err) {
+    // The caller hands the call back on a throw, so the native call runs.
+    await decided.unmark().catch(() => undefined);
+    throw err;
+  }
   const { envelope } = ran;
   const status = String(envelope.status);
   if (
     NOT_STARTED.has(status) ||
     (typeof envelope.reasonCode === 'string' && SETTINGS_CODES.has(envelope.reasonCode))
   ) {
+    await decided.unmark();
     return handBack(`it stopped before anything was sent (${status})`);
   }
   return {
