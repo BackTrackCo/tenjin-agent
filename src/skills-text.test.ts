@@ -627,6 +627,10 @@ describe('the permissions doc matches the product this release ships', () => {
       'Bash(tenjin config --json)',
       'Bash(tenjin config block:*)',
       'Bash(tenjin config prefer:*)',
+      // Status and usage only read; connect and disconnect keep the prompt.
+      'Bash(tenjin status)',
+      'Bash(tenjin status --json)',
+      'Bash(tenjin usage:*)',
       'Bash(tenjin pay:*)',
     ]);
     expect(PERMISSIONS_DOC).toContain(`${REQUEST_TOOL}   allow`);
