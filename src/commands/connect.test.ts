@@ -91,14 +91,17 @@ function makeCtx(): CommandContext {
 }
 
 /** The router's directory, and the account server for everything else. */
-function network(account?: ReturnType<typeof fakeAccountServer>): typeof fetch {
+function network(
+  account?: ReturnType<typeof fakeAccountServer>,
+  listing: typeof DIRECTORY = DIRECTORY,
+): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url === 'https://router.example.test/api/x402-router') {
       const body = JSON.parse(String(init?.body)) as { directory?: unknown; accepts?: string[] };
       if (body.directory === undefined || !body.accepts?.includes('mcp'))
         throw new Error('connect asked the router something else');
-      return new Response(JSON.stringify(DIRECTORY), {
+      return new Response(JSON.stringify(listing), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
@@ -418,21 +421,16 @@ describe('tenjin connect', () => {
           useFirst,
         })),
       );
-    const routed = (async (input: Parameters<typeof fetch>[0]) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (url !== 'https://router.example.test/api/x402-router')
-        throw new Error(`unexpected request to ${url}`);
-      return new Response(JSON.stringify(listing), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as typeof fetch;
     const mcp = sessions(SESSIONS);
     const result = await runConnect(
       'apify',
       { fromEnv: 'APIFY_TOKEN' },
       makeCtx(),
-      deps({ fetchImpl: routed, openSession: mcp.open, env: { APIFY_TOKEN: 'apify_api_1' } }),
+      deps({
+        fetchImpl: network(undefined, listing),
+        openSession: mcp.open,
+        env: { APIFY_TOKEN: 'apify_api_1' },
+      }),
     );
     expect(lines(result).slice(0, 5)).toEqual([
       'Apify connected on this machine.',
@@ -450,6 +448,8 @@ describe('tenjin connect', () => {
     });
     expect(status.humanLines).toEqual(
       expect.arrayContaining([
+        // The header names the preference; the lines under it say where it holds.
+        'Your accounts: Apify (set to come first). Billed to your own plans, not counted in the limit.',
         '  Apify is used first for local business search, instagram accounts and posts, tiktok accounts and videos, x post search, reddit post search, and linkedin profile.',
         '  Apify is also available for people search and web research, without coming first.',
         "  Apify runs for company list search and send email only when you ask for it by name: Tenjin hasn't checked those jobs yet.",
@@ -475,6 +475,38 @@ describe('tenjin connect', () => {
         },
       ],
     });
+  });
+
+  it('never says a preferred account is used first while none of its jobs is checked', async () => {
+    // The day the maps ship: every Apify map waits on its first real call.
+    const listing = structuredClone(DIRECTORY);
+    for (const service of listing.directory.connectable!.find(({ id }) => id === 'apify')!.services)
+      service.verified = false;
+    const mcp = sessions(SESSIONS);
+    const result = await runConnect(
+      'apify',
+      { fromEnv: 'APIFY_TOKEN' },
+      makeCtx(),
+      deps({
+        fetchImpl: network(undefined, listing),
+        openSession: mcp.open,
+        env: { APIFY_TOKEN: 'apify_api_1' },
+      }),
+    );
+    expect(data(result)).toMatchObject({ account: { preference: 'added' } });
+
+    const status = await runRouterStatus(makeCtx(), {
+      cwd: work,
+      routingCredit: async () => 0n,
+      wallet: async () => null,
+    });
+    expect(status.humanLines).toEqual(
+      expect.arrayContaining([
+        'Your accounts: Apify (set to come first). Billed to your own plans, not counted in the limit.',
+        "  Apify runs for local business search only when you ask for it by name: Tenjin hasn't checked that job yet.",
+      ]),
+    );
+    expect(status.humanLines?.join('\n')).not.toMatch(/used first/);
   });
 
   it('leaves out a service whose tools this account lacks', async () => {

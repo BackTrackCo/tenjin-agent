@@ -65,7 +65,8 @@ export function accountJobs(
 export interface AccountStatus {
   id: string;
   label: string;
-  /** In the account-wide preference: used first for the jobs it can do. */
+  /** In the account-wide preference. Where its jobs are known, they say
+   *  which ones that puts it first for. */
   preferred: boolean;
   /** `ok`; `expired`: a refresh was refused; `signed_out`: no sign-in here. */
   signIn: 'ok' | 'expired' | 'signed_out';
@@ -132,14 +133,24 @@ function jobLines(label: string, jobs: AccountJobs): string[] {
   ];
 }
 
-/** The accounts as lines a person reads: who pays, and what needs doing. */
+/**
+ * The accounts as lines a person reads: who pays, and what needs doing. The
+ * header claims "used first" only for a preferred account whose jobs aren't
+ * listed below it. One whose jobs are listed is named as set to come first,
+ * and its job lines say where that holds: none may be checked yet, and the
+ * catalog can keep a job out of the preference.
+ */
 export function accountLines(accounts: readonly AccountStatus[]): string[] {
   if (accounts.length === 0)
     return ['Your accounts: none connected (`tenjin connect <name>` adds one)'];
-  const first = accounts.filter(({ preferred }) => preferred).map(({ label }) => label);
-  const rest = accounts.filter(({ preferred }) => !preferred).map(({ label }) => label);
+  const labels = (keep: (account: AccountStatus) => boolean) =>
+    accounts.filter(keep).map(({ label }) => label);
+  const first = labels(({ preferred, jobs }) => preferred && jobs === undefined);
+  const set = labels(({ preferred, jobs }) => preferred && jobs !== undefined);
+  const rest = labels(({ preferred }) => !preferred);
   const named = [
     ...(first.length > 0 ? [`${list.format(first)} (used first for jobs they can do)`] : []),
+    ...(set.length > 0 ? [`${list.format(set)} (set to come first)`] : []),
     ...(rest.length > 0 ? [`${list.format(rest)} (not put first)`] : []),
   ];
   return [
