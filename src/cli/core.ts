@@ -59,10 +59,14 @@ Learn more:
         };
         const hosts = await installHosts(hostArgs, ctx);
         const note = otherHostNote(hostArgs).catch(() => undefined);
+        // Both hosts run from the same runtime: it is set up, and said, once.
+        const runtime = (await import('../router/install')).runtimeOncePerRun();
         const out = await runEach(hosts, async (host) => {
           const one =
             host === 'codex'
-              ? await (await import('../router/codex-install')).runCodexInstall(codexArgs(o), ctx)
+              ? await (
+                  await import('../router/codex-install')
+                ).runCodexInstall(codexArgs(o), ctx, { runtime })
               : await (
                   await import('../router/install')
                 ).runRouterInstall(
@@ -77,6 +81,7 @@ Learn more:
                       : {}),
                   },
                   ctx,
+                  { runtime },
                 );
           if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
           return one;

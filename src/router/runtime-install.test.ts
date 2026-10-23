@@ -11,7 +11,7 @@ import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/
 import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput } from './hook-tool';
-import { runRouterInstall } from './install';
+import { runRouterInstall, runtimeOncePerRun } from './install';
 import { renderPluginFiles } from './plugin-files';
 
 /**
@@ -628,5 +628,26 @@ describe('the launcher lines', () => {
     expect(notices).toContain(
       `Tenjin runs from ~/.tenjin/runtime on its own Node ${NODE_V}, so a Node upgrade or \`npm rm -g tenjin-cli\` no longer stops it.`,
     );
+  });
+});
+
+describe('an install run over two hosts', () => {
+  it('sets the runtime up once, and says its warnings under the first host only', async () => {
+    const setUp = vi.fn(async (): Promise<RuntimeSetup> => ({
+      state: 'fallback',
+      root: runtimeRoot,
+      firstTime: true,
+      launcher: { ...launcherOk, onPath: false, pathLine: 'fish_add_path ~/.local/bin' },
+      reason: 'download timed out',
+    }));
+    const once = runtimeOncePerRun(setUp);
+    const runtime = (o: unknown) => once(o as Parameters<typeof once>[0]);
+    const warnings = (lines: string[]) => lines.filter((l) => l.startsWith('! '));
+    const first = await runRouterInstall({}, ctx(), deps(runtime));
+    const second = await runRouterInstall({}, ctx(), deps(runtime));
+    expect(setUp).toHaveBeenCalledTimes(1);
+    expect(warnings(first.humanLines!)).toHaveLength(2);
+    expect(warnings(second.humanLines!)).toEqual([]);
+    expect(runtimeOf(second)).toEqual(runtimeOf(first));
   });
 });

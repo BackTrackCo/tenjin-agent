@@ -640,6 +640,28 @@ export async function defaultRuntime(o: Parameters<typeof setupRuntime>[0]): Pro
   return setupRuntime(o);
 }
 
+/** Results a later host of one install run got from the first host's setup: their lines were said there. */
+const sharedResults = new WeakSet<RuntimeSetup>();
+
+/**
+ * ONE RUNTIME SETUP PER INSTALL RUN, however many hosts it installs. The first
+ * host sets the runtime up; every later host gets that result rather than a
+ * second setup, which would retry a failed Node download in full, and says
+ * none of its lines again.
+ */
+export function runtimeOncePerRun(setup = defaultRuntime): typeof defaultRuntime {
+  let first: Promise<RuntimeSetup> | undefined;
+  return async (o) => {
+    if (first === undefined) {
+      first = setup(o);
+      return first;
+    }
+    const rt = { ...(await first) };
+    sharedResults.add(rt);
+    return rt;
+  };
+}
+
 /** Is there a runtime here? Only the default data dir has one, and only once an install set it up. */
 export function hasRuntime(dataDir: string, home: string): boolean {
   return (
@@ -849,7 +871,7 @@ function launcherSentence(launcher: LauncherResult | null, home: string): string
 
 /** The runtime's lines under install's summary: where it runs from, or what needs the person. */
 export function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home: string): string[] {
-  if (rt === null) return [];
+  if (rt === null || sharedResults.has(rt)) return [];
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const runs = runtimeSentence(rt, home);
   const fallback = fallbackSentence(rt);
