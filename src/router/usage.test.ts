@@ -65,6 +65,8 @@ describe('usage', () => {
         row('2026-10-22T10:00:00.000Z', {}),
         row('2026-10-23T10:00:00.000Z', { source: 'tenjin' }),
         row('2026-10-23T11:00:00.000Z', { amountAtomic: '3000' }),
+        // Signed, and never used: the chain says so, so nothing left the balance.
+        row('2026-10-23T11:30:00.000Z', { amountAtomic: '50000', settlement: 'not_charged' }),
         row('2026-10-23T12:00:00.000Z', {
           source: 'apify',
           provider: 'Apify',

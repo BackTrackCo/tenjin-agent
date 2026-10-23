@@ -73,9 +73,17 @@ export async function runRouterUsage(
   const now = (deps.now ?? Date.now)();
   const from = sinceMs(opts.since, now);
   const names = new Map((await savedAccounts(ctx.dataDir)).map(({ id, label }) => [id, label]));
+  // A PAYMENT THE CHAIN SAYS WAS NEVER USED (`not_charged`, from reconcile)
+  // never left the balance: it is no spending, and no call that cost anything.
   const records = (await readPaidRecords(ctx.dataDir)).filter((record) => {
     const at = Date.parse(record.ts);
-    return Number.isFinite(at) && at >= from && at <= now && ATOMIC_RE.test(record.amountAtomic);
+    return (
+      record.settlement !== 'not_charged' &&
+      Number.isFinite(at) &&
+      at >= from &&
+      at <= now &&
+      ATOMIC_RE.test(record.amountAtomic)
+    );
   });
   const groups = new Map<string, Group>();
   for (const record of records) {
