@@ -28,6 +28,7 @@ import {
   EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
+  SETTING_SCOPES,
   loadRawConfig,
   MAX_AUTO_SPEND_FLOOR_ATOMIC,
   MAX_AUTO_SPEND_FLOOR_WHY,
@@ -72,6 +73,8 @@ import {
   type RouterSettings,
 } from '../router/settings';
 import { style } from '../lib/output';
+import { cachedDirectory } from '../router/directory';
+import { describeLimits, settingsReadback } from './config-readback';
 
 /** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
@@ -242,7 +245,10 @@ function isUpdateKey(key: string): key is UpdateConfigKey {
  * Show every effective key with its value and provenance. `data` is keyed by
  * config key; provenance comes from resolveSettings over the *raw* file (not the
  * defaults-merged config), so a key the user never set reads `default`, not
- * `file`.
+ * `file`. `data.settings` is the readback of the user's own settings: saved
+ * rules in their words, automatic replacement and the limits on the Tenjin
+ * balance. All of it is local: names come from the directory last fetched, and
+ * nothing here asks the network.
  */
 export async function runConfigList(ctx: CommandContext): Promise<CommandResult> {
   const settings = await resolveFromContext(ctx);
@@ -301,7 +307,15 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     show(key, describedLine(key, entry));
   }
-  return { data, humanLines };
+  const readback = settingsReadback(
+    router,
+    await cachedDirectory(ctx.dataDir),
+    describeLimits(settings.maxAutoSpend.value, settings.sessionBudget.value),
+  );
+  return {
+    data: { ...data, settings: readback.data },
+    humanLines: [...humanLines, '', ...readback.lines],
+  };
 }
 
 /** Same per-key shape as list, for one key. Unknown key is a USAGE failure. */
@@ -1070,11 +1084,25 @@ async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSetting
   });
 }
 
+/** The personal router keys `config get/set` never reach. */
+const PERSONAL_ROUTER_KEYS: ReadonlySet<string> = new Set(
+  Object.keys(SETTING_SCOPES).filter(
+    (key) => key.startsWith('router.') && !(ROUTER_CONFIG_KEYS as readonly string[]).includes(key),
+  ),
+);
+
 function assertKey(key: string): ScalarConfigKey {
   if (key === 'bazaarPay' || key === 'confirm') {
     throw new CliError('USAGE', `Retired config key: ${key}`, { fix: RETIRED_PAYMENT_GUIDANCE });
   }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
+  if (PERSONAL_ROUTER_KEYS.has(key)) {
+    // Coupled settings: a generic set could skip the checks that keep them
+    // consistent, so only their own operations write them.
+    throw new CliError('USAGE', `${key} changes only through its own operations`, {
+      fix: '`tenjin config` shows it; `tenjin config --help` lists prefer, only, block, unblock, reset and replacement, each with an example.',
+    });
+  }
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
     fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
   });
@@ -1236,7 +1264,7 @@ function parseHttpUrl(value: string): string {
  * drops the other's update (worst case, a zeroed maxAutoSpend resurrected). The
  * data dir is ensured first so the lock's mkdir has a parent on a fresh install.
  */
-async function persist(
+export async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
 ): Promise<void> {
@@ -1246,6 +1274,8 @@ async function persist(
     await withFileLock(lockPath, async () => {
       const existing = await loadRawConfig(dir);
       const merged = merge(existing);
+      // A merge that changed nothing hands back what it was given: no write.
+      if (merged === existing) return;
       const validated = RawConfigSchema.parse(merged);
       // 0600, matching lib/config.ts's `writeConfig`: this file holds
       // `shelfBypassSecret`, and this is the writer `config set` uses to put it

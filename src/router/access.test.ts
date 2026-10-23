@@ -175,7 +175,7 @@ describe('readback coverage', () => {
       expect.arrayContaining(['exa-search', 'exa-contents', 'stableenrich-exa-answer']),
     );
     for (const { id, identity } of listing.services) {
-      expect(allowed(identity, { version: 1, block: [exa] }).ok).toBe(!covered.includes(id));
+      expect(allowed(identity, { block: [exa] }).ok).toBe(!covered.includes(id));
     }
   });
 

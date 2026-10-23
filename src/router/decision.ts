@@ -16,6 +16,7 @@ import {
 } from './access';
 
 export { BUILT_IN_SOURCE, ONLY_DIMENSIONS, POLICY_MAX_BYTES, POLICY_VERSION, TARGET_KINDS };
+export type { OnlyDimension, TargetKind } from './access';
 
 /**
  * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
