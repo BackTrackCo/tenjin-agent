@@ -1,3 +1,5 @@
+import { posix, win32 } from 'node:path';
+
 /**
  * HOW CLAUDE CODE RUNS A COMMAND. With `args` (exec form) it spawns `command`
  * from PATH with no shell, and on Windows that needs a real executable, never
@@ -11,6 +13,13 @@ export type HookForm = 'exec' | 'shell';
 const TENJIN_SHIM = /(^|[\\/])tenjin(\.cmd|\.bat|\.ps1)?$/i;
 /** Characters a shell would read, which exec form passes through as written. */
 const SHELL_SYNTAX = /[\s"'`$|&;<>()]/;
+/**
+ * The same for an absolute command, the runtime's own Node: a home folder may
+ * hold spaces or parentheses (`C:\Users\Jane Doe`), which exec form passes as
+ * one path and only a shell would split, so only what no such path needs is
+ * refused.
+ */
+const ABSOLUTE_SHELL_SYNTAX = /["'`$|&;<>]/;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -40,7 +49,10 @@ export function shellDependence(launch: unknown): string | null {
   if (typeof command !== 'string' || command.length === 0) return 'no command';
   if (!Array.isArray(args)) return `\`${command}\` has no args array, so a shell runs it`;
   if (args.some((a) => typeof a !== 'string')) return `\`${command}\` has a non-string argument`;
-  if (SHELL_SYNTAX.test(command)) return `\`${command}\` holds shell syntax`;
+  const absolute = posix.isAbsolute(command) || win32.isAbsolute(command);
+  if ((absolute ? ABSOLUTE_SHELL_SYNTAX : SHELL_SYNTAX).test(command)) {
+    return `\`${command}\` holds shell syntax`;
+  }
   if (TENJIN_SHIM.test(command)) {
     return `\`${command}\` is the npm shim, which Windows cannot spawn without a shell`;
   }

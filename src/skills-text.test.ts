@@ -257,6 +257,14 @@ describe('send and the other money/state verbs stay out of the recommended allow
     }
   });
 
+  // repair takes a passphrase only a person types. The agent-facing reference
+  // says so in the agent's terms: send the person to their own terminal, and
+  // never solicit the secret into the transcript (B1).
+  it('tenjin-search names repair as never-allowlisted, and never asks for the passphrase', () => {
+    expect(permissionsRef).toContain('tenjin wallet repair');
+    expect(permissionsRef).toContain('never ask for the passphrase');
+  });
+
   it('tenjin-search names send explicitly as never-allowlisted', () => {
     expect(permissionsRef).toMatch(/Never propose an allowlist line for `?tenjin wallet send/i);
   });
@@ -664,6 +672,7 @@ describe('the permissions doc matches the product this release ships', () => {
     for (const verb of [
       'tenjin wallet send',
       'tenjin wallet create',
+      'tenjin wallet repair',
       'tenjin config set',
       'tenjin install',
       'tenjin uninstall',
@@ -674,6 +683,27 @@ describe('the permissions doc matches the product this release ships', () => {
     expect(table).toMatch(/Moves USDC out of the wallet/);
   });
 
+  // The passphrase now has a file fallback (decision 5), so the sentence that
+  // promised there was none has to be gone, not left beside the new one. And
+  // the line that tells a person what to do when the router cannot unlock the
+  // wallet names `tenjin wallet repair`, never the variable: steering a person
+  // to TENJIN_WALLET_PASSPHRASE is how a passphrase lands on a command line (B1).
+  it('describes the passphrase storage this release ships, and repair as the fix', () => {
+    expect(PERMISSIONS_DOC).not.toContain('deliberately no plain-file fallback');
+    expect(PERMISSIONS_DOC).toContain('mode 0600');
+    expect(PERMISSIONS_DOC).toContain('tenjin wallet repair');
+    const line = PERMISSIONS_DOC.split('\n').find((l) =>
+      l.startsWith('- A routing call that cannot be paid takes the free path'),
+    );
+    expect(line).toBeDefined();
+    expect(line).toContain('`tenjin wallet repair`');
+    expect(line).not.toContain('TENJIN_WALLET_PASSPHRASE');
+    // The fee wording on that line is out of scope and must survive the edit.
+    expect(line).toContain(
+      'while the router charges no fee the wallet is not touched and nothing is said',
+    );
+  });
+
   it('still resolves every relative markdown link it carries', () => {
     for (const match of PERMISSIONS_DOC.matchAll(/\]\((\.[^)]+\.md)\)/g)) {
       const target = fileURLToPath(
@@ -681,6 +711,163 @@ describe('the permissions doc matches the product this release ships', () => {
       );
       expect(existsSync(target), `${match[1]!} does not resolve`).toBe(true);
     }
+  });
+});
+
+describe('docs/troubleshooting.md: a wallet Tenjin cannot unlock', () => {
+  const DOCS = fileURLToPath(new URL('../docs/', import.meta.url));
+  const TROUBLE = readFileSync(join(DOCS, 'troubleshooting.md'), 'utf8');
+  const HEAD = '## Tenjin cannot unlock the wallet';
+  /** The section alone, from its heading to the next `## `. */
+  const section = ((): string => {
+    const start = TROUBLE.indexOf(HEAD);
+    const next = TROUBLE.indexOf('\n## ', start + HEAD.length);
+    return start === -1 ? '' : TROUBLE.slice(start, next === -1 ? undefined : next);
+  })();
+
+  it('exists, as the first section', () => {
+    expect(section).not.toBe('');
+    expect(TROUBLE.indexOf('\n## ')).toBe(TROUBLE.indexOf(HEAD) - 1);
+  });
+
+  // The causes are named by the exact fragments the notices and doctor print,
+  // so a person can find the one they were shown by searching for it.
+  it('names each cause by the reason fragment the CLI prints', async () => {
+    const { WALLET_REASONS } = await import('./router/wallet-reasons');
+    for (const key of [
+      'passphrase_missing',
+      'passphrase_wrong',
+      'env_passphrase_wrong',
+      'keychain_locked',
+    ] as const) {
+      expect(section, key).toContain(WALLET_REASONS[key].reason);
+    }
+  });
+
+  it('names repair and the unset, and keeps a correct variable winning', () => {
+    expect(section).toContain('tenjin wallet repair');
+    expect(section).toContain('unset TENJIN_WALLET_PASSPHRASE');
+    expect(section).toContain('A correct variable still wins');
+    expect(section).toMatch(/never paste the passphrase into chat/i);
+  });
+
+  // S3: a locked keychain is unlocked, never worked around with a plain file.
+  it('fixes a locked keychain only by unlocking it', async () => {
+    const { KEYCHAIN_LOCKED_FIX } = await import('./lib/wallet-unlock');
+    const bullet = section
+      .split('\n')
+      .find((l) => l.includes('the keychain holding the wallet passphrase is locked'));
+    expect(bullet).toBeDefined();
+    expect(bullet).toContain(KEYCHAIN_LOCKED_FIX);
+    expect(section).not.toContain('--insecure-storage');
+  });
+
+  it('resolves every relative markdown link it carries', () => {
+    const links = [...TROUBLE.matchAll(/\]\((\.[^)#]+\.md)(#[^)]*)?\)/g)];
+    expect(links.length).toBeGreaterThan(0);
+    for (const match of links) {
+      const target = join(DOCS, match[1]!.replace(/^\.\//, ''));
+      expect(existsSync(target), `${match[1]!} does not resolve`).toBe(true);
+    }
+  });
+});
+
+/**
+ * ONE RESTART INSTRUCTION: "start a new Claude Code session". `/reload-plugins`
+ * does not run the plugin's `SessionStart`, so a page names it only to say
+ * that. A fix to an environment variable says to quit Claude Code fully,
+ * which is still never "restart Claude Code".
+ */
+describe('every page and wallet fix says to start a new Claude Code session', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const pages = [
+    'README.md',
+    ...readdirSync(join(root, 'docs'))
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => join('docs', name)),
+  ];
+
+  it.each(pages)('%s never says "restart Claude Code"', (rel) => {
+    expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/restart Claude Code/i);
+  });
+
+  it.each(pages)('%s names /reload-plugins only to say what it does not run', (rel) => {
+    const sentences = readFileSync(join(root, rel), 'utf8').split(/(?<=\.)\s+|\n+/);
+    for (const sentence of sentences.filter((line) => line.includes('/reload-plugins'))) {
+      expect(sentence).toContain('does not run');
+    }
+  });
+
+  it('no wallet fix says "restart Claude Code"', async () => {
+    const { WALLET_REASONS } = await import('./router/wallet-reasons');
+    for (const [key, { fix, agentFix }] of Object.entries(WALLET_REASONS)) {
+      expect(fix, key).not.toMatch(/restart Claude Code/i);
+      expect(agentFix, key).not.toMatch(/restart Claude Code/i);
+    }
+  });
+});
+
+describe('docs/troubleshooting.md: Tenjin stopped after a Node upgrade', () => {
+  const TROUBLE = readFileSync(
+    fileURLToPath(new URL('../docs/troubleshooting.md', import.meta.url)),
+    'utf8',
+  );
+  const HEAD = '## Tenjin stopped after a Node upgrade (`Executable not found`, `cache-miss`)';
+  const section = ((): string => {
+    const start = TROUBLE.indexOf(HEAD);
+    const next = TROUBLE.indexOf('\n## ', start + HEAD.length);
+    return start === -1 ? '' : TROUBLE.slice(start, next === -1 ? undefined : next);
+  })();
+
+  it('is the second section, after the wallet-unlock one', () => {
+    const heads = TROUBLE.split('\n').filter((line) => line.startsWith('## '));
+    expect(heads.slice(0, 2)).toEqual(['## Tenjin cannot unlock the wallet', HEAD]);
+  });
+
+  it('names the symptoms, the npx fix with --project, and the new session', () => {
+    for (const text of [
+      'Executable not found',
+      'cache-miss',
+      'npx -y tenjin-cli@latest install',
+      'npx -y tenjin-cli@latest install --project',
+      'start a new Claude Code session',
+    ]) {
+      expect(section, text).toContain(text);
+    }
+  });
+
+  it('removes Tenjin with `tenjin uninstall` before `npm uninstall -g`', () => {
+    const uninstall = section.indexOf('tenjin uninstall');
+    expect(uninstall).toBeGreaterThan(-1);
+    expect(section.indexOf('npm uninstall -g')).toBeGreaterThan(uninstall);
+  });
+});
+
+/**
+ * B1 and S3 across every page a person or an agent reads: no passphrase on a
+ * command line (`TENJIN_WALLET_PASSPHRASE=<value>` is exactly that), and no
+ * `--insecure-storage` in the skills, whose reader is an agent that would offer
+ * it as the way past a locked keychain.
+ */
+describe('no doc or skill puts a passphrase on a command line', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  /** Every file under `dir`, relative to the repo root. */
+  function walk(dir: string): string[] {
+    return readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
+    );
+  }
+  const docsAndSkills = [...walk('docs'), ...walk('skills')];
+
+  it.each([...docsAndSkills, join('.changeset', 'wallet-unblock.md')])(
+    '%s has no inline TENJIN_WALLET_PASSPHRASE',
+    (rel) => {
+      expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/TENJIN_WALLET_PASSPHRASE=\S/);
+    },
+  );
+
+  it.each(walk('skills'))('%s never offers --insecure-storage', (rel) => {
+    expect(readFileSync(join(root, rel), 'utf8')).not.toContain('--insecure-storage');
   });
 });
 

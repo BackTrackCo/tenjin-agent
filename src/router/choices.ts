@@ -39,6 +39,7 @@ import {
   type RequestToolResult,
   type TakeOf,
 } from './tool';
+import { agentFixOf } from './wallet-reasons';
 
 /**
  * A CHOICE SET: the services a line offers the user to pick between, or to run
@@ -752,7 +753,7 @@ async function quoteTake(
       : rejectedInput
         ? `${spec.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
         : cli !== undefined
-          ? `${cli.message} ${cli.fix ?? ''}`.trim()
+          ? `${cli.message} ${agentFixOf(cli)}`.trim()
           : String(err);
     const status: FailStatus = cli?.code === 'POLICY_REFUSED' ? 'needs_approval' : 'failed';
     return {

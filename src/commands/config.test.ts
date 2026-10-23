@@ -119,7 +119,7 @@ describe('runConfigList', () => {
     for (const arm of HOOK_ARMS) {
       expect(d[`hooks.${arm}`]).toEqual({ value: true, source: 'default' });
     }
-    expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
+    expect(d['update.mode']).toEqual({ value: 'auto', source: 'default' });
     expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.sh', source: 'default' });
     // REDACTED even here, on a fresh dir where the value is empty: the rendered
     // shape must not depend on whether there is a secret to leak.
@@ -684,12 +684,12 @@ describe('publish readout reflects the per-project .tenjin.json layer', () => {
 });
 
 describe('update.mode', () => {
-  it('defaults to nudge and round-trips every mode', async () => {
+  it('defaults to auto and round-trips every mode', async () => {
     const ctx = makeCtx();
     expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
-      data: { key: 'update.mode', value: 'nudge', source: 'default' },
+      data: { key: 'update.mode', value: 'auto', source: 'default' },
     });
-    for (const value of ['off', 'nudge'] as const) {
+    for (const value of ['off', 'nudge', 'auto'] as const) {
       const set = await runConfigSet({ key: 'update.mode', value }, ctx);
       expect(set.data).toMatchObject({ key: 'update.mode', value, source: 'file' });
       expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
@@ -704,7 +704,7 @@ describe('update.mode', () => {
     );
     expect(bad.code).toBe('USAGE');
     expect(bad.fix).toContain('"nudge"');
-    expect(bad.fix).not.toContain('auto');
+    expect(bad.fix).toContain('"auto"');
   });
 
   // The opt-out has to survive a write to a neighbouring block, or turning auto

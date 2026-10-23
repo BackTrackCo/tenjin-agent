@@ -164,7 +164,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'the turn-end ask to publish what this turn settled, spoken to you and to each subagent at its own end',
   'hooks.primer': 'one-paragraph search-first primer at session start',
   'update.mode':
-    'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
+    "auto=update in the background where Tenjin's runtime is set up (else as nudge), nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm",
   'loop.human_wait_ms':
     'ms a hook fire may take when a human is waiting on it (prompt, Stop, SessionStart)',
   'loop.tool_wait_ms': 'ms a hook fire may take when a tool call is waiting on it',

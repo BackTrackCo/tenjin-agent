@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
+import type { RuntimeSetup } from '../lib/runtime';
 import { parseCodexHistory } from './codex-history';
 import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
@@ -75,6 +76,11 @@ beforeEach(async () => {
     join(dir, 'config.json'),
     JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
   );
+  // A wallet for the offer to pay from: with none, a paid offer is withheld.
+  await writeFile(
+    join(dir, 'wallet.json'),
+    JSON.stringify({ schemaVersion: 2, address: '0x1234567890AbcdEF1234567890aBcdef12345678' }),
+  );
   transcript = join(dir, 'rollout.jsonl');
   await writeFile(transcript, history(meta, item('u', 'Find recent reports on example search.')));
 });
@@ -82,11 +88,19 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** A router stub that records each body and answers `answer`. */
+/**
+ * A router stub that records each router body and answers `answer`. The
+ * wallet's balance reads (JSON-RPC) share the fetch seam; they are not router
+ * calls, so they are answered with a balance and left out of `bodies`.
+ */
 function router(answer: unknown) {
   const bodies: Record<string, unknown>[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
-    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (body.jsonrpc !== undefined) {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0xf4240' }));
+    }
+    bodies.push(body);
     return new Response(JSON.stringify(answer));
   }) as typeof fetch;
   return { bodies, fetchImpl };
@@ -518,10 +532,18 @@ const ctx = (): CommandContext => ({
   io: { stdout: process.stdout, stderr: process.stderr, isTTY: false },
 });
 
-/** A Codex stand-in: records every command in order. */
-function host(config: unknown = {}) {
+/** A Codex stand-in: records every command in order. The runtime is `skipped` unless a test sets it up. */
+function host(config: unknown = {}, rt: Partial<RuntimeSetup> = {}) {
   const steps: string[] = [];
   const deps: CodexSetupDeps = {
+    homeDir: join(dir, 'home'),
+    runtime: async () => ({
+      state: 'skipped',
+      root: join(dir, 'runtime'),
+      firstTime: false,
+      launcher: null,
+      ...rt,
+    }),
     run: async (args: string[]): Promise<CodexRun> => {
       steps.push(`codex ${args.filter((a) => a !== '--json').join(' ')}`);
       return { code: 0, stdout: '{}', stderr: '' };
@@ -632,6 +654,136 @@ describe('Codex install, uninstall and doctor', () => {
       'codex plugin marketplace remove tenjin',
     ]);
     expect(out.data).toEqual({ removed: CODEX_PLUGIN, marketplace: 'tenjin' });
+  });
+
+  describe("from Tenjin's runtime", () => {
+    const runtimeHosts = () => join(dir, 'runtime', 'codex');
+    const withCatalog = async () => {
+      await mkdir(join(runtimeHosts(), '.agents', 'plugins'), { recursive: true });
+      await writeFile(join(runtimeHosts(), '.agents', 'plugins', 'marketplace.json'), '{}');
+    };
+
+    it('adds the runtime folder once the runtime is set up, and carries it in --json', async () => {
+      await withCatalog();
+      const { steps, deps } = host({}, { state: 'active', cli: '1.2.3', nodeVersion: '24.0.0' });
+      const out = await runCodexInstall({ yes: true }, ctx(), deps);
+      expect(steps).toEqual([
+        'wallet',
+        `codex plugin marketplace add ${runtimeHosts()}`,
+        'codex plugin add tenjin@tenjin',
+      ]);
+      expect((out.data as { runtime: unknown }).runtime).toEqual({
+        state: 'active',
+        root: join(dir, 'runtime'),
+        cli: '1.2.3',
+        nodeVersion: '24.0.0',
+      });
+    });
+
+    it('adds the package folder for a skipped or failed runtime, or one with no Codex folder', async () => {
+      for (const rt of [
+        { state: 'skipped' as const },
+        { state: 'fallback' as const, reason: 'no Node' },
+        { state: 'kept' as const, cli: '1.0.0' },
+      ]) {
+        const { steps, deps } = host({}, rt);
+        await runCodexInstall({ yes: true }, ctx(), deps);
+        expect(steps, rt.state).toContain('codex plugin marketplace add /package/dist/hosts/codex');
+      }
+      await withCatalog();
+      const { steps, deps } = host({}, { state: 'fallback', reason: 'no Node' });
+      await runCodexInstall({ yes: true }, ctx(), deps);
+      expect(steps).toContain('codex plugin marketplace add /package/dist/hosts/codex');
+    });
+
+    it('removes a marketplace added from another folder first, and leaves one already there', async () => {
+      await withCatalog();
+      const moved = host(
+        { marketplaces: { tenjin: { source: '/package/dist/hosts/codex' } } },
+        { state: 'current' },
+      );
+      await runCodexInstall({ yes: true }, ctx(), moved.deps);
+      expect(moved.steps).toEqual([
+        'wallet',
+        'codex plugin marketplace remove tenjin',
+        `codex plugin marketplace add ${runtimeHosts()}`,
+        'codex plugin add tenjin@tenjin',
+      ]);
+      const same = host(
+        { marketplaces: { tenjin: { source: `${runtimeHosts()}/` } } },
+        { state: 'current' },
+      );
+      await runCodexInstall({ yes: true }, ctx(), same.deps);
+      expect(same.steps).not.toContain('codex plugin marketplace remove tenjin');
+    });
+
+    it('says in doctor what the plugin runs, information only', async () => {
+      const runs = async (source: string) => {
+        const out = await runCodexDoctor({}, ctx(), {
+          ...host({ marketplaces: { tenjin: { source } } }).deps,
+          hooks: async () => listed(...allRows()),
+        });
+        return out.humanLines?.find((l) => l.startsWith('Codex plugin runs:'));
+      };
+      expect(await runs(runtimeHosts())).toBe(
+        `Codex plugin runs: Tenjin's runtime (${runtimeHosts()})`,
+      );
+      // No runtime to move to: nothing to say.
+      expect(await runs('/package/dist/hosts/codex')).toBeUndefined();
+      expect(await runs(42 as unknown as string)).toBeUndefined();
+    });
+
+    it('names the install that moves the plugin when a runtime is there to move to', async () => {
+      const dataDir = join(dir, 'home', '.tenjin');
+      await mkdir(join(dataDir, 'runtime'), { recursive: true });
+      await writeFile(join(dataDir, 'runtime', 'state.json'), '{}');
+      const run = (source: string) =>
+        runCodexDoctor(
+          {},
+          { ...ctx(), dataDir },
+          {
+            ...host({ marketplaces: { tenjin: { source } } }).deps,
+            hooks: async () => listed(...allRows()),
+          },
+        );
+      const moved = await run(join(dataDir, 'runtime', 'codex'));
+      expect(moved.humanLines).toContain(
+        "Codex plugin runs: Tenjin's runtime (~/.tenjin/runtime/codex)",
+      );
+      const onPath = await run('/package/dist/hosts/codex');
+      expect(onPath.humanLines).toContain(
+        "Codex plugin runs: `tenjin` from your PATH; run `tenjin install --harness codex` to move it to Tenjin's runtime",
+      );
+      expect(onPath.data).toMatchObject({ ok: true });
+    });
+
+    it('says how the last background update ended, information only', async () => {
+      const dataDir = join(dir, 'home', '.tenjin');
+      const root = join(dataDir, 'runtime');
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, 'state.json'), '{}');
+      const run = () =>
+        runCodexDoctor(
+          {},
+          { ...ctx(), dataDir },
+          {
+            ...host({ marketplaces: { tenjin: { source: join(root, 'codex') } } }).deps,
+            hooks: async () => listed(...allRows()),
+          },
+        );
+      expect((await run()).humanLines?.some((l) => l.startsWith('Auto-update:'))).toBe(false);
+      await writeFile(
+        join(root, 'auto-update.json'),
+        JSON.stringify({
+          finishedAt: '2026-10-21T08:00:00.000Z',
+          outcome: 'failed',
+          reason: 'offline',
+        }),
+      );
+      const out = await run();
+      expect(out.humanLines).toContain('Auto-update: 2026-10-21 failed: offline');
+      expect(out.data).toMatchObject({ ok: true });
+    });
   });
 
   it('reads the plugin from hooks/list rows: installed and trusted, absent, untrusted', () => {

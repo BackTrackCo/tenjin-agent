@@ -1,14 +1,13 @@
-import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
-import { walletPath } from '../lib/paths';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
 import { rememberingBalanceReader } from '../lib/usdc-balance';
+import { readWalletFacts } from '../lib/wallet-facts';
 import type { CommandContext } from '../context';
 import {
   buildNativePacket,
@@ -22,14 +21,10 @@ import {
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
-import {
-  depositSentence,
-  FEE_REQUIRED,
-  firstNoticeFor,
-  isFeeRequired,
-  unpaidSentence,
-  type RouteFor,
-} from './fee';
+import { canPayProvider, canSign, type SignVerdict } from './eligibility';
+import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { noticeCleared, noticeFor } from './notice-markers';
+import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
 import { GATE_TIMEOUT_MS } from './gate';
 import {
@@ -62,8 +57,8 @@ import { routerSettings, type RouterSettings } from './settings';
  * The six hook handlers. Between them they do exactly three things: build and
  * seal the packet, ask for one free decision, and say one thing back to the
  * harness. Before an `execute` is shown where nobody can approve it, they also
- * read the wallet's address from its file and its USDC balance from the RPC
- * (`spendShortfall`). A free offer on a search starts one free docs fetch in a
+ * read what the wallet's files say (`readWalletFacts`) and its USDC balance
+ * from the RPC (`spendShortfall`). A free offer on a search starts one free docs fetch in a
  * detached `node` (`augment.ts`); that is the only other thing they touch.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
@@ -573,6 +568,37 @@ export interface HookDeps {
   /** A line for the user beside this leg's answer (`runHookKind` puts it in
    *  the hook's `systemMessage`). */
   notice?: (line: string) => void;
+  /**
+   * Inside `tenjin mcp`: the payer's in-memory sign verdict (what its last
+   * unlock said, no I/O). Absent (`tenjin hook <kind>`, which cannot unlock),
+   * it is decided from the wallet's files alone ({@link spendShortfall}).
+   */
+  signer?: () => SignVerdict;
+  /**
+   * Inside `tenjin mcp`, called only for an event with a valid session_id:
+   * marks the session served (B2) and returns this leg's one-time wallet
+   * lines. `ack()` runs once the response carrying them is built; only then
+   * are they marked delivered (and awaiting_confirmation cleared).
+   */
+  walletNews?: (sessionId: string) => Promise<WalletNews>;
+}
+
+/**
+ * One leg's one-time wallet lines, CLAIMED for that leg: a leg running at the
+ * same time is not handed them. `ack()` marks them delivered once the response
+ * carrying them is built; `release()` hands them back for the next leg when
+ * the leg failed before answering.
+ */
+export interface WalletNews {
+  lines: string[];
+  /**
+   * The reason a still-locked line in `lines` names, if any. The leg marks it
+   * told for the session, so the fee notice for the same reason stays quiet
+   * (once per session and reason).
+   */
+  told?: string;
+  ack: () => Promise<void>;
+  release: () => void;
 }
 
 /**
@@ -602,28 +628,44 @@ function gateDeadline(deps: HookDeps): number {
  * when it would. Every line that points at `request` where nobody can approve
  * asks this first: a subagent cannot reach the user, and the main agent's
  * pre-call deny and prompt hint send it to a call that has to run rather than
- * to the free tools that would have answered. Two things stop that call:
+ * to the free tools that would have answered. Three things stop that call:
  *
  * - THE SPEND POLICY, asked the way `request` will ask it: the same settings,
  *   the same session ledger and the same evaluation, with the provider's host
  *   as the creator the way `pay` names it. Only `allow` runs alone. Nothing is
  *   reserved, and the amount actually signed is still `gateSpend`'s to cap.
- * - THE WALLET. A fresh install's wallet holds no USDC, and the authorization
+ * - A WALLET THAT CANNOT SIGN. Inside `tenjin mcp` that is the payer's own
+ *   verdict ({@link HookDeps.signer}); as `tenjin hook <kind>`, which cannot
+ *   unlock, it is `canSign` over the wallet's files alone (`readWalletFacts`):
+ *   no wallet and no key, a malformed TENJIN_WALLET_KEY, a wallet.json nobody
+ *   can read, or the saved passphrase file gone while TENJIN_WALLET_PASSPHRASE
+ *   is unset. Approval cannot unlock a wallet mid-session, so this one
+ *   withholds discovered offers too ({@link vetOffer}, Q3), and it wins over
+ *   the policy's `needs_approval` for any price above zero. Its note rides
+ *   in `additionalContext`, so it carries the model's `agentFix` (B1).
+ * - THE BALANCE. A fresh install's wallet holds no USDC, and the authorization
  *   it signs is refused after the free call was already denied: the user got
- *   neither. One `balanceOf`, read only once the policy said yes.
+ *   neither. One `balanceOf`, read only once the policy said yes and the
+ *   signer is not definitely blocked.
  *
- * ONLY A BALANCE READ BELOW THE PRICE WITHHOLDS. One that cannot be read (no
- * wallet file, an RPC that fails, rate-limits or runs past the gate's budget)
- * leaves the policy to decide alone, as before this check. Base's public RPC
- * refused the sixth `eth_call` in a second, and parallel fetches are an
- * ordinary turn, so withholding on a failed read would drop the redirect on
- * funded wallets exactly when the router is used most, and a dead `rpcUrl`
- * would switch it off for good. The cost of the other direction needs an
- * empty wallet AND a failed read, and lasts one call. A `TENJIN_WALLET_KEY`
- * wallet is left to the policy too: its address takes a curve this chunk
- * does not load, and the file beside it is not the wallet that pays.
+ * ONLY A DEFINITE BLOCK OR A BALANCE READ BELOW THE PRICE WITHHOLDS. An
+ * unknown signer (a keychain that did not answer, an unlock not tried yet,
+ * every command-mode leg with a readable wallet) still offers: only `blocked`
+ * gates (`eligibility.ts`). A balance that cannot be read (an RPC that fails,
+ * rate-limits or runs past the gate's budget) leaves the policy to decide
+ * alone, as before this check. Base's public RPC refused the sixth `eth_call`
+ * in a second, and parallel fetches are an ordinary turn, so withholding on a
+ * failed read would drop the redirect on funded wallets exactly when the
+ * router is used most, and a dead `rpcUrl` would switch it off for good. The
+ * cost of the other direction needs an empty wallet AND a failed read, and
+ * lasts one call. A valid `TENJIN_WALLET_KEY` wallet is left to the policy
+ * too: its address takes a curve this chunk does not load, and the file
+ * beside it is not the wallet that pays.
+ *
+ * Exported for its tests: a sign-blocked note is never shown in an offer
+ * ({@link vetOffer} withholds it), so they read it here.
  */
-async function spendShortfall(
+export async function spendShortfall(
   decision: { providerPriceAtomic: string; endpoint: string },
   deps: HookDeps,
   deadline: number,
@@ -633,7 +675,9 @@ async function spendShortfall(
     withheld: 'offer needs approval',
     note: `Note: ${price} ${detail}; request will pay nothing and return needs_approval with what it costs.`,
   });
-  let rpcUrl: string;
+  // The policy's answer: today's approval Shortfall, or the RPC to read the
+  // balance from once it said yes.
+  let policy: Shortfall | { rpcUrl: string };
   try {
     const settings = await resolveContextSettings(hookContext(deps));
     const ledger = await readSpendSummary(deps.dataDir, {
@@ -644,60 +688,90 @@ async function spendShortfall(
       creator: new URL(decision.endpoint).host,
       sessionSpentAtomic: ledger === null ? 0n : spentOf(ledger),
     });
-    if (evaluation.decision !== 'allow') {
-      return approval(
-        evaluation.reason === 'above_auto_spend'
-          ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
-          : "needs approval under this machine's spend limits",
+    policy =
+      evaluation.decision !== 'allow'
+        ? approval(
+            evaluation.reason === 'above_auto_spend'
+              ? `is above this machine's automatic per-call limit ($${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd})`
+              : "needs approval under this machine's spend limits",
+          )
+        : { rpcUrl: settings.rpcUrl };
+  } catch {
+    policy = approval("needs approval under this machine's spend limits");
+  }
+  // A free call pays nothing, so it needs nothing from the wallet: one that
+  // cannot sign, or no wallet at all (`--no-wallet`), never withholds it.
+  if (BigInt(decision.providerPriceAtomic) === 0n) return 'rpcUrl' in policy ? null : policy;
+  const facts = await readWalletFacts(deps.dataDir, deps.env ?? process.env);
+  const sign = deps.signer?.() ?? canSign(facts);
+  // A wallet that definitely cannot sign is said before the policy's
+  // `needs_approval` (Q3): approving an over-cap call cannot unlock it
+  // mid-session, so even a discovered offer is withheld.
+  if (sign.status === 'blocked') return cannotSign(sign);
+  if (!('rpcUrl' in policy)) return policy;
+  const { rpcUrl } = policy;
+  let balance: bigint | null = null;
+  if (facts.address !== null && facts.envKey !== 'valid') {
+    // A balance read in the last minute stands: a burst of parallel lookups
+    // otherwise asks the public RPC once each, past its rate limit.
+    const readBalance = rememberingBalanceReader(deps.dataDir, {
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    });
+    balance = await readBalance(facts.address, rpcUrl, {
+      timeoutMs: Math.min(BALANCE_TIMEOUT_MS, deadline - (deps.now?.() ?? Date.now())),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    if (balance === null) {
+      (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+        `tenjin hook: the wallet's USDC balance could not be read from ${new URL(rpcUrl).host}, so the spend policy alone decides`,
       );
     }
-    rpcUrl = settings.rpcUrl;
-  } catch {
-    return approval("needs approval under this machine's spend limits");
   }
-  if ((deps.env ?? process.env).TENJIN_WALLET_KEY?.trim()) return null;
-  const address = await walletAddress(deps.dataDir);
-  if (address === null) return null;
-  // A balance read in the last minute stands: a burst of parallel lookups
-  // otherwise asks the public RPC once each, past its rate limit.
-  const readBalance = rememberingBalanceReader(deps.dataDir, {
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-  });
-  const balance = await readBalance(address, rpcUrl, {
-    timeoutMs: Math.min(BALANCE_TIMEOUT_MS, deadline - (deps.now?.() ?? Date.now())),
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-  });
-  if (balance === null) {
-    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-      `tenjin hook: the wallet's USDC balance could not be read from ${new URL(rpcUrl).host}, so the spend policy alone decides`,
-    );
-    return null;
+  const v = canPayProvider(
+    { policy: { decision: 'allow' }, sign, balanceAtomic: balance },
+    BigInt(decision.providerPriceAtomic),
+  );
+  if (v.status !== 'blocked' || v.reason === 'needs_approval') return null;
+  if (v.reason === 'wallet_short') {
+    if (balance === null) return null;
+    const short = BigInt(decision.providerPriceAtomic) - balance;
+    return {
+      withheld: 'wallet needs USDC',
+      note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
+    };
   }
-  const short = BigInt(decision.providerPriceAtomic) - balance;
-  return short > 0n
-    ? {
-        withheld: 'wallet needs USDC',
-        note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
-      }
-    : null;
+  return cannotSign(v);
+}
+
+/** The Shortfall of a wallet that definitely cannot sign; {@link vetOffer} always withholds it. */
+function cannotSign(v: { reason: string; detail: string; fix: string }): Shortfall {
+  return {
+    withheld: 'wallet cannot sign',
+    note: `Note: Tenjin's wallet cannot pay for this (${v.detail}); ${agentFixFor(v.reason, v.fix)}`,
+    signBlocked: true,
+  };
 }
 
 /** Why a paid call would not run on its own: the footer's words, and the
- *  sentence a discovered offer carries instead of being withheld. */
-interface Shortfall {
+ *  sentence a discovered offer carries instead of being withheld.
+ *  `signBlocked` marks a wallet that definitely cannot sign, which no
+ *  approval fixes mid-session. */
+export interface Shortfall {
   withheld: string;
   note: string;
+  signBlocked?: true;
 }
 
 /**
  * AN OFFER, OR WHY IT IS NOT SHOWN. A curated offer the paid call could not
- * make good on alone is withheld, as it always was. A DISCOVERED one is never
+ * make good on alone is withheld, as it always was. A DISCOVERED one is not
  * withheld where someone can ask the user: it is the only line naming a
  * service that can do the step, so it is shown with one sentence saying the
  * call needs approval or funds; its `needs_approval` result names the
  * `approve` call, which is the asking, so the host never asks first. Where
  * nobody can ask (a subagent's call, a delegated task) it is withheld like
- * any other.
+ * any other. A wallet that definitely cannot sign withholds every offer,
+ * discovered ones included (Q3): asking the user cannot unlock it mid-session.
  *
  * An offer that is shown can still list OTHER services beside its own: a Tenjin
  * list menu, or an alternative after a curated line. One priced over the cap
@@ -715,7 +789,7 @@ async function vetOffer<T extends OfferDecision>(
     const note = await overCapNote(offer, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
   }
-  if (offer.action === 'discovered' && canAskUser) {
+  if (offer.action === 'discovered' && canAskUser && shortfall.signBlocked !== true) {
     return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
   }
   return { withheld: shortfall.withheld };
@@ -791,22 +865,6 @@ async function overCapNote(
     `($${toMoney(cap.toString()).usd}), so request returns needs_approval for ${which}; ` +
     (canAskUser ? 'prefer one within the limit.' : 'use one within the limit.')
   );
-}
-
-/**
- * The wallet file's address, which `lib/wallet/store.ts` keeps top-level in
- * cleartext so it reads without a passphrase; null when there is none to read.
- * Read here rather than through the wallet module, which stays out of this
- * chunk graph.
- */
-async function walletAddress(dataDir: string): Promise<string | null> {
-  try {
-    const record: unknown = JSON.parse(await readFile(walletPath(dataDir), 'utf8'));
-    const address = (record as { address?: unknown } | null)?.address;
-    return typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address) ? address : null;
-  } catch {
-    return null;
-  }
 }
 
 function agentLookup(cwd: string | undefined, deps: HookDeps): AgentLookup {
@@ -1622,6 +1680,13 @@ async function decide(
   if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
     await tellOnce(deps, sessionId, why, now);
   }
+  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
+  // over, and the session hears so once ("Tenjin wallet unlocked." or
+  // "... funded."). Only a decided call that did not fall back to the free path.
+  if (route !== null && outcome.status === 'decided' && outcome.freePath === undefined) {
+    const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
+    if (cleared !== null) deps.notice?.(cleared);
+  }
   // The fee is on: a "no paid path" remembered from before stops holding the
   // machine's calls on the free path.
   if (outcome.status === 'decided' && isFeeRequired(outcome.decision)) {
@@ -1656,14 +1721,17 @@ async function decide(
 }
 
 /**
- * ONE LINE FOR THE USER, ONCE PER SESSION, when a call could not pay the
- * routing fee for a reason the user can fix: the reason and the fix, in the
- * hook's `systemMessage`. Never on every call, and never in place of routing.
+ * ONE LINE FOR THE USER, ONCE PER SESSION AND REASON, when a call could not
+ * pay the routing fee for a reason the user can fix: the reason and the fix,
+ * in the hook's `systemMessage`. Never on every call, and never in place of
+ * routing. A different reason later in the session is news again (a missing
+ * passphrase repaired into a wrong one), the same one is not.
  */
 async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
   const sentence = unpaidSentence(why);
   if (sentence === null || deps.notice === undefined) return;
-  if (await firstNoticeFor(deps.dataDir, sessionId, now).catch(() => false)) deps.notice(sentence);
+  const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
+  if (told === 'tell') deps.notice(sentence);
 }
 
 /** The hooks write their own protocol answer on stdout and nothing else. */

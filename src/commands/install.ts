@@ -31,7 +31,7 @@ import {
 } from '../lib/config';
 import type { PartialConfig, PublishMode } from '../lib/config';
 import { persistGrantDeclined, persistInstallHarness, persistPublishMode } from './config';
-import { resolveWallet, walletValue, type WalletOutcome } from './install-wallet';
+import { resolveWallet, walletValue, type WalletDeps, type WalletOutcome } from './install-wallet';
 import { collectDoctorChecks } from './doctor';
 import type { CheckResult, DoctorDeps, DoctorChecks } from './doctor';
 import type { PassphraseOverrides } from '../lib/wallet/local';
@@ -205,6 +205,10 @@ export interface InstallDeps {
    * keychain under the `tenjin-cli` service.
    */
   walletPassphrase?: PassphraseOverrides;
+  /** Can the wallet sign; see {@link WalletDeps.walletSigning}. Tests inject it. */
+  walletSigning?: WalletDeps['walletSigning'];
+  /** Has a router that served a Claude session signed for this address? */
+  observedSigning?: WalletDeps['observedSigning'];
   /** Steps 1-3 of the hook cutover: bundles, token, a healthy daemon. */
   startDaemon?: WriteHooksOptions['start'];
 }

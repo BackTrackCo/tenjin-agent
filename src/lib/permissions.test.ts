@@ -19,6 +19,7 @@ const FORBIDDEN_VERBS = [
   'tenjin edit',
   'tenjin delete',
   'tenjin wallet create',
+  'tenjin wallet repair',
   'tenjin config set',
   'tenjin install',
   'tenjin mcp',
@@ -143,6 +144,15 @@ describe('money-moving and state-changing verbs are never recommended', () => {
     for (const command of FORBIDDEN_VERBS) {
       expect(documented).toContain(command);
     }
+  });
+
+  // `repair` takes a passphrase only a person types. A rule would let an agent
+  // run it unprompted and overwrite what the store holds, so it is excluded with
+  // its own reason rather than riding along under `wallet create`.
+  it('excludes tenjin wallet repair with a reason that names the passphrase', () => {
+    const repair = NEVER_ALLOWLISTED.find((e) => e.command === 'tenjin wallet repair');
+    expect(repair?.reason).toMatch(/passphrase/);
+    expect(repair?.reason).toMatch(/typed by a person/);
   });
 
   it('ships no broad rule that would swallow an excluded verb', () => {

@@ -1,10 +1,8 @@
-import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { hasCode } from '../lib/errno';
 import { formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import type { DecisionRoute } from './decision';
+import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
 /**
  * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call on the paid
@@ -29,6 +27,10 @@ export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
  * hundred lookups. `tenjin wallet fund` sends it to the checkout as a preset.
  */
 export const SUGGESTED_FUND_USD = '5';
+/** The funding line a new wallet is told, after `tenjin wallet create`. */
+export const FUNDING_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`, or send USDC on Base.`;
+/** The funding line under a wallet at exactly $0, in `tenjin wallet balance` and `tenjin status`: the command alone. */
+export const FUND_COMMAND_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`;
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 
@@ -81,21 +83,26 @@ export function isFeeRequired(response: unknown): boolean {
  * nothing else explains why). Null for a reason that is no fault and needs no
  * fix: another session's call on the channel, a server with no paid path, or
  * a call queued past its own budget, or a payment still out when the call's
- * budget ran out (it finishes in the background).
+ * budget ran out (it finishes in the background), or an unlock that did not
+ * finish inside the call's budget (it keeps running, and the next call gets
+ * its answer).
+ *
+ * THE WALLET'S OWN REASONS ARE `WALLET_REASONS`, spread in rather than written
+ * twice, so a notice names the same cause in the same words as doctor. They
+ * carry the PERSON `fix`, never `agentFix`: this sentence goes in the hook's
+ * `systemMessage`, which the harness shows the person (B1, decision 15), and a
+ * fix that names `tenjin wallet repair` says it asks in their own terminal.
+ * Every other entry, `wallet_low` included, is byte for byte what it was (S5).
  */
+const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fromEntries(
+  Object.entries(WALLET_REASONS).map(([key, { reason, fix }]) => [key, { reason, fix }]),
+);
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
     reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} routing deposit`,
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
-  wallet_locked: {
-    reason: '`tenjin mcp` cannot unlock the wallet without a prompt',
-    fix: 'Set TENJIN_WALLET_PASSPHRASE in the environment Claude Code starts from, then restart Claude Code.',
-  },
-  no_wallet: {
-    reason: 'this machine has no wallet',
-    fix: 'Run `tenjin doctor`.',
-  },
+  ...WALLET_UNPAID,
   limit_below_deposit: {
     reason: `the per-call spend limit is below the $${usd(CHANNEL_DEPOSIT_ATOMIC)} routing deposit`,
     fix: 'Run `tenjin doctor`.',
@@ -123,6 +130,7 @@ const NO_FAULT = new Set([
   'busy',
   'no_call',
   'deadline_after_payment_sent',
+  'unlock_timeout',
 ]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */
@@ -140,11 +148,17 @@ export function depositSentence(amountAtomic: bigint): string {
   return `Tenjin moved $${usd(amountAtomic)} into prepaid routing credit; each routing call uses $${usd(ROUTING_FEE_ATOMIC)}.`;
 }
 
-/** The one line the user sees, once per session, when a call was not paid. */
-export function unpaidSentence(why: string): string | null {
+/**
+ * The one line the user sees, once per session and reason, when a call was not
+ * paid. Its reader picks the fix (B1): the person's by default; for the model
+ * (the `request` tool's text) a wallet unlock reason's `agentFix`, which asks
+ * the person to act and never for the passphrase, and any other reason's own.
+ */
+export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person'): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so calls take the free path until that is fixed. ${u.fix}`;
+  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
+  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so calls take the free path until that is fixed. ${fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
@@ -160,47 +174,4 @@ export function payerDir(dataDir: string, payer: string): string {
 /** Atomic USDC as dollars with at least two decimals, never a float. */
 export function usd(atomic: bigint): string {
   return formatUsdDisplay(atomic.toString());
-}
-
-/** How long a session's notice marker is kept. */
-const NOTICE_KEEP_MS = 7 * 86_400_000;
-
-/**
- * TRUE ONCE PER SESSION: the first caller for a session id creates its marker
- * and gets true; every later one gets false. Each marker holds the time it was
- * made, and those older than a week go on the way past, so the directory does
- * not grow with every session ever run.
- */
-export async function firstNoticeFor(
-  dataDir: string,
-  sessionId: string,
-  now: number,
-): Promise<boolean> {
-  const dir = join(dataDir, 'router', 'notices');
-  const name = createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
-  const created = await createExclusive(join(dir, name), String(now));
-  if (created) {
-    for (const entry of await readdir(dir).catch(() => [] as string[])) {
-      const path = join(dir, entry);
-      const at = Number(await readFile(path, 'utf8').catch(() => 'NaN'));
-      if (!Number.isFinite(at) || now - at > NOTICE_KEEP_MS) await rm(path, { force: true });
-    }
-  }
-  return created;
-}
-
-async function createExclusive(path: string, body: string): Promise<boolean> {
-  try {
-    await mkdir(join(path, '..'), { recursive: true, mode: 0o700 });
-    const handle = await open(path, 'wx', 0o600);
-    try {
-      await handle.writeFile(body);
-    } finally {
-      await handle.close();
-    }
-    return true;
-  } catch (err) {
-    if (hasCode(err, 'EEXIST')) return false;
-    throw err;
-  }
 }

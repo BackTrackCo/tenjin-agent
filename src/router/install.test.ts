@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { runRouterInstall } from './install';
+import { loadStep, NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
+import { NEW_SESSION_FIX, RECONNECT_FIX } from './mcp-processes';
+import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import type { CommandContext } from '../context';
 
 /**
@@ -68,8 +70,7 @@ const ASK_LINES = [
 ];
 /** What Claude Code exports to the commands its agent runs. */
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
-const RELOAD =
-  'type /reload-plugins in this Claude Code session, or start a new session, so Tenjin loads';
+const RELOAD = 'start a new Claude Code session so Tenjin loads';
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
@@ -80,6 +81,11 @@ function deps(over: Record<string, unknown> = {}) {
     walletExists: async () => false,
     createWallet: vi.fn(async () => ADDRESS),
     walletAddress: async () => ADDRESS,
+    // A wallet the keychain unlocks, unless a test says otherwise.
+    walletSigning: async () => ({
+      signing: { status: 'ready' as const, source: 'keychain' as const },
+    }),
+    observedSigning: async () => false,
     listMcpProcesses: async () => [],
     walletBalance: async () => 0n,
     ...over,
@@ -281,16 +287,28 @@ describe('tenjin install', () => {
     );
     expect(result.data).toMatchObject({ mcpServer: { name: 'mcp server', status: 'warn' } });
     expect(result.humanLines!.join('\n')).toContain('started before this install');
-    expect(result.humanLines!.join('\n')).toContain(
-      'Type /reload-plugins in this Claude Code session, or start a new session.',
-    );
+    expect(result.humanLines!.join('\n')).toContain(RECONNECT_FIX);
     // The refresh `tenjin update` runs says it too.
     const refreshed = await runRouterInstall(
       { refresh: true },
       ctx(),
       deps({ listMcpProcesses, installedAt: async () => 2 }),
     );
-    expect(refreshed.humanLines!.join('\n')).toContain('Type /reload-plugins');
+    expect(refreshed.humanLines!.join('\n')).toContain(RECONNECT_FIX);
+  });
+
+  it('never names /reload-plugins as the step that loads Tenjin: only a new session runs SessionStart', () => {
+    for (const text of [
+      NEW_SESSION_STEP,
+      RELOAD_STEP,
+      RECONNECT_FIX,
+      NEW_SESSION_FIX,
+      loadStep(false),
+      loadStep(true),
+    ]) {
+      expect(text).not.toContain('/reload-plugins');
+    }
+    expect(loadStep(false)).toBe(NEW_SESSION_STEP);
   });
 
   it('a refresh brings the plugin up to this build and changes no config', async () => {
@@ -634,6 +652,7 @@ describe('the doctor this release registers', () => {
       'experimental',
       'routing fee',
       'wallet',
+      'claude session',
       'router',
     ]);
     // The experiment ships off, and doctor says so in its one line.
@@ -860,18 +879,18 @@ describe('the install readout and the status window', () => {
       },
     });
     await auth.authorize({ amountAtomic: 10_000n, creator: 's', requestKey: 'k' });
-    const fresh = await runRouterStatus(ctx());
+    const fresh = await runRouterStatus(ctx(), { wallet: async () => null });
     expect((fresh.data as { inFlight: unknown[] }).inFlight).toHaveLength(1);
 
     // Eleven minutes on, that reservation is past its TTL and an authorization
     // would not count it; the readout must not either.
     const later = Date.now() + 11 * 60 * 1000;
-    const aged = await runRouterStatus(ctx(), { now: () => later });
+    const aged = await runRouterStatus(ctx(), { wallet: async () => null, now: () => later });
     expect((aged.data as { inFlight: unknown[] }).inFlight).toHaveLength(0);
 
     // A day on, the whole window has rolled over.
     const nextDay = Date.now() + 25 * 60 * 60 * 1000;
-    const rolled = await runRouterStatus(ctx(), { now: () => nextDay });
+    const rolled = await runRouterStatus(ctx(), { wallet: async () => null, now: () => nextDay });
     expect(
       (rolled.data as { window: { committed: { atomic: string } } }).window.committed.atomic,
     ).toBe('0');
@@ -940,7 +959,7 @@ describe('daily limit readouts', () => {
     async (sessionBudget) => {
       await writeFile(join(data, 'config.json'), JSON.stringify({ sessionBudget }));
       const { runRouterStatus } = await import('./status');
-      const result = await runRouterStatus(ctx());
+      const result = await runRouterStatus(ctx(), { wallet: async () => null });
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
@@ -967,7 +986,10 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
     }),
   );
   const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), { routingCredit: async () => 240_000n });
+  const result = await runRouterStatus(ctx(), {
+    wallet: async () => null,
+    routingCredit: async () => 240_000n,
+  });
   expect(result.data).toMatchObject({
     window: {
       committed: { atomic: '300000' },
@@ -985,7 +1007,10 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
 
 it('status shows no routing credit before any deposit', async () => {
   const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), { routingCredit: async () => 0n });
+  const result = await runRouterStatus(ctx(), {
+    wallet: async () => null,
+    routingCredit: async () => 0n,
+  });
   expect(result.humanLines?.[0]).toBe('lookups 0 USD');
 });
 
@@ -1005,7 +1030,7 @@ it('status warns about ignored retired keys and reports automatic exposure separ
     }),
   );
   const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx());
+  const result = await runRouterStatus(ctx(), { wallet: async () => null });
   expect(result.data).toMatchObject({
     warnings: [expect.stringContaining('bazaarPay, confirm')],
     window: {
@@ -1236,5 +1261,409 @@ describe('install run by an agent asks each question where its answer is needed'
   it('a script outside any harness gets the spend question and no funding question', async () => {
     const result = await runRouterInstall({}, ctx(), deps());
     expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
+  });
+});
+
+describe('the wallet line: can Claude Code unlock it', () => {
+  const PERSON_REPAIR_FIX = WALLET_REASONS.passphrase_missing.fix;
+  const blocked = {
+    signing: {
+      status: 'blocked',
+      reason: 'passphrase_missing',
+      detail: 'no saved wallet passphrase can be reached',
+      fix: PERSON_REPAIR_FIX,
+    },
+  };
+  /** Every line and the `next` of a run, for the sweeps below. */
+  const everything = (r: { data: unknown; humanLines?: string[] }) =>
+    [...(r.humanLines ?? []), (r.data as { next: string }).next].join('\n');
+
+  it('an agent (no TTY) relays a blocked wallet with the agent wording', async () => {
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({ walletExists: async () => true, walletSigning: async () => blocked }),
+    );
+    const lines = result.humanLines!;
+    expect(lines.some((l) => l.includes('✓ Wallet'))).toBe(false);
+    const at = lines.indexOf(
+      `! Wallet ${ADDRESS} cannot be unlocked by Claude Code: no saved wallet passphrase can be reached.`,
+    );
+    expect(at).toBeGreaterThan(-1);
+    expect(lines[at + 1]).toBe(`  ${ASK_FOR_REPAIR}`);
+    const next = (result.data as { next: string }).next;
+    expect(next).toMatch(
+      /^ask the person to run `tenjin wallet repair` in their own terminal \(never ask for the passphrase\), then /,
+    );
+    expect(result.data).toMatchObject({ wallet: { status: 'existing', signing: blocked.signing } });
+  });
+
+  it('a person at a terminal gets the person wording, with the repair clause', async () => {
+    const result = await runRouterInstall(
+      { yes: true },
+      humanCtx(),
+      deps({ walletExists: async () => true, walletSigning: async () => blocked }),
+    );
+    const lines = result.humanLines!;
+    const at = lines.findIndex((l) => l.includes('cannot be unlocked by Claude Code'));
+    expect(lines[at + 1]).toBe(`  ${PERSON_REPAIR_FIX}`);
+    const next = (result.data as { next: string }).next;
+    expect(next).toMatch(/^run `tenjin wallet repair` yourself /);
+    expect(next).toContain(REPAIR_CLAUSE);
+    // Every person-facing string that names repair carries the clause.
+    for (const line of [...lines, next].filter((l) => l.includes('tenjin wallet repair'))) {
+      expect(line).toContain(REPAIR_CLAUSE);
+    }
+  });
+
+  it.each([
+    [false, 'Never ask for the passphrase'],
+    [true, REPAIR_CLAUSE],
+  ])(
+    'a wallet only TENJIN_WALLET_PASSPHRASE in this shell unlocks is no ✓ (TTY %s)',
+    async (tty, says) => {
+      const result = await runRouterInstall(
+        { yes: true },
+        tty ? humanCtx() : ctx(),
+        deps({
+          walletExists: async () => true,
+          walletSigning: async () => ({
+            signing: { status: 'ready', source: 'passphrase-env' },
+            shellOnly: 'passphrase',
+          }),
+        }),
+      );
+      const text = result.humanLines!.join('\n');
+      expect(text).not.toContain('✓ Wallet');
+      const line = result.humanLines!.find((l) => l.startsWith(`! Wallet: ${ADDRESS}`))!;
+      expect(line).toContain('TENJIN_WALLET_PASSPHRASE in this shell');
+      expect(line).toContain('tenjin wallet repair');
+      expect(line).toContain(says);
+      expect(result.data).toMatchObject({ wallet: { shellOnly: 'passphrase' } });
+    },
+  );
+
+  it('a router that served a session and signs for it clears the shell-only line', async () => {
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        walletExists: async () => true,
+        walletSigning: async () => ({
+          signing: { status: 'ready', source: 'passphrase-env' },
+          shellOnly: 'passphrase',
+        }),
+        observedSigning: async () => true,
+      }),
+    );
+    expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
+    expect((result.data as { wallet: { shellOnly?: string } }).wallet.shellOnly).toBeUndefined();
+  });
+
+  it('a TENJIN_WALLET_KEY with no file is the existing wallet: nothing created, no ✓', async () => {
+    const key = `0x${'1'.repeat(64)}`;
+    const createWallet = vi.fn(async () => ADDRESS);
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        env: { TENJIN_WALLET_KEY: key },
+        walletAddress: undefined,
+        walletSigning: undefined,
+        createWallet,
+      }),
+    );
+    expect(createWallet).not.toHaveBeenCalled();
+    const wallet = (result.data as { wallet: { status: string; address: string } }).wallet;
+    expect(wallet).toMatchObject({ status: 'existing', shellOnly: 'key' });
+    expect(result.humanLines!.join('\n')).not.toContain('✓ Wallet');
+    expect(result.humanLines).toContain(
+      `! Wallet: ${wallet.address} signs here only through TENJIN_WALLET_KEY in this shell; Claude Code must have the same variable.`,
+    );
+  });
+
+  it('a created wallet whose passphrase went to the file prints the ✓ and create’s one line', async () => {
+    const note = `No keyring reachable from this session; passphrase saved to ${join(data, 'passphrase.x.plain')} (readable only by you).`;
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        createWallet: async () => ({
+          address: ADDRESS,
+          passphrase: {
+            store: 'file',
+            location: join(data, 'passphrase.x.plain'),
+            durable: true,
+            note,
+          },
+        }),
+      }),
+    );
+    expect(result.humanLines!.slice(1, 3)).toEqual([`✓ Wallet created: ${ADDRESS}`, `  ${note}`]);
+    expect(result.data).toMatchObject({
+      wallet: { status: 'created', signing: { status: 'ready', source: 'file' } },
+    });
+  });
+
+  it('an env passphrase create could not save is shell-only', async () => {
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        createWallet: async () => ({
+          address: ADDRESS,
+          passphrase: {
+            store: 'env',
+            location: 'TENJIN_WALLET_PASSPHRASE',
+            durable: false,
+            note: 'n',
+          },
+        }),
+      }),
+    );
+    expect(result.data).toMatchObject({ wallet: { status: 'created', shellOnly: 'passphrase' } });
+    expect(result.humanLines!.join('\n')).not.toContain('✓ Wallet');
+  });
+
+  it('a reinstall with an empty existing wallet keeps today’s next step and funding question (S6)', async () => {
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ env: HARNESS_ENV, walletExists: async () => true, walletBalance: async () => 0n }),
+    );
+    const data_ = result.data as { next: string; nextSteps: { id: string; question: string }[] };
+    expect(data_.next).toBe(
+      `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
+    );
+    expect(data_.nextSteps).toEqual([
+      expect.objectContaining({
+        id: 'fund',
+        question: 'Do you want to add $5 to your Tenjin wallet now?',
+      }),
+    ]);
+  });
+
+  it('a create a killed keychain probe refused is a locked-store skip, never --insecure-storage', async () => {
+    const { StoreExecError } = await import('../lib/wallet/passphrase');
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        createWallet: undefined,
+        walletPassphrase: {
+          platform: 'darwin',
+          isTTY: false,
+          exec: async () => {
+            throw new StoreExecError('security', { killed: true, signal: 'SIGKILL' });
+          },
+        },
+      }),
+    );
+    const wallet = (result.data as { wallet: { status: string; reason: string; fix: string } })
+      .wallet;
+    expect(wallet).toMatchObject({ status: 'skipped', reason: 'passphrase-store-locked' });
+    expect(wallet.fix).toContain('Unlock your keychain');
+    expect(everything(result)).not.toContain('--insecure-storage');
+  });
+
+  it('a file-store write that failed is no-passphrase-store, and never names a keychain', async () => {
+    const { FILE_STORE_FAILED_FIX } = await import('../lib/wallet-unlock');
+    const path = join(data, 'passphrase.0xabc.plain');
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        createWallet: async () => {
+          throw new CliError('REFUSED', 'Tenjin could not save the passphrase.', {
+            fix: FILE_STORE_FAILED_FIX(path),
+            details: { passphraseStore: { kind: 'file-write-failed', path } },
+          });
+        },
+      }),
+    );
+    const wallet = (result.data as { wallet: { status: string; reason: string; fix: string } })
+      .wallet;
+    expect(wallet).toMatchObject({ status: 'skipped', reason: 'no-passphrase-store' });
+    expect(wallet.fix).toContain(FILE_STORE_FAILED_FIX(path));
+    expect(everything(result)).not.toMatch(/keychain/i);
+  });
+
+  it('never prints an inline TENJIN_WALLET_PASSPHRASE= anywhere', async () => {
+    for (const signing of [
+      blocked,
+      { signing: { status: 'ready', source: 'passphrase-env' }, shellOnly: 'passphrase' },
+      {
+        signing: {
+          status: 'unknown',
+          reason: 'keychain_locked',
+          detail: 'the keychain did not answer',
+        },
+      },
+    ]) {
+      for (const c of [ctx(), humanCtx()]) {
+        const result = await runRouterInstall(
+          { yes: true },
+          c,
+          deps({ walletExists: async () => true, walletSigning: async () => signing }),
+        );
+        expect(everything(result)).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+        expect(JSON.stringify(result.data)).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+      }
+    }
+  });
+
+  it('names no stale server for a router nothing Claude started', async () => {
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        listMcpProcesses: async () => [
+          { pid: 4242, startedAt: 1, kind: 'plugin', underClaude: false },
+        ],
+        installedAt: async () => Date.now(),
+      }),
+    );
+    expect(result.humanLines!.join('\n')).not.toContain('started before this install');
+  });
+
+  it('counts only a router that served a Claude session as one that signs (B2)', async () => {
+    const { writeObservation } = await import('./router-observation');
+    const observation = (servedSession: boolean) => ({
+      version: 1 as const,
+      pid: 5151,
+      startedAt: 1_000,
+      at: 2_000,
+      cliVersion: '0.0.0',
+      harness: 'claude' as const,
+      launchedByPlugin: true,
+      cwd: work,
+      address: ADDRESS,
+      servedSession,
+      env: { passphraseSet: true, keySet: false },
+      sign: { status: 'ready' as const, source: 'passphrase-env' as const },
+    });
+    const run = () =>
+      runRouterInstall(
+        {},
+        ctx(),
+        deps({
+          walletExists: async () => true,
+          walletSigning: async () => ({
+            signing: { status: 'ready', source: 'passphrase-env' },
+            shellOnly: 'passphrase',
+          }),
+          observedSigning: undefined,
+          listProcesses: async () => ({
+            routers: [{ pid: 5151, startedAt: 1_000, kind: 'plugin', underClaude: true }],
+            claude: [],
+          }),
+        }),
+      );
+    await writeObservation(data, observation(false));
+    expect((await run()).humanLines!.join('\n')).not.toContain('✓ Wallet');
+    await writeObservation(data, observation(true));
+    expect((await run()).humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
+  });
+});
+
+describe('the default wallet steps, on a fake keychain', () => {
+  // Real scrypt: the keystore is encrypted and opened for real.
+  const SCRYPT_TIMEOUT_MS = 120_000;
+
+  it(
+    'a TENJIN_WALLET_PASSPHRASE the keychain also holds is a ✓: a saved passphrase opens it',
+    async () => {
+      const { encryptedRecord, KNOWN_PASSPHRASE } = await import('../lib/wallet/test-support');
+      const { writeWalletRecord } = await import('../lib/wallet/store');
+      const { generatePrivateKey } = await import('viem/accounts');
+      const record = await encryptedRecord(generatePrivateKey());
+      await writeWalletRecord(data, record);
+      const exec = async (file: string, args: string[]) => {
+        if (file === 'security' && args[0] === 'find-generic-password') {
+          return { stdout: `${KNOWN_PASSPHRASE}\n`, stderr: '' };
+        }
+        throw new Error(`unexpected ${file} ${args.join(' ')}`);
+      };
+      const result = await runRouterInstall(
+        {},
+        ctx(),
+        deps({
+          env: { TENJIN_WALLET_PASSPHRASE: KNOWN_PASSPHRASE },
+          walletExists: undefined,
+          walletAddress: undefined,
+          walletSigning: undefined,
+          walletPassphrase: { platform: 'darwin', isTTY: false, exec },
+        }),
+      );
+      expect(result.humanLines).toContain(`✓ Wallet: ${record.address}`);
+      expect(result.data).toMatchObject({
+        wallet: { status: 'existing', signing: { status: 'ready', source: 'keychain' } },
+      });
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
+
+  it(
+    'headless Linux with no keyring creates the wallet with its passphrase in the 0600 file',
+    async () => {
+      const { NO_KEYRING_LINE } = await import('../lib/wallet-unlock');
+      const { StoreExecError } = await import('../lib/wallet/passphrase');
+      const result = await runRouterInstall(
+        {},
+        ctx(),
+        deps({
+          createWallet: undefined,
+          walletPassphrase: {
+            platform: 'linux',
+            isTTY: false,
+            exec: async (file: string) => {
+              throw new StoreExecError(file, { code: 'ENOENT', enoent: true });
+            },
+          },
+        }),
+      );
+      const wallet = (
+        result.data as {
+          wallet: { status: string; passphrase: { store: string; location: string; note: string } };
+        }
+      ).wallet;
+      expect(wallet.status).toBe('created');
+      expect(wallet.passphrase.store).toBe('file');
+      expect(wallet.passphrase.note).toBe(NO_KEYRING_LINE(wallet.passphrase.location));
+      expect(result.humanLines).toContain(`  ${wallet.passphrase.note}`);
+    },
+    SCRYPT_TIMEOUT_MS,
+  );
+
+  it.each([
+    ['a terminal', true],
+    ['no terminal', false],
+  ])('the default create is told the context is %s', async (_label, tty) => {
+    vi.resetModules();
+    const runWalletCreate = vi.fn(async () => ({
+      data: {
+        address: ADDRESS,
+        passphraseSource: 'keychain',
+        passphraseLocation: 'your macOS keychain',
+        passphraseDurable: true,
+        passphraseNote: 'saved',
+      },
+    }));
+    vi.doMock('../commands/wallet', () => ({ runWalletCreate }));
+    try {
+      const fresh = await import('./install');
+      await fresh.runRouterInstall(
+        { yes: true },
+        tty ? humanCtx() : ctx(),
+        deps({ createWallet: undefined }),
+      );
+      const opts = (runWalletCreate.mock.calls[0] as unknown[])[1] as {
+        passphrase: { isTTY: boolean };
+      };
+      expect(opts.passphrase.isTTY).toBe(tty);
+    } finally {
+      vi.doUnmock('../commands/wallet');
+      vi.resetModules();
+    }
   });
 });

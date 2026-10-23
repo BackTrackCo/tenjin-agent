@@ -23,6 +23,35 @@ if (Number.isNaN(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
   process.exit(1);
 }
 
+// A STALE COPY HANDS OFF TO TENJIN'S RUNTIME. npm's global bin folder can come
+// before `~/.local/bin` on PATH, so a `tenjin` typed in a terminal may be an
+// npm copy older than the runtime the plugin runs; it must not answer for it.
+// When the runtime's current version is strictly newer, this build runs that
+// one instead, `install` included, so an old copy never sets up anything older
+// than what is already running. The status line, the hooks and `tenjin mcp` pay
+// nothing for this check; any failure falls through and this build runs.
+const verb = process.argv[2];
+if (
+  verb !== 'status-line' &&
+  verb !== 'hook' &&
+  verb !== 'mcp' &&
+  process.env.TENJIN_HANDOFF !== '1'
+) {
+  const [{ handoffTarget }, { default: pkg }] = await Promise.all([
+    import('./lib/runtime-layout'),
+    import('../package.json'),
+  ]);
+  const target = handoffTarget(import.meta.url, pkg.version, process.env);
+  if (target !== null) {
+    const { spawnSync } = await import('node:child_process');
+    const run = spawnSync(target.node, [target.entry, ...process.argv.slice(2)], {
+      stdio: 'inherit',
+      env: { ...process.env, TENJIN_HANDOFF: '1' },
+    });
+    if (run.error === undefined) process.exit(run.status ?? 1);
+  }
+}
+
 // THE STATUS LINE NEVER LOADS THE CLI. Claude Code runs it once a second for as
 // long as a session is open, and commander, zod and the command tree are parse
 // cost it has no use for. Only the bare invocation is diverted; `--help` and
@@ -34,8 +63,10 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
 }
 
 // THE PLUGIN'S SessionStart LEG NEVER LOADS THE CLI EITHER. It runs before
-// every session starts, writes two small files and prints nothing, so it
-// takes the same shortcut. A flag falls through to the command tree.
+// every session starts, writes two small files and prints one JSON line only
+// when the wallet file or its saved passphrase file is unusable, so it takes
+// the same shortcut. A flag falls through to the command tree. Once its answer
+// is out, it starts the daily background update, detached (lib/auto-update).
 if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] === 'alive') {
   const [{ aliveMain }, { dataDir }, { default: pkg }] = await Promise.all([
     import('./router/alive'),
@@ -43,6 +74,10 @@ if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] =
     import('../package.json'),
   ]);
   await aliveMain({ dataDir: dataDir(process.env), version: pkg.version });
+  (await import('./lib/auto-update')).maybeAutoUpdate({
+    dataDir: dataDir(process.env),
+    env: process.env,
+  });
   process.exit(0);
 }
 
