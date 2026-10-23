@@ -3,6 +3,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, posix, resolve, sep, win32 } from 'node:path';
 import pkg from '../../package.json';
+import { autoUpdateLine } from '../lib/auto-update';
 import { hasCode } from '../lib/errno';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -345,7 +346,11 @@ export async function runRouterDoctor(
       details: data,
     });
   }
-  return { data, humanLines: doctorLines(checks) };
+  // Information only, above the summary: how the last background update ended.
+  const lines = doctorLines(checks);
+  const auto = state !== null ? autoUpdateLine(root) : null;
+  if (auto !== null) lines.splice(lines.length - 1, 0, auto);
+  return { data, humanLines: lines };
 }
 
 /** The routing-fee row when there is no host to check it against. */

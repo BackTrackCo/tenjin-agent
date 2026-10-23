@@ -183,10 +183,15 @@ Examples:
       "Update Tenjin to the newest version on npm's latest tag, without npm: it downloads the release, checks it, and switches only once it runs; the previous version stays as the fallback.",
     )
     .option('--check', 'report whether a newer version exists without installing it')
+    // Started by lib/auto-update, detached, at the start of a session.
+    .addOption(new Option('--background').hideHelp())
     .action(async function (this: Command) {
       await runCommand('update', this, async (ctx) => {
         const { runUpdate } = await import('../commands/update');
-        return runUpdate({ check: this.opts().check === true }, ctx);
+        return runUpdate(
+          { check: this.opts().check === true, background: this.opts().background === true },
+          ctx,
+        );
       });
     });
 

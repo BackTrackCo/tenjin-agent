@@ -1875,4 +1875,109 @@ describe('runUpdate: the runtime branch', () => {
     });
     expect(result.humanLines).toContain(`Refreshed the project install in ${project}.`);
   });
+
+  describe('--background, as lib/auto-update starts it', () => {
+    const record = async () =>
+      JSON.parse(await readFile(join(root, 'auto-update.json'), 'utf8')) as Record<string, unknown>;
+    const STARTED = '2026-10-01T00:00:00.000Z';
+    const started = () =>
+      writeFile(join(root, 'auto-update.json'), JSON.stringify({ startedAt: STARTED }));
+
+    it('with no runtime, never reaches npm and records skipped', async () => {
+      await started();
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const result = await runUpdate(
+        { check: false, background: true },
+        ctx,
+        await deps({
+          homeDir: home,
+          spawnImpl: forbiddenSpawn,
+          stage: forbiddenStage,
+          ensure: forbiddenEnsure,
+        }),
+      );
+      expect(result.data).toEqual({ skipped: 'no runtime' });
+      expect(await record()).toMatchObject({
+        startedAt: STARTED,
+        outcome: 'skipped',
+        reason: 'no runtime',
+      });
+    });
+
+    it('records updated after the runtime branch switched, keeping when it started', async () => {
+      await writeState('0.1.0-alpha.6');
+      await writeFile(
+        join(root, 'auto-update.json'),
+        JSON.stringify({ startedAt: STARTED, outcome: 'failed', reason: 'yesterday' }),
+      );
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const s = seams();
+      const spawned = children(() => writeState('0.1.0-alpha.7', '0.1.0-alpha.6'));
+      await runUpdate(
+        { check: false, background: true },
+        ctx,
+        await deps({ homeDir: home, spawnImpl: spawned.impl, stage: s.stage, ensure: s.ensure }),
+      );
+      // The same child the foreground update runs: the new build checks itself.
+      expect(spawned.calls.map((c) => c.args.slice(1))).toEqual([['install', '--refresh']]);
+      const r = await record();
+      expect(r).toMatchObject({
+        startedAt: STARTED,
+        outcome: 'updated',
+        from: '0.1.0-alpha.6',
+        to: '0.1.0-alpha.7',
+      });
+      expect(r.reason).toBeUndefined();
+      expect(typeof r.finishedAt).toBe('string');
+    });
+
+    it('records current when up to date, and never moves to an older version', async () => {
+      for (const running of ['0.1.0-alpha.7', '0.1.0-alpha.8']) {
+        await writeState(running);
+        const before = await readState();
+        const { ctx } = makeCtx();
+        ctx.dataDir = dataDir;
+        await runUpdate(
+          { check: false, background: true },
+          ctx,
+          await deps({
+            homeDir: home,
+            spawnImpl: forbiddenSpawn,
+            stage: forbiddenStage,
+            ensure: forbiddenEnsure,
+          }),
+        );
+        expect(await record()).toMatchObject({ outcome: 'current', to: running });
+        expect(await readState()).toBe(before);
+      }
+    });
+
+    it('records failed with the reason, rethrows, and keeps the current version', async () => {
+      await writeState('0.1.0-alpha.6');
+      const before = await readState();
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const err = await caught(async () =>
+        runUpdate(
+          { check: false, background: true },
+          ctx,
+          await deps({
+            homeDir: home,
+            spawnImpl: forbiddenSpawn,
+            stage: seams(null).stage,
+            ensure: forbiddenEnsure,
+          }),
+        ),
+      );
+      expect(err.code).toBe('UPDATE_FAILED');
+      expect(await record()).toMatchObject({
+        outcome: 'failed',
+        from: '0.1.0-alpha.6',
+        reason: 'tenjin-cli 0.1.0-alpha.7 carries no Node pin, so 0.1.0-alpha.6 stays',
+      });
+      expect(await readState()).toBe(before);
+    });
+  });
 });

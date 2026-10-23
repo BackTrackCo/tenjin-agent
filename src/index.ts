@@ -65,7 +65,8 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
 // THE PLUGIN'S SessionStart LEG NEVER LOADS THE CLI EITHER. It runs before
 // every session starts, writes two small files and prints one JSON line only
 // when the wallet file or its saved passphrase file is unusable, so it takes
-// the same shortcut. A flag falls through to the command tree.
+// the same shortcut. A flag falls through to the command tree. Once its answer
+// is out, it starts the daily background update, detached (lib/auto-update).
 if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] === 'alive') {
   const [{ aliveMain }, { dataDir }, { default: pkg }] = await Promise.all([
     import('./router/alive'),
@@ -73,6 +74,10 @@ if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] =
     import('../package.json'),
   ]);
   await aliveMain({ dataDir: dataDir(process.env), version: pkg.version });
+  (await import('./lib/auto-update')).maybeAutoUpdate({
+    dataDir: dataDir(process.env),
+    env: process.env,
+  });
   process.exit(0);
 }
 

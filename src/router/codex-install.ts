@@ -8,6 +8,7 @@ import pkg from '../../package.json';
 import { persistRouterDefaults } from '../commands/config';
 import { versionFreeEntry } from '../commands/update';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
+import { autoUpdateLine } from '../lib/auto-update';
 import { resolveCodex } from '../lib/codex-bin';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
@@ -316,11 +317,15 @@ export async function runCodexDoctor(
   const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
   const ok = hooks.state === 'trusted' && !refused;
   const runs = runsFrom(ctx, deps, at(config, 'marketplaces', CODEX_MARKETPLACE, 'source'));
+  const auto = hasRuntime(ctx.dataDir, deps.homeDir ?? homedir())
+    ? autoUpdateLine(runtimeDir(ctx.dataDir))
+    : null;
   const lines = [
     `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
     `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
     `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
     ...(runs !== null ? [`Codex plugin runs: ${runs}`] : []),
+    ...(auto !== null ? [auto] : []),
   ];
   const data = {
     plugin: CODEX_PLUGIN,

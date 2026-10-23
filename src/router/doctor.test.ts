@@ -856,6 +856,26 @@ describe('the runtime rows', () => {
     expect(by['tenjin on PATH']).toBeUndefined();
   });
 
+  it('says how the last background update ended, above the summary, information only', async () => {
+    await setUp();
+    const before = await run();
+    const lines = () => (before.out as { humanLines: string[] }).humanLines;
+    expect(lines().some((l) => l.startsWith('Auto-update:'))).toBe(false);
+    await writeFile(
+      join(runtime, 'auto-update.json'),
+      JSON.stringify({
+        finishedAt: '2026-10-21T08:00:00.000Z',
+        outcome: 'updated',
+        from: '0.1.0-alpha.31',
+        to: CLI,
+      }),
+    );
+    const after = await run();
+    const shown = (after.out as { humanLines: string[] }).humanLines;
+    expect(shown.at(-2)).toBe(`Auto-update: 2026-10-21 updated 0.1.0-alpha.31 -> ${CLI}`);
+    expect(after.checks).toEqual(before.checks);
+  });
+
   it('warns for the PATH layout, with --project in the fix for a project install', async () => {
     const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
     const fromPath: PluginLaunch = {

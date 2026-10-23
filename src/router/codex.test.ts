@@ -756,6 +756,34 @@ describe('Codex install, uninstall and doctor', () => {
       );
       expect(onPath.data).toMatchObject({ ok: true });
     });
+
+    it('says how the last background update ended, information only', async () => {
+      const dataDir = join(dir, 'home', '.tenjin');
+      const root = join(dataDir, 'runtime');
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, 'state.json'), '{}');
+      const run = () =>
+        runCodexDoctor(
+          {},
+          { ...ctx(), dataDir },
+          {
+            ...host({ marketplaces: { tenjin: { source: join(root, 'codex') } } }).deps,
+            hooks: async () => listed(...allRows()),
+          },
+        );
+      expect((await run()).humanLines?.some((l) => l.startsWith('Auto-update:'))).toBe(false);
+      await writeFile(
+        join(root, 'auto-update.json'),
+        JSON.stringify({
+          finishedAt: '2026-10-21T08:00:00.000Z',
+          outcome: 'failed',
+          reason: 'offline',
+        }),
+      );
+      const out = await run();
+      expect(out.humanLines).toContain('Auto-update: 2026-10-21 failed: offline');
+      expect(out.data).toMatchObject({ ok: true });
+    });
   });
 
   it('reads the plugin from hooks/list rows: installed and trusted, absent, untrusted', () => {

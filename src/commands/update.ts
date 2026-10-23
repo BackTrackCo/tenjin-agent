@@ -73,6 +73,11 @@ const NODE_TIMEOUT_MS = 300_000;
 export interface UpdateOptions {
   /** Report whether a newer version exists; never install. */
   check: boolean;
+  /**
+   * The detached run lib/auto-update starts: the runtime branch only, never
+   * npm, with how it ended recorded in `<runtime>/auto-update.json`.
+   */
+  background?: boolean;
 }
 
 /**
@@ -162,6 +167,51 @@ export async function runUpdate(
   ctx: CommandContext,
   deps: UpdateDeps = {},
 ): Promise<CommandResult> {
+  if (opts.background !== true) return update(opts, ctx, deps);
+  // THE BACKGROUND RUN records how it ended for doctor, then answers as any
+  // update does: its envelope goes to the log. Only where the runtime folder
+  // already is, so a run with no runtime creates nothing.
+  const root = deps.runtimeRoot ?? runtimeDir(ctx.dataDir);
+  const [{ recordAutoUpdate }, { readRuntimeState }] = await Promise.all([
+    import('../lib/auto-update'),
+    import('../lib/runtime-layout'),
+  ]);
+  const from = readRuntimeState(root)?.current.cli;
+  const record = (r: Parameters<typeof recordAutoUpdate>[1]): void => {
+    if (!existsSync(root)) return;
+    try {
+      recordAutoUpdate(root, { finishedAt: new Date().toISOString(), ...r });
+    } catch {
+      // The update itself is the result; a record that cannot be written is not.
+    }
+  };
+  try {
+    const result = await update(opts, ctx, deps);
+    const d = result.data as Partial<UpdateData> & { skipped?: string };
+    record(
+      d.skipped !== undefined
+        ? { outcome: 'skipped', reason: d.skipped }
+        : d.updated === true
+          ? { outcome: 'updated', from: d.current, to: d.latest }
+          : { outcome: 'current', from: d.current, to: d.current },
+    );
+    return result;
+  } catch (err) {
+    const reason = sanitizeForTerminal(err instanceof Error ? err.message : String(err)).trim();
+    record({
+      outcome: 'failed',
+      ...(from !== undefined ? { from } : {}),
+      reason: reason.slice(0, REASON_LIMIT),
+    });
+    throw err;
+  }
+}
+
+async function update(
+  opts: UpdateOptions,
+  ctx: CommandContext,
+  deps: UpdateDeps,
+): Promise<CommandResult> {
   const current = deps.currentVersion ?? pkg.version;
   const channel = channelTag(current);
   const moduleDir = deps.moduleDir ?? fileURLToPath(new URL('.', import.meta.url));
@@ -193,6 +243,13 @@ export async function runUpdate(
   // about: an npm copy older than the runtime still moves the runtime forward,
   // and "up to date" or `--check` speak of what Claude Code starts.
   const runtime = await runtimeHere(ctx, deps, moduleDir);
+  // The background run never reaches npm: with no runtime it has nothing to do.
+  if (opts.background === true && runtime === null) {
+    return {
+      data: { skipped: 'no runtime' },
+      humanLines: ["Nothing to update in the background: Tenjin's runtime is not set up here."],
+    };
+  }
   const base = runtime?.current ?? current;
   const latest = resolveTarget(base, tags);
   // Not a NETWORK_ERROR: nothing about the connection is wrong, and telling the

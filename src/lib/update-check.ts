@@ -15,10 +15,11 @@ import { isNewer, parseVersion } from './version-order';
  * three ways: one dim stderr line for a human at a terminal, `updateAvailable`
  * on the JSON envelope, and a line on the generated hook scripts' output.
  *
- * It REPORTS and never installs. A CLI that starts a fresh process per
- * invocation has no deferred-activation window to hide a binary swap in — "next
- * start" is "mid-session" for whatever is driving it — so the decision to run
- * `tenjin update` belongs to the agent or the human, not to this check.
+ * It REPORTS and never installs. Installing needs a deferred-activation window,
+ * and Tenjin's runtime is that window (versions side by side, a running session
+ * keeps its own), so `update.mode auto` installs from lib/auto-update, which
+ * the session hooks start; `auto` reports here exactly as `nudge` does. After a
+ * switch the running version equals `latest`, so this line goes quiet by itself.
  *
  * Everything here is subordinate to the command that ran: the fetch happens
  * AFTER the envelope is written, it never touches stdout, it never changes an
@@ -208,9 +209,8 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
  * when `update.mode` is `off` — off silences BOTH surfaces, not just the line a
  * human sees.
  *
- * Reporting rather than installing is the whole design. A CLI that starts a
- * fresh process per invocation has no deferred-activation moment to hide a
- * binary swap in, so the agent is told and decides for itself.
+ * Reporting only: where Tenjin's runtime is set up, lib/auto-update installs in
+ * the background; everywhere else the agent is told and decides for itself.
  */
 export async function readUpdateSignal(
   dir: string,

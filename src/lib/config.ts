@@ -156,17 +156,16 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
 /**
  * What the daily update check is allowed to do about a newer version.
  *
- * `nudge` reports it — one dim line for a human at a terminal, and an
+ * `auto` installs it in the background where Tenjin's runtime is set up for the
+ * default data dir (see lib/auto-update), and elsewhere behaves as `nudge`: the
+ * runtime is the deferred-activation window a self-update needs, since versions
+ * sit side by side and a running session keeps the one it started on. `nudge`
+ * only reports it — one dim line for a human at a terminal, and an
  * `updateAvailable` field on the JSON envelope for everyone else, which is how
- * an agent learns to run `tenjin update` itself. `off` reports neither and stops
- * asking npm entirely.
- *
- * There is deliberately no mode that installs on its own. Replacing the binary
- * under a running agent has no safe moment in a CLI that starts a fresh process
- * per invocation: "next start" IS "mid-session". Reporting is the part that was
- * missing, so reporting is what this key controls.
+ * an agent learns to run `tenjin update` itself. `off` neither reports nor asks
+ * npm.
  */
-export const UpdateModeSchema = z.enum(['nudge', 'off']);
+export const UpdateModeSchema = z.enum(['auto', 'nudge', 'off']);
 
 /**
  * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). TWO
@@ -240,7 +239,7 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
   const parsed = UpdateModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
   throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "nudge" or "off".',
+    fix: 'Use "auto", "nudge" or "off".',
   });
 }
 
@@ -491,7 +490,7 @@ export const CONFIG_DEFAULTS: Config = {
     publish: true,
     primer: true,
   },
-  update: { mode: 'nudge' },
+  update: { mode: 'auto' },
   loop: {
     human_wait_ms: 2500,
     tool_wait_ms: 4000,
