@@ -14,7 +14,7 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeChoices, storeSpecs } from './specs';
+import { readSpec, storeChoices, storeSpecs } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTER_PATH,
@@ -2677,5 +2677,50 @@ describe('the tool list, read for free', () => {
     const result = await runRequestTool({ tool: 'context7-docs' }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'needs_input', reasonCode: 'spec_missing' });
     expect(result.summary).toContain('request({query})');
+  });
+});
+
+/**
+ * A SPEC ON A CONNECTED ACCOUNT (#37), answered to a query from a machine
+ * where that account is connected: this build parses it and runs nothing on
+ * the account yet, so it keeps nothing and sends nothing past the router.
+ */
+describe('a pick on a connected account', () => {
+  it('is refused before anything is kept, sent or paid', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        maxAutoSpend: '250000',
+        sessionBudget: '5000000',
+        router: {
+          sources: [
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', signIn: 'oauth' },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    await writeFile(join(dir, 'sources', 'fal.json'), '{}');
+    const answer = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-lookup-spec-account.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string } };
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'a photoreal image of a lighthouse at dusk, made with my fal account' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'native',
+      reason:
+        "Tenjin picked a service on the user's connected account, which this build can't run yet. Nothing was sent or charged.",
+      nextStep: 'Use your own tools for this one.',
+    });
+    // The connected account rode in the settings the router was sent.
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ policy: { sources: ['fal'] } });
+    expect(await readSpec(dir, answer.decision.id)).toBeNull();
   });
 });

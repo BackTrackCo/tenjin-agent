@@ -14,6 +14,7 @@ import {
   policyProblems,
   type Problem,
 } from './access';
+import { ACCOUNT_ID } from './accounts/ids';
 
 export { BUILT_IN_SOURCE, ONLY_DIMENSIONS, POLICY_MAX_BYTES, POLICY_VERSION, TARGET_KINDS };
 export type { OnlyDimension, TargetKind } from './access';
@@ -888,7 +889,7 @@ const LabelledSchema = z.strictObject({ id: TargetIdSchema, label: z.string().mi
 
 /** A connectable account's id: this client keeps its credential under it, so
  *  it is narrower than a target id (no capitals, spaces, dots or colons). */
-export const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+export { ACCOUNT_ID };
 
 /** How an account signs in: `oauth` is the MCP sign-in, `key` a pasted key
  *  sent as `Authorization: <scheme> <key>`. */

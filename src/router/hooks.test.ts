@@ -3889,3 +3889,31 @@ describe("the user's settings in the hooks", () => {
     expect(calls).toEqual([]);
   });
 });
+
+/**
+ * A SERVICE ON A CONNECTED ACCOUNT (#37) is parsed, and this build's hooks do
+ * not show it yet: the turn runs on the agent's own tools and the footer says
+ * why, with nothing kept to run.
+ */
+describe('an offer led by a connected account', () => {
+  it('shows no line and keeps no spec', async () => {
+    const answer = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-execute-account.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string } };
+    const { fetchImpl, calls } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(calls).toHaveLength(1);
+    expect(out).toEqual({ response: null, action: 'execute' });
+    expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: native tools (account offer not shown)',
+    );
+  });
+});
