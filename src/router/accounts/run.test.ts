@@ -54,7 +54,9 @@ const FAL_LEAD: AccountOfferSpec = { ...FAL.spec, id: FAL.id };
 
 const ROUTER = 'https://router.example.test';
 const ISSUER = 'https://auth.example.test';
-const NOW = Date.parse('2026-10-23T12:00:00.000Z');
+// The clock the sign-ins are dated from: a fixed day would expire them an
+// hour after it, and every later run would refresh instead of calling.
+const NOW = Date.now();
 
 let dir: string;
 let keychain: ReturnType<typeof fakeKeychain>;
