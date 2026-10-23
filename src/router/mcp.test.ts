@@ -1087,7 +1087,7 @@ describe('the base URL the MCP server routes against', () => {
  */
 describe('what the tool tells the model to send', () => {
   it('asks for one lookup, with the turn id beside it', async () => {
-    const { CONFIG_RULE, SCOPE_RULE } = await import('./mcp');
+    const { ACCOUNT_RULE, CONFIG_RULE, SCOPE_RULE } = await import('./mcp');
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
@@ -1167,6 +1167,14 @@ describe('what the tool tells the model to send', () => {
       expect(request.description).toContain(CONFIG_RULE);
       expect(client.getInstructions()).toContain('run `tenjin config --help`');
       expect(CONFIG_RULE).toContain("never change Tenjin's settings yourself");
+      // WHERE THE USER'S OWN ACCOUNTS ARE CONNECTED, and how long a sign-in
+      // may take; a key never goes through the chat.
+      expect(client.getInstructions()).toContain(ACCOUNT_RULE);
+      expect(ACCOUNT_RULE).toContain(
+        "To use the user's own account, run `tenjin connect <name>`. For balance, spend and connected accounts, run `tenjin status`.",
+      );
+      expect(ACCOUNT_RULE).toContain('about 5 minutes');
+      expect(ACCOUNT_RULE).toContain('Never ask for a key or token in chat.');
     } finally {
       await client.close();
       await server.close();
