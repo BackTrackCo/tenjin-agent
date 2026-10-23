@@ -81,6 +81,24 @@ Bash(tenjin config prefer:*)
 
 `block` only ever takes something away, and `prefer` only reorders services you already allow. `unblock`, `only`, `reset`, `set` and `replacement` stay behind Claude Code's normal permission prompt, because each can widen what Tenjin may use or what it runs without asking. Do not add `Bash(tenjin config:*)`: it covers all of them. When you ask your assistant for a change yourself, Tenjin asks no second question; Claude Code's own prompt is the only one, and when you decline it nothing is saved.
 
+## Your own accounts
+
+`tenjin connect <name>` connects your own account at a provider, such as Apify, fal or Firecrawl, or any MCP server by its https address. Tenjin then uses it for the jobs it has checked there, first when you said so (connecting says so unless you pass `--no-prefer`), and your own plan pays: those calls don't count toward `maxAutoSpend` or the daily budget, which cap your Tenjin balance only. An address Tenjin has no map for runs only when you ask for it by name, with a warning that Tenjin hasn't checked it.
+
+```bash
+tenjin connect apify                               # approve the sign-in in your browser
+tenjin connect fal --paste                         # in your own terminal: a key at a hidden prompt
+tenjin config fallback on --source apify           # when Apify refuses, run Tenjin's tool in its place
+tenjin disconnect apify                            # sign out, and forget it on this machine
+tenjin status                                      # your accounts, beside your balance and limits
+tenjin usage --since 7d                            # by day: your balance, and each account
+```
+
+- The sign-in is sealed with AES-256-GCM in `~/.tenjin/sources/<name>.json`, and the key that opens it is in your OS keychain under `tenjin-cli`. No token, key or code reaches Tenjin's server; the router only learns which accounts are connected here.
+- A call sends the credential to the account's own server, in its request headers, and nowhere else. An expiring sign-in is refreshed first, one process at a time.
+- When the account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops with the reason and offers its own tool for the job with its price, and nothing is charged until you pick. `tenjin config fallback on` makes that switch automatic for one account, and the receipt says so. A call the account ran and then failed is never switched: your plan may already have paid for it.
+- `tenjin status` and `tenjin usage` only read this machine's files. `connect`, `disconnect` and `config fallback` stay behind Claude Code's normal permission prompt, because each changes what can be called and who pays.
+
 ## Running Tenjin's picks automatically
 
 "Run Tenjin's picks automatically" is off by default. `tenjin config replacement on --all-providers` turns it on for any service you allow, and `tenjin config replacement on --provider exa` only when Tenjin picks Exa (a reseller route that runs on Exa counts as Exa, and a route whose upstream is not known never fits). The provider choice narrows only what runs automatically: it picks no provider ahead of another, and every other allowed service is still offered as usual.

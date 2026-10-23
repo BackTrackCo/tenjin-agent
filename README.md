@@ -135,10 +135,28 @@ Tell your agent what Tenjin may use. It runs `tenjin config`, and reports what w
 
 [What your settings cover, and the permissions to grant →](./docs/agent-permissions.md#your-settings-what-tenjin-may-use)
 
+## Your accounts
+
+Connect your own Apify, fal or Firecrawl account, and Tenjin uses it first for the jobs it does well there. Your own plan pays for those calls, and they don't count toward your Tenjin limits.
+
+| You say                                | Your agent runs                                   |
+| -------------------------------------- | ------------------------------------------------- |
+| "Use my Apify account."                | `tenjin connect apify`                            |
+| "Don't put Apify first."               | `tenjin config reset --source apify --preference` |
+| "If Apify refuses, use Tenjin's tool." | `tenjin config fallback on --source apify`        |
+| "Disconnect Apify."                    | `tenjin disconnect apify`                         |
+| "What did my accounts do this week?"   | `tenjin usage`                                    |
+
+- You approve the sign-in in your browser. Where no browser can open, run `tenjin connect <name> --paste` in your own terminal and type the key at its hidden prompt. Never paste a key into a chat.
+- The sign-in stays encrypted on this machine, with its key in your OS keychain.
+- When your account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops, says why, and offers its own tool for the job with its price.
+- Any MCP server connects by its address: `tenjin connect https://mcp.example.com/mcp`. Tenjin runs it only when you ask for it by name, and says it hasn't checked it.
+
 ## Commands
 
 ```bash
-tenjin status                          # your balance, spent today, and your limits
+tenjin status                          # your balance, spent today, your limits and your accounts
+tenjin usage                           # what lookups cost, by day, from your balance and on your accounts
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine
 tenjin doctor                          # check that a lookup can run
