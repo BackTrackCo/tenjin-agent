@@ -116,14 +116,64 @@ export function registerRouter(reg: Registration): void {
       await runStatusLine(io, { dataDir: ctx.dataDir });
     });
 
-  leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
+  leaf(SETUP, 'status', 'whether Tenjin is on, your balance, limits, accounts and settings')
     .description(
-      'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force.',
+      "Whether Tenjin is on or paused here; your Tenjin balance; today's spending against your daily limit, and your per-call limit, both on the Tenjin balance only; your connected accounts, which their own plans pay for, outside those limits; and your settings. --json adds the detail: what lookups cost, the prepaid routing credit, and requests still in flight.",
     )
     .action(async function (this: Command) {
       await runCommand('status', this, async (ctx) => {
         const { runRouterStatus } = await import('../router/status');
         return runRouterStatus(ctx);
+      });
+    });
+
+  leaf(SETUP, 'usage', 'what lookups cost, by day and by who ran them')
+    .description(
+      "Totals from this machine's own record, by day: Tenjin's tools, paid from your Tenjin balance, and each of your connected accounts, billed to that account's own plan. --since takes 24h, 7d (the default), 30d or a date. Routing fees aren't in it: `tenjin status` shows today's.",
+    )
+    .option('--since <window>', 'how far back: 24h, 7d, 30d or a date such as 2026-10-01')
+    .action(async function (this: Command) {
+      await runCommand('usage', this, async (ctx) => {
+        const opts = this.opts() as { since?: string };
+        const { runRouterUsage } = await import('../router/usage');
+        return runRouterUsage(ctx, opts.since !== undefined ? { since: opts.since } : {});
+      });
+    });
+
+  leaf(SETUP, 'connect <name>', 'connect your own account at a provider, such as Apify or fal')
+    .description(
+      "Connect your own account so Tenjin can run the jobs it knows for it on that account, which your own plan pays for (not your Tenjin balance, and not counted in its limits). <name> is an account Tenjin knows, such as Apify, fal or Firecrawl, or an MCP server's https address. You approve the sign-in in your browser; where that can't work, --paste reads a key at a hidden prompt in your own terminal, or --from-env reads one from an environment variable once. Tenjin checks the account's tools for free, keeps the sign-in encrypted on this machine with its key in your OS keychain, and puts the account first for its jobs unless you say --no-prefer. Never paste a key into a chat.",
+    )
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin connect apify
+  $ tenjin connect fal --paste
+  $ tenjin connect firecrawl --from-env FIRECRAWL_API_KEY
+  $ tenjin connect apify --no-prefer
+  $ tenjin connect https://mcp.example.com/mcp
+`,
+    )
+    .option('--paste', 'type or paste a key at a hidden prompt (needs your own terminal)')
+    .option('--from-env <var>', 'read the key from this environment variable, once')
+    .option('--no-prefer', 'connect without putting this account first for its jobs')
+    .action(async function (this: Command, name: string) {
+      await runCommand('connect', this, async (ctx) => {
+        const opts = this.opts() as { paste?: boolean; fromEnv?: string; prefer?: boolean };
+        const { runConnect } = await import('../commands/connect');
+        return runConnect(name, opts, ctx);
+      });
+    });
+
+  leaf(SETUP, 'disconnect <name>', 'sign out of a connected account and forget it here')
+    .description(
+      'Sign out of a connected account where it allows that, delete its sign-in from this machine, and take it out of your preferences. Your other settings and accounts stay as they are; `tenjin connect <name>` connects it again.',
+    )
+    .action(async function (this: Command, name: string) {
+      await runCommand('disconnect', this, async (ctx) => {
+        const { runDisconnect } = await import('../commands/connect');
+        return runDisconnect(name, ctx);
       });
     });
 

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.4",
+  "decision": {
+    "action": "native",
+    "reason": "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it runs only when you ask for it by name.",
+    "diagnostics": {
+      "reasonCode": "policy_refused",
+      "stage": "policy",
+      "missing": [],
+      "nextAction": "Continue with your own tools for this step. The user's Tenjin settings rule out every service for it: tell the user which setting applied and that they can change it with `tenjin config`. Do not change the settings yourself.",
+      "rule": {
+        "from": "request",
+        "kind": "unverified",
+        "target": {
+          "kind": "service",
+          "id": "fal.flux-pro-ultra"
+        }
+      }
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 655
+  }
+}

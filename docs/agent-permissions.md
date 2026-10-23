@@ -33,7 +33,7 @@ Manual pay ignores both configured limits and always requires user consent. The 
 A router call whose total is over `maxAutoSpend` or what is left of the day's `sessionBudget` pays nothing, and returns `needs_approval` with one sentence your assistant repeats ("5 takes of AiSpace (Hailuo 3 Max) cost $0.775 in total ($0.155 each)."). In Claude Code 2.1.214 or later, the `router` server also offers the `approve` tool, and the result carries a quote and the call your assistant makes next, `approve({quote, total, what})`. Claude Code shows its own permission prompt for that tool, with the total and what it buys, on every call and in every permission mode; no allow rule or hook skips it, and where nobody can answer (`dontAsk`, or `-p` with a permission-prompt tool) the call is denied. Your yes to that prompt is the only approval: nothing on disk, and no command, approves a quote. It then runs the quoted call exactly, once. A quote lasts ten minutes. An approved call may pass both limits, and counts as your own payment, outside the automatic budget, as manual pay does; it never runs past the wallet's balance. Any other host, and an older Claude Code, gets no `approve` tool: the call is refused with what it would cost and nothing paid. Nothing raises a limit on your behalf: `tenjin config set` below changes them, and only you run it.
 
 ```bash
-tenjin status                          # spent, reserved, and the caps in force
+tenjin status                          # on or paused, your balance, limits, accounts and settings
 tenjin config set maxAutoSpend 0.25
 tenjin config set sessionBudget 2.00
 ```
@@ -81,11 +81,39 @@ Bash(tenjin config prefer:*)
 
 `block` only ever takes something away, and `prefer` only reorders services you already allow. `unblock`, `only`, `reset`, `set` and `replacement` stay behind Claude Code's normal permission prompt, because each can widen what Tenjin may use or what it runs without asking. Do not add `Bash(tenjin config:*)`: it covers all of them. When you ask your assistant for a change yourself, Tenjin asks no second question; Claude Code's own prompt is the only one, and when you decline it nothing is saved.
 
+## Your own accounts
+
+`tenjin connect <name>` connects your own account at a provider, such as Apify, fal or Firecrawl, or any MCP server by its https address. Tenjin then uses it for the jobs it has checked there, first when you said so (connecting says so unless you pass `--no-prefer`), and your own plan pays: those calls don't count toward `maxAutoSpend` or the daily budget, which cap your Tenjin balance only. An address Tenjin has no map for runs only when you ask for it by name, with a warning that Tenjin hasn't checked it.
+
+```bash
+tenjin connect apify                               # approve the sign-in in your browser
+tenjin connect fal --paste                         # in your own terminal: a key at a hidden prompt
+tenjin config fallback on --source apify           # when Apify refuses, run Tenjin's tool in its place
+tenjin disconnect apify                            # sign out, and forget it on this machine
+tenjin status                                      # your accounts and their jobs, beside your balance and limits
+tenjin usage --since 7d                            # by day: your balance, and each account
+```
+
+- The sign-in is sealed with AES-256-GCM in `~/.tenjin/sources/<name>.json`, and the key that opens it is in your OS keychain under `tenjin-cli`. No token, key or code reaches Tenjin's server; the router only learns which of the accounts it lists (Apify, fal, Firecrawl) are connected here. An account you connect by its address is never named to it.
+- A call sends the credential to the account's own server, in its request headers, and nowhere else. An expiring sign-in is refreshed first, one process at a time.
+- When the account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops with the reason and offers its own tool for the job with its price, and nothing is charged until you pick. `tenjin config fallback on` makes that switch automatic for one account, and the receipt says so. A call the account ran and then failed is never switched: your plan may already have paid for it. With "Run Tenjin's picks automatically" on, your account's checked jobs also run in place of a web search or fetch (see [Running Tenjin's picks automatically](#running-tenjins-picks-automatically)).
+- `tenjin usage` only reads this machine's files. `tenjin status` reads them too, and reads your balance from the chain through your configured Base RPC; neither changes anything. These rules let your assistant read them without a prompt each time:
+
+  ```
+  Bash(tenjin status)
+  Bash(tenjin status --json)
+  Bash(tenjin usage:*)
+  ```
+
+- `connect`, `disconnect` and `config fallback` stay behind Claude Code's normal permission prompt, because each changes what can be called and who pays.
+
 ## Running Tenjin's picks automatically
 
 "Run Tenjin's picks automatically" is off by default. `tenjin config replacement on --all-providers` turns it on for any service you allow, and `tenjin config replacement on --provider exa` only when Tenjin picks Exa (a reseller route that runs on Exa counts as Exa, and a route whose upstream is not known never fits). The provider choice narrows only what runs automatically: it picks no provider ahead of another, and every other allowed service is still offered as usual.
 
 With it on, in Claude Code with the Tenjin plugin, a WebSearch or WebFetch your main assistant is about to make is first asked about: when Tenjin's router picks a service for it with its usual confidence, and builds the service's whole input from that search or URL, Tenjin runs the pick in the call's place, and your assistant gets its result instead of the native one. It runs only within your settings and your limits: a call over `maxAutoSpend` or the day's budget, or one your wallet cannot pay, is not run in place, and is offered as usual, which asks you first. Each one is a charge you are not asked about separately, so it shows in the transcript (`Tenjin ran Exa search in place of Web Search · $0.007`), on the call's own row, and in the paid ledger with `via: "swap"`. Once a call has started, its result or error is the answer, with what it cost, and the native search does not run as well; your assistant's own retry of the same search runs natively. A subagent's call, a search limited to some domains, a free docs lookup and a pick that needs a choice are never run in place. Codex, other agents and Claude Code without the plugin keep getting ordinary offers, and `tenjin config` says which you have. `tenjin config replacement off` turns it off and keeps the provider choice.
+
+It runs your connected accounts the same way. When Tenjin's pick for that search or fetch is a job on your own account, such as Firecrawl's page read, and Tenjin has checked that job with a real call, the job runs on your account in the call's place (`Firecrawl · your account · instead of WebFetch`). Your account's plan pays, so your Tenjin limits don't apply to it, and the job's own fixed caps (result counts, page counts, credit caps) do, as on every call to it. The provider choice counts here too: `--provider exa` never runs your Firecrawl account automatically. A job Tenjin hasn't checked never runs in place: it runs only when you ask for it by name. If your account refuses before anything ran (its sign-in expired, or its plan or rate limit ran out), the search or fetch is stopped once with the reason and Tenjin's own tool for the job with its price, for you to pick, and runs as usual if your assistant calls it again. With `tenjin config fallback on` for that account, Tenjin's tool runs in its place instead, but only within your limits and the provider choice, like any pick. Once your account has started a job, nothing else is started for that call.
 
 ## A prefix rule pins the verb, not the flags
 

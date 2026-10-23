@@ -13,6 +13,7 @@ const SETTLEMENT_WORDS: Record<Settlement, string> = {
   settled: 'settled',
   unknown: 'unknown',
   not_charged: 'not charged',
+  account: 'your account',
 };
 
 /**
@@ -52,7 +53,8 @@ export async function runPaymentsList(ctx: CommandContext): Promise<CommandResul
       p.at.slice(0, 16).replace('T', ' '),
       sanitizeForTerminal(p.provider),
       `${sanitizeForTerminal(p.service)}${p.via === 'swap' ? ' (in place)' : ''}`,
-      `$${formatUsdDisplay(p.amount.atomic)}`,
+      // A call on the user's own account: their plan paid, the balance nothing.
+      p.settlement === 'account' ? '-' : `$${formatUsdDisplay(p.amount.atomic)}`,
       SETTLEMENT_WORDS[p.settlement] ?? p.settlement,
       p.txHash ?? '',
     ]),

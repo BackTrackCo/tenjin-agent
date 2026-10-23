@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Read https://docs.example.com/pricing with Firecrawl and list each plan's price."
+    },
+    "history": [],
+    "literalUrls": ["https://docs.example.com/pricing"],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebFetch",
+      "url": "https://docs.example.com/pricing"
+    }
+  },
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a3d",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound", "mcp"],
+  "policy": {
+    "version": 1,
+    "revision": "7e00af43d81bca39",
+    "sources": ["firecrawl"],
+    "prefer": [
+      {
+        "scope": {
+          "kind": "global"
+        },
+        "targets": [
+          {
+            "kind": "source",
+            "id": "firecrawl"
+          }
+        ]
+      }
+    ]
+  }
+}

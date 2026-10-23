@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.4",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d44",
+    "capabilityId": "firecrawl.scrape",
+    "category": "read an exact page",
+    "provider": "Firecrawl",
+    "label": "Firecrawl scrape",
+    "capabilityDescription": "a web page's main content as markdown, rendering scripts first",
+    "providerPriceAtomic": "0",
+    "identity": {
+      "service": "firecrawl.scrape",
+      "source": "firecrawl",
+      "providers": ["firecrawl"],
+      "seller": "firecrawl",
+      "task": "read an exact page",
+      "categories": ["lookups"],
+      "revision": "d230c04c739d1156"
+    },
+    "usage": "the exact page URL",
+    "hint": "Firecrawl scrape, your Firecrawl account: a web page's main content as markdown, rendering scripts first. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d44\", input: {\"url\":\"https://docs.example.com/pricing\"}}) instead; native tools stay allowed for anything else.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d44",
+        "capabilityId": "firecrawl.scrape",
+        "provider": "Firecrawl",
+        "label": "Firecrawl scrape",
+        "holds": {
+          "WebFetch": "url"
+        },
+        "output": "json",
+        "description": "a web page's main content as markdown, rendering scripts first",
+        "mcp": {
+          "tool": "firecrawl_scrape",
+          "args": {
+            "url": "{url}",
+            "objective": "Read this page's main content.",
+            "formats": ["markdown"],
+            "onlyMainContent": true,
+            "parsers": ["pdf"],
+            "pdfOptions": {
+              "maxPages": 10
+            }
+          },
+          "result": "structured"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "maxLength": 2000,
+              "description": "The page's URL."
+            }
+          },
+          "required": ["url"],
+          "additionalProperties": false
+        },
+        "pinned": {},
+        "example": {
+          "url": "https://example.com/pricing"
+        },
+        "returns": "the page's main content as markdown, with its title",
+        "resultSchema": {
+          "type": "object",
+          "required": ["markdown"]
+        },
+        "identity": {
+          "service": "firecrawl.scrape",
+          "source": "firecrawl",
+          "providers": ["firecrawl"],
+          "seller": "firecrawl",
+          "task": "read an exact page",
+          "categories": ["lookups"],
+          "revision": "d230c04c739d1156"
+        },
+        "verified": true
+      }
+    ],
+    "delivery": "offer",
+    "bound": {
+      "url": "https://docs.example.com/pricing"
+    },
+    "fallback": {
+      "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d45",
+      "capabilityId": "munition-scrape",
+      "provider": "Firecrawl",
+      "label": "Firecrawl page read",
+      "holds": {
+        "WebFetch": "url"
+      },
+      "output": "json",
+      "description": "renders one public URL with its scripts and returns its main content as clean markdown",
+      "priceAtomic": "15000",
+      "priceVaries": false,
+      "maxAmountAtomic": "15000",
+      "payTo": "0x54d6C2C08e10F1a1d3dA88dF513bbE9BCf1A4aFa",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://api.munition.io/v1/firecrawl/scrape",
+        "fields": {
+          "formats": "body",
+          "onlyMainContent": "body",
+          "timeout": "body",
+          "url": "body",
+          "waitFor": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "formats": {
+            "default": ["markdown"],
+            "items": {
+              "enum": ["markdown", "html", "links", "summary"],
+              "type": "string"
+            },
+            "type": "array",
+            "const": ["markdown"]
+          },
+          "onlyMainContent": {
+            "default": true,
+            "description": "Strip navigation, footers and boilerplate.",
+            "type": "boolean",
+            "const": true
+          },
+          "timeout": {
+            "maximum": 30000,
+            "minimum": 1000,
+            "type": "integer"
+          },
+          "url": {
+            "description": "Page to scrape.",
+            "format": "uri",
+            "type": "string"
+          },
+          "waitFor": {
+            "description": "Milliseconds to wait for dynamic content.",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "pinned": {
+        "formats": ["markdown"],
+        "onlyMainContent": true
+      },
+      "example": {
+        "url": "https://www.x402.org/"
+      },
+      "returns": "JSON {url, title, markdown, statusCode, meta:{characters, fetchedAt}}: the page's main content as markdown",
+      "returnsExample": {
+        "markdown": "# x402\n\nAn open protocol for internet-native payments…",
+        "meta": {
+          "characters": 1240,
+          "fetchedAt": "2026-09-09T00:00:00.000Z"
+        },
+        "statusCode": 200,
+        "title": "x402",
+        "url": "https://www.x402.org/"
+      },
+      "identity": {
+        "service": "munition-scrape",
+        "source": "tenjin",
+        "providers": ["firecrawl"],
+        "seller": "munition",
+        "task": "read an exact page",
+        "categories": ["lookups"],
+        "revision": "62c0b5d305f4373c"
+      }
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 612
+  }
+}

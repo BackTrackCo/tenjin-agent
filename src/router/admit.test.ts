@@ -265,7 +265,11 @@ describe('a saved offer another process blocks', () => {
     expect(auth.authorize).not.toHaveBeenCalled();
     // One free directory call checked the stored identity first.
     expect(net.directoryCalls()).toHaveLength(1);
-    expect(net.directoryCalls()[0]!.body).toEqual({ schemaVersion: 1, directory: {} });
+    expect(net.directoryCalls()[0]!.body).toEqual({
+      schemaVersion: 1,
+      directory: {},
+      accepts: acceptsFor(false),
+    });
 
     // Unblocked again, the same offer runs: the refusal never claimed it.
     await saveRules(null);
@@ -324,8 +328,12 @@ describe('a saved offer another process blocks', () => {
     );
     expect(second.envelope).toMatchObject({ status: 'fulfilled' });
     expect(net.directoryCalls().map(({ body }) => body)).toEqual([
-      { schemaVersion: 1, directory: {} },
-      { schemaVersion: 1, directory: { ifRevision: LISTING.revision } },
+      { schemaVersion: 1, directory: {}, accepts: acceptsFor(false) },
+      {
+        schemaVersion: 1,
+        directory: { ifRevision: LISTING.revision },
+        accepts: acceptsFor(false),
+      },
     ]);
     expect(net.signed()).toHaveLength(2);
   });

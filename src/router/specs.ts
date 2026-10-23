@@ -4,7 +4,14 @@ import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
-import { ChoicesSchema, OfferSpecSchema, type Choices, type OfferSpec } from './decision';
+import {
+  AccountOfferSpecSchema,
+  ChoicesSchema,
+  OfferSpecSchema,
+  type AccountOfferSpec,
+  type Choices,
+  type OfferSpec,
+} from './decision';
 
 /**
  * THE REQUEST SPECS AN OFFER CARRIED, kept on this machine by the offer's id. The
@@ -51,7 +58,9 @@ export const SHOWN_INPUT_MAX_CHARS = 80;
  * catalog marks as producing media (`output: "media"`: image, video, audio,
  * music, speech), whose input is a prompt.
  */
-export function shownInputField(spec: OfferSpec): string | null {
+export function shownInputField(
+  spec: Pick<OfferSpec, 'output' | 'holds' | 'input'>,
+): string | null {
   if (spec.output === 'media') return null;
   const held = spec.holds?.WebSearch ?? spec.holds?.WebFetch;
   if (held !== undefined) return held;
@@ -117,6 +126,73 @@ export async function readSpec(dataDir: string, id: string): Promise<OfferSpec |
     delete kept[SHOWN_KEY];
     const parsed = OfferSpecSchema.safeParse(kept);
     return parsed.success && parsed.data.id === id ? parsed.data : null;
+  } catch {
+    return null;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
+/** The field of a kept account spec naming Tenjin's own route for its job. */
+const FALLBACK_KEY = 'fallback';
+
+/**
+ * KEEP AN OFFER LED BY THE USER'S OWN ACCOUNT (#37): its spec, and Tenjin's
+ * own route for the same job under that route's id, with the lead naming it.
+ * The line never names the fallback: this client offers it when the account
+ * refuses. Never throws.
+ */
+export async function storeAccountOffer(
+  dataDir: string,
+  lead: AccountOfferSpec,
+  fallback: OfferSpec | undefined,
+): Promise<void> {
+  try {
+    const kept = {
+      ...lead,
+      [SHOWN_KEY]: shownInputField(lead),
+      ...(fallback !== undefined ? { [FALLBACK_KEY]: fallback.id } : {}),
+    };
+    await writeFileAtomic(specPath(dataDir, lead.id), JSON.stringify(kept), {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+  } catch {
+    // `request({id})` says no spec is kept, and the agent asks again.
+  }
+  await storeSpecs(dataDir, fallback !== undefined ? [fallback] : []);
+  await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
+}
+
+/** What is kept for an id: a spec the balance pays, or one on the user's own
+ *  account with the id of Tenjin's route for its job. */
+export type KeptSpec =
+  | { spec: OfferSpec; account?: undefined }
+  | { spec: AccountOfferSpec; account: true; fallbackId?: string };
+
+/** Either kind of spec kept for this id, or null. Callers that run only a
+ *  spec the balance pays read {@link readSpec}, which never returns the other. */
+export async function readKeptSpec(dataDir: string, id: string): Promise<KeptSpec | null> {
+  const file = await open(specPath(dataDir, id), constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+    () => undefined,
+  );
+  if (file === undefined) return null;
+  try {
+    const stat = await file.stat();
+    if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
+    const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
+    const fallback = kept[FALLBACK_KEY];
+    delete kept[SHOWN_KEY];
+    delete kept[FALLBACK_KEY];
+    const paid = OfferSpecSchema.safeParse(kept);
+    if (paid.success) return paid.data.id === id ? { spec: paid.data } : null;
+    const account = AccountOfferSpecSchema.safeParse(kept);
+    if (!account.success || account.data.id !== id) return null;
+    return {
+      spec: account.data,
+      account: true,
+      ...(typeof fallback === 'string' && fallback.length > 0 ? { fallbackId: fallback } : {}),
+    };
   } catch {
     return null;
   } finally {
@@ -192,6 +268,8 @@ export type EarlierPayment =
   | { state: 'paid'; at: string; amountAtomic: string; txHash?: string }
   | { state: 'possibly_paid'; at: string }
   | { state: 'running'; at?: string }
+  /** It ran on the user's own account (#37), or may have. */
+  | { state: 'account'; at: string }
   | { state: 'unrecorded' };
 
 const PaymentSchema = z.discriminatedUnion('state', [
@@ -203,6 +281,7 @@ const PaymentSchema = z.discriminatedUnion('state', [
   }),
   z.strictObject({ state: z.literal('possibly_paid'), at: z.string().max(40) }),
   z.strictObject({ state: z.literal('running'), at: z.string().max(40) }),
+  z.strictObject({ state: z.literal('account'), at: z.string().max(40) }),
 ]);
 
 function paymentPath(dataDir: string, id: string): string {
@@ -276,6 +355,33 @@ export async function settleSpecPayment(
   await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).catch(
     () => undefined,
   );
+}
+
+/**
+ * How a claimed call on the user's own account ended. One that ran, or may
+ * have (its billing call went out), keeps the claim, so the same id never
+ * sends it again; one refused before anything ran frees the id for a retry
+ * after a reconnect or a fixed input. Never throws.
+ */
+export async function settleAccountRun(
+  dataDir: string,
+  id: string,
+  ran: boolean,
+  now: number = Date.now(),
+): Promise<void> {
+  const path = paymentPath(dataDir, id);
+  if (!ran) {
+    await rm(path, { force: true }).catch(() => undefined);
+    return;
+  }
+  await writeFileAtomic(
+    path,
+    JSON.stringify({ state: 'account', at: new Date(now).toISOString() }),
+    {
+      mode: 0o600,
+      dirMode: 0o700,
+    },
+  ).catch(() => undefined);
 }
 
 /**

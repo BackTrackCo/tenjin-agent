@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "query": "a photoreal image of a lighthouse at dusk, made with my fal account",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound", "mcp"],
+  "policy": {
+    "version": 1,
+    "revision": "7af5db61775191e5",
+    "sources": ["apify", "fal"],
+    "prefer": [
+      {
+        "scope": {
+          "kind": "global"
+        },
+        "targets": [
+          {
+            "kind": "source",
+            "id": "apify"
+          }
+        ]
+      }
+    ]
+  },
+  "override": {
+    "prefer": [
+      {
+        "kind": "source",
+        "id": "fal"
+      }
+    ]
+  }
+}
