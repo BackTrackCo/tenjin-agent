@@ -41,7 +41,7 @@ With Tenjin, you install once and keep working. The router suggests the right to
 Paste this into Claude Code:
 
 ```text
-Install Tenjin using https://tenjin.sh/llms.txt
+Install Tenjin using https://tenjin.sh/llms.txt. Ask me once to confirm downloading and running its official installer.
 ```
 
 Your agent confirms installation, handles setup, and asks about spending limits and adding funds. Follow its final activation instruction, then continue your task.
