@@ -102,6 +102,8 @@ describe("a connected account's credential", () => {
     const account = server({});
     const credential = await accountCredential('firecrawl', 'Firecrawl', deps(vault, account));
     expect(credential.headers).toEqual({ authorization: 'Bearer access-1' });
+    // The server it goes to is the one sealed with it.
+    expect(credential.mcpUrl).toBe('https://mcp.firecrawl.dev/v2/mcp-oauth');
     expect(account.seen).toEqual([]);
   });
 

@@ -17,9 +17,9 @@ import {
 import { listAccountTools, runAccountCall } from './call';
 import type { AccountTool } from './client';
 import { McpToolSchema } from '../decision';
-import { connectedSourceIds } from './presence';
 import { accountResult, refusalWords, runDeps } from './run';
 import { savedAccounts, type SavedAccount } from './saved';
+import { readVaultHeader } from './vault';
 
 /**
  * A CONNECTED ACCOUNT'S OWN TOOLS, RUN BECAUSE THE USER NAMED THE ACCOUNT
@@ -99,10 +99,21 @@ export async function runSourceRequest(
     );
   }
   const { label, id } = account;
-  if (connectedSourceIds(dataDir, [id]).length === 0) {
+  const header = await readVaultHeader(dataDir, id).catch(() => null);
+  if (header === null) {
     return fail('needs_input', `${label} isn't signed in on this machine, so nothing was sent.`, {
       nextStep: `The user can sign in with \`tenjin connect ${id}\`.`,
     });
+  }
+  // THE SIGN-IN IS FOR ONE SERVER: the one sealed with it. A descriptor that
+  // names another (a hand edit, a copied or synced file) never gets the
+  // account's credential; the call itself goes to the sealed address anyway.
+  if (header.mcpUrl !== account.mcpUrl) {
+    return fail(
+      'needs_input',
+      `The address saved for ${label} isn't the one it was signed in for, so nothing was sent.`,
+      { nextStep: `The user can reconnect with \`tenjin connect ${id}\`.` },
+    );
   }
   const tool = args.tool?.trim();
   if (tool !== undefined && !McpToolSchema.safeParse(tool).success) {
@@ -139,7 +150,7 @@ export async function runSourceRequest(
   if ('refused' in admitted) return refusedByPolicy(admitted.refused);
 
   const warning = uncheckedWarning(label);
-  const target = { id, label, mcpUrl: account.mcpUrl };
+  const target = { id, label };
   const refused = (reason: Parameters<typeof refusalWords>[0], detail?: string) => {
     const words = refusalWords(reason, { id, label }, detail);
     const text = `${words.said} Nothing ran on your ${label} account.`;
@@ -269,7 +280,7 @@ export async function runSourceRequest(
           media: false,
           parameters: sentInput,
           sent: JSON.stringify(sentInput),
-          request: { url: account.mcpUrl },
+          request: { url: header.mcpUrl },
         },
         deps,
         footer,

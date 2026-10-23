@@ -81,12 +81,14 @@ function account(
   answer: AccountCallResult = { content: [{ type: 'text', text: '{"rows":[1,2,3]}' }] },
 ) {
   const opened: Record<string, string>[] = [];
+  const urls: string[] = [];
   const called: { tool: string; args: Record<string, unknown> }[] = [];
   const openSession: NonNullable<RequestToolDeps['accounts']>['openSession'] = async (
-    _url,
+    url,
     headers,
   ) => {
     opened.push(headers);
+    urls.push(url);
     return {
       listTools: async () => TOOLS,
       callTool: async (tool, args) => {
@@ -96,7 +98,7 @@ function account(
       close: async () => undefined,
     };
   };
-  return { openSession, opened, called };
+  return { openSession, opened, urls, called };
 }
 
 function ctx(): CommandContext {
@@ -147,6 +149,7 @@ describe('an account the user names, with no map', () => {
     expect(rows[0]!.does!.length).toBeLessThanOrEqual(200);
     expect(rows[0]!.does).not.toContain('\n');
     expect(session.opened).toEqual([{ authorization: 'Bearer example-key-1' }]);
+    expect(session.urls).toEqual([ACCOUNT.mcpUrl]);
     expect(session.called).toEqual([]);
     expect(fetched).toEqual([]);
   });
@@ -223,6 +226,30 @@ describe('an account the user names, with no map', () => {
     );
     expect(limited.envelope).toMatchObject({ reasonCode: 'policy_refused' });
     expect(session.opened).toEqual([]);
+  });
+
+  it('never sends the credential to an address the config names in place of the signed-in one', async () => {
+    await connected();
+    // A hand edit, or a copied or synced file, points the descriptor elsewhere.
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        router: { sources: [{ ...ACCOUNT, mcpUrl: 'https://other.example/mcp' }] },
+      }),
+    );
+    const session = account();
+    for (const args of [
+      { source: 'mcp-example-com' },
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+    ]) {
+      const result = await runRequestTool(args, deps(session).run);
+      expect(result.summary).toContain(
+        "The address saved for mcp.example.com isn't the one it was signed in for",
+      );
+      expect(String(result.envelope.nextStep)).toContain('tenjin connect mcp-example-com');
+    }
+    expect(session.opened).toEqual([]);
+    expect(session.called).toEqual([]);
   });
 
   it('sends nothing for an account that is not connected, or not signed in here', async () => {

@@ -385,7 +385,7 @@ export async function runAccountSpec(
   }
   await footer.calling(shownOf(at));
   const run = await runAccountCall(
-    { id: account.id, label: account.label, mcpUrl: account.mcpUrl },
+    { id: account.id, label: account.label },
     spec.mcp,
     merged,
     runDeps(deps),
@@ -658,7 +658,7 @@ export async function resumeAccountJob(
     mcpUrl === undefined
       ? { kind: 'running', ...resume, reason: 'not_connected' }
       : await runAccountCall(
-          { id: at.account.id, label: at.account.label, mcpUrl },
+          { id: at.account.id, label: at.account.label },
           spec.mcp,
           job.input,
           runDeps(deps),

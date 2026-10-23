@@ -72,6 +72,11 @@ export interface AccountCredential {
   headers: Record<string, string>;
   /** What was sent, so a refusal can name the one it refused. */
   sent: string;
+  /** The server it is for: the address sealed into the vault with it (its
+   *  header is the cipher's additional data, so only a vault that opened gives
+   *  one). A call goes here and nowhere else, whatever a descriptor in the
+   *  config file says. */
+  mcpUrl: string;
 }
 
 /** A token this close to its expiry is refreshed before it is sent. */
@@ -93,8 +98,8 @@ function expiring(header: VaultHeader, now: number): boolean {
   return !Number.isFinite(at) || at - now <= REFRESH_SKEW_MS;
 }
 
-function bearer(token: string): AccountCredential {
-  return { kind: 'oauth', headers: { authorization: `Bearer ${token}` }, sent: token };
+function bearer(token: string, mcpUrl: string): AccountCredential {
+  return { kind: 'oauth', headers: { authorization: `Bearer ${token}` }, sent: token, mcpUrl };
 }
 
 /** One line of what the other side said, bounded. */
@@ -135,10 +140,12 @@ export async function accountCredential(
       kind: 'key',
       headers: { authorization: `${secret.keyScheme ?? 'Bearer'} ${key}` },
       sent: key,
+      mcpUrl: header.mcpUrl,
     };
   }
   const token = tokenOf(secret, 'access_token');
-  if (token !== undefined && token !== opts.refused && !expiring(header, now)) return bearer(token);
+  if (token !== undefined && token !== opts.refused && !expiring(header, now))
+    return bearer(token, header.mcpUrl);
   return refreshUnderLock(id, label, deps, token, opts.refused);
 }
 
@@ -172,7 +179,7 @@ async function refreshUnderLock(
           current !== refused &&
           !expiring(header, now)
         )
-          return bearer(current);
+          return bearer(current, header.mcpUrl);
         return refreshed(id, label, header, secret, deps, now);
       },
       { timeoutMs: deps.lockTimeoutMs ?? LOCK_TIMEOUT_MS },
@@ -253,5 +260,5 @@ async function refreshed(
     },
     deps,
   );
-  return bearer(access);
+  return bearer(access, header.mcpUrl);
 }

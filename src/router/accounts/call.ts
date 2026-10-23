@@ -34,7 +34,8 @@ import {
  * cannot wait out comes back `running`, with the first result the follow-up
  * needs, for `request({job})` to pick up where it stopped.
  *
- * THE CREDENTIAL RIDES IN THE HEADERS (`credential.ts`), and a 401 is retried
+ * THE CREDENTIAL RIDES IN THE HEADERS (`credential.ts`), to the server its
+ * vault sealed it for and to no address a caller names, and a 401 is retried
  * once, after a refresh. Everything before the billing call is answered, and
  * every refusal of the billing call itself, ran nothing on the account, which
  * `sent: false` says; a failure after it may have billed the user's plan.
@@ -228,6 +229,13 @@ export interface Resume {
 
 const CALL_TIMEOUT_MS = 120_000;
 
+/** Which account a call is for. Its server is never named here: the session
+ *  opens at the address its vault sealed with the credential. */
+export interface AccountRef {
+  id: string;
+  label: string;
+}
+
 /** The account's session, opened lazily with its credential, and reopened
  *  once with a fresh one when the account answers 401. */
 class Connection {
@@ -236,7 +244,7 @@ class Connection {
   #retried = false;
 
   constructor(
-    private readonly account: { id: string; label: string; mcpUrl: string },
+    private readonly account: AccountRef,
     private readonly deps: AccountRunDeps,
   ) {}
 
@@ -250,7 +258,7 @@ class Connection {
           this.deps,
         );
         this.#session = await (this.deps.openSession ?? openAccountSession)(
-          this.account.mcpUrl,
+          this.#credential.mcpUrl,
           this.#credential.headers,
           {
             ...(this.deps.fetchImpl !== undefined ? { fetchImpl: this.deps.fetchImpl } : {}),
@@ -313,7 +321,7 @@ class Connection {
 
 /** The tools an account lists, free, or why it would not list them. */
 export async function listAccountTools(
-  account: { id: string; label: string; mcpUrl: string },
+  account: AccountRef,
   deps: AccountRunDeps,
 ): Promise<{ tools: AccountTool[] } | Extract<AccountRun, { kind: 'refused' }>> {
   const connection = new Connection(account, deps);
@@ -350,7 +358,7 @@ function said(err: unknown): string {
  * network does.
  */
 export async function runAccountCall(
-  account: { id: string; label: string; mcpUrl: string },
+  account: AccountRef,
   call: AccountCall,
   input: Json,
   deps: AccountRunDeps,
