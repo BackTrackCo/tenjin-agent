@@ -133,6 +133,8 @@ function unpaidWhy(outcome: Awaited<ReturnType<typeof routeOnce>>): string | und
 function tookFreePath(outcome: Awaited<ReturnType<typeof routeOnce>>, router: FakeRouter) {
   expect(outcome.status).toBe('decided');
   expect(router.log.at(-1)).toBe('POST /api/x402-router unpaid');
+  // The free call tells the router why it is unpaid, and says nothing when it was never paid.
+  expect(router.unpaidReasons.at(-1)).toBe(unpaidWhy(outcome) ?? null);
   return unpaidWhy(outcome);
 }
 
