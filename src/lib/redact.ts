@@ -275,7 +275,7 @@ function validateScopes(rule: Rule): void {
   if (rule.tier !== 'block' && rule.tier !== 'warn') {
     throw new Error(`redact-rules.json: rule ${rule.id} has unknown tier ${String(rule.tier)}`);
   }
-  if (!rule.scopes.includes('publish')) {
+  if (rule.scopes.includes('team') && !rule.scopes.includes('publish')) {
     throw new Error(`redact-rules.json: rule ${rule.id} reports for team but not publish`);
   }
   // The block tier is reported on every shelf; the server refuses on it.
@@ -386,6 +386,8 @@ function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
 validateCorpus(CORPUS.rules);
 const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
 const MASK_DETECTORS: LineDetector[] = LINE_DETECTORS.filter((d) => d.scopes.has('query'));
+/** A row scoped `query` alone masks and never reports, so the publish scan skips it. */
+const REPORT_DETECTORS: LineDetector[] = LINE_DETECTORS.filter((d) => d.scopes.has('publish'));
 /** Which algorithm rows `mask()` applies is data on the row, like the regex rows. */
 const MASKED_ALGORITHMS: ReadonlySet<string> = new Set(
   CORPUS.rules
@@ -397,7 +399,7 @@ function scanLineDetectors(lines: string[]): Finding[] {
   const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
-    for (const detector of LINE_DETECTORS) {
+    for (const detector of REPORT_DETECTORS) {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
