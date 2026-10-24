@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { defineConfig } from 'tsup';
+import { defineConfig, type Options } from 'tsup';
 import {
   MOD_FILES,
   PLUGIN_DIR,
@@ -34,6 +34,24 @@ function writeHosts(): void {
       writeFileSync(target, body);
     }
   }
+}
+
+/**
+ * Each build's esbuild metafile, for `scripts/check-bundled-packages.mjs`, which
+ * lists the third-party packages that ship. Written beside `dist`, never in it,
+ * so it stays out of the published package.
+ */
+function writeMetafile(name: string): NonNullable<Options['esbuildPlugins']>[number] {
+  return {
+    name: 'write-metafile',
+    setup(build) {
+      build.onEnd((result) => {
+        if (result.metafile === undefined) return;
+        mkdirSync('.bundle-meta', { recursive: true });
+        writeFileSync(join('.bundle-meta', `${name}.json`), JSON.stringify(result.metafile));
+      });
+    },
+  };
 }
 
 // commander is CommonJS; bundled into ESM its internal require('events') would
@@ -81,6 +99,7 @@ export default defineConfig([
     dts: false,
     outDir: 'dist',
     banner,
+    esbuildPlugins: [writeMetafile('cli')],
     onSuccess: async () => writeHosts(),
   },
   // The keystore KDF worker (src/lib/wallet/keystore-kdf.ts): a single-file
@@ -105,5 +124,6 @@ export default defineConfig([
     dts: false,
     outDir: 'dist',
     outExtension: () => ({ js: '.mjs' }),
+    esbuildPlugins: [writeMetafile('wallet-kdf-worker')],
   },
 ]);

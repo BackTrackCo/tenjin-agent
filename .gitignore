@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# esbuild metafiles tsup.config.ts writes for scripts/check-bundled-packages.mjs.
+.bundle-meta/
 *.log
 *.tgz
 .eslintcache
