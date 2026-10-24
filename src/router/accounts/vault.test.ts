@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sourceKeyFilePath, sourceVaultPath, sourcesDir } from '../../lib/paths';
 import { CliError } from '../../lib/errors';
 import { connectedSourceIds } from './presence';
+import { storeAccountFor } from './ids';
 import { fakeKeychain } from './test-support';
 import {
   clearVaultKeyCache,
@@ -56,9 +57,11 @@ describe('the vault of a connected account', () => {
     expect(plainFile).toBe(false);
     expect(header).toMatchObject({ version: 1, id: 'apify', store: 'keychain', state: 'ok' });
     // The key is the one secret in the keychain: 43 base64url characters
-    // under service tenjin-cli, account source:apify.
-    expect([...keychain.entries.keys()]).toEqual(['tenjin-cli/source:apify']);
-    expect(keychain.entries.get('tenjin-cli/source:apify')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // under service tenjin-cli, account source:apify:<this data folder>.
+    const item = `tenjin-cli/${storeAccountFor('apify', dir)}`;
+    expect(item).toMatch(/^tenjin-cli\/source:apify:[0-9a-f]{12}$/);
+    expect([...keychain.entries.keys()]).toEqual([item]);
+    expect(keychain.entries.get(item)).toMatch(/^[A-Za-z0-9_-]{43}$/);
     // The file holds no token in the clear, at 0600 in a 0700 folder.
     const raw = await readFile(sourceVaultPath('apify', dir), 'utf8');
     expect(raw).not.toContain('at-123');
@@ -106,7 +109,8 @@ describe('the vault of a connected account', () => {
     const keychain = fakeKeychain();
     const deps = { dataDir: dir, platform: 'darwin' as const, exec: keychain.exec };
     await writeVault('apify', 'Apify', HEADER, SECRET, deps);
-    const key = keychain.entries.get('tenjin-cli/source:apify');
+    const item = `tenjin-cli/${storeAccountFor('apify', dir)}`;
+    const key = keychain.entries.get(item);
     clearVaultKeyCache();
     const { header } = await writeVault(
       'apify',
@@ -116,7 +120,7 @@ describe('the vault of a connected account', () => {
       deps,
     );
     await rewriteVault('apify', 'Apify', { ...header, state: 'expired' }, { apiKey: 'k2' }, deps);
-    expect(keychain.entries.get('tenjin-cli/source:apify')).toBe(key);
+    expect(keychain.entries.get(item)).toBe(key);
     expect(keychain.calls.filter(({ args }) => args[0] === '-i')).toHaveLength(1);
     clearVaultKeyCache();
     const read = await readVault('apify', 'Apify', deps);
@@ -171,6 +175,24 @@ describe('the vault of a connected account', () => {
     const names = await readdir(sourcesDir(dir));
     expect(names).toEqual(['apify.json']);
     for (const name of names) expect(name).not.toMatch(/passphrase|:/);
+  });
+
+  it("keeps each data folder's key apart: disconnecting in one leaves the other readable", async () => {
+    // Review: both folders' vaults were sealed under one keychain item, so a
+    // disconnect in one took the key the other still needed.
+    const keychain = fakeKeychain();
+    const other = await mkdtemp(join(tmpdir(), 'tenjin-vault-other-'));
+    try {
+      const here = { dataDir: dir, platform: 'darwin' as const, exec: keychain.exec };
+      const there = { ...here, dataDir: other };
+      await writeVault('apify', 'Apify', HEADER, SECRET, here);
+      await writeVault('apify', 'Apify', HEADER, SECRET, there);
+      await deleteVault('apify', here);
+      clearVaultKeyCache();
+      expect((await readVault('apify', 'Apify', there)).status).toBe('ok');
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
   });
 
   it('deletes the vault and its key, and is connected only with both a vault and a descriptor', async () => {

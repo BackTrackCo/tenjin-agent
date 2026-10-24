@@ -18,7 +18,7 @@ import {
 } from '../../lib/os-store';
 import { sourceKeyBlobPath, sourceKeyFilePath, sourceVaultPath, sourcesDir } from '../../lib/paths';
 import { stableJson } from '../access';
-import { isAccountId, STORE_ACCOUNT, storeAccountFor } from './ids';
+import { accountIdOfStore, isAccountId, STORE_ACCOUNT, storeAccountFor } from './ids';
 
 /**
  * A CONNECTED ACCOUNT'S SIGN-IN, ON THIS MACHINE ONLY (decided37 #14). One
@@ -29,7 +29,8 @@ import { isAccountId, STORE_ACCOUNT, storeAccountFor } from './ids';
  * under a 32-byte key, the header bound in as additional data.
  *
  * The key lives in the OS store the wallet passphrase uses, under service
- * `tenjin-cli` and account `source:<id>`: 43 base64url characters, which the
+ * `tenjin-cli` and account `source:<id>:<folder>` (`ids.ts`: one key per data
+ * folder, never shared): 43 base64url characters, which the
  * keychain's piped writer takes as a plain `-w` value, where a token bundle
  * as hex would run past its line. A refresh rewrites only this file; the store
  * is written once at connect and cleared at disconnect. Connect, refresh and
@@ -147,7 +148,7 @@ async function lockedFor<T>(
 
 /** Where an account's vault key lives in each store. */
 function slotFor(dataDir: string): SecretSlot {
-  const idOf = (account: string) => account.slice('source:'.length);
+  const idOf = accountIdOfStore;
   return {
     accountRe: STORE_ACCOUNT,
     label: (account) => `tenjin-cli account ${idOf(account)}`,
@@ -237,7 +238,7 @@ async function keyForWrite(
   existing: DurableStore | undefined,
 ): Promise<{ key: Buffer; store: DurableStore; plainFile: boolean }> {
   const slot = slotFor(deps.dataDir);
-  const account = storeAccountFor(id);
+  const account = storeAccountFor(id, deps.dataDir);
   const who = { label, id, dataDir: deps.dataDir };
   const end = Date.now() + (deps.interactive ? KEY_WRITE_MS.interactive : KEY_WRITE_MS.headless);
   const left = () => Math.max(1, end - Date.now());
@@ -385,7 +386,9 @@ async function keyForRead(
 ): Promise<Buffer | null> {
   const cached = keys.get(cacheKey(deps.dataDir, id));
   if (cached !== undefined) return cached;
-  const got = await osStoreByName(slotFor(deps.dataDir), deps, store).read(storeAccountFor(id));
+  const got = await osStoreByName(slotFor(deps.dataDir), deps, store).read(
+    storeAccountFor(id, deps.dataDir),
+  );
   if (got.kind === 'locked' || got.kind === 'absent')
     throw storeError({ label, id, dataDir: deps.dataDir }, store, got, 'read');
   const key = got.kind === 'hit' ? decodeKey(got.value) : null;
@@ -422,7 +425,7 @@ export async function readVault(id: string, label: string, deps: VaultDeps): Pro
 export async function deleteVault(id: string, deps: VaultDeps): Promise<{ removed: boolean }> {
   return lockedFor(id, deps, 'removed', async () => {
     const slot = slotFor(deps.dataDir);
-    const account = storeAccountFor(id);
+    const account = storeAccountFor(id, deps.dataDir);
     const file = await readVaultFile(deps.dataDir, id).catch(() => null);
     let removed = false;
     try {

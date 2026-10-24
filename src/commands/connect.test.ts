@@ -14,6 +14,7 @@ import {
   type AccountTool,
   type OpenAccountSession,
 } from '../router/accounts/client';
+import { storeAccountFor } from '../router/accounts/ids';
 import { fakeAccountServer, fakeKeychain } from '../router/accounts/test-support';
 import { clearVaultKeyCache, readVaultHeader } from '../router/accounts/vault';
 import { runConnect, runDisconnect, type ConnectDeps } from './connect';
@@ -245,7 +246,7 @@ describe('tenjin connect', () => {
       ready: ['apify.google-maps-places'],
     });
     expect(await readFile(sourceVaultPath('apify', dir), 'utf8')).not.toContain('access-1');
-    expect([...keychain.entries.keys()]).toEqual(['tenjin-cli/source:apify']);
+    expect([...keychain.entries.keys()]).toEqual([`tenjin-cli/${storeAccountFor('apify', dir)}`]);
     // Connected: the account rides in what the router is sent.
     const settings = await routerSettings({ cwd: work, dataDir: dir });
     expect(settings.sources).toMatchObject({ status: 'ok', connected: ['apify'] });
