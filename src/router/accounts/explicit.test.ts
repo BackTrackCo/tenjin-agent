@@ -234,6 +234,24 @@ describe('an account the user names, with no map', () => {
     });
   });
 
+  it("says the account may have charged when its own error answered, and keeps the call's row", async () => {
+    // Review: an answered error read "nothing charged", though it reached the
+    // account and may have billed it.
+    await connected();
+    const session = account({ isError: true, content: [{ type: 'text', text: 'quota hit' }] });
+    const result = await runRequestTool(
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+      deps(session).run,
+    );
+    expect(result.envelope).toMatchObject({
+      providerError: 'quota hit',
+      cost: ['your mcp.example.com plan may have charged for this, not the Tenjin balance'],
+    });
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { source: 'mcp-example-com', settlement: 'account' },
+    ]);
+  });
+
   it('hands back a structured-only answer', async () => {
     // Review: a named tool was read as content alone, so a valid answer that
     // only carried structuredContent came back fulfilled and empty.

@@ -2,7 +2,7 @@ import { toMoney } from '../../lib/money';
 import { defaultExecFor } from '../../lib/os-store';
 import { validateResultBody } from '../../lib/request-schema';
 import { MAX_CALL_WAIT_MS } from '../jobs';
-import { maskDeep } from '../paid';
+import { maskDeep, recordAccountRow } from '../paid';
 import { policyAtBoundary } from '../admit';
 import type { AccountOfferSpec, OfferSpec, SpecOutcome } from '../decision';
 import { mergedInput, specInputProblems, specText, uncheckedWarning } from '../spec-call';
@@ -19,6 +19,7 @@ import {
   admitExecution,
   deliverResult,
   fail,
+  paidRecord,
   ranNothing,
   refusedByPolicy,
   reportOutcome,
@@ -136,13 +137,15 @@ export function refusalWords(
 const SWITCHABLE: ReadonlySet<string> = new Set(['signin_expired', 'credit', 'rate_limited']);
 
 /** A result in this module's own words: its headline and cost line, never the
- *  generic ones a paid call's failure carries. */
+ *  generic ones a paid call's failure carries. `ran`: the account ran it, or
+ *  `maybe` (its own error answered, so whether it billed is unknown); "nothing
+ *  charged" is only for a call that never reached the account's job. */
 export function accountResult(
   status: FailStatus,
   summary: string,
   reason: string,
   label: string,
-  extras: FailExtras & { extra?: Json; ran?: boolean },
+  extras: FailExtras & { extra?: Json; ran?: boolean | 'maybe' },
 ): RequestToolResult {
   const { extra, ran, ...rest } = extras;
   const base = fail(status, reason, rest);
@@ -151,7 +154,12 @@ export function accountResult(
     summary,
     envelope: {
       ...base.envelope,
-      cost: ran === true ? accountCost(label) : ['nothing charged'],
+      cost:
+        ran === true
+          ? accountCost(label)
+          : ran === 'maybe'
+            ? [`your ${label} plan may have charged for this, not the Tenjin balance`]
+            : ['nothing charged'],
       ...extra,
     },
   };
@@ -458,6 +466,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
     case 'refused':
       return refusal(at, run.reason, run.sent, run.detail);
     case 'declined':
+      await keepAccountRow(at);
       return refusal(at, run.reason ?? 'declined', true, run.detail, { answered: true });
     case 'input': {
       report(at, { status: 'unpaid', reason: 'input' });
@@ -485,6 +494,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
         firstAt: run.firstAt,
         ...(at.fallbackId !== undefined ? { fallbackId: at.fallbackId } : {}),
       });
+      await keepAccountRow(at);
       report(at, { status: 'running' });
       await footer.done('running', { ...shownOf(at), price: 'your account' });
       const stopped =
@@ -502,6 +512,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
     }
     case 'failed': {
       await endAccountJob(dataDir, id);
+      await keepAccountRow(at);
       report(at, { status: 'failed' });
       await footer.done('failed', { ...shownOf(at), price: 'your account' });
       const offer = fallback !== null ? fallbackOffer(fallback) : undefined;
@@ -532,19 +543,10 @@ function stripId(spec: AccountOfferSpec): AccountJob['spec'] {
   return rest;
 }
 
-/** A result that came back: checked, cut, saved, recorded and receipted. */
-async function delivered(
-  run: Extract<AccountRun, { kind: 'done' }>,
-  at: Run,
-): Promise<RequestToolResult> {
+/** The run as delivering and the ledger see it. */
+function callOf(at: Run): DeliverCall {
   const { id, spec, account, sentInput } = at;
-  await endAccountJob(at.deps.ctx.dataDir, id);
-  // THE SUCCESS RULE runs on the whole result; a file is its own proof.
-  const check =
-    spec.resultSchema !== undefined && run.media.length === 0
-      ? validateResultBody(spec.resultSchema, run.text)
-      : { valid: true as const };
-  const call: DeliverCall = {
+  return {
     capabilityId: spec.capabilityId,
     provider: spec.provider,
     ...(spec.label !== undefined ? { label: spec.label } : {}),
@@ -557,6 +559,36 @@ async function delivered(
     ...(spec.outputSchema !== undefined ? { project: { id, schema: spec.outputSchema } } : {}),
     request: { url: account.mcpUrl ?? '' },
   };
+}
+
+/** THE OFFER'S ONE LEDGER ROW, kept once its billing call may have billed the
+ *  account (still running, failed, or answered with its own error), so usage
+ *  and payments show it; a resumed job that delivers finishes that row. */
+async function keepAccountRow(at: Run): Promise<void> {
+  const call = callOf(at);
+  await recordAccountRow(at.deps.ctx.dataDir, {
+    ...paidRecord(call, call.request.url, call.sent, 0n, {
+      savedFiles: [],
+      account: true,
+      ...(at.deps.now !== undefined ? { now: at.deps.now } : {}),
+    }),
+    job: at.id,
+  });
+}
+
+/** A result that came back: checked, cut, saved, recorded and receipted. */
+async function delivered(
+  run: Extract<AccountRun, { kind: 'done' }>,
+  at: Run,
+): Promise<RequestToolResult> {
+  const { id, spec, account } = at;
+  await endAccountJob(at.deps.ctx.dataDir, id);
+  // THE SUCCESS RULE runs on the whole result; a file is its own proof.
+  const check =
+    spec.resultSchema !== undefined && run.media.length === 0
+      ? validateResultBody(spec.resultSchema, run.text)
+      : { valid: true as const };
+  const call = callOf(at);
   const done = await deliverResult(
     call,
     at.deps,
@@ -573,7 +605,8 @@ async function delivered(
     },
     {
       providerAtomic: 0n,
-      ledger: 'append',
+      // One row per offer: a job kept on the ledger while it ran is finished.
+      ledger: { job: id },
       account: {
         label: account.label,
         ...(spec.returns !== undefined ? { returns: spec.returns } : {}),
@@ -689,6 +722,7 @@ async function refusal(
           : `Tell the user: ${words.fix} Otherwise continue with your own tools.`,
       parameters: at.sentInput,
       ...(answered && detail !== undefined ? { providerError: detail } : {}),
+      ...(answered ? { ran: 'maybe' as const } : {}),
       extra: {
         refused: { account: account.label, reason, reconnect: `tenjin connect ${account.id}` },
         ...(offer?.envelope ?? {}),

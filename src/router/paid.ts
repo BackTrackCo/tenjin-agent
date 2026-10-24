@@ -61,6 +61,9 @@ export interface PaidRecord {
   /** When reconcile last asked the chain about it, so a slow or rate-limited
    *  RPC is not asked about the same record on every lookup. */
   lastCheckedAt?: string;
+  /** The offer id of a job on the user's own account (#37): its one row, kept
+   *  from when its billing call may have billed and finished in place. */
+  job?: string;
 }
 
 export const MAX_SENT_CHARS = 4_096;
@@ -134,6 +137,39 @@ export async function updatePaidRecord(
       if (found) {
         await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
       }
+    });
+  } catch {
+    // The record is the user's convenience; the lookup already happened.
+  }
+}
+
+/**
+ * A JOB ON THE USER'S OWN ACCOUNT, ONE ROW (#37). It is written once its
+ * billing call may have billed (still running, failed, or answered with the
+ * account's own error), so usage and payments show it, and a later write for
+ * the same job (the resumed job delivering) finishes that row in place with
+ * the files it saved, under the lock reconcile rewrites with. Never throws.
+ */
+export async function recordAccountRow(
+  dataDir: string,
+  record: PaidRecord & { job: string },
+): Promise<void> {
+  try {
+    const path = paidLedgerPath(dataDir);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      if (!current.some(({ record: kept }) => kept?.job === record.job)) {
+        await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        return;
+      }
+      if (record.savedFiles.length === 0) return;
+      const lines = current.map(({ line, record: kept }) =>
+        kept?.job === record.job
+          ? JSON.stringify({ ...kept, savedFiles: record.savedFiles })
+          : line,
+      );
+      await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
     });
   } catch {
     // The record is the user's convenience; the lookup already happened.

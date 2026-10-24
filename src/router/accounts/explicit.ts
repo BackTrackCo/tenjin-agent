@@ -3,15 +3,17 @@ import { revisionOf } from '../access';
 import { admitByPolicy } from '../admit';
 import type { DirectoryListing, Identity } from '../decision';
 import { cachedDirectory } from '../directory';
-import { maskDeep } from '../paid';
+import { appendPaidRecord, maskDeep } from '../paid';
 import { openLookupFooter } from '../progress';
 import { uncheckedWarning } from '../spec-call';
 import {
   deliverResult,
   fail,
   MAX_INPUT_BYTES,
+  paidRecord,
   refusedByPolicy,
   routeOf,
+  type DeliverCall,
   type RequestToolDeps,
   type RequestToolResult,
 } from '../tool';
@@ -282,6 +284,7 @@ export async function runSourceRequest(
         ? `Tell the user: ${words.fix} Don't send it again unless they ask: it may have run.`
         : `Tell the user: ${words.fix}`,
       ...(answered && detail !== undefined ? { providerError: detail } : {}),
+      ...(answered ? { ran: 'maybe' as const } : {}),
       extra: { refused: { account: label, reason, reconnect: `tenjin connect ${id}` } },
     });
   };
@@ -364,6 +367,29 @@ export async function runSourceRequest(
   const footer = await openLookupFooter(dataDir);
   const sentInput = maskDeep(input) as Json;
   const named = { provider: label, label: `${label} ${tool}`, parameters: sentInput };
+  const call: DeliverCall = {
+    capabilityId: identity.service,
+    provider: label,
+    label: `${label} ${tool}`,
+    identity,
+    // An unchecked service's links are not fetched: only its own files are
+    // saved.
+    media: false,
+    parameters: sentInput,
+    sent: JSON.stringify(sentInput),
+    request: { url: header.mcpUrl },
+  };
+  // A call that reached the account and may have billed it, with no result:
+  // on the ledger all the same, so usage and payments show it.
+  const keepRow = () =>
+    appendPaidRecord(
+      dataDir,
+      paidRecord(call, call.request.url, call.sent, 0n, {
+        savedFiles: [],
+        account: true,
+        ...(deps.now !== undefined ? { now: deps.now } : {}),
+      }),
+    );
   await footer.calling(named);
   // Read as a named tool's answer (`readNamedResult`), whatever `result` says.
   const run = await runAccountCall(
@@ -379,6 +405,7 @@ export async function runSourceRequest(
       await footer.done('needs_input', named);
       return refused(run.reason, run.detail);
     case 'declined':
+      await keepRow();
       await footer.done('needs_input', named);
       return refused(run.reason ?? 'declined', run.detail, true);
     case 'input':
@@ -396,6 +423,7 @@ export async function runSourceRequest(
       );
     case 'running':
     case 'failed': {
+      await keepRow();
       await footer.done('failed', { ...named, price: 'your account' });
       const why = run.kind === 'failed' ? run.why : "it didn't finish";
       const reason = `Your ${label} account ran ${tool}, but ${why}. It may have billed your ${label} plan; nothing was charged to your Tenjin balance.`;
@@ -408,18 +436,7 @@ export async function runSourceRequest(
     }
     case 'done': {
       const done = await deliverResult(
-        {
-          capabilityId: identity.service,
-          provider: label,
-          label: `${label} ${tool}`,
-          identity,
-          // An unchecked service's links are not fetched: only its own files
-          // are saved.
-          media: false,
-          parameters: sentInput,
-          sent: JSON.stringify(sentInput),
-          request: { url: header.mcpUrl },
-        },
+        call,
         deps,
         footer,
         { bodyText: run.text, ...(run.media.length > 0 ? { files: run.media } : {}) },

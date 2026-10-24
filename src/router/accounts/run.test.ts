@@ -410,7 +410,7 @@ describe('a mapped job on the user’s own account', () => {
     );
   });
 
-  it('hands back a job it cannot wait out, and request({job}) finishes it without sending it again', async () => {
+  it('hands back a job it cannot wait out, on the ledger at once, and request({job}) finishes it without sending it again', async () => {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
     await storeAccountOffer(dir, FAL_LEAD, FAL.fallback);
@@ -427,6 +427,9 @@ describe('a mapped job on the user’s own account', () => {
     );
     expect(first.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
     expect(session.tools()).toEqual(['run_model', 'check_job']);
+    // Review: an accepted job may already be billing the account, so it is
+    // on the ledger while it runs, and its finish is that same row.
+    expect(await readPaidRecords(dir)).toMatchObject([{ source: 'fal', settlement: 'account' }]);
     // The same offer again sends nothing.
     const again = await runRequestTool(
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
@@ -438,6 +441,7 @@ describe('a mapped job on the user’s own account', () => {
     const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
     expect(done.envelope).toMatchObject({ status: 'fulfilled' });
     expect(session.tools()).toEqual(['run_model', 'check_job', 'check_job', 'get_job_result']);
+    expect(await readPaidRecords(dir)).toHaveLength(1);
     // And it is gone once delivered.
     const gone = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
     expect(gone.summary).toContain('No job is kept on this machine under that id');
@@ -538,6 +542,12 @@ describe('when the account refuses', () => {
       providerError: 'Actor not found',
       fallback: { id: APIFY.fallback.id },
     });
+    // Review: an answer reached the account, so its charge is unknown, never
+    // "nothing charged", and the call is on the ledger.
+    expect(result.envelope.cost).toEqual([
+      'your Apify plan may have charged for this, not the Tenjin balance',
+    ]);
+    expect(await readPaidRecords(dir)).toMatchObject([{ source: 'apify', settlement: 'account' }]);
   });
 
   it('keeps the offer claimed after an error answer, and never switches on one', async () => {

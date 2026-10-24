@@ -101,6 +101,7 @@ import {
   saveMedia,
   createUniqueFile,
   maskDeep,
+  recordAccountRow,
   updatePaidRecord,
   writeAll,
   type MediaTransport,
@@ -1939,8 +1940,9 @@ export interface DeliveredMoney {
   txHash?: string;
   authorization?: SignedAuthorization;
   /** Append the call's row; finish the row a job wrote when it was paid,
-   *  found by its nonce; or leave the ledger alone. */
-  ledger: 'append' | { update: string } | 'none';
+   *  found by its nonce; keep a job on the user's account to one row, found
+   *  by its offer id; or leave the ledger alone. */
+  ledger: 'append' | { update: string } | { job: string } | 'none';
   /** A call on the user's own account (#37): their plan paid, nothing left
    *  the balance. Its files are saved and its row kept all the same, and the
    *  receipt names the account. `returns` is what the spec says comes back. */
@@ -2065,6 +2067,15 @@ export async function deliverResult(
         ...now,
       }),
     );
+  } else if (typeof money.ledger === 'object' && 'job' in money.ledger) {
+    await recordAccountRow(deps.ctx.dataDir, {
+      ...paidRecord(call, built.url, call.sent, providerAtomic, {
+        savedFiles,
+        account: true,
+        ...now,
+      }),
+      job: money.ledger.job,
+    });
   } else if (typeof money.ledger === 'object') {
     await updatePaidRecord(deps.ctx.dataDir, money.ledger.update, {
       savedFiles,
@@ -2804,7 +2815,7 @@ export function failureOutcome(
 }
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */
-function paidRecord(
+export function paidRecord(
   decision: {
     capabilityId: string;
     provider: string;
