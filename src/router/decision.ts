@@ -674,7 +674,7 @@ export const PAID_PATH_ABSENT = 'paid_path_absent';
 export const PAYMENT_FAILED = 'payment_failed';
 /** The header a free call carries when the paid path skipped it: the skip's
  *  reason, so the router can count unpaid calls by cause. */
-export const UNPAID_REASON_HEADER = 'x-tenjin-unpaid-reason';
+export const UNPAID_REASON_HEADER = 'tenjin-unpaid-reason';
 /** The payment went out and the call's budget ran out before its answer:
  *  no fault. `tenjin mcp` lets the request finish, so it is recorded. */
 export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
