@@ -32,9 +32,12 @@ export const STDIN_TIMEOUT_MS = 1_000;
 export type { HookKind };
 
 /**
- * THE FREE PATH, whatever the config says: a command entry runs where no
- * `tenjin mcp` answers (Codex, a hand-written entry), and only that process
- * pays the routing fee, so there is no {@link HookDeps.route} to pass here.
+ * THE FREE PATH, whatever the config says: only `tenjin mcp` pays the routing
+ * fee, so there is no {@link HookDeps.route} to pass here. Both plugins route
+ * through that server's `hook` tool; a command entry is a hand-written one or
+ * a plugin copy from an older build. Once the router charges the fee, such an
+ * entry offers nothing, and the user is told so once per session (the
+ * `systemMessage` Codex shows too) with `tenjin doctor` as the fix.
  */
 export interface HookCommandDeps extends Omit<HookDeps, 'route'> {
   /** Test seam for the harness event; production reads stdin. */

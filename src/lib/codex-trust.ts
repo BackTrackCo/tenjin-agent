@@ -36,7 +36,7 @@ import { codexHome } from './codex-home';
  */
 
 /** Codex's snake-case event labels, in the order its `hooks.state` keys use. */
-const EVENT_LABEL: Readonly<Record<string, string>> = {
+export const EVENT_LABEL: Readonly<Record<string, string>> = {
   PreToolUse: 'pre_tool_use',
   PermissionRequest: 'permission_request',
   PostToolUse: 'post_tool_use',
@@ -99,7 +99,8 @@ export function trustKey(
 
 /** One handler as `hooks/list` reports it; every field optional, since this is
  *  another program's wire format and a missing one means "cannot tell". */
-interface ListedHook {
+export interface ListedHook {
+  [field: string]: unknown;
   key?: unknown;
   enabled?: unknown;
   trustStatus?: unknown;
@@ -180,7 +181,7 @@ async function listHooksViaAppServer(
 }
 
 /** The handler rows out of a `hooks/list` result, flattened across its cwds. */
-function rowsOf(result: unknown): ListedHook[] {
+export function rowsOf(result: unknown): ListedHook[] {
   if (!isRecord(result) || !Array.isArray(result.data)) return [];
   const out: ListedHook[] = [];
   for (const group of result.data) {
@@ -219,7 +220,7 @@ export interface TrustResult {
 export async function trustCodexHooks(
   home: string,
   keys: readonly string[],
-  ownedBy: (row: { command?: unknown; sourcePath?: unknown }) => boolean,
+  ownedBy: (row: ListedHook) => boolean,
   opts: TrustProbeOptions = {},
 ): Promise<TrustResult> {
   const env = opts.env ?? process.env;

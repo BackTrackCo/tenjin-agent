@@ -338,6 +338,9 @@ async function isHome(dir: string, home: string): Promise<boolean> {
   return dirPath === homePath;
 }
 
+/** How a refresh with no Claude Code install to converge refuses. */
+export const NOTHING_TO_REFRESH = 'Nothing to refresh';
+
 /** Is any install of ours here for a refresh to bring up to date? */
 async function somethingToRefresh(
   claude: ClaudeCodeState,
@@ -411,7 +414,7 @@ export async function runRouterInstall(
     }
     throw new CliError(
       'REFUSED',
-      `Nothing to refresh: neither the ${PLUGIN_ID} plugin nor a settings install of Tenjin is registered here.`,
+      `${NOTHING_TO_REFRESH}: neither the ${PLUGIN_ID} plugin nor a settings install of Tenjin is registered here.`,
       { fix: 'Run `tenjin install` to set this machine up.' },
     );
   }

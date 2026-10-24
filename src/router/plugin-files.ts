@@ -1,6 +1,14 @@
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
-import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
 import {
+  CODEX_HOOK_KINDS,
+  codexHookToolInput,
+  HOOK_TOOL,
+  hookToolInput,
+  type CodexHookKind,
+  type HookKind,
+} from './hook-tool';
+import {
+  CODEX_HOOK_TOOL,
   CODEX_REQUEST_TOOL,
   MARKETPLACE_NAME,
   MCP_SERVER_NAME,
@@ -500,18 +508,31 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
 
 /**
  * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
- * checked-in `hosts/codex/` by the same test. Its legs are command hooks: the
+ * checked-in `hosts/codex/` by the same test. Its legs are `mcp_tool` hooks
+ * into the plugin's own `router` server, as Claude Code's are, so each leg
+ * runs in the process that holds the wallet and pays the routing fee: the
  * prompt, and one web call before it runs and after (Codex has no
- * PostToolUseFailure). Nothing in it names a release, so `codex plugin add`
- * copies the same bytes from every build and the hooks' trust holds across a
- * `tenjin update`. The runtime render, `~/.tenjin/runtime/codex`, runs the
- * `tenjin` launcher in its own `bin/` by absolute path instead of `tenjin` from
- * PATH: the launcher's path never changes, so neither do the hooks Codex
- * trusts, and `activate` rewrites only the launcher on each switch. Naming the
- * versioned Node and entry would change the hooks with every update.
+ * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.149.0: 0.148 parses
+ * them but skips them, and an older Codex rejects the file, so install and
+ * update leave an older Codex's copy as it is and doctor names the build.
+ * The server's `env_vars` passes `CODEX_HOME` through Codex's cleared MCP
+ * environment, so the hook tool finds the session's rollout where Codex
+ * wrote it.
+ * Nothing in it names a release or a path, so `codex plugin add` copies the
+ * same hooks from every build and their trust holds across a `tenjin update`.
+ * The runtime render, `~/.tenjin/runtime/codex`, differs only in `.mcp.json`:
+ * Codex starts the server through the `tenjin` launcher in its own `bin/` by
+ * absolute path, which never changes, and `activate` rewrites only the
+ * launcher on each switch.
  */
 export const CODEX_WEB_MATCHER = 'webrun';
-export const CODEX_LEGS = ['prompt', 'native', 'shortfall'] as const;
+export const CODEX_LEGS = CODEX_HOOK_KINDS;
+/**
+ * The first Codex that runs `mcp_tool` hooks: rust-v0.149.0 adds
+ * `core/src/hook_mcp_executor.rs`; rust-v0.148.0 builds hooks with no MCP
+ * executor and skips each one (`hooks/src/engine/mod.rs`).
+ */
+export const CODEX_MCP_HOOKS_VERSION = '0.149.0';
 
 /** What the Codex runtime render runs: the launch its launchers bake, and the absolute folder they are in. */
 export interface CodexRuntime {
@@ -522,28 +543,50 @@ export interface CodexRuntime {
 
 const onWindows = (o: CodexRuntime): boolean => (o.launch.platform ?? process.platform) === 'win32';
 
-/** The sh launcher's absolute path, with forward slashes on win32 for Git Bash. */
-function codexLauncherSh(o: CodexRuntime): string {
-  return `${onWindows(o) ? o.binDir.replaceAll('\\', '/') : o.binDir}/tenjin`;
-}
+/** The sh launcher's absolute path. */
+const codexLauncherSh = (o: CodexRuntime): string => `${o.binDir}/tenjin`;
 
 /** The `.cmd` launcher's absolute path, for a process Codex spawns directly. */
 const codexLauncherCmd = (o: CodexRuntime): string => `${o.binDir}\\tenjin.cmd`;
 
-export function codexHookCommand(kind: (typeof CODEX_LEGS)[number], o?: CodexRuntime): string {
-  const tenjin = o === undefined ? 'tenjin' : shQuote(codexLauncherSh(o));
-  return `${tenjin} hook ${kind} --harness codex`;
+/** The command form of a leg: what a plugin copy from an older build still runs. */
+export function codexHookCommand(kind: CodexHookKind): string {
+  return `tenjin hook ${kind} --harness codex`;
+}
+
+/** One Codex routing leg: Codex calls the plugin server's `hook` tool. */
+function codexLeg(kind: CodexHookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
+  return [
+    {
+      type: 'mcp_tool',
+      server: MCP_SERVER_NAME,
+      tool: HOOK_TOOL,
+      input: codexHookToolInput(kind),
+      timeout,
+    },
+  ];
+}
+
+/** A fixed hook answer, echoed: `cmd.exe` takes the bare form, a POSIX shell the quoted one. */
+function echoed(answer: string): { command: string; commandWindows: string } {
+  return { command: `echo '${answer}'`, commandWindows: `echo ${answer}` };
 }
 
 /**
- * The same leg under Windows' `cmd.exe /C`, through `commandWindows`: the
- * `.cmd` launcher from `%USERPROFILE%`, as the launcher names its own paths, in
- * the one pair of quotes cmd keeps.
+ * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL, as {@link DENY_HOOK} is in
+ * Claude Code: a model call to it fires PreToolUse as `mcp__router__hook`,
+ * while Codex's own `mcp_tool` hook calls go straight to the server and fire
+ * no PreToolUse (openai/codex `core/src/hook_mcp_executor.rs`).
  */
-function codexHookCommandWindows(kind: (typeof CODEX_LEGS)[number], o: CodexRuntime): string {
-  if (o.launch.home === undefined) throw new Error('the .cmd launcher needs the home folder');
-  return `"${cmdPath(codexLauncherCmd(o), o.launch.home)}" hook ${kind} --harness codex`;
-}
+export const CODEX_DENY_HOOK = echoed(
+  JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: `Only the Tenjin hooks call this tool. To make a lookup, call ${CODEX_REQUEST_TOOL}.`,
+    },
+  }),
+);
 
 /**
  * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link ALLOW_HOOK_COMMAND}
@@ -565,36 +608,25 @@ export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
  */
 export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
 
-/** Every hook the Codex plugin carries: the three legs and the allow answer. */
-export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 1;
+/** Every hook the Codex plugin carries: the three legs, the deny and the allow answer. */
+export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 2;
 
-function codexLeg(
-  kind: (typeof CODEX_LEGS)[number],
-  o?: CodexRuntime,
-  timeout = ROUTE_HOOK_TIMEOUT_SECONDS,
-) {
-  return [
-    {
-      type: 'command',
-      command: codexHookCommand(kind, o),
-      ...(o !== undefined && onWindows(o)
-        ? { commandWindows: codexHookCommandWindows(kind, o) }
-        : {}),
-      timeout,
-    },
-  ];
-}
-
-/** `hooks/hooks.json`: `tenjin` from PATH, or with `o` the runtime's launcher. */
-export function renderCodexHooks(o?: CodexRuntime): { hooks: Record<string, unknown[]> } {
+/** `hooks/hooks.json`: the same for the package and the runtime render. */
+export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
   return {
     hooks: {
-      UserPromptSubmit: [{ hooks: codexLeg('prompt', o) }],
-      PreToolUse: [{ matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native', o) }],
+      UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
+      PreToolUse: [
+        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') },
+        {
+          matcher: CODEX_HOOK_TOOL,
+          hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }],
+        },
+      ],
       PostToolUse: [
         {
           matcher: CODEX_WEB_MATCHER,
-          hooks: codexLeg('shortfall', o, AFTER_CALL_TIMEOUT_SECONDS),
+          hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS),
         },
       ],
       PermissionRequest: [
@@ -624,7 +656,11 @@ export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
 export function renderCodexMcp(o?: CodexRuntime): { mcpServers: Record<string, unknown> } {
   const command =
     o === undefined ? 'tenjin' : onWindows(o) ? codexLauncherCmd(o) : codexLauncherSh(o);
-  return { mcpServers: { [MCP_SERVER_NAME]: { command, args: [...CODEX_MCP_ARGS] } } };
+  return {
+    mcpServers: {
+      [MCP_SERVER_NAME]: { command, args: [...CODEX_MCP_ARGS], env_vars: ['CODEX_HOME'] },
+    },
+  };
 }
 
 /** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */
@@ -669,7 +705,7 @@ export function renderCodexHostFiles(o?: CodexRuntime): Record<string, string> {
     ...Object.fromEntries(
       Object.entries(bin).map(([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const),
     ),
-    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks(o)),
+    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
     [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest()),
   };
 }

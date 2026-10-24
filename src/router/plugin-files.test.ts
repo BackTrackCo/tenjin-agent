@@ -28,6 +28,7 @@ import {
   type ExecLaunch,
   CODEX_ALLOW_HOOK_COMMAND,
   CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
+  CODEX_DENY_HOOK,
   renderCodexHooks,
   renderCodexHostFiles,
   renderCodexManifest,
@@ -397,6 +398,10 @@ describe('the manifest and the marketplace', () => {
   });
 });
 
+const runtimeAt: CodexRuntime = {
+  launch: { node: '/h/n/node', entry: '/h/v/dist/index.js', platform: 'linux' },
+  binDir: '/h/.tenjin/runtime/codex/tenjin/bin',
+};
 const CODEX_HOSTS = fileURLToPath(new URL('../../hosts/codex', import.meta.url));
 
 describe('the checked-in hosts/codex templates', () => {
@@ -410,15 +415,39 @@ describe('the checked-in hosts/codex templates', () => {
     }
   });
 
-  it('carry the prompt leg, one web search before and after, and the request tool allow', () => {
+  it('carry the prompt leg, one web search before and after, the hook deny and the request allow', () => {
     const { hooks } = renderCodexHooks();
-    const cmd = (kind: string, timeout = 5) => [
-      { type: 'command', command: `tenjin hook ${kind} --harness codex`, timeout },
+    const common = {
+      hook_event_name: '${hook_event_name}',
+      session_id: '${session_id}',
+      turn_id: '${turn_id}',
+      transcript_path: '${transcript_path}',
+      cwd: '${cwd}',
+    };
+    const call = {
+      ...common,
+      tool_name: '${tool_name}',
+      tool_input: '${tool_input}',
+      tool_use_id: '${tool_use_id}',
+    };
+    const leg = (input: Record<string, string>, timeout = 5) => [
+      { type: 'mcp_tool', server: 'router', tool: 'hook', input, timeout },
     ];
     expect(hooks).toEqual({
-      UserPromptSubmit: [{ hooks: cmd('prompt') }],
-      PreToolUse: [{ matcher: 'webrun', hooks: cmd('native') }],
-      PostToolUse: [{ matcher: 'webrun', hooks: cmd('shortfall', 15) }],
+      UserPromptSubmit: [{ hooks: leg({ kind: 'prompt', ...common, prompt: '${prompt}' }) }],
+      PreToolUse: [
+        { matcher: 'webrun', hooks: leg({ kind: 'native', ...call }) },
+        {
+          matcher: 'mcp__router__hook',
+          hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: 5 }],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: 'webrun',
+          hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
+        },
+      ],
       PermissionRequest: [
         {
           matcher: 'mcp__router__request',
@@ -441,6 +470,20 @@ describe('the checked-in hosts/codex templates', () => {
     );
   });
 
+  it('denies the hook tool to the model with a fixed PreToolUse answer, in both shells', () => {
+    const answer = JSON.parse(CODEX_DENY_HOOK.command.slice("echo '".length, -1)) as unknown;
+    expect(answer).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining('mcp__router__request'),
+      },
+    });
+    const printed = CODEX_DENY_HOOK.commandWindows.slice('echo '.length);
+    expect(JSON.parse(printed)).toEqual(answer);
+    expect(printed).not.toMatch(/[&|<>^%'!]/);
+  });
+
   it('gives cmd.exe a bare echo, whose output is the same JSON answer', () => {
     const answer = {
       hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
@@ -454,13 +497,29 @@ describe('the checked-in hosts/codex templates', () => {
 
   it("names #25's plugin and server, starts the server as Codex's, and never names x402", () => {
     expect(renderCodexMcp()).toEqual({
-      mcpServers: { router: { command: 'tenjin', args: ['mcp', '--harness', 'codex'] } },
+      mcpServers: {
+        router: {
+          command: 'tenjin',
+          args: ['mcp', '--harness', 'codex'],
+          env_vars: ['CODEX_HOME'],
+        },
+      },
     });
     expect(renderCodexMarketplace()).toMatchObject({
       name: 'tenjin',
       plugins: [{ name: 'tenjin', source: { source: 'local', path: './tenjin' } }],
     });
     expect(JSON.stringify(renderCodexHostFiles())).not.toMatch(/x402/i);
+  });
+
+  it("passes CODEX_HOME through Codex's cleared MCP environment", () => {
+    // Codex starts a stdio server with an allowlist that has no CODEX_HOME
+    // (openai/codex `rmcp-client/src/utils.rs`, DEFAULT_ENV_VARS); `env_vars` adds it.
+    for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
+      expect(JSON.parse(files['tenjin/.mcp.json']!)).toMatchObject({
+        mcpServers: { router: { env_vars: ['CODEX_HOME'] } },
+      });
+    }
   });
 
   it('carries no version, so every build ships the same bytes and hook trust holds', () => {
@@ -472,9 +531,9 @@ describe('the checked-in hosts/codex templates', () => {
 });
 
 /**
- * THE CODEX RUNTIME RENDER: every leg and the server run the launcher in the
- * runtime's own `bin/` by absolute path, so the hooks Codex trusts stay the
- * same bytes across updates.
+ * THE CODEX RUNTIME RENDER: the server runs the launcher in the runtime's own
+ * `bin/` by absolute path, and the hooks name no path, so the hooks Codex
+ * trusts stay the same bytes across updates.
  */
 describe('the Codex runtime render', () => {
   const binDir = "/h/Jane O'Doe/.tenjin/runtime/codex/tenjin/bin";
@@ -487,33 +546,22 @@ describe('the Codex runtime render', () => {
     binDir,
   });
   const files = renderCodexHostFiles(at('1.2.3'));
-  const quoted = `'/h/Jane O'\\''Doe/.tenjin/runtime/codex/tenjin/bin/tenjin'`;
 
-  it('runs each leg through the quoted launcher and keeps the allow hook', () => {
-    const { hooks } = JSON.parse(files['tenjin/hooks/hooks.json']!) as {
-      hooks: Record<string, { hooks: { command: string }[] }[]>;
-    };
-    expect(hooks.UserPromptSubmit![0]!.hooks[0]!.command).toBe(
-      `${quoted} hook prompt --harness codex`,
+  it('carries the same hooks as the package render, which name no path', () => {
+    expect(files['tenjin/hooks/hooks.json']).toBe(
+      renderCodexHostFiles()['tenjin/hooks/hooks.json'],
     );
-    expect(hooks.PreToolUse![0]!.hooks[0]!.command).toBe(`${quoted} hook native --harness codex`);
-    expect(hooks.PostToolUse![0]!.hooks[0]!.command).toBe(
-      `${quoted} hook shortfall --harness codex`,
-    );
-    expect(hooks.PermissionRequest).toEqual(renderCodexHooks().hooks.PermissionRequest);
-    for (const event of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse']) {
-      expect(hooks[event]![0]!.hooks[0], event).not.toHaveProperty('commandWindows');
-    }
-    // sh reads the quoted word back as the path itself.
-    if (process.platform !== 'win32') {
-      const echoed = execFileSync('sh', ['-c', `printf %s ${quoted}`], { encoding: 'utf8' });
-      expect(echoed).toBe(`${binDir}/tenjin`);
-    }
   });
 
   it('starts the server as the launcher and carries the launchers in bin/', () => {
     expect(JSON.parse(files['tenjin/.mcp.json']!)).toEqual({
-      mcpServers: { router: { command: `${binDir}/tenjin`, args: ['mcp', '--harness', 'codex'] } },
+      mcpServers: {
+        router: {
+          command: `${binDir}/tenjin`,
+          args: ['mcp', '--harness', 'codex'],
+          env_vars: ['CODEX_HOME'],
+        },
+      },
     });
     expect(files['tenjin/bin/tenjin']).toBe(renderPluginBin(at('1.2.3').launch)['bin/tenjin']);
     const plain = renderCodexHostFiles();
@@ -546,33 +594,21 @@ describe('the Codex runtime render', () => {
       binDir: `${home}\\.tenjin\\runtime\\codex\\tenjin\\bin`,
     };
 
-    it('gives cmd the .cmd launcher from %USERPROFILE%, and the server its absolute path', () => {
+    it('gives the server the .cmd launcher by its absolute path, and the hooks no path', () => {
       const rendered = renderCodexHostFiles(win);
-      const { hooks } = JSON.parse(rendered['tenjin/hooks/hooks.json']!) as {
-        hooks: Record<string, { hooks: { command: string; commandWindows?: string }[] }[]>;
-      };
-      expect(hooks.UserPromptSubmit![0]!.hooks[0]).toMatchObject({
-        command: `'C:/Users/Zoë Doe/.tenjin/runtime/codex/tenjin/bin/tenjin' hook prompt --harness codex`,
-        commandWindows:
-          '"%USERPROFILE%\\.tenjin\\runtime\\codex\\tenjin\\bin\\tenjin.cmd" hook prompt --harness codex',
-      });
-      for (const leg of [...hooks.PreToolUse!, ...hooks.PostToolUse!]) {
-        const windows = leg.hooks[0]!.commandWindows!;
-        expect(windows.split('"')).toHaveLength(3);
-        expect([...windows].every((c) => c.charCodeAt(0) < 0x80)).toBe(true);
-      }
-      expect(hooks.PermissionRequest).toEqual(renderCodexHooks().hooks.PermissionRequest);
+      expect(rendered['tenjin/hooks/hooks.json']).toBe(
+        renderCodexHostFiles()['tenjin/hooks/hooks.json'],
+      );
       expect(JSON.parse(rendered['tenjin/.mcp.json']!)).toEqual({
         mcpServers: {
-          router: { command: `${win.binDir}\\tenjin.cmd`, args: ['mcp', '--harness', 'codex'] },
+          router: {
+            command: `${win.binDir}\\tenjin.cmd`,
+            args: ['mcp', '--harness', 'codex'],
+            env_vars: ['CODEX_HOME'],
+          },
         },
       });
       expect(rendered['tenjin/bin/tenjin.cmd']).toBe(renderPluginBin(win.launch)['bin/tenjin.cmd']);
-    });
-
-    it('refuses a launcher folder cmd cannot carry, as the .cmd launcher does', () => {
-      expect(() => renderCodexHooks({ ...win, binDir: `${home}\\é\\tenjin\\bin` })).toThrow();
-      expect(() => renderCodexHooks({ ...win, binDir: 'D:\\tenjin\\bin' })).toThrow();
     });
   });
 });

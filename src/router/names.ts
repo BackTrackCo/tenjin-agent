@@ -54,6 +54,8 @@ export type Harness = (typeof HARNESSES)[number];
  * {@link MCP_SERVER_NAME}, so the grant key and the tool name move together.
  */
 export const CODEX_REQUEST_TOOL = `mcp__${MCP_SERVER_NAME}__request`;
+/** The tool the Codex plugin's routing legs call, which its own deny hook keeps from the model. */
+export const CODEX_HOOK_TOOL = `mcp__${MCP_SERVER_NAME}__hook`;
 
 /**
  * The request tool's name as the host exposes it, so an offer line never names

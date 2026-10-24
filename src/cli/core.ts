@@ -45,7 +45,7 @@ Learn more:
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
         const harness = o.harness as Harness | undefined;
-        // Nothing in the Codex plugin changes between builds, so nothing to refresh.
+        // A bare `--refresh` refreshes the Codex plugin (`refreshCodexPlugin`).
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
@@ -61,32 +61,43 @@ Learn more:
         const note = otherHostNote(hostArgs).catch(() => undefined);
         // Both hosts run from the same runtime: it is set up, and said, once.
         const runtime = (await import('../router/install')).runtimeOncePerRun();
-        const out = await runEach(hosts, async (host) => {
-          const one =
-            host === 'codex'
-              ? await (
-                  await import('../router/codex-install')
-                ).runCodexInstall(codexArgs(o), ctx, { runtime })
-              : await (
-                  await import('../router/install')
-                ).runRouterInstall(
-                  {
-                    ...(o.project === true ? { project: true } : {}),
-                    ...(o.refresh === true ? { refresh: true } : {}),
-                    ...(o.yes === true ? { yes: true } : {}),
-                    ...(o.wallet === false ? { noWallet: true } : {}),
-                    ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
-                    ...(typeof o.sessionBudget === 'string'
-                      ? { sessionBudget: o.sessionBudget }
-                      : {}),
-                  },
-                  ctx,
-                  { runtime },
-                );
-          if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
-          return one;
-        });
-        return withNote(out, await note);
+        const installAll = () =>
+          runEach(hosts, async (host) => {
+            const one =
+              host === 'codex'
+                ? await (
+                    await import('../router/codex-install')
+                  ).runCodexInstall(codexArgs(o), ctx, { runtime })
+                : await (
+                    await import('../router/install')
+                  ).runRouterInstall(
+                    {
+                      ...(o.project === true ? { project: true } : {}),
+                      ...(o.refresh === true ? { refresh: true } : {}),
+                      ...(o.yes === true ? { yes: true } : {}),
+                      ...(o.wallet === false ? { noWallet: true } : {}),
+                      ...(typeof o.maxAutoSpend === 'string'
+                        ? { maxAutoSpend: o.maxAutoSpend }
+                        : {}),
+                      ...(typeof o.sessionBudget === 'string'
+                        ? { sessionBudget: o.sessionBudget }
+                        : {}),
+                    },
+                    ctx,
+                    { runtime },
+                  );
+            if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
+            return one;
+          });
+        if (o.refresh !== true || harness !== undefined) {
+          return withNote(await installAll(), await note);
+        }
+        // `tenjin update` runs this refresh in the new build: a Codex that
+        // already has the plugin gets the new hooks too, whatever Claude Code's
+        // refresh found.
+        const { alongsideCodexRefresh, refreshCodexPlugin } =
+          await import('../router/codex-install');
+        return alongsideCodexRefresh(installAll, () => refreshCodexPlugin(ctx));
       });
     });
 

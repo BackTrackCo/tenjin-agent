@@ -53,16 +53,32 @@ export function codexSession(sessionId: string): string {
 
 /**
  * Codex cannot replace a tool's output, so free docs ride beside the result as
- * `additionalContext`, and nothing else in a Claude-shaped answer survives.
+ * `additionalContext`. The one other field kept is `systemMessage`, the line
+ * for the user (an unpaid routing fee, a deposit): Codex takes it on every
+ * event and shows it as a warning (openai/codex `hooks/src/events/*.rs`, CLI
+ * 0.157.1). Nothing else in a Claude-shaped answer survives, because Codex
+ * refuses an answer carrying a field it does not know.
  */
 export function codexResponse(response: unknown): unknown {
   if (response === null || typeof response !== 'object') return null;
-  const output = (response as { hookSpecificOutput?: Record<string, unknown> }).hookSpecificOutput;
+  const { hookSpecificOutput: output, systemMessage } = response as {
+    hookSpecificOutput?: Record<string, unknown>;
+    systemMessage?: unknown;
+  };
+  const message = typeof systemMessage === 'string' ? { systemMessage } : {};
+  const specific = codexSpecific(output);
+  if (specific === null) return Object.keys(message).length > 0 ? message : null;
+  return { hookSpecificOutput: specific, ...message };
+}
+
+function codexSpecific(
+  output: Record<string, unknown> | undefined,
+): Record<string, unknown> | null {
   if (output === undefined) return null;
   if (output.updatedToolOutput !== undefined) {
     const results = (output.updatedToolOutput as { results?: unknown[] }).results;
     if (typeof results?.[0] !== 'string') return null;
-    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: results[0] } };
+    return { hookEventName: 'PostToolUse', additionalContext: results[0] };
   }
-  return { hookSpecificOutput: output };
+  return output;
 }
