@@ -160,6 +160,18 @@ describe('a Codex leg', () => {
     expect(await admit(event(digits, own), digits)).toMatchObject({ transcript_path: own });
   });
 
+  it("reads the session's rollout after a revert, and never another session's", async () => {
+    // A prompt edit gives the thread a new rollout id: `<threadId>_<rolloutId>`
+    // (openai/codex `rollout/src/rollout_file_name.rs`, render).
+    const reverted = join(day, rollout(`${SESSION}_01a1777a-0000-7000-8000-000000000001`));
+    await writeFile(reverted, '{}\n');
+    expect(await admit(event(SESSION, reverted))).toMatchObject({ transcript_path: reverted });
+    const others = join(day, rollout(`${OTHER}_01a1777a-0000-7000-8000-000000000001`));
+    await writeFile(others, '{}\n');
+    expect(await admit(event(SESSION, others))).toBeNull();
+    expect(await admit(event(SESSION, reverted), OTHER)).toBeNull();
+  });
+
   it('routes on the leg alone when there is no transcript yet, or none at all', async () => {
     const unwritten = await admit(event(OTHER, join(day, rollout(OTHER))), OTHER);
     expect(unwritten).not.toHaveProperty('transcript_path');

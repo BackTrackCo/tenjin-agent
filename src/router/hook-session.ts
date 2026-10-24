@@ -75,7 +75,8 @@ export interface CodexAdmitOptions extends AdmitOptions {
 }
 
 /**
- * Codex's rollout file for a session: `rollout-<timestamp>-<session_id>.jsonl`,
+ * Codex's rollout file for a session: `rollout-<timestamp>-<session_id>.jsonl`
+ * (or `<session_id>_<rollout_id>` after a revert),
  * the timestamp exactly `YYYY-MM-DDThh-mm-ss`, so a session id whose leading
  * groups are all digits is never read as part of it.
  */
@@ -100,7 +101,12 @@ export async function admitCodexHookEvent(
   const raw = event['transcript_path'];
   if (raw === undefined) return event;
   if (typeof raw !== 'string' || !isAbsolute(raw)) return null;
-  const named = (path: string) => ROLLOUT_RE.exec(basename(path))?.[1] === sessionId;
+  // After a revert (a prompt edit) Codex names the file `<threadId>_<rolloutId>`
+  // (openai/codex `rollout/src/rollout_file_name.rs`): still this session's.
+  const named = (path: string) => {
+    const id = ROLLOUT_RE.exec(basename(path))?.[1];
+    return id === sessionId || id?.startsWith(`${sessionId}_`) === true;
+  };
   const sessions = join(codexHome(opts.homeDir ?? homedir(), opts.env ?? process.env), 'sessions');
   const roots = [sessions, await realpath(sessions).catch(() => sessions)];
   const under = (path: string, root: string) => path.startsWith(`${root}${sep}`);
