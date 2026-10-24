@@ -50,19 +50,19 @@ describe('unpaidSentence', () => {
   // Captured from d44fcf58, before the wallet reasons changed: these must not move (S5).
   const BEFORE: Record<string, string> = {
     no_wallet:
-      'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so calls take the free path until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.25 routing deposit), so calls take the free path until that is fixed. Fund it with `tenjin wallet fund 5`.',
+      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.25 routing deposit), so Tenjin is not routing calls until that is fixed. Fund it with `tenjin wallet fund 5`.',
     fee_required:
-      'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so calls take the free path until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
-      'Tenjin routing could not pay its $0.003 fee (the routing payment failed), so calls take the free path until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     limit_below_deposit:
-      'Tenjin routing could not pay its $0.003 fee (the per-call spend limit is below the $0.25 routing deposit), so calls take the free path until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the per-call spend limit is below the $0.25 routing deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     budget_reached:
-      'Tenjin routing could not pay its $0.003 fee (the daily spend limit has no room left for the routing fee or its deposit), so calls take the free path until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the daily spend limit has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     not_allowlisted:
-      'Tenjin routing could not pay its $0.003 fee (allowlistCreators does not include the router), so calls take the free path until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
   };
 
   it('matches the pre-change strings byte for byte', () => {
@@ -73,7 +73,7 @@ describe('unpaidSentence', () => {
 
   it('names a repair reason with the clause that keeps the passphrase out of chat', () => {
     expect(unpaidSentence('passphrase_missing')).toBe(
-      `Tenjin routing could not pay its $0.003 fee (${WALLET_REASONS.passphrase_missing.reason}), so calls take the free path until that is fixed. ${WALLET_REASONS.passphrase_missing.fix}`,
+      `Tenjin routing could not pay its $0.003 fee (${WALLET_REASONS.passphrase_missing.reason}), so Tenjin is not routing calls until that is fixed. ${WALLET_REASONS.passphrase_missing.fix}`,
     );
     expect(unpaidSentence('passphrase_missing')).toContain(REPAIR_CLAUSE);
   });

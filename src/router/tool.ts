@@ -1438,7 +1438,14 @@ export interface ProviderCall {
   /** A media service: a paid result's links and inline files are saved
    *  locally ({@link savesMedia}). */
   media: boolean;
-  request: { url: string; method: string; headers: Record<string, string>; body?: string };
+  request: {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    /** A catalog spec's fixed headers ({@link SpecRequest}). */
+    specHeaders?: Record<string, string>;
+    body?: string;
+  };
   terms: AdvertisedTerms;
   requestKey: string;
   resultSchema?: Record<string, unknown>;
@@ -1566,6 +1573,7 @@ async function payAndDeliver(
         url: built.url,
         method: built.method,
         headers: built.headers,
+        ...(built.specHeaders !== undefined ? { specHeaders: built.specHeaders } : {}),
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms: call.terms,
         execution: 'router',

@@ -52,7 +52,7 @@ export function walletPath(dir: string = dataDir()): string {
 }
 
 /**
- * The anonymous install id sent to Tenjin as `X-Tenjin-Install` (lib/install-identity).
+ * The anonymous install id sent to Tenjin as `tenjin-install-id` (lib/install-identity).
  * Under the data dir so it survives upgrades and reinstalls of the CLI itself.
  */
 export function installIdPath(dir: string = dataDir()): string {

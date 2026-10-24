@@ -1772,10 +1772,28 @@ describe('what the hook leaves for the status line', () => {
 
     expect(out).toMatchObject({ response: null, action: 'native' });
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · prompt: native tools (no x402 payment)',
+      'x402 · prompt: native tools (router chose native)',
     );
     // The session is still known, so a lookup it makes later can be attributed.
     expect(await resolveProgressSession(dir, {})).toBe(sessionDir(dir, 'sess-1'));
+  });
+
+  it('names an unpaid routing fee as unpaid, never as the router choosing native tools', async () => {
+    const { fetchImpl } = router({
+      ...NATIVE,
+      decision: {
+        ...NATIVE.decision,
+        diagnostics: { ...NATIVE.decision.diagnostics, reasonCode: 'fee_required' },
+      },
+    });
+
+    await runPromptHook(promptEvent('what is the current price of ETH in USD'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: fee_required');
   });
 
   it('names the native search stage the way the demo does', async () => {
@@ -1789,7 +1807,7 @@ describe('what the hook leaves for the status line', () => {
 
     expect(out).toMatchObject({ response: null });
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · search: native tools (no x402 payment)',
+      'x402 · search: native tools (router chose native)',
     );
   });
 

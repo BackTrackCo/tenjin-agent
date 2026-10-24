@@ -33,6 +33,7 @@ import {
   effectiveLimits,
   hasRuntime,
   namedLimits,
+  NOTHING_TO_REFRESH,
   runtimeData,
   runtimeLines,
   spendStepFor,
@@ -40,6 +41,9 @@ import {
   type QuestionStep,
   type RouterInstallDeps,
 } from './install';
+import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/codex-trust';
+import { readInstalledHosts, withNote } from './hosts';
+import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
 
 /**
@@ -83,6 +87,8 @@ export interface CodexSetupDeps
   homeDir?: string;
   /** Sets up Tenjin's runtime for this build; tests inject it, production runs `setupRuntime`. */
   runtime?: (o: Parameters<typeof setupRuntime>[0]) => Promise<RuntimeSetup>;
+  /** Trusts the listed rows through Codex's app server; tests inject it. */
+  trust?: typeof trustCodexHooks;
 }
 
 const RUN_TIMEOUT_MS = 30_000;
@@ -162,7 +168,138 @@ async function addPlugin(
 }
 
 const TRUST_STEP =
-  'Open Codex, run /hooks and trust the four Tenjin hooks, then start a new session.';
+  'Open Codex, run /hooks and trust the five Tenjin hooks, then start a new session.';
+/** What a person reads when this Codex cannot run the plugin's routing hooks. */
+const CODEX_TOO_OLD = `Routing in Codex needs Codex ${CODEX_MCP_HOOKS_VERSION} or later, so Tenjin left its Codex plugin as it was. Ask your agent to update Codex.`;
+/** What a person reads when an install or update turned the hooks on itself. */
+const NEW_SESSION_STEP = 'Start a new Codex session: Codex reads hooks when a session starts.';
+
+/**
+ * ONE OF THE PLUGIN'S OWN HOOKS, as `hooks/list` lists it: our plugin's hooks
+ * file, and at that event, group and position exactly the handler this build
+ * renders (an `mcp_tool` leg into `router`/`hook`, the deny, or the allow).
+ * Anything else in the list, another plugin's row or a row that moved, is not
+ * ours to trust.
+ */
+export function ownCodexRow(row: ListedHook): boolean {
+  if (row.pluginId !== CODEX_PLUGIN) return false;
+  if (typeof row.sourcePath !== 'string' || !/[\\/]hooks[\\/]hooks\.json$/.test(row.sourcePath)) {
+    return false;
+  }
+  const at = /:([a-z_]+):(\d+):(\d+)$/.exec(typeof row.key === 'string' ? row.key : '');
+  if (at === null) return false;
+  const event = Object.keys(EVENT_LABEL).find((e) => EVENT_LABEL[e] === at[1]);
+  const group = (renderCodexHooks().hooks[event ?? ''] as Record<string, unknown>[] | undefined)?.[
+    Number(at[2])
+  ] as { matcher?: string; hooks: Record<string, unknown>[] } | undefined;
+  const want = group?.hooks[Number(at[3])];
+  if (group === undefined || want === undefined) return false;
+  if ((row.matcher ?? null) !== (group.matcher ?? null)) return false;
+  return want.type === 'mcp_tool'
+    ? row.handlerType === 'mcpTool' && row.server === want.server && row.tool === want.tool
+    : row.handlerType === 'command' &&
+        (row.command === want.command || row.command === want.commandWindows);
+}
+
+/**
+ * TURNS THE PLUGIN'S HOOKS ON, as installing a Claude Code plugin does:
+ * through `lib/codex-trust.ts`, which echoes back the `currentHash` Codex
+ * reports for each of our rows and verifies them trusted. A row the person
+ * turned off in `/hooks` (the allow hook's opt-out) stays off. False when
+ * Codex lists none of our rows or any step fails: the person then reviews
+ * them in `/hooks`.
+ */
+async function trustPlugin(deps: CodexSetupDeps): Promise<boolean> {
+  const list = await (deps.hooks ?? (() => listCodexHooks(process.cwd(), 5_000)))();
+  const ours = rowsOf(list).filter(ownCodexRow);
+  if (ours.length === 0) return false;
+  const keys = ours
+    .filter(
+      (r) => r.enabled !== false && r.trustStatus !== 'trusted' && r.trustStatus !== 'managed',
+    )
+    .map((r) => r.key as string);
+  const result = await (deps.trust ?? trustCodexHooks)(
+    deps.homeDir ?? homedir(),
+    keys,
+    ownCodexRow,
+  );
+  return result.ok;
+}
+
+/** What `tenjin update` says about Codex, in person-facing words with no command. */
+export const CODEX_REFRESH_LINES = {
+  done: "Tenjin updated its Codex hooks. They run in Codex's next new session.",
+  review:
+    "Tenjin updated its Codex hooks but could not turn them on. Open /hooks in Codex and approve Tenjin's hooks so routing works.",
+  old: CODEX_TOO_OLD,
+  failed:
+    'Tenjin could not update its Codex hooks. Ask your agent to run the Tenjin doctor for Codex.',
+} as const;
+
+/**
+ * A bare `install --refresh` with the Codex refresh beside it: the Codex one
+ * runs whatever Claude Code's did. Only Claude Code's "nothing to refresh"
+ * (a Codex-only machine) gives way to a Codex line; any other Claude Code
+ * failure stands, so `tenjin update` still reports it with its fix.
+ */
+export async function alongsideCodexRefresh(
+  claude: () => Promise<CommandResult>,
+  codex: () => Promise<string | undefined>,
+): Promise<CommandResult> {
+  let out: CommandResult;
+  try {
+    out = await claude();
+  } catch (err) {
+    const line = await codex();
+    const nothing = err instanceof CliError && err.message.startsWith(NOTHING_TO_REFRESH);
+    if (line === undefined || !nothing) throw err;
+    return { data: { notices: [line] }, humanLines: [line] };
+  }
+  return withNote(out, await codex());
+}
+
+/**
+ * THE CODEX REFRESH `tenjin update` RUNS, in the new build (`install
+ * --refresh`). Only where Codex already has the Tenjin plugin with the
+ * command legs of an older build: it re-adds the plugin from the same folder,
+ * which replaces Codex's copy, then turns the new hooks on (`trustPlugin`).
+ * It never installs the plugin anywhere it was not, never asks, and never
+ * throws: what happened is one line, or nothing.
+ */
+export async function refreshCodexPlugin(
+  ctx: CommandContext,
+  deps: CodexSetupDeps = {},
+): Promise<string | undefined> {
+  try {
+    const version = await (deps.version ?? codexVersion)();
+    if (version === null) {
+      const recorded = (await readInstalledHosts(ctx.dataDir))?.includes('codex') === true;
+      return recorded ? CODEX_REFRESH_LINES.failed : undefined;
+    }
+    const rows = codexHookRows(
+      await (deps.hooks ?? (() => listCodexHooks(process.cwd(), 5_000)))(),
+    );
+    if (rows.state === 'absent') return undefined;
+    if (rows.state === 'unknown') return CODEX_REFRESH_LINES.failed;
+    if (rows.routing !== 'free') return undefined;
+    if (!codexAtLeast(version, CODEX_MCP_HOOKS_VERSION)) return CODEX_REFRESH_LINES.old;
+    const runtimeCodex = join(runtimeDir(ctx.dataDir), 'codex');
+    const hosts = existsSync(join(runtimeCodex, '.agents', 'plugins', 'marketplace.json'))
+      ? runtimeCodex
+      : deps.hostsDir === undefined
+        ? await codexHostsDir()
+        : deps.hostsDir;
+    const config = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
+    await addPlugin(
+      deps.run ?? runCodex,
+      hosts,
+      at(config, 'marketplaces', CODEX_MARKETPLACE, 'source'),
+    );
+    return (await trustPlugin(deps)) ? CODEX_REFRESH_LINES.done : CODEX_REFRESH_LINES.review;
+  } catch {
+    return CODEX_REFRESH_LINES.failed;
+  }
+}
 
 function userScopeOnly(args: CodexArgs): void {
   if (args.project === true) {
@@ -219,8 +356,16 @@ export async function runCodexInstall(
   const fromRuntime = runtimeHosts(rt);
   const hosts =
     fromRuntime ?? (deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir);
-  const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
-  await addPlugin(run, hosts, at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'));
+  // A Codex too old to run `mcp_tool` hooks keeps whatever copy it has: the
+  // new hooks would be skipped, or the file refused. An unknown build installs.
+  const version = await (deps.version ?? codexVersion)();
+  const tooOld = version !== null && !codexAtLeast(version, CODEX_MCP_HOOKS_VERSION);
+  let next: string = CODEX_TOO_OLD;
+  if (!tooOld) {
+    const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
+    await addPlugin(run, hosts, at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'));
+    next = (await trustPlugin(deps).catch(() => false)) ? NEW_SESSION_STEP : TRUST_STEP;
+  }
 
   // Read back after the write, as the Claude install does.
   const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
@@ -239,11 +384,13 @@ export async function runCodexInstall(
       spend: { ...spend, effective },
       runtime: runtimeData(rt),
       nextSteps: spendAsk !== undefined ? [spendAsk] : [],
-      next: TRUST_STEP,
+      next,
     },
     humanLines: [
       `Wallet: ${walletValue(wallet)}`,
-      `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
+      tooOld
+        ? `Codex plugin: left as it was (Codex ${version})`
+        : `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
       ...runtimeLines(ctx, rt, home),
       `Automatic router: up to $${effective.maxAutoSpend} per call; daily limit ${daily}`,
       ...(spendAsk !== undefined
@@ -255,7 +402,7 @@ export async function runCodexInstall(
           ]
         : []),
       'Request tool: its plugin hook allows it, under your wallet spend limits. Turn that hook off in /hooks to be asked first.',
-      TRUST_STEP,
+      next,
     ],
   };
 }
@@ -300,7 +447,34 @@ function runsFrom(ctx: CommandContext, deps: CodexSetupDeps, source: unknown): s
   return "`tenjin` from your PATH; run `tenjin install --harness codex` to move it to Tenjin's runtime";
 }
 
-/** Reads Codex's view of the plugin and writes nothing. */
+/** Whether `version` (`x.y.z`, any suffix ignored) is `floor` or later. */
+export function codexAtLeast(version: string, floor: string): boolean {
+  const parts = (v: string) =>
+    v
+      .split(/[-+]/)[0]!
+      .split('.')
+      .map((n) => Number.parseInt(n, 10));
+  const have = parts(version);
+  for (const [i, least] of parts(floor).entries()) {
+    const part = have[i] ?? 0;
+    if (!Number.isFinite(part)) return false;
+    if (part !== least) return part > least;
+  }
+  return true;
+}
+
+const ROUTING_LINE: Record<CodexHookRows['routing'], string> = {
+  paid: 'its routing hooks call the router MCP server, which pays the routing fee under your wallet spend limits',
+  free: 'its routing hooks are commands from an older build, which cannot pay the routing fee, so they offer nothing. Run `tenjin update` or `tenjin install --harness codex` to replace them',
+  unknown: "could not read how Codex runs the plugin's routing hooks",
+};
+
+/**
+ * Reads Codex's view of the plugin and writes nothing. Routing compatibility
+ * is read the same way, with nothing paid or sent: the legs must be `mcp_tool`
+ * hooks into the plugin's server (`codexHookRows`), and the Codex build must
+ * run them ({@link CODEX_MCP_HOOKS_VERSION}).
+ */
 export async function runCodexDoctor(
   args: CodexArgs,
   ctx: CommandContext,
@@ -315,7 +489,12 @@ export async function runCodexDoctor(
   const hooks = codexHookRows(list);
   // With its allow hook off, `approval_policy = "never"` refuses the tool.
   const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
-  const ok = hooks.state === 'trusted' && !refused;
+  // An unknown build is not failed on: only a known older one cannot run the legs.
+  const tooOld = version !== null && !codexAtLeast(version, CODEX_MCP_HOOKS_VERSION);
+  const routing = hooks.state === 'absent' ? null : hooks.routing;
+  // Command legs from an older build warn without failing: `tenjin update`
+  // replaces them, and Codex still runs the rest of the plugin.
+  const ok = hooks.state === 'trusted' && !refused && routing !== 'unknown' && !tooOld;
   const runs = runsFrom(ctx, deps, at(config, 'marketplaces', CODEX_MARKETPLACE, 'source'));
   const auto = hasRuntime(ctx.dataDir, deps.homeDir ?? homedir())
     ? autoUpdateLine(runtimeDir(ctx.dataDir))
@@ -323,7 +502,12 @@ export async function runCodexDoctor(
   const lines = [
     `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
     `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
-    `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
+    ...(routing !== null
+      ? [`${routing === 'free' ? '! ' : ''}Routing: ${ROUTING_LINE[routing]}`]
+      : []),
+    tooOld
+      ? `Codex build: ${version}, which cannot run the plugin's routing hooks. Update Codex to ${CODEX_MCP_HOOKS_VERSION} or later`
+      : `Codex build: ${version ?? 'unknown'} (web hooks last captured on ${WEB_VERIFIED_VERSION}; information only)`,
     ...(runs !== null ? [`Codex plugin runs: ${runs}`] : []),
     ...(auto !== null ? [auto] : []),
   ];
@@ -331,6 +515,7 @@ export async function runCodexDoctor(
     plugin: CODEX_PLUGIN,
     hooks: hooks.state,
     allowOff: hooks.allowOff,
+    routing,
     version,
     ok,
   };
