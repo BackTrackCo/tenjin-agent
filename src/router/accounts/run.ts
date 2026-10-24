@@ -309,6 +309,9 @@ interface Run {
   footer: LookupFooter;
   reportDeps: ReportDeps;
   startedAt: number;
+  /** This call holds the offer's claim, not yet settled: a refusal settles
+   *  it once it knows whether Tenjin's own route ran in the account's place. */
+  claimed?: boolean;
 }
 
 type Account = Awaited<ReturnType<typeof accountOf>>;
@@ -401,16 +404,22 @@ export async function runAccountSpec(
         ? `This offer is still running on your ${account.label} account, so nothing was sent again.`
         : earlier.state === 'account'
           ? `This offer was already sent to your ${account.label} account at ${earlier.at}, so nothing was sent again. Its answer is in the earlier request result for this id.`
-          : earlier.state === 'unrecorded'
-            ? `This machine could not record this call, so nothing was sent to your ${account.label} account.`
-            : "A call for this offer already started, so nothing was sent again. Use that call's result.";
+          : earlier.state === 'switched'
+            ? `Tenjin's own tool already ran this job at ${earlier.at}, in your ${account.label} account's place, so nothing was sent to the account. Its answer is in the earlier request result for this id.`
+            : earlier.state === 'unrecorded'
+              ? `This machine could not record this call, so nothing was sent to your ${account.label} account.`
+              : "A call for this offer already started, so nothing was sent again. Use that call's result.";
+    const again = `For another call, send request({query}) for a new offer; this id (${id}) runs once.`;
     return accountResult('needs_input', reason, reason, account.label, {
       nextStep:
         job !== null
           ? `Call request({job: ${JSON.stringify(id)}}) for its result; nothing is sent to the account again.`
-          : `For another call, send request({query}) for a new offer; this id (${id}) runs once.`,
+          : earlier.state === 'switched'
+            ? `If Tenjin's tool was still running, call request({job: ${JSON.stringify(earlier.to)}}) for its result. ${again}`
+            : again,
     });
   }
+  at.claimed = true;
 
   // 4. THE RULES AGAIN, right before the account is called.
   const boundary = await policyAtBoundary(
@@ -431,9 +440,13 @@ export async function runAccountSpec(
     runDeps(deps),
   );
   // THE CLAIM STAYS for anything the account may have run, its own error
-  // answer included; only a refusal of a call that never ran (or arguments
-  // it would not take) frees the id for a retry after the fix.
-  await settleAccountRun(dataDir, id, run.kind !== 'refused' && run.kind !== 'input');
+  // answer included; arguments it would not take free the id for a retry
+  // after the fix. A refusal of a call that never ran is settled by
+  // `refusal`, which knows whether Tenjin's own route ran in its place.
+  if (run.kind !== 'refused') {
+    await settleAccountRun(dataDir, id, run.kind !== 'input');
+    at.claimed = false;
+  }
   return finish(run, at);
 }
 
@@ -619,9 +632,14 @@ async function refusal(
     delete deps.policyRun;
     delete deps.standIn;
     const switched = await runSpec(fallback.id, fallback, fitted, deps, footer, at.reportDeps);
+    // ONE JOB, ONE CLAIM: once Tenjin's route may have run it, this offer
+    // stays claimed and names that route, so a replay never sends the
+    // account's billing call for a job already done and paid.
+    const ran = !ranNothing(switched);
+    await settleRefused(at, ran ? { to: fallback.id } : false);
     // In a native call's place, one that ran nothing (an approval to ask
     // for, a rule, a claim) leaves the refusal and its offer as the answer.
-    if (standIn === undefined || !ranNothing(switched)) {
+    if (standIn === undefined || ran) {
       const note = `${words.said} Tenjin ran its own tool for this job instead, as you set for ${account.label}.`;
       return {
         ...switched,
@@ -634,6 +652,8 @@ async function refusal(
       };
     }
   }
+  // Nothing ran on either: the id is free for a retry after the fix.
+  await settleRefused(at, false);
   await footer.done('needs_input', shownOf(at));
   const offer = fallback !== null ? fallbackOffer(fallback) : undefined;
   const text = `${words.said} ${nothing}`;
@@ -675,6 +695,13 @@ async function refusal(
       },
     },
   );
+}
+
+/** The claim this call still holds, settled once, by the refusal path. */
+async function settleRefused(at: Run, ran: false | { to: string }): Promise<void> {
+  if (at.claimed !== true) return;
+  at.claimed = false;
+  await settleAccountRun(at.deps.ctx.dataDir, at.id, ran);
 }
 
 /**

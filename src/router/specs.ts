@@ -270,6 +270,9 @@ export type EarlierPayment =
   | { state: 'running'; at?: string }
   /** It ran on the user's own account (#37), or may have. */
   | { state: 'account'; at: string }
+  /** The account refused, and Tenjin's own route ran in its place, under
+   *  the offer id `to` (#37): this offer's job is that one's. */
+  | { state: 'switched'; at: string; to: string }
   | { state: 'unrecorded' };
 
 const PaymentSchema = z.discriminatedUnion('state', [
@@ -282,6 +285,11 @@ const PaymentSchema = z.discriminatedUnion('state', [
   z.strictObject({ state: z.literal('possibly_paid'), at: z.string().max(40) }),
   z.strictObject({ state: z.literal('running'), at: z.string().max(40) }),
   z.strictObject({ state: z.literal('account'), at: z.string().max(40) }),
+  z.strictObject({
+    state: z.literal('switched'),
+    at: z.string().max(40),
+    to: z.string().max(200),
+  }),
 ]);
 
 function paymentPath(dataDir: string, id: string): string {
@@ -360,28 +368,27 @@ export async function settleSpecPayment(
 /**
  * How a claimed call on the user's own account ended. One that ran, or may
  * have (its billing call went out), keeps the claim, so the same id never
- * sends it again; one refused before anything ran frees the id for a retry
- * after a reconnect or a fixed input. Never throws.
+ * sends it again; so does one whose job Tenjin's own route took over (`to`,
+ * that route's offer id), which may have run and paid. One refused before
+ * anything ran on either frees the id for a retry after a reconnect or a fixed
+ * input. Never throws.
  */
 export async function settleAccountRun(
   dataDir: string,
   id: string,
-  ran: boolean,
+  ran: boolean | { to: string },
   now: number = Date.now(),
 ): Promise<void> {
   const path = paymentPath(dataDir, id);
-  if (!ran) {
+  if (ran === false) {
     await rm(path, { force: true }).catch(() => undefined);
     return;
   }
-  await writeFileAtomic(
-    path,
-    JSON.stringify({ state: 'account', at: new Date(now).toISOString() }),
-    {
-      mode: 0o600,
-      dirMode: 0o700,
-    },
-  ).catch(() => undefined);
+  const at = new Date(now).toISOString();
+  const record = ran === true ? { state: 'account', at } : { state: 'switched', at, to: ran.to };
+  await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).catch(
+    () => undefined,
+  );
 }
 
 /**

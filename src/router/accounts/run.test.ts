@@ -613,6 +613,64 @@ describe('when the account refuses', () => {
     );
   });
 
+  it('keeps the offer claimed once Tenjin’s tool ran in its place: a replay never reaches the account', async () => {
+    // Review: a 429 freed the account offer's id before Tenjin's tool paid
+    // under its own, so the same request after the limit cleared ran the
+    // account's billing tool for a job already done and paid.
+    const fallback: OfferSpec = {
+      ...APIFY.fallback,
+      request: { ...APIFY.fallback.request, fields: { query: 'body', limit: 'body' } },
+      input: {
+        type: 'object',
+        properties: { query: { type: 'string' }, limit: { type: 'integer' } },
+        required: ['query'],
+      },
+      output: 'json',
+    };
+    await settings([{ ...APIFY_ACCOUNT, onRefusal: 'tenjin' }]);
+    await signedIn(APIFY_ACCOUNT);
+    await storeAccountOffer(dir, LEAD, fallback);
+    const session = apifyScript({
+      'call-actor': [
+        new AccountLimited(429),
+        structured({
+          runId: 'run-1',
+          storages: { datasets: { default: { id: 'ds-1' } } },
+          status: 'SUCCEEDED',
+        }),
+      ],
+      'get-actor-run': [structured({ status: 'SUCCEEDED' })],
+    });
+    let calls = 0;
+    const { fetchImpl: router } = network();
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input) !== fallback.request.url) return router(input, init);
+      calls += 1;
+      return calls === 1
+        ? new Response('{}', {
+            status: 402,
+            headers: {
+              'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '20000', payTo: fallback.payTo })
+                .header,
+            },
+          })
+        : new Response(JSON.stringify({ places: [{ name: 'Cafe One' }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+    }) as typeof fetch;
+    const first = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(first.envelope).toMatchObject({
+      status: 'fulfilled',
+      switched: { reason: 'rate_limited' },
+    });
+    const again = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(again.envelope).toMatchObject({ status: 'needs_input', cost: ['nothing charged'] });
+    expect(again.summary).toContain("Tenjin's own tool already ran this job");
+    expect(String(again.envelope.nextStep)).toContain(`request({job: "${fallback.id}"})`);
+    expect(session.tools()).toEqual(['call-actor']);
+  });
+
   it('with the opt-in and other inputs, hands the agent Tenjin’s spec to run now', async () => {
     await apifyConnected({ onRefusal: 'tenjin' });
     const session = apifyScript({ 'call-actor': [new AccountLimited(429)] });
