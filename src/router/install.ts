@@ -99,8 +99,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * with the install its answer picks, the `claude`
  * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
  * plugin command falls back to the folder, and the one step after it is
- * reloading plugins in a fresh install's conversation. Settings-based
- * upgrades still need a new session so the old server does not route twice.
+ * reloading plugins in a fresh terminal install's conversation. Desktop Code
+ * and settings-based upgrades need a new session to load the MCP server.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -123,8 +123,22 @@ export const NEW_SESSION_STEP = 'start a new Claude Code session so Tenjin loads
 export const RELOAD_STEP =
   'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
 
-/** Fresh installs can keep their task; settings upgrades must leave their old server behind. */
-export function loadStep(settingsInstallPresent: boolean): string {
+/** Desktop reload cannot attach the plugin's MCP server; terminal reload can. */
+export function loadStep(
+  settingsInstallPresent: boolean,
+  env: NodeJS.ProcessEnv = {},
+  command = 'tenjin',
+): string {
+  if (
+    env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' ||
+    env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop-3p'
+  ) {
+    return (
+      "choose New session in Claude Desktop's Code tab for this same folder so Tenjin loads. " +
+      "Before switching, give the person one short ready-to-paste continuation prompt filled with this conversation's task, progress and next action; " +
+      `carry over the person's funding and spending choices, and have the next session check Tenjin with \`${command} doctor\`${process.platform === 'win32' ? ' in PowerShell' : ''} before continuing`
+    );
+  }
   return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
 }
 
@@ -600,6 +614,7 @@ export async function runRouterInstall(
       asksAgent && nextSteps.length > 0,
       ctx.io.isTTY,
       command,
+      env,
     ),
     nextSteps,
     ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
@@ -635,6 +650,7 @@ export async function runRouterInstall(
         router,
         rt,
         home,
+        env,
       }),
       ...removedKeysLines,
       ...serverLines,
@@ -997,9 +1013,10 @@ function nextStep(
   asksQuestion: boolean,
   tty: boolean,
   command: string,
+  env: NodeJS.ProcessEnv,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command);
+  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command, env);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -1014,6 +1031,7 @@ function todaysSteps(
   migration: Migration,
   asksQuestion: boolean,
   command: string,
+  env: NodeJS.ProcessEnv,
 ): string[] {
   const steps: string[] = [];
   if (asksQuestion) {
@@ -1029,7 +1047,7 @@ function todaysSteps(
     return steps;
   }
   if (!claude.meetsFloor) steps.unshift('run `claude update`');
-  steps.push(loadStep(settingsInstallStays(migration) || !claude.meetsFloor));
+  steps.push(loadStep(settingsInstallStays(migration) || !claude.meetsFloor, env, command));
   return steps;
 }
 
@@ -1512,6 +1530,7 @@ function lines(
     router: RouterCheck;
     rt: RuntimeSetup | null;
     home: string;
+    env: NodeJS.ProcessEnv;
   },
 ): string[] {
   const ok = paint(ctx.io, 'green', '✓');
@@ -1556,7 +1575,7 @@ function lines(
     ...migrationLines(ctx, s.migration),
     ...router,
     '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY, continuationCommand(s.rt))}`,
+    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY, continuationCommand(s.rt), s.env)}`,
   ];
 }
 

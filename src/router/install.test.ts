@@ -307,6 +307,44 @@ describe('tenjin install', () => {
     }
   });
 
+  it.each(['claude-desktop', 'claude-desktop-3p'])(
+    'hands %s a filled task continuation for a native new Code session',
+    async (entrypoint) => {
+      const result = await runRouterInstall(
+        { yes: true, noWallet: true },
+        ctx(),
+        deps({
+          env: {
+            ...HARNESS_ENV,
+            CLAUDE_CODE_ENTRYPOINT: entrypoint,
+            CLAUDE_CODE_DESKTOP_APP_VERSION: '',
+          },
+        }),
+      );
+      const next = (result.data as { next: string; nextSteps: unknown[] }).next;
+      expect(next).toContain("New session in Claude Desktop's Code tab");
+      expect(next).toContain('this same folder');
+      expect(next).toContain("this conversation's task, progress and next action");
+      expect(next).toContain("carry over the person's funding and spending choices");
+      expect(next).toContain('`tenjin doctor`');
+      expect(next).not.toContain('/reload-plugins');
+      expect(next).not.toMatch(/quit|reinstall|new wallet|<[^>]+>/i);
+      expect((result.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+      expect(result.humanLines?.at(-1)).toBe(`Next: ${next}`);
+    },
+  );
+
+  it.each([
+    {},
+    { CLAUDE_CODE_ENTRYPOINT: 'cli' },
+    { CLAUDE_CODE_ENTRYPOINT: 'local-agent' },
+    { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop-future' },
+    { CLAUDE_CODE_DESKTOP_APP_VERSION: '3.6556.2' },
+  ])('keeps terminal reload for unverified Desktop detection %j', (env) => {
+    expect(loadStep(false, env)).toBe(RELOAD_STEP);
+    expect(loadStep(true, env)).toBe(NEW_SESSION_STEP);
+  });
+
   it('a refresh brings the plugin up to this build and changes no config', async () => {
     await runRouterInstall({}, ctx(), deps());
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '1' }));

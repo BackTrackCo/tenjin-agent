@@ -592,7 +592,7 @@ export type PluginStart = 'proven' | 'pending' | 'did-not-start' | 'unknown';
 function didNotStartFix(layout: Layout): string {
   return layout !== 'runtime'
     ? `Claude Code starts the plugin with the \`node\` on its own PATH, which must be 22 or newer: run \`node --version\` in the shell it starts from, then quit Claude Code fully and start a new session.${moveToRuntime(layout)}`
-    : `Start a new Claude Code session; if Tenjin still does not start, run \`${RUNTIME_MISSING_FIX}\`.`;
+    : `Start a new Claude Code session. If Tenjin still does not start: ${RUNTIME_MISSING_FIX}`;
 }
 
 /**
@@ -1046,7 +1046,11 @@ async function runtimeCheck(i: {
   const name = 'runtime';
   const flag = i.project ? ' --project' : '';
   const t = (p: string) => tilde(p, i.home);
-  const failFix = `Run \`${RUNTIME_MISSING_FIX}${flag}\`, then start a new Claude Code session.`;
+  const failFix =
+    RUNTIME_MISSING_FIX +
+    (i.project
+      ? ' For a project-only installation, pass `--project` to the installer from that project folder.'
+      : '');
   const { launch } = i;
   const unread: RouterCheck = {
     name,

@@ -104,10 +104,10 @@ try {
     const wrapper = join(fixture, 'run.ps1');
     writeFileSync(
       wrapper,
-      `class FixtureClient {\n [object]$Proxy\n [void] DownloadFile([string]$url, [string]$path) {\n  $source = if ($url.Contains('nodejs.org')) { $env:TENJIN_SMOKE_NODE } else { $env:TENJIN_SMOKE_CLI }\n  Copy-Item -LiteralPath $source -Destination $path\n  if ($env:TENJIN_SMOKE_CORRUPT -and $url.Contains($env:TENJIN_SMOKE_CORRUPT)) { Add-Content -LiteralPath $path -Value 'corrupt' }\n }\n [void] Dispose() {}\n}\nfunction New-Object { param($TypeName, $ArgumentList) if ($TypeName -eq 'Net.WebClient') { return [FixtureClient]::new() }; return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName -ArgumentList $ArgumentList }\n$ErrorActionPreference = 'Continue'\n$Failed = $false\ntry { Invoke-Expression (Get-Content -LiteralPath ${psQuote(join(output, 'install.ps1'))} -Raw) } catch { $Failed = $true; Write-Host $_ }\nif ($ErrorActionPreference -ne 'Continue') { throw 'Installer changed the caller ErrorActionPreference' }\n[IO.File]::WriteAllText($env:TENJIN_SMOKE_SCOPE_RECEIPT, (@{ failed = $Failed; returnedToCaller = $true } | ConvertTo-Json))\nif ($Failed) { exit 1 }\n`,
+      `class FixtureClient {\n [object]$Proxy\n [void] DownloadFile([string]$url, [string]$path) {\n  $source = if ($url.Contains('nodejs.org')) { $env:TENJIN_SMOKE_NODE } else { $env:TENJIN_SMOKE_CLI }\n  Copy-Item -LiteralPath $source -Destination $path\n  if ($env:TENJIN_SMOKE_CORRUPT -and $url.Contains($env:TENJIN_SMOKE_CORRUPT)) { Add-Content -LiteralPath $path -Value 'corrupt' }\n }\n [void] Dispose() {}\n}\nfunction New-Object { param($TypeName, $ArgumentList) if ($TypeName -eq 'Net.WebClient') { return [FixtureClient]::new() }; return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName -ArgumentList $ArgumentList }\n$ErrorActionPreference = 'Continue'\n$Failed = $false\ntry { if ($env:TENJIN_SMOKE_DIRECT) { & ${psQuote(join(output, 'install.ps1'))} --yes --harness codex } else { Invoke-Expression (Get-Content -LiteralPath ${psQuote(join(output, 'install.ps1'))} -Raw) } } catch { $Failed = $true; Write-Host $_ }\nif ($ErrorActionPreference -ne 'Continue') { throw 'Installer changed the caller ErrorActionPreference' }\n[IO.File]::WriteAllText($env:TENJIN_SMOKE_SCOPE_RECEIPT, (@{ failed = $Failed; returnedToCaller = $true } | ConvertTo-Json))\nif ($Failed) { exit 1 }\n`,
     );
     command = 'powershell';
-    args = ['-NoProfile', '-File', wrapper, '--yes', '--harness', 'codex'];
+    args = ['-NoProfile', '-File', wrapper];
   } else {
     for (const name of ['node', 'npm']) {
       const unavailable = join(bin, name);
@@ -155,12 +155,29 @@ try {
   if (success.status !== 0)
     throw new Error(`Native installer failed: ${success.stderr || success.stdout}`);
   const result = JSON.parse(readFileSync(receipt, 'utf8'));
-  if (JSON.stringify(result.args) !== JSON.stringify(['install', '--yes', '--harness', 'codex']))
-    throw new Error('Installer lost arguments');
+  if (
+    JSON.stringify(result.args) !==
+    JSON.stringify(windows ? ['install'] : ['install', '--yes', '--harness', 'codex'])
+  )
+    throw new Error(`Installer lost arguments: ${JSON.stringify(result.args)}`);
   if (result.proxy !== env.HTTPS_PROXY || !result.archive)
     throw new Error('Bootstrap lost proxy or archive handoff');
   if (existsSync(result.archive)) throw new Error('Installer left temporary archive behind');
   rmSync(receipt);
+  if (windows) {
+    const direct = run({ TENJIN_SMOKE_DIRECT: '1' });
+    if (direct.status !== 0)
+      throw new Error(`Direct PowerShell installer failed: ${direct.stderr || direct.stdout}`);
+    const directReceipt = JSON.parse(readFileSync(receipt, 'utf8'));
+    if (
+      JSON.stringify(directReceipt.args) !==
+      JSON.stringify(['install', '--yes', '--harness', 'codex'])
+    )
+      throw new Error(
+        `Direct PowerShell installer lost arguments: ${JSON.stringify(directReceipt.args)}`,
+      );
+    rmSync(receipt);
+  }
   const cliFailed = run({ TENJIN_SMOKE_EXIT: '7' });
   if (cliFailed.status === 0 || existsSync(receipt))
     throw new Error('Installer hid a failed CLI setup');

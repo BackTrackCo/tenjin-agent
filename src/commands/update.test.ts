@@ -1611,6 +1611,35 @@ describe('runUpdate: the runtime branch', () => {
     expect(spawned.calls[0]?.args[0]).toBe(versionEntry(root, '0.1.0-alpha.7'));
   });
 
+  it('offers Node-free official recovery when this release cannot find its package', async () => {
+    await writeState('0.1.0-alpha.6');
+    const before = await readState();
+    const { ctx } = makeCtx();
+    ctx.dataDir = dataDir;
+    const moduleDir = join(dir, 'missing-package', 'dist');
+    await mkdir(moduleDir, { recursive: true });
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        ctx,
+        await deps({
+          moduleDir,
+          currentVersion: '0.1.0-alpha.7',
+          homeDir: home,
+          spawnImpl: forbiddenSpawn,
+          stage: forbiddenStage,
+          ensure: forbiddenEnsure,
+        }),
+      ),
+    );
+    expect(err).toMatchObject({
+      code: 'UPDATE_FAILED',
+      message: 'tenjin-cli 0.1.0-alpha.7 cannot find its own package, so 0.1.0-alpha.6 stays',
+      fix: "Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.",
+    });
+    expect(await readState()).toBe(before);
+  });
+
   it('refuses a release that carries no Node pin, before any child or Node', async () => {
     await writeState('0.1.0-alpha.6');
     const before = await readState();

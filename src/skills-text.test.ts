@@ -817,13 +817,15 @@ describe('docs/troubleshooting.md: Tenjin stopped after a Node upgrade', () => {
     expect(heads.slice(0, 2)).toEqual(['## Tenjin cannot unlock the wallet', HEAD]);
   });
 
-  it('names the symptoms, the npx fix with --project, and the new session', () => {
+  it('names the symptoms and official Node-free recovery with project scope', () => {
     for (const text of [
       'Executable not found',
       'cache-miss',
-      'npx -y tenjin-cli@latest install',
-      'npx -y tenjin-cli@latest install --project',
-      'start a new Claude Code session',
+      'Install Tenjin from tenjin.sh',
+      'https://tenjin.sh/agents',
+      'needs no npm or working `tenjin` command',
+      'pass `--project` to the installer from that project folder',
+      "Follow the installer's activation instruction",
     ]) {
       expect(section, text).toContain(text);
     }
