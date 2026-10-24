@@ -87,22 +87,27 @@ export function registerRouter(reg: Registration): void {
     .action(async function (this: Command) {
       const ctx = buildContext(this);
       const harness = this.opts().harness as Harness;
-      const { runRouterMcpServer } = await import('../router/mcp');
-      await runRouterMcpServer({
-        dataDir: ctx.dataDir,
-        flags: ctx.flags,
-        harness,
-      });
       // Codex has no SessionStart hook to start the daily background update
-      // from (adding one would change the hooks it trusts), so its server does,
-      // as the session ENDS: the switch rewrites the launcher its hooks run, so
-      // starting it any earlier would move them mid-session. Hooks and server
-      // then both start the next session on the new version.
-      if (harness === 'codex') {
-        (await import('../lib/auto-update')).maybeAutoUpdate({
+      // from, so its server does, as the session ends. Armed BEFORE the server
+      // starts: Codex ends it with SIGTERM, which nothing after the `await`
+      // below survives (lib/auto-update). On Windows it fires here instead.
+      // Claude Code's starts from its SessionStart leg, never from here.
+      const sessionEnded =
+        harness === 'codex'
+          ? (await import('../lib/auto-update')).armCodexAutoUpdate({
+              dataDir: ctx.dataDir,
+              env: process.env,
+            })
+          : undefined;
+      try {
+        const { runRouterMcpServer } = await import('../router/mcp');
+        await runRouterMcpServer({
           dataDir: ctx.dataDir,
-          env: process.env,
+          flags: ctx.flags,
+          harness,
         });
+      } finally {
+        sessionEnded?.();
       }
     });
 

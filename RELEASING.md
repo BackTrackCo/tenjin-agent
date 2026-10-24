@@ -34,7 +34,9 @@ before the release PR. Auto-update then delivers that Node with the release.
 
 **Hooks and server across versions.** Codex starts its auto-update as a session
 ends, but with two Codex sessions open, the one still running sees its hooks
-move to the new version while its server stays on the old one. Whatever a hook
+move to the new version while its server stays on the old one. On Windows it
+starts as a session starts (Codex ends the server there without a signal it
+could catch), so every session that runs one sees the same skew. Whatever a hook
 hands the server (offer files under the data dir, the `request` tool's fields
 the hook line tells the model to fill) should stay readable across adjacent
 versions.

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { spawn } from 'node:child_process';
 import {
+  armCodexAutoUpdate,
   AUTO_UPDATE_FILE,
   AUTO_UPDATE_LOG,
   autoUpdateLine,
@@ -16,6 +18,7 @@ import { nodeBinPath, versionEntry } from './runtime-layout';
 
 const NOW = Date.parse('2026-10-22T12:00:00.000Z');
 const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 
 let home: string;
 let dataDir: string;
@@ -224,6 +227,117 @@ describe('maybeAutoUpdate', () => {
     expect(() =>
       maybeAutoUpdate({ dataDir, env: {}, home, now: () => NOW, spawnImpl: impl }),
     ).not.toThrow();
+  });
+});
+
+/** `process` and its stdin as plain emitters; `exit` only records its code. */
+function host(platform: NodeJS.Platform = 'linux') {
+  const exits: number[] = [];
+  const proc = Object.assign(new EventEmitter(), {
+    platform,
+    exit: (code: number) => {
+      exits.push(code);
+    },
+  });
+  return { proc, stdin: new EventEmitter(), exits };
+}
+
+describe('armCodexAutoUpdate', () => {
+  /**
+   * Armed on a clock that moves two days per read, so every call of the update
+   * is due: one spawn proves the trigger fired once, not that the daily stamp
+   * held the rest off.
+   */
+  const arm = (h: ReturnType<typeof host>, r: ReturnType<typeof recorder>) => {
+    let t = NOW;
+    return armCodexAutoUpdate({
+      dataDir,
+      env: {},
+      home,
+      now: () => (t += 2 * DAY),
+      spawnImpl: r.impl,
+      proc: h.proc,
+      stdin: h.stdin,
+    });
+  };
+
+  it('starts nothing while the session runs, then once on SIGTERM, detached, and exits 0', () => {
+    const { node } = runtime();
+    const h = host();
+    const r = recorder();
+    const sessionEnded = arm(h, r);
+    expect(r.calls).toEqual([]);
+    h.proc.emit('SIGTERM');
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]?.cmd).toBe(node);
+    // Its own session and group on Unix, so Codex's SIGKILL to the server's misses it.
+    expect(r.calls[0]?.opts).toMatchObject({ detached: true });
+    expect(h.exits).toEqual([0]);
+    h.stdin.emit('end');
+    h.stdin.emit('close');
+    sessionEnded();
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it.each(['SIGTERM', 'SIGHUP', 'SIGINT'] as const)('fires on %s', (signal) => {
+    runtime();
+    const h = host();
+    const r = recorder();
+    arm(h, r);
+    h.proc.emit(signal);
+    expect(r.calls).toHaveLength(1);
+    expect(h.exits).toEqual([0]);
+  });
+
+  it.each(['end', 'close'] as const)('fires once on stdin %s, without exiting', (event) => {
+    runtime();
+    const h = host();
+    const r = recorder();
+    const sessionEnded = arm(h, r);
+    h.stdin.emit(event);
+    expect(r.calls).toHaveLength(1);
+    expect(h.exits).toEqual([]);
+    sessionEnded();
+    // A signal after the end still exits as SIGTERM would have, and starts nothing more.
+    h.proc.emit('SIGTERM');
+    expect(r.calls).toHaveLength(1);
+    expect(h.exits).toEqual([0]);
+  });
+
+  it('fires once when the server closes, which the caller reports', () => {
+    runtime();
+    const h = host();
+    const r = recorder();
+    const sessionEnded = arm(h, r);
+    sessionEnded();
+    sessionEnded();
+    h.stdin.emit('end');
+    expect(r.calls).toHaveLength(1);
+    expect(h.exits).toEqual([]);
+  });
+
+  it('on Windows, fires as the server starts and leaves signals and stdin alone', () => {
+    runtime();
+    const h = host('win32');
+    const r = recorder();
+    const sessionEnded = arm(h, r);
+    expect(r.calls).toHaveLength(1);
+    for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT']) {
+      expect(h.proc.listenerCount(signal), signal).toBe(0);
+    }
+    expect(h.stdin.listenerCount('end')).toBe(0);
+    expect(h.stdin.listenerCount('close')).toBe(0);
+    sessionEnded();
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it('still exits 0 on a signal when no update is due', () => {
+    const h = host();
+    const r = recorder();
+    arm(h, r);
+    h.proc.emit('SIGTERM');
+    expect(r.calls).toEqual([]);
+    expect(h.exits).toEqual([0]);
   });
 });
 
