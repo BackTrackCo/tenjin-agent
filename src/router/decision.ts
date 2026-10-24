@@ -14,6 +14,7 @@ import {
   policyProblems,
   type Problem,
 } from './access';
+import { ACCOUNT_ID } from './accounts/ids';
 
 export { BUILT_IN_SOURCE, ONLY_DIMENSIONS, POLICY_MAX_BYTES, POLICY_VERSION, TARGET_KINDS };
 export type { OnlyDimension, TargetKind } from './access';
@@ -441,6 +442,190 @@ export type OfferSpec = z.infer<typeof OfferSpecSchema>;
  *  lists, and each option of a choice set. */
 const SpecsSchema = z.array(OfferSpecSchema).min(1).max(8).optional();
 
+/*
+ * A SERVICE ON A CONNECTED ACCOUNT (#37), mirrored from tenjin's `wire.ts`
+ * with the same bounds: one MCP tool call this client makes on the user's own
+ * account, which the user's plan pays. Sent only because this build lists
+ * `mcp` beside `identity`. It carries no URL and no credential: this client
+ * calls the server it connected for `identity.source`, so no answer can send
+ * a user's token anywhere else.
+ */
+
+/** A tool name as the MCP specification bounds it. */
+export const McpToolSchema = z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/);
+
+/** The most an account call, its follow-up included, may serialize to. */
+export const ACCOUNT_CALL_MAX_BYTES = 8 * 1024;
+
+/** How a tool's answer is read: its `structuredContent`; the JSON its text
+ *  items hold, joined in order; or its content items as they come. */
+export const ACCOUNT_RESULTS = ['structured', 'json-text', 'content'] as const;
+
+const RESULT_PATH = '[A-Za-z_][A-Za-z0-9_]{0,63}(?:\\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3}';
+/** An argument value that is exactly `{field}` is that input field's value, of
+ *  its own JSON type; one that is exactly `{result.<path>}`, in a follow-up
+ *  only, is the value at that path in the first call's result. Every other
+ *  value is sent as written: that is how a map pins a tool's settings. */
+export const INPUT_PLACEHOLDER = /^\{([A-Za-z_][A-Za-z0-9_]{0,63})\}$/;
+export const RESULT_PLACEHOLDER = new RegExp(`^\\{result\\.(${RESULT_PATH})\\}$`);
+
+/** A value at a path of a tool's result, and the values that mean a state. */
+const AccountStateSchema = z.strictObject({
+  path: z.string().regex(new RegExp(`^${RESULT_PATH}$`)),
+  values: z.array(z.string().min(1).max(64)).min(1).max(8),
+});
+
+const AccountCallFields = {
+  tool: McpToolSchema,
+  /** The tool's `arguments`, a template (above). */
+  args: z.record(z.string(), z.unknown()),
+  result: z.enum(ACCOUNT_RESULTS),
+};
+
+/** A status call, sent every `everyS` seconds until its own result leaves
+ *  `running`; `failed` ends the call. `maxWaitS` counts from the first call. */
+const AccountPollSchema = z.strictObject({
+  ...AccountCallFields,
+  running: AccountStateSchema,
+  failed: AccountStateSchema.optional(),
+  everyS: z.number().int().min(1).max(30),
+  maxWaitS: z.number().int().min(1).max(600),
+});
+
+/** The follow-up that fetches the result, when the first call does not hold
+ *  it: always, or only `when` the first result is in that state. The call
+ *  that bills is sent once and never again because its job is still running;
+ *  only `poll` repeats. */
+const AccountStepSchema = z.strictObject({
+  when: AccountStateSchema.optional(),
+  poll: AccountPollSchema.optional(),
+  ...AccountCallFields,
+});
+
+const AccountCallSchema = z.strictObject({
+  ...AccountCallFields,
+  next: AccountStepSchema.optional(),
+});
+export type AccountCall = z.infer<typeof AccountCallSchema>;
+
+const AccountSpecFields = z.strictObject({
+  capabilityId: z.string().min(1).max(200),
+  provider: z.string().min(1).max(120),
+  label: LabelSchema.optional(),
+  holds: z
+    .strictObject({
+      WebSearch: z.string().min(1).max(64).optional(),
+      WebFetch: z.string().min(1).max(64).optional(),
+    })
+    .optional(),
+  output: z.enum(['json', 'text', 'media']).optional(),
+  description: z.string().min(1).max(500),
+  /** The call on the account, in place of a paid spec's price and request. */
+  mcp: AccountCallSchema,
+  input: z.record(z.string(), z.unknown()),
+  pinned: z.record(z.string(), z.unknown()),
+  example: z.record(z.string(), z.unknown()).optional(),
+  returns: z.string().min(1).max(200).optional(),
+  returnsExample: z.unknown().optional(),
+  resultSchema: z.record(z.string(), z.unknown()).optional(),
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+  /** Required: this client attaches the credential of `identity.source`. */
+  identity: IdentitySchema,
+  /** Tenjin has checked this map with a real call. */
+  verified: z.boolean(),
+});
+
+/** Every string in a template that is exactly a placeholder. */
+function placeholders(value: unknown): string[] {
+  if (typeof value === 'string')
+    return INPUT_PLACEHOLDER.test(value) || RESULT_PLACEHOLDER.test(value) ? [value] : [];
+  if (Array.isArray(value)) return value.flatMap(placeholders);
+  if (value && typeof value === 'object') return Object.values(value).flatMap(placeholders);
+  return [];
+}
+
+function accountSpecProblems(spec: z.infer<typeof AccountSpecFields>, ctx: z.RefinementCtx): void {
+  const issue = (message: string, path: (string | number)[]) =>
+    ctx.addIssue({ code: 'custom', message, path });
+  const { identity, mcp } = spec;
+  if (identity.source === BUILT_IN_SOURCE)
+    issue(`an account service is never on ${BUILT_IN_SOURCE}`, ['identity', 'source']);
+  if (identity.service !== spec.capabilityId)
+    issue('an account spec carries its own identity', ['identity', 'service']);
+  if (identity.task === undefined) issue('an account service does one task', ['identity']);
+  if (Buffer.byteLength(JSON.stringify(mcp), 'utf8') > ACCOUNT_CALL_MAX_BYTES)
+    issue(`the call must serialize to at most ${ACCOUNT_CALL_MAX_BYTES} bytes`, ['mcp']);
+  // The first call bills, so a poll or follow-up never sends it again.
+  if (mcp.next?.poll?.tool === mcp.tool)
+    issue('the poll never repeats the call that bills', ['mcp', 'next', 'poll', 'tool']);
+  if (mcp.next?.tool === mcp.tool)
+    issue('the follow-up never repeats the call that bills', ['mcp', 'next', 'tool']);
+  const properties = spec.input.properties;
+  const fields = new Set(
+    properties && typeof properties === 'object' ? Object.keys(properties) : [],
+  );
+  const calls: [(string | number)[], Record<string, unknown>, boolean][] = [
+    [['mcp', 'args'], mcp.args, false],
+  ];
+  if (mcp.next?.poll) calls.push([['mcp', 'next', 'poll', 'args'], mcp.next.poll.args, true]);
+  if (mcp.next) calls.push([['mcp', 'next', 'args'], mcp.next.args, true]);
+  for (const [path, args, followUp] of calls)
+    for (const value of placeholders(args)) {
+      const field = INPUT_PLACEHOLDER.exec(value)?.[1];
+      if (field === undefined && !followUp) issue('only a follow-up reads the first result', path);
+      if (field !== undefined && !fields.has(field))
+        issue(`${value} names no field of the input`, path);
+    }
+}
+
+/** An account service's spec, as a lookup's `spec` answer carries it. */
+export const AccountSpecSchema = AccountSpecFields.superRefine(accountSpecProblems);
+export type AccountSpec = z.infer<typeof AccountSpecSchema>;
+
+/** An account service's spec under the offer id the agent calls it with. */
+export const AccountOfferSpecSchema = AccountSpecFields.extend({ id: IdSchema }).superRefine(
+  accountSpecProblems,
+);
+export type AccountOfferSpec = z.infer<typeof AccountOfferSpecSchema>;
+
+/** Any spec an offer id can hold: paid from the balance, or a call on an account. */
+export type AnyOfferSpec = OfferSpec | AccountOfferSpec;
+
+export const isAccountSpec = <T extends ToolSpec | AccountSpec>(spec: T): spec is T & AccountSpec =>
+  'mcp' in spec;
+
+/**
+ * TENJIN'S OWN ROUTE FOR AN ACCOUNT LEAD'S JOB, under its own offer id, with
+ * its price. The line never names it: this client offers it when the account
+ * refuses, and runs it only when the user picks it or has opted in for that
+ * account.
+ */
+const FallbackSchema = OfferSpecSchema.optional();
+
+function fallbackProblems(
+  fallback: OfferSpec | undefined,
+  id: string,
+  lead: AccountSpec | undefined,
+  ctx: z.RefinementCtx,
+): void {
+  if (!fallback) return;
+  const issue = (message: string, path: (string | number)[]) =>
+    ctx.addIssue({ code: 'custom', message, path });
+  if (!lead) return issue('a fallback rides only an account lead', ['fallback']);
+  if (fallback.id === id) issue('the fallback is an offer of its own', ['fallback', 'id']);
+  if (fallback.identity?.source !== BUILT_IN_SOURCE)
+    issue(`the fallback is a ${BUILT_IN_SOURCE} service`, ['fallback', 'identity']);
+  if (fallback.identity?.task !== lead.identity.task)
+    issue("the fallback does the lead's task", ['fallback', 'identity', 'task']);
+}
+
+/** The specs on an `execute`, whose lead may be an account service's. */
+const ExecuteSpecsSchema = z
+  .array(z.union([OfferSpecSchema, AccountOfferSpecSchema]))
+  .min(1)
+  .max(8)
+  .optional();
+
 /** Words this client shows the model itself, in its own line: one plain line. */
 const PlainLine = (max: number) =>
   z
@@ -541,14 +726,60 @@ const DiscoveredSchema = z
   .superRefine(checkHint)
   .superRefine(checkChoices);
 
+/**
+ * AN ACCOUNT LEAD IS OFFERED ALONE, as a checked service this client runs on
+ * its own connection: no endpoint, no balance price, in place of a native
+ * call only through `bound` as any lead, and its listing carries its spec's
+ * identity. Every other `execute` is as it always was, with the URL it pays.
+ */
+function checkExecute(
+  decision: {
+    id: string;
+    capabilityId: string;
+    providerPriceAtomic: string;
+    identity?: Identity | undefined;
+    endpoint?: string | undefined;
+    specs?: AnyOfferSpec[] | undefined;
+    delivery?: 'offer' | 'augment' | undefined;
+    augmentUrl?: string | undefined;
+    fallback?: OfferSpec | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const issue = (message: string, path: (string | number)[]) =>
+    ctx.addIssue({ code: 'custom', message, path });
+  const specs = decision.specs ?? [];
+  const lead = specs.find(({ id }) => id === decision.id);
+  if (!lead || !isAccountSpec(lead)) {
+    if (specs.some((spec) => isAccountSpec(spec)))
+      issue('an account service is only ever the lead', ['specs']);
+    if (decision.endpoint === undefined) issue('an execute names the URL it pays', ['endpoint']);
+    return fallbackProblems(decision.fallback, decision.id, undefined, ctx);
+  }
+  if (specs.length > 1) issue('an account lead is offered alone', ['specs']);
+  if (decision.endpoint !== undefined)
+    issue('an account lead names no endpoint: this client calls its own account', ['endpoint']);
+  if (decision.capabilityId !== lead.capabilityId)
+    issue('the listing names the lead', ['capabilityId']);
+  if (decision.providerPriceAtomic !== '0')
+    issue('the balance pays an account lead nothing', ['providerPriceAtomic']);
+  if (decision.identity?.revision !== lead.identity.revision)
+    issue("the listing carries the lead's identity", ['identity']);
+  if (!lead.verified) issue('the hook offers only a checked account service', ['specs']);
+  if (decision.delivery === 'augment' || decision.augmentUrl !== undefined)
+    issue('an account lead is an offer', ['delivery']);
+  fallbackProblems(decision.fallback, decision.id, lead, ctx);
+}
+
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
     .strictObject({
       action: z.literal('execute'),
       id: IdSchema,
       ...CapabilityFields,
-      /** The x402 URL a lookup would pay, for the line the server writes. */
-      endpoint: z.string().min(1).max(2_048),
+      /** The x402 URL a lookup would pay, for the line the server writes. An
+       *  account lead has none: this client calls the account it connected. */
+      endpoint: z.string().min(1).max(2_048).optional(),
       /** What to pass in `query`, in the service's own terms. */
       usage: z.string().min(1).max(300),
       /**
@@ -559,7 +790,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * bound as a discovered line's.
        */
       hint: z.string().min(1).max(2_000),
-      specs: SpecsSchema,
+      specs: ExecuteSpecsSchema,
       /**
        * HOW THE OFFER IS DELIVERED, sent because this build lists `fields`.
        * `augment` is the free docs lookup before a search: the client shows no
@@ -571,8 +802,11 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
       delivery: z.enum(['offer', 'augment']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),
       bound: BoundSchema,
+      /** Beside an account lead only, for a build that lists `mcp`. */
+      fallback: FallbackSchema,
     })
-    .superRefine(checkHint),
+    .superRefine(checkHint)
+    .superRefine(checkExecute),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -596,11 +830,21 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     .strictObject({
       action: z.literal('spec'),
       id: IdSchema,
-      spec: ToolSpecSchema,
+      spec: z.union([ToolSpecSchema, AccountSpecSchema]),
       hint: z.string().min(1).max(2_000),
       input: z.record(z.string(), z.unknown()).optional(),
+      /** Beside an account service's spec only, for a build that lists `mcp`. */
+      fallback: FallbackSchema,
     })
-    .superRefine(checkHint),
+    .superRefine(checkHint)
+    .superRefine((decision, ctx) =>
+      fallbackProblems(
+        decision.fallback,
+        decision.id,
+        isAccountSpec(decision.spec) ? decision.spec : undefined,
+        ctx,
+      ),
+    ),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -652,33 +896,153 @@ export type BrowseResponse = z.infer<typeof BrowseResponseSchema>;
 
 const LabelledSchema = z.strictObject({ id: TargetIdSchema, label: z.string().min(1).max(120) });
 
+/** A connectable account's id: this client keeps its credential under it, so
+ *  it is narrower than a target id (no capitals, spaces, dots or colons). */
+export { ACCOUNT_ID };
+
+/** How an account signs in: `oauth` is the MCP sign-in, `key` a pasted key
+ *  sent as `Authorization: <scheme> <key>`. */
+export const SIGN_IN = ['oauth', 'key'] as const;
+export type SignIn = (typeof SIGN_IN)[number];
+export const KEY_SCHEMES = ['Bearer', 'Key'] as const;
+export type KeyScheme = (typeof KEY_SCHEMES)[number];
+
+/** Where a connected account is called. A user's token goes here, so it is
+ *  https, with no credentials, query or fragment to carry anything else. */
+export function isAccountUrl(value: string): boolean {
+  const url = URL.canParse(value) ? new URL(value) : undefined;
+  return (
+    url?.protocol === 'https:' &&
+    !url.username &&
+    !url.password &&
+    !value.includes('?') &&
+    !value.includes('#')
+  );
+}
+
+export const ArgumentName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/);
+const twice = (keys: readonly string[]) => new Set(keys).size !== keys.length;
+
+/**
+ * ONE ACCOUNT THIS CLIENT CAN CONNECT, from the directory because this build
+ * lists `mcp`: where its MCP server is, how it signs in, and for each mapped
+ * service whether Tenjin has checked it, whether the account-wide preference
+ * puts it first (`useFirst`), and the tools, with the top-level arguments,
+ * its call makes. `tenjin connect` lists the account's tools (free)
+ * and leaves out, on this machine, a service whose tool is missing.
+ */
+export const ConnectableSchema = z
+  .strictObject({
+    id: z.string().regex(ACCOUNT_ID),
+    label: z.string().min(1).max(120),
+    mcpUrl: z
+      .string()
+      .max(2_048)
+      .refine(isAccountUrl, 'an https URL with no credentials, query or fragment'),
+    signIn: z.array(z.enum(SIGN_IN)).min(1).max(2),
+    key: z.strictObject({ scheme: z.enum(KEY_SCHEMES) }).optional(),
+    services: z
+      .array(
+        z.strictObject({
+          id: TargetIdSchema,
+          verified: z.boolean(),
+          /** The account-wide preference puts it first; without it, it runs
+           *  when named, when Tenjin's own route is ruled out, or alone. */
+          useFirst: z.boolean(),
+          tools: z
+            .array(
+              z.strictObject({ name: McpToolSchema, arguments: z.array(ArgumentName).max(32) }),
+            )
+            .min(1)
+            .max(3),
+        }),
+      )
+      .min(1)
+      .max(64),
+  })
+  .superRefine((account, ctx) => {
+    const issue = (message: string, path: (string | number)[]) =>
+      ctx.addIssue({ code: 'custom', message, path });
+    if (account.id === BUILT_IN_SOURCE) issue(`${BUILT_IN_SOURCE} is never connected`, ['id']);
+    if (twice(account.signIn)) issue('a sign-in is listed twice', ['signIn']);
+    if (account.signIn.includes('key') !== (account.key !== undefined))
+      issue('a key sign-in says how the key is sent, and only it does', ['key']);
+    if (twice(account.services.map(({ id }) => id)))
+      issue('a service is listed twice', ['services']);
+    account.services.forEach(({ tools }, index) => {
+      if (twice(tools.map(({ name }) => name)))
+        issue('a tool is listed twice', ['services', index, 'tools']);
+    });
+  });
+export type Connectable = z.infer<typeof ConnectableSchema>;
+
+const FullDirectorySchema = z.strictObject({
+  revision: RevisionSchema,
+  categories: z
+    .array(LabelledSchema.extend({ tasks: z.array(TargetIdSchema).min(1).max(64) }))
+    .max(64),
+  /** A task's label is its id. */
+  tasks: z.array(LabelledSchema).max(256),
+  providers: z.array(LabelledSchema).max(512),
+  sellers: z.array(LabelledSchema).max(512),
+  sources: z.array(LabelledSchema).max(64),
+  services: z.array(LabelledSchema.extend({ identity: IdentitySchema })).max(1024),
+  retired: z.array(LabelledSchema.extend({ kind: z.enum(TARGET_KINDS) })).max(512),
+  /** Because this build lists `mcp`: every account it can connect, which
+   *  between them list every service not on `tenjin`. */
+  connectable: z.array(ConnectableSchema).max(16).optional(),
+});
+
+/** Each connectable account is a listed source, each of its services a listed
+ *  service on it, and every service off `tenjin` listed exactly once. */
+function checkConnectable(
+  directory: z.infer<typeof FullDirectorySchema>,
+  ctx: z.RefinementCtx,
+): void {
+  if (!directory.connectable) return;
+  const issue = (message: string, path: (string | number)[]) =>
+    ctx.addIssue({ code: 'custom', message, path });
+  const sources = new Set(directory.sources.map(({ id }) => id));
+  const sourceOf = new Map(directory.services.map(({ id, identity }) => [id, identity.source]));
+  const listed = directory.connectable.flatMap(({ services }) => services.map(({ id }) => id));
+  if (twice(directory.connectable.map(({ id }) => id)))
+    issue('an account is listed twice', ['connectable']);
+  if (twice(listed)) issue('a service is listed under two accounts', ['connectable']);
+  directory.connectable.forEach(({ id, services }, index) => {
+    if (!sources.has(id)) issue('an account is a listed source', ['connectable', index, 'id']);
+    services.forEach((service, at) => {
+      if (sourceOf.get(service.id) !== id)
+        issue("an account's service is a listed service on it", [
+          'connectable',
+          index,
+          'services',
+          at,
+          'id',
+        ]);
+    });
+  });
+  for (const [id, source] of sourceOf)
+    if (source !== BUILT_IN_SOURCE && !listed.includes(id))
+      issue(`no account lists ${id}`, ['connectable']);
+}
+
 /**
  * EVERY ID A SETTING CAN NAME, free and unfiltered by settings: the
  * categories with their reviewed tasks, the tasks, providers, sellers and
  * sources with their labels, every catalog service with its identity, and the
- * retired ids a saved rule may still hold. `revision` is the catalog's ETag;
- * asked with the one this client holds, the answer is `unchanged`. `tenjin
- * config` resolves a typed name against it, and readback names what a rule
- * covers from it.
+ * retired ids a saved rule may still hold, and, because this build lists
+ * `mcp`, every account it can connect. `revision` is the ETag of the answer
+ * this client gets; asked with the one it holds, the answer is `unchanged`.
+ * `tenjin config` resolves a typed name against it, readback names what a
+ * rule covers from it, and `tenjin connect` reads an account's sign-in and
+ * tools from it.
  */
 const DirectoryResponseSchema = z.strictObject({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
   directory: z.union([
     z.strictObject({ revision: RevisionSchema, unchanged: z.literal(true) }),
-    z.strictObject({
-      revision: RevisionSchema,
-      categories: z
-        .array(LabelledSchema.extend({ tasks: z.array(TargetIdSchema).min(1).max(64) }))
-        .max(64),
-      /** A task's label is its id. */
-      tasks: z.array(LabelledSchema).max(256),
-      providers: z.array(LabelledSchema).max(512),
-      sellers: z.array(LabelledSchema).max(512),
-      sources: z.array(LabelledSchema).max(64),
-      services: z.array(LabelledSchema.extend({ identity: IdentitySchema })).max(1024),
-      retired: z.array(LabelledSchema.extend({ kind: z.enum(TARGET_KINDS) })).max(512),
-    }),
+    FullDirectorySchema.superRefine(checkConnectable),
   ]),
 });
 export type DirectoryResponse = z.infer<typeof DirectoryResponseSchema>;
@@ -728,8 +1092,11 @@ export type CallKind = 'hook' | 'tool' | 'browse' | 'directory';
  * identity, the one thing a saved setting reads, and `bound` for the native
  * call's own input on the hook before a search or fetch runs. Both describe
  * parsers, not settings, so they ride on every call; neither `policy` nor
- * `override` is a token. `bazaar` widens discovery to the open Bazaar and is
- * sent only while `experimental.bazaar` is on.
+ * `override` is a token. `mcp` takes a spec whose call is an MCP tool call on
+ * a connected account, the `execute` that offers one with no `endpoint`, the
+ * `fallback` beside it and `connectable` in the directory; it counts only
+ * beside `identity`. `bazaar` widens discovery to the open Bazaar and is sent
+ * only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
   'catalog',
@@ -739,6 +1106,7 @@ export const CLIENT_ACCEPTS: readonly string[] = [
   'jobs',
   'identity',
   'bound',
+  'mcp',
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
 
@@ -839,12 +1207,16 @@ export function buildToolSpecBody(request: {
 }
 
 /** The directory: every id a setting can name. `ifRevision` is the revision
- *  of a directory this client already holds. No `accepts`, no `harness`, no
- *  `policy`: the answer is the same for every client. */
-export function buildDirectoryBody(request: { ifRevision?: string } = {}): Record<string, unknown> {
+ *  of a directory this client already holds. `accepts` is read for `mcp`
+ *  alone, which adds the accounts this client can connect. No `harness`, no
+ *  `policy`: the answer is the same for every client that accepts the same. */
+export function buildDirectoryBody(
+  request: { ifRevision?: string; accepts?: readonly string[] } = {},
+): Record<string, unknown> {
   return {
     schemaVersion: 1,
     directory: request.ifRevision !== undefined ? { ifRevision: request.ifRevision } : {},
+    ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
   };
 }
 
@@ -1116,7 +1488,10 @@ export async function requestDirectory(
       method: 'POST',
       timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
       blockRedirects: true,
-      jsonBody: buildDirectoryBody(ifRevision !== undefined ? { ifRevision } : {}),
+      jsonBody: buildDirectoryBody({
+        ...(ifRevision !== undefined ? { ifRevision } : {}),
+        accepts: acceptsFor(false),
+      }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     DirectoryResponseSchema,

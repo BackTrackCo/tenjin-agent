@@ -21,7 +21,9 @@ import type { Identity } from './decision';
  * against. Nothing here can fail a lookup: every write swallows its own error.
  */
 
-export type Settlement = 'settled' | 'unknown' | 'not_charged';
+/** `account`: run on the user's own connected account, which their plan
+ *  pays; nothing left the balance, so there is nothing to settle. */
+export type Settlement = 'settled' | 'unknown' | 'not_charged' | 'account';
 
 /** The EIP-3009 authorization that was signed, enough to ask the token later
  *  whether it was used. */
@@ -39,6 +41,10 @@ export interface PaidRecord {
   provider: string;
   /** The service's display name, when its decision or spec carried one. */
   label?: string;
+  /** Who the call ran through: `tenjin` for Tenjin's own tools, or the id of
+   *  the connected account that ran it. Rows from before #37 have none and
+   *  read as their identity's source, else `tenjin`. */
+  source?: string;
   /** The route the user's settings held it to, when its spec or decision
    *  carried one: which service, source, providers and seller were paid. */
   identity?: Identity;
@@ -55,6 +61,15 @@ export interface PaidRecord {
   /** When reconcile last asked the chain about it, so a slow or rate-limited
    *  RPC is not asked about the same record on every lookup. */
   lastCheckedAt?: string;
+  /** The offer id of a job on the user's own account (#37): its one row, kept
+   *  from when its billing call may have billed and finished in place. */
+  job?: string;
+  /** `unknown`: a call on the user's own account that may have billed it,
+   *  with no result to show it did: still running, failed after the account's
+   *  job started, or answered with the account's own error. Usage and
+   *  payments say it may have charged, and never count it as billed. Absent:
+   *  the account ran it. */
+  charge?: 'unknown';
 }
 
 export const MAX_SENT_CHARS = 4_096;
@@ -128,6 +143,48 @@ export async function updatePaidRecord(
       if (found) {
         await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
       }
+    });
+  } catch {
+    // The record is the user's convenience; the lookup already happened.
+  }
+}
+
+/**
+ * A JOB ON THE USER'S OWN ACCOUNT, ONE ROW (#37). It is written once its
+ * billing call may have billed (still running, failed, or answered with the
+ * account's own error), its charge `unknown`, so usage and payments show it
+ * as may have charged; a later write for the same job that delivered (the
+ * resumed job) finishes that row in place, with the files it saved and its
+ * charge no longer unknown, under the lock reconcile rewrites with. Never
+ * throws.
+ */
+export async function recordAccountRow(
+  dataDir: string,
+  record: PaidRecord & { job: string },
+): Promise<void> {
+  try {
+    const path = paidLedgerPath(dataDir);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      const kept = current.find(({ record: row }) => row?.job === record.job)?.record;
+      if (kept === undefined || kept === null) {
+        await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        return;
+      }
+      // Still unknown, or already finished with nothing to add: unchanged.
+      if (record.charge !== undefined) return;
+      if (kept.charge === undefined && record.savedFiles.length === 0) return;
+      const lines = current.map(({ line, record: row }) => {
+        if (row?.job !== record.job) return line;
+        const finished: PaidRecord = {
+          ...row,
+          ...(record.savedFiles.length > 0 ? { savedFiles: record.savedFiles } : {}),
+        };
+        delete finished.charge;
+        return JSON.stringify(finished);
+      });
+      await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
     });
   } catch {
     // The record is the user's convenience; the lookup already happened.

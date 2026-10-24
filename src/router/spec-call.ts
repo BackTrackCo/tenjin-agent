@@ -1,7 +1,7 @@
 import { requestHeaderProblem } from '../lib/http';
 import { toMoney } from '../lib/money';
 import { inputProblems } from '../lib/request-schema';
-import type { ToolSpec } from './decision';
+import { isAccountSpec, type AccountSpec, type ToolSpec } from './decision';
 
 /**
  * A REQUEST SPEC, READ AND RUN. `request({id})` shows the agent a spec as text:
@@ -124,8 +124,26 @@ function priceLine(spec: ToolSpec): string {
     : `${price} per call`;
 }
 
-/** The spec as the agent reads it, ending with the call that runs it. */
-export function specText(id: string, spec: ToolSpec): string {
+/**
+ * Who pays for a call on the user's own account, and where it runs: their
+ * plan, never the Tenjin balance, and no address is shown, since the call
+ * goes to the server they connected. `account` is the account's name.
+ */
+function accountLines(spec: AccountSpec, account: string): string[] {
+  return [
+    `Price: billed to your ${account} account's own plan, not the Tenjin balance, and not counted in its limits.`,
+    `Runs on: your ${account} account.${spec.verified ? '' : ` ${uncheckedWarning(account)}`}`,
+  ];
+}
+
+/** The words every result of a service Tenjin hasn't checked carries. */
+export function uncheckedWarning(account: string): string {
+  return `Tenjin hasn't checked this service yet. Results may vary, and your ${account} account pays.`;
+}
+
+/** The spec as the agent reads it, ending with the call that runs it. An
+ *  account service's says the account pays, named by `account`. */
+export function specText(id: string, spec: ToolSpec | AccountSpec, account?: string): string {
   const properties = record(spec.input.properties);
   const required = new Set(Array.isArray(spec.input.required) ? spec.input.required : []);
   const open = Object.keys(properties).filter((name) => !(name in spec.pinned));
@@ -136,8 +154,12 @@ export function specText(id: string, spec: ToolSpec): string {
   const budget = { left: NESTED_LINES };
   const lines = [
     `${spec.provider}: ${spec.description}`,
-    `Price: ${priceLine(spec)}, paid by this machine's wallet straight to the provider.`,
-    `Request: ${spec.request.method} ${spec.request.url}`,
+    ...(isAccountSpec(spec)
+      ? accountLines(spec, account ?? spec.provider)
+      : [
+          `Price: ${priceLine(spec)}, paid by this machine's wallet straight to the provider.`,
+          `Request: ${spec.request.method} ${spec.request.url}`,
+        ]),
     ordered.length
       ? `Inputs:\n${ordered.flatMap((name) => fieldLines(name, record(properties[name]), required.has(name), budget)).join('\n')}`
       : 'Inputs: none.',
@@ -153,13 +175,13 @@ export function specText(id: string, spec: ToolSpec): string {
   if (spec.returnsExample !== undefined)
     lines.push(`Example of what comes back (shortened): ${JSON.stringify(spec.returnsExample)}`);
   lines.push(
-    `To run it, call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above. Nothing has been paid.`,
+    `To run it, call request({id: ${JSON.stringify(id)}, input: {...}}) with the inputs above. ${isAccountSpec(spec) ? 'Nothing has run yet.' : 'Nothing has been paid.'}`,
   );
   return lines.join('\n');
 }
 
 /** The agent's input with the pinned fields over it: a pin always wins. */
-export function mergedInput(spec: ToolSpec, input: Json): Json {
+export function mergedInput(spec: Pick<ToolSpec, 'pinned'>, input: Json): Json {
   return { ...input, ...spec.pinned };
 }
 
@@ -170,7 +192,10 @@ export function mergedInput(spec: ToolSpec, input: Json): Json {
  * does not name is a problem too, whatever the schema says about extras: the
  * agent has no description for it, so it is a guess, and a paid guess at that.
  */
-export function specInputProblems(spec: ToolSpec, merged: Json): string[] | undefined {
+export function specInputProblems(
+  spec: Pick<ToolSpec, 'input' | 'pinned'>,
+  merged: Json,
+): string[] | undefined {
   const problems = inputProblems(spec.input, merged);
   if (problems === undefined) return undefined;
   const properties = spec.input.properties;

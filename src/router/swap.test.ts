@@ -9,12 +9,16 @@ import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import type { SavedPolicy } from './access';
-import type { DirectoryListing, Identity, OfferSpec } from './decision';
+import type { AccountOfferSpec, DirectoryListing, Identity, OfferSpec } from './decision';
 import { runNativeHook, type HookDeps } from './hooks';
 import { readPaidRecords } from './paid';
 import { redirectClaimed, renderProgress, sessionDir } from './progress';
+import { claimSpecPayment } from './specs';
 import { runSwap } from './swap';
 import type { RequestToolDeps } from './tool';
+import { AccountLimited, type AccountCallResult } from './accounts/client';
+import { fakeKeychain } from './accounts/test-support';
+import { clearVaultKeyCache, writeVault } from './accounts/vault';
 
 // Pass-through, so a test can say no payment was even attempted.
 vi.mock('../commands/pay', async (importOriginal) => {
@@ -128,7 +132,14 @@ interface Sent {
 }
 
 /** The router (decisions and outcome reports) and the provider, every call kept. */
-function network(opts: { decide?: () => unknown; paidStatus?: number } = {}) {
+function network(
+  opts: {
+    decide?: () => unknown;
+    paidStatus?: number;
+    paidBody?: unknown;
+    payTo?: string;
+  } = {},
+) {
   const calls: Sent[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = String(input);
@@ -151,10 +162,15 @@ function network(opts: { decide?: () => unknown; paidStatus?: number } = {}) {
       return json(
         402,
         {},
-        { 'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '10000' }).header },
+        {
+          'PAYMENT-REQUIRED': buildPaymentRequired({
+            amount: '10000',
+            ...(opts.payTo !== undefined ? { payTo: opts.payTo } : {}),
+          }).header,
+        },
       );
     }
-    return json(opts.paidStatus ?? 200, { data: { BTC: 1 } });
+    return json(opts.paidStatus ?? 200, opts.paidBody ?? { data: { BTC: 1 } });
   }) as typeof fetch;
   const isReport = (call: Sent) => call.body !== undefined && 'status' in call.body;
   return {
@@ -493,6 +509,385 @@ describe('a search handed back', () => {
     });
     const net = network();
     expect((await swap(net)).envelope).toMatchObject({ reason: 'settings rule it out' });
+    expect(net.providerCalls()).toEqual([]);
+  });
+});
+
+/**
+ * A CHECKED MAP ON THE USER'S CONNECTED ACCOUNT, run in a native fetch's place
+ * (vraspar, 2026-10-23: "yes, include it"). The router binds it as any lead;
+ * here it meets the same rereads, rules and claim, runs on the account with
+ * the map's pins, and its receipt says what it replaced. The account's plan
+ * pays, so the Tenjin limits are not asked. When the account refuses before
+ * anything ran, Tenjin's own tool stands in only where the user opted in, and
+ * only past the same checks; otherwise the refusal and its offer answer.
+ */
+describe("a fetch run in place on the user's own account", () => {
+  const BOUND = fixture('wire-hook-execute-account-bound.json') as {
+    decision: Record<string, unknown> & {
+      id: string;
+      specs: AccountOfferSpec[];
+      fallback: OfferSpec;
+      bound: { url: string };
+    };
+  };
+  const LEAD = BOUND.decision.specs[0]!;
+  const FALLBACK = BOUND.decision.fallback;
+  const URL_ASKED = BOUND.decision.bound.url;
+  const FIRECRAWL = {
+    id: 'firecrawl',
+    label: 'Firecrawl',
+    mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+  };
+  const PAGE = { markdown: '# Pricing\nPro: $20', metadata: { title: 'Pricing' } };
+  const ISSUER = 'https://auth.example.test';
+
+  let keychain: ReturnType<typeof fakeKeychain>;
+  beforeEach(() => {
+    keychain = fakeKeychain();
+    clearVaultKeyCache();
+  });
+
+  /** The router's answer: the checked Firecrawl scrape, `bound` from the fetch. */
+  const answer = (edit: (d: typeof BOUND.decision) => Record<string, unknown> = (d) => d) => ({
+    ...BOUND,
+    decision: edit(BOUND.decision),
+  });
+
+  /** Firecrawl saved and signed in on this machine, with automatic use on. */
+  async function connected(
+    over: { onRefusal?: 'tenjin'; state?: 'ok' | 'expired' } = {},
+    router: Record<string, unknown> = {},
+    limits: Record<string, string> = LIMITS,
+  ) {
+    await saveConfig(
+      {
+        nativeReplacement: 'when-routed',
+        sources: [
+          {
+            ...FIRECRAWL,
+            signIn: 'oauth',
+            mapped: true,
+            ...(over.onRefusal !== undefined ? { onRefusal: over.onRefusal } : {}),
+          },
+        ],
+        ...router,
+      },
+      limits,
+    );
+    const now = Date.now();
+    await writeVault(
+      FIRECRAWL.id,
+      FIRECRAWL.label,
+      {
+        kind: 'oauth',
+        mcpUrl: FIRECRAWL.mcpUrl,
+        connectedAt: new Date(now - 60_000).toISOString(),
+        expiresAt: new Date(now + 3_600_000).toISOString(),
+        state: over.state ?? 'ok',
+        ready: [],
+        missing: [],
+      },
+      {
+        tokens: { access_token: 'access-1', refresh_token: 'refresh-1', token_type: 'Bearer' },
+        obtainedAt: now - 60_000,
+        clientInformation: { client_id: 'https://tenjin.sh/oauth/client-metadata.json' },
+        discoveryState: {
+          authorizationServerUrl: ISSUER,
+          authorizationServerMetadata: {
+            issuer: ISSUER,
+            authorization_endpoint: `${ISSUER}/authorize`,
+            token_endpoint: `${ISSUER}/token`,
+            response_types_supported: ['code'],
+          },
+        },
+      },
+      { dataDir: dir, platform: 'darwin', exec: keychain.exec },
+    );
+  }
+
+  /** The account's MCP server: each call it got, and its answer. */
+  function firecrawl(answers: (AccountCallResult | Error)[] = [{ structuredContent: PAGE }]) {
+    const called: { tool: string; args: Record<string, unknown> }[] = [];
+    const openSession: NonNullable<RequestToolDeps['accounts']>['openSession'] = async () => ({
+      listTools: async () => [],
+      callTool: async (tool, args) => {
+        called.push({ tool, args });
+        const next = answers.length > 1 ? answers.shift()! : answers[0]!;
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      close: async () => undefined,
+    });
+    return { openSession, called };
+  }
+
+  const fetchEvent = (over: Record<string, unknown> = {}) =>
+    search({ tool_name: 'WebFetch', tool_input: { url: URL_ASKED }, ...over });
+
+  const swapOnAccount = (
+    net: ReturnType<typeof network>,
+    account: ReturnType<typeof firecrawl>,
+    event = fetchEvent(),
+    hook: Partial<HookDeps> = {},
+  ) =>
+    runSwap(
+      event,
+      { ...hookDeps(net.fetchImpl), ...hook },
+      {
+        ...requestDeps(net.fetchImpl),
+        accounts: { exec: keychain.exec, platform: 'darwin', openSession: account.openSession },
+      },
+    );
+
+  const target = `WebFetch ${new URL(URL_ASKED).toString()}`;
+
+  it("runs the bound input on the account with the map's pins, outside the limits, and says what it replaced", async () => {
+    // A per-call limit no Tenjin tool here fits: the account's plan pays.
+    await connected({}, {}, { maxAutoSpend: '1', sessionBudget: '1' });
+    const net = network({ decide: () => answer() });
+    const account = firecrawl();
+    const result = await swapOnAccount(net, account);
+    expect(result.envelope).toMatchObject({
+      status: 'fulfilled',
+      via: 'swap',
+      cost: ['billed to your Firecrawl account, not the Tenjin balance'],
+      receipt: 'Firecrawl · your account · instead of WebFetch',
+    });
+    expect(result.summary).toBe('Firecrawl · your account · instead of WebFetch');
+    // The bound URL, with the map's own pins and nothing built here.
+    expect(account.called).toEqual([
+      {
+        tool: 'firecrawl_scrape',
+        args: {
+          url: URL_ASKED,
+          objective: "Read this page's main content.",
+          formats: ['markdown'],
+          onlyMainContent: true,
+          parsers: ['pdf'],
+          pdfOptions: { maxPages: 10 },
+        },
+      },
+    ]);
+    expect(net.decisions()).toHaveLength(1);
+    expect(net.providerCalls()).toEqual([]);
+    expect(runPay).not.toHaveBeenCalled();
+    const [row, ...more] = await readPaidRecords(dir);
+    expect(more).toEqual([]);
+    expect(row).toMatchObject({
+      capabilityId: 'firecrawl.scrape',
+      source: 'firecrawl',
+      settlement: 'account',
+      amountAtomic: '0',
+      via: 'swap',
+    });
+    await vi.waitFor(() =>
+      expect(net.reports()).toEqual([
+        expect.objectContaining({ id: LEAD.id, status: 'fulfilled', via: 'swap' }),
+      ]),
+    );
+    expect(await offerRecord()).toMatchObject({ offerId: LEAD.id, swap: true });
+    expect(await offerRecord()).not.toHaveProperty('priceAtomic');
+    // Claimed like any swap: the model's own retry of this fetch runs natively.
+    expect(await redirectClaimed(dir, SESSION, undefined, target)).toBe(true);
+    const again = network({ decide: () => answer() });
+    const retry = await swapOnAccount(again, account, fetchEvent({ tool_use_id: 'toolu_retry' }));
+    expect(retry.envelope).toMatchObject({ status: 'native', swap: 'handback' });
+    expect(account.called).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toMatch(/x402|USDC|wallet|Jev/i);
+  });
+
+  it('never runs a map Tenjin has not checked: the router answer does not parse', async () => {
+    await connected();
+    const net = network({
+      decide: () => answer((d) => ({ ...d, specs: [{ ...LEAD, verified: false }] })),
+    });
+    const account = firecrawl();
+    const result = await swapOnAccount(net, account);
+    expect(result.envelope).toMatchObject({ swap: 'handback', reason: 'no paid lookup fits' });
+    expect(account.called).toEqual([]);
+  });
+
+  it("hands back when the account is outside automatic use's providers, and offers it as usual", async () => {
+    await connected({}, { nativeReplacementProviders: [provider('exa')] });
+    const net = network({ decide: () => answer() });
+    const account = firecrawl();
+    expect((await swapOnAccount(net, account)).envelope).toMatchObject({
+      swap: 'handback',
+      reason: 'outside automatic use',
+    });
+    expect(account.called).toEqual([]);
+    expect(await redirectClaimed(dir, SESSION, undefined, target)).toBe(false);
+    // The same pick is the pre-call hook's offer, from the one decision.
+    const hook = await runNativeHook(fetchEvent(), hookDeps(net.fetchImpl));
+    expect(hook).toMatchObject({ action: 'execute', id: LEAD.id });
+    expect(net.decisions()).toHaveLength(1);
+    // Narrowed to the account's own provider, it runs.
+    const fits = network({ decide: () => answer() });
+    await saveConfig({
+      nativeReplacement: 'when-routed',
+      nativeReplacementProviders: [provider('firecrawl')],
+      sources: [{ ...FIRECRAWL, signIn: 'oauth', mapped: true }],
+    });
+    const ran = await swapOnAccount(
+      fits,
+      account,
+      fetchEvent({ tool_use_id: 'toolu_scoped', tool_input: { url: `${URL_ASKED}?plans` } }),
+    );
+    expect(ran.envelope).toMatchObject({ status: 'fulfilled', via: 'swap' });
+  });
+
+  it('hands back, with nothing claimed or sent, when the account is removed while the router decides', async () => {
+    await connected();
+    const net = network({
+      decide: () => {
+        // Another process saving the settings without the account.
+        writeFileSync(
+          join(dir, 'config.json'),
+          JSON.stringify({ ...LIMITS, router: { nativeReplacement: 'when-routed' } }),
+        );
+        return answer();
+      },
+    });
+    const account = firecrawl();
+    expect((await swapOnAccount(net, account)).envelope).toMatchObject({
+      swap: 'handback',
+      reason: 'your settings rule it out',
+    });
+    expect(account.called).toEqual([]);
+    expect(await redirectClaimed(dir, SESSION, undefined, target)).toBe(false);
+  });
+
+  it('a host that cannot run a pick in place asks nothing', async () => {
+    await connected();
+    const net = network({ decide: () => answer() });
+    const account = firecrawl();
+    expect(
+      (await swapOnAccount(net, account, fetchEvent(), { harness: 'codex' })).envelope,
+    ).toMatchObject({ swap: 'handback', reason: 'this host cannot run a pick in place' });
+    expect(net.decisions()).toEqual([]);
+    expect(account.called).toEqual([]);
+  });
+
+  describe('when the account refuses before anything ran', () => {
+    it("answers with the refusal and Tenjin's tool for the user to pick, and the fetch runs if called again", async () => {
+      await connected({ state: 'expired' });
+      const net = network({ decide: () => answer() });
+      const account = firecrawl();
+      const result = await swapOnAccount(net, account);
+      expect(result.envelope).toMatchObject({
+        status: 'needs_input',
+        via: 'swap',
+        cost: ['nothing charged'],
+        refused: { account: 'Firecrawl', reason: 'signin_expired' },
+        fallback: { id: FALLBACK.id, label: 'Firecrawl page read', price: '$0.015' },
+      });
+      expect(result.envelope).not.toHaveProperty('switched');
+      expect(result.summary).toMatch(/^Your Firecrawl sign-in has expired\. /);
+      expect(result.summary).toContain(
+        'The WebFetch did not run; call it again to run it as usual.',
+      );
+      expect(account.called).toEqual([]);
+      expect(net.providerCalls()).toEqual([]);
+      // The fetch called again runs natively, with no second decision.
+      const retry = await swapOnAccount(net, account, fetchEvent({ tool_use_id: 'toolu_again' }));
+      expect(retry.envelope).toMatchObject({ swap: 'handback', reason: 'already routed once' });
+      expect(net.decisions()).toHaveLength(1);
+    });
+
+    it("with the opt-in, runs Tenjin's tool in its place under the limits, tagged on its ledger row", async () => {
+      await connected({ onRefusal: 'tenjin' });
+      const net = network({ decide: () => answer(), paidBody: PAGE, payTo: FALLBACK.payTo });
+      const account = firecrawl([new AccountLimited(429)]);
+      const result = await swapOnAccount(net, account);
+      expect(account.called).toHaveLength(1);
+      expect(result.envelope).toMatchObject({
+        status: 'fulfilled',
+        via: 'swap',
+        cost: ['provider price 0.01 USD'],
+        switched: { from: 'Firecrawl', to: 'Firecrawl page read', reason: 'rate_limited' },
+      });
+      expect(net.signed()).toHaveLength(1);
+      const [row] = await readPaidRecords(dir);
+      expect(row).toMatchObject({ capabilityId: 'munition-scrape', source: 'tenjin', via: 'swap' });
+    });
+
+    it("with the opt-in, over the per-call limit: nothing paid, and the refusal and Tenjin's tool answer", async () => {
+      await connected({ onRefusal: 'tenjin' }, {}, { ...LIMITS, maxAutoSpend: '5000' });
+      const net = network({ decide: () => answer() });
+      const account = firecrawl([new AccountLimited(402)]);
+      const result = await swapOnAccount(net, account);
+      expect(result.envelope).toMatchObject({
+        status: 'needs_input',
+        via: 'swap',
+        refused: { reason: 'credit' },
+        fallback: { id: FALLBACK.id },
+      });
+      expect(result.envelope).not.toHaveProperty('switched');
+      // Not even a price probe to Tenjin's tool.
+      expect(net.providerCalls()).toEqual([]);
+      expect(runPay).not.toHaveBeenCalled();
+    });
+
+    it("with the opt-in, outside automatic use's providers: the refusal and Tenjin's tool answer", async () => {
+      await connected(
+        { onRefusal: 'tenjin' },
+        { nativeReplacementProviders: [provider('firecrawl')] },
+      );
+      const net = network({
+        decide: () =>
+          answer((d) => ({
+            ...d,
+            fallback: { ...FALLBACK, identity: { ...FALLBACK.identity, providers: ['munition'] } },
+          })),
+      });
+      const account = firecrawl([new AccountLimited(429)]);
+      const result = await swapOnAccount(net, account);
+      expect(result.envelope).toMatchObject({ refused: { reason: 'rate_limited' }, via: 'swap' });
+      expect(result.envelope).not.toHaveProperty('switched');
+      expect(net.providerCalls()).toEqual([]);
+    });
+
+    it("with the opt-in, when Tenjin's tool then runs nothing, the refusal and its offer answer", async () => {
+      await connected({ onRefusal: 'tenjin' });
+      // Tenjin's tool for this offer was already called once.
+      await claimSpecPayment(dir, FALLBACK.id);
+      const net = network({ decide: () => answer() });
+      const account = firecrawl([new AccountLimited(429)]);
+      const result = await swapOnAccount(net, account);
+      expect(result.envelope).toMatchObject({ refused: { reason: 'rate_limited' }, via: 'swap' });
+      expect(result.envelope).not.toHaveProperty('switched');
+      expect(net.signed()).toEqual([]);
+    });
+  });
+
+  it('once the account call started, never starts another provider, even with the opt-in', async () => {
+    await connected({ onRefusal: 'tenjin' });
+    const net = network({ decide: () => answer() });
+    // The account's own error answer: its job may have started.
+    const account = firecrawl([
+      { isError: true, content: [{ type: 'text', text: 'Insufficient credits' }] },
+    ]);
+    const result = await swapOnAccount(net, account);
+    expect(account.called).toHaveLength(1);
+    expect(result.envelope).toMatchObject({ via: 'swap', refused: { reason: 'credit' } });
+    expect(result.envelope).not.toHaveProperty('switched');
+    expect(net.providerCalls()).toEqual([]);
+  });
+
+  it('once the account ran and failed, that is the answer: never a hand-back or another provider', async () => {
+    await connected({ onRefusal: 'tenjin' });
+    const net = network({ decide: () => answer() });
+    const account = firecrawl([{ content: [] }]);
+    const result = await swapOnAccount(net, account);
+    expect(account.called).toHaveLength(1);
+    // Nothing shows whether the account charged for it: never "billed".
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      via: 'swap',
+      cost: ['your Firecrawl plan may have charged for this, not the Tenjin balance'],
+    });
+    expect(result.envelope.swap).toBeUndefined();
     expect(net.providerCalls()).toEqual([]);
   });
 });

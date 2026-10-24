@@ -963,7 +963,9 @@ describe('daily limit readouts', () => {
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
-      expect(result.humanLines?.join('\n')).toContain('automatic router up to');
+      expect(result.humanLines?.join('\n')).toContain(
+        'Per call: up to $0.25 from the Tenjin balance runs on its own; a call above it asks you first.',
+      );
       expect(result.humanLines?.join('\n')).not.toContain('per call at most');
     },
   );
@@ -999,10 +1001,12 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
     },
     routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
   });
-  expect(result.humanLines?.slice(0, 2)).toEqual([
-    'lookups 0.05 USD · routing credit 0.25 USD prepaid, 0.24 USD left (~80 calls)',
+  // What a person reads: the day against the limit, and the deposit counted in
+  // it; lookups and the routing credit are --json's alone.
+  expect(result.humanLines).toContain(
     'Today $0.30 of your $5.00 daily limit (Tenjin balance, over the last 24 hours)',
-  ]);
+  );
+  expect(result.humanLines?.join('\n')).not.toContain('routing credit');
 });
 
 it('status shows no routing credit before any deposit', async () => {
@@ -1011,7 +1015,10 @@ it('status shows no routing credit before any deposit', async () => {
     wallet: async () => null,
     routingCredit: async () => 0n,
   });
-  expect(result.humanLines?.[0]).toBe('lookups 0 USD');
+  expect(result.data).toMatchObject({
+    window: { routingDeposits: { atomic: '0' } },
+    routingCredit: { remaining: { atomic: '0' }, calls: 0 },
+  });
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {

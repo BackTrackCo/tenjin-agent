@@ -6,12 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext, CommandResult } from '../context';
 import { CliError } from '../lib/errors';
 import { directoryCachePath } from '../lib/paths';
-import type { DirectoryListing, WirePolicy } from '../router/decision';
+import { acceptsFor, type DirectoryListing, type WirePolicy } from '../router/decision';
 import { writeObservation, type RouterObservation } from '../router/router-observation';
 import { routerSettings } from '../router/settings';
 import { runConfigList, runConfigSet } from './config';
 import {
   runConfigBlock,
+  runConfigFallback,
   runConfigOnly,
   runConfigPrefer,
   runConfigReplacement,
@@ -33,6 +34,8 @@ const fixture = <T>(name: string): T =>
 const DIRECTORY = fixture<{ schemaVersion: 1; routerVersion: string; directory: DirectoryListing }>(
   'wire-directory.json',
 );
+/** The same directory with the accounts `tenjin connect` can connect. */
+const MCP_DIRECTORY = fixture<{ directory: DirectoryListing }>('wire-directory-mcp.json').directory;
 
 let dir: string;
 let work: string;
@@ -147,7 +150,7 @@ describe('prefer', () => {
       reset: 'tenjin config reset --task "web research" --preference',
     });
     // One free directory call, nothing else asked.
-    expect(net.bodies).toEqual([{ schemaVersion: 1, directory: {} }]);
+    expect(net.bodies).toEqual([{ schemaVersion: 1, directory: {}, accepts: acceptsFor(false) }]);
   });
 
   it('replaces the list at its scope and leaves every other rule alone', async () => {
@@ -179,6 +182,7 @@ describe('prefer', () => {
     expect(net.bodies.at(-1)).toEqual({
       schemaVersion: 1,
       directory: { ifRevision: DIRECTORY.directory.revision },
+      accepts: acceptsFor(false),
     });
   });
 
@@ -571,6 +575,10 @@ describe('replacement', () => {
     expect(text).toContain(
       'It works in Claude Code 2.1.287 or later with the Tenjin plugin; other agents keep getting ordinary offers.',
     );
+    // No account connected: what one would do, and who pays for it.
+    expect(text).toContain(
+      'An account you connect with `tenjin connect` runs this way too within the same provider choice, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.',
+    );
     expect(data(on)).toMatchObject({ replacement: { supported: false } });
     expect(data(on)).toMatchObject({ scope: 'machine', reset: 'tenjin config replacement off' });
     const off = await runConfigReplacement({ state: 'off' }, makeCtx(), offline());
@@ -581,6 +589,82 @@ describe('replacement', () => {
     expect(lines(off)).toContain(
       "Run Tenjin's picks automatically: off (its saved choice of Exa is kept for when it is turned on).",
     );
+  });
+
+  it("names the connected accounts it also runs, which bill their own plans, never one that isn't", async () => {
+    // Apify connected here with a map; fal saved but not signed in on this
+    // machine; an address with no map runs only when named.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
+            {
+              id: 'mcp-example-com',
+              label: 'mcp.example.com',
+              mcpUrl: 'https://mcp.example.com/mcp',
+              signIn: 'key',
+            },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    for (const id of ['apify', 'mcp-example-com'])
+      await writeFile(join(dir, 'sources', `${id}.json`), '{}');
+    const on = await runConfigReplacement(
+      { state: 'on', allProviders: true },
+      makeCtx(),
+      offline(),
+    );
+    const text = lines(on);
+    expect(text).toContain(
+      "It also runs your Apify account this way, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.",
+    );
+    expect(text).not.toMatch(/\bfal\b|mcp\.example\.com|mcp-example-com/);
+  });
+
+  it('names only the connected accounts whose jobs fit the provider choice', async () => {
+    // Apify, Firecrawl and fal connected with maps. fal's image job needs
+    // Black Forest Labs too, so naming fal alone leaves it out.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            {
+              id: 'firecrawl',
+              label: 'Firecrawl',
+              mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+              mapped: true,
+            },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    for (const id of ['apify', 'firecrawl', 'fal'])
+      await writeFile(join(dir, 'sources', `${id}.json`), '{}');
+    const net = router(MCP_DIRECTORY);
+    const firecrawl = lines(
+      await runConfigReplacement({ state: 'on', provider: ['firecrawl', 'fal'] }, makeCtx(), net),
+    );
+    expect(firecrawl).toContain(
+      "It also runs your Firecrawl account this way within the same provider choice, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.",
+    );
+    expect(firecrawl).not.toMatch(/\bApify\b/);
+    // None fits: no account is named as running automatically.
+    const google = lines(
+      await runConfigReplacement({ state: 'on', provider: ['google'] }, makeCtx(), net),
+    );
+    expect(google).toContain(
+      'An account you connect with `tenjin connect` runs this way too within the same provider choice, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.',
+    );
+    expect(google).not.toMatch(/\bApify\b|\bFirecrawl\b|\bfal\b/);
   });
 
   it('says it runs in place only where a running Claude Code with the plugin can', async () => {
@@ -668,6 +752,110 @@ describe('replacement', () => {
     );
     expect(err.code).toBe('REFUSED');
     expect((await personal()).nativeReplacement).toBeUndefined();
+  });
+});
+
+/**
+ * WHAT HAPPENS WHEN ONE OF THE USER'S ACCOUNTS REFUSES A CALL (#37): stop and
+ * offer Tenjin's own tool (the default), or run it in the account's place.
+ * Saved on the account's own entry, offline, and read back with its undo.
+ */
+describe('fallback', () => {
+  async function apifySaved(extra: Record<string, unknown> = {}): Promise<void> {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            {
+              id: 'apify',
+              label: 'Apify',
+              mcpUrl: 'https://mcp.apify.com',
+              signIn: 'oauth',
+              ...extra,
+            },
+          ],
+        },
+      }),
+    );
+  }
+  const saved = async () =>
+    ((await readFileJson())?.router as { sources: Record<string, unknown>[] }).sources[0];
+
+  it('runs Tenjin’s tool when the account refuses, by its name, offline, and undoes', async () => {
+    await apifySaved();
+    const net = offline();
+    const on = await runConfigFallback({ state: 'on', source: ['Apify'] }, makeCtx(), {
+      fetchImpl: net.fetchImpl,
+    });
+    expect(await saved()).toMatchObject({ id: 'apify', onRefusal: 'tenjin' });
+    expect(data(on)).toMatchObject({
+      operation: 'fallback',
+      changed: true,
+      scope: 'user',
+      reset: 'tenjin config fallback off --source apify',
+      account: { label: 'Apify', onRefusal: 'tenjin' },
+    });
+    expect(lines(on)).toContain(
+      'when your Apify account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin runs its own tool for the same job instead.',
+    );
+    // "What have I changed?" names it, with its undo.
+    const list = await runConfigList(makeCtx());
+    expect(lines(list)).toContain(
+      "When your Apify account refuses a call, Tenjin's own tool for that job runs in its place",
+    );
+    expect(lines(list)).toContain('Undo: `tenjin config fallback off --source apify`');
+    const off = await runConfigFallback({ state: 'off', source: ['apify'] }, makeCtx(), {
+      fetchImpl: net.fetchImpl,
+    });
+    expect(await saved()).not.toHaveProperty('onRefusal');
+    expect(data(off)).toMatchObject({ changed: true, account: { onRefusal: 'ask' } });
+    expect(net.bodies).toEqual([]);
+  });
+
+  it('names every connected account in "What have I changed?", with who pays and its undo', async () => {
+    // Connected with --no-prefer, and by its address: no rule names either.
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        router: {
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', signIn: 'oauth' },
+            {
+              id: 'mcp-example-com',
+              label: 'mcp.example.com',
+              mcpUrl: 'https://mcp.example.com/mcp',
+              signIn: 'key',
+            },
+          ],
+          policy: {
+            version: 1,
+            prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] }],
+          },
+        },
+      }),
+    );
+    const list = await runConfigList(makeCtx());
+    expect(lines(list)).toContain(
+      'Your Apify account, used first for the jobs it can do: its own plan pays, outside your limits on the Tenjin balance.',
+    );
+    expect(lines(list)).toContain('Disconnect: `tenjin disconnect apify`');
+    expect(lines(list)).toContain(
+      'Your mcp.example.com account: its own plan pays, outside your limits on the Tenjin balance.',
+    );
+    expect(lines(list)).toContain('Disconnect: `tenjin disconnect mcp-example-com`');
+  });
+
+  it('refuses an account that is not connected, and saves nothing', async () => {
+    await apifySaved();
+    const error = await caught(() =>
+      runConfigFallback({ state: 'on', source: ['fal'] }, makeCtx(), offline()),
+    );
+    expect(error.code).toBe('USAGE');
+    expect(error.message).toBe(
+      '"fal" isn\'t one of your connected accounts, so nothing was saved.',
+    );
+    expect(await saved()).not.toHaveProperty('onRefusal');
   });
 });
 

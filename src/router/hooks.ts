@@ -19,8 +19,17 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
-import { storeChoices, storeSpecs } from './specs';
-import { requestDecision, ROUTER_PATH, type HookDecision, type OfferSpec } from './decision';
+import { storeAccountOffer, storeChoices, storeSpecs } from './specs';
+import { accountLacks } from './accounts/presence';
+import {
+  isAccountSpec,
+  parseHookDecision,
+  requestDecision,
+  ROUTER_PATH,
+  type AnyOfferSpec,
+  type HookDecision,
+  type OfferSpec,
+} from './decision';
 import { keepDecided, takeDecided, type Decided } from './decided';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
@@ -787,7 +796,23 @@ async function vetOffer<T extends OfferDecision>(
   deadline: number,
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
-  const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
+  // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend
+  // policy or the wallet to check, and it is offered alone. One whose service
+  // this account was found to lack when it was connected is left out, rather
+  // than leading its task and failing when called: by now it has no fallback
+  // to stand in for it ({@link servableHere}).
+  if (isAccountOffer(offer)) {
+    const lead = offer.specs.find(({ id }) => id === offer.id);
+    if (lead === undefined || !isAccountSpec(lead)) return { withheld: 'account lead unreadable' };
+    if (await accountLacks(deps.dataDir, lead.identity))
+      return { withheld: 'account lacks this job' };
+    return { offer };
+  }
+  const terms = termsOf(offer);
+  const shortfall =
+    terms.endpoint === undefined
+      ? null
+      : await spendShortfall({ ...terms, endpoint: terms.endpoint }, deps, deadline);
   if (shortfall === null) {
     const note = await overCapNote(offer, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
@@ -796,6 +821,62 @@ async function vetOffer<T extends OfferDecision>(
     return { offer: { ...offer, hint: `${offer.hint} ${shortfall.note}` } };
   }
   return { withheld: shortfall.withheld };
+}
+
+/**
+ * AN ACCOUNT LEAD THIS MACHINE CANNOT RUN, SERVED BY TENJIN'S OWN ROUTE. The
+ * connect-time check found the account lacks the lead's tool (a higher plan,
+ * say), or there is no sign-in here to read, but the router never learns
+ * that: the account-wide preference keeps putting the account first for the
+ * task. So the fallback the server sends beside every account lead becomes
+ * the offer, as `offerAccountLead` does for a query: a paid `execute` on
+ * Tenjin's route, which the settings check, the spend check and the footer
+ * then treat like any other, and never `bound`, so it never runs in place of
+ * a native call. With no fallback (the settings allow no Tenjin route for
+ * the task) the lead is kept, and {@link vetOffer} withholds it.
+ *
+ * The line is this client's, since the server writes none for the fallback.
+ * A decision that would not parse as an answer keeps the lead too, so what
+ * is returned (and what the swap keeps for the pre-call arm) always does.
+ */
+async function servableHere(
+  decision: HookDecision | null,
+  dataDir: string,
+): Promise<HookDecision | null> {
+  if (!isAccountOffer(decision) || decision.fallback === undefined) return decision;
+  const lead = decision.specs.find(({ id }) => id === decision.id);
+  if (lead === undefined || !isAccountSpec(lead)) return decision;
+  if (!(await accountLacks(dataDir, lead.identity))) return decision;
+  return parseHookDecision(fallbackOffer(decision, decision.fallback)) ?? decision;
+}
+
+/** Tenjin's own route for an account lead's task, as an offer of its own. */
+function fallbackOffer(lead: AccountExecute, fallback: OfferSpec): ExecuteDecision {
+  const id = JSON.stringify(fallback.id);
+  const name = fallback.label ?? fallback.provider;
+  const price = fallback.priceVaries
+    ? `About $${toMoney(fallback.priceAtomic).usd} a call (up to $${toMoney(fallback.maxAmountAtomic).usd})`
+    : `$${toMoney(fallback.priceAtomic).usd} a call`;
+  const what = fallback.description.replace(/[\s.]+$/, '');
+  return {
+    action: 'execute',
+    id: fallback.id,
+    capabilityId: fallback.capabilityId,
+    category: lead.category,
+    provider: fallback.provider,
+    ...(fallback.label !== undefined ? { label: fallback.label } : {}),
+    capabilityDescription: fallback.description,
+    providerPriceAtomic: fallback.priceAtomic,
+    endpoint: fallback.request.url,
+    ...(fallback.identity !== undefined ? { identity: fallback.identity } : {}),
+    usage: lead.usage,
+    hint:
+      `${name} fits this, Tenjin's own tool: ${what}. ${price}, paid from the Tenjin balance. ` +
+      `Call request({id: ${id}}) for its inputs, then request({id: ${id}, input: {...}}) alone ` +
+      'and wait for its result; native tools stay allowed for anything else.',
+    specs: [fallback],
+    delivery: 'offer',
+  };
 }
 
 /** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
@@ -822,7 +903,7 @@ function listedPrices(offer: OfferDecision): bigint[] {
   if (offer.specs !== undefined) {
     return offer.specs
       .filter((spec) => spec.id !== offer.id)
-      .map((spec) => BigInt(spec.priceAtomic));
+      .flatMap((spec) => (isAccountSpec(spec) ? [] : [BigInt(spec.priceAtomic)]));
   }
   return [...offer.hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].flatMap((match) => {
     try {
@@ -1013,25 +1094,53 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
   savedPdf?: true;
 }
 
-type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
+/** An `execute` the balance pays: it names its URL, and every spec on it is
+ *  a paid one. The schema holds every `execute` that does not lead with an
+ *  account service to exactly this. */
+type ExecuteDecision = Extract<HookDecision, { action: 'execute' }> & {
+  endpoint: string;
+  specs?: OfferSpec[];
+};
 
 /**
- * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), or a
- * pay-per-call service the server found for a step nothing curated serves
- * (`discovered`). Both carry an id and a finished line, and every hook shows
- * them in the same place, under the same spend and one-block rules.
+ * AN OFFER LED BY A SERVICE ON THE USER'S CONNECTED ACCOUNT (#37): no URL,
+ * nothing the balance pays, and Tenjin's own route for the job beside it,
+ * which a refusal offers. The server sends one only for an account this
+ * machine says is connected, alone and checked, with `bound` when it can run
+ * in place of the native call it holds.
  */
-type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' }>;
+type AccountExecute = Extract<HookDecision, { action: 'execute' }> & {
+  endpoint?: undefined;
+  specs: AnyOfferSpec[];
+};
 
-function isOffer(decision: HookDecision | null): decision is OfferDecision {
-  return decision?.action === 'execute' || decision?.action === 'discovered';
+/**
+ * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), a service
+ * on the user's own account, or a pay-per-call service the server found for a
+ * step nothing curated serves (`discovered`). Each carries an id and a
+ * finished line, and every hook shows them in the same place, under the same
+ * rules; only one the balance pays meets the spend check.
+ */
+type OfferDecision =
+  ExecuteDecision | AccountExecute | Extract<HookDecision, { action: 'discovered' }>;
+
+function isAccountOffer(decision: HookDecision | null): decision is AccountExecute {
+  return decision?.action === 'execute' && (decision.specs ?? []).some(isAccountSpec);
 }
 
-/** What the spend check and the footer read, for either kind of offer. */
+function isOffer(decision: HookDecision | null): decision is OfferDecision {
+  if (decision?.action === 'discovered') return true;
+  return (
+    decision?.action === 'execute' && (decision.endpoint !== undefined || isAccountOffer(decision))
+  );
+}
+
+/** What the spend check and the footer read, for any kind of offer. An
+ *  account's has no URL, and costs the balance nothing. */
 function termsOf(offer: OfferDecision): {
   provider: string;
   providerPriceAtomic: string;
-  endpoint: string;
+  endpoint?: string;
 } {
   if (offer.action === 'execute') return offer;
   const { candidate } = offer;
@@ -1043,9 +1152,10 @@ function termsOf(offer: OfferDecision): {
 }
 
 /** A free curated offer: nothing to pay, so nothing for the spend policy or
- *  the wallet. A discovered service is never one: it is always a sale. */
+ *  the wallet. A discovered service is never one: it is always a sale. Nor is
+ *  one on the user's account, which their own plan pays. */
 function isFree(offer: OfferDecision): offer is ExecuteDecision {
-  return offer.action === 'execute' && offer.providerPriceAtomic === '0';
+  return offer.action === 'execute' && offer.providerPriceAtomic === '0' && !isAccountOffer(offer);
 }
 
 /**
@@ -1315,9 +1425,12 @@ export type SwapDecision =
   | { handback: string }
   | {
       offer: OfferDecision;
-      /** The lead's spec, which `bound` fills. */
-      spec: OfferSpec;
+      /** The lead's spec, which `bound` fills: a paid one, or a service on
+       *  the user's connected account. */
+      spec: AnyOfferSpec;
       bound: Record<string, unknown>;
+      /** The native call it runs in place of, for the receipt. */
+      tool: 'WebSearch' | 'WebFetch';
       /**
        * Claims every search or URL of the call for the main agent, as a
        * redirect does, and marks the call answered in place. False when a
@@ -1371,7 +1484,12 @@ export function outsideAutomaticUse(
 export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDecision> {
   if (hostOf(deps) !== 'claude') return { handback: 'this host cannot run a pick in place' };
   const event = decodeEvent(raw);
-  if (event?.kind !== 'native' || event.pending === null || event.toolUseId === undefined) {
+  if (
+    event?.kind !== 'native' ||
+    event.pending === null ||
+    event.pending.tool === 'AskUserQuestion' ||
+    event.toolUseId === undefined
+  ) {
     return { handback: 'not a search or fetch Tenjin routes' };
   }
   if (event.agentId !== undefined) return { handback: 'a subagent call' };
@@ -1415,7 +1533,9 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   if (!isOffer(outcome)) return back('no paid lookup fits');
   const spec = outcome.specs?.find(({ id }) => id === outcome.id);
   // NOTHING TO RUN AS IT STANDS: no `bound` (an older router, a free docs
-  // lookup, a choice to make) or no spec for it to fill.
+  // lookup, a choice to make, a map Tenjin has not checked) or no spec for it
+  // to fill. A checked map on the user's own account runs in place like any
+  // pick, and its own plan pays.
   if (
     outcome.bound === undefined ||
     spec === undefined ||
@@ -1430,7 +1550,8 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   const outside = outsideAutomaticUse(nativeReplacement, spec.identity);
   if (outside !== null) return back(outside);
   // ONLY A CALL THAT WOULD RUN ON ITS OWN: over a limit, or a wallet that
-  // cannot pay, goes back to the offer, whose request asks for approval.
+  // cannot pay, goes back to the offer, whose request asks for approval. An
+  // account's call meets no limit, and only needs the job on this account.
   const vetted = await vetOffer(outcome, deps, deadline, false);
   if (vetted.withheld !== undefined) return back(vetted.withheld);
   // Kept like a shown offer's: the spec `request({id, input})` runs.
@@ -1441,6 +1562,7 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
     offer: outcome,
     spec,
     bound: outcome.bound,
+    tool: pending.tool,
     claim: async () => {
       if (!(await claimRedirect(deps.dataDir, session, undefined, target, now()))) return false;
       await Promise.all(
@@ -1472,7 +1594,8 @@ function offeredTerms(offer: OfferDecision): OfferedTerms {
   return {
     offerId: offer.id,
     ...(label !== undefined ? { label } : {}),
-    priceAtomic: termsOf(offer).providerPriceAtomic,
+    // An account's call costs the balance nothing: no price to show.
+    ...(isAccountOffer(offer) ? {} : { priceAtomic: termsOf(offer).providerPriceAtomic }),
   };
 }
 
@@ -1807,8 +1930,15 @@ async function openFooter(
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
         // The line is shown, so the specs of the services it names are what
         // `request({id, input})` runs and `request({id})` shows, and its
-        // choice set is what `request({id, choice})` picks from.
-        await storeSpecs(deps.dataDir, decision.specs);
+        // choice set is what `request({id, choice})` picks from. An account's
+        // lead is kept with Tenjin's own route for its job.
+        if (isAccountOffer(decision)) {
+          const lead = decision.specs.find((spec) => spec.id === decision.id);
+          if (lead !== undefined && isAccountSpec(lead))
+            await storeAccountOffer(deps.dataDir, lead, decision.fallback);
+        } else {
+          await storeSpecs(deps.dataDir, decision.specs);
+        }
         if (decision.action === 'discovered' && decision.choices !== undefined) {
           await storeChoices(deps.dataDir, decision.id, {
             choices: decision.choices,
@@ -1825,6 +1955,7 @@ async function openFooter(
  *  routing fee that was not paid (`fee_required`, `wallet_low` and the rest)
  *  is named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
+  if (isAccountOffer(decision)) return `account lookup offered (${decision.provider})`;
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
     // `fee unpaid: <reason>` fits the record's 40 characters for every reason.
@@ -1936,7 +2067,7 @@ async function decide(
     warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
     return null;
   }
-  return outcome.decision.decision;
+  return servableHere(outcome.decision.decision, deps.dataDir);
 }
 
 /**

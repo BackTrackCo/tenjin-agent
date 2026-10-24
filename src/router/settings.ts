@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   CONFIG_DEFAULTS,
   loadRawConfig,
@@ -12,7 +12,9 @@ import {
   type RouterLayer,
   type SourceDescriptor,
 } from '../lib/config';
-import { normalizeForWire, type SavedPolicy } from './access';
+import { normalizeForWire, POLICY_VERSION, type SavedPolicy } from './access';
+import { connectedSourceIds } from './accounts/presence';
+import { isMappedDescriptor } from './accounts/saved';
 import { WirePolicySchema, type Target, type WirePolicy } from './decision';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
@@ -88,7 +90,8 @@ export type PolicySetting =
     }
   | { status: 'invalid'; problem: string; path: string };
 
-/** Saved account descriptors (#37). A descriptor alone connects nothing. */
+/** Saved account descriptors (#37). A descriptor alone connects nothing:
+ *  `connected` is those this machine also holds a vault for. */
 export type SourcesSetting =
   | { status: 'ok'; saved: SourceDescriptor[]; connected: string[] }
   | { status: 'invalid'; problem: string };
@@ -153,18 +156,26 @@ export async function routerSettings(
 }
 
 /**
- * The personal settings, from the global file's router block alone. No source
- * is connected until #37 adds connection state: a saved descriptor names an
- * account, it does not sign this machine in.
+ * The personal settings, from the global file's router block alone. A saved
+ * descriptor names an account; it is connected only where this machine also
+ * holds its vault (`accounts/presence.ts`), beside the file in `dataDir`.
  */
 export function personalSettings(
   router: unknown,
   path: string,
+  dataDir: string = dirname(path),
 ): Pick<RouterSettings, 'policy' | 'sources' | 'nativeReplacement'> {
   const personal = readPersonalRouter(router);
   const sources: SourcesSetting =
     personal.sources.status === 'ok'
-      ? { status: 'ok', saved: personal.sources.saved, connected: [] }
+      ? {
+          status: 'ok',
+          saved: personal.sources.saved,
+          connected: connectedSourceIds(
+            dataDir,
+            personal.sources.saved.map(({ id }) => id),
+          ),
+        }
       : personal.sources;
   return {
     policy: policySetting(personal.policy, sources, path),
@@ -182,9 +193,18 @@ function policySetting(
   // The sources ride inside the policy that is sent, so saved accounts this
   // build cannot read make the rules unreadable too: fail closed.
   if (sources.status === 'invalid') return { status: 'invalid', problem: sources.problem, path };
-  if (saved.status === 'none') return { status: 'none', path };
-  const wire = normalizeForWire(saved.saved, sources.connected);
-  if (wire === undefined) return { status: 'ok', saved: saved.saved, path };
+  // A connected account the router has jobs for rides in `sources` with no
+  // rule at all: without it the router reads every route on that account as
+  // unavailable. One connected by its address alone is never named to the
+  // router (its id comes from a private hostname, and the router has nothing
+  // for it); it runs only when the user names it, which is checked here.
+  const routed = sources.connected.filter((id) =>
+    sources.saved.some((entry) => entry.id === id && isMappedDescriptor(entry)),
+  );
+  if (saved.status === 'none' && routed.length === 0) return { status: 'none', path };
+  const rules: SavedPolicy = saved.status === 'ok' ? saved.saved : { version: POLICY_VERSION };
+  const wire = normalizeForWire(rules, routed);
+  if (wire === undefined) return { status: 'ok', saved: rules, path };
   // The bounds a single rule cannot break: the whole policy's serialized size.
   const checked = WirePolicySchema.safeParse(wire);
   if (!checked.success) {
@@ -197,7 +217,7 @@ function policySetting(
   }
   return {
     status: 'ok',
-    saved: saved.saved,
+    saved: rules,
     wire,
     ...(wire.revision !== undefined ? { revision: wire.revision } : {}),
     path,

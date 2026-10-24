@@ -7,9 +7,9 @@ validates is a contract only one side keeps. Three divergences so far
 round trip; copy these files rather than hand-writing an equivalent.
 
 Change them here, in the same commit as the `wire.ts` change that makes them
-valid, then copy them across. `harness/` is the exception: harness events
-(what Claude Code hands a router hook) that only this client reads, never
-copied. `ROUTER_VERSION` is `2026-10-23.1`.
+valid, then copy them across. `harness/`, in tenjin-agent alone, is the
+exception: harness events (what Claude Code hands a router hook) that only the
+client reads, never copied. `ROUTER_VERSION` is `2026-10-23.4`.
 
 ## The calls
 
@@ -18,7 +18,8 @@ each capability needs a client that runs its spec, so a client without it is
 answered `native` with the `client_outdated` diagnostic, on every form, before
 any model call. While the fee is `required`, the free route answers `{packet}`
 and `{query}` with `fee_required` first, with or without `spec` (The paid path,
-below). The outcome report and the directory carry no `accepts`.
+below). The outcome report carries no `accepts`, and the directory reads only
+`mcp` from its own.
 
 | call      | request                                                            | answer                                                                                                                      |
 | --------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
@@ -26,7 +27,7 @@ below). The outcome report and the directory carry no `accepts`.
 | tool      | `{schemaVersion, query, id?, accepts, policy?, override?}`         | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
 | browse    | `{schemaVersion, browse, accepts, policy?}`                        | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
 | by id     | `{schemaVersion, tool, accepts, policy?}`                          | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| directory | `{schemaVersion, directory: {ifRevision?}}`                        | `{schemaVersion, routerVersion, directory}`: every id a setting can name, free, or `unchanged`                              |
+| directory | `{schemaVersion, directory: {ifRevision?}, accepts?}`              | `{schemaVersion, routerVersion, directory}`: every id a setting can name, free, or `unchanged`                              |
 | outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`     | an empty 204                                                                                                                |
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
@@ -97,9 +98,17 @@ gate is offered only the tasks whose capabilities a client runs.
   `WebSearch` or `WebFetch`, no `nativeOutcome`), an `execute` or `discovered`
   answer whose lead has a spec and no `choices` may carry `bound`: the complete
   input for the spec under the decision's `id`, from that native call, pins
-  left out. The client runs it unchanged in the native call's place, through
-  its ordinary executor, or not at all; it never edits it. Never for the free
-  docs lookup or an `augment`.
+  left out; a required field the call does not carry (a result count) takes
+  the `default` the spec's schema declares. The client runs it unchanged in
+  the native call's place, through its ordinary executor, or not at all; it
+  never edits it. Never for the free docs lookup or an `augment`. An account
+  lead carries one only for a client that also sends `mcp`, and only when
+  Tenjin has checked its map (`verified`).
+- `mcp`: services on the user's connected accounts (Connected accounts,
+  below): a spec whose call is an MCP tool call on that account, the
+  `execute` that offers one with no `endpoint`, the `fallback` beside it, and
+  `connectable` in the directory. It counts only beside `identity`, which an
+  account spec always carries, and an account service needs it (`minContract`).
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above. Neither `policy`, `override` nor the
@@ -160,8 +169,12 @@ only?, prefer?}`:
   targets of their own kind.
 - `prefer`: `{scope, targets}`, ordered, all of one kind: `source` for the
   global scope, `provider`, `service` or `source` for a task.
-- `sources`: the connected sources on this machine. `tenjin`, the source of
-  every catalog service and open-Bazaar listing, is implied and never listed.
+- `sources`: the connected accounts this machine holds both a description and
+  a credential of, among those the directory listed as `connectable` when
+  they were connected. An account connected by its address alone is never
+  listed: the router has no service on it. `tenjin`, the source of every
+  catalog service and open-Bazaar listing, is implied and never listed. A
+  route on any other source is `unavailable` (Connected accounts, below).
 - `revision`: the first 16 hex of sha256 over the rest, its keys sorted at
   every level and no whitespace (`contractHash` in `contract.ts`). Logged,
   never authority.
@@ -235,6 +248,190 @@ each), `services` (`{id, label, identity}`, every catalog service) and
 true}`. No gate, no Jev, no payment and no row; it is answered before the fee
 and the contract filter, and the paid path does not take it. A client resolves
 a typed name against it and rechecks a saved offer's `identity.revision`.
+
+## Connected accounts
+
+A user can connect their own account at a provider, such as Apify, fal or
+Firecrawl. Its mapped services do catalog tasks on that account, and the
+user's own plan pays for them: the balance pays none of it, and the daily and
+per-call limits do not cover it. An account service's `identity.source` is the
+account's id (`apify`), never `tenjin`, and it runs only where
+`policy.sources` lists that id. An account maps every task its tools can do,
+and connecting makes all of them eligible, never first: a service ranks first
+only through the visible source preference that connecting writes, and that
+preference covers only the services the catalog marks `useFirst`. Only a
+client that sends `mcp` beside `identity` is offered one.
+
+### The account spec
+
+An account service's spec has a paid spec's `capabilityId`, `provider`,
+`label?`, `holds?`, `output?`, `description`, `input`, `pinned`, `example?`,
+`returns?`, `returnsExample?`, `resultSchema?` and `outputSchema?`. In place of
+a price and a request it has:
+
+- `mcp`: the call, `{tool, args, result, next?}`.
+- `identity`, always: the client attaches the credential it holds for
+  `identity.source` and calls the MCP server it connected for that account.
+  No URL and no credential travels, so no answer can send a user's token
+  anywhere else.
+- `verified`: Tenjin has checked this map with a real call.
+
+It never has `job` or `takes`: one call is one run on the user's account, and
+nothing of Tenjin's caps what that plan bills.
+
+`args` is the tool's `arguments` as a template. `pinned` is merged into the
+input first, as on a paid spec. Then:
+
+- A value that is exactly `"{field}"` is that input field's value, of its own
+  JSON type. When the field is absent, the key or array element holding it is
+  dropped, so a map makes every cost-driving input required, with a schema
+  maximum, or pins it.
+- A value that is exactly `"{result.<path>}"`, a dotted path of up to four
+  names, is allowed in a follow-up only: the value at that path in the first
+  call's result. When it is missing, the call stops there.
+- Any other value, braces inside a longer string included, is sent as written.
+  That is how a map pins a tool's settings: an Actor, a model, a spending cap,
+  one image.
+
+Every `{field}` names a property of `input`, and the whole call, `next`
+included, serializes to at most 8192 bytes.
+
+`result` says how a tool's answer is read: `structured` is its
+`structuredContent`; `json-text` is the JSON its text items hold, joined in
+order; `content` is its content items as they come, text and the image or
+audio media the client saves. An answer with `isError` is a refusal (below).
+The client checks `resultSchema` on the final result and gives the agent a copy
+trimmed to `outputSchema`, as on a paid spec.
+
+`next` is the follow-up for a first call that does not hold the result,
+`{when?, poll?, tool, args, result}`:
+
+- Without `when` it always runs: Apify's `call-actor`, then
+  `get-dataset-items` with the run's dataset,
+  `{result.storages.datasets.default.id}`; Firecrawl's research agent,
+  `firecrawl_agent`, then `firecrawl_agent_status` with its job,
+  `{result.id}`. With `when: {path, values}`
+  it runs only when the first result's value at `path` is one of `values`:
+  fal's `run_model` answering `processing`.
+- `poll`, `{tool, args, result, running, failed?, everyS, maxWaitS}`, is a
+  status call sent before the follow-up, every `everyS` seconds while its own
+  result is in `running` (`{path, values}`). `failed` stops the call; past
+  `maxWaitS` seconds from the first call, it ends unfinished.
+- The call that bills is sent once, and never again because its job is still
+  running: only `poll` repeats. A spec whose `poll` or follow-up names the
+  first call's `tool` is refused.
+
+The final result is the follow-up's when it ran, else the first call's.
+
+### Offers on an account
+
+The router suggests an account service on its own only when it is `verified`.
+An unchecked one runs only when the request names it: a `query` whose
+`override` prefers its source or the service, or only admits the service, or
+its id sent as `tool`. The hook carries no override, so it offers checked
+services alone. Browse lists checked ones, with `price` reading `your <label>
+account` and `free` false. Among the services a request allows, an account's
+follow Tenjin's own in catalog order, so one leads only through a preference:
+the account-wide source preference connecting writes, a task's own, or the
+request's. The account-wide one covers only the services the catalog marks
+`useFirst`; it passes over the rest, which keep their catalog place, after
+Tenjin's own. Such a service still runs when a request or a task's preference
+names it, when no Tenjin route for the task is left (the rules block it, or
+this client does not run it), and when the user uses only their own accounts.
+
+An account lead goes out as the hook's `execute` or the tool's `spec`, alone:
+never a batch sibling, a compare option or on a `discovered` offer. Its
+`execute` carries no `endpoint`, a `providerPriceAtomic` of `"0"` and the lead
+spec's `identity`, and its line names the account by label with no price:
+`Apify Google Maps, your Apify account: …`. Before a native search or fetch its
+map holds (Firecrawl's scrape holds `WebFetch`, its search `WebSearch`), it
+carries `bound` as any lead does, the account's input built from that call, so
+a client that runs Tenjin's picks automatically runs it in the native call's
+place on the user's own plan, under the map's pinned bounds. A provider scope
+the user set on automatic use reads the spec's `identity.providers`, as for any
+lead (`firecrawl` for Firecrawl's maps). The hook leads
+with checked maps only, and an unchecked one never carries `bound`, since it
+runs only when the request names it. When the account maps the task more than
+once (fal's edit, background removal and upscale), the lead is the one of them
+the request needs, as the list's pick chooses.
+
+Beside the lead, both answers carry `fallback`: Tenjin's own route for the
+same task, a paid spec with its `identity` (`source: "tenjin"`) and its price,
+under its own offer id. The line does not name it. When the account refuses
+the call (its sign-in expired, its plan or rate limit ran out), the client
+stops, charges nothing, and offers the fallback as the next step. It runs the
+fallback only when the user picks it or has opted in for that account. There
+is none when the settings allow no Tenjin route for the task. A lead this
+machine cannot run (connecting found the account lacks its tool, or there is
+no sign-in here) is never shown: the client offers the fallback in its place,
+with a line of its own, under the checks any paid offer meets.
+
+An account call's outcome report keeps a broken map apart from an account
+that refused: a refusal (sign-in, plan or rate limit) is `unpaid` with
+`reason: "provider"`, a result that misses `resultSchema` is `unverified`, and
+a poll that reaches `failed` is `failed`.
+
+### Connecting
+
+The directory request's `accepts` is read for `mcp` alone. With it, the full
+answer adds every account to `sources`, their services to `services`, the
+providers and sellers only those name, and `connectable`: every account a
+client can connect, which between them list every service not on `tenjin`.
+Without it the answer is the one a client that cannot run them always got.
+Each connectable account is `{id, label, mcpUrl, signIn, key?, services}`:
+
+- `id`: the account's source id, under which the client keeps its credential:
+  1 to 48 of `[a-z0-9-]`, starting with a letter or digit, never `tenjin`.
+- `mcpUrl`: its MCP server, https with no credentials, query or fragment.
+- `signIn`: `oauth` (MCP sign-in), `key`, or both. With `key`, `key: {scheme}`
+  says how a pasted key is sent, `Authorization: <scheme> <key>`: `Bearer`
+  for Apify and Firecrawl, `Key` for fal, whose key is `<key_id>:<key_secret>`.
+- `services`: `{id, verified, useFirst, tools}` for each mapped service.
+  `useFirst` says whether the account-wide preference puts it first, so the
+  connect readback can name the jobs the account is used first for; a catalog
+  edit sets it false to demote a service without removing it. `tools` lists
+  each call its spec makes (the call, the poll, the follow-up), each with the
+  top-level `arguments` it sends. A connect-time `tools/list` that lacks one
+  leaves that service out on this machine.
+
+`revision` is the ETag of the answer the client gets, so an `mcp` client's
+covers `connectable`.
+
+tenjin-cli signs in with Tenjin's OAuth client document, which is its alone,
+`oauth-client-metadata.json`, served at its own `client_id`,
+`https://tenjin.sh/oauth/client-metadata.json`.
+It is a public client: no secret, `token_endpoint_auth_method: "none"`, PKCE,
+`authorization_code` and `refresh_token`. Its `redirect_uris` are fixed
+loopback ports, `http://127.0.0.1:<port>/callback`, which `tenjin connect`
+serves for one sign-in. A server that still wants dynamic registration gets the
+same fields. No token or code reaches Tenjin's server.
+
+### Refusals on an account
+
+Both come as `native` with `policy_refused` and the `rule`:
+
+- `unavailable`, `{from: "saved", target: {kind: "source", id}}`: a route on
+  an account that `sources` does not list. "Apify isn't connected on this
+  machine." The router offers no such route, so a client meets it rechecking a
+  saved offer.
+- `unverified`, `{from: "request", target: {kind: "service", id}}`: the rules
+  allow some service for the step, but every one they allow is an account
+  service Tenjin hasn't checked and the request doesn't name. It names the
+  first: "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it runs only
+  when you ask for it by name." When the rules leave nothing checked for any
+  step, the refusal made before the gate names the rule instead, which holds
+  whatever was asked: "Your Tenjin settings block Tenjin's tools." A client
+  refusing, unnamed, a tool of a connected account that has no map uses the
+  same rule on the account's `source`: "Tenjin hasn't checked your <label>
+  account yet, so it runs only when you ask for it by name."
+
+Text a user reads names an account by its label, never its id. The maps ship
+unchecked (catalog `fixtures/catalog/sources`, with no `verifiedAt`). The
+account fixtures are the live route's answers with Apify's Google Maps map, or
+for the bound one Firecrawl's scrape, marked checked, as a real call will mark
+it, and, in the directory, Firecrawl's search kept out of the account-wide
+preference (`useFirst: false`), as a catalog edit would demote it; their Actor,
+model, tool and argument values stand in until those checks settle them.
 
 ## Discovered services
 
@@ -452,6 +649,17 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-directory.json`                      | the directory answer, trimmed to the services the other fixtures name                     |
 | `wire-directory-unchanged.json`            | the directory answer for the revision the client already holds                            |
 | `wire-policy-cases.json`                   | `allowed` cases: `[{name, policy?, override?, identity, expect}]`, run by both sides      |
+| `wire-hook-request-mcp.json`               | the hook from an `mcp` client: its accounts in `sources`, Apify preferred                 |
+| `wire-hook-execute-account.json`           | hook answer: a checked account lead alone, no `endpoint`, and the `fallback`              |
+| `wire-hook-request-account-fetch.json`     | the hook before a fetch, from an `mcp` client with Firecrawl preferred                    |
+| `wire-hook-execute-account-bound.json`     | hook answer for it: the checked Firecrawl scrape, `bound` from the fetch, the `fallback`  |
+| `wire-tool-request-account.json`           | the tool call naming the user's fal account: `override.prefer` its source                 |
+| `wire-lookup-spec-account.json`            | tool answer: an unchecked account spec, its `when` follow-up, and the `fallback`          |
+| `wire-tool-request-only-accounts.json`     | the tool call with Tenjin's own tools blocked, naming no account                          |
+| `wire-lookup-account-unverified.json`      | tool answer for it: `policy_refused` with the `unverified` rule                           |
+| `wire-directory-request-mcp.json`          | the directory from an `mcp` client                                                        |
+| `wire-directory-mcp.json`                  | its answer: `connectable`, trimmed to the account fixtures' services, one not `useFirst`  |
+| `oauth-client-metadata.json`               | Tenjin's OAuth client document, served at its `client_id` (Connecting, above)             |
 
 Two rules the fixtures exist to hold:
 
@@ -463,7 +671,8 @@ Two rules the fixtures exist to hold:
   contractless outcome without diagnostics does not typecheck.
 
 There is no `billing` block and no fee. The decision is free; the one payment in
-a lookup is the caller's own, to the provider.
+a lookup is the caller's own, to the provider, or the user's own plan on a
+connected account.
 
 ## Bounds both sides enforce
 
@@ -479,7 +688,7 @@ Take these from here; do not re-derive them.
 | `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                             |
 | `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                          |
 | `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                |
-| `accepts`                       | up to 16 strings of 1-32 characters, `spec` required; the server also reads `catalog`, `label`, `fields`, `jobs`, `identity`, `bound`, `discovered` (the list), `bazaar` (open Bazaar), `choices` (compare) |
+| `accepts`                       | up to 16 strings, 1-32 characters, `spec` required; the server also reads `catalog`, `label`, `fields`, `jobs`, `identity`, `bound`, `mcp`, `discovered` (the list), `bazaar` (Bazaar), `choices` (compare) |
 | `browse`                        | 0 to 8000 characters                                                                                                                                                                                        |
 | `tool`                          | 1 to 200 characters, a browse row's `id`                                                                                                                                                                    |
 | `label`                         | 1 to 32 characters on a spec or an `execute`; up to 120 on a browse row (a list entry's upstream)                                                                                                           |
@@ -498,6 +707,9 @@ Take these from here; do not re-derive them.
 | `identity`                      | `providers` and `categories` up to 8 ids each                                                                                                                                                               |
 | `bound`                         | a JSON object, at most 16384 bytes serialized, like `input`                                                                                                                                                 |
 | `directory` lists               | `categories` 64, each 1 to 64 `tasks`; `tasks` 256; `providers` and `sellers` 512 each; `sources` 64; `services` 1024; `retired` 512; every `label` 1 to 120 characters                                     |
+| account `mcp`                   | `tool` 1 to 128 of `[A-Za-z0-9_.-]`, not starting with `.` or `-`; the call, `next` included, 8192 bytes serialized; a `{result.<path>}` path up to 4 names                                                 |
+| `next.poll`                     | `everyS` 1 to 30, `maxWaitS` 1 to 600; `when`, `running` and `failed` each 1 to 8 `values` of 1 to 64 characters                                                                                            |
+| `connectable`                   | 16 accounts; `id` 1 to 48 of `[a-z0-9-]`, starting with a letter or digit; `mcpUrl` up to 2048 characters; 1 to 64 `services`, each 1 to 3 `tools` of up to 32 `arguments`                                  |
 | `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                  |
 | `id`                            | a uuid the server minted; a client never invents one                                                                                                                                                        |
 | id lifetime                     | 15 minutes from the hook call that created it                                                                                                                                                               |

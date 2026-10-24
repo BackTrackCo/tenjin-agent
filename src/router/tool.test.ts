@@ -14,7 +14,7 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeChoices, storeSpecs } from './specs';
+import { readKeptSpec, readSpec, storeChoices, storeSpecs } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTER_PATH,
@@ -1061,7 +1061,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound', 'mcp'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -2053,7 +2053,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound', 'mcp'],
       harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
@@ -2140,7 +2140,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound', 'mcp'],
       harness: 'claude',
     });
   });
@@ -2507,7 +2507,7 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound'];
+  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound', 'mcp'];
   /** A paid routing path that must never be asked. */
   const route = vi.fn(async () => {
     throw new Error('the paid routing path was asked');
@@ -2677,5 +2677,97 @@ describe('the tool list, read for free', () => {
     const result = await runRequestTool({ tool: 'context7-docs' }, deps(fetchImpl));
     expect(result.envelope).toMatchObject({ status: 'needs_input', reasonCode: 'spec_missing' });
     expect(result.summary).toContain('request({query})');
+  });
+});
+
+/**
+ * A SPEC ON A CONNECTED ACCOUNT (#37), answered to a query from a machine
+ * where that account is connected: kept with Tenjin's own route for its job,
+ * and shown saying the account pays, with nothing run yet.
+ */
+describe('a pick on a connected account', () => {
+  /** fal connected here: its descriptor, and a sign-in whose header lists the
+   *  services the connect-time check found it lacks. */
+  async function falConnected(missing: string[] = []): Promise<void> {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        maxAutoSpend: '250000',
+        sessionBudget: '5000000',
+        router: {
+          sources: [
+            {
+              id: 'fal',
+              label: 'fal',
+              mcpUrl: 'https://mcp.fal.ai/mcp-relay',
+              signIn: 'oauth',
+              mapped: true,
+            },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    await writeFile(
+      join(dir, 'sources', 'fal.json'),
+      JSON.stringify({ header: { id: 'fal', missing } }),
+    );
+  }
+
+  it('is kept and shown, saying who pays, before anything runs', async () => {
+    await falConnected();
+    const answer = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-lookup-spec-account.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; fallback: { id: string } } };
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'a photoreal image of a lighthouse at dusk, made with my fal account' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'spec',
+      id: answer.decision.id,
+      cost: ['nothing charged'],
+    });
+    expect(result.summary).toContain(
+      "Price: billed to your fal account's own plan, not the Tenjin balance",
+    );
+    // Unchecked: named by the user, and said so.
+    expect(result.summary).toContain("Tenjin hasn't checked this service yet.");
+    expect(result.summary).not.toMatch(/wallet|x402|USDC/);
+    // The connected account rode in the settings the router was sent.
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ policy: { sources: ['fal'] } });
+    expect(await readKeptSpec(dir, answer.decision.id)).toMatchObject({
+      account: true,
+      fallbackId: answer.decision.fallback.id,
+    });
+    expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await readSpec(dir, answer.decision.fallback.id)).not.toBeNull();
+  });
+
+  it("shows Tenjin's own tool in place of one this account was found to lack", async () => {
+    await falConnected(['fal.flux-pro-ultra']);
+    const answer = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-lookup-spec-account.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; fallback: { id: string } } };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'a photoreal image of a lighthouse at dusk, made with my fal account' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'spec', id: answer.decision.fallback.id });
+    expect(result.summary).toMatch(
+      /^This fal account doesn't have what this job needs: its tool was missing when it was connected\. Tenjin's own tool for this task is below, paid from the Tenjin balance\.\n/,
+    );
+    // The lead is never kept, so nothing can run it on the account.
+    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
+    expect(await readSpec(dir, answer.decision.fallback.id)).not.toBeNull();
   });
 });

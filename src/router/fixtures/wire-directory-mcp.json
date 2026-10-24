@@ -1,0 +1,469 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.4",
+  "directory": {
+    "revision": "62f9a77b90fd4d07",
+    "categories": [
+      {
+        "id": "lookups",
+        "label": "Everyday lookups",
+        "tasks": [
+          "library or API documentation",
+          "web research",
+          "read an exact page",
+          "computation",
+          "crypto price quote",
+          "company profile by domain",
+          "company match by name or social URL",
+          "email verification",
+          "person enrichment",
+          "x post search",
+          "reddit post search"
+        ]
+      },
+      {
+        "id": "images",
+        "label": "Images",
+        "tasks": [
+          "image with exact text",
+          "photoreal image",
+          "general image",
+          "image edit",
+          "illustration",
+          "logo or vector graphic"
+        ]
+      },
+      {
+        "id": "voice-and-sound",
+        "label": "Voice and sound",
+        "tasks": ["voiceover", "sound effect", "music", "audio transcription"]
+      },
+      {
+        "id": "video",
+        "label": "Video clips",
+        "tasks": ["video clip"]
+      },
+      {
+        "id": "research",
+        "label": "Research",
+        "tasks": ["academic papers"]
+      },
+      {
+        "id": "people-and-companies",
+        "label": "People and companies",
+        "tasks": ["people search", "company list search", "linkedin profile", "sec filings"]
+      },
+      {
+        "id": "social-and-local",
+        "label": "Social and local",
+        "tasks": [
+          "local business search",
+          "instagram accounts and posts",
+          "tiktok accounts and videos"
+        ]
+      },
+      {
+        "id": "files-and-pages",
+        "label": "Files and pages",
+        "tasks": [
+          "image text extraction",
+          "pdf to markdown",
+          "page screenshot or pdf render",
+          "html page hosting",
+          "send email"
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "web research",
+        "label": "web research"
+      },
+      {
+        "id": "read an exact page",
+        "label": "read an exact page"
+      },
+      {
+        "id": "crypto price quote",
+        "label": "crypto price quote"
+      },
+      {
+        "id": "company profile by domain",
+        "label": "company profile by domain"
+      },
+      {
+        "id": "company match by name or social URL",
+        "label": "company match by name or social URL"
+      },
+      {
+        "id": "email verification",
+        "label": "email verification"
+      },
+      {
+        "id": "person enrichment",
+        "label": "person enrichment"
+      },
+      {
+        "id": "computation",
+        "label": "computation"
+      },
+      {
+        "id": "library or API documentation",
+        "label": "library or API documentation"
+      },
+      {
+        "id": "x post search",
+        "label": "x post search"
+      },
+      {
+        "id": "reddit post search",
+        "label": "reddit post search"
+      },
+      {
+        "id": "image with exact text",
+        "label": "image with exact text"
+      },
+      {
+        "id": "image edit",
+        "label": "image edit"
+      },
+      {
+        "id": "general image",
+        "label": "general image"
+      },
+      {
+        "id": "photoreal image",
+        "label": "photoreal image"
+      },
+      {
+        "id": "illustration",
+        "label": "illustration"
+      },
+      {
+        "id": "logo or vector graphic",
+        "label": "logo or vector graphic"
+      },
+      {
+        "id": "video clip",
+        "label": "video clip"
+      },
+      {
+        "id": "voiceover",
+        "label": "voiceover"
+      },
+      {
+        "id": "sound effect",
+        "label": "sound effect"
+      },
+      {
+        "id": "music",
+        "label": "music"
+      },
+      {
+        "id": "audio transcription",
+        "label": "audio transcription"
+      },
+      {
+        "id": "academic papers",
+        "label": "academic papers"
+      },
+      {
+        "id": "people search",
+        "label": "people search"
+      },
+      {
+        "id": "company list search",
+        "label": "company list search"
+      },
+      {
+        "id": "linkedin profile",
+        "label": "linkedin profile"
+      },
+      {
+        "id": "sec filings",
+        "label": "sec filings"
+      },
+      {
+        "id": "local business search",
+        "label": "local business search"
+      },
+      {
+        "id": "instagram accounts and posts",
+        "label": "instagram accounts and posts"
+      },
+      {
+        "id": "tiktok accounts and videos",
+        "label": "tiktok accounts and videos"
+      },
+      {
+        "id": "image text extraction",
+        "label": "image text extraction"
+      },
+      {
+        "id": "pdf to markdown",
+        "label": "pdf to markdown"
+      },
+      {
+        "id": "page screenshot or pdf render",
+        "label": "page screenshot or pdf render"
+      },
+      {
+        "id": "html page hosting",
+        "label": "html page hosting"
+      },
+      {
+        "id": "send email",
+        "label": "send email"
+      }
+    ],
+    "providers": [
+      {
+        "id": "apify",
+        "label": "Apify"
+      },
+      {
+        "id": "black-forest-labs",
+        "label": "Black Forest Labs"
+      },
+      {
+        "id": "fal",
+        "label": "fal"
+      },
+      {
+        "id": "firecrawl",
+        "label": "Firecrawl"
+      },
+      {
+        "id": "google",
+        "label": "Google"
+      },
+      {
+        "id": "venice",
+        "label": "Venice"
+      }
+    ],
+    "sellers": [
+      {
+        "id": "aispace",
+        "label": "AiSpace"
+      },
+      {
+        "id": "apify",
+        "label": "Apify"
+      },
+      {
+        "id": "fal",
+        "label": "fal"
+      },
+      {
+        "id": "firecrawl",
+        "label": "Firecrawl"
+      },
+      {
+        "id": "stableenrich",
+        "label": "StableEnrich"
+      }
+    ],
+    "sources": [
+      {
+        "id": "tenjin",
+        "label": "Tenjin's tools"
+      },
+      {
+        "id": "apify",
+        "label": "Apify"
+      },
+      {
+        "id": "fal",
+        "label": "fal"
+      },
+      {
+        "id": "firecrawl",
+        "label": "Firecrawl"
+      }
+    ],
+    "services": [
+      {
+        "id": "aispace-nano-banana-2.1",
+        "label": "Google Nano Banana 2.1",
+        "identity": {
+          "service": "aispace-nano-banana-2.1",
+          "source": "tenjin",
+          "providers": ["google", "venice"],
+          "seller": "aispace",
+          "task": "photoreal image",
+          "categories": ["images"],
+          "revision": "ab0cd7b94addd984"
+        }
+      },
+      {
+        "id": "stableenrich-maps-text",
+        "label": "Google Maps Places",
+        "identity": {
+          "service": "stableenrich-maps-text",
+          "source": "tenjin",
+          "providers": ["google"],
+          "seller": "stableenrich",
+          "task": "local business search",
+          "categories": ["social-and-local"],
+          "revision": "3cb32565796f1267"
+        }
+      },
+      {
+        "id": "apify.google-maps-places",
+        "label": "Apify Google Maps",
+        "identity": {
+          "service": "apify.google-maps-places",
+          "source": "apify",
+          "providers": ["apify"],
+          "seller": "apify",
+          "task": "local business search",
+          "categories": ["social-and-local"],
+          "revision": "83ad1ac731cc992f"
+        }
+      },
+      {
+        "id": "fal.flux-pro-ultra",
+        "label": "fal FLUX1.1 Pro Ultra",
+        "identity": {
+          "service": "fal.flux-pro-ultra",
+          "source": "fal",
+          "providers": ["black-forest-labs", "fal"],
+          "seller": "fal",
+          "task": "photoreal image",
+          "categories": ["images"],
+          "revision": "ed3484d2b66e6901"
+        }
+      },
+      {
+        "id": "firecrawl.scrape",
+        "label": "Firecrawl scrape",
+        "identity": {
+          "service": "firecrawl.scrape",
+          "source": "firecrawl",
+          "providers": ["firecrawl"],
+          "seller": "firecrawl",
+          "task": "read an exact page",
+          "categories": ["lookups"],
+          "revision": "d230c04c739d1156"
+        }
+      },
+      {
+        "id": "firecrawl.search",
+        "label": "Firecrawl search",
+        "identity": {
+          "service": "firecrawl.search",
+          "source": "firecrawl",
+          "providers": ["firecrawl"],
+          "seller": "firecrawl",
+          "task": "web research",
+          "categories": ["lookups"],
+          "revision": "4d91ee025b87f91d"
+        }
+      }
+    ],
+    "retired": [],
+    "connectable": [
+      {
+        "id": "apify",
+        "label": "Apify",
+        "mcpUrl": "https://mcp.apify.com",
+        "signIn": ["oauth", "key"],
+        "key": {
+          "scheme": "Bearer"
+        },
+        "services": [
+          {
+            "id": "apify.google-maps-places",
+            "verified": true,
+            "useFirst": true,
+            "tools": [
+              {
+                "name": "call-actor",
+                "arguments": ["actor", "input", "callOptions"]
+              },
+              {
+                "name": "get-actor-run",
+                "arguments": ["runId"]
+              },
+              {
+                "name": "get-dataset-items",
+                "arguments": ["datasetId", "limit", "fields", "clean"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "fal",
+        "label": "fal",
+        "mcpUrl": "https://mcp.fal.ai/mcp-relay",
+        "signIn": ["oauth", "key"],
+        "key": {
+          "scheme": "Key"
+        },
+        "services": [
+          {
+            "id": "fal.flux-pro-ultra",
+            "verified": false,
+            "useFirst": true,
+            "tools": [
+              {
+                "name": "run_model",
+                "arguments": ["endpoint_id", "input"]
+              },
+              {
+                "name": "check_job",
+                "arguments": ["endpoint_id", "request_id"]
+              },
+              {
+                "name": "get_job_result",
+                "arguments": ["endpoint_id", "request_id"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "firecrawl",
+        "label": "Firecrawl",
+        "mcpUrl": "https://mcp.firecrawl.dev/v2/mcp-oauth",
+        "signIn": ["oauth", "key"],
+        "key": {
+          "scheme": "Bearer"
+        },
+        "services": [
+          {
+            "id": "firecrawl.scrape",
+            "verified": false,
+            "useFirst": true,
+            "tools": [
+              {
+                "name": "firecrawl_scrape",
+                "arguments": [
+                  "url",
+                  "objective",
+                  "formats",
+                  "onlyMainContent",
+                  "parsers",
+                  "pdfOptions"
+                ]
+              }
+            ]
+          },
+          {
+            "id": "firecrawl.search",
+            "verified": false,
+            "useFirst": false,
+            "tools": [
+              {
+                "name": "firecrawl_search",
+                "arguments": ["query", "objective", "limit"]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

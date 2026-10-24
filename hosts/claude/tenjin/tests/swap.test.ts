@@ -296,3 +296,76 @@ test('on, a fetch is answered in place in the fetch result shape', async ($, on)
     bytes: new TextEncoder().encode(RAN).length,
   });
 });
+
+/** The offer record for a pick on the user's own account: no price, since
+ *  their plan pays (`offeredTerms`). */
+async function keepAccountSwap(files: Map<string, string>, toolUseId: string) {
+  files.set(
+    `${DATA}/progress/${await sha256Hex(SESSION)}/offer-${await sha256Hex(toolUseId)}.json`,
+    JSON.stringify({ version: 1, at: 1, offerId: OFFER, label: 'Firecrawl scrape', swap: true }),
+  );
+}
+
+const ON_ACCOUNT = envelope('fulfilled', {
+  label: 'Firecrawl scrape',
+  cost: ['billed to your Firecrawl account, not the Tenjin balance'],
+  receipt: 'Firecrawl · your account · instead of WebFetch',
+  result: '{"markdown":"# Spec"}',
+  via: 'swap',
+});
+const ACCOUNT_REFUSED = envelope('needs_input', {
+  reason: 'Your Firecrawl sign-in has expired.',
+  cost: ['nothing charged'],
+  refused: {
+    account: 'Firecrawl',
+    reason: 'signin_expired',
+    reconnect: 'tenjin connect firecrawl',
+  },
+  fallback: { id: 'f-1', label: 'Firecrawl page read', price: '$0.015' },
+  via: 'swap',
+});
+
+test("on, a fetch run on the user's own account says their plan paid, in the fetch result shape", async ($, on) => {
+  const { files } = machine(on);
+  switchOn(files);
+  requestTool(on, ON_ACCOUNT, () => keepAccountSwap(files, 'toolu_account'));
+  const ran = nativeTool(on);
+  const answered = await $.tool.call({ tool: 'WebFetch', tool_use_id: 'toolu_account', ...FETCH });
+  expect(ran).toEqual([]);
+  expect(answered.result).toMatchObject({ url: FETCH.url, code: 200, result: ON_ACCOUNT });
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('toolu_account', 'WebFetch', FETCH, 'done'),
+  });
+  const lines = await shownLines(ui);
+  expect(lines[1]).toBe('Firecrawl scrape');
+  expect(lines).toContain(' · your account');
+  expect(lines.at(-1)).toBe('in place of Fetch');
+  expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
+  await ui.unmount();
+});
+
+test('on, an account that refused before anything ran is the fetch refused, drawn as refused', async ($, on) => {
+  const { files } = machine(on);
+  switchOn(files);
+  requestTool(on, ACCOUNT_REFUSED, () => keepAccountSwap(files, 'toolu_refused'));
+  const ran = nativeTool(on);
+  const answered = await $.tool.call({ tool: 'WebFetch', tool_use_id: 'toolu_refused', ...FETCH });
+  // The refusal and Tenjin's own tool are the call's answer; nothing ran natively.
+  expect(ran).toEqual([]);
+  expect(answered.result).toBeUndefined();
+  expect(answered.deny).toBe(ACCOUNT_REFUSED);
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('toolu_refused', 'WebFetch', FETCH, 'done'),
+  });
+  const lines = await shownLines(ui);
+  expect(lines).toContain(' · refused');
+  expect(lines).not.toContain(' · your account');
+  expect(await dotOf(ui)).toEqual({ color: 'error', dimColor: undefined });
+  await ui.unmount();
+});
