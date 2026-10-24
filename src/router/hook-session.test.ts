@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { admitHookEvent, claudeProjectsDir } from './hook-session';
+import { admitCodexHookEvent, admitHookEvent, claudeProjectsDir } from './hook-session';
 
 /**
  * The `hook` tool reads history only from a file under Claude Code's projects
@@ -130,5 +130,68 @@ describe('admitHookEvent', () => {
     await expect(
       admitHookEvent(event(SESSION, transcript), { env: { CLAUDE_CONFIG_DIR: '' }, homeDir: home }),
     ).resolves.not.toBeNull();
+  });
+});
+
+describe('a Codex leg', () => {
+  const rollout = (id: string) => `rollout-2026-10-22T17-35-09-${id}.jsonl`;
+  let day: string;
+  beforeEach(async () => {
+    day = join(home, '.codex', 'sessions', '2026', '10', '22');
+    await mkdir(day, { recursive: true });
+    await writeFile(join(day, rollout(SESSION)), '{}\n');
+  });
+  const admit = (e: Record<string, unknown>, threadId: unknown = SESSION, env = {}) =>
+    admitCodexHookEvent(e, { homeDir: home, env, threadId });
+
+  it("reads the session's own rollout file under the Codex home, and nothing else", async () => {
+    const own = join(day, rollout(SESSION));
+    expect(await admit(event(SESSION, own))).toMatchObject({ transcript_path: own });
+    await writeFile(join(day, rollout(OTHER)), '{}\n');
+    expect(await admit(event(SESSION, join(day, rollout(OTHER))))).toBeNull();
+    expect(await admit(event(SESSION, outside))).toBeNull();
+    expect(await admit(event(SESSION, 'relative.jsonl'))).toBeNull();
+  });
+
+  it('reads the rollout file of a session id whose leading groups are all digits', async () => {
+    const digits = '01912345-6789-7123-8123-123456789abc';
+    const own = join(day, rollout(digits));
+    await writeFile(own, '{}\n');
+    expect(await admit(event(digits, own), digits)).toMatchObject({ transcript_path: own });
+  });
+
+  it("reads the session's rollout after a revert, and never another session's", async () => {
+    // A prompt edit gives the thread a new rollout id: `<threadId>_<rolloutId>`
+    // (openai/codex `rollout/src/rollout_file_name.rs`, render).
+    const reverted = join(day, rollout(`${SESSION}_01a1777a-0000-7000-8000-000000000001`));
+    await writeFile(reverted, '{}\n');
+    expect(await admit(event(SESSION, reverted))).toMatchObject({ transcript_path: reverted });
+    const others = join(day, rollout(`${OTHER}_01a1777a-0000-7000-8000-000000000001`));
+    await writeFile(others, '{}\n');
+    expect(await admit(event(SESSION, others))).toBeNull();
+    expect(await admit(event(SESSION, reverted), OTHER)).toBeNull();
+  });
+
+  it('routes on the leg alone when there is no transcript yet, or none at all', async () => {
+    const unwritten = await admit(event(OTHER, join(day, rollout(OTHER))), OTHER);
+    expect(unwritten).not.toHaveProperty('transcript_path');
+    const none: Record<string, unknown> = event(SESSION, '');
+    delete none['transcript_path'];
+    expect(await admit(none)).toEqual(none);
+  });
+
+  it("refuses a subagent's leg, whose thread is not the session's own", async () => {
+    expect(await admit(event(SESSION, join(day, rollout(SESSION))), OTHER)).toBeNull();
+  });
+
+  it('follows CODEX_HOME', async () => {
+    const custom = join(home, 'custom', 'sessions');
+    await mkdir(custom, { recursive: true });
+    await writeFile(join(custom, rollout(SESSION)), '{}\n');
+    const env = { CODEX_HOME: join(home, 'custom') };
+    expect(
+      await admit(event(SESSION, join(custom, rollout(SESSION))), SESSION, env),
+    ).not.toBeNull();
+    expect(await admit(event(SESSION, join(day, rollout(SESSION))), SESSION, env)).toBeNull();
   });
 });
