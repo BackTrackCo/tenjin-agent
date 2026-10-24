@@ -4,6 +4,19 @@ import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/ht
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 import type { Harness } from './names';
+import {
+  BUILT_IN_SOURCE,
+  ONLY_DIMENSIONS,
+  POLICY_MAX_BYTES,
+  POLICY_VERSION,
+  TARGET_KINDS,
+  overrideProblems,
+  policyProblems,
+  type Problem,
+} from './access';
+
+export { BUILT_IN_SOURCE, ONLY_DIMENSIONS, POLICY_MAX_BYTES, POLICY_VERSION, TARGET_KINDS };
+export type { OnlyDimension, TargetKind } from './access';
 
 /**
  * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
@@ -52,16 +65,135 @@ const ContractSchema = z.object({
 });
 export type DecisionContract = z.infer<typeof ContractSchema>;
 
+/*
+ * THE USER'S SETTINGS ON THE WIRE, mirrored from tenjin's `wire.ts` with the
+ * same bounds, every object strict. `policy` is the saved routing rules
+ * (`router.policy`, global file only), `override` one request's narrowing.
+ * Code enforces both on each side; Jev never sees either. The checks beyond
+ * shape (`policyProblems`, `overrideProblems`) live in `access.ts`, which both
+ * these schemas and the config writer run, so a policy this client saves is
+ * one the server takes.
+ */
+
+/** Any typed id: task ids carry spaces and capitals ("company match by name or
+ *  social URL"), Bazaar ids colons. */
+export const TargetIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$/);
+export const TargetSchema = z.strictObject({ kind: z.enum(TARGET_KINDS), id: TargetIdSchema });
+export const ScopeSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('global') }),
+  z.strictObject({ kind: z.literal('task'), id: TargetIdSchema }),
+]);
+const RevisionSchema = z.string().regex(/^[0-9a-f]{16}$/);
+
+export const OnlyRuleSchema = z.strictObject({
+  scope: ScopeSchema,
+  dimension: z.enum(ONLY_DIMENSIONS),
+  targets: z.array(TargetSchema).min(1).max(64),
+});
+export const PreferRuleSchema = z.strictObject({
+  scope: ScopeSchema,
+  targets: z.array(TargetSchema).min(1).max(16),
+});
+
+export type Target = z.infer<typeof TargetSchema>;
+export type Scope = z.infer<typeof ScopeSchema>;
+export type OnlyRule = z.infer<typeof OnlyRuleSchema>;
+export type PreferRule = z.infer<typeof PreferRuleSchema>;
+
+/** Each problem a check in `access.ts` found, as an issue at its path. */
+function reported(problems: Problem[], ctx: z.RefinementCtx): void {
+  for (const { message, path } of problems) ctx.addIssue({ code: 'custom', message, path });
+}
+
+export const WirePolicySchema = z
+  .strictObject({
+    version: z.literal(POLICY_VERSION),
+    /** sha256 of the rest, first 16 hex: logged, never authority. */
+    revision: RevisionSchema.optional(),
+    /** Connected sources on this machine; `tenjin` is implied, never listed. */
+    sources: z.array(TargetIdSchema).min(1).max(16).optional(),
+    block: z.array(TargetSchema).min(1).max(128).optional(),
+    only: z.array(OnlyRuleSchema).min(1).max(32).optional(),
+    prefer: z.array(PreferRuleSchema).min(1).max(64).optional(),
+  })
+  .superRefine((policy, ctx) => reported(policyProblems(policy), ctx));
+export type WirePolicy = z.infer<typeof WirePolicySchema>;
+
+/** This request only: it narrows or re-ranks, and never widens, connects,
+ *  raises a limit or turns on replacement. Its only rules are global. */
+export const WireOverrideSchema = z
+  .strictObject({
+    only: z
+      .array(
+        z.strictObject({
+          dimension: z.enum(ONLY_DIMENSIONS),
+          targets: z.array(TargetSchema).min(1).max(16),
+        }),
+      )
+      .min(1)
+      .max(4)
+      .optional(),
+    prefer: z.array(TargetSchema).min(1).max(16).optional(),
+  })
+  .superRefine((override, ctx) => reported(overrideProblems(override), ctx));
+export type WireOverride = z.infer<typeof WireOverrideSchema>;
+
+/**
+ * A ROUTE AS THE USER'S SETTINGS READ IT, sent on every spec and both
+ * `execute` arms because this build lists `identity`. Built by the server from
+ * reviewed catalog data, never from a display name or a hostname. `providers`
+ * names every upstream party, sorted; `[]` and an absent `seller` are unknown,
+ * which only an open-Bazaar listing is. Not the discovered candidate's
+ * `source` (listing provenance) and not a payee label: those are never read
+ * as identity.
+ */
+export const IdentitySchema = z.strictObject({
+  /** The catalog id, or an open-Bazaar listing's `discovered:bazaar:` id. */
+  service: TargetIdSchema,
+  source: TargetIdSchema,
+  providers: z.array(TargetIdSchema).max(8),
+  seller: TargetIdSchema.optional(),
+  /** The wire's `category`; absent for a Bazaar listing. */
+  task: TargetIdSchema.optional(),
+  /** The categories whose reviewed membership holds `task`. */
+  categories: z.array(TargetIdSchema).max(8),
+  /** Changes exactly when one of the fields above does. */
+  revision: RevisionSchema,
+});
+export type Identity = z.infer<typeof IdentitySchema>;
+
+/**
+ * THE RULE A `policy_refused` NAMES, read LENIENTLY: every field a string, an
+ * unknown key dropped, and a value that is not even that dropped with it. A
+ * later rule kind (#37's `unavailable` source, say) must never cost the answer
+ * it rides on, which is a refusal the host already acts on without it.
+ */
+const PolicyRuleSchema = z
+  .object({
+    from: z.string().min(1).max(32),
+    kind: z.string().min(1).max(32),
+    target: z.object({ kind: z.string().min(1).max(32), id: z.string().min(1).max(64) }).optional(),
+    scope: z
+      .object({ kind: z.string().min(1).max(32), id: z.string().min(1).max(64).optional() })
+      .optional(),
+    dimension: z.string().min(1).max(32).optional(),
+  })
+  .optional()
+  .catch(undefined);
+export type DiagnosticsRule = NonNullable<z.infer<typeof PolicyRuleSchema>>;
+
 /**
  * What stopped an outcome this client cannot execute, in terms the host can act
  * on: a stable reason code, the stage that stopped, the fields or scope choices
- * the user can supply, and one concrete next action.
+ * the user can supply, and one concrete next action. `rule` rides only with
+ * `policy_refused`, which only a request that carried `policy` gets.
  */
 const DiagnosticsSchema = z.object({
   reasonCode: z.string().min(1).max(64),
   stage: z.string().min(1).max(32),
   missing: z.array(z.string().max(200)).max(60),
   nextAction: z.string().max(500),
+  rule: PolicyRuleSchema,
 });
 export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 
@@ -120,6 +252,9 @@ const CapabilityFields = {
   /** What the provider charges, atomic USDC. The `request` tool refuses a live
    *  402 above it; `gateSpend` still caps the amount actually signed. */
   providerPriceAtomic: z.string().regex(/^\d+$/),
+  /** Because this build lists `identity`. The free docs lookup has no spec,
+   *  so this is its only identity. */
+  identity: IdentitySchema.optional(),
 };
 
 /**
@@ -293,6 +428,9 @@ export const ToolSpecSchema = z.strictObject({
   job: JobSchema.optional(),
   /** A media service that runs several takes of one call: `count` up to `max`. */
   takes: z.strictObject({ max: z.number().int().min(2).max(5) }).optional(),
+  /** This spec's own service, because this build lists `identity`: never one
+   *  inferred from the lead. */
+  identity: IdentitySchema.optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 
@@ -368,6 +506,24 @@ function checkChoices(
   else if (fallback.id !== decision.id) issue("the default choice is this answer's own offer");
 }
 
+/** One call's input, bounded as the server bounds it. */
+export const INPUT_MAX_BYTES = 16 * 1024;
+
+/**
+ * THE NATIVE CALL'S OWN INPUT, sent because this build lists `bound`: on the
+ * hook before a native search or fetch runs, the complete input (pins left
+ * out) for the spec under the decision's `id`, built by the server from that
+ * call's query or URL. Run unchanged in the native call's place, through the
+ * ordinary executor, or not at all; never edited, merged or parsed here.
+ */
+const BoundSchema = z
+  .record(z.string(), z.unknown())
+  .refine(
+    (input) => Buffer.byteLength(JSON.stringify(input), 'utf8') <= INPUT_MAX_BYTES,
+    `bound must serialize to at most ${INPUT_MAX_BYTES} bytes`,
+  )
+  .optional();
+
 /** The same answer on both calls: the hook's offer, and the tool's answer
  *  when a query with no id found a service nobody curated. */
 const DiscoveredSchema = z
@@ -380,6 +536,7 @@ const DiscoveredSchema = z
     hint: z.string().min(1).max(2_000),
     specs: SpecsSchema,
     choices: ChoicesSchema.optional(),
+    bound: BoundSchema,
   })
   .superRefine(checkHint)
   .superRefine(checkChoices);
@@ -413,6 +570,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        */
       delivery: z.enum(['offer', 'augment']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),
+      bound: BoundSchema,
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -492,13 +650,62 @@ const BrowseResponseSchema = z.strictObject({
 });
 export type BrowseResponse = z.infer<typeof BrowseResponseSchema>;
 
+const LabelledSchema = z.strictObject({ id: TargetIdSchema, label: z.string().min(1).max(120) });
+
+/**
+ * EVERY ID A SETTING CAN NAME, free and unfiltered by settings: the
+ * categories with their reviewed tasks, the tasks, providers, sellers and
+ * sources with their labels, every catalog service with its identity, and the
+ * retired ids a saved rule may still hold. `revision` is the catalog's ETag;
+ * asked with the one this client holds, the answer is `unchanged`. `tenjin
+ * config` resolves a typed name against it, and readback names what a rule
+ * covers from it.
+ */
+const DirectoryResponseSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  routerVersion: z.string().min(1).max(64),
+  directory: z.union([
+    z.strictObject({ revision: RevisionSchema, unchanged: z.literal(true) }),
+    z.strictObject({
+      revision: RevisionSchema,
+      categories: z
+        .array(LabelledSchema.extend({ tasks: z.array(TargetIdSchema).min(1).max(64) }))
+        .max(64),
+      /** A task's label is its id. */
+      tasks: z.array(LabelledSchema).max(256),
+      providers: z.array(LabelledSchema).max(512),
+      sellers: z.array(LabelledSchema).max(512),
+      sources: z.array(LabelledSchema).max(64),
+      services: z.array(LabelledSchema.extend({ identity: IdentitySchema })).max(1024),
+      retired: z.array(LabelledSchema.extend({ kind: z.enum(TARGET_KINDS) })).max(512),
+    }),
+  ]),
+});
+export type DirectoryResponse = z.infer<typeof DirectoryResponseSchema>;
+export type Directory = DirectoryResponse['directory'];
+/** The directory's full answer, as opposed to `unchanged`. */
+export type DirectoryListing = Extract<Directory, { categories: unknown }>;
+
+/** A saved directory, reread from disk: the full arm only. */
+export function parseDirectoryListing(value: unknown): DirectoryListing | undefined {
+  const parsed = DirectoryResponseSchema.shape.directory.safeParse(value);
+  return parsed.success && 'categories' in parsed.data ? parsed.data : undefined;
+}
+
+/** A hook decision reread from disk (`decided.ts`), held to the same schema
+ *  as the router's answer: anything else reads as absent. */
+export function parseHookDecision(value: unknown): HookDecision | undefined {
+  const parsed = HookDecisionSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
 export type HookDecision = HookResponse['decision'];
 export type ToolDecision = ToolResponse['decision'];
 
 /** Which call this is, and therefore which answer is legal for it. */
-export type CallKind = 'hook' | 'tool' | 'browse';
+export type CallKind = 'hook' | 'tool' | 'browse' | 'directory';
 
 /**
  * What this client can act on beyond the curated answers, sent on every call.
@@ -517,10 +724,22 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * decision on a query with no id, which only a build that parses them can
  * take: the decision schemas are strict. `jobs` asks for each spec's `job`,
  * for the services that never answer inline, and for `count` on a media
- * offer's line. `bazaar` widens discovery to the open Bazaar and is sent only
- * while `experimental.bazaar` is on.
+ * offer's line. `identity` asks for each spec's and each `execute`'s route
+ * identity, the one thing a saved setting reads, and `bound` for the native
+ * call's own input on the hook before a search or fetch runs. Both describe
+ * parsers, not settings, so they ride on every call; neither `policy` nor
+ * `override` is a token. `bazaar` widens discovery to the open Bazaar and is
+ * sent only while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'label', 'fields', 'jobs'];
+export const CLIENT_ACCEPTS: readonly string[] = [
+  'catalog',
+  'spec',
+  'label',
+  'fields',
+  'jobs',
+  'identity',
+  'bound',
+];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
@@ -538,11 +757,18 @@ export function acceptsFor(bazaar: boolean): string[] {
  * does not. A `source` beside the packet was the `/prepare` route's shape, and
  * that route is gone. `sessionId` is the harness's own session id, which the
  * server uses only so one session is not offered the same discovered service
- * twice.
+ * twice. `policy` is a sibling of the packet, NEVER inside it: the packet is
+ * what the server's model reads, and the user's settings are for code alone.
+ * Absent when the user has no rules, which keeps their body what it was.
  */
 export function buildHookBody(
   packet: Packet,
-  extras: { sessionId?: string; accepts?: readonly string[]; harness?: Harness } = {},
+  extras: {
+    sessionId?: string;
+    accepts?: readonly string[];
+    harness?: Harness;
+    policy?: WirePolicy;
+  } = {},
 ): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -550,18 +776,22 @@ export function buildHookBody(
     ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
     ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
     packet,
+    ...(extras.policy !== undefined ? { policy: extras.policy } : {}),
   };
 }
 
 /** The exact body the tool call sends. `id` is the offer the query is for,
  *  sent only for an offer with no spec kept; `gateHint` is evidence, never
- *  authority. */
+ *  authority. `override` narrows this one query, so the server takes it only
+ *  beside `query`. */
 export function buildToolBody(request: {
   query?: string;
   id?: string;
   gateHint?: GateHint;
   accepts?: readonly string[];
   harness?: Harness;
+  policy?: WirePolicy;
+  override?: WireOverride;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -570,6 +800,8 @@ export function buildToolBody(request: {
     ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.policy !== undefined ? { policy: request.policy } : {}),
+    ...(request.override !== undefined ? { override: request.override } : {}),
   };
 }
 
@@ -579,12 +811,14 @@ export function buildBrowseBody(request: {
   browse: string;
   accepts: readonly string[];
   harness?: Harness;
+  policy?: WirePolicy;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
     browse: request.browse,
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.policy !== undefined ? { policy: request.policy } : {}),
   };
 }
 
@@ -593,12 +827,24 @@ export function buildToolSpecBody(request: {
   tool: string;
   accepts: readonly string[];
   harness?: Harness;
+  policy?: WirePolicy;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
     tool: request.tool,
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.policy !== undefined ? { policy: request.policy } : {}),
+  };
+}
+
+/** The directory: every id a setting can name. `ifRevision` is the revision
+ *  of a directory this client already holds. No `accepts`, no `harness`, no
+ *  `policy`: the answer is the same for every client. */
+export function buildDirectoryBody(request: { ifRevision?: string } = {}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    directory: request.ifRevision !== undefined ? { ifRevision: request.ifRevision } : {},
   };
 }
 
@@ -613,7 +859,9 @@ function schemaFor(kind: CallKind) {
     ? HookResponseSchema
     : kind === 'tool'
       ? ToolResponseSchema
-      : BrowseResponseSchema;
+      : kind === 'browse'
+        ? BrowseResponseSchema
+        : DirectoryResponseSchema;
 }
 
 /**
@@ -639,6 +887,12 @@ export interface DecisionDeps {
    * `claude`, and every production caller sends it.
    */
   harness?: Harness;
+  /**
+   * The user's saved rules as the wire carries them, resolved from the global
+   * file on every call (`routerSettings`) and never cached here: absent when
+   * there are none, so a user without rules sends what they always sent.
+   */
+  policy?: WirePolicy;
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
@@ -698,6 +952,9 @@ export type DecisionOutcome<T> =
       unreachable?: true;
       /** No answer came back at all: a transport failure or a timeout. */
       noAnswer?: true;
+      /** The router's own non-2xx status. A 400 to a body carrying `policy`
+       *  or `override` is a router that cannot apply the user's settings. */
+      httpStatus?: number;
     }
   /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
    *  for the free path: the native tool runs. */
@@ -719,17 +976,18 @@ export async function requestDecision(
 ): Promise<DecisionOutcome<HookResponse>>;
 export async function requestDecision(
   kind: 'tool',
-  request: { query: string; id?: string; gateHint?: GateHint },
+  request: { query: string; id?: string; gateHint?: GateHint; override?: WireOverride },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<ToolResponse>>;
 export async function requestDecision(
-  kind: CallKind,
+  kind: 'hook' | 'tool',
   request: {
     query?: string;
     packet?: Packet;
     sessionId?: string;
     id?: string;
     gateHint?: GateHint;
+    override?: WireOverride;
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
@@ -744,6 +1002,7 @@ export async function requestDecision(
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
+            ...(deps.policy !== undefined ? { policy: deps.policy } : {}),
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
@@ -751,6 +1010,8 @@ export async function requestDecision(
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
+            ...(deps.policy !== undefined ? { policy: deps.policy } : {}),
+            ...(request.override !== undefined ? { override: request.override } : {}),
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
@@ -778,6 +1039,7 @@ export async function requestDecision(
         status: 'failed',
         reason: free.reason,
         ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
+        ...(free.httpStatus !== undefined ? { httpStatus: free.httpStatus } : {}),
         // Still no answer, which must not end another call's backoff.
         ...(free.noAnswer === true ? { noAnswer: true as const } : {}),
         freePath: err.why,
@@ -809,6 +1071,7 @@ export async function requestBrowse(
         browse,
         accepts: acceptsFor(deps.acceptsBazaar === true),
         harness: deps.harness ?? 'claude',
+        ...(deps.policy !== undefined ? { policy: deps.policy } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
@@ -830,10 +1093,33 @@ export async function requestToolSpec(
         tool,
         accepts: acceptsFor(deps.acceptsBazaar === true),
         harness: deps.harness ?? 'claude',
+        ...(deps.policy !== undefined ? { policy: deps.policy } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     ToolResponseSchema,
+  );
+}
+
+/**
+ * THE DIRECTORY, ALWAYS FREE: no gate, no Jev, no payment and no row on the
+ * server, so it takes the free path whatever `deps.route` says. `ifRevision`
+ * is the revision of a directory this client holds; an `unchanged` answer
+ * says that copy is current for this call, and only for it.
+ */
+export async function requestDirectory(
+  ifRevision: string | undefined,
+  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'timeoutMs'>,
+): Promise<DecisionOutcome<DirectoryResponse>> {
+  return readDecision(
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildDirectoryBody(ifRevision !== undefined ? { ifRevision } : {}),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+    DirectoryResponseSchema,
   );
 }
 
@@ -854,6 +1140,9 @@ export interface SpecOutcome {
   reason?: UnpaidReason;
   httpStatus?: number;
   ms?: number;
+  /** The path that made the call, when it was not an ordinary request: `swap`,
+   *  a native search or fetch answered in place. Never on a default body. */
+  via?: 'swap';
 }
 
 /** The outcome report's own deadline: it is telemetry and never holds a result. */
@@ -892,6 +1181,7 @@ export function buildOutcomeBody(outcome: SpecOutcome, harness?: Harness): Recor
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
     ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),
     ...(outcome.ms !== undefined ? { ms: Math.max(0, Math.round(outcome.ms)) } : {}),
+    ...(outcome.via !== undefined ? { via: outcome.via } : {}),
   };
 }
 
@@ -920,6 +1210,7 @@ function readDecision<T extends z.ZodTypeAny>(
           ? `The router endpoint answered ${response.status}.`
           : `The router endpoint answered ${response.status} (${named.code}): ${named.message}`,
       ...(named !== null ? { errorCode: named.code } : {}),
+      httpStatus: response.status,
     };
   }
   const parsed = schema.safeParse(response.json);

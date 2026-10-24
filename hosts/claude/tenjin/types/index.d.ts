@@ -19,13 +19,18 @@ export type TenjinRow = {
   paid?: string;
 };
 
-/** A native call the router held for an offer, from the CLI's offer record. */
+/** A native call the router held for an offer, or answered in place, from
+ *  the CLI's offer record. */
 export type TenjinHeld = {
   offerId: string;
   /** The offer's `label`, when the decision carried one. */
   label?: string;
   /** The native tool and its search or URL, to see the same call run natively. */
   key: string;
+  /** The offer ran in the call's place (the swap), rather than holding it. */
+  swap?: true;
+  /** The offer's price, `$0.007`, from the record. */
+  price?: string;
 };
 
 declare module 'claude-code' {

@@ -3082,7 +3082,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -3255,6 +3255,8 @@ describe('a discovered service', () => {
       'label',
       'fields',
       'jobs',
+      'identity',
+      'bound',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3273,6 +3275,8 @@ describe('a discovered service', () => {
       'label',
       'fields',
       'jobs',
+      'identity',
+      'bound',
       'bazaar',
     ]);
   });
@@ -3562,7 +3566,7 @@ describe('a question to the user', () => {
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
     expect(body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'identity', 'bound'],
     });
   });
 
@@ -3755,5 +3759,149 @@ describe('a question to the user', () => {
       expect(written).toHaveLength(1);
       expect(JSON.parse(written[0]!)).toMatchObject({ hookSpecificOutput: expected });
     }
+  });
+});
+
+/**
+ * THE USER'S SETTINGS IN THE HOOKS. The saved rules (`router.policy` in the
+ * global file) ride beside the packet, never inside it, and only when there
+ * are some. An offer they refuse is never shown, and one with no identity is
+ * withheld under a rule that reads identity. Local only: a hook never calls
+ * the directory. A free docs lookup the rules refuse is not prefetched.
+ */
+describe("the user's settings in the hooks", () => {
+  const MUNITION = {
+    service: 'munition-scrape',
+    source: 'tenjin',
+    providers: ['firecrawl'],
+    seller: 'munition',
+    task: 'read an exact page',
+    categories: ['lookups'],
+    revision: '62c0b5d305f4373c',
+  };
+  const IDENTIFIED = { ...EXECUTE, decision: { ...EXECUTE.decision, identity: MUNITION } };
+  const firecrawl = { kind: 'provider', id: 'firecrawl' };
+  const exa = { kind: 'provider', id: 'exa' };
+
+  async function rules(policy: Record<string, unknown>): Promise<void> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, router: { policy: { version: 1, ...policy } } }),
+    );
+  }
+
+  const prompt = (body: unknown) => {
+    const { fetchImpl, calls } = router(body);
+    return runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    }).then((out) => ({ out, calls: calls as { body: Record<string, unknown> }[] }));
+  };
+
+  it('sends the rules beside the packet, and shows an offer they allow', async () => {
+    await rules({ block: [exa] });
+    const { out, calls } = await prompt(IDENTIFIED);
+    expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
+    expect(out.response).not.toBeNull();
+    const sent = calls[0]!.body;
+    expect(Object.keys(sent).sort()).toEqual([
+      'accepts',
+      'harness',
+      'packet',
+      'policy',
+      'schemaVersion',
+      'sessionId',
+    ]);
+    expect(sent.policy).toMatchObject({ version: 1, block: [exa] });
+    expect(JSON.stringify(sent.packet)).not.toContain('policy');
+  });
+
+  it('withholds an offer the rules refuse', async () => {
+    await rules({ block: [firecrawl] });
+    const { out } = await prompt(IDENTIFIED);
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: native tools (settings rule it out)',
+    );
+  });
+
+  it('withholds an offer with no identity under a rule that reads it, and not under preferences', async () => {
+    await rules({ block: [exa] });
+    expect((await prompt(EXECUTE)).out).toEqual({
+      response: null,
+      action: 'execute',
+      withheld: true,
+    });
+    await rules({
+      prefer: [{ scope: { kind: 'task', id: 'read an exact page' }, targets: [firecrawl] }],
+    });
+    expect((await prompt(EXECUTE)).out.response).not.toBeNull();
+  });
+
+  it('appends no offer the rules refuse to a delegated task', async () => {
+    await rules({ block: [firecrawl] });
+    const { fetchImpl } = router(IDENTIFIED);
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'Summarize the spec.' } },
+    ]);
+    const out = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Read https://example.test/spec', subagent_type: 'general-purpose' },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+  });
+
+  it('withholds a pre-call redirect the rules refuse, so the native call runs', async () => {
+    await rules({ block: [firecrawl] });
+    const { fetchImpl } = router(IDENTIFIED);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+  });
+
+  it('prefetches no free docs the rules refuse', async () => {
+    await rules({ block: [{ kind: 'provider', id: 'context7' }] });
+    const free = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL('./fixtures/wire-hook-execute-augment-identity.json', import.meta.url),
+        ),
+        'utf8',
+      ),
+    ) as unknown;
+    const jobs: PrefetchJob[] = [];
+    const { fetchImpl } = router(free);
+    const out = await runNativeHook(
+      await preCall('next.js 16 middleware matcher', 'WebSearch', { tool_use_id: 'toolu_9' }),
+      {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+        homeDir: dir,
+        prefetch: (job: PrefetchJob) => jobs.push(job),
+      },
+    );
+    expect(out).toMatchObject({ response: null, withheld: true });
+    expect(out.augmenting).toBeUndefined();
+    expect(jobs).toEqual([]);
+  });
+
+  it('stays silent and sends nothing when the rules cannot be read', async () => {
+    await rules({ version: 2 });
+    const { out, calls } = await prompt(IDENTIFIED);
+    expect(out.response).toBeNull();
+    expect(calls).toEqual([]);
   });
 });

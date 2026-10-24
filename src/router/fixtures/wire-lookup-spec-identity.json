@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.1",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d34",
+    "spec": {
+      "capabilityId": "cmc-quotes",
+      "provider": "CoinMarketCap",
+      "label": "CoinMarketCap quotes",
+      "holds": {},
+      "output": "json",
+      "description": "latest market quotes (price, market cap, 24h volume, percent changes) for one or more cryptocurrencies",
+      "priceAtomic": "10000",
+      "priceVaries": false,
+      "maxAmountAtomic": "10000",
+      "payTo": "0x3C5f3a6cE224BB89D72f5EB4232ecC27F67B3eeA",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "GET",
+        "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest",
+        "fields": {
+          "aux": "query",
+          "convert": "query",
+          "convert_id": "query",
+          "id": "query",
+          "skip_invalid": "query",
+          "slug": "query",
+          "symbol": "query"
+        },
+        "location": "query"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "aux": {
+            "description": "Comma-separated list of supplemental data fields: num_market_pairs, cmc_rank, date_added, tags, platform, max_supply, circulating_supply, total_supply, is_active, is_fiat.",
+            "type": "string"
+          },
+          "convert": {
+            "description": "Optionally calculate market quotes in up to 120 currencies by passing a comma-separated list. Default: \"USD\".",
+            "type": "string"
+          },
+          "convert_id": {
+            "description": "Optionally calculate market quotes by CoinMarketCap ID instead of symbol.",
+            "type": "string"
+          },
+          "id": {
+            "description": "One or more comma-separated CoinMarketCap cryptocurrency IDs. Example: \"1,1027\".",
+            "type": "string"
+          },
+          "skip_invalid": {
+            "description": "Pass true to relax request validation and skip any invalid IDs/symbols.",
+            "type": "boolean"
+          },
+          "slug": {
+            "description": "One or more comma-separated cryptocurrency slugs. Example: \"bitcoin,ethereum\". A slug names exactly one coin, unlike a symbol.",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "One or more comma-separated cryptocurrency symbols. Example: \"BTC,ETH\". A symbol can name several coins: each comes back as a list of every coin using it, inactive ones included, so read the entry with is_active 1 and the lowest cmc_rank, or pass slug or id to name one coin.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      },
+      "pinned": {},
+      "example": {
+        "symbol": "BTC,ETH",
+        "convert": "USD"
+      },
+      "returnsExample": {
+        "data": {
+          "1": {
+            "circulating_supply": 19830000,
+            "cmc_rank": 1,
+            "date_added": "2010-07-13T00:00:00.000Z",
+            "id": 1,
+            "is_active": 1,
+            "last_updated": "2026-02-26T10:20:00.000Z",
+            "max_supply": 21000000,
+            "name": "Bitcoin",
+            "quote": {
+              "USD": {
+                "fully_diluted_market_cap": "…",
+                "last_updated": "…",
+                "market_cap": "…",
+                "market_cap_dominance": "…",
+                "percent_change_1h": "…",
+                "percent_change_24h": "…",
+                "percent_change_30d": "…",
+                "percent_change_7d": "…",
+                "price": "…",
+                "volume_24h": "…",
+                "volume_change_24h": "…"
+              }
+            },
+            "slug": "bitcoin",
+            "symbol": "BTC",
+            "total_supply": 19830000
+          },
+          "1027": {
+            "circulating_supply": 120500000,
+            "cmc_rank": 2,
+            "date_added": "2015-08-07T00:00:00.000Z",
+            "id": 1027,
+            "is_active": 1,
+            "last_updated": "2026-02-26T10:20:00.000Z",
+            "name": "Ethereum",
+            "quote": {
+              "USD": {
+                "fully_diluted_market_cap": "…",
+                "last_updated": "…",
+                "market_cap": "…",
+                "market_cap_dominance": "…",
+                "percent_change_1h": "…",
+                "percent_change_24h": "…",
+                "percent_change_30d": "…",
+                "percent_change_7d": "…",
+                "price": "…",
+                "volume_24h": "…",
+                "volume_change_24h": "…"
+              }
+            },
+            "slug": "ethereum",
+            "symbol": "ETH",
+            "total_supply": 120500000
+          }
+        },
+        "status": {
+          "credit_count": 1,
+          "elapsed": 12,
+          "error_code": 0,
+          "error_message": "",
+          "timestamp": "2026-02-26T10:20:05.000Z"
+        }
+      },
+      "identity": {
+        "service": "cmc-quotes",
+        "source": "tenjin",
+        "providers": ["coinmarketcap"],
+        "seller": "coinmarketcap",
+        "task": "crypto price quote",
+        "categories": ["lookups"],
+        "revision": "dd56ec0ae5ea3e55"
+      }
+    },
+    "hint": "Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d34\", input: {\"symbol\":\"<symbol>\",\"convert\":\"<convert>\"}}) alone and wait for its result."
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}

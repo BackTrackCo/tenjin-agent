@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   buildBrowseBody,
+  buildDirectoryBody,
   buildHookBody,
   buildOutcomeBody,
   buildToolBody,
@@ -11,7 +12,11 @@ import {
   acceptsFor,
   CLIENT_ACCEPTS,
   parseForTests,
+  WireOverrideSchema,
+  WirePolicySchema,
   type SpecOutcome,
+  type WireOverride,
+  type WirePolicy,
 } from './decision';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
@@ -158,15 +163,50 @@ describe('the request bodies', () => {
    * it does not. A token is added only with the parser that takes its fields.
    */
   it("sends this build's accepts: the contract tokens it parses and runs", () => {
-    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs']);
+    expect(CLIENT_ACCEPTS).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'identity',
+      'bound',
+    ]);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
       'label',
       'fields',
       'jobs',
+      'identity',
+      'bound',
     ]);
-    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs', 'bazaar']);
-    const read = ['spec', 'catalog', 'label', 'fields', 'jobs', 'discovered', 'bazaar', 'choices'];
+    // The server's own request from a client that sends both settings tokens.
+    expect(acceptsFor(false)).toEqual(fixture('wire-hook-request-policy.json').accepts);
+    expect(acceptsFor(true)).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'identity',
+      'bound',
+      'bazaar',
+    ]);
+    const read = [
+      'spec',
+      'catalog',
+      'label',
+      'fields',
+      'jobs',
+      'identity',
+      'bound',
+      'discovered',
+      'bazaar',
+      'choices',
+    ];
+    // Each token this build sends is one the shared README documents.
+    const readme = readFileSync(join(dir, 'README.md'), 'utf8');
+    for (const token of acceptsFor(true)) expect(readme).toContain(`\`${token}\``);
     for (const token of acceptsFor(true)) expect(read).toContain(token);
     // The server's bounds: up to 16 tokens, each 1 to 32 characters.
     expect(acceptsFor(true).length).toBeLessThanOrEqual(16);
@@ -251,32 +291,250 @@ describe('the request bodies', () => {
         ...(canonical.sessionId !== undefined ? { sessionId: canonical.sessionId as string } : {}),
         ...(canonical.accepts !== undefined ? { accepts: canonical.accepts as string[] } : {}),
         harness: 'claude',
+        ...(canonical.policy !== undefined ? { policy: canonical.policy as WirePolicy } : {}),
       });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
     for (const name of readdirSync(dir).filter((n) => n.startsWith('wire-tool-request-'))) {
       const canonical = fixture(name);
       const accepts = canonical.accepts as string[];
+      const policy =
+        canonical.policy !== undefined ? { policy: canonical.policy as WirePolicy } : {};
       // A browse row's id is its own form; every other tool request is a query.
       const body =
         typeof canonical.tool === 'string'
-          ? buildToolSpecBody({ tool: canonical.tool, accepts, harness: 'claude' })
-          : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
+          ? buildToolSpecBody({ tool: canonical.tool, accepts, harness: 'claude', ...policy })
+          : buildToolBody({
+              query: canonical.query as string,
+              accepts,
+              harness: 'claude',
+              ...policy,
+              ...(canonical.override !== undefined
+                ? { override: canonical.override as WireOverride }
+                : {}),
+            });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
-    const browse = fixture('wire-browse-request.json');
-    expect(
-      buildBrowseBody({
-        browse: browse.browse as string,
-        accepts: browse.accepts as string[],
-        harness: 'claude',
-      }),
-    ).toEqual({ ...browse, harness: 'claude' });
+    for (const name of readdirSync(dir).filter((n) => n.startsWith('wire-browse-request'))) {
+      const browse = fixture(name);
+      expect(
+        buildBrowseBody({
+          browse: browse.browse as string,
+          accepts: browse.accepts as string[],
+          harness: 'claude',
+          ...(browse.policy !== undefined ? { policy: browse.policy as WirePolicy } : {}),
+        }),
+        name,
+      ).toEqual({ ...browse, harness: 'claude' });
+    }
     for (const name of ['wire-outcome-request.json', 'wire-outcome-unpaid.json']) {
       const canonical = fixture(name);
       const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
+  });
+
+  /**
+   * THE SETTINGS RIDE BESIDE THE PACKET, NEVER IN IT. The packet is what the
+   * server's model reads; `policy` is for code on both sides, so it is a
+   * top-level sibling, the last key, and each fixture's policy is one this
+   * client's own schema takes. A body with no rules carries no `policy`.
+   */
+  it('builds every settings-bearing request, byte for byte, policy beside the packet', () => {
+    const hook = fixture('wire-hook-request-policy.json');
+    const body = buildHookBody(hook.packet as Packet, {
+      sessionId: hook.sessionId as string,
+      accepts: hook.accepts as string[],
+      policy: hook.policy as WirePolicy,
+    });
+    expect(JSON.stringify(body)).toBe(JSON.stringify(hook));
+    expect(JSON.stringify((body.packet as object) ?? {})).not.toContain('policy');
+    const tool = fixture('wire-tool-request-policy.json');
+    expect(
+      JSON.stringify(
+        buildToolBody({
+          query: tool.query as string,
+          accepts: tool.accepts as string[],
+          policy: tool.policy as WirePolicy,
+          override: tool.override as WireOverride,
+        }),
+      ),
+    ).toBe(JSON.stringify(tool));
+    const browse = fixture('wire-browse-request-policy.json');
+    expect(
+      JSON.stringify(
+        buildBrowseBody({
+          browse: browse.browse as string,
+          accepts: browse.accepts as string[],
+          policy: browse.policy as WirePolicy,
+        }),
+      ),
+    ).toBe(JSON.stringify(browse));
+    const byId = fixture('wire-tool-request-by-id-policy.json');
+    expect(
+      JSON.stringify(
+        buildToolSpecBody({
+          tool: byId.tool as string,
+          accepts: byId.accepts as string[],
+          policy: byId.policy as WirePolicy,
+        }),
+      ),
+    ).toBe(JSON.stringify(byId));
+    for (const canonical of [hook, tool, browse, byId]) {
+      expect(WirePolicySchema.safeParse(canonical.policy).success).toBe(true);
+    }
+    expect(WireOverrideSchema.safeParse(tool.override).success).toBe(true);
+    // No rules, no field: the body is the one this client always sent.
+    const plain = buildHookBody(hook.packet as Packet, { accepts: hook.accepts as string[] });
+    expect(plain).not.toHaveProperty('policy');
+    expect(buildToolBody({ query: 'x' })).toEqual({ schemaVersion: 1, query: 'x' });
+  });
+
+  /** One rejected example per rule the server's `policySchema` runs, so the
+   *  config writer, which saves only what this schema takes, can never save
+   *  what the server answers 400. */
+  it.each([
+    ['an unsupported version', { version: 2, block: [{ kind: 'provider', id: 'exa' }] }],
+    [
+      'a capability rule scoped to a task',
+      {
+        version: 1,
+        only: [
+          {
+            scope: { kind: 'task', id: 'web research' },
+            dimension: 'capability',
+            targets: [{ kind: 'category', id: 'images' }],
+          },
+        ],
+      },
+    ],
+    [
+      'a provider rule naming a seller',
+      {
+        version: 1,
+        only: [
+          {
+            scope: { kind: 'global' },
+            dimension: 'provider',
+            targets: [{ kind: 'seller', id: 'exa' }],
+          },
+        ],
+      },
+    ],
+    [
+      'two only rules for one scope and dimension',
+      {
+        version: 1,
+        only: [
+          {
+            scope: { kind: 'global' },
+            dimension: 'provider',
+            targets: [{ kind: 'provider', id: 'exa' }],
+          },
+          {
+            scope: { kind: 'global' },
+            dimension: 'provider',
+            targets: [{ kind: 'provider', id: 'firecrawl' }],
+          },
+        ],
+      },
+    ],
+    [
+      'a global preference naming a provider',
+      {
+        version: 1,
+        prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'provider', id: 'exa' }] }],
+      },
+    ],
+    [
+      'a preference of mixed kinds',
+      {
+        version: 1,
+        prefer: [
+          {
+            scope: { kind: 'task', id: 'web research' },
+            targets: [
+              { kind: 'provider', id: 'exa' },
+              { kind: 'service', id: 'exa-search' },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      'two preferences for one scope',
+      {
+        version: 1,
+        prefer: [
+          { scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] },
+          { scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'exa' }] },
+        ],
+      },
+    ],
+    [
+      'a target blocked twice',
+      {
+        version: 1,
+        block: [
+          { kind: 'provider', id: 'exa' },
+          { kind: 'provider', id: 'exa' },
+        ],
+      },
+    ],
+    ['the built-in source listed', { version: 1, sources: ['tenjin'] }],
+    ['an empty block list', { version: 1, block: [] }],
+    [
+      'a policy over 16384 bytes',
+      {
+        version: 1,
+        block: Array.from({ length: 128 }, (_, i) => ({
+          kind: 'task',
+          id: `${String(i).padStart(3, '0')} ${'x'.repeat(60)}`,
+        })),
+        only: Array.from({ length: 8 }, (_, i) => ({
+          scope: { kind: 'task', id: `t${i}` },
+          dimension: 'service',
+          targets: Array.from({ length: 16 }, (_, j) => ({
+            kind: 'service',
+            id: `${i}-${j}-${'y'.repeat(50)}`,
+          })),
+        })),
+      },
+    ],
+  ])('refuses a policy with %s', (_, policy) => {
+    expect(WirePolicySchema.safeParse(policy).success).toBe(false);
+  });
+
+  it.each([
+    ['nothing in it', {}],
+    [
+      'two only rules on one dimension',
+      {
+        only: [
+          { dimension: 'provider', targets: [{ kind: 'provider', id: 'exa' }] },
+          { dimension: 'provider', targets: [{ kind: 'provider', id: 'firecrawl' }] },
+        ],
+      },
+    ],
+    ['a preference naming a category', { prefer: [{ kind: 'category', id: 'images' }] }],
+  ])('refuses an override with %s', (_, override) => {
+    expect(WireOverrideSchema.safeParse(override).success).toBe(false);
+  });
+
+  it('asks for the directory with the revision it holds, and nothing else', () => {
+    const canonical = fixture('wire-directory-request.json');
+    const ifRevision = (canonical.directory as { ifRevision: string }).ifRevision;
+    expect(JSON.stringify(buildDirectoryBody({ ifRevision }))).toBe(JSON.stringify(canonical));
+    expect(buildDirectoryBody()).toEqual({ schemaVersion: 1, directory: {} });
+  });
+
+  it('reports a swapped call with via, and only that one', () => {
+    const canonical = fixture('wire-outcome-via.json');
+    expect(JSON.stringify(buildOutcomeBody(canonical as unknown as SpecOutcome))).toBe(
+      JSON.stringify(canonical),
+    );
+    const plain = fixture('wire-outcome-request.json');
+    expect(buildOutcomeBody(plain as unknown as SpecOutcome)).not.toHaveProperty('via');
   });
 
   it('carries nothing about money on any form', () => {
@@ -293,6 +551,10 @@ describe('the request bodies', () => {
       'wire-browse-request.json',
       'wire-tool-request-by-id.json',
       'wire-hook-request-harness.json',
+      // The two other settings requests quote a user asking about payments.
+      'wire-browse-request-policy.json',
+      'wire-tool-request-by-id-policy.json',
+      'wire-directory-request.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -673,6 +935,91 @@ describe('every answer payload on disk', () => {
       false,
     );
     expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
+  });
+});
+
+/**
+ * THE SETTINGS ANSWERS. `identity` and `bound` reach only a build that sends
+ * their tokens, and this one does, so its strict parsers take them; a field
+ * either adds that this build does not know still fails the answer. The
+ * refusal's `rule` is read leniently: a later rule kind never costs the answer.
+ */
+describe('the settings answers', () => {
+  type Spec = Record<string, unknown> & { identity?: Record<string, unknown> };
+
+  it('takes identity on the execute answer and each spec, and bound from the search', () => {
+    const payload = fixture('wire-hook-execute-identity.json');
+    const decision = payload.decision as Record<string, unknown> & { specs: Spec[] };
+    expect(parseForTests('hook', payload).success).toBe(true);
+    expect(decision.identity).toMatchObject({ service: 'exa-search', source: 'tenjin' });
+    for (const spec of decision.specs) expect(spec.identity).toBeDefined();
+    expect(decision.bound).toEqual({ query: 'x402 agent payments' });
+    const identity = decision.identity as Record<string, unknown>;
+    const withIdentity = (value: unknown) => ({
+      ...payload,
+      decision: { ...decision, identity: value },
+    });
+    expect(parseForTests('hook', withIdentity({ ...identity, surprise: 1 })).success).toBe(false);
+    expect(parseForTests('hook', withIdentity({ ...identity, revision: 'abc' })).success).toBe(
+      false,
+    );
+    const oversize = { query: 'x'.repeat(16 * 1024) };
+    expect(
+      parseForTests('hook', { ...payload, decision: { ...decision, bound: oversize } }).success,
+    ).toBe(false);
+  });
+
+  it('takes the augment identity, the bound list offer and the row spec identity', () => {
+    const augment = fixture('wire-hook-execute-augment-identity.json');
+    expect(parseForTests('hook', augment).success).toBe(true);
+    expect(augment.decision).not.toHaveProperty('bound');
+    const bound = fixture('wire-hook-discovered-bound.json');
+    expect(parseForTests('hook', bound).success).toBe(true);
+    const discovered = bound.decision as { id: string; bound: unknown; specs: Spec[] };
+    expect(discovered.bound).toBeDefined();
+    for (const spec of discovered.specs) expect(spec.identity).toBeDefined();
+    const row = fixture('wire-lookup-spec-identity.json');
+    expect(parseForTests('tool', row).success).toBe(true);
+    expect((row.decision as { spec: Spec }).spec.identity).toBeDefined();
+  });
+
+  it('reads policy_refused with its rule, and keeps the answer when the rule is new or odd', () => {
+    for (const [name, kind] of [
+      ['wire-hook-policy-refused.json', 'hook'],
+      ['wire-lookup-policy-refused.json', 'tool'],
+    ] as const) {
+      const payload = fixture(name);
+      const decision = payload.decision as { diagnostics: Record<string, unknown> };
+      expect(decision.diagnostics.reasonCode).toBe('policy_refused');
+      expect(parseForTests(kind, payload).success).toBe(true);
+      const withRule = (rule: unknown) => ({
+        ...payload,
+        decision: { ...decision, diagnostics: { ...decision.diagnostics, rule } },
+      });
+      expect(
+        parseForTests(kind, withRule({ from: 'saved', kind: 'account_only', extra: true })).success,
+      ).toBe(true);
+      expect(parseForTests(kind, withRule(42)).success).toBe(true);
+    }
+  });
+
+  it('parses the directory and its unchanged answer, and nothing else as one', () => {
+    const full = fixture('wire-directory.json');
+    expect(parseForTests('directory', full).success).toBe(true);
+    expect(parseForTests('directory', fixture('wire-directory-unchanged.json')).success).toBe(true);
+    expect(parseForTests('browse', full).success).toBe(false);
+    expect(parseForTests('directory', fixture('wire-browse.json')).success).toBe(false);
+    const listing = full.directory as Record<string, unknown> & { services: Spec[] };
+    expect(
+      parseForTests('directory', { ...full, directory: { ...listing, surprise: [] } }).success,
+    ).toBe(false);
+    const [first] = listing.services;
+    expect(
+      parseForTests('directory', {
+        ...full,
+        directory: { ...listing, services: [{ ...first, identity: undefined }] },
+      }).success,
+    ).toBe(false);
   });
 });
 

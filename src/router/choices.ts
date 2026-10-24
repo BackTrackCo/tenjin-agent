@@ -12,6 +12,7 @@ import {
   type PlanWords,
   type QuotedCall,
 } from './plan';
+import { policyAtBoundary, type Route } from './admit';
 import { SILENT_FOOTER, type LookupFooter } from './progress';
 import {
   claimSpecPayment,
@@ -22,14 +23,18 @@ import {
   type KeptChoices,
 } from './specs';
 import {
+  admitExecution,
   alreadyPaid,
   costLines,
   fail,
   failureOutcome,
   type FailExtras,
+  memberOf,
   paySpec,
   prepareSpec,
+  refusedByPolicy,
   reportOutcome,
+  routeOf,
   runningJob,
   specTerms,
   type FailStatus,
@@ -180,7 +185,10 @@ type StepResult = { status: unknown } & Record<string, unknown>;
  *    user approved brings its own slots instead, one per claimed step, or
  *    nothing runs.
  * 5. Every planned step pays at once, each against its own slot, through the
- *    single-offer pay step.
+ *    single-offer pay step. A choice set is held to the user's rules as one
+ *    set first (`recheck`), after its probes, so a block saved while they ran
+ *    refuses every option before any pays; each option's own payment
+ *    boundary holds the whole set to them again.
  */
 async function runTakes(
   steps: TakeStep[],
@@ -191,6 +199,9 @@ async function runTakes(
     call: (planned: PlannedStep[]) => QuotedCall;
     /** The slots of a quote the user approved, in the steps' order. */
     approved?: PlanSlot[];
+    /** A choice set's rules, read again for its claimed options: a refusal
+     *  stops the set. A count has none: its takes are one call. */
+    recheck?: (claimed: readonly TakeStep[]) => Promise<RequestToolResult | null>;
   },
   deps: RequestToolDeps,
   reportDeps: ReportDeps,
@@ -272,6 +283,19 @@ async function runTakes(
     }
   }
 
+  // THE SET AGAIN, AFTER ITS PROBES AND BEFORE ANY PAYMENT: a block saved
+  // while the probes ran refuses every option, claims released, rather than
+  // pay for what is left of the set. Each option's payment boundary then
+  // reads the rules for the whole set too, not only for itself.
+  const group = plan.recheck !== undefined ? routesOf(claimed) : undefined;
+  if (plan.recheck !== undefined && planned.length > 0) {
+    const stop = await plan.recheck(claimed);
+    if (stop !== null) {
+      await release(planned.map(({ step }) => step));
+      return { refused: stop };
+    }
+  }
+
   const paid = new Map(
     await Promise.all(
       planned.map(
@@ -280,7 +304,7 @@ async function runTakes(
             step,
             await paySpec(
               step.prepared,
-              { slot: slots.get(step)! },
+              { slot: slots.get(step)!, ...(group !== undefined ? { group } : {}) },
               deps,
               SILENT_FOOTER,
               reportDeps,
@@ -496,29 +520,54 @@ export async function runChoiceSet(
   }
 
   // A quote the user approved runs only the options it covered.
-  const steps: TakeStep[] = prepared
-    .filter(({ option }) => approved === undefined || approved.keys.includes(option.key))
-    .map(({ option, checked }) => ({
-      named: { key: option.key, label: option.label, id: option.id },
-      claim: option.id,
-      prepared: checked,
-    }));
+  const running = prepared.filter(
+    ({ option }) => approved === undefined || approved.keys.includes(option.key),
+  );
+  // THE USER'S SETTINGS, FOR THE WHOLE SET AT ONCE, before any option is
+  // claimed or probed: one member the rules now refuse refuses the set the
+  // user approved, never a smaller one, and names the options that could run
+  // on their own. One directory call covers every member.
+  const admitted = await admitExecution(
+    running.map(({ option, checked }) => routeOf(checked.spec.identity, memberOf(option))),
+    deps,
+    reportDeps,
+  );
+  if ('refused' in admitted) {
+    await footer.done(String(admitted.refused.envelope.status));
+    return admitted.refused;
+  }
+  const steps: TakeStep[] = running.map(({ option, checked }) => ({
+    named: { key: option.key, label: option.label, id: option.id },
+    claim: option.id,
+    prepared: checked,
+  }));
+  // The rules read again for the whole set, before its probes and once more
+  // after them, before any option pays.
+  const recheck = async (claimed: readonly TakeStep[]): Promise<RequestToolResult | null> => {
+    const boundary = await groupBoundary(claimed, admitted.deps);
+    if (boundary !== null) await footer.done(String(boundary.envelope.status));
+    return boundary;
+  };
   const run = await runTakes(
     steps,
     {
       // EACH OPTION AT ITS LIVE PRICE: the plan is what the set will cost,
       // not what its ceilings allow. One its seller refuses there (the
-      // prompt, the price) is its own entry, with nothing paid.
-      price: async (claimed) =>
-        Promise.all(
+      // prompt, the price) is its own entry, with nothing paid. The probes
+      // are provider calls, so the rules are read again first, for the set.
+      price: async (claimed) => {
+        const boundary = await recheck(claimed);
+        if (boundary !== null) return { stop: boundary };
+        return Promise.all(
           claimed.map(async (step): Promise<Priced> => {
-            const quote = await quoteTake(step.prepared, deps);
+            const quote = await quoteTake(step.prepared, admitted.deps);
             if (!('refused' in quote)) return quote.atomic;
             const { outcome, result } = quote.refused;
             if (outcome !== null) reportOutcome(reportDeps, step.claim, outcome, startedAt);
             return { refused: result };
           }),
-        ),
+        );
+      },
       words: (planned) =>
         choicesOf(
           planned.map(({ step }) => String(step.named.label)),
@@ -533,8 +582,9 @@ export async function runChoiceSet(
         input,
       }),
       ...(approved !== undefined ? { approved: approved.slots } : {}),
+      recheck,
     },
-    deps,
+    admitted.deps,
     reportDeps,
     settings,
     {
@@ -622,6 +672,12 @@ export async function runCount(
   };
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
+  // THE USER'S SETTINGS, before any take is claimed or probed.
+  const admitted = await admitExecution([routeOf(spec.identity)], deps, reportDeps);
+  if ('refused' in admitted) {
+    await footer.done(String(admitted.refused.envelope.status));
+    return admitted.refused;
+  }
   const steps: TakeStep[] = Array.from({ length: count }, (_, index) => {
     const n = index + 1;
     const claim = n === 1 ? id : `${id}#${n}`;
@@ -639,7 +695,12 @@ export async function runCount(
       // call of this input is planned at, so a price that varies by input is
       // planned at what this input costs, not at the spec's ceiling.
       price: async (claimed) => {
-        const quoted = await quoteTake(checked.prepared, deps);
+        const boundary = await groupBoundary(claimed.slice(0, 1), admitted.deps);
+        if (boundary !== null) {
+          await footer.done(String(boundary.envelope.status));
+          return { stop: boundary };
+        }
+        const quoted = await quoteTake(checked.prepared, admitted.deps);
         if (!('refused' in quoted)) return claimed.map(() => quoted.atomic);
         const { outcome, result } = quoted.refused;
         if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
@@ -654,7 +715,7 @@ export async function runCount(
       call: () => ({ kind: 'count', id, spec, input, count }),
       ...(approved !== undefined ? { approved } : {}),
     },
-    deps,
+    admitted.deps,
     reportDeps,
     settings,
     {
@@ -696,6 +757,31 @@ export async function runCount(
   if (outcome !== null) reportOutcome(reportDeps, id, outcome, startedAt);
   await footer.done(status, { price: `$${toMoney(paidHere(run.ran).toString()).usd}` });
   return set;
+}
+
+/**
+ * THE RULES READ AGAIN FOR EVERY CLAIMED STEP, before the unpaid probes go
+ * out: a block saved since the set was admitted stops the whole set, claims
+ * released, rather than run what is left of it. Null: the probes may go.
+ */
+async function groupBoundary(
+  claimed: readonly TakeStep[],
+  deps: RequestToolDeps,
+): Promise<RequestToolResult | null> {
+  const refusal = await policyAtBoundary(routesOf(claimed), deps.policyRun, deps.ctx.dataDir);
+  return refusal === null ? null : refusedByPolicy(refusal);
+}
+
+/** The routes the claimed steps take, each a choice's member where it is one. */
+function routesOf(claimed: readonly TakeStep[]): Route[] {
+  return claimed.map((step) => {
+    const { key, label, id } = step.named;
+    const member =
+      typeof key === 'string' && typeof label === 'string' && typeof id === 'string'
+        ? { key, label, id }
+        : undefined;
+    return routeOf(step.prepared.spec.identity, member);
+  });
 }
 
 /**

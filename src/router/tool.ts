@@ -52,9 +52,24 @@ import {
   type DecisionDeps,
   type DecisionDiagnostics,
   type DecisionRoute,
+  type Identity,
   type Job,
   type OfferSpec,
+  type WireOverride,
+  WireOverrideSchema,
 } from './decision';
+import {
+  admitByPolicy,
+  knownRefused,
+  policyAtBoundary,
+  policyInvalid,
+  readLocalPolicy,
+  settingsNotApplied,
+  type GroupMember,
+  type PolicyRefusal,
+  type PolicyRun,
+  type Route,
+} from './admit';
 import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './choices';
 import {
   approveCall,
@@ -179,6 +194,11 @@ export interface RequestToolArgs {
   /** A job an earlier call left running, by the id its result named: polled
    *  again, with nothing paid. */
   job?: string;
+  /** This request only, beside `query`: it narrows what the router may pick
+   *  or re-ranks it (`WireOverrideSchema`), and never widens the saved
+   *  settings, connects an account, raises a limit or turns on replacement.
+   *  Checked here; one that does not parse sends nothing. */
+  override?: Record<string, unknown>;
 }
 
 /** The server's own cap on `input`, serialized. */
@@ -231,6 +251,13 @@ export interface RequestToolDeps {
   waitsForJobs?: boolean;
   /** The host that launched this server; absent is Claude Code. */
   harness?: Harness;
+  /** What this execution's settings check established ({@link admitByPolicy}),
+   *  for each of its call boundaries. Set inside one execution only. */
+  policyRun?: PolicyRun;
+  /** The path that made the call, when not an ordinary request: `swap`, a
+   *  native search or fetch answered in place (`swap.ts`). Kept on its ledger
+   *  row and its outcome report, never on a default body. */
+  via?: 'swap';
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -355,6 +382,22 @@ export async function runApproveTool(
       { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
     );
   }
+  // THE USER'S SETTINGS COME BEFORE THE QUOTE IS USED UP, OR THE WALLET
+  // OPENED: a block saved since the quote (by another process, say) refuses
+  // it here, with nothing reserved or signed and the quote still open. A
+  // quote is a stored offer, so a rule that reads identity has the catalog
+  // confirm it first, once for every call the quote runs.
+  const settings = await resolveContextSettings(deps.ctx);
+  const policy = await admitByPolicy(
+    quotedRoutes(call),
+    {
+      ctx: deps.ctx,
+      baseUrl: settings.baseUrl,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    },
+    { stored: true },
+  );
+  if ('refused' in policy) return refusedByPolicy(policy.refused);
   // THE WALLET OPENS BEFORE THE QUOTE IS USED UP. `admitQuote` spends the
   // quote's one run, so a wallet that will not sign (a passphrase gone or
   // wrong) must stop here, with the quote still open for a yes after the
@@ -375,8 +418,8 @@ export async function runApproveTool(
     provider,
     startedAt: deps.startedAt ?? now(),
     downloads: deps.downloads ?? { leftBytes: MAX_CALL_DOWNLOAD_BYTES },
+    policyRun: policy.run,
   };
-  const settings = await resolveContextSettings(deps.ctx);
   const admitted = await admitQuote(dataDir, quote.id, {
     balance: () => walletBalance(call_, settings.rpcUrl),
     now,
@@ -432,6 +475,53 @@ export async function runApproveTool(
   }
 }
 
+/** Every call a quote runs, as the settings check reads it: a choice set's
+ *  members by the options the quote covers, in the set's order. */
+function quotedRoutes(call: QuotedCall): Route[] {
+  switch (call.kind) {
+    case 'spec':
+    case 'count':
+      return [routeOf(call.spec.identity)];
+    case 'call':
+      return [routeOf(call.call.identity)];
+    case 'choices':
+      return call.kept.choices.options.flatMap((option, index) =>
+        call.keys.includes(option.key)
+          ? [routeOf(call.specs[index]?.identity, memberOf(option))]
+          : [],
+      );
+  }
+}
+
+/** One route, with its identity when it has one. */
+export function routeOf(identity: Identity | undefined, member?: GroupMember): Route {
+  return {
+    ...(identity !== undefined ? { identity } : {}),
+    ...(member !== undefined ? { member } : {}),
+  };
+}
+
+/** A choice as a refused group names it. */
+export function memberOf(option: { key: string; label: string; id: string }): GroupMember {
+  return { key: option.key, label: option.label, id: option.id };
+}
+
+/** A settings refusal as the tool answers it: its code and stage where the
+ *  host reads a router's, the rule that applied, and nothing sent or paid. */
+export function refusedByPolicy(refusal: PolicyRefusal): RequestToolResult {
+  return fail(refusal.status, refusal.reason, {
+    nextStep: refusal.nextStep,
+    diagnostics: {
+      reasonCode: refusal.code,
+      stage: 'policy',
+      missing: [],
+      nextAction: refusal.nextStep,
+      ...(refusal.rule !== undefined ? { rule: refusal.rule } : {}),
+    },
+    ...(refusal.allowed !== undefined ? { allowedChoices: refusal.allowed } : {}),
+  });
+}
+
 /** An echoed total in USD, `$0.775` or `0.775`, as atomic units; undefined
  *  when it is not one. */
 function usdAtomic(text: string): bigint | undefined {
@@ -468,6 +558,41 @@ async function requestTool(
       });
     }
     return resumeJob(args.job, deps);
+  }
+  // THE USER'S SAVED RULES, read now from the global file and never cached.
+  // Rules this build cannot read run nothing: no rule is guessed, and no
+  // call goes out without them. A job already running is past this point.
+  const local = await readLocalPolicy(deps.ctx.dataDir);
+  if (local.status === 'invalid') return refusedByPolicy(policyInvalid());
+  // THIS REQUEST'S OWN NARROWING, beside a query only: the server takes it
+  // nowhere else, and a spec or a choice already names its service.
+  let override: WireOverride | undefined;
+  if (args.override !== undefined) {
+    if (
+      args.query === undefined ||
+      args.input !== undefined ||
+      args.choice !== undefined ||
+      args.count !== undefined
+    ) {
+      return fail(
+        'needs_input',
+        '`override` goes with a query alone, for the router to pick within it; nothing was sent or paid.',
+        { nextStep: 'Call request({query, override}), or leave `override` out.' },
+      );
+    }
+    const parsed = WireOverrideSchema.safeParse(args.override);
+    if (!parsed.success) {
+      const [issue] = parsed.error.issues;
+      return fail(
+        'needs_input',
+        `That override is not one the router takes (${issue?.message ?? 'its shape'}), so nothing was sent or paid.`,
+        {
+          nextStep:
+            'Send override as {only: [{dimension, targets: [{kind, id}]}], prefer: [{kind, id}]}, or leave it out.',
+        },
+      );
+    }
+    override = parsed.data;
   }
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
   let id = offered;
@@ -590,12 +715,16 @@ async function requestTool(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
   }).catch(() => undefined);
+  // THE RULES RIDE BESIDE THE CALL, never inside what the router's model reads,
+  // and only when there are some: a user with none sends what they always did.
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
     harness: deps.harness ?? 'claude',
+    ...(local.wire !== undefined ? { policy: local.wire } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.via !== undefined ? { via: deps.via } : {}),
   };
 
   // EVERY OPTION OF A SET, each its own offer, checked, claimed and paid
@@ -627,7 +756,11 @@ async function requestTool(
     const route = (await deps.route?.(settings.baseUrl)) ?? null;
     const outcome = await requestDecision(
       'tool',
-      { query, ...(id !== undefined ? { id } : {}) },
+      {
+        query,
+        ...(id !== undefined ? { id } : {}),
+        ...(override !== undefined ? { override } : {}),
+      },
       { ...decisionDeps, ...(route !== null ? { route } : {}) },
     );
     return { route, outcome };
@@ -657,11 +790,41 @@ async function requestTool(
   }
   if (fresh.status === 'failed') {
     await footer.done('failed');
+    // A ROUTER THAT CANNOT READ THE USER'S SETTINGS answers them with a 400
+    // (one from before settings, or rolled back): this call is refused, never
+    // sent again without them.
+    if (fresh.httpStatus === 400 && (local.wire !== undefined || override !== undefined)) {
+      return refusedByPolicy(settingsNotApplied());
+    }
     return fail('failed', fresh.reason, {
       ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
     });
   }
   const { decision, note } = fresh.decision;
+  // WHAT THE ROUTER ANSWERED, HELD TO THE RULES AS THEY ARE NOW, before a spec
+  // is kept or a call runs. The router applied them first; this is the same
+  // check on this side of the wire, so a rule saved while it answered, or a
+  // router that answered without identity, offers nothing.
+  const answered =
+    decision.action === 'spec'
+      ? [routeOf(decision.spec.identity)]
+      : decision.action === 'discovered'
+        ? (decision.specs?.map((spec) => routeOf(spec.identity)) ?? [routeOf(undefined)])
+        : decision.action === 'execute'
+          ? [routeOf(decision.identity)]
+          : [];
+  const admittedAnswer =
+    answered.length > 0
+      ? await admitByPolicy(
+          answered,
+          { ctx: deps.ctx, baseUrl: settings.baseUrl },
+          { stored: false, ...(override !== undefined ? { override } : {}) },
+        )
+      : null;
+  if (admittedAnswer !== null && 'refused' in admittedAnswer) {
+    await footer.done(admittedAnswer.refused.status);
+    return refusedByPolicy(admittedAnswer.refused);
+  }
 
   // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
   // which is wrong for this one: what stops routing here is a routing fee this
@@ -762,6 +925,8 @@ async function requestTool(
     capabilityId: decision.capabilityId,
     provider: decision.provider,
     ...(decision.label !== undefined ? { label: decision.label } : {}),
+    // Its only identity: the free docs lookup has no spec.
+    ...(decision.identity !== undefined ? { identity: decision.identity } : {}),
     // The free docs lookup, the one answer with no spec: text, never files.
     media: false,
     request: contract.request,
@@ -773,7 +938,19 @@ async function requestTool(
     sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
     ...(note !== undefined ? { note } : {}),
   };
-  return (await payAndDeliver(call, { alone: { kind: 'call', call } }, deps, footer)).result;
+  // Fresh from the router in this very call: its identity is current.
+  const run: PolicyRun = admittedAnswer?.run ?? {
+    current: true,
+    ...(override !== undefined ? { override } : {}),
+  };
+  return (
+    await payAndDeliver(
+      call,
+      { alone: { kind: 'call', call } },
+      { ...deps, policyRun: run },
+      footer,
+    )
+  ).result;
 }
 
 /**
@@ -789,7 +966,7 @@ async function readToolList(
   args: RequestToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
-  const others = (['query', 'id', 'input', 'choice', 'count', 'job'] as const).filter(
+  const others = (['query', 'id', 'input', 'choice', 'count', 'job', 'override'] as const).filter(
     (key) => args[key] !== undefined,
   );
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
@@ -802,26 +979,47 @@ async function readToolList(
   if (mask(words) !== words) {
     return fail('native', 'the words carry a credential-shaped value, so nothing was sent');
   }
+  // The saved rules ride on both reads, so the router lists and specs only
+  // what they allow; rules this build cannot read send neither.
+  const local = await readLocalPolicy(deps.ctx.dataDir);
+  if (local.status === 'invalid') return refusedByPolicy(policyInvalid());
   const settings = await resolveContextSettings(deps.ctx);
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
     harness: deps.harness ?? 'claude',
+    ...(local.wire !== undefined ? { policy: local.wire } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
+  const unsent = (outcome: Exclude<DecisionOutcome<unknown>, { status: 'decided' }>) =>
+    outcome.status === 'failed' && outcome.httpStatus === 400 && local.wire !== undefined
+      ? refusedByPolicy(settingsNotApplied())
+      : listFailure(outcome);
   if (args.browse !== undefined) {
     const listed = await requestBrowse(words, decisionDeps);
-    if (listed.status !== 'decided') return listFailure(listed);
+    if (listed.status !== 'decided') return unsent(listed);
     return showRows(listed.decision.rows);
   }
   if (words.length === 0) {
     return fail('needs_input', '`tool` takes a row id from request({browse}).');
   }
+  // A TOOL THE RULES ALREADY RULE OUT is refused here, with no network call:
+  // a block on that very service, or the identity the directory copy on disk
+  // lists for it. The copy can only refuse; the router's answer still decides.
+  const known = await knownRefused(words, deps.ctx.dataDir);
+  if (known !== null) return refusedByPolicy(known);
   const fetched = await requestToolSpec(words, decisionDeps);
-  if (fetched.status !== 'decided') return listFailure(fetched);
+  if (fetched.status !== 'decided') return unsent(fetched);
   const { decision } = fetched.decision;
   if (decision.action === 'spec') {
+    // Held to the rules as they are now before it is kept, like a query's pick.
+    const admitted = await admitByPolicy(
+      [routeOf(decision.spec.identity)],
+      { ctx: deps.ctx, baseUrl: settings.baseUrl },
+      { stored: false },
+    );
+    if ('refused' in admitted) return refusedByPolicy(admitted.refused);
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
     await storeSpecs(deps.ctx.dataDir, [picked]);
     return showSpec(picked.id, picked, [], decision.hint);
@@ -972,6 +1170,14 @@ async function runSpec(
 ): Promise<RequestToolResult> {
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
+  // THE USER'S SETTINGS, before the claim: a stored offer the rules now
+  // refuse, or one the catalog no longer stands behind, runs nothing and
+  // keeps its id free. An approved quote was checked before it was used.
+  const admitted = await admitExecution([routeOf(spec.identity)], deps, reportDeps);
+  if ('refused' in admitted) {
+    await footer.done(String(admitted.refused.envelope.status));
+    return admitted.refused;
+  }
   // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
   // id, or a second call racing it, pays nothing. A repeat is not an outcome,
   // so it is not reported.
@@ -982,7 +1188,34 @@ async function runSpec(
   }
   const admission: Admission =
     approved !== undefined ? { slot: approved[0]! } : { alone: { kind: 'spec', id, spec, input } };
-  return (await paySpec(checked.prepared, admission, deps, footer, reportDeps)).result;
+  return (await paySpec(checked.prepared, admission, admitted.deps, footer, reportDeps)).result;
+}
+
+/**
+ * ONE STORED EXECUTION'S SETTINGS CHECK ({@link admitByPolicy}): one spec, a
+ * count's spec, or every member of a group at once, with one directory call
+ * between them when a rule reads identity. Skipped when this execution was
+ * already admitted (an approved quote checks before it is used), so a group
+ * is never asked about twice. The deps it hands back carry the run to each
+ * call boundary.
+ */
+export async function admitExecution(
+  routes: readonly Route[],
+  deps: RequestToolDeps,
+  reportDeps: ReportDeps,
+): Promise<{ deps: RequestToolDeps } | { refused: RequestToolResult }> {
+  if (deps.policyRun !== undefined) return { deps };
+  const admitted = await admitByPolicy(
+    routes,
+    {
+      ctx: reportDeps.ctx,
+      baseUrl: reportDeps.baseUrl,
+      ...(reportDeps.fetchImpl !== undefined ? { fetchImpl: reportDeps.fetchImpl } : {}),
+    },
+    { stored: true },
+  );
+  if ('refused' in admitted) return { refused: refusedByPolicy(admitted.refused) };
+  return { deps: { ...deps, policyRun: admitted.run } };
 }
 
 /** The job id to resume when a take of this offer is still running. */
@@ -991,8 +1224,10 @@ export async function runningJob(dataDir: string, id: string): Promise<string | 
   return takes.some((take) => take.state === 'running') ? id : undefined;
 }
 
-/** Where a spec call's outcome report goes. */
-export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>;
+/** Where a spec call's outcome report goes, and the path that made the call. */
+export type ReportDeps = Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'> & {
+  via?: 'swap';
+};
 
 /**
  * EVERY CALL FROM A SPEC IS REPORTED, refused or run, so the server can tell
@@ -1007,7 +1242,12 @@ export function reportOutcome(
   startedAt: number,
 ): void {
   void reportSpecOutcome(
-    { id, ...outcome, ms: Date.now() - startedAt },
+    {
+      id,
+      ...outcome,
+      ms: Date.now() - startedAt,
+      ...(reportDeps.via !== undefined ? { via: reportDeps.via } : {}),
+    },
     {
       ctx: reportDeps.ctx,
       baseUrl: reportDeps.baseUrl,
@@ -1123,6 +1363,8 @@ export async function paySpec(
       capabilityId: spec.capabilityId,
       provider: spec.provider,
       ...(spec.label !== undefined ? { label: spec.label } : {}),
+      ...(spec.identity !== undefined ? { identity: spec.identity } : {}),
+      ...(deps.via !== undefined ? { via: deps.via } : {}),
       media: savesMedia(spec),
       request: built,
       terms: specTerms(spec),
@@ -1187,6 +1429,12 @@ export interface ProviderCall {
   /** The service's display name, from its decision or spec: what the footer
    *  and the ledger name in place of the URL called. */
   label?: string;
+  /** The route as the user's settings read it, from its spec or decision:
+   *  held to the rules again at the call's boundary, and kept on its ledger
+   *  row. Absent from a router or a spec older than identity. */
+  identity?: Identity;
+  /** `swap`: the call answers a native search or fetch in place. */
+  via?: 'swap';
   /** A media service: a paid result's links and inline files are saved
    *  locally ({@link savesMedia}). */
   media: boolean;
@@ -1231,9 +1479,11 @@ interface CallJob {
  * WHERE A PAYMENT'S PLACE IN ITS CALL'S PLAN COMES FROM: a slot the plan
  * already admitted (several payments, planned together, or a quote the user
  * approved), or a plan of one admitted at the live price as it is signed,
- * which over the limits is kept as the quote `alone` replays.
+ * which over the limits is kept as the quote `alone` replays. `group`: the
+ * routes of the choice set the slot's payment belongs to, which its call
+ * boundary holds to the rules as one set.
  */
-export type Admission = { slot: PlanSlot } | { alone: QuotedCall };
+export type Admission = { slot: PlanSlot; group?: readonly Route[] } | { alone: QuotedCall };
 
 /** What a payment's plan of one is stopped with: `runPay` throws it, and the
  *  caller answers with it. */
@@ -1298,6 +1548,27 @@ async function payAndDeliver(
   // and the payment it carried: what a job is started from.
   let leg: PaidLeg | undefined;
   const submittedAt = (deps.now ?? Date.now)();
+  // THE CALL BOUNDARY: the user's rules, reread from the file now, before the
+  // provider is called, a payment reserved or anything signed. A block saved
+  // by another process since this execution was admitted stops this call
+  // here, with nothing sent; a call already sent is not unsent. A choice
+  // set's option is held to them with the whole set, so a block on any
+  // option stops every one not yet sent.
+  const boundary = await policyAtBoundary(
+    'slot' in admission && admission.group !== undefined
+      ? admission.group
+      : [routeOf(call.identity)],
+    deps.policyRun,
+    deps.ctx.dataDir,
+  );
+  if (boundary !== null) {
+    await footer.done(boundary.status, { provider: built.url, ...named, ...parameters });
+    return {
+      result: refusedByPolicy(boundary),
+      outcome: null,
+      left: { amountAtomic: 0n, signed: false },
+    };
+  }
   try {
     // WHAT IS ABOUT TO BE CALLED, named while it is being called. This is the
     // executed destination, not the hint's suggestion, which is the whole point
@@ -1587,7 +1858,15 @@ interface DeliveredMoney {
 /** What delivering needs of a call: a provider call, or a job's record of one. */
 type DeliverCall = Pick<
   ProviderCall,
-  'capabilityId' | 'provider' | 'label' | 'media' | 'parameters' | 'sent' | 'note' | 'project'
+  | 'capabilityId'
+  | 'provider'
+  | 'label'
+  | 'identity'
+  | 'media'
+  | 'parameters'
+  | 'sent'
+  | 'note'
+  | 'project'
 > & { request: { url: string } };
 
 /**
@@ -2402,7 +2681,13 @@ export function failureOutcome(
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */
 function paidRecord(
-  decision: { capabilityId: string; provider: string; label?: string },
+  decision: {
+    capabilityId: string;
+    provider: string;
+    label?: string;
+    identity?: Identity;
+    via?: 'swap';
+  },
   url: string,
   sent: string,
   amountAtomic: bigint,
@@ -2419,6 +2704,8 @@ function paidRecord(
     capabilityId: decision.capabilityId,
     provider: decision.provider,
     ...(decision.label !== undefined ? { label: decision.label } : {}),
+    ...(decision.identity !== undefined ? { identity: decision.identity } : {}),
+    ...(decision.via !== undefined ? { via: decision.via } : {}),
     url,
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
@@ -2626,6 +2913,8 @@ const NEXT_STEP_BY_REASON: Record<string, string> = {
     'Ask the user for the scope choice or field named above, then call `request` again with it.',
   classifier_failure:
     'The router could not classify this one and charged nothing. Continue with your own tools, or call `request` once more.',
+  policy_refused:
+    "Continue with your own tools for this step. Tell the user which of their Tenjin settings ruled it out; they can change it with `tenjin config`. Do not change Tenjin's settings yourself.",
 };
 
 export interface FailExtras {
@@ -2658,6 +2947,9 @@ export interface FailExtras {
   /** A plan over the limits, kept for the user's yes: its id, what it buys
    *  and its total. */
   quote?: Record<string, unknown>;
+  /** A group the user's settings refused whole: the members that could run
+   *  on their own. */
+  allowedChoices?: GroupMember[];
 }
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
@@ -2704,8 +2996,11 @@ export function fail(
             reasonCode: diagnostics.reasonCode,
             stage: diagnostics.stage,
             ...(diagnostics.missing.length > 0 ? { missing: diagnostics.missing } : {}),
+            // The setting that refused it, on `policy_refused` alone.
+            ...(diagnostics.rule !== undefined ? { rule: diagnostics.rule } : {}),
           }
         : {}),
+      ...(extras.allowedChoices !== undefined ? { allowedChoices: extras.allowedChoices } : {}),
       // What LEFT, not what was delivered: an authorization that was
       // transmitted is money at risk whether or not a result came back.
       cost: costLines(extras.providerAtomic ?? 0n),

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.1",
+  "decision": {
+    "action": "native",
+    "reason": "Your Tenjin settings block Tenjin's tools.",
+    "diagnostics": {
+      "reasonCode": "policy_refused",
+      "stage": "policy",
+      "missing": [],
+      "nextAction": "Continue with your own tools for this step. The user's Tenjin settings rule out every service for it: tell the user which setting applied and that they can change it with `tenjin config`. Do not change the settings yourself.",
+      "rule": {
+        "from": "saved",
+        "kind": "block",
+        "target": {
+          "kind": "source",
+          "id": "tenjin"
+        }
+      }
+    }
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}

@@ -11,6 +11,7 @@ import { downloadsDir, paidLedgerPath } from '../lib/paths';
 import { mask } from '../lib/redact';
 import { USDC_ADDRESS } from '../lib/usdc-balance';
 import { releaseUnchargedExposure } from '../lib/wallet/spend';
+import type { Identity } from './decision';
 
 /**
  * WHAT A PAID ROUTER CALL BOUGHT, KEPT ON THIS MACHINE. One JSON line per paid
@@ -38,6 +39,11 @@ export interface PaidRecord {
   provider: string;
   /** The service's display name, when its decision or spec carried one. */
   label?: string;
+  /** The route the user's settings held it to, when its spec or decision
+   *  carried one: which service, source, providers and seller were paid. */
+  identity?: Identity;
+  /** `swap`: the call answered a native search or fetch in place. */
+  via?: 'swap';
   url: string;
   /** The input or query sent, masked and cut to {@link MAX_SENT_CHARS}. */
   sent: string;

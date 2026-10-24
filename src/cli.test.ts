@@ -121,6 +121,26 @@ describe('main', () => {
   });
 
   /**
+   * `tenjin config --help` IS HOW AN AGENT FINDS THE SETTINGS OPERATIONS: the
+   * MCP instructions send it there when a user asks to change what Tenjin may
+   * use. Every operation is listed with an example, every one is a real
+   * subcommand, and the coupled keys stay out of reach of `config set`.
+   */
+  it('lists every settings operation with an example in `tenjin config --help`', async () => {
+    const cap = captureIo();
+    expect(await main(['config', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const operation of ['prefer', 'only', 'block', 'unblock', 'reset', 'replacement']) {
+      expect(help).toMatch(new RegExp(`^  \\$ tenjin config ${operation} `, 'm'));
+      const leaf = captureIo();
+      expect(await main(['config', operation, '--help'], leaf.io)).toBe(0);
+      expect(leaf.stdout()).toContain(`$ tenjin config ${operation} `);
+    }
+    for (const variant of ['--source', '--dimension', '--capabilities', '--all-providers'])
+      expect(help).toContain(variant);
+  });
+
+  /**
    * The shape `tenjin --help` is expected to hold (clig.dev's "display the most
    * common flags and commands at the start", gh's grouped root list): five
    * headings, one line per command, the globals listed once, and examples plus

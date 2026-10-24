@@ -100,11 +100,19 @@ export interface ExcludedVerb {
  * or `Bash(tenjin config:*)` rule would silently swallow `wallet create` and
  * `config set`, and `config set` can raise the spend caps.
  *
+ * The settings operations follow the same line (`docs/agent-permissions.md`,
+ * "Your settings"): `config block` only ever takes something away and `config
+ * prefer` only reorders what is already allowed, so a prefix rule on each is
+ * narrow; `config unblock`, `only`, `reset`, `replacement` and `set` can widen
+ * what Tenjin may use or run without asking, and stay behind the harness's own
+ * prompt. None of them is in this list: it predates them and the router's
+ * installer does not write it.
+ *
  * Two known gaps, both fail-closed (denied, never wrongly allowed):
  *  - Bare `tenjin config` (runConfigList) is as read-only as `config get`, but no
- *    prefix rule reaches it without also covering `config set`, so it stays out.
- *    Use `tenjin config get <key>`, which is a different supported command rather
- *    than a reworded one.
+ *    prefix rule reaches it without also covering `config set`, so it stays out
+ *    of this list. A harness that takes exact rules clears it with
+ *    `Bash(tenjin config)`, which matches that command alone.
  *  - Group-level flag forms like `tenjin wallet --json show` are not covered.
  *    Put global flags AFTER the leaf verb (`tenjin wallet show --json`); the
  *    CLI parses either, and only the trailing form matches these rules.

@@ -501,6 +501,86 @@ describe('the hook tool', () => {
   });
 
   /**
+   * THE PLUGIN'S `decide` FORM (the swap, `swap.ts`). It reads only the
+   * transcript of a session this process's own hook legs served, so a call
+   * naming any other session reads, sends and pays nothing; and it is sent
+   * alone.
+   */
+  it('decides a native call only for a session its hook legs served, and only alone', async () => {
+    const { homeDir, transcript } = await home('sess-swap');
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '100000', router: { nativeReplacement: 'when-routed' } }),
+    );
+    const sent: Record<string, unknown>[] = [];
+    const native = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          reason: 'Your own tools cover this.',
+          diagnostics: {
+            reasonCode: 'native_sufficient',
+            stage: 'capability',
+            missing: [],
+            nextAction: '',
+          },
+        },
+      });
+    }) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      handlerDeps: { cwd: dir, authorizer: authorizer() },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: native, warn: () => undefined },
+    });
+    const client = await connect(server);
+    const decide = (session: string) => ({
+      tool: 'WebSearch',
+      input: { query: 'rust async runtimes' },
+      tool_use_id: 'toolu_1',
+      session_id: session,
+    });
+    const envelope = async (args: Record<string, unknown>) =>
+      envelopeOf(await client.callTool({ name: 'request', arguments: args })) as Record<
+        string,
+        unknown
+      >;
+    try {
+      expect(await envelope({ decide: decide('sess-swap'), query: 'x' })).toMatchObject({
+        status: 'needs_input',
+      });
+      // Not seen yet: handed back, with nothing read or sent.
+      expect(await envelope({ decide: decide('sess-swap') })).toMatchObject({
+        status: 'native',
+        swap: 'handback',
+      });
+      expect(sent).toEqual([]);
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-swap', transcript)),
+      });
+      sent.length = 0;
+      expect(await envelope({ decide: decide('sess-swap') })).toMatchObject({
+        swap: 'handback',
+        reason: 'no paid lookup fits',
+      });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        packet: { pendingCall: { tool: 'WebSearch', query: 'rust async runtimes' } },
+      });
+      // Another session's name gets nothing.
+      expect(await envelope({ decide: decide('sess-other') })).toMatchObject({ swap: 'handback' });
+      expect(sent).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  /**
    * A MACHINE CARRYING THE PLUGIN AND A SETTINGS INSTALL runs both servers in
    * a session. The plugin's `alive` leg marks the session first; the settings
    * install's server, which the plugin did not launch, then says nothing there.
@@ -1007,7 +1087,7 @@ describe('the base URL the MCP server routes against', () => {
  */
 describe('what the tool tells the model to send', () => {
   it('asks for one lookup, with the turn id beside it', async () => {
-    const { SCOPE_RULE } = await import('./mcp');
+    const { CONFIG_RULE, SCOPE_RULE } = await import('./mcp');
     const server = buildRouterMcpServer({
       dataDir: dir,
       handlerDeps: {
@@ -1081,6 +1161,12 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // Deciding is free now, and the instructions say so.
       expect(request.description).toContain('Deciding what to route is free');
+      // WHERE SETTINGS CHANGE, in the server's own instructions too, which a
+      // host shows when it defers the tool's description; and never by the
+      // agent itself to get past a refusal.
+      expect(request.description).toContain(CONFIG_RULE);
+      expect(client.getInstructions()).toContain('run `tenjin config --help`');
+      expect(CONFIG_RULE).toContain("never change Tenjin's settings yourself");
     } finally {
       await client.close();
       await server.close();
@@ -1121,6 +1207,62 @@ describe('a free answer on a machine with no wallet', () => {
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       expect(called.isError).toBe(false);
       expect(envelopeOf(called)).toMatchObject({ status: 'native' });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * SETTINGS APPLY TO THE NEXT CALL OF A SERVER ALREADY RUNNING: `tenjin config`
+ * in another terminal writes the global file, and the long-lived `tenjin mcp`
+ * reads it on every call. This request's own `override` rides beside its query.
+ */
+describe('settings a running server reads per call', () => {
+  it('sends a block saved after the server started, and an override beside a query', async () => {
+    const sent: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          routerVersion: '2026-10-23.1',
+          decision: {
+            action: 'native',
+            reason: 'Your own tools cover this.',
+            diagnostics: {
+              reasonCode: 'native_sufficient',
+              stage: 'capability',
+              missing: [],
+              nextAction: '',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      handlerDeps: { cwd: dir, authorizer: authorizer(), fetchImpl },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const override = { prefer: [{ kind: 'provider', id: 'exa' }] };
+      await client.callTool({ name: 'request', arguments: { query: 'weather', override } });
+      expect(sent[0]).not.toHaveProperty('policy');
+      expect(sent[0]!.override).toEqual(override);
+
+      const block = [{ kind: 'provider', id: 'firecrawl' }];
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ router: { policy: { version: 1, block } } }),
+      );
+      await client.callTool({ name: 'request', arguments: { query: 'weather' } });
+      expect(sent[1]!.policy).toMatchObject({ version: 1, block });
+      expect(sent[1]).not.toHaveProperty('override');
     } finally {
       await client.close();
       await server.close();

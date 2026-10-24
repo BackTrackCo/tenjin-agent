@@ -256,3 +256,13 @@ export function jobsDir(dir: string = dataDir()): string {
 export function quotesDir(dir: string = dataDir()): string {
   return join(dir, 'quotes');
 }
+
+/**
+ * The router's directory as last fetched: every id a setting can name, with
+ * its label. `tenjin config` shows saved rules by name from it offline, and
+ * sends its revision so an unchanged catalog answers in a few bytes. A copy
+ * here is never proof the catalog is current: only a fresh `unchanged` is.
+ */
+export function directoryCachePath(dir: string = dataDir()): string {
+  return join(dir, 'router-directory.json');
+}
