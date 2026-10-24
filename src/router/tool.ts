@@ -1479,9 +1479,11 @@ interface CallJob {
  * WHERE A PAYMENT'S PLACE IN ITS CALL'S PLAN COMES FROM: a slot the plan
  * already admitted (several payments, planned together, or a quote the user
  * approved), or a plan of one admitted at the live price as it is signed,
- * which over the limits is kept as the quote `alone` replays.
+ * which over the limits is kept as the quote `alone` replays. `group`: the
+ * routes of the choice set the slot's payment belongs to, which its call
+ * boundary holds to the rules as one set.
  */
-export type Admission = { slot: PlanSlot } | { alone: QuotedCall };
+export type Admission = { slot: PlanSlot; group?: readonly Route[] } | { alone: QuotedCall };
 
 /** What a payment's plan of one is stopped with: `runPay` throws it, and the
  *  caller answers with it. */
@@ -1549,9 +1551,13 @@ async function payAndDeliver(
   // THE CALL BOUNDARY: the user's rules, reread from the file now, before the
   // provider is called, a payment reserved or anything signed. A block saved
   // by another process since this execution was admitted stops this call
-  // here, with nothing sent; a call already sent is not unsent.
+  // here, with nothing sent; a call already sent is not unsent. A choice
+  // set's option is held to them with the whole set, so a block on any
+  // option stops every one not yet sent.
   const boundary = await policyAtBoundary(
-    [routeOf(call.identity)],
+    'slot' in admission && admission.group !== undefined
+      ? admission.group
+      : [routeOf(call.identity)],
     deps.policyRun,
     deps.ctx.dataDir,
   );
