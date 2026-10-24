@@ -138,7 +138,8 @@ describe('the vault of a connected account', () => {
     expect((error as CliError).message).toBe(
       "Tenjin couldn't keep the sign-in for Apify: your macOS keychain didn't answer. Nothing was saved.",
     );
-    await expect(readdir(sourcesDir(dir))).rejects.toThrow();
+    // The account's lock leaves its private folder behind, and nothing in it.
+    expect(await readdir(sourcesDir(dir))).toEqual([]);
   });
 
   it('keeps the key in a 0600 file, and says so, where no OS store exists', async () => {

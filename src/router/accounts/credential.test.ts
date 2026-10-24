@@ -182,6 +182,79 @@ describe("a connected account's credential", () => {
     expect(account.refreshes).toEqual([]);
   });
 
+  /** A refresh held at its token request until `release`, and the reconnect
+   *  to another account that lands while it waits. */
+  async function refreshInFlight(vault: Awaited<ReturnType<typeof connected>>) {
+    const account = server({});
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let asked!: () => void;
+    const tokenAsked = new Promise<void>((resolve) => (asked = resolve));
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input instanceof Request ? input.url : input) === `${ISSUER}/token`) {
+        asked();
+        await gate;
+      }
+      return account.fetchImpl(input, init);
+    }) as typeof fetch;
+    const refreshing = accountCredential(
+      'firecrawl',
+      'Firecrawl',
+      deps(vault, account, { fetchImpl }),
+    ).catch((err: unknown) => err);
+    await tokenAsked;
+    const reconnect = () =>
+      writeVault(
+        'firecrawl',
+        'Firecrawl',
+        {
+          kind: 'oauth',
+          mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+          connectedAt: new Date(NOW).toISOString(),
+          expiresAt: '2026-10-23T13:00:00.000Z',
+          state: 'ok',
+          ready: ['firecrawl.scrape'],
+          missing: [],
+        },
+        {
+          ...SIGNED_IN,
+          tokens: { ...SIGNED_IN.tokens, access_token: 'new-account', refresh_token: 'refresh-n' },
+        },
+        vault,
+      );
+    return { refreshing, release, reconnect };
+  }
+
+  const savedToken = async (vault: Awaited<ReturnType<typeof connected>>) => {
+    clearVaultKeyCache();
+    const kept = await readVault('firecrawl', 'Firecrawl', vault);
+    return kept.status === 'ok' ? kept.secret.tokens?.access_token : kept.status;
+  };
+
+  it('never lets a refresh in flight overwrite a reconnect that finished while it waited', async () => {
+    // Review: connect wrote the vault outside the refresh's lock, so the old
+    // refresh's late answer brought the previous account back.
+    const vault = await connected('2026-10-23T12:00:10.000Z');
+    const { refreshing, release, reconnect } = await refreshInFlight(vault);
+    const saved = reconnect();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    release();
+    await Promise.all([refreshing, saved]);
+    expect(await savedToken(vault)).toBe('new-account');
+  });
+
+  it('drops a refresh result once the saved sign-in changed under it', async () => {
+    // The lock removed by hand while the refresh still runs, as the busy
+    // refusal tells the user to do: the newer sign-in still stands.
+    const vault = await connected('2026-10-23T12:00:10.000Z');
+    const { refreshing, release, reconnect } = await refreshInFlight(vault);
+    await rm(`${sourceVaultPath('firecrawl', dir)}.lock`, { recursive: true, force: true });
+    await reconnect();
+    release();
+    expect(refusal(await refreshing)).toBe('busy');
+    expect(await savedToken(vault)).toBe('new-account');
+  });
+
   it('stops waiting at its bound, names the lock, and sends nothing', async () => {
     const vault = await connected('2026-10-23T12:00:10.000Z');
     const account = server({});

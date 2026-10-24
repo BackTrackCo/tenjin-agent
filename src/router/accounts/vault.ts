@@ -1,10 +1,11 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { writeFileAtomic } from '../../lib/atomic-json';
 import { CliError } from '../../lib/errors';
 import { hasCode } from '../../lib/errno';
+import { LockTimeoutError, withFileLock } from '../../lib/lock';
 import {
   osStoreByName,
   osStoreFor,
@@ -31,7 +32,9 @@ import { isAccountId, STORE_ACCOUNT, storeAccountFor } from './ids';
  * `tenjin-cli` and account `source:<id>`: 43 base64url characters, which the
  * keychain's piped writer takes as a plain `-w` value, where a token bundle
  * as hex would run past its line. A refresh rewrites only this file; the store
- * is written once at connect and cleared at disconnect. Where no OS store
+ * is written once at connect and cleared at disconnect. Connect, refresh and
+ * disconnect each hold the account's lock beside the vault for their whole
+ * read and write ({@link withVaultLock}). Where no OS store
  * exists at all the key goes to a 0600 file beside the vault, the same
  * announced exception the wallet makes; a store that exists but is locked is
  * never worked around.
@@ -97,6 +100,49 @@ export interface VaultDeps {
   exec?: ExecFn;
   /** A person may be answering an OS unlock prompt: writes wait longer. */
   interactive?: boolean;
+  /** How long a writer waits for the account's lock. */
+  lockTimeoutMs?: number;
+}
+
+/** How long a writer waits for another's hold on the same account: a refresh
+ *  holds it across its bounded token request. */
+const LOCK_TIMEOUT_MS = 15_000;
+
+/**
+ * ONE WRITER PER ACCOUNT'S SIGN-IN, ACROSS PROCESSES: connect, refresh and
+ * disconnect each hold the lock beside the vault (`<id>.json.lock`, the mkdir
+ * lock the config writer uses) for their whole read and write, so a refresh's
+ * late answer never lands over a newer sign-in or brings back a removed one.
+ * A wait past its bound throws {@link LockTimeoutError}, naming the lock.
+ */
+export async function withVaultLock<T>(
+  id: string,
+  deps: VaultDeps,
+  fn: () => Promise<T>,
+): Promise<T> {
+  await mkdir(sourcesDir(deps.dataDir), { recursive: true, mode: 0o700 });
+  return withFileLock(`${sourceVaultPath(id, deps.dataDir)}.lock`, fn, {
+    timeoutMs: deps.lockTimeoutMs ?? LOCK_TIMEOUT_MS,
+  });
+}
+
+/** {@link withVaultLock} for a command: a wait past its bound says what to do. */
+async function lockedFor<T>(
+  id: string,
+  deps: VaultDeps,
+  nothing: 'saved' | 'removed',
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await withVaultLock(id, deps, fn);
+  } catch (err) {
+    if (!(err instanceof LockTimeoutError)) throw err;
+    throw new CliError(
+      'REFUSED',
+      `Another Tenjin process is using this sign-in right now, so nothing was ${nothing}.`,
+      { fix: `Try again; if no other Tenjin process is running, remove ${err.lockPath} first.` },
+    );
+  }
 }
 
 /** Where an account's vault key lives in each store. */
@@ -292,20 +338,23 @@ export async function writeVault(
   secret: VaultSecret,
   deps: VaultDeps,
 ): Promise<{ header: VaultHeader; plainFile: boolean }> {
-  const existing = await readVaultFile(deps.dataDir, id).catch(() => null);
-  const { key, store, plainFile } = await keyForWrite(id, label, deps, existing?.header.store);
-  const header = HeaderSchema.parse({ version: VAULT_VERSION, id, store, ...input });
-  const sealed = seal(header, SecretSchema.parse(secret), key);
-  await writeFileAtomic(sourceVaultPath(id, deps.dataDir), `${JSON.stringify(sealed)}\n`, {
-    mode: 0o600,
-    dirMode: 0o700,
+  return lockedFor(id, deps, 'saved', async () => {
+    const existing = await readVaultFile(deps.dataDir, id).catch(() => null);
+    const { key, store, plainFile } = await keyForWrite(id, label, deps, existing?.header.store);
+    const header = HeaderSchema.parse({ version: VAULT_VERSION, id, store, ...input });
+    const sealed = seal(header, SecretSchema.parse(secret), key);
+    await writeFileAtomic(sourceVaultPath(id, deps.dataDir), `${JSON.stringify(sealed)}\n`, {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+    keys.set(cacheKey(deps.dataDir, id), key);
+    return { header, plainFile };
   });
-  keys.set(cacheKey(deps.dataDir, id), key);
-  return { header, plainFile };
 }
 
 /** Rewrite a vault under the key it already has: a refresh, or a header
- *  change such as `expired`. Never makes a key. */
+ *  change such as `expired`. Never makes a key. The caller holds the
+ *  account's lock ({@link withVaultLock}). */
 export async function rewriteVault(
   id: string,
   label: string,
@@ -371,25 +420,27 @@ export async function readVault(id: string, label: string, deps: VaultDeps): Pro
  * `removed` says whether a vault was here.
  */
 export async function deleteVault(id: string, deps: VaultDeps): Promise<{ removed: boolean }> {
-  const slot = slotFor(deps.dataDir);
-  const account = storeAccountFor(id);
-  const file = await readVaultFile(deps.dataDir, id).catch(() => null);
-  let removed = false;
-  try {
-    await unlink(sourceVaultPath(id, deps.dataDir));
-    removed = true;
-  } catch (err) {
-    if (!hasCode(err, 'ENOENT')) throw err;
-  }
-  keys.delete(cacheKey(deps.dataDir, id));
-  const stores = new Set<DurableStore>(['file']);
-  if (file !== null) stores.add(file.header.store);
-  const platform = osStoreFor(slot, deps);
-  if (platform !== null) stores.add(platform.source);
-  for (const store of stores) {
-    await osStoreByName(slot, deps, store)
-      .remove(account, { timeoutMs: KEY_WRITE_MS.headless })
-      .catch(() => false);
-  }
-  return { removed };
+  return lockedFor(id, deps, 'removed', async () => {
+    const slot = slotFor(deps.dataDir);
+    const account = storeAccountFor(id);
+    const file = await readVaultFile(deps.dataDir, id).catch(() => null);
+    let removed = false;
+    try {
+      await unlink(sourceVaultPath(id, deps.dataDir));
+      removed = true;
+    } catch (err) {
+      if (!hasCode(err, 'ENOENT')) throw err;
+    }
+    keys.delete(cacheKey(deps.dataDir, id));
+    const stores = new Set<DurableStore>(['file']);
+    if (file !== null) stores.add(file.header.store);
+    const platform = osStoreFor(slot, deps);
+    if (platform !== null) stores.add(platform.source);
+    for (const store of stores) {
+      await osStoreByName(slot, deps, store)
+        .remove(account, { timeoutMs: KEY_WRITE_MS.headless })
+        .catch(() => false);
+    }
+    return { removed };
+  });
 }

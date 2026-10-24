@@ -1,8 +1,9 @@
-import { LockTimeoutError, withFileLock } from '../../lib/lock';
-import { sourceVaultPath } from '../../lib/paths';
+import { LockTimeoutError } from '../../lib/lock';
 import {
   readVault,
+  readVaultHeader,
   rewriteVault,
+  withVaultLock,
   type VaultDeps,
   type VaultHeader,
   type VaultSecret,
@@ -17,11 +18,13 @@ import {
  *
  * A REFRESH IS ONE AT A TIME, ACROSS PROCESSES. Firecrawl's refresh tokens
  * work once, and every `tenjin mcp` a session starts can call the same
- * account, so a refresh runs under a lock beside the vault (`<id>.json.lock`,
- * the mkdir lock the config writer uses) and reads the vault again inside it:
- * a token another process, or another call in this one, already rotated is
- * used as it is, never refreshed a second time. Waiting for the lock and the
- * token request are both bounded, and a refusal never leaves the lock behind.
+ * account, so a refresh runs under the account's lock beside the vault, the
+ * one connect and disconnect hold too (`vault.ts`), and reads the vault again
+ * inside it: a token another process, or another call in this one, already
+ * rotated is used as it is, never refreshed a second time. Waiting for the
+ * lock and the token request are both bounded, and a refusal never leaves the
+ * lock behind. A refresh whose sign-in was replaced or removed while it ran
+ * (past a lock removed by hand) writes nothing.
  *
  * A REFRESH THE AUTHORIZATION SERVER REFUSES marks the vault `expired`, so
  * every later call refuses at once with the reconnect step and sends nothing;
@@ -60,8 +63,6 @@ export class AccountRefusal extends Error {
 export interface CredentialDeps extends VaultDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
-  /** How long a refresh waits for another process's. */
-  lockTimeoutMs?: number;
   /** The token request's own deadline. */
   requestTimeoutMs?: number;
 }
@@ -81,7 +82,6 @@ export interface AccountCredential {
 
 /** A token this close to its expiry is refreshed before it is sent. */
 export const REFRESH_SKEW_MS = 60_000;
-const LOCK_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /** What the authorization server says when a refresh can never work again. */
@@ -161,29 +161,24 @@ async function refreshUnderLock(
   stale: string | undefined,
   refused: string | undefined,
 ): Promise<AccountCredential> {
-  const lock = `${sourceVaultPath(id, deps.dataDir)}.lock`;
   try {
-    return await withFileLock(
-      lock,
-      async () => {
-        const now = deps.now?.() ?? Date.now();
-        const vault = await read(id, label, deps);
-        if (vault.status === 'absent') throw new AccountRefusal('not_connected');
-        if (vault.status === 'unreadable' || vault.header.state === 'expired')
-          throw new AccountRefusal('signin_expired');
-        const { header, secret } = vault;
-        const current = tokenOf(secret, 'access_token');
-        if (
-          current !== undefined &&
-          current !== stale &&
-          current !== refused &&
-          !expiring(header, now)
-        )
-          return bearer(current, header.mcpUrl);
-        return refreshed(id, label, header, secret, deps, now);
-      },
-      { timeoutMs: deps.lockTimeoutMs ?? LOCK_TIMEOUT_MS },
-    );
+    return await withVaultLock(id, deps, async () => {
+      const now = deps.now?.() ?? Date.now();
+      const vault = await read(id, label, deps);
+      if (vault.status === 'absent') throw new AccountRefusal('not_connected');
+      if (vault.status === 'unreadable' || vault.header.state === 'expired')
+        throw new AccountRefusal('signin_expired');
+      const { header, secret } = vault;
+      const current = tokenOf(secret, 'access_token');
+      if (
+        current !== undefined &&
+        current !== stale &&
+        current !== refused &&
+        !expiring(header, now)
+      )
+        return bearer(current, header.mcpUrl);
+      return refreshed(id, label, header, secret, deps, now);
+    });
   } catch (err) {
     if (err instanceof LockTimeoutError) throw new AccountRefusal('busy', err.lockPath);
     throw err;
@@ -198,7 +193,16 @@ async function refreshed(
   deps: CredentialDeps,
   now: number,
 ): Promise<AccountCredential> {
+  // THE SIGN-IN THIS REFRESH STARTED FROM must still be the saved one: a
+  // reconnect or disconnect that got in while it ran is never overwritten
+  // with the old sign-in's tokens, nor marked expired for its refused grant.
+  const replaced = async (): Promise<void> => {
+    const saved = await readVaultHeader(deps.dataDir, id).catch(() => null);
+    if (saved?.connectedAt !== header.connectedAt || saved.kind !== header.kind)
+      throw new AccountRefusal('busy');
+  };
   const expire = async (): Promise<never> => {
+    await replaced();
     // Best effort: the refusal stands whether or not the mark is written.
     await rewriteVault(id, label, { ...header, state: 'expired' }, secret, deps).catch(
       () => undefined,
@@ -249,6 +253,7 @@ async function refreshed(
   const issuer = secret.tokens?.issuer;
   const rest: Omit<VaultHeader, 'expiresAt'> & { expiresAt?: string } = { ...header };
   delete rest.expiresAt;
+  await replaced();
   await rewriteVault(
     id,
     label,
