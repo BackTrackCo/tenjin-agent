@@ -863,13 +863,14 @@ describe('no doc or skill puts a passphrase on a command line', () => {
     );
   }
   const docsAndSkills = [...walk('docs'), ...walk('skills')];
-
-  it.each([...docsAndSkills, join('.changeset', 'wallet-unblock.md')])(
-    '%s has no inline TENJIN_WALLET_PASSPHRASE',
-    (rel) => {
-      expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/TENJIN_WALLET_PASSPHRASE=\S/);
-    },
+  /** Pending changesets, wherever the release process leaves them (`.changeset/pre/` on the version branch). */
+  const changesets = walk('.changeset').filter(
+    (rel) => rel.endsWith('.md') && !rel.endsWith('README.md'),
   );
+
+  it.each([...docsAndSkills, ...changesets])('%s has no inline TENJIN_WALLET_PASSPHRASE', (rel) => {
+    expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/TENJIN_WALLET_PASSPHRASE=\S/);
+  });
 
   it.each(walk('skills'))('%s never offers --insecure-storage', (rel) => {
     expect(readFileSync(join(root, rel), 'utf8')).not.toContain('--insecure-storage');
