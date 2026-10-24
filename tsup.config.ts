@@ -99,6 +99,10 @@ export default defineConfig([
     dts: false,
     outDir: 'dist',
     banner,
+    // Keeps `ws` out: viem's webSocket transport (unused; RPC is `http()`) imports isows.
+    esbuildOptions: (options) => {
+      options.alias = { isows: './src/lib/isows-native.ts' };
+    },
     esbuildPlugins: [writeMetafile('cli')],
     onSuccess: async () => writeHosts(),
   },

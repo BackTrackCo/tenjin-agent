@@ -18,13 +18,11 @@
   "fast-string-width",
   "fast-uri",
   "fast-wrap-ansi",
-  "isows",
   "json-schema-traverse",
   "lean-qr",
   "ox",
   "sisteransi",
   "viem",
-  "ws",
   "zod",
   "zod-to-json-schema"
 ]
