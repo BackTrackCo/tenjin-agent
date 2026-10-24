@@ -672,9 +672,6 @@ export const CHANNEL_BUSY = 'channel_busy';
 export const PAID_PATH_ABSENT = 'paid_path_absent';
 /** The paid call got no answer, a refused payment or a server error. */
 export const PAYMENT_FAILED = 'payment_failed';
-/** The header a free call carries when the paid path skipped it: the skip's
- *  reason, so the router can count unpaid calls by cause. */
-export const UNPAID_REASON_HEADER = 'tenjin-unpaid-reason';
 /** The payment went out and the call's budget ran out before its answer:
  *  no fault. `tenjin mcp` lets the request finish, so it is recorded. */
 export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
@@ -764,7 +761,6 @@ export async function requestDecision(
     // unpaid, inside what is left of its budget, and says why.
     response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       ...options,
-      headers: { ...options.headers, [UNPAID_REASON_HEADER]: err.why },
       timeoutMs: left,
     });
     const free = readDecision(response, schema);

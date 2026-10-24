@@ -9,7 +9,6 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { UNPAID_REASON_HEADER } from './decision';
 import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
@@ -52,8 +51,6 @@ export class FakeRouter {
   settledFees = 0;
   /** Every request, as `METHOD path paid|unpaid`. */
   readonly log: string[] = [];
-  /** Each free-path request's unpaid-reason header, null when it had none. */
-  readonly unpaidReasons: (string | null)[] = [];
   /** Settle the next paid answer, then drop the connection before it is read. */
   abortAfterSettle = false;
   /** How long each paid request holds its channel. */
@@ -86,10 +83,7 @@ export class FakeRouter {
     const url = new URL(request.url);
     const signature = request.headers.get('payment-signature');
     this.log.push(`${request.method} ${url.pathname} ${signature ? 'paid' : 'unpaid'}`);
-    if (url.pathname !== ROUTE_PAID_PATH) {
-      this.unpaidReasons.push(request.headers.get(UNPAID_REASON_HEADER));
-      return json(this.body, 200);
-    }
+    if (url.pathname !== ROUTE_PAID_PATH) return json(this.body, 200);
     if (this.opts.paid === false) return json({}, 404);
     if (signature === null) return this.required(url.toString());
     const payload = decodePaymentSignatureHeader(signature).payload as {
