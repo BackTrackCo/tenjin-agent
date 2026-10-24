@@ -255,7 +255,7 @@ describe('tenjin install', () => {
       ...ASK_LINES,
       `  Plugin tenjin@skills-dir written to ${folder()} (no claude binary on PATH or in CLAUDE_CODE_EXECPATH)`,
       '',
-      `Next: fund the wallet with \`tenjin wallet fund\`, then ${RELOAD}`,
+      `Next: fund the wallet with \`tenjin wallet fund 5\`, then ${RELOAD}`,
     ]);
     // The data-handling detail is not dropped, it moves to --json and the docs.
     expect(result.data).toMatchObject({
@@ -1255,7 +1255,7 @@ describe('install run by an agent asks each question where its answer is needed'
     );
     expect(stepsOf(result)).toEqual([]);
     expect(result.humanLines!.at(-1)).toBe(
-      `Next: fund the wallet with \`tenjin wallet fund\`, then ${RELOAD}`,
+      `Next: fund the wallet with \`tenjin wallet fund 5\`, then ${RELOAD}`,
     );
   });
 

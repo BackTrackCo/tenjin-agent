@@ -238,7 +238,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
       .humanLines!.find((line) => line.startsWith('  For this project only; check it with: '))
       ?.split('check it with: ')[1];
     for (const [command, expected] of [
-      [funding, ['wallet', 'fund']],
+      [funding, ['wallet', 'fund', '5']],
       [project, ['doctor', '--project']],
     ] as const) {
       expect(command).toBeDefined();

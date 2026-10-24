@@ -418,11 +418,11 @@ export function renderHostFiles(
  * not Tenjin's, and is never overwritten or removed.
  */
 export const LAUNCHER_MARKER = 'tenjin-runtime-launcher';
-/** The one fix for a missing runtime: npx installs from its own cache, not the broken launcher. */
-export const RUNTIME_MISSING_FIX = 'npx -y tenjin-cli@latest install';
+/** Official recovery instructions: the installer includes Node and needs no working launcher. */
+export const RUNTIME_MISSING_FIX = 'https://tenjin.sh/agents';
 
 const missingSentence = (entry: string): string =>
-  `tenjin: Tenjin's runtime is missing (${entry}). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session.`;
+  `tenjin: Tenjin's runtime is missing (${entry}). Reinstall from ${RUNTIME_MISSING_FIX} (no Node or npm needed), then follow the installer's activation instruction.`;
 
 /** A single-quoted sh word: everything literal, a `'` closed, escaped and reopened. */
 export const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;

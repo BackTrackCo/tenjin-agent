@@ -66,7 +66,7 @@ try {
   );
   writeFileSync(
     join(packageDir, 'dist', 'index.js'),
-    `import {writeFileSync} from 'node:fs'; writeFileSync(process.env.TENJIN_SMOKE_RECEIPT, JSON.stringify({args:process.argv.slice(2), archive:process.env.TENJIN_BOOTSTRAP_NODE_ARCHIVE, proxy:process.env.HTTPS_PROXY}));\n`,
+    `import {writeFileSync} from 'node:fs'; if (process.env.TENJIN_SMOKE_EXIT) process.exit(Number(process.env.TENJIN_SMOKE_EXIT)); writeFileSync(process.env.TENJIN_SMOKE_RECEIPT, JSON.stringify({args:process.argv.slice(2), archive:process.env.TENJIN_BOOTSTRAP_NODE_ARCHIVE, proxy:process.env.HTTPS_PROXY}));\n`,
   );
   const cliArchive = join(fixture, 'cli.tgz');
   execFileSync('tar', ['-czf', cliArchive, '-C', fixture, 'package']);
@@ -77,12 +77,14 @@ try {
     output,
   ]);
   const receipt = join(fixture, 'receipt.json');
+  const scopeReceipt = join(fixture, 'scope.json');
   const env = {
     ...process.env,
     HOME: home,
     USERPROFILE: home,
     TENJIN_DATA_DIR: '',
     TENJIN_SMOKE_RECEIPT: receipt,
+    TENJIN_SMOKE_SCOPE_RECEIPT: scopeReceipt,
     TENJIN_SMOKE_NODE: nodeArchive,
     TENJIN_SMOKE_CLI: cliArchive,
     HTTPS_PROXY: 'http://fixture.invalid:8080',
@@ -102,10 +104,10 @@ try {
     const wrapper = join(fixture, 'run.ps1');
     writeFileSync(
       wrapper,
-      `class FixtureClient {\n [object]$Proxy\n [void] DownloadFile([string]$url, [string]$path) {\n  $source = if ($url.Contains('nodejs.org')) { $env:TENJIN_SMOKE_NODE } else { $env:TENJIN_SMOKE_CLI }\n  Copy-Item -LiteralPath $source -Destination $path\n  if ($env:TENJIN_SMOKE_CORRUPT -and $url.Contains($env:TENJIN_SMOKE_CORRUPT)) { Add-Content -LiteralPath $path -Value 'corrupt' }\n }\n [void] Dispose() {}\n}\nfunction New-Object { param($TypeName, $ArgumentList) if ($TypeName -eq 'Net.WebClient') { return [FixtureClient]::new() }; return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName -ArgumentList $ArgumentList }\n& ${psQuote(join(output, 'install.ps1'))} --yes --harness codex\nexit $LASTEXITCODE\n`,
+      `class FixtureClient {\n [object]$Proxy\n [void] DownloadFile([string]$url, [string]$path) {\n  $source = if ($url.Contains('nodejs.org')) { $env:TENJIN_SMOKE_NODE } else { $env:TENJIN_SMOKE_CLI }\n  Copy-Item -LiteralPath $source -Destination $path\n  if ($env:TENJIN_SMOKE_CORRUPT -and $url.Contains($env:TENJIN_SMOKE_CORRUPT)) { Add-Content -LiteralPath $path -Value 'corrupt' }\n }\n [void] Dispose() {}\n}\nfunction New-Object { param($TypeName, $ArgumentList) if ($TypeName -eq 'Net.WebClient') { return [FixtureClient]::new() }; return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName -ArgumentList $ArgumentList }\n$ErrorActionPreference = 'Continue'\n$Failed = $false\ntry { Invoke-Expression (Get-Content -LiteralPath ${psQuote(join(output, 'install.ps1'))} -Raw) } catch { $Failed = $true; Write-Host $_ }\nif ($ErrorActionPreference -ne 'Continue') { throw 'Installer changed the caller ErrorActionPreference' }\n[IO.File]::WriteAllText($env:TENJIN_SMOKE_SCOPE_RECEIPT, (@{ failed = $Failed; returnedToCaller = $true } | ConvertTo-Json))\nif ($Failed) { exit 1 }\n`,
     );
     command = 'powershell';
-    args = ['-NoProfile', '-File', wrapper];
+    args = ['-NoProfile', '-File', wrapper, '--yes', '--harness', 'codex'];
   } else {
     for (const name of ['node', 'npm']) {
       const unavailable = join(bin, name);
@@ -133,8 +135,22 @@ try {
     command = 'sh';
     args = [join(output, 'install.sh'), '--yes', '--harness', 'codex'];
   }
-  const run = (extra = {}) =>
-    spawnSync(command, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 60000 });
+  const run = (extra = {}) => {
+    rmSync(scopeReceipt, { force: true });
+    const result = spawnSync(command, args, {
+      env: { ...env, ...extra },
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    if (windows) {
+      if (!existsSync(scopeReceipt))
+        throw new Error(`PowerShell installer did not return to its caller: ${result.stderr}`);
+      const scope = JSON.parse(readFileSync(scopeReceipt, 'utf8'));
+      if (!scope.returnedToCaller || scope.failed !== (result.status !== 0))
+        throw new Error('PowerShell installer lost its success/failure status');
+    }
+    return result;
+  };
   const success = run();
   if (success.status !== 0)
     throw new Error(`Native installer failed: ${success.stderr || success.stdout}`);
@@ -145,6 +161,9 @@ try {
     throw new Error('Bootstrap lost proxy or archive handoff');
   if (existsSync(result.archive)) throw new Error('Installer left temporary archive behind');
   rmSync(receipt);
+  const cliFailed = run({ TENJIN_SMOKE_EXIT: '7' });
+  if (cliFailed.status === 0 || existsSync(receipt))
+    throw new Error('Installer hid a failed CLI setup');
   for (const target of ['nodejs.org', 'registry.npmjs.org']) {
     const failed = run({ TENJIN_SMOKE_CORRUPT: target });
     if (failed.status === 0 || existsSync(receipt))

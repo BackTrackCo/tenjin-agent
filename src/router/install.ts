@@ -1019,7 +1019,7 @@ function todaysSteps(
   if (asksQuestion) {
     steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
-    steps.push(`fund the wallet with \`${command} wallet fund\``);
+    steps.push(`fund the wallet with \`${command} wallet fund ${SUGGESTED_FUND_USD}\``);
   }
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');

@@ -49,9 +49,12 @@ Your install request gives the agent permission to handle setup. It briefly expl
 Or from a terminal (Node and npm are not required):
 
 ```sh
-tenjin_install_dir="$(mktemp -d)"
-curl -fsSL https://tenjin.sh/install.sh -o "$tenjin_install_dir/install.sh" &&
-  sh "$tenjin_install_dir/install.sh"
+(
+  tenjin_install_dir="$(mktemp -d ./.tenjin-install.XXXXXXXX)" || exit
+  trap 'rm -f "$tenjin_install_dir/install.sh"; rmdir "$tenjin_install_dir"' EXIT
+  curl -fsSL https://tenjin.sh/install.sh -o "$tenjin_install_dir/install.sh" &&
+    sh "$tenjin_install_dir/install.sh"
+)
 ```
 
 On Windows, in PowerShell:
@@ -105,7 +108,7 @@ The router names the tool and its price, and your agent calls it.
 | Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
 | PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-Provider prices above exclude Tenjin's $0.003 routing fee per lookup. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
+Provider prices above exclude Tenjin's $0.003 fee per paid routing call. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
 ## How it works
 
@@ -125,7 +128,7 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 | Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Routing costs $0.003 a call, on top of the tool's price. $5 covers about 500 web searches, 130 images or 40 voiceovers.
+- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)

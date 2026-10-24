@@ -327,7 +327,7 @@ describe('the runtime render', () => {
       `node='/h/o'\\''b/node'`,
       `entry='/h/e.js'`,
       'if [ -x "$node" ] && [ -f "$entry" ]; then exec "$node" "$entry" "$@"; fi',
-      `echo "tenjin: Tenjin's runtime is missing ($entry). Reinstall it with \\\`${RUNTIME_MISSING_FIX}\\\`, then start a new Claude Code session." >&2`,
+      `echo "tenjin: Tenjin's runtime is missing ($entry). Reinstall from ${RUNTIME_MISSING_FIX} (no Node or npm needed), then follow the installer's activation instruction." >&2`,
       'exit 1',
       '',
     ]);
@@ -355,7 +355,7 @@ describe('the runtime render', () => {
         '@echo off',
         `rem ${LAUNCHER_MARKER}`,
         'if exist "%USERPROFILE%\\.tenjin\\runtime\\node\\24.0.0\\node.exe" if exist "%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js" ( "%USERPROFILE%\\.tenjin\\runtime\\node\\24.0.0\\node.exe" "%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js" %* & exit /b )',
-        `echo tenjin: Tenjin's runtime is missing (%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session. 1>&2`,
+        `echo tenjin: Tenjin's runtime is missing (%USERPROFILE%\\.tenjin\\runtime\\versions\\1.2.3\\dist\\index.js). Reinstall from ${RUNTIME_MISSING_FIX} (no Node or npm needed), then follow the installer's activation instruction. 1>&2`,
         'exit /b 1',
         '',
       ]);

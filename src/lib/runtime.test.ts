@@ -670,7 +670,7 @@ describe('launchers', () => {
     const run = spawnSync(join(bin(), 'tenjin'), ['--version'], { encoding: 'utf8' });
     expect(run.status).toBe(1);
     expect(run.stderr).toBe(
-      `tenjin: Tenjin's runtime is missing (${entry}). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session.\n`,
+      `tenjin: Tenjin's runtime is missing (${entry}). Reinstall from ${RUNTIME_MISSING_FIX} (no Node or npm needed), then follow the installer's activation instruction.\n`,
     );
   });
 
