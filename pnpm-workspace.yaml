@@ -65,6 +65,18 @@ overrides:
   'source-map-js@>=1.0.0 <1.2.2': '^1.2.2'
   'vite@>=8.0.0 <8.1.6': '^8.1.6'
 
+# Accepted risks: advisories with no patched release, each with why it can't
+# reach the CLI and when to drop it.
+#
+# GHSA-mrhx-c7xc-m3w5 (zod memory exhaustion on large failing arrays, high),
+# zod 3 only: zod has no fixed 3.x release. The vulnerable code is the zod 4
+# core's $ZodArray; @x402/core and abitype (via viem) call zod 3's classic API,
+# which never reaches it. Our own zod and the MCP SDK's resolve zod 4.6.6+.
+# Drop once no package resolves zod 3.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-mrhx-c7xc-m3w5
+
 # pnpm 11 errors (ERR_PNPM_IGNORED_BUILDS) on any build-script dep missing an
 # entry here, so keep it exhaustive. `false` = don't run the script; esbuild's
 # native binary comes from its platform optional-deps.
