@@ -365,6 +365,7 @@ export async function runSourceRequest(
   const sentInput = maskDeep(input) as Json;
   const named = { provider: label, label: `${label} ${tool}`, parameters: sentInput };
   await footer.calling(named);
+  // Read as a named tool's answer (`readNamedResult`), whatever `result` says.
   const run = await runAccountCall(
     target,
     { tool: tool!, args: input, result: 'content' },

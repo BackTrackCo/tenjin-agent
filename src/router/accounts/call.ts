@@ -166,6 +166,15 @@ export function readResult(result: AccountCallResult, mode: AccountCall['result'
   return { value, text, media };
 }
 
+/** A tool the user named, which no map reads: its structured result when it
+ *  gave one, with any files its content holds; its content otherwise. */
+export function readNamedResult(result: AccountCallResult): ToolRead {
+  const content = readResult(result, 'content');
+  const value = result.structuredContent;
+  if (value === undefined || 'problem' in content) return content;
+  return { value, text: JSON.stringify(value), media: content.media };
+}
+
 /** The text of an `isError` answer, bounded: what the account said. */
 export function errorText(result: AccountCallResult): string {
   return textItems(result.content).join(' ').replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -380,7 +389,7 @@ export async function runAccountCall(
       ({ first, firstAt } = resume);
     } else {
       // A TOOL THE USER NAMED takes the agent's arguments as written: no map,
-      // so nothing in them is a placeholder.
+      // so nothing in them is a placeholder, and none says how to read it.
       const args = opts.literal === true ? { value: call.args } : fillArgs(call.args, input);
       if ('missing' in args)
         return { kind: 'failed', why: 'its map reads a result before there is one' };
@@ -406,7 +415,8 @@ export async function runAccountCall(
         const reason = refusalIn(detail);
         return { kind: 'declined', detail, ...(reason !== undefined ? { reason } : {}) };
       }
-      const read = readResult(result, call.result);
+      const read =
+        opts.literal === true ? readNamedResult(result) : readResult(result, call.result);
       if ('problem' in read) return { kind: 'failed', why: read.problem };
       const { next } = call;
       if (next === undefined || (next.when !== undefined && !inState(read.value, next.when)))

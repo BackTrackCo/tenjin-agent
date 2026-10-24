@@ -234,6 +234,19 @@ describe('an account the user names, with no map', () => {
     });
   });
 
+  it('hands back a structured-only answer', async () => {
+    // Review: a named tool was read as content alone, so a valid answer that
+    // only carried structuredContent came back fulfilled and empty.
+    await connected();
+    const session = account({ content: [], structuredContent: { answer: 42 } });
+    const result = await runRequestTool(
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+      deps(session).run,
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(JSON.parse(String(result.envelope.result))).toEqual({ answer: 42 });
+  });
+
   it("holds it to the user's settings: a block on the account, and any only rule", async () => {
     await connected({ version: 1, block: [{ kind: 'source', id: 'mcp-example-com' }] });
     const session = account();
