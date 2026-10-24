@@ -34,6 +34,10 @@ export const AUTO_UPDATE_LOG = 'auto-update.log';
 
 const DAY_MS = 86_400_000;
 
+/** Why no background update starts while Node checks no TLS certificate. */
+export const TLS_OFF =
+  'TLS certificate checks are turned off (NODE_TLS_REJECT_UNAUTHORIZED=0); set NODE_EXTRA_CA_CERTS instead';
+
 export interface AutoUpdateRecord {
   /** When the last background run was started (ISO). */
   startedAt?: string;
@@ -80,6 +84,17 @@ export function maybeAutoUpdate(o: {
     const started = Date.parse(previous?.startedAt ?? '');
     // A start in the future (a clock set back) counts as due, not as a day away.
     if (!Number.isNaN(started) && nowMs - started >= 0 && nowMs - started < DAY_MS) return;
+
+    // NOT WITH TLS CERTIFICATE CHECKS TURNED OFF: the child inherits this
+    // environment, and then anyone on the network path can answer for the
+    // registry, the dist-tags, the attestations and the tarball alike, so no
+    // check the update makes would hold. Recorded as a run, once a day, so
+    // doctor names the cause and the fix.
+    if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+      const at = new Date(nowMs).toISOString();
+      writeRecord(root, { startedAt: at, finishedAt: at, outcome: 'skipped', reason: TLS_OFF });
+      return;
+    }
 
     // Stamped BEFORE the spawn, so a second session starting in the same
     // second finds it and stays put. The last result is kept for doctor.
