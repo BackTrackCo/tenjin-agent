@@ -3,7 +3,7 @@ import { Option, type Command } from 'commander';
 import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
-import { SETUP, WALLET, type Registration } from './registration';
+import { SETUP, WALLET, collect, type Registration } from './registration';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -397,8 +397,12 @@ Examples:
     .description(
       'Pay an x402 endpoint (exact scheme, USDC on Base) with explicit user consent. Manual pay ignores automatic router limits and always confirms; --yes records prior consent for this quote. Never use it as an autonomous workaround for router refusal. Unlisted endpoints need no warning flag. Registry lookup failures or listed-term mismatches require --ignore-warnings separately. Every paid call pays; entitled delivery remains free.',
     )
-    .option('-X, --method <method>', 'GET (default) or POST (implied by --data)')
+    .option(
+      '-X, --method <method>',
+      'GET (default), POST (implied by a body), PUT, PATCH or DELETE',
+    )
     .option('-d, --data <json>', 'JSON request body (sent as application/json)')
+    .option('--data-raw <text>', "request body sent byte for byte; needs -H 'Content-Type: <type>'")
     .option('--max-price <usd>', 'hard price cap in decimal USD (never bypassed by --yes)')
     .option('--yes', 'bypass the interactive confirm only (not the price cap)')
     // NOT the same flag as `read`/`buy` carry: there it adds `body` to the
@@ -408,6 +412,15 @@ Examples:
       'acknowledge direct-payment registry warnings only; all payment checks still apply',
     )
     .option('--print-body', 'print the full body instead of the capped preview')
+    .option(
+      '--quote',
+      'probe only: report the 402 terms and the advertised request shape; opens no wallet, signs nothing',
+    )
+    .option(
+      '-H, --header <line>',
+      "a request header the endpoint asks for, as 'Name: value' (repeatable); payment, sign-in and bypass headers are refused",
+      collect,
+    )
     .addHelpText(
       'after',
       `
@@ -415,6 +428,10 @@ Examples:
   $ tenjin pay https://api.example.com/quote --max-price 0.05
   $ tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
   $ tenjin pay https://api.example.com/quote -d '{"symbol":"ETH"}' --yes
+  $ tenjin pay https://api.example.com/search -d '{"q":"x"}' --quote
+  $ tenjin pay https://api.example.com/search -d '{"q":"x"}' -H 'X-Api-Beta: 2026-08-28' --yes
+  $ tenjin pay https://api.example.com/items/7 -X PATCH -d '{"name":"y"}' --max-price 0.05 --yes
+  $ tenjin pay https://api.example.com/form --data-raw 'a=1' -H 'Content-Type: application/x-www-form-urlencoded' --quote
 `,
     )
     .action(async function (this: Command, url: string) {
@@ -426,10 +443,15 @@ Examples:
             url,
             ...(typeof o.method === 'string' ? { method: o.method } : {}),
             ...(typeof o.data === 'string' ? { data: o.data } : {}),
+            ...(typeof o.dataRaw === 'string' ? { dataRaw: o.dataRaw } : {}),
             ...(typeof o.maxPrice === 'string' ? { maxPrice: o.maxPrice } : {}),
             ...(o.yes === true ? { yes: true } : {}),
             ...(o.printBody === true ? { printBody: true } : {}),
             ...(o.ignoreWarnings === true ? { ignoreWarnings: true } : {}),
+            ...(o.quote === true ? { quote: true } : {}),
+            ...(Array.isArray(o.header) && o.header.length > 0
+              ? { header: o.header as string[] }
+              : {}),
           },
           ctx,
         );

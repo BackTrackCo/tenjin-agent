@@ -156,15 +156,21 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
  * against that token's contract directly, no facilitator required.
  */
 export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
-  requirements.filter((requirement) => {
-    const allowed = ALLOWED_USDC_BY_NETWORK[requirement.network];
-    if (allowed === undefined) return false;
-    try {
-      return getAddress(requirement.asset) === getAddress(allowed);
-    } catch {
-      return false;
-    }
-  });
+  requirements.filter(isCanonicalUsdc);
+
+/**
+ * Whether an entry names canonical USDC on a chain this CLI pays on. Only such
+ * an amount is 6-decimal by construction, so only it may be shown in USD.
+ */
+export function isCanonicalUsdc(entry: Pick<PaymentRequirements, 'network' | 'asset'>): boolean {
+  const allowed = ALLOWED_USDC_BY_NETWORK[entry.network];
+  if (allowed === undefined) return false;
+  try {
+    return getAddress(entry.asset) === getAddress(allowed);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The entry the SDK would pay, or undefined when it would pay none. The SDK

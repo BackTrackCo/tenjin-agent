@@ -89,8 +89,8 @@ describe('the checked-in hosts/claude templates', () => {
     expect(shipped).toEqual(Object.keys(rendered).sort());
     for (const [path, body] of Object.entries(rendered)) {
       const checkedIn = readFileSync(join(HOSTS, path), 'utf8');
-      // Parsed, so prettier's formatting of the checked-in copy is not drift;
-      // the mod's own files ship as written.
+      // JSON is parsed, so prettier's formatting of the checked-in copy is not
+      // drift; the mod's own files and the skill ship as written.
       if (path.endsWith('.json')) expect(JSON.parse(checkedIn), path).toEqual(JSON.parse(body));
       else expect(checkedIn, path).toBe(body);
     }

@@ -1,3 +1,4 @@
+import { PAY_SKILL, PAY_SKILL_PATH } from './plugin-skill';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import {
   CODEX_HOOK_KINDS,
@@ -325,6 +326,7 @@ export const PLUGIN_FILES = [
   'types/index.d.ts',
   'hooks/register.tsx',
   'hooks/hooks.json',
+  PAY_SKILL_PATH,
   '.claude-plugin/plugin.json',
 ] as const;
 
@@ -358,6 +360,7 @@ export function renderPluginFiles(
     '.mcp.json': json(renderPluginMcp(entry, o)),
     ...(o.mod ?? {}),
     'hooks/hooks.json': json(renderPluginHooks(entry, o)),
+    [PAY_SKILL_PATH]: PAY_SKILL,
     '.claude-plugin/plugin.json': json(renderPluginManifest(version, o)),
   };
 }
