@@ -70,10 +70,11 @@ overrides:
 #
 # GHSA-mrhx-c7xc-m3w5 (zod memory exhaustion on large failing arrays, high),
 # zod 3 only: zod has no fixed 3.x release, and @x402/core and abitype (via
-# viem) still ask for ^3. zod 3 has the same per-element issue growth, but here
-# it only parses 402 challenges from a provider the user chose to call, so the
-# worst case is that provider crashing the one CLI process. Our own zod and
-# the MCP SDK's resolve 4.6.6+. Drop once @x402/core ships on zod 4.
+# viem) still ask for ^3. zod 3 has the same per-element issue growth, but the
+# CLI's only zod 3 parse is PaymentRequirementsV2Schema on bazaar listings
+# (src/lib/bazaar.ts), which has no array to inflate; x402 only JSON.parses
+# live 402s. Our own zod and the MCP SDK's resolve 4.6.6+. Drop once
+# @x402/core ships on zod 4.
 auditConfig:
   ignoreGhsas:
     - GHSA-mrhx-c7xc-m3w5
