@@ -516,6 +516,19 @@ describe('reset', () => {
     expect(await readFileJson()).toEqual(before);
   });
 
+  it('says --all removed the blocks too, and leaves the spending limits', async () => {
+    await seed();
+    await runConfigSet({ key: 'maxAutoSpend', value: '0.5' }, makeCtx());
+    const limit = (await readFileJson())?.maxAutoSpend;
+    const result = await runConfigReset({ all: true }, makeCtx(), offline());
+    expect(await savedPolicy()).toBeUndefined();
+    expect((await readFileJson())?.maxAutoSpend).toBe(limit);
+    expect(lines(result)).toContain(
+      'Saved on this machine (not synced): removed every saved routing rule, including your blocks, restrictions and preferences, so anything you blocked can be used again. Your spending limits stay as they are.',
+    );
+    expect(lines(result)).not.toContain('Your blocks, limits and other rules stay as they are.');
+  });
+
   it('writes no file at all when a fresh machine has nothing to reset or unblock', async () => {
     await runConfigReset({ all: true }, makeCtx(), offline());
     await runConfigUnblock({ provider: ['exa'] }, makeCtx(), offline());
