@@ -5,7 +5,7 @@ import type { PlanAdmission, PlannedPayment } from '../lib/spend-plan';
 import { createQuote, type Quote } from '../lib/spend-quotes';
 import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
-import { OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
+import { IdentitySchema, OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
 import { KeptChoicesSchema, type KeptChoices } from './specs';
 import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './tool';
 
@@ -78,6 +78,9 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
       capabilityId: z.string().min(1).max(200),
       provider: z.string().min(1).max(120),
       label: z.string().max(200).optional(),
+      /** The docs lookup's route, rechecked against the settings when the
+       *  quote is approved. */
+      identity: IdentitySchema.optional(),
       media: z.boolean(),
       request: z.strictObject({
         url: z.string().min(1).max(16_384),

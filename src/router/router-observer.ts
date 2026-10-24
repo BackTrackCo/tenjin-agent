@@ -47,6 +47,8 @@ export interface RouterObserver {
   queueNews: (line: string) => void;
   /** HookDeps.walletNews. */
   takeNews: (sessionId: string) => Promise<WalletNews>;
+  /** The MCP client's own name and version, once it has said them. */
+  noteClient: (client: { name: string; version: string }) => void;
   /** Remove the exit handler and the observation (tests; the process exit does it otherwise). */
   dispose: () => void;
 }
@@ -152,6 +154,15 @@ export function createRouterObserver(o: {
     },
 
     unlockStamp: async () => unlockStamp(await readWalletFacts(o.dataDir, o.env)),
+
+    noteClient(client) {
+      observation = {
+        ...observation,
+        client: { name: client.name.slice(0, 200), version: client.version.slice(0, 200) },
+        at: now(),
+      };
+      write();
+    },
 
     queueNews(line) {
       if (!queue.includes(line)) queue.push(line);

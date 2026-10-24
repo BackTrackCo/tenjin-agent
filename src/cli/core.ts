@@ -3,7 +3,7 @@ import { Option, type Command } from 'commander';
 import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
-import { SETUP, WALLET, type Registration } from './registration';
+import { collect, SETUP, WALLET, type Registration } from './registration';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -200,17 +200,40 @@ Examples:
       });
     });
 
-  const config = leaf(SETUP, 'config', 'read and set config values').description(
-    'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default).',
+  const config = leaf(SETUP, 'config', 'read and set config values, and your settings').description(
+    "Print every effective config value and your settings, read and write one value, or change what Tenjin may use: prefer, only, block, unblock, reset, and whether Tenjin's picks run automatically. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved, what it covers and the command that undoes it.",
   );
   config.addHelpText(
     'after',
     `
 Examples:
   $ tenjin config
+  $ tenjin config --json
   $ tenjin config set router.context turn
   $ tenjin config set maxAutoSpend 0.25
   $ tenjin config set --project router.enabled false
+
+What Tenjin may use (saved on this machine, not synced):
+  $ tenjin config prefer --task "web research" --provider exa
+  $ tenjin config prefer --source apify
+  $ tenjin config only --task "web research" --provider exa
+  $ tenjin config only --global --category images --task "web research"
+  $ tenjin config block --provider firecrawl
+  $ tenjin config block --task "crypto price quote"
+  $ tenjin config block --source tenjin
+  $ tenjin config unblock --provider firecrawl
+  $ tenjin config reset --task "web research" --preference
+  $ tenjin config reset --source apify --preference
+  $ tenjin config reset --task "web research" --restriction --dimension provider
+  $ tenjin config reset --global --capabilities
+  $ tenjin config reset --all
+  $ tenjin config replacement on --provider exa
+  $ tenjin config replacement on --all-providers
+  $ tenjin config replacement off
+
+A name is the catalog's name or id ("Exa" or exa). An unclear or unknown name
+saves nothing and lists what it could mean. To pause Tenjin:
+  $ tenjin config set router.enabled false
 `,
   );
   config.action(async function (this: Command) {
@@ -250,6 +273,8 @@ Examples:
         );
       });
     });
+
+  registerConfigRules(config, reg);
 
   // Group-level flags so `tenjin wallet --json show` parses like the config group.
   const wallet = leaf(
@@ -442,4 +467,214 @@ function codexArgs(o: Record<string, unknown>): import('../router/codex-install'
     ...(typeof o.maxAutoSpend === 'string' ? { maxAutoSpend: o.maxAutoSpend } : {}),
     ...(typeof o.sessionBudget === 'string' ? { sessionBudget: o.sessionBudget } : {}),
   };
+}
+
+type TargetKindFlag = 'task' | 'category' | 'provider' | 'seller' | 'service' | 'source';
+
+const TARGET_FLAGS: Record<TargetKindFlag, string> = {
+  task: 'a task, such as "web research" (repeatable)',
+  category: 'a category of tasks, such as images (repeatable)',
+  provider: 'a provider, such as exa (repeatable)',
+  seller: 'who sells the call, such as stableenrich (repeatable)',
+  service: 'one service, such as exa-search (repeatable)',
+  source: "one of your accounts, or tenjin for Tenjin's own tools (repeatable)",
+};
+
+function targetOptions(cmd: Command, kinds: readonly TargetKindFlag[]): Command {
+  for (const kind of kinds) cmd.option(`--${kind} <name>`, TARGET_FLAGS[kind], collect);
+  return cmd;
+}
+
+/** The repeatable target flags, as the operations read them. */
+function targetFlags(o: Record<string, unknown>): Record<TargetKindFlag, string[] | undefined> {
+  const read = (key: TargetKindFlag) => (Array.isArray(o[key]) ? (o[key] as string[]) : undefined);
+  return {
+    task: read('task'),
+    category: read('category'),
+    provider: read('provider'),
+    seller: read('seller'),
+    service: read('service'),
+    source: read('source'),
+  };
+}
+
+/**
+ * THE SETTINGS OPERATIONS, under `tenjin config`. Each answers with what it
+ * saved in the user's words and the command that undoes it, so an agent
+ * reports the readback rather than assuming the write worked.
+ */
+function registerConfigRules(config: Command, reg: Registration): void {
+  const { runCommand, addGlobalFlags } = reg;
+  const rules = () => import('../commands/config-rules');
+  const all: TargetKindFlag[] = ['task', 'category', 'provider', 'seller', 'service', 'source'];
+
+  targetOptions(addGlobalFlags(config.command('prefer')), ['task', 'provider', 'service', 'source'])
+    .summary('set the order Tenjin tries allowed services in')
+    .description(
+      'Prefer providers, services or your accounts, in order. With --task the preference is for that task; with --source alone it is account-wide, and a task preference comes first. Repeating it replaces the list at that scope. Other allowed services stay available when a preferred one cannot meet a request: use only to forbid them.',
+    )
+    .option('--global', 'the account-wide preference (with --source)')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config prefer --task "web research" --provider exa
+  $ tenjin config prefer --task "web research" --provider exa --provider tavily
+  $ tenjin config prefer --source apify
+`,
+    )
+    .action(async function (this: Command) {
+      const o = this.opts();
+      await runCommand('config.prefer', this, async (ctx) =>
+        (await rules()).runConfigPrefer(
+          { ...targetFlags(o), ...(o.global === true ? { global: true } : {}) },
+          ctx,
+        ),
+      );
+    });
+
+  targetOptions(addGlobalFlags(config.command('only')), [
+    'task',
+    'category',
+    'provider',
+    'seller',
+    'service',
+  ])
+    .summary('allow only the named services, providers or tasks')
+    .description(
+      'Allow only what you name. --global with --category or --task limits which tasks Tenjin does anywhere; --task with --provider, --seller or --service limits who does that one task and leaves other tasks alone. Repeating it replaces the set for that scope; blocks and other rules stay. A request no allowed service can meet is refused with the reason, never sent elsewhere.',
+    )
+    .option('--global', 'apply everywhere: with --category or --task, which tasks Tenjin does')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config only --task "web research" --provider exa
+  $ tenjin config only --global --category images
+  $ tenjin config only --global --task "web research" --task "read an exact page"
+`,
+    )
+    .action(async function (this: Command) {
+      const o = this.opts();
+      await runCommand('config.only', this, async (ctx) =>
+        (await rules()).runConfigOnly(
+          { ...targetFlags(o), ...(o.global === true ? { global: true } : {}) },
+          ctx,
+        ),
+      );
+    });
+
+  targetOptions(addGlobalFlags(config.command('block')), all)
+    .summary('never let Tenjin use what you name')
+    .description(
+      "Block a provider, seller, service, task, category or account. A provider block covers reviewed reseller routes through it. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. Blocking Tenjin's own tools (--source tenjin) leaves only your accounts.",
+    )
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config block --provider firecrawl
+  $ tenjin config block --service exa-contents
+  $ tenjin config block --task "crypto price quote"
+  $ tenjin config block --category images
+`,
+    )
+    .action(async function (this: Command) {
+      const o = this.opts();
+      await runCommand('config.block', this, async (ctx) =>
+        (await rules()).runConfigBlock(targetFlags(o), ctx),
+      );
+    });
+
+  targetOptions(addGlobalFlags(config.command('unblock')), all)
+    .summary('remove a block')
+    .description('Remove the named blocks and nothing else. Works offline.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config unblock --provider firecrawl
+  $ tenjin config unblock --task "crypto price quote"
+`,
+    )
+    .action(async function (this: Command) {
+      const o = this.opts();
+      await runCommand('config.unblock', this, async (ctx) =>
+        (await rules()).runConfigUnblock(targetFlags(o), ctx),
+      );
+    });
+
+  targetOptions(addGlobalFlags(config.command('reset')), ['task', 'provider', 'service', 'source'])
+    .summary('remove one saved rule, or all of them')
+    .description(
+      'Remove exactly the rule named, offline. --preference removes a task preference (with --task) or the account-wide one (--global), or with --source one account from it. --restriction removes the only rules for a task or --global, or with --dimension just one. --capabilities removes the global task allowlist. --all removes every saved routing rule. Blocks, spending limits and your accounts stay.',
+    )
+    .option('--global', 'the account-wide preference, or the global restrictions')
+    .option('--preference', 'reset a preference')
+    .option('--restriction', 'reset only rules')
+    .option(
+      '--dimension <dimension>',
+      'with --restriction: capability, provider, seller or service',
+    )
+    .option('--capabilities', 'reset which tasks Tenjin may do')
+    .option('--all', 'reset every saved routing rule')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config reset --task "web research" --preference
+  $ tenjin config reset --source apify --preference
+  $ tenjin config reset --task "web research" --restriction
+  $ tenjin config reset --task "web research" --restriction --dimension provider
+  $ tenjin config reset --global --capabilities
+  $ tenjin config reset --all
+`,
+    )
+    .action(async function (this: Command) {
+      const o = this.opts();
+      await runCommand('config.reset', this, async (ctx) =>
+        (await rules()).runConfigReset(
+          {
+            ...targetFlags(o),
+            ...(o.global === true ? { global: true } : {}),
+            ...(o.preference === true ? { preference: true } : {}),
+            ...(o.restriction === true ? { restriction: true } : {}),
+            ...(o.capabilities === true ? { capabilities: true } : {}),
+            ...(o.all === true ? { all: true } : {}),
+            ...(typeof o.dimension === 'string' ? { dimension: o.dimension } : {}),
+          },
+          ctx,
+        ),
+      );
+    });
+
+  addGlobalFlags(config.command('replacement <state>'))
+    .summary("turn Run Tenjin's picks automatically on or off")
+    .description(
+      "Run Tenjin's picks automatically: on lets a host that supports it run Tenjin's pick in place of your agent's web search or page fetch, within your limits, instead of offering it first. on needs --provider (repeatable) or --all-providers; off keeps a saved provider choice. It never changes what is allowed or which service is picked first.",
+    )
+    .option('--provider <name>', 'only when Tenjin picks this provider (repeatable)', collect)
+    .option('--all-providers', 'for any allowed provider')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config replacement on --provider exa
+  $ tenjin config replacement on --all-providers
+  $ tenjin config replacement off
+`,
+    )
+    .action(async function (this: Command, state: string) {
+      const o = this.opts();
+      await runCommand('config.replacement', this, async (ctx) =>
+        (await rules()).runConfigReplacement(
+          {
+            state,
+            ...(Array.isArray(o.provider) ? { provider: o.provider as string[] } : {}),
+            ...(o.allProviders === true ? { allProviders: true } : {}),
+          },
+          ctx,
+        ),
+      );
+    });
 }

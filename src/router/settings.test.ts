@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { RouterLayerSchema, parseRouterLayer } from '../lib/config';
+import { PROJECT_ROUTER_KEYS, RouterLayerSchema, parseRouterLayer } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { projectRouterPath, routerSettings } from './settings';
 
@@ -43,6 +43,9 @@ describe('routerSettings', () => {
     expect(await resolve(repo)).toEqual({
       enabled: { value: true, source: 'default' },
       context: { value: 'session', source: 'default' },
+      policy: { status: 'none', path: join(data, 'config.json') },
+      sources: { status: 'ok', saved: [], connected: [] },
+      nativeReplacement: { mode: 'off' },
     });
   });
 
@@ -258,9 +261,147 @@ describe('routerSettings in a git worktree', () => {
   });
 });
 
+/**
+ * THE PERSONAL SETTINGS ARE THE GLOBAL FILE'S ALONE: routing rules, saved
+ * accounts and automatic replacement. A repository's files cannot add a rule
+ * or turn replacement on, and a rule this build cannot read fails closed for
+ * what reads rules without making anything else unreadable.
+ */
+describe('the personal settings', () => {
+  const rules = {
+    version: 1,
+    block: [{ kind: 'provider', id: 'firecrawl' }],
+    prefer: [
+      { scope: { kind: 'task', id: 'web research' }, targets: [{ kind: 'provider', id: 'exa' }] },
+    ],
+  };
+
+  it('reads the saved rules and the policy sent for them, revision included', async () => {
+    await put(join(data, 'config.json'), { router: { policy: rules } });
+    const { policy } = await resolve(repo);
+    expect(policy).toMatchObject({ status: 'ok', saved: rules });
+    if (policy.status !== 'ok') throw new Error('expected ok');
+    expect(policy.wire).toEqual({
+      version: 1,
+      revision: policy.revision,
+      block: rules.block,
+      prefer: rules.prefer,
+    });
+    expect(policy.revision).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('sends nothing for a policy with no rules left in it', async () => {
+    await put(join(data, 'config.json'), {
+      router: { policy: { version: 1, block: [], prefer: [] } },
+    });
+    const { policy } = await resolve(repo);
+    expect(policy.status).toBe('ok');
+    expect(policy).not.toHaveProperty('wire');
+  });
+
+  it('ignores every personal key in a project or personal project file', async () => {
+    const planted = {
+      router: {
+        policy: rules,
+        sources: [{ id: 'apify' }],
+        nativeReplacement: 'when-routed',
+        nativeReplacementProviders: [{ kind: 'provider', id: 'exa' }],
+      },
+    };
+    await put(project(repo), planted);
+    await put(local(repo), planted);
+    const s = await resolve(repo);
+    expect(s.policy.status).toBe('none');
+    expect(s.sources).toEqual({ status: 'ok', saved: [], connected: [] });
+    expect(s.nativeReplacement).toEqual({ mode: 'off' });
+  });
+
+  it('fails closed on a policy it cannot read, and still reads the rest', async () => {
+    await put(join(data, 'config.json'), {
+      router: {
+        enabled: false,
+        policy: {
+          version: 1,
+          only: [
+            {
+              scope: { kind: 'task', id: 'web research' },
+              dimension: 'capability',
+              targets: [{ kind: 'category', id: 'images' }],
+            },
+          ],
+        },
+      },
+    });
+    const s = await resolve(repo);
+    expect(s.enabled.value).toBe(false);
+    expect(s.policy).toMatchObject({ status: 'invalid' });
+    expect(s.policy.status === 'invalid' && s.policy.problem).toContain(
+      'a capability rule is global',
+    );
+  });
+
+  it('refuses a policy of another version, and one past the wire bound', async () => {
+    await put(join(data, 'config.json'), { router: { policy: { ...rules, version: 2 } } });
+    expect((await resolve(repo)).policy.status).toBe('invalid');
+    const huge = {
+      version: 1,
+      block: Array.from({ length: 128 }, (_, i) => ({
+        kind: 'task',
+        id: `${String(i).padStart(3, '0')} ${'x'.repeat(60)}`,
+      })),
+      only: Array.from({ length: 8 }, (_, i) => ({
+        scope: { kind: 'task', id: `t${i}` },
+        dimension: 'service',
+        targets: Array.from({ length: 16 }, (_, j) => ({
+          kind: 'service',
+          id: `${i}-${j}-${'y'.repeat(50)}`,
+        })),
+      })),
+    };
+    await put(join(data, 'config.json'), { router: { policy: huge } });
+    const s = await resolve(repo);
+    expect(s.policy.status === 'invalid' && s.policy.problem).toContain('16384 bytes');
+  });
+
+  it('makes the rules unreadable when the saved accounts are, and lists none as connected', async () => {
+    await put(join(data, 'config.json'), {
+      router: { policy: rules, sources: [{ id: 'tenjin' }] },
+    });
+    const s = await resolve(repo);
+    expect(s.sources.status).toBe('invalid');
+    expect(s.policy.status).toBe('invalid');
+    await put(join(data, 'config.json'), { router: { policy: rules, sources: [{ id: 'apify' }] } });
+    const ok = await resolve(repo);
+    expect(ok.sources).toEqual({ status: 'ok', saved: [{ id: 'apify' }], connected: [] });
+    // A descriptor connects nothing, so no source rides in the policy.
+    expect(ok.policy.status === 'ok' && ok.policy.wire).not.toHaveProperty('sources');
+  });
+
+  it('reads replacement off unless the global file says when-routed, and an odd value as off', async () => {
+    await put(join(data, 'config.json'), {
+      router: {
+        nativeReplacement: 'when-routed',
+        nativeReplacementProviders: [{ kind: 'provider', id: 'exa' }],
+      },
+    });
+    expect((await resolve(repo)).nativeReplacement).toEqual({
+      mode: 'when-routed',
+      providers: [{ kind: 'provider', id: 'exa' }],
+    });
+    await put(join(data, 'config.json'), {
+      router: { nativeReplacement: 'when-routed', nativeReplacementProviders: [] },
+    });
+    expect((await resolve(repo)).nativeReplacement).toMatchObject({ mode: 'off' });
+    await put(join(data, 'config.json'), { router: { nativeReplacement: 'always' } });
+    expect((await resolve(repo)).nativeReplacement).toMatchObject({ mode: 'off' });
+  });
+});
+
 describe('the project layer parser', () => {
   it('accepts exactly router.enabled and router.context, and reads nothing else', () => {
     expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual(['context', 'enabled']);
+    // The scope registry names the same two as the only keys a project may carry.
+    expect([...PROJECT_ROUTER_KEYS].sort()).toEqual(['context', 'enabled']);
     const planted = {
       maxAutoSpend: '100000000',
       baseUrl: 'https://attacker.example',

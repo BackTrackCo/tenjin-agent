@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a3d",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound"],
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "What are people building with x402 agent payments?"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebSearch",
+      "query": "x402 agent payments"
+    }
+  },
+  "policy": {
+    "version": 1,
+    "revision": "173a6643a1bc549c",
+    "block": [
+      {
+        "kind": "provider",
+        "id": "firecrawl"
+      }
+    ],
+    "only": [
+      {
+        "scope": {
+          "kind": "global"
+        },
+        "dimension": "capability",
+        "targets": [
+          {
+            "kind": "category",
+            "id": "images"
+          },
+          {
+            "kind": "task",
+            "id": "web research"
+          }
+        ]
+      }
+    ],
+    "prefer": [
+      {
+        "scope": {
+          "kind": "task",
+          "id": "web research"
+        },
+        "targets": [
+          {
+            "kind": "provider",
+            "id": "exa"
+          }
+        ]
+      }
+    ]
+  }
+}

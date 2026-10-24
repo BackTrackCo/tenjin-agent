@@ -1,0 +1,426 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-23.1",
+  "directory": {
+    "revision": "53bcee0539bdf72a",
+    "categories": [
+      {
+        "id": "lookups",
+        "label": "Everyday lookups",
+        "tasks": [
+          "library or API documentation",
+          "web research",
+          "read an exact page",
+          "computation",
+          "crypto price quote",
+          "company profile by domain",
+          "company match by name or social URL",
+          "email verification",
+          "person enrichment",
+          "x post search",
+          "reddit post search"
+        ]
+      },
+      {
+        "id": "images",
+        "label": "Images",
+        "tasks": [
+          "image with exact text",
+          "photoreal image",
+          "general image",
+          "image edit",
+          "illustration",
+          "logo or vector graphic"
+        ]
+      },
+      {
+        "id": "voice-and-sound",
+        "label": "Voice and sound",
+        "tasks": ["voiceover", "sound effect", "music", "audio transcription"]
+      },
+      {
+        "id": "video",
+        "label": "Video clips",
+        "tasks": ["video clip"]
+      },
+      {
+        "id": "research",
+        "label": "Research",
+        "tasks": ["academic papers"]
+      },
+      {
+        "id": "people-and-companies",
+        "label": "People and companies",
+        "tasks": ["people search", "company list search", "linkedin profile", "sec filings"]
+      },
+      {
+        "id": "social-and-local",
+        "label": "Social and local",
+        "tasks": [
+          "local business search",
+          "instagram accounts and posts",
+          "tiktok accounts and videos"
+        ]
+      },
+      {
+        "id": "files-and-pages",
+        "label": "Files and pages",
+        "tasks": [
+          "image text extraction",
+          "pdf to markdown",
+          "page screenshot or pdf render",
+          "html page hosting",
+          "send email"
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "web research",
+        "label": "web research"
+      },
+      {
+        "id": "read an exact page",
+        "label": "read an exact page"
+      },
+      {
+        "id": "crypto price quote",
+        "label": "crypto price quote"
+      },
+      {
+        "id": "company profile by domain",
+        "label": "company profile by domain"
+      },
+      {
+        "id": "company match by name or social URL",
+        "label": "company match by name or social URL"
+      },
+      {
+        "id": "email verification",
+        "label": "email verification"
+      },
+      {
+        "id": "person enrichment",
+        "label": "person enrichment"
+      },
+      {
+        "id": "computation",
+        "label": "computation"
+      },
+      {
+        "id": "library or API documentation",
+        "label": "library or API documentation"
+      },
+      {
+        "id": "x post search",
+        "label": "x post search"
+      },
+      {
+        "id": "reddit post search",
+        "label": "reddit post search"
+      },
+      {
+        "id": "image with exact text",
+        "label": "image with exact text"
+      },
+      {
+        "id": "image edit",
+        "label": "image edit"
+      },
+      {
+        "id": "general image",
+        "label": "general image"
+      },
+      {
+        "id": "photoreal image",
+        "label": "photoreal image"
+      },
+      {
+        "id": "illustration",
+        "label": "illustration"
+      },
+      {
+        "id": "logo or vector graphic",
+        "label": "logo or vector graphic"
+      },
+      {
+        "id": "video clip",
+        "label": "video clip"
+      },
+      {
+        "id": "voiceover",
+        "label": "voiceover"
+      },
+      {
+        "id": "sound effect",
+        "label": "sound effect"
+      },
+      {
+        "id": "music",
+        "label": "music"
+      },
+      {
+        "id": "audio transcription",
+        "label": "audio transcription"
+      },
+      {
+        "id": "academic papers",
+        "label": "academic papers"
+      },
+      {
+        "id": "people search",
+        "label": "people search"
+      },
+      {
+        "id": "company list search",
+        "label": "company list search"
+      },
+      {
+        "id": "linkedin profile",
+        "label": "linkedin profile"
+      },
+      {
+        "id": "sec filings",
+        "label": "sec filings"
+      },
+      {
+        "id": "local business search",
+        "label": "local business search"
+      },
+      {
+        "id": "instagram accounts and posts",
+        "label": "instagram accounts and posts"
+      },
+      {
+        "id": "tiktok accounts and videos",
+        "label": "tiktok accounts and videos"
+      },
+      {
+        "id": "image text extraction",
+        "label": "image text extraction"
+      },
+      {
+        "id": "pdf to markdown",
+        "label": "pdf to markdown"
+      },
+      {
+        "id": "page screenshot or pdf render",
+        "label": "page screenshot or pdf render"
+      },
+      {
+        "id": "html page hosting",
+        "label": "html page hosting"
+      },
+      {
+        "id": "send email",
+        "label": "send email"
+      }
+    ],
+    "providers": [
+      {
+        "id": "arxiv",
+        "label": "arXiv"
+      },
+      {
+        "id": "coinmarketcap",
+        "label": "CoinMarketCap"
+      },
+      {
+        "id": "context7",
+        "label": "Context7"
+      },
+      {
+        "id": "crossref",
+        "label": "Crossref"
+      },
+      {
+        "id": "exa",
+        "label": "Exa"
+      },
+      {
+        "id": "firecrawl",
+        "label": "Firecrawl"
+      },
+      {
+        "id": "google",
+        "label": "Google"
+      },
+      {
+        "id": "kadec0",
+        "label": "kadec0"
+      },
+      {
+        "id": "openalex",
+        "label": "OpenAlex"
+      },
+      {
+        "id": "pubmed",
+        "label": "PubMed"
+      },
+      {
+        "id": "semantic-scholar",
+        "label": "Semantic Scholar"
+      },
+      {
+        "id": "venice",
+        "label": "Venice"
+      }
+    ],
+    "sellers": [
+      {
+        "id": "aispace",
+        "label": "AiSpace"
+      },
+      {
+        "id": "coinmarketcap",
+        "label": "CoinMarketCap"
+      },
+      {
+        "id": "exa",
+        "label": "Exa"
+      },
+      {
+        "id": "kadec0",
+        "label": "kadec0"
+      },
+      {
+        "id": "munition",
+        "label": "Munition"
+      },
+      {
+        "id": "stableenrich",
+        "label": "StableEnrich"
+      },
+      {
+        "id": "tenjin",
+        "label": "Tenjin"
+      }
+    ],
+    "sources": [
+      {
+        "id": "tenjin",
+        "label": "Tenjin's tools"
+      }
+    ],
+    "services": [
+      {
+        "id": "exa-search",
+        "label": "Exa search",
+        "identity": {
+          "service": "exa-search",
+          "source": "tenjin",
+          "providers": ["exa"],
+          "seller": "exa",
+          "task": "web research",
+          "categories": ["lookups"],
+          "revision": "ff5de4ab6c4af412"
+        }
+      },
+      {
+        "id": "exa-contents",
+        "label": "Exa page read",
+        "identity": {
+          "service": "exa-contents",
+          "source": "tenjin",
+          "providers": ["exa"],
+          "seller": "exa",
+          "task": "read an exact page",
+          "categories": ["lookups"],
+          "revision": "11489cc6f483e5c3"
+        }
+      },
+      {
+        "id": "stableenrich-exa-answer",
+        "label": "Exa Answer",
+        "identity": {
+          "service": "stableenrich-exa-answer",
+          "source": "tenjin",
+          "providers": ["exa"],
+          "seller": "stableenrich",
+          "task": "web research",
+          "categories": ["lookups"],
+          "revision": "af7d5ab14e2bfaa9"
+        }
+      },
+      {
+        "id": "munition-scrape",
+        "label": "Firecrawl page read",
+        "identity": {
+          "service": "munition-scrape",
+          "source": "tenjin",
+          "providers": ["firecrawl"],
+          "seller": "munition",
+          "task": "read an exact page",
+          "categories": ["lookups"],
+          "revision": "62c0b5d305f4373c"
+        }
+      },
+      {
+        "id": "context7-docs",
+        "label": "Context7 docs",
+        "identity": {
+          "service": "context7-docs",
+          "source": "tenjin",
+          "providers": ["context7"],
+          "seller": "tenjin",
+          "task": "library or API documentation",
+          "categories": ["lookups"],
+          "revision": "ed0bca47b11b6d56"
+        }
+      },
+      {
+        "id": "cmc-quotes",
+        "label": "CoinMarketCap quotes",
+        "identity": {
+          "service": "cmc-quotes",
+          "source": "tenjin",
+          "providers": ["coinmarketcap"],
+          "seller": "coinmarketcap",
+          "task": "crypto price quote",
+          "categories": ["lookups"],
+          "revision": "dd56ec0ae5ea3e55"
+        }
+      },
+      {
+        "id": "kadec0-papers",
+        "label": "Scholarly paper search",
+        "identity": {
+          "service": "kadec0-papers",
+          "source": "tenjin",
+          "providers": ["arxiv", "crossref", "openalex", "pubmed", "semantic-scholar"],
+          "seller": "kadec0",
+          "task": "academic papers",
+          "categories": ["research"],
+          "revision": "269f80a5a8f5a90f"
+        }
+      },
+      {
+        "id": "kadec0-paper-fulltext",
+        "label": "Open-access full text",
+        "identity": {
+          "service": "kadec0-paper-fulltext",
+          "source": "tenjin",
+          "providers": ["kadec0"],
+          "seller": "kadec0",
+          "task": "academic papers",
+          "categories": ["research"],
+          "revision": "3957bc2a55f0dba0"
+        }
+      },
+      {
+        "id": "aispace-nano-banana-2.1",
+        "label": "Google Nano Banana 2.1",
+        "identity": {
+          "service": "aispace-nano-banana-2.1",
+          "source": "tenjin",
+          "providers": ["google", "venice"],
+          "seller": "aispace",
+          "task": "photoreal image",
+          "categories": ["images"],
+          "revision": "ab0cd7b94addd984"
+        }
+      }
+    ],
+    "retired": []
+  }
+}

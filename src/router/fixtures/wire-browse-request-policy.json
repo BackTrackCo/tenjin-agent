@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "browse": "photoreal image",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound"],
+  "policy": {
+    "version": 1,
+    "revision": "8f19de9311d70b40",
+    "block": [
+      {
+        "kind": "provider",
+        "id": "venice"
+      }
+    ]
+  }
+}

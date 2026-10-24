@@ -35,6 +35,8 @@ export async function runPaymentsList(ctx: CommandContext): Promise<CommandResul
       amount: toMoney(record.amountAtomic),
       settlement: record.settlement,
       ...(record.txHash !== undefined ? { txHash: record.txHash } : {}),
+      // Run in a native search's or fetch's place, which nobody was asked about.
+      ...(record.via !== undefined ? { via: record.via } : {}),
     }));
   const unknown = records.filter((record) => record.settlement === 'unknown').length;
   if (payments.length === 0) {
@@ -49,7 +51,7 @@ export async function runPaymentsList(ctx: CommandContext): Promise<CommandResul
     ...payments.map((p) => [
       p.at.slice(0, 16).replace('T', ' '),
       sanitizeForTerminal(p.provider),
-      sanitizeForTerminal(p.service),
+      `${sanitizeForTerminal(p.service)}${p.via === 'swap' ? ' (in place)' : ''}`,
       `$${formatUsdDisplay(p.amount.atomic)}`,
       SETTLEMENT_WORDS[p.settlement] ?? p.settlement,
       p.txHash ?? '',

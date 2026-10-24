@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "query": "find recent writing on x402 agent payments",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound"],
+  "policy": {
+    "version": 1,
+    "revision": "4d5dc17201318c6f",
+    "only": [
+      {
+        "scope": {
+          "kind": "task",
+          "id": "web research"
+        },
+        "dimension": "seller",
+        "targets": [
+          {
+            "kind": "seller",
+            "id": "exa"
+          },
+          {
+            "kind": "seller",
+            "id": "stableenrich"
+          }
+        ]
+      }
+    ]
+  },
+  "override": {
+    "only": [
+      {
+        "dimension": "provider",
+        "targets": [
+          {
+            "kind": "provider",
+            "id": "exa"
+          }
+        ]
+      }
+    ],
+    "prefer": [
+      {
+        "kind": "service",
+        "id": "stableenrich-exa-answer"
+      }
+    ]
+  }
+}

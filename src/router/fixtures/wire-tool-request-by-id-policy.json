@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tool": "cmc-quotes",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "identity", "bound"],
+  "policy": {
+    "version": 1,
+    "revision": "0d00bc738bb2894c",
+    "block": [
+      {
+        "kind": "source",
+        "id": "tenjin"
+      }
+    ]
+  }
+}

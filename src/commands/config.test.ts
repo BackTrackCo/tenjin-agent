@@ -129,11 +129,29 @@ describe('runConfigList', () => {
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
     // The human listing is the router's: 6 scalar keys + update.mode + 2
-    // router.* + experimental.bazaar. The shelf keys stay in `data` only.
-    expect(humanLines).toHaveLength(10);
-    expect((humanLines ?? []).join('\n')).not.toMatch(
+    // router.* + experimental.bazaar, then a blank line and your settings. The
+    // shelf keys stay in `data` only.
+    const lines = humanLines ?? [];
+    expect(lines.indexOf('')).toBe(10);
+    expect(lines.slice(0, 10).join('\n')).not.toMatch(
       /publish\.|hooks\.|loop\.|team\.|Shelf|allowlistCreators|evalCohort/,
     );
+    // No rules saved: the readback says so, with the limits on the balance.
+    expect(lines.slice(11)).toEqual([
+      'Your settings (saved on this machine; not synced):',
+      '  No custom rules: Tenjin uses its defaults.',
+      "  Run Tenjin's picks automatically: off.",
+      '  Limits: $0.25 a call, $5.00 a day (Tenjin balance).',
+      '  Change them with `tenjin config --help`.',
+    ]);
+    expect(d.settings).toMatchObject({
+      saved: 'Saved on this machine; not synced.',
+      policy: { status: 'none' },
+      rules: [],
+      replacement: { mode: 'off', supported: false },
+      limits: { perCall: '$0.25', daily: '$5.00' },
+      reset: 'tenjin config reset --all',
+    });
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {

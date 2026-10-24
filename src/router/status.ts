@@ -1,4 +1,4 @@
-import { toMoney } from '../lib/money';
+import { formatUsdDisplay, toMoney } from '../lib/money';
 import { loadRawConfig, retiredPaymentKeys, RETIRED_PAYMENT_GUIDANCE } from '../lib/config';
 import { spentOf } from '../lib/spend-ledger';
 import { resolveContextSettings } from '../lib/settings';
@@ -131,11 +131,13 @@ export async function runRouterStatus(
       ...(r.requestKey !== undefined ? { request: r.requestKey } : {}),
     })),
   };
-  const automatic = toMoney(automaticAtomic.toString()).usd;
+  // THE LIMITS CAP THE TENJIN BALANCE, and say so: a bill an account of the
+  // user's own sends (#37) is not counted against them.
+  const automatic = `$${formatUsdDisplay(automaticAtomic.toString())}`;
   const budgetLine =
     budgetAtomic === null
-      ? `automatic spend ${automatic} USD; no daily limit`
-      : `counted toward the daily limit: ${automatic} USD of ${toMoney(budgetAtomic.toString()).usd} USD in the rolling 24h window`;
+      ? `Today ${automatic} spent automatically (Tenjin balance); no daily limit`
+      : `Today ${automatic} of your $${formatUsdDisplay(budgetAtomic.toString())} daily limit (Tenjin balance, over the last 24 hours)`;
   const credit = [
     ...(depositedAtomic > 0n ? [`${toMoney(depositedAtomic.toString()).usd} USD prepaid`] : []),
     ...(depositedAtomic > 0n || creditAtomic > 0n
@@ -159,7 +161,7 @@ export async function runRouterStatus(
         (credit.length > 0 ? ` · routing credit ${credit.join(', ')}` : ''),
       budgetLine,
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
-      `automatic router up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD per call; manual pay always requires consent`,
+      `automatic router up to $${formatUsdDisplay(settings.policy.maxAutoSpendAtomic.toString())} a call (Tenjin balance); manual pay always requires consent`,
       ...warnings,
     ],
   };

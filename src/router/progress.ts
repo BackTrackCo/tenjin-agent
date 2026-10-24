@@ -50,6 +50,9 @@ const AUGMENT_PREFIX = 'augment-';
 const AUGMENT_BODY_SUFFIX = '.docs';
 /** One agent's search query that was augmented, so the same one is not fetched twice. */
 const QUERY_PREFIX = 'query-';
+/** A native call's routing decision, kept for the pre-call hook when the swap
+ *  hands it back (`decided.ts`). Its size is the router's, so it ages by mtime. */
+export const DECIDED_PREFIX = 'decided-';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
 
@@ -117,19 +120,25 @@ interface SavedAugment extends Stamp {
  * it to draw the redirected row and to find the `request` call that takes the
  * offer up by its id; it never parses the reason the model read. Version 1
  * grows by optional fields only, so a reader ignores one it does not know, and
- * an older CLI's prune still reads it as a record.
+ * an older CLI's prune still reads it as a record. A record with no offer id
+ * is a call the swap claimed and then handed back ({@link markHandedBack}):
+ * the native call ran, and the mod draws nothing of its own on it.
  */
 interface SavedOffer extends Stamp {
   offerId?: string;
   label?: string;
   priceAtomic?: string;
+  /** The call was answered in place by the offer (the swap), not held. */
+  swap?: true;
 }
 
-/** What the offer record names: the offer's id, display name and price. */
+/** What the offer record names: the offer's id, display name and price, and
+ *  whether the offer ran in the native call's place. */
 export interface OfferedTerms {
   offerId?: string;
   label?: string;
   priceAtomic: string;
+  swap?: true;
 }
 
 export interface ProgressStep {
@@ -255,7 +264,27 @@ export async function markOffered(
       : {}),
     ...(offer.label !== undefined ? { label: sanitize(offer.label, 32) } : {}),
     ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
+    ...(offer.swap === true ? { swap: true as const } : {}),
   };
+  await write(
+    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
+    saved,
+  );
+}
+
+/**
+ * THE SWAP HANDED A CLAIMED CALL BACK, so the native call runs after all: its
+ * offer record keeps only its stamp. The after-call arm still reads one
+ * routing answer for the call, and the mod, finding no offer in it, draws the
+ * native call and its result as the engine does, never as a lookup that ran.
+ */
+export async function markHandedBack(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<void> {
+  const saved: SavedOffer = { version: 1, at: now };
   await write(
     join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
     saved,
@@ -569,12 +598,17 @@ export async function pruneProgress(directory: string, now = Date.now()): Promis
 /**
  * A FILE THAT IS NOT A WHOLE RECORD is aged by its mtime, never read as one: a
  * temp file between its write and its rename (every writer here names them
- * `.<name>.<suffix>`), and a docs body, whose size is the provider's. Read as
+ * `.<name>.<suffix>`), a docs body, whose size is the provider's, and a kept
+ * decision, whose size is the router's. Read as
  * records they are damaged, and the prune deleted them out from under a
  * parallel hook's rename.
  */
 function agesByMtime(name: string): boolean {
-  return name.startsWith('.') || (name.startsWith(AUGMENT_PREFIX) && !name.endsWith('.json'));
+  return (
+    name.startsWith('.') ||
+    name.startsWith(DECIDED_PREFIX) ||
+    (name.startsWith(AUGMENT_PREFIX) && !name.endsWith('.json'))
+  );
 }
 
 async function mtimeOf(path: string): Promise<Stamp | null> {

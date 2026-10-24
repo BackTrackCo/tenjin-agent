@@ -114,6 +114,27 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
 
+The limits cap spending from your Tenjin balance.
+
+## Your settings
+
+Tell your agent what Tenjin may use. It runs `tenjin config`, and reports what was saved and how to undo it.
+
+| You say                                     | Your agent runs                                             |
+| ------------------------------------------- | ----------------------------------------------------------- |
+| "Prefer Exa for web research."              | `tenjin config prefer --task "web research" --provider exa` |
+| "Never use Firecrawl through Tenjin."       | `tenjin config block --provider firecrawl`                  |
+| "Only use Tenjin for images."               | `tenjin config only --global --category images`             |
+| "Run Tenjin's picks automatically for Exa." | `tenjin config replacement on --provider exa`               |
+| "What have I changed?"                      | `tenjin config`                                             |
+| "Reset my web research preference."         | `tenjin config reset --task "web research" --preference`    |
+
+- Settings stay on this machine. A project's files can't add a rule.
+- "Run Tenjin's picks automatically" is off by default. On, Claude Code with the Tenjin plugin runs Tenjin's pick in place of a web search or page fetch, within your limits.
+- `tenjin config --help` lists every operation.
+
+[What your settings cover, and the permissions to grant →](./docs/agent-permissions.md#your-settings-what-tenjin-may-use)
+
 ## Commands
 
 ```bash

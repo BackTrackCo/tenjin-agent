@@ -55,6 +55,9 @@ export interface RouterObservation {
     source?: SigningSource;
   };
   routing?: { status: 'ready' | 'blocked' | 'unknown'; reason?: string; at: number };
+  /** The host that started this router, as it named itself to the server:
+   *  what readback reads to say whether picks can run in place there. */
+  client?: { name: string; version: string };
 }
 
 export interface UnlockInputs {
@@ -110,6 +113,7 @@ const ObservationSchema = z.object({
       at: z.number(),
     })
     .optional(),
+  client: z.object({ name: z.string().max(200), version: z.string().max(200) }).optional(),
 });
 
 const UnlockRecordSchema = z.object({

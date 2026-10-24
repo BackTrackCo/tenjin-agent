@@ -20,7 +20,8 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
-import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
+import { requestDecision, ROUTER_PATH, type HookDecision, type OfferSpec } from './decision';
+import { keepDecided, takeDecided } from './decided';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -40,6 +41,7 @@ import { finishAugment, startAugment, type PrefetchJob, type SearchResponse } fr
 import {
   bindDecision,
   claimRedirect,
+  markHandedBack,
   markOffered,
   type OfferedTerms,
   newCallId,
@@ -51,7 +53,8 @@ import {
   wasOffered,
   writeProgress,
 } from './progress';
-import { routerSettings, type RouterSettings } from './settings';
+import { routerSettings, type ReplacementSetting, type RouterSettings } from './settings';
+import { admitRoutes, replacementFits } from './access';
 
 /**
  * The six hook handlers. Between them they do exactly three things: build and
@@ -947,10 +950,15 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  const ruledOut = withheldBySettings(outcome, router.settings);
+  if (ruledOut !== null) {
+    await footer.close(outcome, { withheld: ruledOut });
+    return { response: null, action: outcome.action, withheld: true };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
@@ -1041,6 +1049,52 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
 }
 
 /**
+ * THE PACKET FOR A NATIVE CALL, sealed, or null when nothing may be asked
+ * about it. Shared by both native arms and the swap ({@link decideSwap}).
+ */
+async function sealNative(
+  event: Omit<NativeCall, 'tool' | 'pending'>,
+  pending: PendingCall,
+  settings: RouterSettings,
+  deps: HookDeps,
+  nativeOutcome?: NativeOutcome,
+): Promise<Sealed | null> {
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
+  // made the search string the whole conversation, so "native tools only, no
+  // paid services" never reached this gate. Inside a subagent, its own task
+  // comes first: see `buildNativePacket`.
+  const sealed = seal(
+    scoped(
+      await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+        ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+        harness: hostOf(deps),
+      }),
+      settings,
+    ),
+  );
+  // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
+  // and sends the conversation for nothing.
+  if (sealed.localTarget) return null;
+  // A CREDENTIAL IN THE SEARCH OR URL NEVER LEAVES. Sending it masked would put
+  // the mask into the hint the server writes from it, and the model would call
+  // the provider with the mask. The call stays native.
+  if (sealed.subjectChanged) {
+    warn('tenjin hook: the native call carries a credential-shaped value, so it is not routed');
+    return null;
+  }
+  // AND WHEN THEY CANNOT BE READ, NOTHING IS OFFERED. An offer routed on the
+  // tool argument alone is how an instruction the user gave this turn gets
+  // overruled by a decision that never saw it.
+  if (sealed.packet.historyStatus !== 'ok') {
+    warn("tenjin hook: this session's transcript could not be read, so no paid lookup is offered");
+    return null;
+  }
+  return sealed;
+}
+
+/**
  * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
  * agent's tool list, the packet from the right transcript, one free decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
@@ -1065,6 +1119,10 @@ async function routeNativeCall(
     /** False where a discovered offer must be affordable as it stands: the
      *  call it would replace is the one way to reach the user. */
     canAskUser?: boolean;
+    /** The decision the swap already made for this very call ({@link
+     *  decideSwap}): used as the router's answer, so one search is never
+     *  decided, or charged a routing fee, twice. */
+    recorded?: { decision: HookDecision | null };
   } = {},
 ): Promise<
   | { offer: OfferDecision; free?: undefined }
@@ -1094,51 +1152,32 @@ async function routeNativeCall(
     await footer.close(null, { withheld: 'already redirected once' });
     return { offer: null, outcome: { response: null, alreadyRedirected: true } };
   }
-  // THE USER'S WORDS COME WITH IT. Building this from the tool argument alone
-  // made the search string the whole conversation, so "native tools only, no
-  // paid services" never reached this gate. Inside a subagent, its own task
-  // comes first: see `buildNativePacket`.
-  const sealed = seal(
-    scoped(
-      await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
-        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
-        ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-        harness: hostOf(deps),
-      }),
-      router.settings,
-    ),
-  );
-  const { packet } = sealed;
-  // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
-  // and sends the conversation for nothing.
-  if (sealed.localTarget) return { offer: null, outcome: { response: null } };
-  // A CREDENTIAL IN THE SEARCH OR URL NEVER LEAVES. Sending it masked would put
-  // the mask into the hint the server writes from it, and the model would call
-  // the provider with the mask. The call stays native.
-  if (sealed.subjectChanged) {
-    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-      'tenjin hook: the native call carries a credential-shaped value, so it is not routed',
-    );
-    return { offer: null, outcome: { response: null } };
-  }
-  // AND WHEN THEY CANNOT BE READ, NOTHING IS OFFERED. An offer routed on the
-  // tool argument alone is how an instruction the user gave this turn gets
-  // overruled by a decision that never saw it.
-  if (packet.historyStatus !== 'ok') {
-    (deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-      "tenjin hook: this session's transcript could not be read, so no paid lookup is offered",
-    );
-    return { offer: null, outcome: { response: null } };
-  }
+  const { recorded } = opts;
+  const sealed =
+    recorded === undefined
+      ? await sealNative(event, pending, router.settings, deps, nativeOutcome)
+      : undefined;
+  if (sealed === null) return { offer: null, outcome: { response: null } };
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome =
+    sealed === undefined
+      ? (recorded?.decision ?? null)
+      : await decide(sealed, deps, router, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
       offer: null,
       outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
+  }
+  // BEFORE THE FREE PASS TOO: the free docs lookup is still a call to a
+  // provider, and its prefetch starts the moment it passes, so an offer the
+  // user's rules refuse neither redirects nor fetches anything.
+  const ruledOut = withheldBySettings(outcome, router.settings);
+  if (ruledOut !== null) {
+    await footer.close(outcome, { withheld: ruledOut });
+    return { offer: null, outcome: { response: null, action: outcome.action, withheld: true } };
   }
   if (opts.passFree === true && isFree(outcome)) {
     await footer.close(outcome, { withheld: 'free lookup, call runs' });
@@ -1205,7 +1244,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const targets = [...new Set((event.targets ?? [event.pending]).map(redirectTarget))];
   const session = localSession(event.sessionId, deps);
   const claim = (t: string) => claimRedirect(deps.dataDir, session, event.agentId, t, deps.now?.());
+  // THE SWAP HANDED THIS CALL BACK: its decision stands, and is not asked for again.
+  const recorded =
+    event.toolUseId !== undefined && event.agentId === undefined
+      ? await takeDecided(deps.dataDir, session, event.toolUseId, target, deps.now?.())
+      : undefined;
   const routed = await routeNativeCall(event, event.pending, deps, {
+    ...(recorded !== undefined ? { recorded } : {}),
     passFree: true,
     repeated: async () => {
       if (!(await claim(target))) return true;
@@ -1259,6 +1304,141 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     hostOf(deps),
     event.rest === undefined ? ONE_BLOCK : `${ONE_BLOCK} ${restSentence(event.rest)}`,
   );
+}
+
+/** What the swap's decision came to: the call to run in the native call's
+ *  place, or why the call goes back to the host's own flow. */
+export type SwapDecision =
+  | { handback: string }
+  | {
+      offer: OfferDecision;
+      /** The lead's spec, which `bound` fills. */
+      spec: OfferSpec;
+      bound: Record<string, unknown>;
+      /**
+       * Claims every search or URL of the call for the main agent, as a
+       * redirect does, and marks the call answered in place. False when a
+       * claim is already held: the call then goes back, and runs natively.
+       */
+      claim: () => Promise<boolean>;
+      /**
+       * After a claim, the call goes back after all: its mark no longer says
+       * it was answered in place, or names the pick, so the mod draws the
+       * native call that runs. The claim and the one routing answer stay.
+       */
+      unmark: () => Promise<void>;
+    };
+
+/**
+ * WHY THE AUTOMATIC SWITCH AND ITS SCOPE KEEP A PICK FROM RUNNING IN PLACE,
+ * or null when they let it: the switch off, or a narrowed provider scope the
+ * route does not fit, which a route with no known provider never does. After
+ * selection, never instead of it: a pick outside is an ordinary offer.
+ */
+export function outsideAutomaticUse(
+  replacement: ReplacementSetting,
+  identity: OfferSpec['identity'],
+): string | null {
+  if (replacement.mode !== 'when-routed') return 'automatic use is off';
+  const { providers } = replacement;
+  if (
+    providers !== undefined &&
+    (identity === undefined || !replacementFits(identity, providers))
+  ) {
+    return 'outside automatic use';
+  }
+  return null;
+}
+
+/**
+ * THE SWAP'S DECISION, for a host that can answer a WebSearch or WebFetch in
+ * place (`router.nativeReplacement: when-routed`, the Claude Code mod). The
+ * same route the pre-call hook takes: the switch, the transcript, the hook
+ * body (so the gate's confidence floor applies), the user's rules and the
+ * spend check. On top of it, only a decision that names a spec and carries
+ * `bound` (the complete input the router built from this call's own search
+ * or URL) for a provider inside the automatic scope can run in place. The
+ * input is never built, parsed or edited here.
+ *
+ * Anything else HANDS THE CALL BACK, and the decision is kept for it
+ * ({@link keepDecided}): the pre-call hook then offers from it, as it would
+ * have, without asking again. The main agent only: a subagent's call takes
+ * the ordinary route.
+ */
+export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDecision> {
+  if (hostOf(deps) !== 'claude') return { handback: 'this host cannot run a pick in place' };
+  const event = decodeEvent(raw);
+  if (event?.kind !== 'native' || event.pending === null || event.toolUseId === undefined) {
+    return { handback: 'not a search or fetch Tenjin routes' };
+  }
+  if (event.agentId !== undefined) return { handback: 'a subagent call' };
+  // THE SWITCH, READ NOW from the global file alone: a project file cannot
+  // turn it on, and turning it off applies to the very next call.
+  const router = await routerFor(event.cwd, deps);
+  if (router === null) return { handback: 'Tenjin is off here' };
+  const { nativeReplacement } = router.settings;
+  if (nativeReplacement.mode !== 'when-routed') return { handback: 'automatic use is off' };
+  const { pending, toolUseId } = event;
+  const session = localSession(event.sessionId, deps);
+  const target = redirectTarget(pending);
+  const targets = [...new Set((event.targets ?? [pending]).map(redirectTarget))];
+  // A RETRY OF A CALL ALREADY ROUTED runs natively, as after a redirect.
+  for (const t of targets) {
+    if (await redirectClaimed(deps.dataDir, session, undefined, t, deps.now?.())) {
+      return { handback: 'already routed once' };
+    }
+  }
+  const sealed = await sealNative(event, pending, router.settings, deps);
+  if (sealed === null) return { handback: 'not routed' };
+  const footer = await openFooter(deps, event.sessionId, 'search');
+  const deadline = gateDeadline(deps);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline);
+  await keepDecided(deps.dataDir, session, toolUseId, target, outcome, deps.now?.());
+  const back = async (why: string): Promise<SwapDecision> => {
+    await footer.close(outcome, isOffer(outcome) ? { withheld: why } : undefined);
+    return { handback: why };
+  };
+  if (!isOffer(outcome)) return back('no paid lookup fits');
+  const spec = outcome.specs?.find(({ id }) => id === outcome.id);
+  // NOTHING TO RUN AS IT STANDS: no `bound` (an older router, a free docs
+  // lookup, a choice to make) or no spec for it to fill.
+  if (
+    outcome.bound === undefined ||
+    spec === undefined ||
+    isFree(outcome) ||
+    (outcome.action === 'discovered' && outcome.choices !== undefined)
+  ) {
+    return back('no input to run in place');
+  }
+  if (withheldBySettings(outcome, router.settings) !== null) return back('settings rule it out');
+  // THE AUTOMATIC SCOPE, after selection and never instead of it. `runSwap`
+  // reads it again before anything runs.
+  const outside = outsideAutomaticUse(nativeReplacement, spec.identity);
+  if (outside !== null) return back(outside);
+  // ONLY A CALL THAT WOULD RUN ON ITS OWN: over a limit, or a wallet that
+  // cannot pay, goes back to the offer, whose request asks for approval.
+  const vetted = await vetOffer(outcome, deps, deadline, false);
+  if (vetted.withheld !== undefined) return back(vetted.withheld);
+  // Kept like a shown offer's: the spec `request({id, input})` runs.
+  await footer.close(outcome);
+  const now = () => deps.now?.() ?? Date.now();
+  const terms = { ...offeredTerms(outcome), swap: true as const };
+  return {
+    offer: outcome,
+    spec,
+    bound: outcome.bound,
+    claim: async () => {
+      if (!(await claimRedirect(deps.dataDir, session, undefined, target, now()))) return false;
+      await Promise.all(
+        targets
+          .filter((t) => t !== target)
+          .map((t) => claimRedirect(deps.dataDir, session, undefined, t, now())),
+      );
+      await markOffered(deps.dataDir, session, toolUseId, terms, now());
+      return true;
+    },
+    unmark: () => markHandedBack(deps.dataDir, session, toolUseId, now()),
+  };
 }
 
 /**
@@ -1520,10 +1700,15 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router.config, event.sessionId, deadline);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+  }
+  const ruledOut = withheldBySettings(outcome, router.settings);
+  if (ruledOut !== null) {
+    await footer.close(outcome, { withheld: ruledOut });
+    return { response: null, action: outcome.action, withheld: true };
   }
   // The subagent will make the call and cannot ask the user, so nothing it
   // could not pay for alone is offered to it.
@@ -1635,10 +1820,14 @@ function hookOutcome(decision: HookDecision | null): string {
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
-  config: PartialConfig,
+  router: { settings: RouterSettings; config: PartialConfig },
   sessionId: string,
   deadline: number,
 ): Promise<HookDecision | null> {
+  const { config } = router;
+  // THE SAVED RULES RIDE BESIDE THE PACKET, never in it: the packet is what
+  // the server's model reads. Absent with no rules, so the body is unchanged.
+  const policy = router.settings.policy.status === 'ok' ? router.settings.policy.wire : undefined;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1658,6 +1847,7 @@ async function decide(
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
       harness: hostOf(deps),
       timeoutMs: Math.max(0, deadline - now),
+      ...(policy !== undefined ? { policy } : {}),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== null ? { route } : {}),
     },
@@ -1788,11 +1978,43 @@ async function routerFor(
       { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir, config },
       { warn: (line) => warn(`tenjin hook: ${line}`) },
     );
-    return settings.enabled.value ? { settings, config } : null;
+    if (!settings.enabled.value) return null;
+    // RULES THIS BUILD CANNOT READ OFFER NOTHING: no rule is guessed, and no
+    // turn is routed without them. `tenjin config` shows the problem.
+    if (settings.policy.status === 'invalid') {
+      warn(
+        `tenjin hook: your Tenjin settings can't be read (${settings.policy.problem}), so no lookup is offered`,
+      );
+      return null;
+    }
+    return { settings, config };
   } catch (err) {
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;
   }
+}
+
+/**
+ * AN OFFER THE USER'S RULES REFUSE IS NEVER SHOWN, in the footer's words why,
+ * or null when it may be. Every service the line names is held to the rules
+ * read for this event: the offer's own identity, and each spec's. Under a
+ * rule that reads identity, an offer with none (a router from before it) is
+ * withheld too. Local only: no directory call fits a hook's budget, and the
+ * request tool checks again before anything runs. The server applied the
+ * same rules first; this is the same check on this side of the wire.
+ */
+function withheldBySettings(offer: OfferDecision, settings: RouterSettings): string | null {
+  const policy = settings.policy.status === 'ok' ? settings.policy.wire : undefined;
+  const specs = offer.specs?.map((spec) => spec.identity) ?? [];
+  const identities =
+    offer.action === 'execute'
+      ? [offer.identity, ...specs]
+      : specs.length > 0
+        ? specs
+        : [undefined];
+  const verdict = admitRoutes(identities, policy);
+  if (verdict.ok) return null;
+  return 'unverified' in verdict ? "can't check settings" : 'settings rule it out';
 }
 
 /**
