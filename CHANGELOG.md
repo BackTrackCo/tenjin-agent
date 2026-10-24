@@ -1,5 +1,77 @@
 # tenjin-cli
 
+## 0.1.0-alpha.32
+
+### Minor Changes
+
+- 058df3f: Paying an endpoint can now start with a free quote, and the plugin teaches an
+  agent to quote first and then pay with this machine's wallet.
+
+  A quote decodes the endpoint's 402 and reports every payment option, the
+  resource line, the seller's extensions (a listing's advertised request shape
+  rides there) and the body. No wallet is opened and nothing is signed. Only a
+  USDC option carries a dollar amount, and the option the paid path would sign is
+  marked payable, chosen by the same selection. The headline prices that option,
+  or says the endpoint lists none this wallet can pay, so an 18-decimal option a
+  seller lists first is never shown as dollars.
+
+  A paid call can send a request header the endpoint asks for, such as a
+  provider's beta opt-in or an API version, on the probe and the paid leg alike,
+  and it can send several. Every header the CLI signs or sets itself is refused
+  before any request leaves: the payment signature, sign-in-with-x, the session
+  delegation, the shelf bypass, the install id, the payment header namespace and
+  the transport headers (host, content length, content type, user agent). A
+  routing decision still passes only the accept and content type headers. A
+  catalog spec can now carry fixed request headers the catalog decides, such as a
+  provider's beta opt-in. They ride the routed call's probe and paid leg under
+  its own accept and content type, and a spec naming any header refused above is
+  refused before anything is sent. The server does not send them yet.
+
+  A paid call now takes GET, POST, PUT, PATCH or DELETE, and a body needs POST,
+  PUT or PATCH. A body that is not JSON goes byte for byte under the content type
+  sent with it, the one case where that header may be set.
+
+  The Claude Code plugin gains a `tenjin-pay` skill: quote first, cap the price
+  at the payable option, pay with the user's consent to that quote, send the
+  headers the endpoint asks for, and never use another tool's wallet for a call
+  this one can make. Install and update write it with the plugin's other files,
+  and uninstall removes it with them.
+
+### Patch Changes
+
+- 622e5b4: Codex's automatic hooks route again now that the router charges its routing fee. The Codex plugin's three routing legs (the prompt, and a web call before and after it runs) are `mcp_tool` hooks into the plugin's `router` server, as Claude Code's are, so each leg pays the $0.003 fee from the wallet under the local spend limits, the same way a `request` does. They need Codex 0.149.0 or later: install and update leave an older Codex's plugin copy as it is and say so in one line. Routing keeps working after a prompt edit and under a custom `CODEX_HOME`, which the server now receives through `env_vars`. A fifth hook denies the server's `hook` tool to the assistant. `tenjin install --harness codex` now turns the five hooks on through Codex's app server, the same call `/hooks` makes, for Tenjin's own rows only, and names `/hooks` only when that fails. When the fee cannot be paid, Codex shows why (a low wallet, a locked wallet, the daily limit) once per session, and the status line records `fee unpaid: <reason>` instead of a native choice. `tenjin doctor --harness codex` checks that the routing legs reach the server and that Codex is new enough to run them, with nothing paid or sent. `tenjin update` replaces a Codex plugin copy from an earlier release (only where Codex already has it) and turns its new hooks on; when it cannot, it prints one line and the update still succeeds. `tenjin doctor --harness codex` warns, without failing, while a copy still has the old command legs.
+- 88360c1: Tenjin keeps working after a Node upgrade. Install copies Tenjin into `~/.tenjin/runtime` with its own pinned Node 24, downloaded from nodejs.org and checked against the SHA-256 the build carries, and Claude Code runs the plugin's hooks and server from there by absolute path. Removing the Node that installed it, switching versions with mise, nvm, fnm, asdf or Volta, or running `npm rm -g tenjin-cli` no longer stops the router. On a platform with no pinned Node (musl, or glibc older than 2.28), under a non-default `TENJIN_DATA_DIR`, or when setting up the runtime fails, Tenjin runs from the npm package as before and says why.
+
+  The `tenjin` command is now a launcher in `~/.local/bin` (`tenjin.cmd` too on Windows), and the plugin carries the same launcher in its `bin/`, which Claude Code puts at the end of the Bash tool's PATH. When the runtime is gone, the launcher says so and names the fix: `npx -y tenjin-cli@latest install`, then start a new Claude Code session. Install says when `~/.local/bin` is not on your PATH and gives the line to add, and leaves a `tenjin` there that is not its own.
+
+  `tenjin update` no longer needs npm. It downloads the new version from the npm registry, checks it against the registry's SHA-512, and has the new build check itself on its own Node before it switches anything; a failed check keeps the version you had. The previous version stays in the runtime, and older ones are removed only once nothing runs from them. An older build never replaces a newer one; to go back, run `tenjin uninstall`, then install the older version.
+
+  Codex runs Tenjin from the same runtime: install adds the Codex plugin from `~/.tenjin/runtime/codex`, whose hooks and server run the runtime's launcher, so a Node upgrade no longer breaks Tenjin in Codex. Run `tenjin install` once in Codex to move an existing install; Codex asks you to review the changed hooks.
+
+  Tenjin now updates itself in the background, at most once a day, at the start of a Claude Code session or as a Codex session ends, where its runtime is set up. It uses `tenjin update`'s checks, never npm. Claude Code and Codex both run the new version from their next session. `tenjin config set update.mode nudge` only reports a newer version; `off` turns the check off.
+
+  `tenjin doctor` checks the runtime Claude Code starts, and names an older `tenjin` first on your PATH, or a plugin an older build moved back to its npm folder.
+
+  Existing installs move to the runtime on their next `tenjin install` or `tenjin update`, project installs included. The wallet, the passphrase, the spend ledger and the config stay where they are.
+
+  `tenjin uninstall` removes the install for where you are, from any folder: the project install for this folder or the nearest one above it, or else the user install. `--project <path>` removes another project's install, and `--all` removes every one. A run is all or nothing: when a removal fails, the marketplace, the runtime and the launcher stay, and it names what was removed and what is left. It ends by saying what it kept (your wallet and its address, the spend ledger, the config, where the passphrase is saved) and to run `npm uninstall -g tenjin-cli` after it, never before.
+
+  A wallet that will not open no longer uses up an approved quote: the `approve` call opens the wallet first, so the quote waits for a second yes after `tenjin wallet repair`. `tenjin status` shows the wallet's USDC balance, and `tenjin status` and `tenjin wallet balance` say how to fund a wallet at $0.
+
+  Every fix now says the same thing: start a new Claude Code session. Fixes to an environment variable say to quit Claude Code fully and start a new session, since a running Claude Code keeps the environment it started with.
+
+  New troubleshooting entry: "Tenjin stopped after a Node upgrade (`Executable not found`, `cache-miss`)".
+
+- 9f9cc3e: A paid read of a public link no longer stops at "the query carries a credential-shaped value". Queries stopped masking any long letters-and-digits path segment, which also caught Reddit slugs, Google Docs and Drive ids, gists, Loom shares and Notion pages and sent nothing. A query still masks an RPC provider key in a URL path (QuickNode, Alchemy, Infura, Ankr, Chainstack, GetBlock, dRPC, Tenderly) and a webhook token in one (Slack, Discord, Make), along with vendor tokens, credential query parameters, bearer tokens and connection strings.
+- f37f0ed: When the routing fee cannot be paid, the notice and `tenjin doctor` now say Tenjin is not routing calls until it is fixed, instead of saying calls take the free path: the router charges the fee on every call, so an unpaid call gets no routing.
+- 313ccae: A wallet Claude Code cannot unlock is now fixed, and said plainly. The wallet's passphrase is saved where Claude Code can read it without a prompt: the platform's credential store where one answers (Keychain, Secret Service, DPAPI), and otherwise a file only you can read, `~/.tenjin/passphrase.<address>.plain` (mode 0600), recorded in `~/.tenjin/passphrase-store.json`. `wallet.json` is never rewritten, and a machine with no such record behaves as before. `tenjin wallet create --insecure-storage` picks the file even where a keychain exists; it is a choice, never the fix for a locked keychain. A locked keychain is fixed by unlocking it (or logging in to the desktop session) and retrying.
+
+  `tenjin wallet create` no longer prompts for the new wallet's passphrase: it generates one, or uses `TENJIN_WALLET_PASSPHRASE` when set, so set that first to choose your own. A `TENJIN_WALLET_PASSPHRASE` given when a wallet is created is now saved too (the keychain, else a file only you can read), and create says where in one line.
+
+  New `tenjin wallet repair`, for a wallet whose passphrase was never saved (before this release, a passphrase given in the variable when the wallet was created was never saved, and one typed at the create prompt was not saved either, since create prompted only when no keychain answered). Run it yourself in a terminal: it asks for the passphrase (or uses `TENJIN_WALLET_PASSPHRASE` when that opens the wallet); never paste the passphrase into chat. It checks the passphrase opens the wallet, saves it, and says to start a new Claude Code session; the next session says "Tenjin wallet unlocked." It is never pre-approved for an agent.
+
+  A `TENJIN_WALLET_PASSPHRASE` that does not open the wallet no longer blocks it: the saved passphrase is tried next, and Claude Code says once that the variable is wrong. A correct variable still wins. Wallet notices name the reason and are said once per reason; wallet fixes name `tenjin wallet repair` instead of the variable. Paid lookups are not offered while the wallet definitely cannot pay, and are offered as before when Tenjin cannot tell. A keychain that does not answer never stalls a lookup. `tenjin doctor` says what the router in your running Claude Code session saw, and `tenjin install` never marks with a ✓ a wallet Claude Code could not unlock.
+
 ## 0.1.0-alpha.31
 
 ### Patch Changes
