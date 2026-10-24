@@ -2,7 +2,7 @@
 
 ## Tenjin cannot unlock the wallet
 
-Claude Code's message line, the session's first message or `tenjin doctor` says Tenjin cannot use its wallet, and names one of these reasons. Until it is fixed, Tenjin lookups take the free path and paid lookups do not run; your assistant's own tools keep working.
+Claude Code's message line, the session's first message or `tenjin doctor` says Tenjin cannot use its wallet, and names one of these reasons. Until it is fixed, Tenjin does not route lookups and paid lookups do not run; your assistant's own tools keep working.
 
 - **`no saved wallet passphrase can be reached`.** The passphrase was never saved where Claude Code can read it, or the file Tenjin saved it in is gone. Before 0.1.0-alpha.31, a passphrase given in `TENJIN_WALLET_PASSPHRASE` when the wallet was created was never saved, and one typed at the create prompt was not saved either (create prompted only when no keychain answered). Run `tenjin wallet repair` (below).
 - **`the saved wallet passphrase does not open the wallet`.** The keychain or the passphrase file holds a passphrase, but not this wallet's. Run `tenjin wallet repair` (below).

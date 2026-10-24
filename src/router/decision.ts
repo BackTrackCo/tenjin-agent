@@ -408,6 +408,13 @@ export const ToolSpecSchema = z.strictObject({
     url: z.string().min(1).max(2_048),
     fields: z.record(z.string(), z.enum(['path', 'query', 'body'])),
     location: z.enum(['query', 'body']),
+    /** Fixed request headers the catalog decides for this service (a
+     *  provider's beta opt-in, say), never the agent. The call refuses a name
+     *  this client signs or sets itself; `accept` and `content-type` stay its own. */
+    headers: z
+      .record(z.string().min(1).max(64), z.string().min(1).max(1_024))
+      .refine((headers) => Object.keys(headers).length <= 8, 'at most 8 headers')
+      .optional(),
   }),
   input: z.record(z.string(), z.unknown()),
   pinned: z.record(z.string(), z.unknown()),

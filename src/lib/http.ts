@@ -327,6 +327,51 @@ function carriesSignedMaterial(headers: Record<string, string>): boolean {
   return Object.keys(headers).some((name) => CREDENTIAL_HEADERS.has(name.toLowerCase()));
 }
 
+/**
+ * A request header name this client sets itself and an operator may not: the
+ * wallet-signed material above, the shelf bypass secret, this install's
+ * identity, and the x402 payment namespace. Kept beside the set so the two
+ * cannot drift.
+ */
+export function isReservedRequestHeader(name: string): boolean {
+  const lowered = name.toLowerCase();
+  return (
+    CREDENTIAL_HEADERS.has(lowered) ||
+    lowered === SHELF_BYPASS_HEADER ||
+    lowered === INSTALL_ID_HEADER ||
+    lowered.startsWith('payment-') ||
+    lowered.startsWith('x-payment')
+  );
+}
+
+/** One header name, as RFC 9110 spells a token. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Names the transport or the body encoding own. */
+const TRANSPORT_HEADERS = new Set(['host', 'content-length', 'content-type', 'user-agent']);
+
+/**
+ * Why a request header someone else names (an operator's `-H`, a catalog
+ * spec) cannot ride a paid request, or null when it can: `name` for a name
+ * that is not a token or a value that is empty, `reserved` for a name this
+ * client signs or sets itself or the transport owns, `value` for a value over
+ * 1,024 characters or one that spans lines. `ownContentType` lets the caller
+ * name `content-type`, for a body this client does not encode.
+ */
+export function requestHeaderProblem(
+  name: string,
+  value: string,
+  ownContentType = false,
+): 'name' | 'reserved' | 'value' | null {
+  if (!HEADER_NAME.test(name) || value.length === 0) return 'name';
+  const lowered = name.toLowerCase();
+  const contentType = ownContentType && lowered === 'content-type';
+  if (isReservedRequestHeader(lowered) || (TRANSPORT_HEADERS.has(lowered) && !contentType)) {
+    return 'reserved';
+  }
+  if (value.length > 1_024 || /[\r\n]/.test(value)) return 'value';
+  return null;
+}
+
 export type FetchJsonResult = FetchJsonSuccess | FetchJsonFailure;
 
 export async function fetchJson(url: string, opts: FetchJsonOptions): Promise<FetchJsonResult> {
@@ -462,7 +507,7 @@ function timeoutFailure(url: string, timeoutMs: number): FetchJsonFailure {
  * still returns the discriminated FetchJsonFailure so callers map it uniformly.
  */
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   timeoutMs: number;
   headers?: Record<string, string>;
   /** The team shelf's bypass secret and its origin; see {@link ShelfBypass}. */
@@ -605,7 +650,11 @@ function prepareRequest(url: string, opts: HttpRequestOptions): PreparedRequest 
     } else if (opts.rawBody !== undefined) {
       body = opts.rawBody;
     }
-    const wantsAccept = opts.method === 'POST' || opts.method === 'PUT' || body !== undefined;
+    const wantsAccept =
+      opts.method === 'POST' ||
+      opts.method === 'PUT' ||
+      opts.method === 'PATCH' ||
+      body !== undefined;
     if (wantsAccept && !merged.has('accept')) merged.set('accept', 'application/json');
     // An `accept`/`content-type` set here wins the slot regardless of how a
     // caller cased its own copy.

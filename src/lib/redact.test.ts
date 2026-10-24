@@ -884,10 +884,9 @@ describe('mask() carries the key, PEM, seed-phrase and URL credential rows (#388
     );
   });
 
-  it('masks a long mixed path segment', () => {
-    expect(mask('https://hooks.acme.io/services/x9Y8z7W6v5U4t3S2r1Q0p9O8nM')).toBe(
-      'https://hooks.acme.io/services/…[redacted 26 chars]',
-    );
+  it('leaves a long mixed path segment in a query', () => {
+    const url = 'https://hooks.acme.io/services/x9Y8z7W6v5U4t3S2r1Q0p9O8nM';
+    expect(mask(url)).toBe(url);
   });
 
   it('leaves ordinary URLs untouched', () => {
@@ -929,6 +928,30 @@ describe('the #296 credential shapes', () => {
     expect(find(text, 'bip39-seed-phrase')?.excerpt).toBe(
       '[redacted 12-word BIP-39 recovery phrase]',
     );
+  });
+});
+
+describe('webhook tokens in a query (#489)', () => {
+  // Split so the committed bytes carry no contiguous webhook URL for a scanner.
+  const SLACK = ['x9Y8z7W6v5U4', 't3S2r1Q0p9O8'].join('');
+  const DISCORD = [
+    'Ab3Cd5Ef7Gh9Jk2Lm4Np6Qr8St0Uv1Wx',
+    'Yz2Ab4Cd6Ef8Gh0Jk2Lm4Np6Qr8St0Uv1WxYz2A',
+  ].join('');
+
+  it('masks a Slack and a Discord webhook token', () => {
+    expect(mask(`post to https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/${SLACK}`)).toBe(
+      'post to https://hooks.slack.com/services/T0A1B2C3D/B0E4F5G6H/…[redacted 24 chars]',
+    );
+    expect(mask(`post to https://discord.com/api/webhooks/123456789012345678/${DISCORD}`)).toBe(
+      `post to https://discord.com/api/webhooks/123456789012345678/…[redacted ${DISCORD.length} chars]`,
+    );
+  });
+
+  it('leaves a public underscore slug alone', () => {
+    const url =
+      'https://www.reddit.com/r/rust/comments/1dh773j/report_on_the_rustnl_2024_unconference/';
+    expect(mask(url)).toBe(url);
   });
 });
 

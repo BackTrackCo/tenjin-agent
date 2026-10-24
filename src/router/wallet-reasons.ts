@@ -150,7 +150,7 @@ export function sessionStartMessage(reason: UnlockReason | 'wallet_locked'): {
   const r = entryFor(reason);
   return {
     systemMessage: `Tenjin can't use its wallet in this session: ${r.reason}. ${r.fix}`,
-    additionalContext: `Tenjin's wallet cannot sign in this session (${r.reason}), so Tenjin lookups take the free path and paid lookups will not run. ${r.agentFix}`,
+    additionalContext: `Tenjin's wallet cannot sign in this session (${r.reason}), so Tenjin is not routing lookups and paid lookups will not run. ${r.agentFix}`,
   };
 }
 

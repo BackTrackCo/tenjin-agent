@@ -1,3 +1,4 @@
+import { requestHeaderProblem } from '../lib/http';
 import { toMoney } from '../lib/money';
 import { inputProblems } from '../lib/request-schema';
 import { isAccountSpec, type AccountSpec, type ToolSpec } from './decision';
@@ -212,6 +213,9 @@ export interface SpecRequest {
   url: string;
   method: 'GET' | 'POST';
   headers: Record<string, string>;
+  /** The spec's fixed headers, kept apart from `headers` so a decision's own
+   *  two-name contract still holds; the paid leg sets them under `headers`. */
+  specHeaders?: Record<string, string>;
   body?: string;
 }
 
@@ -233,6 +237,13 @@ const segment = (value: unknown): boolean => scalar(value) && value !== '.' && v
  * request never leaves the spec's own origin.
  */
 export function buildSpecRequest(spec: ToolSpec, merged: Json): SpecRequest | { problem: string } {
+  const fixed = spec.request.headers ?? {};
+  const refused = Object.entries(fixed).find(([name, value]) => requestHeaderProblem(name, value));
+  if (refused !== undefined)
+    return {
+      problem: `the spec sets the header ${JSON.stringify(refused[0])}, which this build will not send`,
+    };
+  const specHeaders = Object.keys(fixed).length ? { specHeaders: fixed } : {};
   const where = (name: string) => spec.request.fields[name] ?? spec.request.location;
   const inPath = [...spec.request.url.matchAll(PLACEHOLDER_RE)].map((match) => match[1]!);
   const missing = inPath.filter((name) => !segment(merged[name]));
@@ -276,12 +287,18 @@ export function buildSpecRequest(spec: ToolSpec, merged: Json): SpecRequest | { 
       return {
         problem: `a GET carries no body, so ${Object.keys(body).join(', ')} cannot be sent`,
       };
-    return { url: url.toString(), method: 'GET', headers: { accept: 'application/json' } };
+    return {
+      url: url.toString(),
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      ...specHeaders,
+    };
   }
   return {
     url: url.toString(),
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
+    ...specHeaders,
     body: JSON.stringify(body),
   };
 }

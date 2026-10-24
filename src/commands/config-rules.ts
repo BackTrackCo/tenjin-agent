@@ -912,12 +912,18 @@ export async function runConfigReset(
           : prefer.map((rule) => (rule === entry ? { ...entry, targets: kept } : rule)),
     });
   });
+  // --all takes the blocks with it, so it never says they stay: anything the
+  // user blocked is usable again, and only the spending limits are untouched.
   const explanation =
     missing !== undefined
       ? [`${missing} Nothing changed.`]
-      : [
-          `${SAVED_PREFIX} removed ${describeRemoved(mode, removed, listing)}. Your blocks, limits and other rules stay as they are.`,
-        ];
+      : mode === 'all'
+        ? [
+            `${SAVED_PREFIX} removed every saved routing rule, including your blocks, restrictions and preferences, so anything you blocked can be used again. Your spending limits stay as they are.`,
+          ]
+        : [
+            `${SAVED_PREFIX} removed ${describeRemoved(mode, removed, listing)}. Your blocks, limits and other rules stay as they are.`,
+          ];
   return answer(
     {
       operation: 'reset',
@@ -946,11 +952,10 @@ function recreate(rule: OnlyRule | PreferRule): string {
 }
 
 function describeRemoved(
-  mode: 'all' | 'preference' | 'restriction' | 'capabilities',
+  mode: 'preference' | 'restriction' | 'capabilities',
   removed: readonly unknown[],
   listing: DirectoryListing | undefined,
 ): string {
-  if (mode === 'all') return 'every saved routing rule';
   const list = new Intl.ListFormat('en');
   if (mode === 'preference') {
     const [first] = removed;

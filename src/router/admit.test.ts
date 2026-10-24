@@ -11,6 +11,7 @@ import { readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { normalizeForWire, type SavedPolicy } from './access';
+import { policyAtBoundary } from './admit';
 import {
   acceptsFor,
   buildToolBody,
@@ -31,6 +32,11 @@ vi.mock('../commands/pay', async (importOriginal) => {
 vi.mock('./specs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./specs')>();
   return { ...actual, claimSpecPayment: vi.fn(actual.claimSpecPayment) };
+});
+// Pass-through, so a test can save a block just after a boundary passed.
+vi.mock('./admit', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./admit')>();
+  return { ...actual, policyAtBoundary: vi.fn(actual.policyAtBoundary) };
 });
 
 /**
@@ -158,13 +164,14 @@ interface Answer {
 /**
  * THE NETWORK: the router's directory, decisions and outcome reports, and the
  * provider. `directory` and `decide` answer from the body sent; `onProbe` runs
- * as the provider receives an unpaid request.
+ * as the provider receives an unpaid request, and `probe` is its 402 for a URL.
  */
 function network(
   opts: {
     directory?: (body: Record<string, unknown>) => Answer;
     decide?: (body: Record<string, unknown>) => Answer;
     onProbe?: () => void;
+    probe?: (url: string) => Answer;
   } = {},
 ) {
   const calls: Sent[] = [];
@@ -191,11 +198,13 @@ function network(
     }
     if (!paid) {
       opts.onProbe?.();
-      return answer({
-        status: 402,
-        body: {},
-        headers: { 'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '10000' }).header },
-      });
+      return answer(
+        opts.probe?.(url) ?? {
+          status: 402,
+          body: {},
+          headers: { 'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '10000' }).header },
+        },
+      );
     }
     return answer({ status: 200, body: { data: { BTC: 1 } } });
   }) as typeof fetch;
@@ -827,6 +836,73 @@ describe('a compare group', () => {
     expect(net.directoryCalls()).toHaveLength(1);
     expect(net.providerCalls()).toEqual([]);
     expect(claimSpecPayment).not.toHaveBeenCalled();
+  });
+
+  /** Each seller quotes its own terms, so every member is planned. */
+  const sellerTerms = (url: string): Answer => {
+    const { priceAtomic, payTo } = SPECS.find(({ request }) => request.url === url)!;
+    return {
+      status: 402,
+      body: {},
+      headers: { 'PAYMENT-REQUIRED': buildPaymentRequired({ amount: priceAtomic, payTo }).header },
+    };
+  };
+  /** What another process's `tenjin config block --provider google` saves. */
+  const blockGoogle = () =>
+    writeFileSync(
+      join(dir, 'config.json'),
+      configWith({ block: [provider('firecrawl'), provider('google')] }),
+    );
+
+  it('is refused whole when a block lands while its members are probed: nothing signed', async () => {
+    await storeSpecs(dir, SPECS);
+    await storeChoices(dir, ID, { choices: CHOICES, hint: HINT });
+    // An unrelated block, so the set is admitted against the catalog.
+    await saveRules({ block: [provider('firecrawl')] });
+    const net = network({
+      directory: withGpt,
+      probe: sellerTerms,
+      // The probes are the moment another process saves a Google block.
+      onProbe: blockGoogle,
+    });
+    const result = await runRequestTool(
+      { id: ID, choice: 'all', input: { prompt: 'a lighthouse' } },
+      deps(net.fetchImpl),
+    );
+    expect(net.signed()).toEqual([]);
+    // The two probes, and nothing after them.
+    expect(net.providerCalls()).toHaveLength(2);
+    expect(result.envelope).toMatchObject({
+      reasonCode: 'policy_refused',
+      rule: { kind: 'block', target: provider('google') },
+      allowedChoices: [
+        { key: 'gpt-image-2.5', label: 'GPT Image 2.5 Sunburst', id: CHOICES.options[0]!.id },
+      ],
+    });
+  });
+
+  it("holds each member's own payment to the whole set, for a block saved after the last check", async () => {
+    await storeSpecs(dir, SPECS);
+    await storeChoices(dir, ID, { choices: CHOICES, hint: HINT });
+    await saveRules({ block: [provider('firecrawl')] });
+    // The set's checks before and after its probes pass; the block lands
+    // as the second one returns, before either member's payment boundary.
+    const boundary = vi.mocked(policyAtBoundary);
+    const real = boundary.getMockImplementation()!;
+    boundary.mockImplementationOnce(real).mockImplementationOnce(async (...args) => {
+      const verdict = await real(...args);
+      blockGoogle();
+      return verdict;
+    });
+    const net = network({ directory: withGpt, probe: sellerTerms });
+    const result = await runRequestTool(
+      { id: ID, choice: 'all', input: { prompt: 'a lighthouse' } },
+      deps(net.fetchImpl),
+    );
+    expect(net.signed()).toEqual([]);
+    const results = result.envelope.results as Record<string, unknown>[];
+    expect(results).toHaveLength(2);
+    for (const member of results) expect(member).toMatchObject({ reasonCode: 'policy_refused' });
   });
 });
 

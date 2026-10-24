@@ -185,7 +185,10 @@ type StepResult = { status: unknown } & Record<string, unknown>;
  *    user approved brings its own slots instead, one per claimed step, or
  *    nothing runs.
  * 5. Every planned step pays at once, each against its own slot, through the
- *    single-offer pay step.
+ *    single-offer pay step. A choice set is held to the user's rules as one
+ *    set first (`recheck`), after its probes, so a block saved while they ran
+ *    refuses every option before any pays; each option's own payment
+ *    boundary holds the whole set to them again.
  */
 async function runTakes(
   steps: TakeStep[],
@@ -196,6 +199,9 @@ async function runTakes(
     call: (planned: PlannedStep[]) => QuotedCall;
     /** The slots of a quote the user approved, in the steps' order. */
     approved?: PlanSlot[];
+    /** A choice set's rules, read again for its claimed options: a refusal
+     *  stops the set. A count has none: its takes are one call. */
+    recheck?: (claimed: readonly TakeStep[]) => Promise<RequestToolResult | null>;
   },
   deps: RequestToolDeps,
   reportDeps: ReportDeps,
@@ -277,6 +283,19 @@ async function runTakes(
     }
   }
 
+  // THE SET AGAIN, AFTER ITS PROBES AND BEFORE ANY PAYMENT: a block saved
+  // while the probes ran refuses every option, claims released, rather than
+  // pay for what is left of the set. Each option's payment boundary then
+  // reads the rules for the whole set too, not only for itself.
+  const group = plan.recheck !== undefined ? routesOf(claimed) : undefined;
+  if (plan.recheck !== undefined && planned.length > 0) {
+    const stop = await plan.recheck(claimed);
+    if (stop !== null) {
+      await release(planned.map(({ step }) => step));
+      return { refused: stop };
+    }
+  }
+
   const paid = new Map(
     await Promise.all(
       planned.map(
@@ -285,7 +304,7 @@ async function runTakes(
             step,
             await paySpec(
               step.prepared,
-              { slot: slots.get(step)! },
+              { slot: slots.get(step)!, ...(group !== undefined ? { group } : {}) },
               deps,
               SILENT_FOOTER,
               reportDeps,
@@ -522,6 +541,13 @@ export async function runChoiceSet(
     claim: option.id,
     prepared: checked,
   }));
+  // The rules read again for the whole set, before its probes and once more
+  // after them, before any option pays.
+  const recheck = async (claimed: readonly TakeStep[]): Promise<RequestToolResult | null> => {
+    const boundary = await groupBoundary(claimed, admitted.deps);
+    if (boundary !== null) await footer.done(String(boundary.envelope.status));
+    return boundary;
+  };
   const run = await runTakes(
     steps,
     {
@@ -530,11 +556,8 @@ export async function runChoiceSet(
       // prompt, the price) is its own entry, with nothing paid. The probes
       // are provider calls, so the rules are read again first, for the set.
       price: async (claimed) => {
-        const boundary = await groupBoundary(claimed, admitted.deps);
-        if (boundary !== null) {
-          await footer.done(String(boundary.envelope.status));
-          return { stop: boundary };
-        }
+        const boundary = await recheck(claimed);
+        if (boundary !== null) return { stop: boundary };
         return Promise.all(
           claimed.map(async (step): Promise<Priced> => {
             const quote = await quoteTake(step.prepared, admitted.deps);
@@ -559,6 +582,7 @@ export async function runChoiceSet(
         input,
       }),
       ...(approved !== undefined ? { approved: approved.slots } : {}),
+      recheck,
     },
     admitted.deps,
     reportDeps,
@@ -744,7 +768,13 @@ async function groupBoundary(
   claimed: readonly TakeStep[],
   deps: RequestToolDeps,
 ): Promise<RequestToolResult | null> {
-  const routes: Route[] = claimed.map((step) => {
+  const refusal = await policyAtBoundary(routesOf(claimed), deps.policyRun, deps.ctx.dataDir);
+  return refusal === null ? null : refusedByPolicy(refusal);
+}
+
+/** The routes the claimed steps take, each a choice's member where it is one. */
+function routesOf(claimed: readonly TakeStep[]): Route[] {
+  return claimed.map((step) => {
     const { key, label, id } = step.named;
     const member =
       typeof key === 'string' && typeof label === 'string' && typeof id === 'string'
@@ -752,8 +782,6 @@ async function groupBoundary(
         : undefined;
     return routeOf(step.prepared.spec.identity, member);
   });
-  const refusal = await policyAtBoundary(routes, deps.policyRun, deps.ctx.dataDir);
-  return refusal === null ? null : refusedByPolicy(refusal);
 }
 
 /**
@@ -781,6 +809,7 @@ async function quoteTake(
         url: built.url,
         method: built.method,
         headers: built.headers,
+        ...(built.specHeaders !== undefined ? { specHeaders: built.specHeaders } : {}),
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
         terms: specTerms(spec),
       },

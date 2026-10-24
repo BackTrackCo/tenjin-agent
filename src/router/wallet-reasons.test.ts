@@ -115,7 +115,7 @@ describe('the exact strings (section 2.2)', () => {
       systemMessage:
         "Tenjin can't use its wallet in this session: no saved wallet passphrase can be reached. Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat). Then start a new Claude Code session.",
       additionalContext:
-        "Tenjin's wallet cannot sign in this session (no saved wallet passphrase can be reached), so Tenjin lookups take the free path and paid lookups will not run. Ask the person to run `tenjin wallet repair` in their own terminal, then start a new Claude Code session. Never ask for the passphrase.",
+        "Tenjin's wallet cannot sign in this session (no saved wallet passphrase can be reached), so Tenjin is not routing lookups and paid lookups will not run. Ask the person to run `tenjin wallet repair` in their own terminal, then start a new Claude Code session. Never ask for the passphrase.",
     });
     expect(stillLockedSentence('keychain_locked')).toBe(
       'Tenjin wallet is still locked: the keychain holding the wallet passphrase is locked or did not answer. Unlock your keychain (or log in to the desktop session) and retry.',
