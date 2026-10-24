@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { defineConfig, type Options } from 'tsup';
 import {
   MOD_FILES,
@@ -39,12 +39,16 @@ function writeHosts(): void {
 /**
  * Each build's esbuild metafile, for `scripts/check-bundled-packages.mjs`, which
  * lists the third-party packages that ship. Written beside `dist`, never in it,
- * so it stays out of the published package.
+ * so it stays out of the published package. Only a build into `dist` writes:
+ * tsup's `build()` API (src/daemon/smoke.test.ts) also loads this config for
+ * its temp-dir builds, which must not overwrite the shipped build's record.
  */
 function writeMetafile(name: string): NonNullable<Options['esbuildPlugins']>[number] {
   return {
     name: 'write-metafile',
     setup(build) {
+      const outdir = build.initialOptions.outdir;
+      if (outdir === undefined || resolve(outdir) !== resolve('dist')) return;
       build.onEnd((result) => {
         if (result.metafile === undefined) return;
         mkdirSync('.bundle-meta', { recursive: true });
