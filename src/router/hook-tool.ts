@@ -70,7 +70,7 @@ export function eventFromToolInput(args: Record<string, unknown>): Record<string
 }
 
 /**
- * THE SAME EVENT, CARRIED BY A CODEX `mcp_tool` ENTRY (Codex 0.148 and later).
+ * THE SAME EVENT, CARRIED BY A CODEX `mcp_tool` ENTRY (Codex 0.149 and later).
  * Codex substitutes `${field}` from the event too, with two differences
  * (openai/codex `hooks/src/engine/mcp_runner.rs`): a whole placeholder keeps
  * the field's JSON type, so `tool_input` arrives as an object and a null

@@ -169,6 +169,8 @@ async function addPlugin(
 
 const TRUST_STEP =
   'Open Codex, run /hooks and trust the five Tenjin hooks, then start a new session.';
+/** What a person reads when this Codex cannot run the plugin's routing hooks. */
+const CODEX_TOO_OLD = `Routing in Codex needs Codex ${CODEX_MCP_HOOKS_VERSION} or later, so Tenjin left its Codex plugin as it was. Ask your agent to update Codex.`;
 /** What a person reads when an install or update turned the hooks on itself. */
 const NEW_SESSION_STEP = 'Start a new Codex session: Codex reads hooks when a session starts.';
 
@@ -229,7 +231,7 @@ export const CODEX_REFRESH_LINES = {
   done: "Tenjin updated its Codex hooks. They run in Codex's next new session.",
   review:
     "Tenjin updated its Codex hooks but could not turn them on. Open /hooks in Codex and approve Tenjin's hooks so routing works.",
-  old: 'Tenjin could not update its Codex hooks: this Codex is too old for them. Ask your agent to update Codex.',
+  old: CODEX_TOO_OLD,
   failed:
     'Tenjin could not update its Codex hooks. Ask your agent to run the Tenjin doctor for Codex.',
 } as const;
@@ -354,9 +356,16 @@ export async function runCodexInstall(
   const fromRuntime = runtimeHosts(rt);
   const hosts =
     fromRuntime ?? (deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir);
-  const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
-  await addPlugin(run, hosts, at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'));
-  const next = (await trustPlugin(deps).catch(() => false)) ? NEW_SESSION_STEP : TRUST_STEP;
+  // A Codex too old to run `mcp_tool` hooks keeps whatever copy it has: the
+  // new hooks would be skipped, or the file refused. An unknown build installs.
+  const version = await (deps.version ?? codexVersion)();
+  const tooOld = version !== null && !codexAtLeast(version, CODEX_MCP_HOOKS_VERSION);
+  let next: string = CODEX_TOO_OLD;
+  if (!tooOld) {
+    const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
+    await addPlugin(run, hosts, at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'));
+    next = (await trustPlugin(deps).catch(() => false)) ? NEW_SESSION_STEP : TRUST_STEP;
+  }
 
   // Read back after the write, as the Claude install does.
   const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
@@ -379,7 +388,9 @@ export async function runCodexInstall(
     },
     humanLines: [
       `Wallet: ${walletValue(wallet)}`,
-      `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
+      tooOld
+        ? `Codex plugin: left as it was (Codex ${version})`
+        : `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
       ...runtimeLines(ctx, rt, home),
       `Automatic router: up to $${effective.maxAutoSpend} per call; daily limit ${daily}`,
       ...(spendAsk !== undefined

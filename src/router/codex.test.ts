@@ -870,11 +870,11 @@ describe('Codex install, uninstall and doctor', () => {
       runCodexDoctor({}, ctx(), {
         ...deps,
         hooks: async () => listed(...allRows()),
-        version: async () => '0.147.0',
+        version: async () => '0.148.0',
       }),
     ).rejects.toMatchObject({
-      details: { routing: 'paid', version: '0.147.0', ok: false },
-      fix: expect.stringContaining('Update Codex to 0.148.0 or later'),
+      details: { routing: 'paid', version: '0.148.0', ok: false },
+      fix: expect.stringContaining('Update Codex to 0.149.0 or later'),
     });
     // Nothing ran: no codex command, and the only reads are the stand-ins above.
     expect(steps).toEqual([]);
@@ -882,9 +882,9 @@ describe('Codex install, uninstall and doctor', () => {
 
   it('compares Codex builds by number, a suffix ignored', () => {
     expect(codexAtLeast('0.157.1', '0.148.0')).toBe(true);
-    expect(codexAtLeast('0.148.0', '0.148.0')).toBe(true);
-    expect(codexAtLeast('0.148.0-alpha.2', '0.148.0')).toBe(true);
-    expect(codexAtLeast('0.147.9', '0.148.0')).toBe(false);
+    expect(codexAtLeast('0.149.0', '0.149.0')).toBe(true);
+    expect(codexAtLeast('0.149.0-alpha.2', '0.149.0')).toBe(true);
+    expect(codexAtLeast('0.148.9', '0.149.0')).toBe(false);
     expect(codexAtLeast('1.0.0', '0.148.0')).toBe(true);
   });
 
@@ -1034,6 +1034,29 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       i < 3 ? { ...r, handlerType: 'command', command: `tenjin hook prompt --harness codex` } : r,
     );
 
+  it('installs the plugin from 0.149.0 or an unknown build, and leaves an older copy', async () => {
+    for (const [version, adds] of [
+      ['0.148.0', false],
+      ['0.149.0', true],
+      [null, true],
+    ] as const) {
+      const { steps, deps } = host();
+      const out = await runCodexInstall({ yes: true }, ctx(), {
+        ...deps,
+        version: async () => version,
+      });
+      expect(
+        steps.some((s) => s.startsWith('codex plugin add')),
+        String(version),
+      ).toBe(adds);
+      if (!adds) {
+        expect(out.data).toMatchObject({ next: CODEX_REFRESH_LINES.old });
+        expect(CODEX_REFRESH_LINES.old).toContain('0.149.0');
+        expect(CODEX_REFRESH_LINES.old).not.toMatch(/tenjin |`/);
+      }
+    }
+  });
+
   it('does nothing where Codex is absent or does not have the plugin', async () => {
     const { steps, deps } = host();
     expect(await refreshCodexPlugin(ctx(), { ...deps, version: async () => null })).toBeUndefined();
@@ -1075,7 +1098,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
     expect(failed).toBe(CODEX_REFRESH_LINES.failed);
     const old = await refreshCodexPlugin(ctx(), {
       ...deps,
-      version: async () => '0.147.0',
+      version: async () => '0.148.0',
       hooks: async () => ({ data: [{ hooks: stale() }] }),
     });
     expect(old).toBe(CODEX_REFRESH_LINES.old);

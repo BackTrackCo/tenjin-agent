@@ -493,7 +493,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
 
 /**
  * THE CODEX HOOK LEGS' TOOL. The Codex plugin's routing legs are `mcp_tool`
- * hooks into this server (Codex 0.148 and later), so each leg runs in this
+ * hooks into this server (Codex 0.149 and later), so each leg runs in this
  * process and pays through its payer, as Claude Code's do. Codex keeps each
  * field's JSON type, so the fields are not strings here. The plugin's own
  * PreToolUse hook denies the tool to the model; the event is still plain

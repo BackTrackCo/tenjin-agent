@@ -512,8 +512,9 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  * into the plugin's own `router` server, as Claude Code's are, so each leg
  * runs in the process that holds the wallet and pays the routing fee: the
  * prompt, and one web call before it runs and after (Codex has no
- * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.148.0, and an older
- * Codex rejects the file (`tenjin doctor --harness codex` checks the build).
+ * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.149.0: 0.148 parses
+ * them but skips them, and an older Codex rejects the file, so install and
+ * update leave an older Codex's copy as it is and doctor names the build.
  * The server's `env_vars` passes `CODEX_HOME` through Codex's cleared MCP
  * environment, so the hook tool finds the session's rollout where Codex
  * wrote it.
@@ -526,8 +527,12 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  */
 export const CODEX_WEB_MATCHER = 'webrun';
 export const CODEX_LEGS = CODEX_HOOK_KINDS;
-/** The first Codex that runs `mcp_tool` hooks (openai/codex `rust-v0.148.0`). */
-export const CODEX_MCP_HOOKS_VERSION = '0.148.0';
+/**
+ * The first Codex that runs `mcp_tool` hooks: rust-v0.149.0 adds
+ * `core/src/hook_mcp_executor.rs`; rust-v0.148.0 builds hooks with no MCP
+ * executor and skips each one (`hooks/src/engine/mod.rs`).
+ */
+export const CODEX_MCP_HOOKS_VERSION = '0.149.0';
 
 /** What the Codex runtime render runs: the launch its launchers bake, and the absolute folder they are in. */
 export interface CodexRuntime {
