@@ -41,8 +41,11 @@ else
 fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/tenjin-install.XXXXXXXX") || fail 'Could not create a temporary folder.'
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
+# A stalled transfer fails, a slow one does not: under 1 KB/s for 60 s ends it,
+# and 30 minutes caps the whole. Node's archive is over 50 MB, past a fixed
+# 5-minute cap on any link below about 1.5 Mbit/s.
 fetch() {
-  HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}" curl -q --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --connect-timeout 30 --max-time 300 "$1" -o "$2" || fail 'A download failed. Check your connection or proxy settings.'
+  HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}" curl -q --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 1800 "$1" -o "$2" || fail 'A download failed. Check your connection or proxy settings.'
 }
 printf 'Installing Tenjin %s…\n' "$CLI_VERSION" >&2
 archive="node-v$NODE_VERSION-$key"
