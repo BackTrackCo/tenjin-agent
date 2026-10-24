@@ -14,7 +14,9 @@ import { DECIDED_PREFIX, sessionDir } from './progress';
  * the same decision instead of asking, and paying for, a second one. The
  * decision is kept here, under the session and the harness's own
  * `tool_use_id`, with the exact search or URL it was made for; a different
- * target, a stale record or one that does not parse is read as absent.
+ * target, a stale record or one that does not parse is read as absent. A
+ * routing fee the swap could not pay is kept beside it, so the pre-call
+ * hook's footer says `fee unpaid` as the swap's did. Display only.
  *
  * Hook-safe: node, zod (through `decision.ts`) and `lib/atomic-json` only.
  * Every failure is "absent": a lost record costs one more decision, never a
@@ -33,19 +35,27 @@ function decidedPath(dataDir: string, sessionId: string, toolUseId: string): str
   return join(sessionDir(dataDir, sessionId), `${DECIDED_PREFIX}${digest(toolUseId)}.json`);
 }
 
-/** Keep the decision the swap made for this call: null when the router gave none. */
+/** What the swap decided for one call. */
+export interface Decided {
+  /** The router's answer: null when it gave none. */
+  decision: HookDecision | null;
+  /** Why the routing fee was not paid, when it was not (`fee_required`, `wallet_low`, ...). */
+  unpaid?: string;
+}
+
+/** Keep the decision the swap made for this call. */
 export async function keepDecided(
   dataDir: string,
   sessionId: string,
   toolUseId: string,
   target: string,
-  decision: HookDecision | null,
+  { decision, unpaid }: Decided,
   now = Date.now(),
 ): Promise<void> {
   try {
     await writeFileAtomic(
       decidedPath(dataDir, sessionId, toolUseId),
-      JSON.stringify({ version: 1, at: now, target, decision }),
+      JSON.stringify({ version: 1, at: now, target, decision, unpaid }),
       { mode: 0o600, dirMode: 0o700 },
     );
   } catch {
@@ -64,16 +74,18 @@ export async function takeDecided(
   toolUseId: string,
   target: string,
   now = Date.now(),
-): Promise<{ decision: HookDecision | null } | undefined> {
+): Promise<Decided | undefined> {
   const path = decidedPath(dataDir, sessionId, toolUseId);
   const row = await readBounded(path);
   if (row === undefined) return undefined;
   await rm(path, { force: true }).catch(() => undefined);
   if (row.version !== 1 || typeof row.at !== 'number' || row.target !== target) return undefined;
   if (now - row.at > DECIDED_TTL_MS || row.at > now + DECIDED_TTL_MS) return undefined;
-  if (row.decision === null) return { decision: null };
+  // Only a string is a reason; anything else reads as none.
+  const unpaid = typeof row.unpaid === 'string' ? { unpaid: row.unpaid } : {};
+  if (row.decision === null) return { decision: null, ...unpaid };
   const decision = parseHookDecision(row.decision);
-  return decision === undefined ? undefined : { decision };
+  return decision === undefined ? undefined : { decision, ...unpaid };
 }
 
 /** One bounded JSON object, never through a symlink planted under the data dir. */

@@ -21,7 +21,7 @@ import {
 } from './context';
 import { storeChoices, storeSpecs } from './specs';
 import { requestDecision, ROUTER_PATH, type HookDecision, type OfferSpec } from './decision';
-import { keepDecided, takeDecided } from './decided';
+import { keepDecided, takeDecided, type Decided } from './decided';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -1122,7 +1122,7 @@ async function routeNativeCall(
     /** The decision the swap already made for this very call ({@link
      *  decideSwap}): used as the router's answer, so one search is never
      *  decided, or charged a routing fee, twice. */
-    recorded?: { decision: HookDecision | null };
+    recorded?: Decided;
   } = {},
 ): Promise<
   | { offer: OfferDecision; free?: undefined }
@@ -1159,6 +1159,9 @@ async function routeNativeCall(
       : undefined;
   if (sealed === null) return { offer: null, outcome: { response: null } };
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+  // The swap's unpaid fee is this call's: its line replaces the swap's, and
+  // says so rather than that the router chose native tools.
+  if (recorded?.unpaid !== undefined) footer.unpaid(recorded.unpaid);
   const deadline = gateDeadline(deps);
   const outcome =
     sealed === undefined
@@ -1392,8 +1395,19 @@ export async function decideSwap(raw: unknown, deps: HookDeps): Promise<SwapDeci
   if (sealed === null) return { handback: 'not routed' };
   const footer = await openFooter(deps, event.sessionId, 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
-  await keepDecided(deps.dataDir, session, toolUseId, target, outcome, deps.now?.());
+  let unpaid: string | undefined;
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, (why) => {
+    unpaid = why;
+    footer.unpaid(why);
+  });
+  await keepDecided(
+    deps.dataDir,
+    session,
+    toolUseId,
+    target,
+    { decision: outcome, ...(unpaid !== undefined ? { unpaid } : {}) },
+    deps.now?.(),
+  );
   const back = async (why: string): Promise<SwapDecision> => {
     await footer.close(outcome, isOffer(outcome) ? { withheld: why } : undefined);
     return { handback: why };

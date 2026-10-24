@@ -12,7 +12,7 @@ import type { SavedPolicy } from './access';
 import type { DirectoryListing, Identity, OfferSpec } from './decision';
 import { runNativeHook, type HookDeps } from './hooks';
 import { readPaidRecords } from './paid';
-import { redirectClaimed, sessionDir } from './progress';
+import { redirectClaimed, renderProgress, sessionDir } from './progress';
 import { runSwap } from './swap';
 import type { RequestToolDeps } from './tool';
 
@@ -354,6 +354,38 @@ describe('a search handed back', () => {
     const hook = await runNativeHook(search(), hookDeps(net.fetchImpl));
     expect(hook).toMatchObject({ action: 'execute', id: SPEC_ID });
     expect(net.decisions()).toHaveLength(1);
+  });
+
+  it('with the routing fee unpaid: the pre-call footer keeps saying so', async () => {
+    const net = network({
+      decide: () => ({
+        schemaVersion: 1,
+        routerVersion: 'v',
+        decision: {
+          action: 'native',
+          reason: 'The routing fee was not paid.',
+          diagnostics: {
+            reasonCode: 'fee_required',
+            stage: 'capability',
+            missing: [],
+            nextAction: 'Answer with your own tools.',
+          },
+        },
+      }),
+    });
+    expect((await swap(net)).envelope).toMatchObject({
+      swap: 'handback',
+      reason: 'no paid lookup fits',
+    });
+    expect(await renderProgress(dir, SESSION)).toBe('x402 · search: fee unpaid: fee_required');
+    // The pre-call hook runs from the kept decision, a moment later: its line
+    // replaces the swap's, and must not pass the unpaid fee off as a choice.
+    const later = Date.now() + 1000;
+    await runNativeHook(search(), { ...hookDeps(net.fetchImpl), now: () => later });
+    expect(net.decisions()).toHaveLength(1);
+    expect(await renderProgress(dir, SESSION, { now: later })).toBe(
+      'x402 · search: fee unpaid: fee_required',
+    );
   });
 
   it('when the pick is outside the automatic scope, which never reranks or restricts', async () => {
