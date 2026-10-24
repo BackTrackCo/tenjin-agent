@@ -765,6 +765,8 @@ describe('an install run over two hosts', () => {
           homeDir: home,
           env: fake.env,
           runtime,
+          version: async () => '0.157.1',
+          hooks: async () => ({ data: [] }),
           config: async () => ({}),
           run: async (args) => {
             steps.push(args.join(' '));
@@ -808,6 +810,8 @@ describe('an install run over two hosts', () => {
         homeDir: home,
         env: fake.env,
         runtime,
+        version: async () => '0.157.1',
+        hooks: async () => ({ data: [] }),
         config: async () => ({}),
         run: async () => ({ code: 1, stdout: '', stderr: 'Codex registration failed' }),
       }),
@@ -831,6 +835,8 @@ describe('an install run over two hosts', () => {
       homeDir: home,
       env: fake.env,
       runtime,
+      version: async () => '0.157.1',
+      hooks: async () => ({ data: [] }),
       config: async () => ({}),
       run: async () => ({ code: 0, stdout: '{}', stderr: '' }),
     });

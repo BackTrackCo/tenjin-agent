@@ -158,7 +158,7 @@ export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person
   const u = unpaid(why);
   if (u === null) return null;
   const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
-  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so calls take the free path until that is fixed. ${fix}`;
+  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;

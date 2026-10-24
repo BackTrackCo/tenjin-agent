@@ -31,7 +31,7 @@ const SRC_DIR = fileURLToPath(new URL('.', import.meta.url));
 
 /** The shape this file reads out of `lib/redact-rules.json`; redact.ts owns the full type. */
 interface ScanRuleCorpus {
-  rules: Array<{ id: string; tier?: string }>;
+  rules: Array<{ id: string; tier?: string; scopes: string[] }>;
 }
 
 /**
@@ -459,7 +459,12 @@ describe('tenjin-publish teaches complete public card context', () => {
     const corpus = JSON.parse(
       readFileSync(join(SRC_DIR, 'lib', 'redact-rules.json'), 'utf8'),
     ) as ScanRuleCorpus;
-    const warns = new Set(corpus.rules.filter((r) => r.tier === 'warn').map((r) => r.id));
+    // A row scoped `query` alone is masked and never reported, so it has no triage.
+    const warns = new Set(
+      corpus.rules
+        .filter((r) => r.tier === 'warn' && r.scopes.includes('publish'))
+        .map((r) => r.id),
+    );
     expect(warns.size, 'no warn detectors found; the corpus read is broken').toBeGreaterThan(5);
 
     const section = text.slice(text.indexOf('warnings split in two'));
@@ -846,13 +851,14 @@ describe('no doc or skill puts a passphrase on a command line', () => {
     );
   }
   const docsAndSkills = [...walk('docs'), ...walk('skills')];
-
-  it.each([...docsAndSkills, join('.changeset', 'wallet-unblock.md')])(
-    '%s has no inline TENJIN_WALLET_PASSPHRASE',
-    (rel) => {
-      expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/TENJIN_WALLET_PASSPHRASE=\S/);
-    },
+  /** Pending changesets, wherever the release process leaves them (`.changeset/pre/` on the version branch). */
+  const changesets = walk('.changeset').filter(
+    (rel) => rel.endsWith('.md') && !rel.endsWith('README.md'),
   );
+
+  it.each([...docsAndSkills, ...changesets])('%s has no inline TENJIN_WALLET_PASSPHRASE', (rel) => {
+    expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/TENJIN_WALLET_PASSPHRASE=\S/);
+  });
 
   it.each(walk('skills'))('%s never offers --insecure-storage', (rel) => {
     expect(readFileSync(join(root, rel), 'utf8')).not.toContain('--insecure-storage');

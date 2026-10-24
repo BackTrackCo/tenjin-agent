@@ -134,31 +134,31 @@ describe('routingFeeRow', () => {
     [
       'wallet_low',
       routing(READY, { balanceAtomic: 100_000n }),
-      'the wallet holds less than the $0.25 routing deposit, so routing calls take the free path',
+      'the wallet holds less than the $0.25 routing deposit, so Tenjin is not routing calls',
       'Fund it with `tenjin wallet fund 5`.',
     ],
     [
       'no_wallet',
       routing(canSign({ envKey: 'absent', walletFile: 'absent' })),
-      'this machine has no wallet, so routing calls take the free path',
+      'this machine has no wallet, so Tenjin is not routing calls',
       'Run `tenjin wallet create`, then `tenjin wallet fund 5`.',
     ],
     [
       'limit_below_deposit',
       routing(READY, { depositRefusal: 'limit_below_deposit' }),
-      'the per-call spend limit is below the $0.25 routing deposit, so routing calls take the free path',
+      'the per-call spend limit is below the $0.25 routing deposit, so Tenjin is not routing calls',
       'Raise it with `tenjin config set maxAutoSpend 0.25`.',
     ],
     [
       'budget_reached',
       routing(READY, { feeRefusal: 'budget_reached' }),
-      'the daily spend limit has no room left for the routing fee or its deposit, so routing calls take the free path',
+      'the daily spend limit has no room left for the routing fee or its deposit, so Tenjin is not routing calls',
       'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
     ],
     [
       'not_allowlisted',
       routing(READY, { feeRefusal: 'not_allowlisted' }),
-      'allowlistCreators does not include the router, so routing calls take the free path',
+      'allowlistCreators does not include the router, so Tenjin is not routing calls',
       'Add tenjin.sh to allowlistCreators, or clear the allowlist.',
     ],
   ])('names %s in today’s words and fix', (_why, verdict, detail, fix) => {
@@ -180,7 +180,7 @@ describe('routingFeeRow', () => {
     const row = routingFeeRow({ canPayRouting: routing(blockedSign(reason)) }, 'tenjin.sh');
     expect(row.status).toBe('warn');
     expect(row.detail).toBe(
-      `${WALLET_REASONS[reason as keyof typeof WALLET_REASONS].reason}, so routing calls take the free path`,
+      `${WALLET_REASONS[reason as keyof typeof WALLET_REASONS].reason}, so Tenjin is not routing calls`,
     );
     expect(row.fix).toBe(WALLET_REASONS[reason as keyof typeof WALLET_REASONS].fix);
     expectPersonFix(row.fix);
@@ -621,7 +621,7 @@ describe('runRouterDoctor, with its seams injected', () => {
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({
       detail:
-        'the wallet holds less than the $0.25 routing deposit, so routing calls take the free path',
+        'the wallet holds less than the $0.25 routing deposit, so Tenjin is not routing calls',
       fix: 'Fund it with `tenjin wallet fund 5`.',
     });
     expect((out as { humanLines: string[] }).humanLines.at(-1)).toBe(

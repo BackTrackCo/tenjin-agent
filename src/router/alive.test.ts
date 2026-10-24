@@ -124,7 +124,7 @@ describe('runAliveHook says one thing', () => {
       systemMessage: `Tenjin can't use its wallet in this session: ${r.reason}. ${r.fix}`,
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: `Tenjin's wallet cannot sign in this session (${r.reason}), so Tenjin lookups take the free path and paid lookups will not run. ${r.agentFix}`,
+        additionalContext: `Tenjin's wallet cannot sign in this session (${r.reason}), so Tenjin is not routing lookups and paid lookups will not run. ${r.agentFix}`,
       },
     } satisfies AliveAnswer);
     // The model's half carries agentFix; no half ever puts the passphrase on a command line (B1).
