@@ -1357,7 +1357,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'warn',
       required: false,
-      detail: `${WALLET_REASONS[why as keyof typeof WALLET_REASONS].reason}, so routing calls take the free path`,
+      detail: `${WALLET_REASONS[why as keyof typeof WALLET_REASONS].reason}, so Tenjin is not routing calls`,
       fix: v.fix,
     };
   }
@@ -1373,7 +1373,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
     name,
     status: 'warn',
     required: false,
-    detail: `${u?.reason ?? v.detail}, so routing calls take the free path`,
+    detail: `${u?.reason ?? v.detail}, so Tenjin is not routing calls`,
     fix: fixes[why] ?? u?.fix ?? v.fix,
   };
 }
