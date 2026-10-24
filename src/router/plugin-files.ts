@@ -514,6 +514,9 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  * prompt, and one web call before it runs and after (Codex has no
  * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.148.0, and an older
  * Codex rejects the file (`tenjin doctor --harness codex` checks the build).
+ * The server's `env_vars` passes `CODEX_HOME` through Codex's cleared MCP
+ * environment, so the hook tool finds the session's rollout where Codex
+ * wrote it.
  * Nothing in it names a release or a path, so `codex plugin add` copies the
  * same hooks from every build and their trust holds across a `tenjin update`.
  * The runtime render, `~/.tenjin/runtime/codex`, differs only in `.mcp.json`:
@@ -648,7 +651,11 @@ export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
 export function renderCodexMcp(o?: CodexRuntime): { mcpServers: Record<string, unknown> } {
   const command =
     o === undefined ? 'tenjin' : onWindows(o) ? codexLauncherCmd(o) : codexLauncherSh(o);
-  return { mcpServers: { [MCP_SERVER_NAME]: { command, args: [...CODEX_MCP_ARGS] } } };
+  return {
+    mcpServers: {
+      [MCP_SERVER_NAME]: { command, args: [...CODEX_MCP_ARGS], env_vars: ['CODEX_HOME'] },
+    },
+  };
 }
 
 /** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */

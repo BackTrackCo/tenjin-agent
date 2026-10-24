@@ -398,6 +398,10 @@ describe('the manifest and the marketplace', () => {
   });
 });
 
+const runtimeAt: CodexRuntime = {
+  launch: { node: '/h/n/node', entry: '/h/v/dist/index.js', platform: 'linux' },
+  binDir: '/h/.tenjin/runtime/codex/tenjin/bin',
+};
 const CODEX_HOSTS = fileURLToPath(new URL('../../hosts/codex', import.meta.url));
 
 describe('the checked-in hosts/codex templates', () => {
@@ -493,13 +497,29 @@ describe('the checked-in hosts/codex templates', () => {
 
   it("names #25's plugin and server, starts the server as Codex's, and never names x402", () => {
     expect(renderCodexMcp()).toEqual({
-      mcpServers: { router: { command: 'tenjin', args: ['mcp', '--harness', 'codex'] } },
+      mcpServers: {
+        router: {
+          command: 'tenjin',
+          args: ['mcp', '--harness', 'codex'],
+          env_vars: ['CODEX_HOME'],
+        },
+      },
     });
     expect(renderCodexMarketplace()).toMatchObject({
       name: 'tenjin',
       plugins: [{ name: 'tenjin', source: { source: 'local', path: './tenjin' } }],
     });
     expect(JSON.stringify(renderCodexHostFiles())).not.toMatch(/x402/i);
+  });
+
+  it("passes CODEX_HOME through Codex's cleared MCP environment", () => {
+    // Codex starts a stdio server with an allowlist that has no CODEX_HOME
+    // (openai/codex `rmcp-client/src/utils.rs`, DEFAULT_ENV_VARS); `env_vars` adds it.
+    for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
+      expect(JSON.parse(files['tenjin/.mcp.json']!)).toMatchObject({
+        mcpServers: { router: { env_vars: ['CODEX_HOME'] } },
+      });
+    }
   });
 
   it('carries no version, so every build ships the same bytes and hook trust holds', () => {
@@ -535,7 +555,13 @@ describe('the Codex runtime render', () => {
 
   it('starts the server as the launcher and carries the launchers in bin/', () => {
     expect(JSON.parse(files['tenjin/.mcp.json']!)).toEqual({
-      mcpServers: { router: { command: `${binDir}/tenjin`, args: ['mcp', '--harness', 'codex'] } },
+      mcpServers: {
+        router: {
+          command: `${binDir}/tenjin`,
+          args: ['mcp', '--harness', 'codex'],
+          env_vars: ['CODEX_HOME'],
+        },
+      },
     });
     expect(files['tenjin/bin/tenjin']).toBe(renderPluginBin(at('1.2.3').launch)['bin/tenjin']);
     const plain = renderCodexHostFiles();
@@ -575,7 +601,11 @@ describe('the Codex runtime render', () => {
       );
       expect(JSON.parse(rendered['tenjin/.mcp.json']!)).toEqual({
         mcpServers: {
-          router: { command: `${win.binDir}\\tenjin.cmd`, args: ['mcp', '--harness', 'codex'] },
+          router: {
+            command: `${win.binDir}\\tenjin.cmd`,
+            args: ['mcp', '--harness', 'codex'],
+            env_vars: ['CODEX_HOME'],
+          },
         },
       });
       expect(rendered['tenjin/bin/tenjin.cmd']).toBe(renderPluginBin(win.launch)['bin/tenjin.cmd']);
