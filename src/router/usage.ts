@@ -12,7 +12,11 @@ import { readPaidRecords, type PaidRecord } from './paid';
  * `tenjin usage [--since 7d]`: WHAT THIS MACHINE'S LOOKUPS COST, BY DAY AND BY
  * WHO RAN THEM. Tenjin's own tools, paid from the Tenjin balance, and each of
  * the user's connected accounts, billed to that account's own plan, which
- * Tenjin neither sees nor limits. It reads the local ledger and nothing else.
+ * Tenjin neither sees nor limits. A call on an account whose charge is unknown
+ * (still running, failed after the account's job started, or answered with
+ * the account's own error) has its own row that says it may have charged, and
+ * is never counted with the calls that billed. It reads the local ledger and
+ * nothing else.
  *
  * The routing fee is not in it: the ledger keeps the calls a lookup made, and
  * the fee's history lives only in today's spend window (`tenjin status`).
@@ -63,6 +67,8 @@ interface Group {
   calls: number;
   /** From the Tenjin balance; null on an account, whose plan paid. */
   spentAtomic: bigint | null;
+  /** Calls on an account whose charge is unknown: they may have charged it. */
+  mayHaveCharged: boolean;
 }
 
 export async function runRouterUsage(
@@ -89,29 +95,33 @@ export async function runRouterUsage(
   for (const record of records) {
     const source = sourceOf(record);
     const account = record.settlement === 'account';
+    const mayHaveCharged = account && record.charge === 'unknown';
     const day = record.ts.slice(0, 10);
-    const key = `${day}\0${source}`;
+    const key = `${day}\0${source}\0${mayHaveCharged ? 'maybe' : ''}`;
     const group = groups.get(key) ?? {
       day,
       source,
       label: account ? `your ${names.get(source) ?? record.provider} account` : "Tenjin's tools",
       calls: 0,
       spentAtomic: account ? null : 0n,
+      mayHaveCharged,
     };
     group.calls += 1;
     if (group.spentAtomic !== null) group.spentAtomic += BigInt(record.amountAtomic);
     groups.set(key, group);
   }
   const rows = [...groups.values()].sort(
-    (a, b) => b.day.localeCompare(a.day) || a.label.localeCompare(b.label),
+    (a, b) =>
+      b.day.localeCompare(a.day) ||
+      a.label.localeCompare(b.label) ||
+      Number(a.mayHaveCharged) - Number(b.mayHaveCharged),
   );
   const balanceAtomic = rows.reduce((sum, row) => sum + (row.spentAtomic ?? 0n), 0n);
-  const balanceCalls = rows
-    .filter((row) => row.spentAtomic !== null)
-    .reduce((n, r) => n + r.calls, 0);
-  const accountCalls = rows
-    .filter((row) => row.spentAtomic === null)
-    .reduce((n, r) => n + r.calls, 0);
+  const callsWhere = (keep: (row: Group) => boolean) =>
+    rows.filter(keep).reduce((n, r) => n + r.calls, 0);
+  const balanceCalls = callsWhere((row) => row.spentAtomic !== null);
+  const accountCalls = callsWhere((row) => row.spentAtomic === null && !row.mayHaveCharged);
+  const mayHaveChargedCalls = callsWhere((row) => row.mayHaveCharged);
   const sinceDay = new Date(from).toISOString().slice(0, 10);
   const data = {
     ledger: paidLedgerPath(ctx.dataDir),
@@ -123,12 +133,15 @@ export async function runRouterUsage(
       calls: row.calls,
       ...(row.spentAtomic !== null
         ? { spent: toMoney(row.spentAtomic.toString()) }
-        : { billedTo: 'account' }),
+        : row.mayHaveCharged
+          ? { mayHaveCharged: 'account' }
+          : { billedTo: 'account' }),
     })),
     totals: {
       balance: toMoney(balanceAtomic.toString()),
       balanceCalls,
       accountCalls,
+      mayHaveChargedCalls,
     },
   };
   const width = Math.max(0, ...rows.map((row) => row.label.length));
@@ -145,13 +158,20 @@ export async function runRouterUsage(
                 `${row.day}  ${sanitizeForTerminal(row.label).padEnd(width)}  ${calls(row.calls).padEnd(9)}  ${
                   row.spentAtomic !== null
                     ? `$${formatUsdDisplay(row.spentAtomic.toString())}`
-                    : 'billed to that account'
+                    : row.mayHaveCharged
+                      ? 'may have charged'
+                      : 'billed to that account'
                 }`,
             ),
             `Total: $${formatUsdDisplay(balanceAtomic.toString())} from your Tenjin balance over ${calls(balanceCalls)}` +
               (accountCalls > 0
                 ? `; ${calls(accountCalls)} on your own accounts, billed to their plans and not counted in the limit.`
                 : '.'),
+            ...(mayHaveChargedCalls > 0
+              ? [
+                  `${calls(mayHaveChargedCalls)} on your own accounts may have charged their plans: still running, failed, or answered with the account's own error.`,
+                ]
+              : []),
             "Routing fees aren't in this history; `tenjin status` shows today's spending with them.",
           ],
   };

@@ -563,7 +563,8 @@ function callOf(at: Run): DeliverCall {
 
 /** THE OFFER'S ONE LEDGER ROW, kept once its billing call may have billed the
  *  account (still running, failed, or answered with its own error), so usage
- *  and payments show it; a resumed job that delivers finishes that row. */
+ *  and payments show it as may have charged; a resumed job that delivers
+ *  finishes that row. */
 async function keepAccountRow(at: Run): Promise<void> {
   const call = callOf(at);
   await recordAccountRow(at.deps.ctx.dataDir, {
@@ -573,6 +574,7 @@ async function keepAccountRow(at: Run): Promise<void> {
       ...(at.deps.now !== undefined ? { now: at.deps.now } : {}),
     }),
     job: at.id,
+    charge: 'unknown',
   });
 }
 

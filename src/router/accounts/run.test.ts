@@ -429,7 +429,11 @@ describe('a mapped job on the user’s own account', () => {
     expect(session.tools()).toEqual(['run_model', 'check_job']);
     // Review: an accepted job may already be billing the account, so it is
     // on the ledger while it runs, and its finish is that same row.
-    expect(await readPaidRecords(dir)).toMatchObject([{ source: 'fal', settlement: 'account' }]);
+    // Its charge is unknown until it delivers: usage and payments say it may
+    // have charged, never that it billed.
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { source: 'fal', settlement: 'account', charge: 'unknown' },
+    ]);
     // The same offer again sends nothing.
     const again = await runRequestTool(
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
@@ -441,7 +445,11 @@ describe('a mapped job on the user’s own account', () => {
     const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
     expect(done.envelope).toMatchObject({ status: 'fulfilled' });
     expect(session.tools()).toEqual(['run_model', 'check_job', 'check_job', 'get_job_result']);
-    expect(await readPaidRecords(dir)).toHaveLength(1);
+    // Delivered: the same row, now a plain charge to the account.
+    const rows = await readPaidRecords(dir);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ source: 'fal', settlement: 'account' });
+    expect(rows[0]).not.toHaveProperty('charge');
     // And it is gone once delivered.
     const gone = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
     expect(gone.summary).toContain('No job is kept on this machine under that id');
@@ -547,7 +555,9 @@ describe('when the account refuses', () => {
     expect(result.envelope.cost).toEqual([
       'your Apify plan may have charged for this, not the Tenjin balance',
     ]);
-    expect(await readPaidRecords(dir)).toMatchObject([{ source: 'apify', settlement: 'account' }]);
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { source: 'apify', settlement: 'account', charge: 'unknown' },
+    ]);
   });
 
   it('keeps the offer claimed after an error answer, and never switches on one', async () => {

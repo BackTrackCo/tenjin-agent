@@ -232,6 +232,7 @@ describe('an account the user names, with no map', () => {
       amountAtomic: '0',
       identity: { source: 'mcp-example-com', providers: ['mcp-example-com'] },
     });
+    expect(row).not.toHaveProperty('charge');
   });
 
   it("says the account may have charged when its own error answered, and keeps the call's row", async () => {
@@ -248,7 +249,7 @@ describe('an account the user names, with no map', () => {
       cost: ['your mcp.example.com plan may have charged for this, not the Tenjin balance'],
     });
     expect(await readPaidRecords(dir)).toMatchObject([
-      { source: 'mcp-example-com', settlement: 'account' },
+      { source: 'mcp-example-com', settlement: 'account', charge: 'unknown' },
     ]);
   });
 

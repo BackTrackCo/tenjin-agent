@@ -380,16 +380,17 @@ export async function runSourceRequest(
     request: { url: header.mcpUrl },
   };
   // A call that reached the account and may have billed it, with no result:
-  // on the ledger all the same, so usage and payments show it.
+  // on the ledger all the same, so usage and payments show it as may have
+  // charged.
   const keepRow = () =>
-    appendPaidRecord(
-      dataDir,
-      paidRecord(call, call.request.url, call.sent, 0n, {
+    appendPaidRecord(dataDir, {
+      ...paidRecord(call, call.request.url, call.sent, 0n, {
         savedFiles: [],
         account: true,
         ...(deps.now !== undefined ? { now: deps.now } : {}),
       }),
-    );
+      charge: 'unknown',
+    });
   await footer.calling(named);
   // Read as a named tool's answer (`readNamedResult`), whatever `result` says.
   const run = await runAccountCall(

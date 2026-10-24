@@ -35,6 +35,11 @@ export async function runPaymentsList(ctx: CommandContext): Promise<CommandResul
       service: record.capabilityId,
       amount: toMoney(record.amountAtomic),
       settlement: record.settlement,
+      // On the user's own account with no result to show it billed: it may
+      // have charged, and is never shown as a plain charge.
+      ...(record.settlement === 'account' && record.charge === 'unknown'
+        ? { charge: record.charge }
+        : {}),
       ...(record.txHash !== undefined ? { txHash: record.txHash } : {}),
       // Run in a native search's or fetch's place, which nobody was asked about.
       ...(record.via !== undefined ? { via: record.via } : {}),
@@ -55,7 +60,7 @@ export async function runPaymentsList(ctx: CommandContext): Promise<CommandResul
       `${sanitizeForTerminal(p.service)}${p.via === 'swap' ? ' (in place)' : ''}`,
       // A call on the user's own account: their plan paid, the balance nothing.
       p.settlement === 'account' ? '-' : `$${formatUsdDisplay(p.amount.atomic)}`,
-      SETTLEMENT_WORDS[p.settlement] ?? p.settlement,
+      `${SETTLEMENT_WORDS[p.settlement] ?? p.settlement}${p.charge === 'unknown' ? ' · may have charged' : ''}`,
       p.txHash ?? '',
     ]),
   ];

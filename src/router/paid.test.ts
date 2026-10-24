@@ -675,6 +675,33 @@ describe('resolving a settlement left unknown', () => {
     );
   });
 
+  it('marks an account call whose charge is unknown as may have charged', async () => {
+    // Review: a job still running, failed after it started, or answered with
+    // the account's own error read as the account's plain charge.
+    const account = { amountAtomic: '0', settlement: 'account', provider: 'Apify' };
+    await ledger([
+      JSON.stringify(record(1, { ts: '2027-01-15T09:30:00.000Z', ...account })),
+      JSON.stringify(record(2, { ts: '2027-01-15T10:45:00.000Z', ...account, charge: 'unknown' })),
+    ]);
+    const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+    const result = await runPaymentsList({
+      flags: { json: false, timeout: 5000 },
+      dataDir: dir,
+      io: { stdout: sink, stderr: sink, isTTY: true },
+    });
+    expect(result.data).toMatchObject({
+      payments: [
+        { service: 'cap-2', settlement: 'account', charge: 'unknown' },
+        { service: 'cap-1', settlement: 'account' },
+      ],
+    });
+    expect((result.data as { payments: object[] }).payments[1]).not.toHaveProperty('charge');
+    expect(result.humanLines?.slice(1, 3)).toEqual([
+      '2027-01-15 10:45  Apify     cap-2    -       your account · may have charged',
+      '2027-01-15 09:30  Apify     cap-1    -       your account',
+    ]);
+  });
+
   it('says so when this machine has paid for nothing', async () => {
     const sink = { write: () => true } as unknown as NodeJS.WritableStream;
     const result = await runPaymentsList({
