@@ -881,10 +881,11 @@ describe("a fetch run in place on the user's own account", () => {
     const account = firecrawl([{ content: [] }]);
     const result = await swapOnAccount(net, account);
     expect(account.called).toHaveLength(1);
+    // Nothing shows whether the account charged for it: never "billed".
     expect(result.envelope).toMatchObject({
       status: 'failed',
       via: 'swap',
-      cost: ['billed to your Firecrawl account, not the Tenjin balance'],
+      cost: ['your Firecrawl plan may have charged for this, not the Tenjin balance'],
     });
     expect(result.envelope.swap).toBeUndefined();
     expect(net.providerCalls()).toEqual([]);

@@ -15,7 +15,6 @@ import {
 } from '../specs';
 import { openLookupFooter, type LookupFooter } from '../progress';
 import {
-  accountCost,
   admitExecution,
   deliverResult,
   fail,
@@ -137,15 +136,17 @@ export function refusalWords(
 const SWITCHABLE: ReadonlySet<string> = new Set(['signin_expired', 'credit', 'rate_limited']);
 
 /** A result in this module's own words: its headline and cost line, never the
- *  generic ones a paid call's failure carries. `ran`: the account ran it, or
- *  `maybe` (its own error answered, so whether it billed is unknown); "nothing
- *  charged" is only for a call that never reached the account's job. */
+ *  generic ones a paid call's failure carries. `ran: 'maybe'`: the call
+ *  reached the account's job with no result to show it billed (still running,
+ *  failed after the job started, or answered with the account's own error),
+ *  so its plan may have charged for it; "nothing charged" is only for a call
+ *  that never reached the account's job. */
 export function accountResult(
   status: FailStatus,
   summary: string,
   reason: string,
   label: string,
-  extras: FailExtras & { extra?: Json; ran?: boolean | 'maybe' },
+  extras: FailExtras & { extra?: Json; ran?: 'maybe' },
 ): RequestToolResult {
   const { extra, ran, ...rest } = extras;
   const base = fail(status, reason, rest);
@@ -155,11 +156,9 @@ export function accountResult(
     envelope: {
       ...base.envelope,
       cost:
-        ran === true
-          ? accountCost(label)
-          : ran === 'maybe'
-            ? [`your ${label} plan may have charged for this, not the Tenjin balance`]
-            : ['nothing charged'],
+        ran === 'maybe'
+          ? [`your ${label} plan may have charged for this, not the Tenjin balance`]
+          : ['nothing charged'],
       ...extra,
     },
   };
@@ -506,7 +505,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       return accountResult('needs_input', summary, summary, account.label, {
         nextStep: next,
         parameters: sentInput,
-        ran: true,
+        ran: 'maybe',
         extra: { status: 'running', ...(kept ? { job: id } : {}) },
       });
     }
@@ -526,7 +525,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
           ...(run.detail !== undefined ? { providerError: run.detail } : {}),
           nextStep: `Tell the user it may have run on their ${account.label} account; don't call it again for this.${offer !== undefined ? ` ${offer.next}` : ''}`,
           parameters: sentInput,
-          ran: true,
+          ran: 'maybe',
           ...(offer !== undefined ? { extra: offer.envelope } : {}),
         },
       );

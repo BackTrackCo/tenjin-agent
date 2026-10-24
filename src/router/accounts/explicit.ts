@@ -432,7 +432,7 @@ export async function runSourceRequest(
         ...(run.detail !== undefined ? { providerError: run.detail } : {}),
         nextStep: `Tell the user it may have run on their ${label} account; don't call it again for this.`,
         parameters: sentInput,
-        ran: true,
+        ran: 'maybe',
       });
     }
     case 'done': {

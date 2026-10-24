@@ -426,6 +426,10 @@ describe('a mapped job on the user’s own account', () => {
       deps(fetchImpl, session, { startedAt: Date.now() - MAX_CALL_WAIT_MS }),
     );
     expect(first.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    // Review: nothing shows yet that it billed, so the receipt never says so.
+    expect(first.envelope.cost).toEqual([
+      'your fal plan may have charged for this, not the Tenjin balance',
+    ]);
     expect(session.tools()).toEqual(['run_model', 'check_job']);
     // Review: an accepted job may already be billing the account, so it is
     // on the ledger while it runs, and its finish is that same row.
@@ -453,6 +457,25 @@ describe('a mapped job on the user’s own account', () => {
     // And it is gone once delivered.
     const gone = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
     expect(gone.summary).toContain('No job is kept on this machine under that id');
+  });
+});
+
+describe('when the job fails after it started', () => {
+  it('says the plan may have charged for it, keeps its row, and never reads as billed', async () => {
+    // Review: a job that ended as FAILED read "billed to your Apify account",
+    // though nothing shows whether the account charged for it.
+    await apifyConnected();
+    const session = apifyScript({ 'get-actor-run': [structured({ status: 'FAILED' })] });
+    const { fetchImpl } = network();
+    const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(session.tools()).toEqual(['call-actor', 'get-actor-run']);
+    expect(result.envelope).toMatchObject({ status: 'failed' });
+    expect(result.envelope.cost).toEqual([
+      'your Apify plan may have charged for this, not the Tenjin balance',
+    ]);
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { source: 'apify', settlement: 'account', charge: 'unknown' },
+    ]);
   });
 });
 

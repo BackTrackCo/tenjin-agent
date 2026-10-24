@@ -253,6 +253,33 @@ describe('an account the user names, with no map', () => {
     ]);
   });
 
+  it('says the account may have charged when the call went out and no answer came back', async () => {
+    // Review: a call sent with no answer read "billed to your ... account",
+    // though nothing shows whether the account charged for it.
+    await connected();
+    const session = account();
+    const lost = {
+      ...session,
+      openSession: (async (url, headers) => ({
+        ...(await session.openSession(url, headers)),
+        callTool: async () => {
+          throw new Error('socket hang up');
+        },
+      })) as typeof session.openSession,
+    };
+    const result = await runRequestTool(
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+      deps(lost).run,
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      cost: ['your mcp.example.com plan may have charged for this, not the Tenjin balance'],
+    });
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { source: 'mcp-example-com', settlement: 'account', charge: 'unknown' },
+    ]);
+  });
+
   it('hands back a structured-only answer', async () => {
     // Review: a named tool was read as content alone, so a valid answer that
     // only carried structuredContent came back fulfilled and empty.
