@@ -11,7 +11,14 @@ if [ -n "${TENJIN_DATA_DIR:-}" ] && [ "$TENJIN_DATA_DIR" != "$HOME/.tenjin" ]; t
   fail 'Plugin installation needs the default data directory. Run without TENJIN_DATA_DIR.'
 fi
 case "$(uname -s)" in
-  Darwin) os=darwin ;;
+  Darwin)
+    os=darwin
+    # Node 24's macOS builds target 13.5. sw_vers says 14 or 13.4.1; a missing minor is 0.
+    macos=$(sw_vers -productVersion 2>/dev/null || true)
+    case "$macos" in ''|.*|*[!0-9.]*) fail 'Could not read the macOS version.' ;; esac
+    major=${macos%%.*}; minor=${macos#"$major"}; minor=${minor#.}; minor=${minor%%.*}
+    [ "$major" -gt 13 ] || { [ "$major" -eq 13 ] && [ "${minor:-0}" -ge 5 ]; } || fail 'Tenjin needs macOS 13.5 or newer.'
+    ;;
   Linux)
     os=linux
     glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
@@ -19,7 +26,7 @@ case "$(uname -s)" in
     major=${glibc%%.*}; minor=${glibc#*.}; minor=${minor%%.*}
     [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 28 ]; } || fail 'Linux needs glibc 2.28 or newer.'
     ;;
-  *) fail 'This platform is unsupported. Use macOS, Windows or glibc Linux on x64/arm64.' ;;
+  *) fail 'This platform is unsupported. Use macOS 13.5+, Windows or glibc Linux on x64/arm64.' ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64) arch=x64 ;;
