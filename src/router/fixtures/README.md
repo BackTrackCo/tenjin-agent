@@ -309,6 +309,7 @@ ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 | `wire-hook-discovered-choices.json`        | hook answer: a compare group's options, each under its own id and spec, and the one line  |
 | `wire-lookup-discovered-choices.json`      | tool fallback answer: the same `choices` shape with fresh ids                             |
 | `wire-hook-execute-labelled.json`          | hook answer for a `label` and `fields` client: the label, the short line, the fields      |
+| `wire-hook-execute-headers.json`           | the same for a `headers` client: the Exa spec with its `Exa-Beta` header                  |
 | `wire-hook-execute-augment.json`           | the free docs lookup before a search, for a `fields` client: `augment` and `augmentUrl`   |
 | `wire-browse-request.json`                 | a browse of the tool list                                                                 |
 | `wire-browse.json`                         | the browse answer: its rows                                                               |
