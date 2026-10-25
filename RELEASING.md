@@ -202,6 +202,7 @@ setup. For a fork or a re-setup, the steps are:
    tokens"; Trusted Publishing keeps working under it, and nothing else can
    publish.
 3. **Create a GitHub Environment named `npm-publish`** (Settings ->
-   Environments) with its deployment branches limited to `main`. Trusted
-   Publishing does not check the branch, so this is what keeps a dispatch from
-   another branch from publishing.
+   Environments) with its deployment branches limited to `main` and required
+   reviewers to gate each publish. Trusted Publishing does not check the
+   branch, so this is what keeps a dispatch from another branch from
+   publishing.

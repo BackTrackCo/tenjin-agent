@@ -95,9 +95,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Environment named in the npm Trusted Publishing config for tenjin-cli. Its
-    # deployment branches are limited to `main` (RELEASING.md, One-time owner
-    # setup), which is the publish gate. The name must stay regardless, for OIDC
-    # scope.
+    # protection rules are the publish gate: deployment from `main` only and a
+    # required reviewer (RELEASING.md, One-time owner setup). The name must stay
+    # regardless, for OIDC scope.
     environment: npm-publish
     permissions:
       contents: write # git tag + GitHub release created by changesets/action
