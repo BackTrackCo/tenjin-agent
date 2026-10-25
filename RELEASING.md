@@ -60,13 +60,10 @@ breaks any of it strands users until they reinstall by hand. That is also why
 the Claude Code session-start leg starts the update in a `finally`: a build
 whose leg throws still starts the update that can replace it.
 
-**Hooks and server across versions.** Codex starts its auto-update as a session
-ends, but with two Codex sessions open, the one still running sees its hooks
-move to the new version while its server stays on the old one. On Windows it
-starts as a session starts (Codex ends the server there without a signal it
-could catch), so every session that runs one sees the same skew. Claude Code
-has the same split: an open session's MCP server stays on the old version while
-the launcher moves to the new one. Whatever a hook hands the server (offer files
+**Hooks and server across versions.** Claude Code and Codex both start the
+auto-update as a session starts. An open session's MCP server stays on the old
+version while the launcher moves to the new one, so with two sessions open the
+old and new versions run side by side. Whatever a hook hands the server (offer files
 under the data dir, the `request` tool's fields the hook line tells the model to
 fill) should stay readable across adjacent versions. `config.json` and
 `spend.json` must stay readable by the previous release: new fields optional,

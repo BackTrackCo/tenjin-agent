@@ -8,21 +8,19 @@ import { nodeBinPath, readRuntimeState, versionEntry } from './runtime-layout';
 /**
  * BACKGROUND AUTO-UPDATE, the way Claude Code's native installer does it:
  * downloaded in the background, used from the next session. At most once a
- * day, at the start of a Claude Code session or the end of a Codex one (its
- * start on Windows), this starts `tenjin update --background` DETACHED on the
- * runtime's own Node and current entry, and returns: the caller adds no
- * latency and never waits.
+ * day, at the start of a Claude Code or Codex session, this starts
+ * `tenjin update --background` DETACHED on the runtime's own Node and current
+ * entry, and returns: the caller adds no latency and never waits.
  * The child is `tenjin update`'s runtime branch (the release's build
  * provenance is checked before it is downloaded and the build before the
  * switch, the previous version stays, an older one is never switched to, the
  * runtime lock is held), except that it takes only a release published at
  * least a day ago (`BACKGROUND_COOLDOWN_MS` in commands/update). So npm and PATH
- * are never involved, and a running Claude Code session keeps its version
- * until the next one.
- * Codex's hooks run the launcher, which the switch rewrites, so Codex starts
- * the update as its session ends and the next session starts on the new one;
- * {@link armCodexAutoUpdate} says how the end is caught, and why Windows
- * starts it at the beginning instead.
+ * are never involved, and a running session keeps its version until the next
+ * one. Codex has no SessionStart hook, so `tenjin mcp --harness codex` starts
+ * it as the server starts; its routing legs are `mcp_tool` calls into that
+ * server, so the switch moves nothing the session is using, and the launcher
+ * it rewrites starts the next session's server.
  *
  * `node:*`, the paths and the runtime layout only: the `alive` leg and
  * `tenjin mcp` load this, and neither may pay for zod, the config schema or
@@ -120,72 +118,6 @@ export function maybeAutoUpdate(o: {
   } catch {
     // Never the session's business.
   }
-}
-
-/** What {@link armCodexAutoUpdate} needs of `process`, injectable for tests. */
-export interface TriggerProcess {
-  platform: NodeJS.Platform;
-  once(event: NodeJS.Signals, listener: () => void): unknown;
-  exit(code: number): void;
-}
-
-/** What {@link armCodexAutoUpdate} needs of stdin, injectable for tests. */
-export interface TriggerInput {
-  once(event: 'end' | 'close', listener: () => void): unknown;
-}
-
-/** How Codex, or a terminal it runs in, ends the server on Unix. */
-const SESSION_END_SIGNALS = ['SIGTERM', 'SIGHUP', 'SIGINT'] as const;
-
-/**
- * CODEX'S TRIGGER. Codex has no SessionStart hook to start the update from
- * (adding one would change the hooks it trusts), so `tenjin mcp --harness
- * codex` starts it as the session ENDS: the switch rewrites the launcher the
- * hooks run, so starting it any earlier would move them mid-session.
- *
- * Code after the server returns is not enough to catch that end. Codex stops
- * its MCP server with SIGTERM to the process group, and SIGKILL about two
- * seconds later, and SIGTERM's default action ends the process before any of
- * that code runs, so a Codex-only machine would stay on its install version
- * for good. So this is armed as the server starts, with this module
- * already loaded so the trigger is synchronous, and fires ONCE on whichever
- * comes first: stdin's `end` or `close`, the server closing (the caller fires
- * the returned trigger), or SIGTERM, SIGHUP or SIGINT, after which the process
- * exits 0 as the default action would have ended it. The child is spawned
- * `detached`, which on Unix makes it the leader of its own session and process
- * group, so the SIGKILL Codex sends the server's group misses it.
- *
- * On Windows Codex ends the server by terminating its job object: no handler
- * runs, and the child dies with the job, since libuv's `detached` does not ask
- * to break away from it. There it fires as the server STARTS, so the update has
- * the session to finish in, and the launcher switch lands mid-session: the
- * hooks move to the new version while this server stays on the old one, the
- * skew RELEASING.md already asks releases to tolerate.
- */
-export function armCodexAutoUpdate(
-  o: Parameters<typeof maybeAutoUpdate>[0] & { proc?: TriggerProcess; stdin?: TriggerInput },
-): () => void {
-  const { proc = process, stdin, ...update } = o;
-  let fired = false;
-  const fire = (): void => {
-    if (fired) return;
-    fired = true;
-    maybeAutoUpdate(update);
-  };
-  if (proc.platform === 'win32') {
-    fire();
-    return fire;
-  }
-  const input = stdin ?? process.stdin;
-  input.once('end', fire);
-  input.once('close', fire);
-  for (const signal of SESSION_END_SIGNALS) {
-    proc.once(signal, () => {
-      fire();
-      proc.exit(0);
-    });
-  }
-  return fire;
 }
 
 /**
