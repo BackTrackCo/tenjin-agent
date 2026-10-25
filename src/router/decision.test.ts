@@ -147,6 +147,7 @@ describe('one free decision', () => {
       'label',
       'fields',
       'jobs',
+      'note',
     ]);
   });
 
@@ -169,6 +170,7 @@ describe('one free decision', () => {
         'label',
         'fields',
         'jobs',
+        'note',
         'bazaar',
       ]);
     }

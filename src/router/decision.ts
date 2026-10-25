@@ -405,13 +405,14 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
       specs: SpecsSchema,
       /**
        * HOW THE OFFER IS DELIVERED, sent because this build lists `fields`.
-       * `augment` is the free docs lookup before a search: the client shows no
-       * line and puts what `augmentUrl` returns above the search's own
-       * results. `offer` is every line the client shows. Absent (a server
-       * from before the token), a free curated offer before a search is read
-       * as `augment`, as builds before this one did.
+       * `note` is the free docs lookup before a search, for a client that
+       * also lists `note`: the line comes after the search. `augment` is the
+       * same offer for a client that does not, with the `augmentUrl` that
+       * client fetches. `offer` is every other line. This build shows a free
+       * offer before a search as a note whatever this says, `augmentUrl`
+       * included, so a server from before `note` is served the same way.
        */
-      delivery: z.enum(['offer', 'augment']).optional(),
+      delivery: z.enum(['offer', 'augment', 'note']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),
     })
     .superRefine(checkHint),
@@ -507,7 +508,10 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * `label` takes each catalog service's display name on its spec and both
  * `execute` answers, and the offer line that starts at it. `fields` takes
  * each spec's `holds` and `output`, and the hook `execute`'s `delivery` and
- * `augmentUrl`. `catalog` takes Tenjin's reviewed list of third-party services as
+ * `augmentUrl`. `note` asks for `delivery: "note"` on the free docs lookup
+ * before a search, whose line this build shows after the search, in place of
+ * the `augment` an older build fetched. `catalog` takes Tenjin's reviewed
+ * list of third-party services as
  * `discovered` offers under their catalog ids, with each spec's `holds` and
  * `output`, and `choices`, a set of options the user picks between or runs
  * all of, beside a discovered offer from a compare group. A build that sends
@@ -520,7 +524,14 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * offer's line. `bazaar` widens discovery to the open Bazaar and is sent only
  * while `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'label', 'fields', 'jobs'];
+export const CLIENT_ACCEPTS: readonly string[] = [
+  'catalog',
+  'spec',
+  'label',
+  'fields',
+  'jobs',
+  'note',
+];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */

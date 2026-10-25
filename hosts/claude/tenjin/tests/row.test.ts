@@ -9,6 +9,7 @@ import {
   TOOL,
   dotOf,
   envelope,
+  keepLabel,
   keepSpec,
   machine,
   rowText,
@@ -210,7 +211,7 @@ test('a charged failure draws the error dot, the amount and the state, never a s
   }
 });
 
-test("draws nothing for a needs_input answer, a free call, or the router's own calls", async ($, on) => {
+test("draws nothing for a needs_input answer, a free call nobody named, or the router's own calls", async ($, on) => {
   const { files } = machine(on);
   await keepSpec(files, OFFER, EXA);
   const needsInput = envelope('needs_input', {
@@ -247,6 +248,167 @@ test("draws nothing for a needs_input answer, a free call, or the router's own c
     expect(await shownLines(group)).toEqual([]);
     await group.unmount();
   }
+});
+
+/**
+ * A FREE LOOKUP THE CLI NAMED (its line kept the label, `storeLabel`) draws as
+ * every lookup does, with `free` where the price goes: after a search's note,
+ * or at the start of a turn. A bare `{query}` the router answered for free has
+ * no name before it runs, and stays hidden (above).
+ */
+test('a free lookup the CLI named: Calling with its query, then the folded line, free', async ($, on) => {
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['rows'] });
+  });
+  const engine = engineRows(on);
+  const { files, clock } = machine(on);
+  await keepLabel(files, OFFER);
+  const args = { query: 'zod v4 discriminatedUnion', id: OFFER };
+  const free = envelope('fulfilled', {
+    label: 'Context7 docs',
+    cost: ['provider price 0 USD'],
+    result: 'docs',
+  });
+  let release = (): void => undefined;
+  const looking = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  on('tool.call', { tool: TOOL }, async () => {
+    await looking;
+    return { result: free, text: free };
+  });
+  const running = $.tool.call({ tool: TOOL, tool_use_id: 'toolu_docs', ...args });
+  await clock.settle();
+  const call = toolRow('toolu_docs', TOOL, args);
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolGroup',
+      props: groupOf([call]),
+    });
+    expect(await rowText(ui)).toBe(
+      '⏺ Calling Context7 docs… · free  ⎿  "zod v4 discriminatedUnion"',
+    );
+    expect(await dotOf(ui)).toEqual({ color: undefined, dimColor: true });
+    await ui.unmount();
+  }
+  release();
+  await running;
+  const ended = toolRow('toolu_docs', TOOL, args, free);
+  for (const surface of SURFACES) {
+    for (const props of [groupOf([ended]), ended]) {
+      const ui = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'calls' in props ? 'ToolGroup' : 'ToolUse',
+        props: props as never,
+      });
+      expect(await rowText(ui)).toBe('Called Context7 docs · free (ctrl+o to expand)');
+      expect(await dotOf(ui)).toBeUndefined();
+      await ui.unmount();
+    }
+    await expandRun($, [ended]);
+    const open = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: ended,
+    });
+    expect(await shownLines(open)).toEqual(['engine row']);
+    expect(engine.seen.at(-1)).toMatchObject({ input: args, output: free });
+    await open.unmount();
+  }
+});
+
+test('a search the CLI noted a free lookup on stays the engine row, its result too', async ($, on) => {
+  const engine = engineRows(on);
+  const { files } = machine(on);
+  on('ui.render', { component: 'ToolResult' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['engine result'] });
+  });
+  await keepLabel(files, OFFER);
+  files.set(
+    `${DATA}/progress/${await sha256Hex('sess-test')}/note-${await sha256Hex('toolu_search')}.json`,
+    JSON.stringify({ version: 1, at: 0, offerId: OFFER, line: `call request({id: "${OFFER}"})` }),
+  );
+  const search = { query: 'zod v4 discriminatedUnion' };
+  for (const surface of SURFACES) {
+    for (const output of [undefined, 'Did 1 search in 4s']) {
+      const props = toolRow('toolu_search', 'WebSearch', search, output);
+      const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
+      expect(await shownLines(ui)).toEqual(['engine row']);
+      expect(engine.seen.at(-1)).toMatchObject({ tool: 'WebSearch', input: search });
+      await ui.unmount();
+    }
+    const result = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolResult',
+      props: { tool_use_id: 'toolu_search', tool: 'WebSearch', output: {}, isErrored: false },
+    });
+    expect(await shownLines(result)).toEqual(['engine result']);
+    await result.unmount();
+  }
+});
+
+test('a free lookup that failed or was cut keeps the error dot and its state word', async ($, on) => {
+  const { files } = machine(on);
+  await keepLabel(files, OFFER);
+  const failed = envelope('failed', {
+    reason: 'No indexed library matched this question. Use your own tools.',
+    cost: ['provider price 0 USD'],
+  });
+  on('tool.call', { tool: TOOL }, async (_$, e) =>
+    e.tool_use_id === 'toolu_failed' ? { result: failed, text: failed } : { deny: 'Interrupted' },
+  );
+  const args = { query: 'acme billing sdk', id: OFFER };
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_failed', ...args });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_cut', ...args }).catch(() => undefined);
+  const cases = [
+    [toolRow('toolu_failed', TOOL, args, failed), 'failed'],
+    [{ ...toolRow('toolu_cut', TOOL, args, 'Interrupted'), isInterrupted: true }, 'interrupted'],
+  ] as const;
+  for (const surface of SURFACES) {
+    for (const [props, word] of cases) {
+      const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
+      expect(await rowText(ui)).toBe(`⏺ Context7 docs(acme billing sdk) · free · ${word}`);
+      expect(await dotOf(ui)).toEqual({ color: 'error', dimColor: undefined });
+      await ui.unmount();
+    }
+  }
+});
+
+test('a free lookup sent back for input draws nothing, and its retry draws', async ($, on) => {
+  const { files } = machine(on);
+  await keepLabel(files, OFFER);
+  const needsInput = envelope('needs_input', { reason: 'query is required' });
+  const free = envelope('fulfilled', { label: 'Context7 docs', cost: ['provider price 0 USD'] });
+  on('tool.call', { tool: TOOL }, async (_$, e) =>
+    e.tool_use_id === 'toolu_first'
+      ? { result: needsInput, text: needsInput }
+      : { result: free, text: free },
+  );
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_first', id: OFFER, query: '' });
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_retry', id: OFFER, query: 'zod' });
+  const first = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('toolu_first', TOOL, { id: OFFER, query: '' }, needsInput),
+  });
+  expect(await shownLines(first)).toEqual([]);
+  await first.unmount();
+  const retry = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: toolRow('toolu_retry', TOOL, { id: OFFER, query: 'zod' }, free),
+  });
+  expect(await rowText(retry)).toBe('Called Context7 docs · free (ctrl+o to expand)');
+  await retry.unmount();
 });
 
 test('a run mixing a lookup with other calls unfolds for the engine to draw', async ($, on) => {
