@@ -44,9 +44,7 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      # check = build + test. Offline contract pins (src/contract.test.ts against
-      # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
-      # (scheduled + dispatch) so a server blip can never red an unrelated PR.
+      # check = build + test.
       - run: pnpm run check
       # Supply-chain advisory scan. WARN-ONLY on ordinary PRs: advisories
       # publish against a frozen lockfile, so a blocking gate reds every open PR

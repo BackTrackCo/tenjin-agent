@@ -58,7 +58,6 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "pnpm run build && pnpm run test",
-    "sync:skill": "node scripts/sync-skill.mjs",
     "pack-smoke": "bash scripts/pack-smoke.sh",
     "changeset": "changeset",
     "prepublishOnly": "pnpm run build",

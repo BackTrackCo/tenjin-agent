@@ -10,7 +10,7 @@
 # override. Before this, the first hard failure was release.yml's pre-publish
 # gate, on release day. Now the fix PR lands the day the advisory does.
 #
-# Same shape as open-skill-resync-pr.sh: one bot branch, one PR updated in place.
+# One bot branch, one PR updated in place.
 set -euo pipefail
 
 BRANCH=bot/audit-fix
@@ -28,9 +28,9 @@ if pnpm audit --audit-level=high >/dev/null; then
 fi
 echo "audit-fix: main has high or critical advisories."
 
-# Only a SAME-REPO pull request may steer this run (see open-skill-resync-pr.sh:
-# `gh pr list --head` matches the head-ref name alone, so a fork could otherwise
-# park a branch with this name and silence the run).
+# Only a SAME-REPO pull request may steer this run: `gh pr list --head` matches
+# the head-ref name alone, so a fork could otherwise park a branch with this
+# name and silence the run.
 pr_number=$(gh pr list --head "$BRANCH" --state open --json number,isCrossRepository \
   --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty')
 
