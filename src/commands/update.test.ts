@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -17,6 +18,7 @@ import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
 import { PLUGIN_ID } from '../router/names';
 import { runRouterInstall } from '../router/install';
 import { RECONNECT_FIX } from '../router/mcp-processes';
+import { attestationsFor } from '../lib/fixtures/npm-attestations';
 import { nodeBinPath, versionEntry } from '../lib/runtime-layout';
 import type { NodePin } from '../lib/runtime';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -47,13 +49,36 @@ function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false) {
   return { ctx, stdout: () => out.join(''), stderr: () => err.join('') };
 }
 
+const RELEASE_DOC = /^https:\/\/registry\.npmjs\.org\/tenjin-cli\/([^/]+)$/;
+const ATTESTATIONS = /^https:\/\/registry\.npmjs\.org\/-\/npm\/v1\/attestations\/tenjin-cli@(.+)$/;
+
+/**
+ * npm's answer about one release, as the provenance check reads it: the
+ * per-version document, and attestations that name that version and sha512,
+ * built by Tenjin's release workflow. Null for any other URL.
+ */
+function releaseAnswer(url: string): Response | null {
+  const sha512 = (v: string) => createHash('sha512').update(v);
+  const doc = RELEASE_DOC.exec(url);
+  if (doc !== null) {
+    const v = doc[1]!;
+    return Response.json({
+      dist: {
+        tarball: `https://registry.npmjs.org/tenjin-cli/-/tenjin-cli-${v}.tgz`,
+        integrity: `sha512-${sha512(v).digest('base64')}`,
+      },
+    });
+  }
+  const att = ATTESTATIONS.exec(url);
+  if (att === null) return null;
+  return Response.json(attestationsFor(att[1]!, sha512(att[1]!).digest('hex')));
+}
+
+/** npm with these dist-tags, whose releases all carry Tenjin's provenance. */
 function registry(tags: Record<string, string>) {
-  let calls = 0;
-  const fetchImpl: typeof fetch = async () => {
-    calls += 1;
-    return new Response(JSON.stringify(tags), { status: 200 });
-  };
-  return { fetchImpl, calls: () => calls };
+  const fetchImpl: typeof fetch = async (input) =>
+    releaseAnswer(String(input)) ?? new Response(JSON.stringify(tags), { status: 200 });
+  return { fetchImpl };
 }
 
 const forbiddenFetch: typeof fetch = async () => {
@@ -1911,6 +1936,29 @@ describe('runUpdate: the runtime branch', () => {
     const STARTED = '2026-10-01T00:00:00.000Z';
     const started = () =>
       writeFile(join(root, 'auto-update.json'), JSON.stringify({ startedAt: STARTED }));
+    const NOW = Date.parse('2026-10-02T00:00:00.000Z');
+    const HOUR = 3_600_000;
+    const PACKUMENT = 'https://registry.npmjs.org/tenjin-cli';
+    /**
+     * npm as the background run reads it: the dist-tags, and the packument's
+     * `time`, which names when each version was published.
+     */
+    function npm(published: string) {
+      const urls: string[] = [];
+      const fetchImpl: typeof fetch = async (input) => {
+        const url = String(input);
+        urls.push(url);
+        const tags = { latest: '0.1.0-alpha.7' };
+        return url === PACKUMENT
+          ? Response.json({
+              'dist-tags': tags,
+              time: { '0.1.0-alpha.7': published },
+            })
+          : Response.json(tags);
+      };
+      return { fetchImpl, urls };
+    }
+    const dayOld = new Date(NOW - 25 * HOUR).toISOString();
 
     it('with no runtime, never reaches npm and records skipped', async () => {
       await started();
@@ -1947,7 +1995,14 @@ describe('runUpdate: the runtime branch', () => {
       await runUpdate(
         { check: false, background: true },
         ctx,
-        await deps({ homeDir: home, spawnImpl: spawned.impl, stage: s.stage, ensure: s.ensure }),
+        await deps({
+          homeDir: home,
+          spawnImpl: spawned.impl,
+          stage: s.stage,
+          ensure: s.ensure,
+          fetchImpl: npm(dayOld).fetchImpl,
+          now: () => NOW,
+        }),
       );
       // The same child the foreground update runs: the new build checks itself.
       expect(spawned.calls.map((c) => c.args.slice(1))).toEqual([['install', '--refresh']]);
@@ -1997,6 +2052,8 @@ describe('runUpdate: the runtime branch', () => {
             spawnImpl: forbiddenSpawn,
             stage: seams(null).stage,
             ensure: forbiddenEnsure,
+            fetchImpl: npm(dayOld).fetchImpl,
+            now: () => NOW,
           }),
         ),
       );
@@ -2007,6 +2064,79 @@ describe('runUpdate: the runtime branch', () => {
         reason: 'tenjin-cli 0.1.0-alpha.7 carries no Node pin, so 0.1.0-alpha.6 stays',
       });
       expect(await readState()).toBe(before);
+    });
+
+    it('waits a day after a release is published, switching nothing until then', async () => {
+      await writeState('0.1.0-alpha.6');
+      await started();
+      const before = await readState();
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const reason = 'tenjin-cli 0.1.0-alpha.7 was published under 24 hours ago';
+      const result = await runUpdate(
+        { check: false, background: true },
+        ctx,
+        await deps({
+          homeDir: home,
+          spawnImpl: forbiddenSpawn,
+          stage: forbiddenStage,
+          ensure: forbiddenEnsure,
+          fetchImpl: npm(new Date(NOW - 24 * HOUR + 1).toISOString()).fetchImpl,
+          now: () => NOW,
+        }),
+      );
+      expect(result.data).toMatchObject({
+        current: '0.1.0-alpha.6',
+        latest: '0.1.0-alpha.7',
+        updated: false,
+        skipped: reason,
+      });
+      expect(await record()).toMatchObject({ startedAt: STARTED, outcome: 'skipped', reason });
+      expect(await readState()).toBe(before);
+    });
+
+    it('takes a release published exactly a day ago', async () => {
+      await writeState('0.1.0-alpha.6');
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const s = seams();
+      await runUpdate(
+        { check: false, background: true },
+        ctx,
+        await deps({
+          homeDir: home,
+          spawnImpl: children(() => writeState('0.1.0-alpha.7', '0.1.0-alpha.6')).impl,
+          stage: s.stage,
+          ensure: s.ensure,
+          fetchImpl: npm(new Date(NOW - 24 * HOUR).toISOString()).fetchImpl,
+          now: () => NOW,
+        }),
+      );
+      expect(s.staged.map((x) => x.version)).toEqual(['0.1.0-alpha.7']);
+      expect(await record()).toMatchObject({ outcome: 'updated', to: '0.1.0-alpha.7' });
+    });
+
+    it('waits only in the background: a manual update takes a release published an hour ago', async () => {
+      await writeState('0.1.0-alpha.6');
+      const { ctx } = makeCtx();
+      ctx.dataDir = dataDir;
+      const s = seams();
+      const registryRead = npm(new Date(NOW - HOUR).toISOString());
+      const result = await runUpdate(
+        { check: false },
+        ctx,
+        await deps({
+          homeDir: home,
+          spawnImpl: children(() => writeState('0.1.0-alpha.7', '0.1.0-alpha.6')).impl,
+          stage: s.stage,
+          ensure: s.ensure,
+          fetchImpl: registryRead.fetchImpl,
+          now: () => NOW,
+        }),
+      );
+      expect(result.data).toMatchObject({ latest: '0.1.0-alpha.7', updated: true });
+      expect(s.staged.map((x) => x.version)).toEqual(['0.1.0-alpha.7']);
+      expect(registryRead.urls).not.toContain(PACKUMENT);
     });
   });
 });

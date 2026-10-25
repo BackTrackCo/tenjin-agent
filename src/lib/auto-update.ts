@@ -11,10 +11,13 @@ import { nodeBinPath, readRuntimeState, versionEntry } from './runtime-layout';
  * day, at the start of a Claude Code session or the end of a Codex one, this
  * starts `tenjin update --background` DETACHED on the runtime's own Node and
  * current entry, and returns: the caller adds no latency and never waits.
- * The child is `tenjin update`'s runtime branch unchanged (the release is
- * checked before the switch, the previous version stays, an older one is never
- * switched to, the runtime lock is held), so npm and PATH are never involved,
- * and a running Claude Code session keeps its version until the next one.
+ * The child is `tenjin update`'s runtime branch (the release's build
+ * provenance is checked before it is downloaded and the build before the
+ * switch, the previous version stays, an older one is never switched to, the
+ * runtime lock is held), except that it takes only a release published at
+ * least a day ago (`BACKGROUND_COOLDOWN_MS` in commands/update). So npm and PATH
+ * are never involved, and a running Claude Code session keeps its version
+ * until the next one.
  * Codex's hooks run the launcher, which the switch rewrites, so Codex starts
  * the update as its session ends and the next session starts on the new one.
  *
@@ -154,5 +157,10 @@ export function autoUpdateLine(root: string): string | null {
   if (r.outcome === 'updated') return `Auto-update: ${when} updated ${r.from} -> ${r.to}`;
   if (r.outcome === 'current') return `Auto-update: ${when} up to date (${r.to ?? r.from})`;
   if (r.outcome === 'failed') return `Auto-update: ${when} failed: ${r.reason ?? 'unknown'}`;
+  // A run that chose to wait (a release under a day old, TLS checks turned
+  // off) says why, so the person sees what holds the update back.
+  if (r.outcome === 'skipped' && r.reason !== undefined) {
+    return `Auto-update: ${when} skipped: ${r.reason}`;
+  }
   return null;
 }
