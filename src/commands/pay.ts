@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
+import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
 import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-balance';
@@ -13,7 +14,7 @@ import { sanitizeForTerminal } from '../lib/output';
 import { mask } from '../lib/redact';
 import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
-import { SIGN_IN_WITH_X, SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
+import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
 import { spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
