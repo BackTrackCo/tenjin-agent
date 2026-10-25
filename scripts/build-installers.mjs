@@ -14,7 +14,7 @@ const bytes = await readFile(tarball);
 const pkg = JSON.parse(
   execFileSync('tar', ['-xOf', resolve(tarball), 'package/package.json'], { encoding: 'utf8' }),
 );
-if (pkg.name !== 'tenjin-cli' || !/^\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?$/.test(pkg.version))
+if (pkg.name !== 'tenjin-cli' || !/^\d+\.\d+\.\d+(?:-alpha\.\d+)?$/.test(pkg.version))
   throw new Error('Not a versioned tenjin-cli tarball');
 const node = pkg.tenjinRuntime?.node;
 if (!node || !/^\d+\.\d+\.\d+$/.test(node.version)) throw new Error('No pinned Node');
