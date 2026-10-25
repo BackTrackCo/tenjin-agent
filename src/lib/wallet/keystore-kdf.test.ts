@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { generatePrivateKey } from 'viem/accounts';
 import * as Keystore from 'ox/Keystore';
 import { deriveKeystoreKey } from './keystore-kdf';
+import { prepareLocalWallet } from './local';
+
+// The real ox defaults, not test-kdf-setup.ts's cheap ones: this file pins the
+// production cost. Its fixtures pass `n` explicitly, so only that test pays it.
+vi.unmock('ox/Keystore');
 
 const salt = new Uint8Array(32).fill(7);
 const iv = new Uint8Array(16).fill(3);
@@ -61,6 +66,14 @@ describe('isolated keystore derivation', () => {
     } finally {
       clearInterval(timer);
     }
+  }, 120_000);
+
+  it('writes a new wallet with the production scrypt parameters', async () => {
+    const { record } = await prepareLocalWallet('production-shape fixture');
+    expect(record.keystore.crypto).toMatchObject({
+      kdf: 'scrypt',
+      kdfparams: { dklen: 32, n: 262144, p: 8, r: 1 },
+    });
   }, 120_000);
 
   it('terminates a timed out computation and can derive again afterwards', async () => {
