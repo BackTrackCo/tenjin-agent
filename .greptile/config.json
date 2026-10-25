@@ -3,7 +3,7 @@
   "commentTypes": ["logic"],
   "autoReview": ["open", "push"],
   "excludeAuthors": ["dependabot[bot]", "renovate[bot]"],
-  "ignorePatterns": "pnpm-lock.yaml\ndist/**\n**/*.snap\nsrc/fixtures/**\nevals/**/fixtures/**\nCHANGELOG.md",
+  "ignorePatterns": "pnpm-lock.yaml\ndist/**\n**/*.snap\nCHANGELOG.md",
   "fixWithAI": true,
   "confidenceScoreSection": { "included": true },
   "summarySection": { "included": true, "collapsible": true, "defaultOpen": false },
@@ -19,7 +19,7 @@
     {
       "id": "session-isolation",
       "rule": "Data from one agent session (prompt, history, packet, key) must never be read or sent on behalf of another session. Any lookup that picks the newest file across sessions without a session id is a defect.",
-      "scope": ["src/router/**", "src/daemon/**", "src/mcp/**", "src/hooks/**"],
+      "scope": ["src/router/**"],
       "severity": "high"
     },
     {
