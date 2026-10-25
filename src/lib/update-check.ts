@@ -35,9 +35,6 @@ import { isNewer, parseVersion } from './version-order';
  * data dirs come out of a settings file this CLI does not own, and this check is
  * the one thing in a refresh that would CREATE such a directory — `writeCache`
  * mkdirs the tree — where the refresh itself only converges what exists.
- *
- * A separate switch rather than `CI`, which would also stand the skills heal
- * down (lib/skill-heal) and so gut the refresh it was set for.
  */
 export const NUDGE_OPT_OUT = 'TENJIN_NO_UPDATE_CHECK';
 
