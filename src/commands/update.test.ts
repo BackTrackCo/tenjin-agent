@@ -55,9 +55,10 @@ const ATTESTATIONS = /^https:\/\/registry\.npmjs\.org\/-\/npm\/v1\/attestations\
 /**
  * npm's answer about one release, as the provenance check reads it: the
  * per-version document, and attestations that name that version and sha512,
- * built by Tenjin's release workflow. Null for any other URL.
+ * built by Tenjin's release workflow (`attested: false`: a 404, none at all).
+ * Null for any other URL.
  */
-function releaseAnswer(url: string): Response | null {
+function releaseAnswer(url: string, o: { attested?: boolean } = {}): Response | null {
   const sha512 = (v: string) => createHash('sha512').update(v);
   const doc = RELEASE_DOC.exec(url);
   if (doc !== null) {
@@ -71,13 +72,14 @@ function releaseAnswer(url: string): Response | null {
   }
   const att = ATTESTATIONS.exec(url);
   if (att === null) return null;
+  if (o.attested === false) return new Response('{}', { status: 404 });
   return Response.json(attestationsFor(att[1]!, sha512(att[1]!).digest('hex')));
 }
 
-/** npm with these dist-tags, whose releases all carry Tenjin's provenance. */
-function registry(tags: Record<string, string>) {
+/** npm with these dist-tags, whose releases all carry Tenjin's provenance unless `attested` is false. */
+function registry(tags: Record<string, string>, o: { attested?: boolean } = {}) {
   const fetchImpl: typeof fetch = async (input) =>
-    releaseAnswer(String(input)) ?? new Response(JSON.stringify(tags), { status: 200 });
+    releaseAnswer(String(input), o) ?? new Response(JSON.stringify(tags), { status: 200 });
   return { fetchImpl };
 }
 
@@ -187,6 +189,23 @@ describe('runUpdate', () => {
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
     // The install question names the routing fee; update stays silent about it.
     expect(result.humanLines?.join(' ')).not.toContain('Routing costs');
+  });
+
+  it('spawns no package manager for a release without Tenjin’s provenance', async () => {
+    const spawned = spawnRecorder();
+    const err = await caught(async () =>
+      runUpdate(
+        { check: false },
+        makeCtx().ctx,
+        await deps({
+          fetchImpl: registry({ latest: '0.1.0-alpha.7' }, { attested: false }).fetchImpl,
+          spawnImpl: spawned.impl,
+        }),
+      ),
+    );
+    expect(err.code).toBe('UPDATE_FAILED');
+    expect(err.message).toContain('has no valid build provenance');
+    expect(spawned.calls).toEqual([]);
   });
 
   it('never re-adds the Codex plugin: it carries no version, so nothing changes between builds', async () => {
