@@ -36,18 +36,12 @@ const replacements = {
     .join('\n'),
 };
 await mkdir(output, { recursive: true });
-const pins = { cliVersion: pkg.version, shSha256: '', ps1Sha256: '' };
-for (const [file, pin] of [
-  ['install.sh', 'shSha256'],
-  ['install.ps1', 'ps1Sha256'],
-]) {
+for (const file of ['install.sh', 'install.ps1']) {
   let script = await readFile(join(root, 'scripts', 'installers', file), 'utf8');
   script = script.replace(/@([A-Z_0-9]+)@/g, (_, key) => {
     if (!(key in replacements)) throw new Error(`Unknown installer token ${key}`);
     return replacements[key];
   });
   await writeFile(join(output, file), script, { mode: 0o755 });
-  pins[pin] = createHash('sha256').update(script).digest('hex');
+  console.log(`${file} ${createHash('sha256').update(script).digest('hex')}`);
 }
-await writeFile(join(output, 'pins.json'), `${JSON.stringify(pins, null, 2)}\n`);
-console.log(JSON.stringify(pins));

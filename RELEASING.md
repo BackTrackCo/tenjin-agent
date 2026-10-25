@@ -134,8 +134,9 @@ update downloads it into the runtime or has npm install it (an npm mirror the
 user configured is outside that check). Every CLI since that check shipped
 carries the triple, so a release published any other way (a manual
 `npm publish`, a renamed workflow file, another branch) is refused by every
-updater. Changing it means shipping the new triple first and waiting for
-adoption. Provenance cannot catch a compromised release workflow, so the
+updater that has the check. 0.1.0-alpha.32 and older check neither provenance
+nor age, and take a new `latest` at their next daily run. Changing the triple
+means shipping the new one first and waiting for adoption. Provenance cannot catch a compromised release workflow, so the
 background run also waits until a release is 24 hours old before taking it. A
 manual `tenjin update` does not wait.
 
@@ -199,8 +200,9 @@ setup. For a fork or a re-setup, the steps are:
    Actions, organization `BackTrackCo`, repository `tenjin-agent`, workflow
    filename `release.yml`, environment `npm-publish`. Then set the package's
    **Publishing access** to "Require two-factor authentication and disallow
-   tokens"; Trusted Publishing keeps working under it, and nothing else can
-   publish.
+   tokens"; Trusted Publishing keeps working under it, and no token can
+   publish. An owner can still publish by hand with 2FA; updaters refuse that
+   release for lack of provenance.
 3. **Create a GitHub Environment named `npm-publish`** (Settings ->
    Environments) with its deployment branches limited to `main` and required
    reviewers to gate each publish. Trusted Publishing does not check the
