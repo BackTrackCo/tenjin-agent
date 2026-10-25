@@ -292,6 +292,23 @@ describe.skipIf(!POSIX)('ensureNode', () => {
     expect(fetchImpl.urls).toHaveLength(1);
   });
 
+  it('rehashes a bootstrap archive and refuses corruption without fetching', async () => {
+    const archive = nodeArchive(V);
+    const file = join(base, 'bootstrap-node.tar.gz');
+    writeFileSync(file, archive.bytes);
+    const fetchImpl = server({});
+    const pin = { version: V, sha256: { [KEY]: archive.sha256 } };
+    await ensureNode(root, pin, { ...opts(fetchImpl), archivePath: file });
+    expect(fetchImpl.urls).toEqual([]);
+    rmSync(join(root, 'node'), { recursive: true });
+    writeFileSync(file, Buffer.concat([archive.bytes, Buffer.from('corrupt')]));
+    await expect(ensureNode(root, pin, { ...opts(fetchImpl), archivePath: file })).rejects.toThrow(
+      'pinned checksum',
+    );
+    expect(existsSync(nodeBinPath(root, V, 'darwin'))).toBe(false);
+    expect(readFileSync(file).length).toBeGreaterThan(archive.bytes.length);
+  });
+
   it('leaves no node/<V> and an empty tmp/ when the download does not match the pin', async () => {
     const archive = nodeArchive(V);
     const fetchImpl = server({ [nodeUrl(V)]: () => new Response(archive.bytes) });
@@ -653,7 +670,7 @@ describe('launchers', () => {
     const run = spawnSync(join(bin(), 'tenjin'), ['--version'], { encoding: 'utf8' });
     expect(run.status).toBe(1);
     expect(run.stderr).toBe(
-      `tenjin: Tenjin's runtime is missing (${entry}). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session.\n`,
+      `tenjin: Tenjin's runtime is missing (${entry}). ${RUNTIME_MISSING_FIX}\n`,
     );
   });
 
@@ -1166,7 +1183,7 @@ describe('setupRuntime', () => {
     });
   };
 
-  it('is skipped for a source checkout and for a non-default data dir, touching nothing', async () => {
+  it('skips a source checkout but refuses a non-default data dir, touching nothing', async () => {
     const checkout = npmPackage('0.1.0-alpha.32', pin, { 'src/index.ts': '' });
     const fromCheckout = await setupRuntime({
       dataDir,
@@ -1180,7 +1197,7 @@ describe('setupRuntime', () => {
     });
     expect(fromCheckout).toMatchObject({ state: 'skipped', launcher: null });
     const profile = await setup('0.1.0-alpha.32', { dataDir: join(home, 'profile') });
-    expect(profile).toMatchObject({ state: 'skipped', root: join(home, 'profile', 'runtime') });
+    expect(profile).toMatchObject({ state: 'failed', root: join(home, 'profile', 'runtime') });
     expect(existsSync(root)).toBe(false);
     expect(existsSync(join(home, '.local'))).toBe(false);
   });
@@ -1365,7 +1382,7 @@ describe('setupRuntime', () => {
 
   it('falls back with no runtime and a failed download', async () => {
     const r = await setup('0.1.0-alpha.32', { fetchImpl: failing() });
-    expect(r).toMatchObject({ state: 'fallback', launcher: null, firstTime: true });
+    expect(r).toMatchObject({ state: 'failed', launcher: null, firstTime: true });
     expect(r.reason).toMatch(/could not download/);
     expect(r.reason!.length).toBeLessThanOrEqual(200);
     expect(readRuntimeState(root)).toBeNull();
@@ -1374,7 +1391,7 @@ describe('setupRuntime', () => {
   it('names the proxy, and the step that works, when the download skipped the shell’s proxy (#470)', async () => {
     const env = { HTTPS_PROXY: 'http://proxy.corp:3128' };
     const r = await setup('0.1.0-alpha.32', { fetchImpl: failing(), env, proxySupported: false });
-    expect(r).toMatchObject({ state: 'fallback' });
+    expect(r).toMatchObject({ state: 'failed' });
     expect(r.reason).toMatch(
       new RegExp(
         `^this shell sets HTTPS_PROXY, which Node ${process.versions.node.replace(/\./g, '\\.')} cannot send downloads through: could not download`,
@@ -1398,13 +1415,13 @@ describe('setupRuntime', () => {
   it('falls back with no pinned Node for this platform, naming the platform as unpinned', async () => {
     const r = await setup('0.1.0-alpha.32', { platform: 'freebsd', arch: 'x64' });
     expect(r).toMatchObject({
-      state: 'fallback',
+      state: 'failed',
       reason: 'no pinned Node for this platform, freebsd-x64',
       unpinned: 'freebsd-x64',
     });
     // A build without a pin is not the platform's fault: a later build may carry one.
     const unpinned = await setup('0.1.0-alpha.32', { pkgPin: null });
-    expect(unpinned).toMatchObject({ state: 'fallback', reason: `no pinned Node for ${KEY}` });
+    expect(unpinned).toMatchObject({ state: 'failed', reason: `no pinned Node for ${KEY}` });
     expect(unpinned.unpinned).toBeUndefined();
   });
 
@@ -1467,7 +1484,7 @@ describe('setupRuntime', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       await new Promise((r) => setImmediate(r));
     }
-    expect(settled).toMatchObject({ state: 'fallback', reason: 'the 35 s refresh budget ran out' });
+    expect(settled).toMatchObject({ state: 'failed', reason: 'the 35 s refresh budget ran out' });
     expect(Date.now() - started).toBeLessThanOrEqual(35_000);
   }, 30_000);
 });

@@ -44,17 +44,36 @@ Paste this into Claude Code:
 Install Tenjin from tenjin.sh
 ```
 
-Your agent asks before it installs or spends anything, then sets everything up. Start a new Claude Code session, and the router is on.
+Your install request gives the agent permission to handle setup. It briefly explains task-context sharing before activation and asks about spending limits and adding funds. Follow its final activation instruction, then continue your task.
 
-Or from a terminal:
+Or from a terminal (Node and npm are not required):
 
-```bash
-npm i -g tenjin-cli
-tenjin install          # adds the plugin and creates your wallet
-tenjin wallet fund 5    # optional: add $5 with a card, via Coinbase
+```sh
+(
+  tenjin_install_dir="$(mktemp -d ./.tenjin-install.XXXXXXXX)" || exit
+  trap 'rm -f "$tenjin_install_dir/install.sh"; rmdir "$tenjin_install_dir"' EXIT
+  curl -fsSL https://tenjin.sh/install.sh -o "$tenjin_install_dir/install.sh" &&
+    sh "$tenjin_install_dir/install.sh"
+)
 ```
 
-Needs Claude Code 2.1.287+, and Node.js 22+ with npm to install. Install copies Tenjin, with its own Node, into `~/.tenjin/runtime` and puts the `tenjin` command in `~/.local/bin`, so switching or removing Node later doesn't stop it. Add `--project` to set it up for one project only.
+On Windows, in PowerShell:
+
+```powershell
+irm https://tenjin.sh/install.ps1 | iex
+```
+
+The installer downloads a pinned Node and Tenjin, verifies both, and sets up
+the plugin. Supports macOS, Windows and glibc Linux 2.28+ on x64/arm64.
+Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
+Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
+later does not stop it. Add `--project` to `tenjin install` for one project.
+Plugin installation uses the default data directory; run without
+`TENJIN_DATA_DIR`. Other CLI commands can still use a custom data directory.
+
+Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`. It sets up
+the same private runtime. An installation failure keeps your existing plugin
+registration. Check the reported cause, then retry the install.
 
 **Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 
@@ -75,21 +94,21 @@ The router names the tool and its price, and your agent calls it.
 
 ## What your agent can do
 
-| Your agent needs                       | With                            | Per call      |
-| -------------------------------------- | ------------------------------- | ------------- |
-| Library docs                           | Context7                        | free          |
-| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢  |
-| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢      |
-| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢   |
-| X and Reddit                           | glim                            | 0.1¢ to 1¢    |
-| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14.4¢ |
-| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 1¢ to 12¢     |
-| Video clips                            | MiniMax Hailuo, Google Veo      | 15.5¢ to 45¢  |
-| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢    |
-| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢            |
-| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢   |
+| Your agent needs                       | With                            | Provider price |
+| -------------------------------------- | ------------------------------- | -------------- |
+| Library docs                           | Context7                        | free           |
+| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢   |
+| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢       |
+| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢    |
+| X and Reddit                           | glim                            | 0.1¢ to 1¢     |
+| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14.4¢  |
+| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 1¢ to 12¢      |
+| Video clips                            | MiniMax Hailuo, Google Veo      | 15.5¢ to 45¢   |
+| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢     |
+| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
+| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
+Provider prices above exclude Tenjin's $0.003 fee per paid routing call. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
 ## How it works
 
@@ -109,7 +128,7 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 | Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Routing costs $0.003 a call, on top of the tool's price. $5 covers about 500 web searches, 130 images or 40 voiceovers.
+- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)

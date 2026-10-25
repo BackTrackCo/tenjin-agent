@@ -777,13 +777,8 @@ describe('docs/troubleshooting.md: a wallet Tenjin cannot unlock', () => {
   });
 });
 
-/**
- * ONE RESTART INSTRUCTION: "start a new Claude Code session". `/reload-plugins`
- * does not run the plugin's `SessionStart`, so a page names it only to say
- * that. A fix to an environment variable says to quit Claude Code fully,
- * which is still never "restart Claude Code".
- */
-describe('every page and wallet fix says to start a new Claude Code session', () => {
+/** Session fixes name the action explicitly; wallet/environment repairs still require a new session. */
+describe('activation instructions name the required session action', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const pages = [
     'README.md',
@@ -794,13 +789,6 @@ describe('every page and wallet fix says to start a new Claude Code session', ()
 
   it.each(pages)('%s never says "restart Claude Code"', (rel) => {
     expect(readFileSync(join(root, rel), 'utf8')).not.toMatch(/restart Claude Code/i);
-  });
-
-  it.each(pages)('%s names /reload-plugins only to say what it does not run', (rel) => {
-    const sentences = readFileSync(join(root, rel), 'utf8').split(/(?<=\.)\s+|\n+/);
-    for (const sentence of sentences.filter((line) => line.includes('/reload-plugins'))) {
-      expect(sentence).toContain('does not run');
-    }
   });
 
   it('no wallet fix says "restart Claude Code"', async () => {
@@ -829,13 +817,15 @@ describe('docs/troubleshooting.md: Tenjin stopped after a Node upgrade', () => {
     expect(heads.slice(0, 2)).toEqual(['## Tenjin cannot unlock the wallet', HEAD]);
   });
 
-  it('names the symptoms, the npx fix with --project, and the new session', () => {
+  it('names the symptoms and official Node-free recovery with project scope', () => {
     for (const text of [
       'Executable not found',
       'cache-miss',
-      'npx -y tenjin-cli@latest install',
-      'npx -y tenjin-cli@latest install --project',
-      'start a new Claude Code session',
+      'Install Tenjin from tenjin.sh',
+      'https://tenjin.sh/agents',
+      'needs no npm or working `tenjin` command',
+      'pass `--project` to the installer from that project folder',
+      "Follow the installer's activation instruction",
     ]) {
       expect(section, text).toContain(text);
     }

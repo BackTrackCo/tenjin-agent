@@ -39,17 +39,17 @@ The router fails to start in Claude Code or shows `cache-miss`, a terminal says 
 
 Before this release, Tenjin ran from npm's global folder, which belongs to one Node version. mise, nvm, fnm, asdf and Volta keep one such folder per version, so removing that Node, or running `npm rm -g tenjin-cli`, deleted the files the plugin ran.
 
-Install it again with npx, which does not need a working `tenjin`:
+Ask your agent to reinstall it:
 
-```bash
-npx -y tenjin-cli@latest install
+```text
+Install Tenjin from tenjin.sh
 ```
 
-For a project install, run `npx -y tenjin-cli@latest install --project` in that project instead. Then start a new Claude Code session. From this release on, Tenjin runs from `~/.tenjin/runtime` on its own Node, so a Node upgrade or `npm rm -g tenjin-cli` no longer stops it. Your wallet, spend ledger and settings stay where they were.
+Or follow the [official installation instructions](https://tenjin.sh/agents); the installer includes Node and needs no npm or working `tenjin` command. For a project-only installation, pass `--project` to the installer from that project folder. Follow the installer's activation instruction. From this release on, Tenjin runs from `~/.tenjin/runtime` on its own Node, so a Node upgrade or `npm rm -g tenjin-cli` no longer stops it. Your wallet, spend ledger and settings stay where they were.
 
 ### The launcher says the runtime is missing
 
-`tenjin: Tenjin's runtime is missing (…)` means the files in `~/.tenjin/runtime` that the `tenjin` command runs are gone. The fix is the same: run `npx -y tenjin-cli@latest install` (with `--project` for a project install), then start a new Claude Code session.
+`tenjin: Tenjin's runtime is missing (…)` means the files in `~/.tenjin/runtime` that the `tenjin` command runs are gone. Use the same official installer above, keeping `--project` for a project-only installation, then follow its activation instruction.
 
 ### `tenjin` not found in a terminal
 

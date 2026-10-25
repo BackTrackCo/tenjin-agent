@@ -76,7 +76,7 @@ import {
  * THE RUNTIME CLAUDE CODE STARTS is read from the plugin it loads (the
  * marketplace `claude plugin marketplace list` names, and its `.mcp.json`),
  * run once with `--version`, and checked with the launcher a terminal needs.
- * For the default data dir only: other data dirs keep the npm folder.
+ * Plugin installation uses the default data directory only.
  *
  * EVERY FIX IS A STEP THE AGENT TAKES IN THE SESSION: a command it runs, or a
  * slash command the person types there. None sends anyone out of Claude Code.
@@ -223,8 +223,7 @@ export async function runRouterDoctor(
     liveObservations(observations, snapshot?.routers ?? null, deps.isAlive),
   );
 
-  // THE RUNTIME, for the default data dir only: other data dirs keep the npm
-  // folder's registration, and have no runtime to check.
+  // Only the default profile owns plugin registration and a private runtime.
   const runtime = resolve(ctx.dataDir) === resolve(defaultDataDir(home));
   const root = runtimeDir(ctx.dataDir);
   const state = runtime ? readRuntimeState(root) : null;
@@ -273,7 +272,23 @@ export async function runRouterDoctor(
     if (old !== null) checks.push(old);
   }
   if (plugin.registered && claude.binary !== null) {
-    checks.push(await serverCheck(claude.binary, env, cwd, layout));
+    const serving = live.find(
+      (o) =>
+        o.harness === 'claude' &&
+        o.launchedByPlugin &&
+        o.cliVersion === pkg.version &&
+        resolve(o.cwd) === resolve(cwd),
+    );
+    checks.push(
+      serving !== undefined
+        ? {
+            name: 'router server',
+            status: 'ok',
+            required: true,
+            detail: `${PLUGIN_SERVER} is serving a Claude Code session in this directory (pid ${serving.pid})`,
+          }
+        : await serverCheck(claude.binary, env, cwd, layout),
+    );
   }
   if (legacy.present || legacy.unreadable !== undefined) {
     checks.push(await migrationCheck(legacy, claude, ctx.dataDir, env, cwd));
@@ -577,7 +592,7 @@ export type PluginStart = 'proven' | 'pending' | 'did-not-start' | 'unknown';
 function didNotStartFix(layout: Layout): string {
   return layout !== 'runtime'
     ? `Claude Code starts the plugin with the \`node\` on its own PATH, which must be 22 or newer: run \`node --version\` in the shell it starts from, then quit Claude Code fully and start a new session.${moveToRuntime(layout)}`
-    : `Start a new Claude Code session; if Tenjin still does not start, run \`${RUNTIME_MISSING_FIX}\`.`;
+    : `Start a new Claude Code session. If Tenjin still does not start: ${RUNTIME_MISSING_FIX}`;
 }
 
 /**
@@ -1008,8 +1023,7 @@ function tilde(path: string, home: string): string {
  *   Claude Code cannot start the router (the one required failure);
  * - a marketplace outside `runtime/claude` while a runtime exists: an older
  *   build moved it back (warn);
- * - `node` from PATH on a platform Tenjin pins no Node for: today's layout,
- *   by design (warn, with no move to offer);
+ * - an older npm installation on an unsupported platform (warn, with no retry);
  * - `node` from PATH: no runtime, so a Node upgrade or `npm rm -g` stops it
  *   (warn);
  * - an absolute Node or entry that is not there, or that does not run: Claude
@@ -1032,7 +1046,11 @@ async function runtimeCheck(i: {
   const name = 'runtime';
   const flag = i.project ? ' --project' : '';
   const t = (p: string) => tilde(p, i.home);
-  const failFix = `Run \`${RUNTIME_MISSING_FIX}${flag}\`, then start a new Claude Code session.`;
+  const failFix =
+    RUNTIME_MISSING_FIX +
+    (i.project
+      ? ' For a project-only installation, pass `--project` to the installer from that project folder.'
+      : '');
   const { launch } = i;
   const unread: RouterCheck = {
     name,
@@ -1071,8 +1089,8 @@ async function runtimeCheck(i: {
       name,
       status: 'warn',
       required: false,
-      detail: `Tenjin pins no Node for this platform (${i.unpinned}), so it keeps running from npm's copy${from} on the \`node\` on Claude Code's PATH, by design`,
-      fix: `Nothing to move. Keep Node 22 or newer on the PATH Claude Code starts with; after changing Node versions, reinstall with that Node's \`npm i -g tenjin-cli\`, then run \`tenjin install${flag}\`.`,
+      detail: `This older installation runs from npm's copy${from}; this platform (${i.unpinned}) does not support Tenjin's private runtime`,
+      fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. This installation was left unchanged.',
     };
   }
   if (launch.command === 'node') {

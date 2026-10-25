@@ -29,6 +29,9 @@ import {
 import { resolveContextSettings } from '../lib/settings';
 import {
   approveLimits,
+  assertPluginInstallation,
+  continuationCommand,
+  requireRuntime,
   defaultRuntime,
   effectiveLimits,
   hasRuntime,
@@ -147,24 +150,53 @@ async function addPlugin(
   run: (args: string[]) => Promise<CodexRun>,
   hosts: string | null,
   registered: unknown,
+  previousEnabled: boolean,
+  restoreRuntime?: () => Promise<void>,
 ): Promise<void> {
-  if (hosts === null) {
-    throw new CliError(
-      'INTERNAL',
-      'This build carries no Codex plugin folder (dist/hosts/codex).',
-      {
-        fix: 'Reinstall a published build: npm i -g tenjin-cli',
-      },
-    );
+  let removed = false;
+  let added = false;
+  const moved =
+    typeof registered === 'string' && hosts !== null && resolve(registered) !== resolve(hosts);
+  try {
+    if (hosts === null)
+      throw new CliError('UPDATE_FAILED', 'The verified runtime carries no Codex plugin folder.');
+    if (moved) {
+      const old = await run(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
+      removed = old.code === 0;
+    }
+    const market = await run(['plugin', 'marketplace', 'add', hosts, '--json']);
+    if (market.code !== 0) throw failed('plugin marketplace add', market);
+    added = true;
+    const plugin = await run(['plugin', 'add', CODEX_PLUGIN, '--json']);
+    if (plugin.code !== 0) throw failed('plugin add', plugin);
+  } catch (error) {
+    try {
+      await restoreRuntime?.();
+      const restore = async (args: string[]): Promise<void> => {
+        const out = await run(args);
+        if (out.code !== 0) throw failed(args.join(' '), out);
+      };
+      if (added && (moved || typeof registered !== 'string')) {
+        await restore(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
+      }
+      if (moved && (removed || added) && typeof registered === 'string') {
+        await restore(['plugin', 'marketplace', 'add', registered, '--json']);
+      }
+      if (previousEnabled && (removed || added)) {
+        await restore(['plugin', 'add', CODEX_PLUGIN, '--json']);
+      }
+    } catch {
+      throw new CliError(
+        'UPDATE_FAILED',
+        'Codex plugin registration failed and the previous registration could not be fully restored.',
+        {
+          fix: 'Run tenjin install --harness codex again. Your payment keys and funds were kept.',
+          cause: error,
+        },
+      );
+    }
+    throw error;
   }
-  if (typeof registered === 'string' && resolve(registered) !== resolve(hosts)) {
-    // Absent already is fine: the add then reports.
-    await run(['plugin', 'marketplace', 'remove', CODEX_MARKETPLACE]);
-  }
-  const market = await run(['plugin', 'marketplace', 'add', hosts, '--json']);
-  if (market.code !== 0) throw failed('plugin marketplace add', market);
-  const plugin = await run(['plugin', 'add', CODEX_PLUGIN, '--json']);
-  if (plugin.code !== 0) throw failed('plugin add', plugin);
 }
 
 const TRUST_STEP =
@@ -294,6 +326,7 @@ export async function refreshCodexPlugin(
       deps.run ?? runCodex,
       hosts,
       at(config, 'marketplaces', CODEX_MARKETPLACE, 'source'),
+      at(config, 'plugins', CODEX_PLUGIN, 'enabled') === true,
     );
     return (await trustPlugin(deps)) ? CODEX_REFRESH_LINES.done : CODEX_REFRESH_LINES.review;
   } catch {
@@ -315,6 +348,7 @@ export async function runCodexInstall(
   userScopeOnly(args);
   const run = deps.run ?? runCodex;
   const home = deps.homeDir ?? homedir();
+  assertPluginInstallation(ctx.dataDir, home, deps.env ?? process.env);
   const config = await loadRawConfig(ctx.dataDir);
   const named = namedLimits(args);
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
@@ -334,17 +368,6 @@ export async function runCodexInstall(
           ? await approveLimits(deps)
           : {};
 
-  const { resolveWallet, walletValue } = await import('../commands/install-wallet');
-  const wallet: WalletOutcome = await resolveWallet(
-    ctx,
-    deps,
-    args.noWallet === true ? 'flag' : undefined,
-    false,
-  );
-  const spend = await persistRouterDefaults(ctx.dataDir, false, limits, named.keys);
-  // TENJIN'S OWN RUNTIME, for a Codex-only machine too, so a Node upgrade
-  // cannot stop the plugin. A runtime that could not be set up, or a
-  // non-default data dir, keeps the package's folder.
   const rt = await (deps.runtime ?? defaultRuntime)({
     dataDir: ctx.dataDir,
     home,
@@ -353,9 +376,22 @@ export async function runCodexInstall(
     moduleDir: dirname(fileURLToPath(import.meta.url)),
     refresh: false,
   });
+  requireRuntime(rt);
+  const { resolveWallet, walletValue } = await import('../commands/install-wallet');
+  const wallet: WalletOutcome = await resolveWallet(
+    ctx,
+    deps,
+    args.noWallet === true ? 'flag' : undefined,
+    false,
+  );
+  const spend = await persistRouterDefaults(ctx.dataDir, false, limits, named.keys);
   const fromRuntime = runtimeHosts(rt);
   const hosts =
-    fromRuntime ?? (deps.hostsDir === undefined ? await codexHostsDir() : deps.hostsDir);
+    rt.state === 'skipped'
+      ? deps.hostsDir === undefined
+        ? await codexHostsDir()
+        : deps.hostsDir
+      : fromRuntime;
   // A Codex too old to run `mcp_tool` hooks keeps whatever copy it has: the
   // new hooks would be skipped, or the file refused. An unknown build installs.
   const version = await (deps.version ?? codexVersion)();
@@ -363,14 +399,23 @@ export async function runCodexInstall(
   let next: string = CODEX_TOO_OLD;
   if (!tooOld) {
     const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
-    await addPlugin(run, hosts, at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'));
+    await addPlugin(
+      run,
+      hosts,
+      at(codexConfig, 'marketplaces', CODEX_MARKETPLACE, 'source'),
+      at(codexConfig, 'plugins', CODEX_PLUGIN, 'enabled') === true,
+      rt.restore,
+    );
     next = (await trustPlugin(deps).catch(() => false)) ? NEW_SESSION_STEP : TRUST_STEP;
   }
 
   // Read back after the write, as the Claude install does.
   const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
   // Run again by the agent in Codex, a bare install finds Codex itself.
-  const install = ['tenjin install', ...(args.noWallet ? ['--no-wallet'] : [])].join(' ');
+  const install = [
+    `${continuationCommand(rt)} install`,
+    ...(args.noWallet ? ['--no-wallet'] : []),
+  ].join(' ');
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
   const daily =

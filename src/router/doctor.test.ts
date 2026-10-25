@@ -629,6 +629,48 @@ describe('runRouterDoctor, with its seams injected', () => {
     );
   });
 
+  it('uses the real session after reload instead of a failing standalone MCP probe', async () => {
+    await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+    const live = observation({ cwd: work });
+    const { out, by } = await run({
+      eligibility: async () => eligibility(),
+      readObservations: async () => [live],
+      listProcesses: async () => ({
+        routers: [{ pid: live.pid, startedAt: live.startedAt, kind: 'plugin', underClaude: true }],
+        claude: [],
+      }),
+    });
+    expect(out).not.toBeInstanceOf(CliError);
+    expect(by['router server']).toMatchObject({ status: 'ok' });
+    expect(by['router server']?.detail).toContain('serving a Claude Code session');
+    expect((await fake.calls()).filter((c) => c.startsWith('mcp get'))).toEqual([]);
+  });
+
+  it.each([
+    { servedSession: false },
+    { cliVersion: '0.0.0' },
+    { cwd: '/another-project' },
+    { harness: 'codex' as const },
+  ])(
+    'still checks the server when a router cannot prove this install is active: %j',
+    async (over) => {
+      await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
+      const live = observation({ cwd: work, ...over });
+      const { by } = await run({
+        eligibility: async () => eligibility(),
+        readObservations: async () => [live],
+        listProcesses: async () => ({
+          routers: [
+            { pid: live.pid, startedAt: live.startedAt, kind: 'plugin', underClaude: true },
+          ],
+          claude: [],
+        }),
+      });
+      expect(by['router server']).toMatchObject({ status: 'fail' });
+      expect((await fake.calls()).some((c) => c.startsWith('mcp get'))).toBe(true);
+    },
+  );
+
   it('never throws when the eligibility check rejects: the rows say not checked', async () => {
     const { out, by } = await run({
       eligibility: async () => {
@@ -839,7 +881,8 @@ describe('the runtime rows', () => {
     return { out, checks, by: Object.fromEntries(checks.map((c) => [c.name, c])) };
   }
 
-  const FAIL_FIX = 'Run `npx -y tenjin-cli@latest install`, then start a new Claude Code session.';
+  const FAIL_FIX =
+    "Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.";
 
   it('passes an absolute Node and entry that run, between the plugin and router server rows', async () => {
     await setUp();
@@ -916,7 +959,7 @@ describe('the runtime rows', () => {
       runVersion: async () => ({ code: 1, stdout: '', stderr: '', timedOut: false }),
     });
     expect(project.by['runtime']?.fix).toBe(
-      'Run `npx -y tenjin-cli@latest install --project`, then start a new Claude Code session.',
+      "Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction. For a project-only installation, pass `--project` to the installer from that project folder.",
     );
   });
 
@@ -1014,7 +1057,7 @@ describe('the runtime rows', () => {
    * fix sends the person to the `node` on PATH or to `tenjin install`, which
    * is the broken launcher now.
    */
-  it('fails, with the npx reinstall, when the runtime folder Claude Code loads is gone', async () => {
+  it('fails, with the Node-free official installer, when the runtime folder Claude Code loads is gone', async () => {
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
     const { by } = await run({
       readLaunch: async () => ({
@@ -1034,18 +1077,18 @@ describe('the runtime rows', () => {
     });
     const rest = [by['plugin']?.fix, by['router server']?.fix];
     expect(rest).toEqual([
-      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
-      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+      "Start a new Claude Code session. If Tenjin still does not start: Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.",
+      "Start a new Claude Code session. If Tenjin still does not start: Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.",
     ]);
   });
 
   /**
    * PR 1 or alpha.30 registered npm's folder; a Node upgrade deleted that
    * prefix, so Claude Code loads a folder that is gone, and no runtime exists
-   * yet. The runtime row fails with the npx reinstall, and nothing blames the
+   * yet. The runtime row fails with the Node-free official installer, and nothing blames the
    * `node` on Claude Code's PATH.
    */
-  it('fails, with the npx reinstall, when the npm folder Claude Code loads is gone', async () => {
+  it('fails, with the Node-free official installer, when the npm folder Claude Code loads is gone', async () => {
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
     const npm = join(root, 'old-prefix', 'lib', 'node_modules', 'tenjin-cli', 'dist');
     const gone: PluginLaunch = {
@@ -1070,16 +1113,16 @@ describe('the runtime rows', () => {
     });
     for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
       expect(fix).toBe(
-        'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+        "Start a new Claude Code session. If Tenjin still does not start: Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.",
       );
     }
     const project = await run({ ...over, project: true });
     expect(project.by['runtime']?.fix).toBe(
-      'Run `npx -y tenjin-cli@latest install --project`, then start a new Claude Code session.',
+      "Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction. For a project-only installation, pass `--project` to the installer from that project folder.",
     );
   });
 
-  it('says a platform with no pinned Node runs npm’s copy by design, and never offers the move', async () => {
+  it('reports an older npm install on an unsupported platform without recommending another unsupported install', async () => {
     await fake.respond('mcp-get', 'plugin:tenjin:router:\n  Status: ✘ Failed to connect\n');
     const npm = join(root, 'npm', 'lib', 'node_modules', 'tenjin-cli', 'dist');
     const unpinned = 'linux-x64 with musl, not glibc';
@@ -1097,8 +1140,8 @@ describe('the runtime rows', () => {
       name: 'runtime',
       status: 'warn',
       required: false,
-      detail: `Tenjin pins no Node for this platform (${unpinned}), so it keeps running from npm's copy at ${npm} on the \`node\` on Claude Code's PATH, by design`,
-      fix: "Nothing to move. Keep Node 22 or newer on the PATH Claude Code starts with; after changing Node versions, reinstall with that Node's `npm i -g tenjin-cli`, then run `tenjin install`.",
+      detail: `This older installation runs from npm's copy at ${npm}; this platform (${unpinned}) does not support Tenjin's private runtime`,
+      fix: 'Use macOS, Windows or glibc Linux 2.28+ on x64/arm64. This installation was left unchanged.',
     });
     for (const fix of [by['plugin']?.fix, by['router server']?.fix]) {
       expect(fix).toContain('`node`');
@@ -1162,8 +1205,8 @@ describe('the runtime rows', () => {
     ];
     expect(fixes).toEqual([
       "Start a new Claude Code session and run `tenjin doctor` again: `/reload-plugins` does not run the plugin's `SessionStart`, so only a new session writes the stamp.",
-      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
-      'Start a new Claude Code session; if Tenjin still does not start, run `npx -y tenjin-cli@latest install`.',
+      "Start a new Claude Code session. If Tenjin still does not start: Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.",
+      "Start a new Claude Code session. If Tenjin still does not start: Reinstall from https://tenjin.sh/agents (no Node or npm needed), then follow the installer's activation instruction.",
     ]);
     for (const fix of fixes) expect(fix).not.toMatch(/node.{0,10}PATH|restart Claude Code/i);
   });

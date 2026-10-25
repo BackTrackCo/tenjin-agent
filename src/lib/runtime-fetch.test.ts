@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   download,
+  downloadViaCurl,
   extract,
   nodeArtifact,
   nodeKey,
@@ -193,6 +194,34 @@ describe('download', () => {
       full.mockRestore();
     }
     expect(readdirSync(dir)).toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('proxy download on older npm Node', () => {
+  it('passes the proxy environment to curl, hashes its bytes, and removes failed downloads', async () => {
+    const curl = join(dir, 'curl');
+    writeFileSync(
+      curl,
+      '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = --output ]; then shift; file=$1; fi; shift; done\nprintf "%s" "$HTTPS_PROXY" > "$file"\nexit "${FIXTURE_EXIT:-0}"\n',
+    );
+    chmodSync(curl, 0o755);
+    const env = { PATH: dir, HTTPS_PROXY: 'http://fixture.invalid:8080' };
+    const options = { dir, maxBytes: 1000, timeoutMs: 1000, env };
+    const got = await downloadViaCurl('https://nodejs.org/archive.tar.gz', options);
+    expect(got.digest.toString('hex')).toBe(
+      createHash('sha256').update(env.HTTPS_PROXY).digest('hex'),
+    );
+    rmSync(got.file);
+    await expect(
+      downloadViaCurl('https://nodejs.org/archive.tar.gz', {
+        ...options,
+        env: { ...env, FIXTURE_EXIT: '7' },
+      }),
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(readdirSync(dir).filter((name) => name.startsWith('dl-'))).toEqual([]);
+    await expect(downloadViaCurl('http://nodejs.org/archive.tar.gz', options)).rejects.toThrow(
+      'HTTPS',
+    );
   });
 });
 

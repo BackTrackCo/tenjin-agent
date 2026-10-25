@@ -23,12 +23,12 @@ import {
  * THE CLAUDE CODE PLUGIN, AS FILES, in two renders. `tenjin install` registers
  * it with Claude Code's own `claude plugin` commands from Tenjin's runtime,
  * `~/.tenjin/runtime/claude`, which `activate` renders with the runtime's
- * absolute Node and entry (the runtime render). Where there is no runtime (a
- * non-default data dir, an unsupported platform, a runtime that could not be
- * set up) it registers the package's `dist/hosts/claude` instead, which the
- * build renders from this module with `node` from PATH (the package render),
- * and writes the same plugin folder under the config dir's `skills/` when there
- * is no `claude` binary to run. The checked-in `hosts/claude/` templates are
+ * absolute Node and entry (the runtime render). Installation requires that
+ * runtime; a non-default data dir, unsupported platform or runtime setup
+ * failure stops before registration. The build also renders the package's
+ * `dist/hosts/claude` with `node` from PATH for source development (the package
+ * render). With no `claude` binary, install writes the runtime-backed plugin
+ * under the config dir's `skills/`. The checked-in `hosts/claude/` templates are
  * pinned to the package render by a test, so the two cannot drift.
  *
  * NOTHING HERE IMPORTS MORE THAN THE NAMES AND THE PRODUCTION ORIGIN:
@@ -418,14 +418,14 @@ export function renderHostFiles(
  * not Tenjin's, and is never overwritten or removed.
  */
 export const LAUNCHER_MARKER = 'tenjin-runtime-launcher';
-/** The one fix for a missing runtime: npx installs from its own cache, not the broken launcher. */
-export const RUNTIME_MISSING_FIX = 'npx -y tenjin-cli@latest install';
+/** Official recovery instructions: the installer includes Node and needs no working launcher. */
+export const RUNTIME_MISSING_FIX = `Reinstall from ${PRODUCTION_ORIGIN}/agents (no Node or npm needed), then follow the installer's activation instruction.`;
 
 const missingSentence = (entry: string): string =>
-  `tenjin: Tenjin's runtime is missing (${entry}). Reinstall it with \`${RUNTIME_MISSING_FIX}\`, then start a new Claude Code session.`;
+  `tenjin: Tenjin's runtime is missing (${entry}). ${RUNTIME_MISSING_FIX}`;
 
 /** A single-quoted sh word: everything literal, a `'` closed, escaped and reopened. */
-const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+export const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 /**
  * THE `tenjin` LAUNCHER, as sh, for `~/.local/bin` and the plugin's `bin/`.
