@@ -91,6 +91,10 @@ export default defineConfig([
   // business in a worker thread.
   {
     entry: { 'wallet-kdf-worker': 'src/lib/wallet/keystore-kdf-worker.ts' },
+    // Prefer hash-wasm's tree-shakeable ESM so only scrypt and SHA-256 ship.
+    esbuildOptions(options) {
+      options.mainFields = ['module', 'main'];
+    },
     // Explicitly empty, not merely absent: tsup's `build()` API carries options
     // across builds in one process, so an omitted banner can be inherited.
     banner: {},

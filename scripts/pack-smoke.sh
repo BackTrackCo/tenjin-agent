@@ -90,25 +90,42 @@ echo "pack-smoke: --version -> $GOT_VERSION (ok)"
 # here means the packed worker is not the KDF the wallet was encrypted with.
 KDF_KEYSTORE='{"crypto": {"cipher": "aes-128-ctr", "ciphertext": "908d830584a9ece93fa07b7e900423a136c9f0eb101ec884f9f7ed4198df5a05", "cipherparams": {"iv": "03030303030303030303030303030303"}, "kdf": "pbkdf2", "kdfparams": {"c": 1024, "dklen": 32, "prf": "hmac-sha256", "salt": "0707070707070707070707070707070707070707070707070707070707070707"}, "mac": "d16c240f4b901d3daf5a81af7835a7c600bddbde1cf3ad82e7ca0369acf167dc"}, "id": "fd2890d5-c26b-4333-8449-f948ad996e62", "version": 3}'
 KDF_EXPECTED='0x824d7d885002e6070efafa3288922e189ffee45189abc699b2f4eb10cb83e565'
-KDF_KEYSTORE="$KDF_KEYSTORE" KDF_EXPECTED="$KDF_EXPECTED" node --input-type=module -e '
+# Same synthetic private key, encrypted with the accelerated scrypt shape at a
+# cheap cost. This exercises bundled WASM rather than only the Ox fallback.
+KDF_SCRYPT='{"crypto":{"cipher":"aes-128-ctr","ciphertext":"1145e300d698aa381e0e732d81d9fa73c1fccb3e0708f99764f1261cb25db69c","cipherparams":{"iv":"03030303030303030303030303030303"},"kdf":"scrypt","kdfparams":{"dklen":32,"n":1024,"p":8,"r":1,"salt":"0707070707070707070707070707070707070707070707070707070707070707"},"mac":"350fab099d73d2c83e94048c5836c82c7a3b4f26eac4d55077df0f47db9a7ba7"},"id":"950e86e3-903d-43e1-94a8-b76e72e519a5","version":3}'
+KDF_SCRYPT_EXPECTED='0x08d888111d6f8760863b433a3384f6ea9f638ea0934fc382ddc172104f2ad6b7'
+KDF_KEYSTORE="$KDF_KEYSTORE" KDF_EXPECTED="$KDF_EXPECTED" KDF_SCRYPT="$KDF_SCRYPT" KDF_SCRYPT_EXPECTED="$KDF_SCRYPT_EXPECTED" node --input-type=module -e '
   import { Worker } from "node:worker_threads";
-  const keystore = JSON.parse(process.env.KDF_KEYSTORE);
   const url = new URL("./node_modules/tenjin-cli/dist/wallet-kdf-worker.mjs", import.meta.url);
-  const worker = new Worker(url, { workerData: { keystore, password: "pack smoke" }, execArgv: [] });
-  const message = await new Promise((resolve, reject) => {
-    worker.once("message", resolve);
-    worker.once("error", reject);
-    worker.once("exit", () => reject(new Error("worker exited with no result")));
-  });
-  await worker.terminate();
-  if (message.key !== process.env.KDF_EXPECTED) {
-    throw new Error("the packed worker derived " + JSON.stringify(message) + ", expected " + process.env.KDF_EXPECTED);
+  for (const [fixture, expected, disableWasm] of [
+    [process.env.KDF_KEYSTORE, process.env.KDF_EXPECTED, false],
+    [process.env.KDF_SCRYPT, process.env.KDF_SCRYPT_EXPECTED, false],
+    [process.env.KDF_SCRYPT, process.env.KDF_SCRYPT_EXPECTED, true],
+  ]) {
+    const source = disableWasm
+      ? "globalThis.WebAssembly = undefined; void import(" + JSON.stringify(url.href) + ");"
+      : url;
+    const worker = new Worker(source, {
+      workerData: { keystore: JSON.parse(fixture), password: "pack smoke" },
+      execArgv: [],
+      ...(disableWasm ? { eval: true } : {}),
+    });
+    try {
+      const message = await new Promise((resolve, reject) => {
+        worker.once("message", resolve);
+        worker.once("error", reject);
+        worker.once("exit", () => reject(new Error("worker exited with no result")));
+      });
+      if (message.key !== expected) throw new Error("the packed worker derived an unexpected key");
+    } finally {
+      await worker.terminate();
+    }
   }
 ' || {
   echo "pack-smoke: FAIL — the packed keystore worker did not derive its key" >&2
   exit 1
 }
-echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
+echo "pack-smoke: packed wallet-kdf-worker.mjs derives PBKDF2 and scrypt keys, with WASM fallback (ok)"
 
 # 1d) The Claude Code plugin `tenjin install` registers lives in the package, as
 # a directory marketplace Claude Code reads in place. A build that stopped
