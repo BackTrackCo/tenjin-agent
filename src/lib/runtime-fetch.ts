@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { open, rm } from 'node:fs/promises';
+import { open, readFile, rm, stat } from 'node:fs/promises';
 import { join, posix, win32 } from 'node:path';
 import { CliError } from './errors';
+import { proxyVariable } from './env-proxy';
 
 /**
  * WHAT THE RUNTIME DOWNLOADS, AND HOW: Node's own release archive and the npm
@@ -180,6 +181,85 @@ export async function download(
     if (!closed) await handle.close().catch(() => undefined);
     await rm(file, { force: true }).catch(() => undefined);
     throw err;
+  }
+}
+
+/** Old npm Node releases cannot use environment proxies; curl keeps the first install working there. */
+export async function downloadViaCurl(
+  url: string,
+  o: {
+    dir: string;
+    maxBytes: number;
+    timeoutMs: number;
+    env: NodeJS.ProcessEnv;
+  },
+): Promise<{ file: string; digest: Buffer }> {
+  if (!isHttps(url)) throw new CliError('UPDATE_FAILED', 'Only HTTPS downloads are allowed.');
+  const proxy = proxyVariable(o.env);
+  const env = proxy === undefined ? o.env : { ...o.env, HTTPS_PROXY: o.env[proxy] };
+  const file = join(o.dir, `dl-${randomBytes(6).toString('hex')}`);
+  const handle = await open(file, 'wx', 0o600);
+  await handle.close();
+  try {
+    await new Promise<void>((done, fail) => {
+      const child = spawn(
+        process.platform === 'win32' ? 'curl.exe' : 'curl',
+        [
+          '-q',
+          '--proto',
+          '=https',
+          '--proto-redir',
+          '=https',
+          '--fail',
+          '--location',
+          '--silent',
+          '--show-error',
+          '--connect-timeout',
+          '30',
+          '--max-time',
+          String(Math.max(1, Math.ceil(o.timeoutMs / 1000))),
+          '--max-filesize',
+          String(o.maxBytes),
+          '--output',
+          file,
+          url,
+        ],
+        // In Tenjin's own tmp folder: Windows looks for `curl.exe` in the
+        // working directory before PATH, and Tenjin runs from whatever folder
+        // the person is in, a cloned repository included. The output path is
+        // already absolute.
+        { cwd: o.dir, env, stdio: 'ignore', windowsHide: true, timeout: o.timeoutMs + 1000 },
+      );
+      child.once('error', () =>
+        fail(
+          new CliError(
+            'NETWORK_ERROR',
+            'Could not start curl for the proxy download. Use the shell or PowerShell installer.',
+          ),
+        ),
+      );
+      child.once('close', (code) =>
+        code === 0
+          ? done()
+          : fail(
+              new CliError(
+                'NETWORK_ERROR',
+                'The download through the configured proxy failed. Check the connection and retry installation.',
+              ),
+            ),
+      );
+    });
+    if ((await stat(file)).size > o.maxBytes)
+      throw new CliError('UPDATE_FAILED', 'The Node download is too large.');
+    return {
+      file,
+      digest: createHash('sha256')
+        .update(await readFile(file))
+        .digest(),
+    };
+  } catch (error) {
+    await rm(file, { force: true });
+    throw error;
   }
 }
 

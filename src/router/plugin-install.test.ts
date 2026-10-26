@@ -8,7 +8,7 @@ import type { CommandContext } from '../context';
 import { aliveDir, runAliveHook } from './alive';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput, type HookKind } from './hook-tool';
-import { NEW_SESSION_STEP, runRouterInstall } from './install';
+import { NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
 import { fileURLToPath } from 'node:url';
 import { RECONNECT_FIX } from './mcp-processes';
 import {
@@ -193,7 +193,7 @@ describe('tenjin install registers the plugin through Claude Code', () => {
   it('ends with a step taken in the session, never a command run elsewhere', async () => {
     const result = await runRouterInstall({}, ctx(), deps());
     const next = (result.data as { next: string }).next;
-    expect(next).toBe(NEW_SESSION_STEP);
+    expect(next).toBe(RELOAD_STEP);
     const text = [next, ...(result.humanLines ?? [])].join('\n');
     expect(text).not.toMatch(/terminal|restart Claude Code|run the command above|by hand/i);
     expect(result.humanLines).toContain(
@@ -598,8 +598,8 @@ describe('the settings install of an earlier release', () => {
    * /reload-plugins RECONNECTS PLUGIN SERVERS ONLY, and does not run the
    * plugin's `SessionStart`. In the session the upgrade ran in, the settings
    * install's `x402` server still runs the old build, which knows no marker,
-   * so loading the plugin beside it would route every event twice. The step
-   * is a new session, with or without a settings install.
+   * so loading the plugin beside it would route every event twice. A settings
+   * upgrade still needs a new session; a fresh install can reload.
    */
   it('asks for a new session, never /reload-plugins, while a settings install stays', async () => {
     await writeLegacy();
@@ -622,12 +622,12 @@ describe('the settings install of an earlier release', () => {
     expect((refresh.data as { notices: string[] }).notices).toEqual([
       'Start a new Claude Code session so the Tenjin plugin loads; the earlier settings setup is removed by the next `tenjin update` or `tenjin install` after that.',
     ]);
-    // Once it is gone, the step is still a new session.
+    // With the settings install gone, the plugin can reload in this conversation.
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
     await runRouterInstall({ refresh: true }, ctx(), deps());
     const after = await runRouterInstall({}, ctx(), deps(stale));
-    expect((after.data as { next: string }).next).toBe(NEW_SESSION_STEP);
+    expect((after.data as { next: string }).next).toBe(RELOAD_STEP);
   });
 
   it('names the Tenjin status line it removes, in install and in the notices update prints', async () => {

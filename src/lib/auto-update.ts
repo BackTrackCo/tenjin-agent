@@ -8,15 +8,19 @@ import { nodeBinPath, readRuntimeState, versionEntry } from './runtime-layout';
 /**
  * BACKGROUND AUTO-UPDATE, the way Claude Code's native installer does it:
  * downloaded in the background, used from the next session. At most once a
- * day, at the start of a Claude Code session or the end of a Codex one, this
- * starts `tenjin update --background` DETACHED on the runtime's own Node and
- * current entry, and returns: the caller adds no latency and never waits.
- * The child is `tenjin update`'s runtime branch unchanged (the release is
- * checked before the switch, the previous version stays, an older one is never
- * switched to, the runtime lock is held), so npm and PATH are never involved,
- * and a running Claude Code session keeps its version until the next one.
- * Codex's hooks run the launcher, which the switch rewrites, so Codex starts
- * the update as its session ends and the next session starts on the new one.
+ * day, at the start of a Claude Code or Codex session, this starts
+ * `tenjin update --background` DETACHED on the runtime's own Node and current
+ * entry, and returns: the caller adds no latency and never waits.
+ * The child is `tenjin update`'s runtime branch (the release's build
+ * provenance is checked before it is downloaded and the build before the
+ * switch, the previous version stays, an older one is never switched to, the
+ * runtime lock is held), except that it takes only a release published at
+ * least a day ago (`BACKGROUND_COOLDOWN_MS` in commands/update). So npm and PATH
+ * are never involved, and a running session keeps its version until the next
+ * one. Codex has no SessionStart hook, so `tenjin mcp --harness codex` starts
+ * it as the server starts; its routing legs are `mcp_tool` calls into that
+ * server, so the switch moves nothing the session is using, and the launcher
+ * it rewrites starts the next session's server.
  *
  * `node:*`, the paths and the runtime layout only: the `alive` leg and
  * `tenjin mcp` load this, and neither may pay for zod, the config schema or
@@ -30,6 +34,10 @@ export const AUTO_UPDATE_FILE = 'auto-update.json';
 export const AUTO_UPDATE_LOG = 'auto-update.log';
 
 const DAY_MS = 86_400_000;
+
+/** Why no background update starts while Node checks no TLS certificate. */
+export const TLS_OFF =
+  'TLS certificate checks are turned off (NODE_TLS_REJECT_UNAUTHORIZED=0); set NODE_EXTRA_CA_CERTS instead';
 
 export interface AutoUpdateRecord {
   /** When the last background run was started (ISO). */
@@ -77,6 +85,17 @@ export function maybeAutoUpdate(o: {
     const started = Date.parse(previous?.startedAt ?? '');
     // A start in the future (a clock set back) counts as due, not as a day away.
     if (!Number.isNaN(started) && nowMs - started >= 0 && nowMs - started < DAY_MS) return;
+
+    // NOT WITH TLS CERTIFICATE CHECKS TURNED OFF: the child inherits this
+    // environment, and then anyone on the network path can answer for the
+    // registry, the dist-tags, the attestations and the tarball alike, so no
+    // check the update makes would hold. Recorded as a run, once a day, so
+    // doctor names the cause and the fix.
+    if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+      const at = new Date(nowMs).toISOString();
+      writeRecord(root, { startedAt: at, finishedAt: at, outcome: 'skipped', reason: TLS_OFF });
+      return;
+    }
 
     // Stamped BEFORE the spawn, so a second session starting in the same
     // second finds it and stays put. The last result is kept for doctor.
@@ -154,5 +173,10 @@ export function autoUpdateLine(root: string): string | null {
   if (r.outcome === 'updated') return `Auto-update: ${when} updated ${r.from} -> ${r.to}`;
   if (r.outcome === 'current') return `Auto-update: ${when} up to date (${r.to ?? r.from})`;
   if (r.outcome === 'failed') return `Auto-update: ${when} failed: ${r.reason ?? 'unknown'}`;
+  // A run that chose to wait (a release under a day old, TLS checks turned
+  // off) says why, so the person sees what holds the update back.
+  if (r.outcome === 'skipped' && r.reason !== undefined) {
+    return `Auto-update: ${when} skipped: ${r.reason}`;
+  }
   return null;
 }

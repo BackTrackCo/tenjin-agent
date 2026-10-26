@@ -700,20 +700,56 @@ describe('Codex install, uninstall and doctor', () => {
       });
     });
 
-    it('adds the package folder for a skipped or failed runtime, or one with no Codex folder', async () => {
-      for (const rt of [
-        { state: 'skipped' as const },
-        { state: 'fallback' as const, reason: 'no Node' },
-        { state: 'kept' as const, cli: '1.0.0' },
-      ]) {
-        const { steps, deps } = host({}, rt);
-        await runCodexInstall({ yes: true }, ctx(), deps);
-        expect(steps, rt.state).toContain('codex plugin marketplace add /package/dist/hosts/codex');
-      }
-      await withCatalog();
-      const { steps, deps } = host({}, { state: 'fallback', reason: 'no Node' });
+    it('refuses runtime failure before creating a wallet or changing registration', async () => {
+      const { steps, deps } = host({}, { state: 'failed', reason: 'no Node' });
+      await expect(runCodexInstall({ yes: true }, ctx(), deps)).rejects.toThrow('no Node');
+      expect(steps).toEqual([]);
+    });
+
+    it('uses a checkout folder only for source development', async () => {
+      const { steps, deps } = host();
       await runCodexInstall({ yes: true }, ctx(), deps);
       expect(steps).toContain('codex plugin marketplace add /package/dist/hosts/codex');
+    });
+
+    it('restores only the prior Tenjin marketplace and runtime after plugin add fails', async () => {
+      await withCatalog();
+      let restored = false;
+      let source = '/previous/tenjin';
+      let enabled = true;
+      const unrelated = { source: '/other/plugin', enabled: true };
+      const { deps } = host(
+        {
+          marketplaces: { tenjin: { source } },
+          plugins: { 'tenjin@tenjin': { enabled } },
+          unrelated,
+        },
+        {
+          state: 'active',
+          restore: async () => {
+            restored = true;
+          },
+        },
+      );
+      let failNext = true;
+      deps.run = async (args) => {
+        if (args[1] === 'marketplace' && args[2] === 'remove') source = '';
+        if (args[1] === 'marketplace' && args[2] === 'add') source = args[3]!;
+        if (args[1] === 'add' && failNext) {
+          failNext = false;
+          enabled = false;
+          return { code: 1, stdout: '', stderr: 'simulated registration failure' };
+        }
+        if (args[1] === 'add') enabled = true;
+        return { code: 0, stdout: '{}', stderr: '' };
+      };
+      await expect(runCodexInstall({ yes: true }, ctx(), deps)).rejects.toThrow(
+        'simulated registration failure',
+      );
+      expect(restored).toBe(true);
+      expect(source).toBe('/previous/tenjin');
+      expect(enabled).toBe(true);
+      expect(unrelated).toEqual({ source: '/other/plugin', enabled: true });
     });
 
     it('removes a marketplace added from another folder first, and leaves one already there', async () => {

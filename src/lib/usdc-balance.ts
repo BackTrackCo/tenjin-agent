@@ -6,7 +6,7 @@
  * the send path and re-exports the address from here.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { writeFileAtomic } from './atomic-json';
 import { balanceCachePath } from './paths';
 
@@ -115,6 +115,11 @@ function sameUrl(a: string, b: string): boolean {
  * the hooks' read only decides whether to offer.
  */
 export const LAST_KNOWN_BALANCE_MS = 60_000;
+
+/** An explicit balance check or observed funding makes a hook's cached balance obsolete. */
+export async function forgetRememberedBalance(dataDir: string): Promise<void> {
+  await rm(balanceCachePath(dataDir), { force: true }).catch(() => undefined);
+}
 
 /**
  * {@link readUsdcBalanceWithFallback} for the router hooks, which returns the
