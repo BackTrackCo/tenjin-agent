@@ -40,6 +40,7 @@ import {
   type ModSources,
 } from './plugin-files';
 import { readModSources } from './plugin-folder';
+import { PAY_SKILL, PAY_SKILL_PATH } from './plugin-skill';
 
 const HOSTS = fileURLToPath(new URL('../../hosts/claude', import.meta.url));
 
@@ -191,10 +192,12 @@ describe("the plugin's hooks", () => {
     expect(REQUEST_TOOL).toBe('mcp__plugin_tenjin_router__request');
   });
 
-  it('never name x402 anywhere the plugin shows', () => {
+  it('keeps protocol names out of plugin presentation, apart from discovery instructions', () => {
     // The mod's source names it in comments and in its own test of what a
     // surface may never draw; its surfaces are pinned by `claude plugin test`.
-    expect(JSON.stringify(renderHostFiles('1.2.3'))).not.toMatch(/x402/i);
+    const files = renderHostFiles('1.2.3');
+    delete files[`tenjin/${PAY_SKILL_PATH}`];
+    expect(JSON.stringify(files)).not.toMatch(/x402/i);
   });
 });
 
@@ -409,9 +412,18 @@ describe('the checked-in hosts/codex templates', () => {
     const rendered = renderCodexHostFiles();
     expect(filesUnder(CODEX_HOSTS)).toEqual(Object.keys(rendered).sort());
     for (const [path, body] of Object.entries(rendered)) {
-      expect(JSON.parse(readFileSync(join(CODEX_HOSTS, path), 'utf8')), path).toEqual(
-        JSON.parse(body),
-      );
+      const checkedIn = readFileSync(join(CODEX_HOSTS, path), 'utf8');
+      if (path.endsWith('.json')) expect(JSON.parse(checkedIn), path).toEqual(JSON.parse(body));
+      else expect(checkedIn, path).toBe(body);
+    }
+  });
+
+  it('exposes the shared payment skill in the package and runtime plugins', () => {
+    for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
+      const manifest = JSON.parse(files['tenjin/.codex-plugin/plugin.json']!);
+      expect(manifest.skills).toBe('./skills/');
+      expect(files[`tenjin/${PAY_SKILL_PATH}`]).toBe(PAY_SKILL);
+      expect(files[`tenjin/${PAY_SKILL_PATH}`]).toBe(renderPluginFiles()[PAY_SKILL_PATH]);
     }
   });
 
@@ -495,7 +507,7 @@ describe('the checked-in hosts/codex templates', () => {
     expect(printed).not.toMatch(/[&|<>^%'!]/);
   });
 
-  it("names #25's plugin and server, starts the server as Codex's, and never names x402", () => {
+  it("names #25's plugin and server and keeps protocol names out of its presentation", () => {
     expect(renderCodexMcp()).toEqual({
       mcpServers: {
         router: {
@@ -509,7 +521,9 @@ describe('the checked-in hosts/codex templates', () => {
       name: 'tenjin',
       plugins: [{ name: 'tenjin', source: { source: 'local', path: './tenjin' } }],
     });
-    expect(JSON.stringify(renderCodexHostFiles())).not.toMatch(/x402/i);
+    const files = renderCodexHostFiles();
+    delete files[`tenjin/${PAY_SKILL_PATH}`];
+    expect(JSON.stringify(files)).not.toMatch(/x402/i);
   });
 
   it("passes CODEX_HOME through Codex's cleared MCP environment", () => {

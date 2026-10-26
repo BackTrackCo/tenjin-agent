@@ -115,8 +115,9 @@ describe('main', () => {
     const help = cap.stdout();
     for (const command of ['install', 'uninstall', 'update', 'config', 'doctor', 'status'])
       expect(help).toContain(command);
-    for (const command of ['wallet', 'pay', 'hook', 'mcp']) expect(help).toContain(command);
-    for (const shelf of ['search <question>', 'publish [file]', 'discover', 'grade', 'daemon'])
+    for (const command of ['wallet', 'pay', 'discover', 'hook', 'mcp'])
+      expect(help).toContain(command);
+    for (const shelf of ['search <question>', 'publish [file]', 'grade', 'daemon'])
       expect(help).not.toContain(shelf);
   });
 
@@ -193,7 +194,7 @@ describe('main', () => {
 
   // The two things an operator chooses at install time, and nothing else: which
   // settings file, and whether this is a converge run for `tenjin update`.
-  it('documents invocation-scoped payment warnings without the shelved discover command', async () => {
+  it('documents invocation-scoped payment warnings', async () => {
     const cap = captureIo();
     expect(await main(['pay', '--help'], cap.io)).toBe(0);
     const help = cap.stdout();

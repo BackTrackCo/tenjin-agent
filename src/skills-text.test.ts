@@ -663,7 +663,6 @@ describe('the permissions doc matches the product this release ships', () => {
       'tenjin buy',
       'tenjin read',
       'tenjin outcome',
-      'tenjin discover',
       'tenjin daemon',
       'tenjin hooks',
       'mcp__tenjin__',

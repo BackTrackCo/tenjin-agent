@@ -35,6 +35,31 @@ afterEach(() => {
 });
 
 describe('Ultravioleta discovery adapter', () => {
+  it('preserves the seller name and advertised request schema', async () => {
+    const extensions = { bazaar: { info: { input: { method: 'POST', body: { text: 'hello' } } } } };
+    stub(() => page([item({ serviceName: 'Speech API', extensions })]));
+    const sweep = await sweepRegistries([UV], { timeoutMs: 1000, query: 'speech' });
+    expect(sweep.resources[0]).toMatchObject({ serviceName: 'Speech API', extensions });
+  });
+
+  it('reports a standard registry search cursor as incomplete coverage', async () => {
+    stub(() =>
+      Response.json({
+        x402Version: 2,
+        resources: [{ ...item(), resource: URL }],
+        pagination: { limit: 20, cursor: 'more' },
+      }),
+    );
+    const sweep = await sweepRegistries(['https://registry.test'], {
+      timeoutMs: 1000,
+      query: 'speech',
+    });
+    expect(sweep.resources).toHaveLength(1);
+    expect(sweep.errors).toEqual([
+      { registry: 'https://registry.test', message: 'Registry search returned partial results' },
+    ]);
+  });
+
   it('translates search to supported params, normalizes timestamps and filters resource types locally', async () => {
     const fetch = stub((url) => {
       expect(url.pathname).toBe('/discovery/resources');

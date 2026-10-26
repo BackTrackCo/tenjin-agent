@@ -110,6 +110,8 @@ The router names the tool and its price, and your agent calls it.
 
 Provider prices above exclude Tenjin's $0.003 fee per paid routing call. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
+You can also ask: "Find x402 endpoints I can use for speech synthesis, video generation and web search." Only when explicitly asked to discover endpoints, the shared skill checks Tenjin's catalog, public Bazaar registries and Orthogonal, then compares advertised prices, inputs and coverage. Discovery runs no provider task and pays nothing. From a terminal, `tenjin discover "speech synthesis" --json` runs the manual public-source search directly. Ordinary tasks and requests to quote or pay a known URL do not start endpoint discovery.
+
 ## How it works
 
 1. The router watches the moments a tool could help: your prompt, each web search or page fetch, each task handed to a subagent, and each question your agent asks you.

@@ -116,7 +116,7 @@ echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 # fallback, with every source-tree test green. The manifest carries this
 # version, so the plugin Claude Code lists is the build that runs.
 HOSTS="./node_modules/tenjin-cli/dist/hosts/claude"
-for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts; do
+for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts tenjin/skills/tenjin-pay/SKILL.md; do
   [ -f "$HOSTS/$f" ] || {
     echo "pack-smoke: FAIL: dist/hosts/claude/$f missing from the installed package" >&2
     exit 1
@@ -135,12 +135,24 @@ EXPECTED_VERSION="$EXPECTED_VERSION" HOSTS="$HOSTS" node -e '
 }
 # The Codex plugin ships beside it, a local marketplace `codex plugin add` copies.
 CODEX_HOSTS="./node_modules/tenjin-cli/dist/hosts/codex"
-for f in .agents/plugins/marketplace.json tenjin/.codex-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
+for f in .agents/plugins/marketplace.json tenjin/.codex-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/skills/tenjin-pay/SKILL.md; do
   [ -f "$CODEX_HOSTS/$f" ] || {
     echo "pack-smoke: FAIL: dist/hosts/codex/$f missing from the installed package" >&2
     exit 1
   }
 done
+HOSTS="$HOSTS" CODEX_HOSTS="$CODEX_HOSTS" node -e '
+  const { readFileSync } = require("node:fs");
+  const manifest = JSON.parse(readFileSync(process.env.CODEX_HOSTS + "/tenjin/.codex-plugin/plugin.json", "utf8"));
+  if (manifest.skills !== "./skills/") throw new Error("Codex does not declare its skills directory");
+  const skill = "/tenjin/skills/tenjin-pay/SKILL.md";
+  if (readFileSync(process.env.CODEX_HOSTS + skill, "utf8") !== readFileSync(process.env.HOSTS + skill, "utf8")) {
+    throw new Error("Codex and Claude Code ship different payment instructions");
+  }
+' || {
+  echo "pack-smoke: FAIL: the packed Codex plugin does not expose the shared payment skill" >&2
+  exit 1
+}
 # Claude Code's own validator, where a runner has the binary: the marketplace,
 # then the plugin with its mod, which validate reads as the engine will load it.
 # Then the mod's tests from the source tree, run against the PACKED module.
@@ -202,6 +214,22 @@ printf '%s' "$CONFIG_OUT" | node -e '
   exit 1
 }
 echo "pack-smoke: config -> exit 0, JSON envelope with schemaVersion (ok)"
+
+# Load the discover command from the published chunks, with no network or wallet.
+mkdir -p "$DATA_DIR/discovery"
+printf '%s\n' '{"bazaarRegistries":[]}' > "$DATA_DIR/discovery/config.json"
+DISCOVERY_OUT="$(TENJIN_DATA_DIR="$DATA_DIR/discovery" "$BIN" discover 'speech synthesis' --sources registries --json)"
+printf '%s' "$DISCOVERY_OUT" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    const o = JSON.parse(s);
+    if (!o.ok || o.command !== "discover" || o.data.query !== "speech synthesis" ||
+        o.data.registries.length !== 0 || o.data.resources.length !== 0 || o.data.errors.length !== 0) {
+      throw new Error("the packed discover command did not return the configured registry sweep");
+    }
+  });
+'
+echo "pack-smoke: discover -> configured registry sweep, no wallet (ok)"
 
 # 3) A bogus subcommand exits 2 with a parseable JSON error envelope.
 set +e
