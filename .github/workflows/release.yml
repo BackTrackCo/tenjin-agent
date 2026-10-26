@@ -94,9 +94,10 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Environment named in the npm Trusted Publishing config for tenjin-cli.
-    # Required-reviewer protection here is optional (workflow_dispatch already
-    # gates on maintainer access); the label must stay regardless for OIDC scope.
+    # Environment named in the npm Trusted Publishing config for tenjin-cli. Its
+    # protection rules are the publish gate: deployment from `main` only and a
+    # required reviewer (RELEASING.md, One-time owner setup). The name must stay
+    # regardless, for OIDC scope.
     environment: npm-publish
     permissions:
       contents: write # git tag + GitHub release created by changesets/action
@@ -150,13 +151,16 @@ jobs:
       # Build + validate BEFORE publishing so a broken build or failing test
       # can't ship. (The house template validates with publint + attw via
       # test:pkg; this repo doesn't carry those yet, so we gate on the
-      # existing check suite, pnpm audit, and the packed-artifact smoke,
-      # which exercises the real published tarball.)
+      # existing check suite, pnpm audit, the packed-artifact smoke, which
+      # exercises the real published tarball, and the installer smoke, which
+      # runs the generated install.sh against offline fixtures, so a broken
+      # installer template fails here, before the publish it would ship with.)
       - name: Build + validate
         run: |
           pnpm run check
           pnpm audit --audit-level=high
           bash scripts/pack-smoke.sh
+          node scripts/installer-smoke.mjs
 
       - name: Publish to npm
         id: publish
@@ -165,10 +169,7 @@ jobs:
           # The action reads published packages from the CHANGESETS_OUTPUT file
           # it sets in this script's environment, not from stdout.
           publish-script: pnpm exec changeset publish
+          # Release notes only. The installers carry no GitHub asset: tenjin.sh
+          # fills them from the templates in the npm tarball (RELEASING.md).
           create-github-releases: true
           github-token: ${{ steps.app-token.outputs.token }}
-
-      - name: Publish verified installer assets
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: node scripts/release-installers.mjs

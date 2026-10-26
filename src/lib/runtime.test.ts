@@ -17,6 +17,7 @@ import * as fsp from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ALPHA32_ATTESTATIONS, attestationsFor } from './fixtures/npm-attestations';
 import { LockTimeoutError } from './lock';
 import { renderCodexHostFiles, renderHostFiles, RUNTIME_MISSING_FIX } from '../router/plugin-files';
 import {
@@ -26,6 +27,7 @@ import {
   NewerRuntime,
   pathLine,
   placeVersion,
+  provenanceProblem,
   readNodePin,
   removeLaunchers,
   removeRuntime,
@@ -479,26 +481,71 @@ describe.skipIf(!POSIX)('stageTarball', () => {
     writeFileSync(join(dir, 'package', 'dist', 'index.js'), '//');
     return execFileSync('tar', ['-czf', '-', '-C', dir, 'package']);
   };
-  const registry = (bytes: Buffer, meta: Record<string, unknown> = {}) =>
-    server({
-      [`https://registry.npmjs.org/tenjin-cli/${v}`]: () =>
-        Response.json({
-          dist: {
-            tarball: tarballUrl,
-            integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
-            ...meta,
-          },
-        }),
+  const metaUrl = `https://registry.npmjs.org/tenjin-cli/${v}`;
+  const attestationsUrl = `https://registry.npmjs.org/-/npm/v1/attestations/tenjin-cli@${v}`;
+  const sha512 = (bytes: Buffer, encoding: 'hex' | 'base64') =>
+    createHash('sha512').update(bytes).digest(encoding);
+  const attestations = (sha512Hex: string, workflow?: Record<string, string>) =>
+    attestationsFor(v, sha512Hex, workflow);
+  /**
+   * The registry for one release: its metadata, the attestations `attest`
+   * returns for the sha512 its metadata names (none: a 404), and the tarball.
+   */
+  const registry = (
+    bytes: Buffer,
+    meta: Record<string, unknown> = {},
+    attest: ((sha512Hex: string) => unknown) | null = (hex) => attestations(hex),
+  ) => {
+    const integrity = (meta.integrity as string | undefined) ?? `sha512-${sha512(bytes, 'base64')}`;
+    const hex = Buffer.from(integrity.slice('sha512-'.length), 'base64').toString('hex');
+    return server({
+      [metaUrl]: () => Response.json({ dist: { tarball: tarballUrl, integrity, ...meta } }),
+      ...(attest !== null ? { [attestationsUrl]: () => Response.json(attest(hex)) } : {}),
       [tarballUrl]: () => new Response(bytes),
     });
+  };
 
-  it('stages the release whose integrity matches', async () => {
-    const stage = await stageTarball(root, v, {
-      timeoutMs: 5_000,
-      fetchImpl: registry(tarball(v)),
-    });
+  it('stages the release whose provenance and integrity match, asking provenance first', async () => {
+    const fetchImpl = registry(tarball(v));
+    const stage = await stageTarball(root, v, { timeoutMs: 5_000, fetchImpl });
     expect(JSON.parse(readFileSync(join(stage, 'package.json'), 'utf8')).version).toBe(v);
     expect(readdirSync(join(root, 'tmp')).filter((n) => n.startsWith('dl-'))).toEqual([]);
+    expect(fetchImpl.urls).toEqual([metaUrl, attestationsUrl, tarballUrl]);
+  });
+
+  it('refuses a release without provenance from Tenjin’s release workflow, before downloading it', async () => {
+    const other = sha512(tarball('0.1.0-alpha.34'), 'hex');
+    const elsewhere = "it was built by something other than Tenjin's release workflow on main";
+    const cases: [string, ((hex: string) => unknown) | null, string][] = [
+      ['no attestations (a 404)', null, 'npm holds no attestations for it'],
+      [
+        'another repository',
+        (hex) => attestations(hex, { repository: 'https://github.com/someone/tenjin-agent' }),
+        elsewhere,
+      ],
+      [
+        'another workflow',
+        (hex) => attestations(hex, { path: '.github/workflows/ci.yml' }),
+        elsewhere,
+      ],
+      ['another branch', (hex) => attestations(hex, { ref: 'refs/heads/x' }), elsewhere],
+      [
+        'another sha512',
+        () => attestations(other),
+        'its provenance names another sha512 than the registry does',
+      ],
+    ];
+    for (const [what, attest, problem] of cases) {
+      const fetchImpl = registry(tarball(v), {}, attest);
+      const err = await stageTarball(root, v, { timeoutMs: 5_000, fetchImpl }).catch(
+        (e: unknown) => e,
+      );
+      expect(err, what).toMatchObject({
+        code: 'UPDATE_FAILED',
+        message: `tenjin-cli ${v} has no valid build provenance from Tenjin's release workflow (${problem}), so it was not installed`,
+      });
+      expect(fetchImpl.urls, what).not.toContain(tarballUrl);
+    }
   });
 
   it('rejects a tarball outside the registry, an integrity mismatch and a wrong version', async () => {
@@ -508,6 +555,7 @@ describe.skipIf(!POSIX)('stageTarball', () => {
     );
     expect(foreign.urls).toHaveLength(1);
 
+    // The registry and its provenance agree on a sha512 the bytes do not have.
     const mismatch = registry(tarball(v), { integrity: `sha512-${'A'.repeat(86)}==` });
     await expect(stageTarball(root, v, { timeoutMs: 5_000, fetchImpl: mismatch })).rejects.toThrow(
       /did not match its integrity/,
@@ -522,6 +570,21 @@ describe.skipIf(!POSIX)('stageTarball', () => {
       /holds another package/,
     );
     expect(readdirSync(join(root, 'tmp'))).toEqual([]);
+  });
+});
+
+/**
+ * The release that shipped the runtime, exactly as npm attests it: the
+ * registry's recorded answer for tenjin-cli 0.1.0-alpha.32 (`fixtures/`), and
+ * that version's real `dist.integrity`. A misread of npm's shape would refuse
+ * every release on every machine, and fails here instead.
+ */
+describe('provenanceProblem', () => {
+  it('accepts alpha.32 as npm attests it, against the sha512 its dist.integrity names', () => {
+    const integrity =
+      'sha512-pdhHX5OKyFQUpiPBnVwapOPRHShqKrBjhoXQksMIgjwxkau+PIZKC+xULJF6km/ceuaWXoZ6KMY9ElDi1Of7vw==';
+    const hex = Buffer.from(integrity.slice('sha512-'.length), 'base64').toString('hex');
+    expect(provenanceProblem(ALPHA32_ATTESTATIONS, '0.1.0-alpha.32', hex)).toBeNull();
   });
 });
 
