@@ -408,9 +408,9 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        * `note` is the free docs lookup before a search, for a client that
        * also lists `note`: the line comes after the search. `augment` is the
        * same offer for a client that does not, with the `augmentUrl` that
-       * client fetches. `offer` is every other line. This build shows a free
-       * offer before a search as a note whatever this says, `augmentUrl`
-       * included, so a server from before `note` is served the same way.
+       * client fetches. `offer` is every other line. This build shows only a
+       * `note` after a search; any other free offer before one, `augment`
+       * included, runs silent.
        */
       delivery: z.enum(['offer', 'augment', 'note']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),

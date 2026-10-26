@@ -2586,8 +2586,9 @@ describe('no hook but the pre-call one', () => {
  * A FREE LOOKUP NOTED AFTER A SEARCH, NEVER IN PLACE OF ONE AND NEVER FETCHED
  * FOR IT. A free offer on a WebSearch is not a deny: the search runs with no
  * output, the server's line is kept, and the after-call arm shows it once the
- * search has run, whatever the server called the delivery. Generic: any free
- * offer before a search, keyed on its price, never on its service.
+ * search has run, only when the server sent it as `delivery: "note"`. Any
+ * other free offer before a search runs silent. Generic: keyed on the price
+ * and the delivery, never on the service.
  */
 describe('a free lookup noted after a search', () => {
   const ID = 'k3f9-abcd';
@@ -2620,6 +2621,8 @@ describe('a free lookup noted after a search', () => {
       augmentUrl: `${BASE}/api/docs-lookup?query=next.js+middleware+matcher`,
     },
   };
+  /** As a server sends any other line. */
+  const OFFER = { ...FREE, decision: { ...FREE.decision, delivery: 'offer' } };
   /** And as a server from before `delivery` sends it. */
   const BARE = {
     ...FREE,
@@ -2708,50 +2711,62 @@ describe('a free lookup noted after a search', () => {
     return { out: await runShortfallHook(event, d), calls };
   }
 
-  it.each([
-    ['note', FREE, NOTE_HINT],
-    ['augment, from the server in production today', AUGMENT, PRECALL_FREE_HINT],
-    ['absent, from a server older than both', BARE, PRECALL_FREE_HINT],
-  ])(
-    'lets the search run with no output and shows the line after it, delivery %s',
-    async (_label, body, hint) => {
-      const pre = await before('next.js middleware matcher', 'toolu_1', {}, body);
-      expect(pre.out).toEqual({
-        response: null,
-        action: 'execute',
-        id: ID,
-        free: true,
-        noted: true,
-      });
-      // One gate call and nothing else: no balance read, no docs fetched.
-      expect(pre.calls).toHaveLength(1);
-      expect(rpcCalls).toHaveLength(0);
-      // Not a redirect: nothing for the one-block rule or the offer mark.
-      expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
-      expect(
-        await claimRedirect(dir, 'sess-1', undefined, 'WebSearch next.js middleware matcher'),
-      ).toBe(true);
-      // Both records, and the id bound to this session as a shown line's is.
-      expect(JSON.parse(await readFile(notePath('toolu_1'), 'utf8'))).toEqual({
-        version: 1,
-        at: expect.any(Number) as number,
-        offerId: ID,
-        line: hint,
-      });
-      expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
-        id: ID,
-        label: 'Context7 docs',
-      });
-      expect(await resolveProgressSession(dir, { id: ID })).toBe(sessionDir(dir, 'sess-1'));
-      expect(await renderProgress(dir, 'sess-1')).toBe(
-        'x402 · search: paid lookup offered (Context7)',
-      );
+  it('lets the search run with no output and shows the line after it, delivery note', async () => {
+    const pre = await before('next.js middleware matcher', 'toolu_1');
+    expect(pre.out).toEqual({
+      response: null,
+      action: 'execute',
+      id: ID,
+      free: true,
+      noted: true,
+    });
+    // One gate call and nothing else: no balance read, no docs fetched.
+    expect(pre.calls).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(0);
+    // Not a redirect: nothing for the one-block rule or the offer mark.
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+    expect(
+      await claimRedirect(dir, 'sess-1', undefined, 'WebSearch next.js middleware matcher'),
+    ).toBe(true);
+    // Both records, and the id bound to this session as a shown line's is.
+    expect(JSON.parse(await readFile(notePath('toolu_1'), 'utf8'))).toEqual({
+      version: 1,
+      at: expect.any(Number) as number,
+      offerId: ID,
+      line: NOTE_HINT,
+    });
+    expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
+      id: ID,
+      label: 'Context7 docs',
+    });
+    expect(await resolveProgressSession(dir, { id: ID })).toBe(sessionDir(dir, 'sess-1'));
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: paid lookup offered (Context7)',
+    );
 
-      const post = await after('next.js middleware matcher', 'toolu_1');
-      expect(post.out).toEqual(noted(hint));
-      expect(post.calls).toHaveLength(0);
-    },
-  );
+    const post = await after('next.js middleware matcher', 'toolu_1');
+    expect(post.out).toEqual(noted(NOTE_HINT));
+    expect(post.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['augment, from the server in production today', AUGMENT],
+    ['offer', OFFER],
+    ['absent, from a server older than both', BARE],
+  ])('lets the search run with no output and no line after it, delivery %s', async (_l, body) => {
+    const pre = await before('next.js middleware matcher', 'toolu_1', {}, body);
+    expect(pre.out).toEqual({ response: null, action: 'execute', id: ID, free: true });
+    expect(pre.calls).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(0);
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+    expect(await exists(notePath('toolu_1'))).toBe(false);
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (free lookup, call runs)',
+    );
+    // A silent offer spends no note window: a note for the same query still shows.
+    expect((await after('next.js middleware matcher', 'toolu_1')).out).toEqual({ response: null });
+    expect((await before('next.js middleware matcher', 'toolu_2')).out.noted).toBe(true);
+  });
 
   it('shows the line after a failed search under its own event name, and nothing on an interrupt', async () => {
     await before('next.js middleware matcher', 'toolu_1');

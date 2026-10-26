@@ -1201,11 +1201,12 @@ async function routeNativeCall(
  *
  * A FREE OFFER IS NEVER A REDIRECT. Denying a search for the free docs lookup
  * sent the agent on a detour, and round a loop when the docs missed. The call
- * runs with no output and no redirect claim. On a WebSearch the server's line
- * is kept, once per query per agent in five minutes, and the after-call arm
- * shows it once the search has run; its footer closes as a shown offer, so
- * the lookup the agent may call resolves to this session. A WebFetch just
- * runs.
+ * runs with no output and no redirect claim. On a WebSearch with
+ * `delivery: "note"` the server's line is kept, once per query per agent in
+ * five minutes, and the after-call arm shows it once the search has run; its
+ * footer closes as a shown offer, so the lookup the agent may call resolves to
+ * this session. Any other free offer, and any WebFetch, just runs: the server
+ * owns which offer is a note.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1240,6 +1241,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
     // Only a search the harness gave an id can be matched to its after-call event.
     const noted =
       pending.tool === 'WebSearch' &&
+      routed.offer.delivery === 'note' &&
       toolUseId !== undefined &&
       (await claimNote(deps.dataDir, session, event.agentId, pending.query, now)) &&
       (await markNoted(deps.dataDir, session, toolUseId, { offerId: id, line: hint }, now));
