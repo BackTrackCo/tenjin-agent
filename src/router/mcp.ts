@@ -32,6 +32,8 @@ import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { createRouterObserver, type RouterObserver } from './router-observer';
 import { chainReader, RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import { handBack, runSwap } from './swap';
+import { runTools } from './tools';
+import { replacementSupportOf } from '../commands/config-readback';
 import {
   fail,
   runApproveTool,
@@ -106,7 +108,9 @@ const INSTRUCTIONS =
   "provider's whole response is saved to the file at `fullResultPath`. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
-  'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
+  'Use /tenjin-tools in Claude Code, or `tenjin tools`, to inspect enabled and disabled tools and their settings. ' +
+  '`{inspect: ""}` returns that read-only inspection, even while paused; a filter stays local. ' +
+  'For callable tools, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free, or a flat $0.003 routing fee; a wallet on ' +
@@ -331,6 +335,14 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       _meta: { [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS, [ALWAYS_LOAD_KEY]: true },
       description: INSTRUCTIONS,
       inputSchema: {
+        inspect: z
+          .string()
+          .max(1000)
+          .optional()
+          .describe(
+            'Sent alone: inspect every tool, including disabled tools and the settings behind their state. ' +
+              'An empty string lists everything; other text filters locally. Free, read-only, available while paused.',
+          ),
         // OPTIONAL ONLY FOR `input`: a discovered service's call carries the
         // object the service takes instead. Every other call still needs it,
         // and the handler answers `needs_input` when neither is there.
@@ -428,9 +440,58 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async (
-      { query, id, input, choice, browse, tool, count, job, override, decide },
+      { query, id, input, choice, browse, tool, count, job, override, decide, inspect },
       extra,
     ): Promise<CallToolResult> => {
+      if (inspect !== undefined) {
+        if (
+          Object.values({
+            query,
+            id,
+            input,
+            choice,
+            browse,
+            tool,
+            count,
+            job,
+            override,
+            decide,
+          }).some((value) => value !== undefined)
+        ) {
+          return toolResult(
+            fail('needs_input', '`inspect` is sent alone; nothing was sent or paid.'),
+          );
+        }
+        const client = server.server.getClientVersion();
+        const result = await runTools({ filter: inspect }, ctx, {
+          ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
+          ...(opts.handlerDeps?.fetchImpl !== undefined
+            ? { fetchImpl: opts.handlerDeps.fetchImpl }
+            : {}),
+          support: replacementSupportOf([
+            {
+              at: 0,
+              harness: opts.harness ?? 'claude',
+              servedSession: true,
+              launchedByPlugin: launchedByPlugin(opts.env),
+              ...(client !== undefined ? { client } : {}),
+            },
+          ]),
+        });
+        return {
+          content: [
+            { type: 'text', text: result.humanLines!.join('\n') },
+            {
+              type: 'text',
+              text: JSON.stringify({
+                status: 'inspection',
+                view: result.data,
+                cost: ['provider price 0 USD'],
+              }),
+            },
+          ],
+        };
+      }
       // Resolved per call, from settings read now: a policy frozen at the
       // first call would leave a limit the user changed with no effect until
       // the harness restarts the server.

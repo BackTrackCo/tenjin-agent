@@ -33,9 +33,19 @@ export type TenjinHeld = {
   price?: string;
 };
 
+/** The read-only tool inspection, rendered by /tenjin-tools. */
+export type TenjinTools = {
+  filter: string;
+  header: string[];
+  lines: string[];
+  page: number;
+  loading: boolean;
+};
+
 declare module 'claude-code' {
   interface PluginState {
     tenjin: {
+      tools: TenjinTools;
       rows: StateFamily<TenjinRow>;
       held: StateFamily<TenjinHeld>;
       /** `hold:<offer id>` and `take:<offer id>`: the held native call and the

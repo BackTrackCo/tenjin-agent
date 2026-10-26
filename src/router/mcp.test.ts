@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -99,6 +99,61 @@ function router(body: unknown): typeof fetch {
 }
 
 describe('the router MCP server', () => {
+  it('inspects disabled tools while paused without routing, unlocking or authorizing', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ router: { enabled: false } }));
+    const directory = JSON.parse(
+      await readFile(new URL('./fixtures/wire-directory.json', import.meta.url), 'utf8'),
+    );
+    const bodies: unknown[] = [];
+    const getSigner = vi.fn(async () => {
+      throw new Error('inspection must not unlock');
+    });
+    const auth = authorizer();
+    const route = vi.fn();
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      harness: 'codex',
+      handlerDeps: {
+        cwd: dir,
+        provider: { ...testWalletProvider(), getSigner },
+        authorizer: auth,
+        route,
+        fetchImpl: async (_url, init) => {
+          bodies.push(JSON.parse(String(init?.body)));
+          return Response.json(directory);
+        },
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'codex', version: '0.163.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const inspect = () =>
+        client.callTool({ name: 'request', arguments: { inspect: 'Exa search' } });
+      expect(envelopeOf(await inspect())).toMatchObject({
+        status: 'inspection',
+        view: { catalog: 'current', rows: [{ id: 'exa-search', state: 'disabled' }] },
+      });
+      expect(bodies).toEqual([{ schemaVersion: 1, directory: {} }]);
+      await writeFile(join(dir, 'config.json'), JSON.stringify({ router: { enabled: true } }));
+      expect(envelopeOf(await inspect())).toMatchObject({
+        view: { rows: [{ id: 'exa-search', state: 'enabled' }] },
+      });
+      const mixed = await client.callTool({
+        name: 'request',
+        arguments: { inspect: '', query: 'pay for a search' },
+      });
+      expect(envelopeOf(mixed)).toMatchObject({ status: 'needs_input' });
+      expect(bodies).toHaveLength(2);
+      expect(getSigner).not.toHaveBeenCalled();
+      expect(auth.authorize).not.toHaveBeenCalled();
+      expect(route).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('advertises one request tool and answers it, then closes cleanly', async () => {
     const fetchImpl = router({
       schemaVersion: 1,
