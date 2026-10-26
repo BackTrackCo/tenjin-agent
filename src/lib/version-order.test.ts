@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import pkg from '../../package.json';
 import { isNewer as reexported } from './update-check';
 import { isNewer, parseVersion } from './version-order';
 
@@ -34,5 +35,30 @@ describe('isNewer', () => {
 
   it('is the one update-check re-exports', () => {
     expect(reexported).toBe(isNewer);
+  });
+});
+
+/**
+ * THE RELEASE CONTRACT. Every installed runtime (alpha.32 on) reads npm's
+ * `latest` tag through parseVersion, so the version this repo publishes must be
+ * one it accepts. Anything else is not "older", it is unreadable: each
+ * machine's daily `tenjin update` throws on it, installs refuse it, and the
+ * build itself can never update again. The version PR's CI and the publish
+ * job's check suite both run this file, which is what stops a hand-edited
+ * version PR (`0.2.0-beta.1`, `0.2.0-rc.1`) before it reaches `latest`.
+ *
+ * Widening VERSION_RE in the same release does not help: the machines reading
+ * `latest` run the code they already have. So the version is also held to
+ * SHIPPED_IN_FIELD, a frozen copy of the grammar alpha.32 shipped: a PR that
+ * widens VERSION_RE and moves the version to the new shape passes the live
+ * check, and fails this one. Widen it only once a build that reads the wider
+ * grammar has reached users.
+ */
+const SHIPPED_IN_FIELD = /^(\d+)\.(\d+)\.(\d+)(?:-alpha\.(\d+))?$/;
+
+describe('the version this repo publishes', () => {
+  it('is one every installed runtime can read', () => {
+    expect(parseVersion(pkg.version), pkg.version).not.toBeNull();
+    expect(pkg.version).toMatch(SHIPPED_IN_FIELD);
   });
 });

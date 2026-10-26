@@ -47,6 +47,7 @@
   "files": [
     "dist",
     "docs",
+    "scripts/installers",
     "NOTICE.md"
   ],
   "packageManager": "pnpm@11.11.0",

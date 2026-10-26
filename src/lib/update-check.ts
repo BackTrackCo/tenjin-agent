@@ -41,6 +41,7 @@ export const NUDGE_OPT_OUT = 'TENJIN_NO_UPDATE_CHECK';
 const CHECK_INTERVAL_MS = 86_400_000; // 24h
 const FETCH_TIMEOUT_MS = 1500;
 const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags';
+const PACKUMENT_URL = 'https://registry.npmjs.org/tenjin-cli';
 
 /** What is known about ONE dist-tag: when it was asked, and what it said. */
 const TagEntrySchema = z.object({
@@ -286,6 +287,34 @@ export async function fetchDistTags(opts: {
   }
   const parsed = DistTagsSchema.safeParse(json);
   return parsed.success ? parsed.data : null;
+}
+
+/**
+ * When the registry says `version` was published, in ms since the epoch, from
+ * the packument's `time` map (the per-version document carries no time). Null
+ * when the registry could not be asked; `{ publishedAt: null }` when it
+ * answered with no time for that version, or one that does not parse. The
+ * registry sets these times itself at publish, and a publisher cannot backdate
+ * them, which is what lets `tenjin update --background` wait on one.
+ */
+export async function fetchPublishTime(
+  version: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs: number },
+): Promise<{ publishedAt: number | null } | null> {
+  let json: { time?: Record<string, unknown> } | null;
+  try {
+    const res = await (opts.fetchImpl ?? fetch)(PACKUMENT_URL, {
+      signal: AbortSignal.timeout(opts.timeoutMs),
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    json = (await res.json()) as typeof json;
+  } catch {
+    return null;
+  }
+  const raw = json?.time?.[version];
+  const at = typeof raw === 'string' ? Date.parse(raw) : NaN;
+  return { publishedAt: Number.isNaN(at) ? null : at };
 }
 
 /**

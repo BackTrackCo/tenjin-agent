@@ -10,6 +10,7 @@ import {
   autoUpdateLine,
   maybeAutoUpdate,
   recordAutoUpdate,
+  TLS_OFF,
 } from './auto-update';
 import { nodeBinPath, versionEntry } from './runtime-layout';
 
@@ -149,6 +150,31 @@ describe('maybeAutoUpdate', () => {
     run(r, { env: { TENJIN_NO_UPDATE_CHECK: '1' } });
     expect(r.calls).toEqual([]);
     expect(existsSync(join(root, AUTO_UPDATE_FILE))).toBe(false);
+  });
+
+  it('starts nothing with TLS checks turned off, and records why once a day for doctor', () => {
+    runtime();
+    const r = recorder();
+    run(r, { env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' } });
+    expect(r.calls).toEqual([]);
+    const at = new Date(NOW).toISOString();
+    expect(record()).toEqual({
+      startedAt: at,
+      finishedAt: at,
+      outcome: 'skipped',
+      reason: TLS_OFF,
+    });
+    expect(TLS_OFF).toBe(
+      'TLS certificate checks are turned off (NODE_TLS_REJECT_UNAUTHORIZED=0); set NODE_EXTRA_CA_CERTS instead',
+    );
+    expect(autoUpdateLine(root)).toBe(`Auto-update: ${at.slice(0, 10)} skipped: ${TLS_OFF}`);
+    // Once a day, like a run: the next session does not rewrite it.
+    run(r, { env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, now: NOW + HOUR });
+    expect(record()).toMatchObject({ startedAt: at });
+    // Any other value leaves Node's checks on.
+    rmSync(join(root, AUTO_UPDATE_FILE));
+    run(r, { env: { NODE_TLS_REJECT_UNAUTHORIZED: '1' } });
+    expect(r.calls).toHaveLength(1);
   });
 
   it('stays put for a data dir that is not the default, which has no runtime', () => {
