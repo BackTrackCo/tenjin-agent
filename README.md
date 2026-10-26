@@ -128,7 +128,7 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 | Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Browsing tools and their specs is free.
+- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. The stock payment SDK usually sets aside $0.03 at a time for routing; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)

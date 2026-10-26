@@ -132,9 +132,8 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit is always the full $0.25 and meets the whole policy once, as
-  // the payer's `depositStrategy` meets it; an unreadable ledger counts as
-  // nothing spent, as an absent one does.
+  // Offline estimate from the production server's deposit hint. The payer
+  // checks the SDK's actual amount again before signing.
   const deposit = evaluateSpendPolicy(input.policy, {
     mode: 'automatic',
     amountAtomic: CHANNEL_DEPOSIT_ATOMIC,

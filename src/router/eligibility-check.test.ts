@@ -75,6 +75,19 @@ function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
 }
 
 describe('checkEligibility', () => {
+  it('can pay from a wallet below $0.25 when the normal SDK deposit fits', async () => {
+    await writeWallet();
+    const e = await checkEligibility(
+      input({
+        provider: fakeProvider({ verify: async () => verified('keychain') }),
+        readBalance: async () => 210_000n,
+        policy: { ...POLICY, sessionBudgetAtomic: 500_000n },
+        readSpent: async () => 470_000n,
+      }),
+    );
+    expect(e.canPayRouting).toEqual({ status: 'ready', source: 'keychain' });
+  });
+
   it('a verify that throws gives unknown and never rejects', async () => {
     await writeWallet();
     const e = await checkEligibility(

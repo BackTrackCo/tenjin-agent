@@ -18,9 +18,9 @@ export const ROUTE_PAID_PATH = '/api/x402-router/route';
 
 /** The flat fee per routing call, atomic USDC ($0.003). */
 export const ROUTING_FEE_ATOMIC = 3_000n;
-/** The largest channel deposit, atomic USDC ($0.25), made inline by the SDK
- *  on the first paid call of a channel that cannot cover the next fee. */
-export const CHANNEL_DEPOSIT_ATOMIC = 250_000n;
+/** The production server's default deposit hint: ten routing fees. Used for
+ *  offline eligibility; the payer authorizes the SDK's actual deposit amount. */
+export const CHANNEL_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
 /**
  * The top-up every "fund the wallet" hint names, in USD: the checkout's Apple
  * Pay and Google Pay minimum, which covers the routing deposit and a few
@@ -92,19 +92,18 @@ export function isFeeRequired(response: unknown): boolean {
  * carry the PERSON `fix`, never `agentFix`: this sentence goes in the hook's
  * `systemMessage`, which the harness shows the person (B1, decision 15), and a
  * fix that names `tenjin wallet repair` says it asks in their own terminal.
- * Every other entry, `wallet_low` included, is byte for byte what it was (S5).
  */
 const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fromEntries(
   Object.entries(WALLET_REASONS).map(([key, { reason, fix }]) => [key, { reason, fix }]),
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} routing deposit`,
+    reason: `the wallet holds less than the usual $${usd(CHANNEL_DEPOSIT_ATOMIC)} needed to set aside for routing`,
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
   limit_below_deposit: {
-    reason: `the per-call spend limit is below the $${usd(CHANNEL_DEPOSIT_ATOMIC)} routing deposit`,
+    reason: 'the per-call spend limit cannot cover the routing fee or its deposit',
     fix: 'Run `tenjin doctor`.',
   },
   budget_reached: {
@@ -141,11 +140,11 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 
 /**
  * The one line said when a routing call's deposit went through: the money is
- * prepaid credit the next calls draw from, not a lookup it bought. It still
+ * funds set aside for the next routing fees, not a lookup it bought. It still
  * counts toward the daily limit ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin moved $${usd(amountAtomic)} into prepaid routing credit; each routing call uses $${usd(ROUTING_FEE_ATOMIC)}.`;
+  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing decision costs $${usd(ROUTING_FEE_ATOMIC)}. Unused funds remain yours.`;
 }
 
 /**

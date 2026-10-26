@@ -195,7 +195,7 @@ describe('Codex automatic hooks', () => {
           hookEventName: 'UserPromptSubmit',
           additionalContext: expect.stringContaining('mcp__router__request'),
         },
-        systemMessage: expect.stringContaining('prepaid routing credit'),
+        systemMessage: expect.stringContaining('set aside $0.03 for routing'),
       });
       const native = await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
       expect(native).toMatchObject({
@@ -210,7 +210,7 @@ describe('Codex automatic hooks', () => {
       ]);
       expect(fake.deposits).toBe(1);
       // The deposit counts against the daily budget, as an MCP lookup's does.
-      expect((await readSpendSummary(dir))?.committedAtomic).toBe('250000');
+      expect((await readSpendSummary(dir))?.committedAtomic).toBe('30000');
     } finally {
       await server.close();
     }
@@ -225,7 +225,7 @@ describe('Codex automatic hooks', () => {
       new URL(input instanceof Request ? input.url : String(input)).pathname === '/api/x402-router'
         ? Response.json(FEE_REQUIRED)
         : free(input, init)) as typeof fetch;
-    const server = await connect(fake, { walletBalance: async () => 50_000n }, routed);
+    const server = await connect(fake, { walletBalance: async () => 20_000n }, routed);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
       expect(out).toEqual({ systemMessage: expect.stringContaining('`tenjin wallet fund 5`') });

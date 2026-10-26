@@ -26,7 +26,6 @@ import {
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
-  CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   payerDir,
   refusedWhy,
@@ -115,7 +114,8 @@ const NOT_CHECKED: SignVerdict = {
  * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
  * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
  * two together are the largest deposit: $0.05 × 5 = $0.25
- * ({@link CHANNEL_DEPOSIT_ATOMIC}). The exact fee is the payment policy's to hold.
+ * while the SDK chooses the actual amount from the server's deposit hint.
+ * The exact fee is the payment policy's to hold.
  */
 export const ROUTING_SPEND_CAP = '$0.05';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
@@ -705,7 +705,7 @@ export class RoutingPayer {
 
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size, and the refusals. The deposit is always the SDK's ceiling ($0.25); a
+   * authorization and the refusals. The SDK chooses the deposit amount; a
    * wallet that cannot cover it, or a spend the authorizer denies (the per-call
    * limit, the daily budget, the creator allowlist), refuses it and the call is
    * not paid.
@@ -714,7 +714,7 @@ export class RoutingPayer {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
-    const amount = BigInt(ctx.maxDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString());
+    const amount = BigInt(ctx.depositAmount);
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
     const payer = this.channel!.payer;

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { BatchSettlementEvmScheme } from '@x402/evm/batch-settlement/server';
 import { KEYCHAIN_LOCKED_FIX, REPAIR_CLAUSE } from '../lib/wallet-unlock';
-import { unpaid, unpaidSentence } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, unpaid, unpaidSentence } from './fee';
+import { FakeRouter } from './fee-test-utils';
 import { ASK_FOR_REPAIR, WALLET_REASONS } from './wallet-reasons';
 
 /** Every key the routing payer can skip with, and the free path's own. */
@@ -15,6 +17,12 @@ const ALL_KEYS = [
 ];
 
 describe('UNPAID wallet entries', () => {
+  it('keeps offline eligibility aligned with the pinned server SDK deposit hint', async () => {
+    const scheme = new BatchSettlementEvmScheme('0x0000000000000000000000000000000000000001');
+    const requirement = { ...new FakeRouter().requirement, extra: {} };
+    expect(CHANNEL_DEPOSIT_ATOMIC).toBe(BigInt(await scheme.resolveMinDepositHint(requirement)));
+  });
+
   it('is {reason, fix} from WALLET_REASONS, the PERSON fix, for every wallet key', () => {
     for (const [key, entry] of Object.entries(WALLET_REASONS)) {
       expect(unpaid(key), key).toEqual({ reason: entry.reason, fix: entry.fix });
@@ -47,26 +55,26 @@ describe('UNPAID wallet entries', () => {
 });
 
 describe('unpaidSentence', () => {
-  // Captured from d44fcf58, before the wallet reasons changed: these must not move (S5).
-  const BEFORE: Record<string, string> = {
+  // User-visible notices keep the funding and recovery action with the reason.
+  const EXPECTED: Record<string, string> = {
     no_wallet:
       'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.25 routing deposit), so Tenjin is not routing calls until that is fixed. Fund it with `tenjin wallet fund 5`.',
+      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the usual $0.03 needed to set aside for routing), so Tenjin is not routing calls until that is fixed. Fund it with `tenjin wallet fund 5`.',
     fee_required:
       'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
       'Tenjin routing could not pay its $0.003 fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     limit_below_deposit:
-      'Tenjin routing could not pay its $0.003 fee (the per-call spend limit is below the $0.25 routing deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     budget_reached:
       'Tenjin routing could not pay its $0.003 fee (the daily spend limit has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     not_allowlisted:
       'Tenjin routing could not pay its $0.003 fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
   };
 
-  it('matches the pre-change strings byte for byte', () => {
-    for (const [why, sentence] of Object.entries(BEFORE)) {
+  it('includes the current routing terms and recovery guidance', () => {
+    for (const [why, sentence] of Object.entries(EXPECTED)) {
       expect(unpaidSentence(why), why).toBe(sentence);
     }
   });
