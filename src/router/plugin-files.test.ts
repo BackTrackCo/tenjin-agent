@@ -40,6 +40,7 @@ import {
   type ModSources,
 } from './plugin-files';
 import { readModSources } from './plugin-folder';
+import { PAY_SKILL, PAY_SKILL_PATH } from './plugin-skill';
 
 const HOSTS = fileURLToPath(new URL('../../hosts/claude', import.meta.url));
 
@@ -409,9 +410,18 @@ describe('the checked-in hosts/codex templates', () => {
     const rendered = renderCodexHostFiles();
     expect(filesUnder(CODEX_HOSTS)).toEqual(Object.keys(rendered).sort());
     for (const [path, body] of Object.entries(rendered)) {
-      expect(JSON.parse(readFileSync(join(CODEX_HOSTS, path), 'utf8')), path).toEqual(
-        JSON.parse(body),
-      );
+      const checkedIn = readFileSync(join(CODEX_HOSTS, path), 'utf8');
+      if (path.endsWith('.json')) expect(JSON.parse(checkedIn), path).toEqual(JSON.parse(body));
+      else expect(checkedIn, path).toBe(body);
+    }
+  });
+
+  it('exposes the shared payment skill in the package and runtime plugins', () => {
+    for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
+      const manifest = JSON.parse(files['tenjin/.codex-plugin/plugin.json']!);
+      expect(manifest.skills).toBe('./skills/');
+      expect(files[`tenjin/${PAY_SKILL_PATH}`]).toBe(PAY_SKILL);
+      expect(files[`tenjin/${PAY_SKILL_PATH}`]).toBe(renderPluginFiles()[PAY_SKILL_PATH]);
     }
   });
 

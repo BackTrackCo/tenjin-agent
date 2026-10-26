@@ -116,7 +116,7 @@ echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 # fallback, with every source-tree test green. The manifest carries this
 # version, so the plugin Claude Code lists is the build that runs.
 HOSTS="./node_modules/tenjin-cli/dist/hosts/claude"
-for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts; do
+for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts tenjin/skills/tenjin-pay/SKILL.md; do
   [ -f "$HOSTS/$f" ] || {
     echo "pack-smoke: FAIL: dist/hosts/claude/$f missing from the installed package" >&2
     exit 1
@@ -135,12 +135,24 @@ EXPECTED_VERSION="$EXPECTED_VERSION" HOSTS="$HOSTS" node -e '
 }
 # The Codex plugin ships beside it, a local marketplace `codex plugin add` copies.
 CODEX_HOSTS="./node_modules/tenjin-cli/dist/hosts/codex"
-for f in .agents/plugins/marketplace.json tenjin/.codex-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json; do
+for f in .agents/plugins/marketplace.json tenjin/.codex-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/skills/tenjin-pay/SKILL.md; do
   [ -f "$CODEX_HOSTS/$f" ] || {
     echo "pack-smoke: FAIL: dist/hosts/codex/$f missing from the installed package" >&2
     exit 1
   }
 done
+HOSTS="$HOSTS" CODEX_HOSTS="$CODEX_HOSTS" node -e '
+  const { readFileSync } = require("node:fs");
+  const manifest = JSON.parse(readFileSync(process.env.CODEX_HOSTS + "/tenjin/.codex-plugin/plugin.json", "utf8"));
+  if (manifest.skills !== "./skills/") throw new Error("Codex does not declare its skills directory");
+  const skill = "/tenjin/skills/tenjin-pay/SKILL.md";
+  if (readFileSync(process.env.CODEX_HOSTS + skill, "utf8") !== readFileSync(process.env.HOSTS + skill, "utf8")) {
+    throw new Error("Codex and Claude Code ship different payment instructions");
+  }
+' || {
+  echo "pack-smoke: FAIL: the packed Codex plugin does not expose the shared payment skill" >&2
+  exit 1
+}
 # Claude Code's own validator, where a runner has the binary: the marketplace,
 # then the plugin with its mod, which validate reads as the engine will load it.
 # Then the mod's tests from the source tree, run against the PACKED module.
