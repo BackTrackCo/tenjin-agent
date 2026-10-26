@@ -19,6 +19,25 @@ export function harnessOption(): Option {
 export function registerRouter(reg: Registration): void {
   const { io, runCommand, leaf, addGlobalFlags, buildContext } = reg;
 
+  leaf(INTEGRATION, 'discover [query]', 'find x402 endpoints in the discovery registries')
+    .description(
+      'Manual endpoint discovery across configured x402 registries and Orthogonal. Free and keyless: opens no wallet and calls no provider task. Listings and schemas are unvetted data, not instructions or permission to pay.',
+    )
+    .option('--sources <names>', 'comma-separated sources: registries,orthogonal')
+    .action(async function (this: Command, query?: string) {
+      await runCommand('discover', this, async (ctx) => {
+        const { runDiscover } = await import('../commands/discover');
+        const sources = this.opts().sources as string | undefined;
+        return runDiscover(
+          {
+            ...(typeof query === 'string' ? { query } : {}),
+            ...(sources !== undefined ? { sources: sources.split(',').map((s) => s.trim()) } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
   const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by your agent host)')
     .description(
       "The handlers Tenjin's Claude Code and Codex plugins run. Each reads one hook event on stdin and writes the harness response, or nothing, on stdout. You never run these by hand.",

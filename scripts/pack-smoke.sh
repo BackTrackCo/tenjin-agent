@@ -215,6 +215,22 @@ printf '%s' "$CONFIG_OUT" | node -e '
 }
 echo "pack-smoke: config -> exit 0, JSON envelope with schemaVersion (ok)"
 
+# Load the discover command from the published chunks, with no network or wallet.
+mkdir -p "$DATA_DIR/discovery"
+printf '%s\n' '{"bazaarRegistries":[]}' > "$DATA_DIR/discovery/config.json"
+DISCOVERY_OUT="$(TENJIN_DATA_DIR="$DATA_DIR/discovery" "$BIN" discover 'speech synthesis' --sources registries --json)"
+printf '%s' "$DISCOVERY_OUT" | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    const o = JSON.parse(s);
+    if (!o.ok || o.command !== "discover" || o.data.query !== "speech synthesis" ||
+        o.data.registries.length !== 0 || o.data.resources.length !== 0 || o.data.errors.length !== 0) {
+      throw new Error("the packed discover command did not return the configured registry sweep");
+    }
+  });
+'
+echo "pack-smoke: discover -> configured registry sweep, no wallet (ok)"
+
 # 3) A bogus subcommand exits 2 with a parseable JSON error envelope.
 set +e
 BOGUS_OUT="$("$BIN" definitely-not-a-real-command 2>/dev/null)"
