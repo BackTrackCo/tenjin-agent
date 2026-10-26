@@ -183,7 +183,7 @@ export async function removeAliveState(dataDir: string): Promise<boolean> {
 }
 
 /** How long the leg waits on a balance read before it says nothing. */
-export const WALLET_READ_MS = 2_000;
+export const WALLET_READ_MS = 500;
 
 /**
  * THE WALLET, SAID TO THE PERSON AT THE START OF A SESSION while it cannot
@@ -194,28 +194,56 @@ export const WALLET_READ_MS = 2_000;
  */
 export async function walletNotice(
   dataDir: string,
-  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number } = {},
+  opts: {
+    read?: typeof readUsdcBalanceWithFallback;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<string | null> {
-  const wallet = await readJson(walletPath(dataDir));
-  const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
-  if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
-  const config = await readJson(configPath(dataDir));
-  const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
-  const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
-  const read = rememberingBalanceReader(dataDir, {
-    ...(opts.read !== undefined ? { read: opts.read } : {}),
+  // An env key pays from another wallet; never report the file wallet's funds.
+  if ((opts.env ?? process.env).TENJIN_WALLET_KEY?.trim()) return null;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Race the WHOLE operation, including body decoding. Abort alone depends on
+  // the transport honoring it and cannot guarantee that SessionStart returns.
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(
+      () => {
+        controller.abort();
+        resolve(null);
+      },
+      Math.min(WALLET_READ_MS, opts.timeoutMs ?? WALLET_READ_MS),
+    );
+    timer.unref();
   });
-  const balance = await read(address, rpcUrl, { timeoutMs });
-  if (balance === null) return null;
-  // The per-call limit as the spend policy reads it: the file's, else the default.
-  const cap = BigInt(
-    typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
-      ? config.maxAutoSpend
-      : DEFAULT_MAX_AUTO_SPEND,
-  );
-  if (balance > 0n && balance >= cap) return null;
-  // Only the person reads it, inside the session: they ask, the agent runs it.
-  return `Tenjin balance: $${dollars(balance)}. Ask your agent to add funds to Tenjin.`;
+  const check = async (): Promise<string | null> => {
+    const wallet = await readJson(walletPath(dataDir));
+    const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
+    if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
+    const config = await readJson(configPath(dataDir));
+    const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
+    const timeoutMs = Math.min(WALLET_READ_MS, opts.timeoutMs ?? WALLET_READ_MS);
+    const read = rememberingBalanceReader(dataDir, {
+      read: opts.read ?? readUsdcBalanceWithFallback,
+    });
+    const balance = await read(address, rpcUrl, { timeoutMs, signal: controller.signal });
+    if (balance === null || controller.signal.aborted) return null;
+    // The per-call limit as the spend policy reads it: the file's, else the default.
+    const cap = BigInt(
+      typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
+        ? config.maxAutoSpend
+        : DEFAULT_MAX_AUTO_SPEND,
+    );
+    if (balance > 0n && balance >= cap) return null;
+    // Only the person reads it, inside the session: they ask, the agent runs it.
+    return `Tenjin last checked balance: $${dollars(balance)}. Ask your agent to check funds and add funds if needed. After checkout, check \`tenjin wallet balance\` before funding again.`;
+  };
+  try {
+    return await Promise.race([check().catch(() => null), deadline]);
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
 }
 
 /** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
@@ -257,7 +285,12 @@ export async function aliveMain(opts: {
     version: opts.version,
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   });
-  const notice = answer === null ? await walletNotice(opts.dataDir).catch(() => null) : null;
+  const notice =
+    answer === null
+      ? await walletNotice(opts.dataDir, {
+          ...(opts.env !== undefined ? { env: opts.env } : {}),
+        }).catch(() => null)
+      : null;
   const payload = answer ?? (notice !== null ? { systemMessage: notice } : null);
   if (payload === null) return;
   const out = opts.stdout ?? process.stdout;

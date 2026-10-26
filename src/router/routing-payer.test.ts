@@ -613,11 +613,11 @@ describe('RoutingPayer', () => {
     expect(router.paidRequests()).toBe(0);
   });
 
-  it('signs no deposit from a wallet that cannot cover it', async () => {
+  it('leaves deposit funding verification to the facilitator', async () => {
     const router = new FakeRouter();
     const p = payer(router, { walletAtomic: 100_000n });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_low');
-    expect(router.paidRequests()).toBe(0);
+    await routeOnce(p, router);
+    expect(router.paidRequests()).toBeGreaterThan(0);
   });
 
   it('applies the creator allowlist to a deposit', async () => {
@@ -1029,9 +1029,7 @@ describe('RoutingPayer and the wallet verdict', () => {
     const low = new FakeRouter();
     const lowSeen: PayerObservation[] = [];
     await routeOnce(payer(low, { walletAtomic: 100_000n, observe: (u) => lowSeen.push(u) }), low);
-    expect(lowSeen.map((u) => u.routing).filter(Boolean)).toEqual([
-      { status: 'blocked', reason: 'wallet_low', at: clock },
-    ]);
+    expect(lowSeen.map((u) => u.routing).filter(Boolean)).toEqual([{ status: 'ready', at: clock }]);
 
     const greedy = new FakeRouter({ amount: '30000' });
     const greedySeen: PayerObservation[] = [];

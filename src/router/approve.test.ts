@@ -292,19 +292,36 @@ describe("approve, called through the host's own prompt", () => {
     expect(paidCalls()).toEqual([]);
   });
 
-  it('never runs past the balance, and leaves the quote for a funded wallet', async () => {
+  it('uses an approved quote once without a balance preflight', async () => {
     await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
     const { fetchImpl, paidCalls } = seller();
     const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
-    const short = await runApproveTool(
-      { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl, authorizer(), 100_000n), approves: true },
-    );
-    // The wallet emptied after the quote: the fund command, nothing paid.
-    expect(short.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
-    expect(String(short.envelope.reason)).toContain('`tenjin wallet fund`');
-    expect(paidCalls()).toEqual([]);
-    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const low = { ...deps(fetchImpl, authorizer(), 100_000n), approves: true };
+    expect((await runApproveTool(args, low)).envelope).toMatchObject({ status: 'fulfilled' });
+    expect(paidCalls().length).toBeGreaterThan(0);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, low)).envelope).toMatchObject({ status: 'needs_input' });
+  });
+
+  it('does not reopen an approved quote after a transmitted payment is rejected', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    let signed = 0;
+    const rejected = (async (...args: Parameters<typeof fetch>) => {
+      if (new Headers(args[1]?.headers).has('payment-signature')) {
+        signed += 1;
+        return new Response('{}', { status: 402 });
+      }
+      return normal.fetchImpl(...args);
+    }) as typeof fetch;
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(rejected), approves: true };
+    expect((await runApproveTool(args, d)).envelope.status).toBe('failed');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(signed).toBe(1);
   });
 
   /** THE WALLET OPENS BEFORE THE QUOTE IS USED UP: a saved passphrase that

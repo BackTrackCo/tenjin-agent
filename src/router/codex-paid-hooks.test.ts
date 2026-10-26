@@ -225,13 +225,23 @@ describe('Codex automatic hooks', () => {
       new URL(input instanceof Request ? input.url : String(input)).pathname === '/api/x402-router'
         ? Response.json(FEE_REQUIRED)
         : free(input, init)) as typeof fetch;
-    const server = await connect(fake, { walletBalance: async () => 50_000n }, routed);
+    const server = await connect(
+      fake,
+      {
+        policy: async () => ({
+          maxAutoSpendAtomic: 0n,
+          sessionBudgetAtomic: null,
+          allowlistCreators: [],
+        }),
+      },
+      routed,
+    );
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({ systemMessage: expect.stringContaining('`tenjin wallet fund 5`') });
+      expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
       expect(fake.paidRequests()).toBe(0);
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
-        'prompt: fee unpaid: wallet_low',
+        'prompt: fee unpaid: limit_below_deposit',
       );
     } finally {
       await server.close();

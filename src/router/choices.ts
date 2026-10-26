@@ -4,14 +4,7 @@ import { toMoney } from '../lib/money';
 import type { SpendPolicy } from '../lib/policy';
 import { admitPlan, type PlanSlot } from '../lib/spend-plan';
 import { ALL_CHOICES, type Choices, type OfferSpec, type SpecOutcome } from './decision';
-import {
-  choicesOf,
-  planStop,
-  takesOf,
-  walletBalance,
-  type PlanWords,
-  type QuotedCall,
-} from './plan';
+import { choicesOf, planStop, takesOf, type PlanWords, type QuotedCall } from './plan';
 import { SILENT_FOOTER, type LookupFooter } from './progress';
 import {
   claimSpecPayment,
@@ -174,9 +167,8 @@ type StepResult = { status: unknown } & Record<string, unknown>;
  * 4. The claimed steps are priced live (`price`), and are the call's plan,
  *    each at its price; one its seller would not quote drops its claim and
  *    is its own entry, or stops them all. The plan is admitted as a whole:
- *    its total under `maxAutoSpend` and the day's budget, and inside the
- *    balance. If not, every claim is dropped and nothing is signed: over the
- *    limits, the plan is kept as a quote for the user's yes. A quote the
+ *    its total under `maxAutoSpend` and the day's budget. If not, every claim
+ *    is dropped and nothing is signed: over the limits, the plan is kept as a quote for the user's yes. A quote the
  *    user approved brings its own slots instead, one per claimed step, or
  *    nothing runs.
  * 5. Every planned step pays at once, each against its own slot, through the
@@ -251,7 +243,6 @@ async function runTakes(
       const admission = await admitPlan(payments, {
         dataDir,
         policy: settings.policy,
-        balance: () => walletBalance(deps, settings.rpcUrl),
         ...(deps.now !== undefined ? { now: deps.now } : {}),
       });
       if (!('admitted' in admission)) {
@@ -593,7 +584,7 @@ const TAKES_NEXT_STEP =
  * take's request key ends in `#n`, or the same-turn duplicate guard would
  * deny takes 2 to N as one request repeated. One unpaid probe quotes a take
  * at this input's live price, and the count's plan is N takes at it: their
- * total meets the automatic limits and the balance before any take is
+ * total meets the automatic limits before any take is
  * signed, and a take quoted higher when it is signed is refused there. A take
  * the seller answers before it is ready is a job under the offer's id,
  * resumed with `request({job})`. The offer is reported once, for the count as

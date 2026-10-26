@@ -22,7 +22,6 @@ import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../li
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import { buildSpecRequest } from '../router/spec-call';
 import type { ToolSpec } from '../router/decision';
-import { DEFAULT_RPC_URL, FALLBACK_RPC_URLS, rememberingBalanceReader } from '../lib/usdc-balance';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -56,7 +55,6 @@ async function planned(amountAtomic: bigint): Promise<PlanSlot> {
   const plan = await admitPlan([{ amountAtomic, creator: 'seller.example' }], {
     dataDir: dir,
     policy: { maxAutoSpendAtomic: 10n ** 12n, sessionBudgetAtomic: null, allowlistCreators: [] },
-    balance: async () => null,
   });
   if (!('admitted' in plan)) throw new Error('a roomy plan was not admitted');
   return plan.admitted[0]!;
@@ -1717,9 +1715,7 @@ describe('runPay, the shared request gate', () => {
       payments: [{ amountAtomic: 100_000n, creator: 'seller.example' }],
       call: {},
     });
-    const admitted = await admitQuote(dir, quote.id, {
-      balance: async () => null,
-    });
+    const admitted = await admitQuote(dir, quote.id, {});
     if (!('admitted' in admitted)) throw new Error('the quote was not admitted');
     const fixture = buildPaymentRequired();
     const { fetch } = scriptedFetch([
@@ -2351,44 +2347,26 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     });
     expect(confirm).toHaveBeenCalledOnce();
   });
-  it.each([null, 0n, 99_999n])(
-    'balance %s releases the real reservation and never signs or counts spend',
-    async (balance) => {
-      await writeConfig({ sessionBudget: 'none' });
-      warningRegistry('unlisted');
-      const { fetch, calls } = paymentResponses();
-      const provider = testWalletProvider();
-      const signer = await provider.getSigner();
-      const sign = vi.spyOn(signer, 'signTypedData');
-      const readBalance = vi.fn(async () => balance);
-      await expect(
-        runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true }, makeCtx(), {
-          ...PUBLIC_DNS,
-          fetchImpl: fetch,
-          provider,
-          readBalance,
-        }),
-      ).rejects.toMatchObject({
-        code: 'REFUSED',
-        details: { reason: balance === null ? 'balance_unavailable' : 'insufficient_funds' },
-        ...(balance === 99_999n
-          ? {
-              message: expect.stringContaining(
-                'It holds 0.099999 USD and this costs 0.1 USD: 0.000001 USD short.',
-              ),
-            }
-          : {}),
-      });
-      expect(readBalance).toHaveBeenCalledWith(signer.address, expect.any(String), {
-        timeoutMs: expect.any(Number),
-      });
-      expect(sign).not.toHaveBeenCalled();
-      expect(readBalance).toHaveBeenCalledTimes(balance === null ? 2 : 1);
-      expect(calls).toHaveLength(1);
-      const { readSpendSummary } = await import('../lib/wallet/spend');
-      expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '0', reservations: [] });
-    },
-  );
+  it.each([null, 0n, 99_999n])('signs offline without consulting balance %s', async (balance) => {
+    await writeConfig({ sessionBudget: 'none' });
+    warningRegistry('unlisted');
+    const { fetch, calls } = paymentResponses();
+    const readBalance = vi.fn(async () => balance);
+    const result = await runPay({ url: FOREIGN_URL, ignoreWarnings: true, yes: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      readBalance,
+    });
+    expect(result.data).toMatchObject({ paid: true });
+    expect(readBalance).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    const { readSpendSummary } = await import('../lib/wallet/spend');
+    expect(await readSpendSummary(dir)).toMatchObject({
+      committedAtomic: '100000',
+      reservations: [],
+    });
+  });
   it.each([{ sessionBudget: '0' }, { sessionBudget: '99999' }, { maxAutoSpend: '0' }, {}])(
     'manual pay ignores automatic limits %j but always requires consent',
     async (settings) => {
@@ -2430,53 +2408,19 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     });
     expect(result.data).toMatchObject({ paid: true });
   });
-  it('retries an unreadable balance once before signing', async () => {
-    const readBalance = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(100_000n);
-    const result = await runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
-      ...PUBLIC_DNS,
-      fetchImpl: paymentResponses().fetch,
-      provider: testWalletProvider(),
-      readBalance,
-    });
-    expect(result.data).toMatchObject({ paid: true });
-    expect(readBalance).toHaveBeenCalledTimes(2);
-    expect(readBalance.mock.calls[1]![2].timeoutMs).toBeLessThan(5000);
-  });
-  /** THE SIGNER'S BALANCE IS READ LIVE before signing (docs/agent-permissions.md).
-   *  The balance the hooks remembered a minute ago can be one the wallet has
-   *  since spent, so it never stands in for a read that failed. */
-  it('refuses an unreadable balance even with one the hooks remembered', async () => {
-    const provider = testWalletProvider();
-    const signer = await provider.getSigner();
-    const remember = rememberingBalanceReader(dir, { read: async () => 100_000_000n });
-    expect(await remember(signer.address, 'https://rpc.test', { timeoutMs: 1_000 })).toBe(
-      100_000_000n,
-    );
+  it('makes no balance RPC even when all public RPCs are unavailable', async () => {
     const asked: string[] = [];
     vi.stubGlobal('fetch', async (input: unknown) => {
       asked.push(String(input));
       return new Response('over rate limit', { status: 429 });
     });
-    const sign = vi.spyOn(signer, 'signTypedData');
-    const { fetch, calls } = paymentResponses();
-    await expect(
-      runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
-        destination: PUBLIC_DNS.destination,
-        fetchImpl: fetch,
-        provider,
-      }),
-    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'balance_unavailable' } });
-    // Both reads asked the default and each public fallback, live.
-    expect(asked).toEqual([
-      DEFAULT_RPC_URL,
-      ...FALLBACK_RPC_URLS,
-      DEFAULT_RPC_URL,
-      ...FALLBACK_RPC_URLS,
-    ]);
-    expect(sign).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(1);
-    const { readSpendSummary } = await import('../lib/wallet/spend');
-    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '0', reservations: [] });
+    const result = await runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
+      destination: PUBLIC_DNS.destination,
+      fetchImpl: paymentResponses().fetch,
+      provider: testWalletProvider(),
+    });
+    expect(result.data).toMatchObject({ paid: true });
+    expect(asked).toEqual([]);
   });
   it('both flags cannot bypass an explicit price cap', async () => {
     await writeConfig({ sessionBudget: 'none' });
@@ -2527,7 +2471,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
 });
 
 describe('payment hard gates with acknowledged warnings', () => {
-  it('checks the selected signer and configured RPC after confirmation, then commits the transmitted exposure', async () => {
+  it('signs after confirmation without RPC, then commits transmitted exposure', async () => {
     await writeConfig({
       sessionBudget: 'none',
       maxAutoSpend: '0',
@@ -2565,10 +2509,8 @@ describe('payment hard gates with acknowledged warnings', () => {
       code: 'PAYMENT_FAILED',
       details: { amountAtomic: '100000' },
     });
-    expect(order).toEqual(['confirm', 'balance', 'sign']);
-    expect(readBalance).toHaveBeenCalledWith(signer.address, 'https://rpc.example.test', {
-      timeoutMs: expect.any(Number),
-    });
+    expect(order).toEqual(['confirm', 'sign']);
+    expect(readBalance).not.toHaveBeenCalled();
     expect(calls).toHaveLength(2);
     const { readSpendSummary } = await import('../lib/wallet/spend');
     expect(await readSpendSummary(dir)).toMatchObject({

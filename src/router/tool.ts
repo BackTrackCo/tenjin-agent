@@ -63,7 +63,6 @@ import {
   planStop,
   quotedCall,
   quoteView,
-  walletBalance,
   type PlanStop,
   type QuotedCall,
 } from './plan';
@@ -139,7 +138,7 @@ import {
  * success rule against the compiler, its destination against the shared
  * preflight inside `runPay`, and the call's SPEND PLAN: every payment it will
  * make, at its quoted amount, whose total meets `maxAutoSpend` (the limit for
- * the whole call), the day's `sessionBudget` and the balance at once
+ * the whole call) and the day's `sessionBudget` at once
  * (`lib/spend-plan.ts`). `runPay` signs a router payment only against a slot
  * of an admitted plan, and `gateSpend` still meets each one. That is the
  * whole money story: a hostile backend can name any origin and spend at most
@@ -299,7 +298,7 @@ export interface ApproveToolArgs {
  * person's yes; nothing on disk counts as one. The prompt shows the call's
  * arguments, so the total and what it buys must be there and must be the
  * quote's. A yes runs the quote once, past `maxAutoSpend` and the day's
- * budget, which a person just agreed to, never past the balance, and answers
+ * budget, which a person just agreed to, and answers
  * as `request` would have.
  */
 export async function runApproveTool(
@@ -378,7 +377,6 @@ export async function runApproveTool(
   };
   const settings = await resolveContextSettings(deps.ctx);
   const admitted = await admitQuote(dataDir, quote.id, {
-    balance: () => walletBalance(call_, settings.rpcUrl),
     now,
   });
   if ('refused' in admitted) {
@@ -388,14 +386,6 @@ export async function runApproveTool(
         ? 'That quote already ran, and a quote pays once, so nothing more was paid.'
         : 'That quote can no longer run, so nothing was paid.',
       { nextStep: fresh },
-    );
-  }
-  if ('short' in admitted) {
-    const { balanceAtomic, totalAtomic } = admitted.short;
-    return fail(
-      'failed',
-      `${quote.sentence} The wallet holds $${toMoney(balanceAtomic.toString()).usd}, $${toMoney((totalAtomic - balanceAtomic).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
-      { nextStep: 'Tell the user. The quote waits for its ten minutes; nothing was paid.' },
     );
   }
   const slots = admitted.admitted;
@@ -1242,7 +1232,7 @@ const PLAN_STOP = 'planStop';
 /**
  * A PLAN OF ONE, admitted at the price `runPay` is about to sign, before the
  * wallet is opened: the same planner several payments meet, so one call is
- * one rule. Over the limits, under the allowlist, or past the balance it is
+ * one rule. Over the limits or outside the allowlist it is
  * stopped, and the stop rides the throw back to {@link payAndDeliver}.
  */
 function admitAlone(
@@ -1256,7 +1246,6 @@ function admitAlone(
     const admission = await admitPlan(payments, {
       dataDir: deps.ctx.dataDir,
       policy: settings.policy,
-      balance: () => walletBalance(deps, settings.rpcUrl),
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     });
     if ('admitted' in admission) return admission.admitted[0]!;

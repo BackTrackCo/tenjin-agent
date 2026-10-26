@@ -10,7 +10,6 @@ import { z } from 'zod';
 import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
-import { readUsdcBalance } from '../lib/usdc-balance';
 import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -644,7 +643,6 @@ async function routingPayer(
         onCorrupt: (reason) =>
           process.stderr.write(`tenjin mcp: the spend ledger was unreadable (${reason})\n`),
       }),
-    walletBalance: (address, timeoutMs) => readUsdcBalance(address, settings.rpcUrl, { timeoutMs }),
     readContract: chainReader(settings.rpcUrl),
     observe: observer.observe,
     unlockStamp: observer.unlockStamp,

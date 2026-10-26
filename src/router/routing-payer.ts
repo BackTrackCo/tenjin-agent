@@ -140,12 +140,9 @@ export const SIGNER_RECHECK_MS = 60_000;
  * in what is left (an unknown verdict never skips a routing attempt).
  */
 export const FREE_PATH_RESERVE_MS = 1_000;
-/** The wallet balance read before a deposit, inside the caller's budget.
- *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
-export const BALANCE_TIMEOUT_MS = 1_000;
 /**
  * THE SDK'S CHAIN READS: `recoverChannel` on a process's first call and the
- * recovery after a corrective 402. Bounded like the wallet read, with no
+ * recovery after a corrective 402. Persisted channels skip recovery. With no
  * retries and never past the call's own budget, so a slow RPC costs the call
  * its routing rather than holding the prompt.
  */
@@ -177,8 +174,8 @@ export interface RoutingPayerDeps {
   policy: () => Promise<SpendPolicy>;
   /** The local spend authorizer over that policy (`createLocalSpendAuthorizer`). */
   authorizer: (policy: SpendPolicy) => SpendAuthorizer;
-  /** The wallet's USDC balance, or null when it cannot be read. */
-  walletBalance: (address: string, timeoutMs: number) => Promise<bigint | null>;
+  /** Legacy injection seam, no longer consulted: deposits are signed offline. */
+  walletBalance?: (address: string, timeoutMs: number) => Promise<bigint | null>;
   /** Chain reads for the SDK's channel recovery. */
   readContract?: ChainRead;
   fetchImpl?: typeof fetch;
@@ -706,9 +703,8 @@ export class RoutingPayer {
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
    * size, and the refusals. The deposit is always the SDK's ceiling ($0.25); a
-   * wallet that cannot cover it, or a spend the authorizer denies (the per-call
-   * limit, the daily budget, the creator allowlist), refuses it and the call is
-   * not paid.
+   * spend the authorizer denies (the per-call limit, the daily budget, the
+   * creator allowlist) refuses it. The facilitator checks funds at settlement.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
@@ -717,9 +713,6 @@ export class RoutingPayer {
     const amount = BigInt(ctx.maxDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString());
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
-    const payer = this.channel!.payer;
-    const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
-    if (wallet !== null && wallet < amount) this.refuse('wallet_low');
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',

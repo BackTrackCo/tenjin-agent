@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
@@ -15,13 +15,7 @@ import { RoutingPayer } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
-import {
-  ASK_FOR_REPAIR,
-  REPAIR_CLAUSE,
-  WALLET_FUNDED,
-  WALLET_REASONS,
-  WALLET_UNLOCKED,
-} from './wallet-reasons';
+import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS, WALLET_UNLOCKED } from './wallet-reasons';
 
 /**
  * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
@@ -220,11 +214,6 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it.each([
-    [
-      'the wallet holds less than the deposit',
-      { walletBalance: async () => 50_000n },
-      '`tenjin wallet fund 5`',
-    ],
     [
       'the wallet cannot be unlocked',
       {
@@ -526,15 +515,14 @@ describe('wallet notices', () => {
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
-  it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
+  it('does not turn an unused balance preflight into a funding warning', async () => {
     const fake = new FakeRouter();
-    let balance = 50_000n;
-    const p = payer(fake, { walletBalance: async () => balance });
-    const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(low)).toContain('`tenjin wallet fund 5`');
-    balance = 10_000_000n;
-    const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
+    const read = vi.fn(async () => 50_000n);
+    const p = payer(fake, { walletBalance: read });
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(read).not.toHaveBeenCalled();
+    expect(systemMessageOf(answer)).not.toContain('wallet fund');
+    expect(fake.paidRequests()).toBeGreaterThan(0);
   });
 
   it('says nothing for an unlock that ran out of time', async () => {
