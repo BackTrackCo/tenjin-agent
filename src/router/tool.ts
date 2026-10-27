@@ -2662,7 +2662,7 @@ export interface FailExtras {
 
 /** The headline: calm for a routine outcome, explicit for a real failure. */
 function summaryFor(status: FailStatus, reason: string): string {
-  if (status === 'native') return `No paid lookup needed: ${reason}`;
+  if (status === 'native') return `Use your usual tools: ${reason}`;
   if (status === 'needs_input') return `More input needed: ${reason}`;
   if (status === 'needs_approval') return `Needs the user's approval: ${reason}`;
   return `x402 request ${status}: ${reason}`;

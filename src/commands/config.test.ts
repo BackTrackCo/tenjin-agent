@@ -49,18 +49,44 @@ async function caught<T>(fn: () => Promise<T>): Promise<CliError> {
 }
 
 describe('runConfigList', () => {
+  it('carries spending meaning in agent JSON without turning defaults into saved choices', async () => {
+    const { data } = await runConfigList(makeCtx());
+    const settings = data as Record<
+      string,
+      { value: unknown; source: string; description?: string }
+    >;
+    expect(settings.sessionBudget?.description).toMatch(
+      /24-hour budget window.*across agent sessions/,
+    );
+    expect(settings.maxAutoSpend?.description).toContain('per call');
+    expect(settings.sendMaxAmount?.description).toContain('unset = send refuses');
+    expect(settings.sessionBudget?.source).toBe('default');
+    const one = await runConfigGet({ key: 'sessionBudget' }, makeCtx());
+    expect(one.data).toMatchObject({
+      description: settings.sessionBudget?.description,
+      source: 'default',
+    });
+    expect(existsSync(configFile())).toBe(false);
+  });
+
   it('reports every key with default provenance on a fresh dir', async () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const d = data as Record<string, { value: unknown; source: string }>;
-    expect(d.maxAutoSpend).toEqual({ value: { atomic: '250000', usd: '0.25' }, source: 'default' });
-    expect(d.sessionBudget).toEqual({ value: { atomic: '5000000', usd: '5' }, source: 'default' });
+    expect(d.maxAutoSpend).toMatchObject({
+      value: { atomic: '250000', usd: '0.25' },
+      source: 'default',
+    });
+    expect(d.sessionBudget).toMatchObject({
+      value: { atomic: '5000000', usd: '5' },
+      source: 'default',
+    });
     expect(d.confirm).toBeUndefined();
     expect(d.allowlistCreators).toEqual({ value: [], source: 'default' });
     expect(d.baseUrl).toEqual({ value: PRODUCTION_ORIGIN, source: 'default' });
     expect(d.rpcUrl).toEqual({ value: 'https://mainnet.base.org', source: 'default' });
     // No numeric or 'none' default: absent resolves to the 'unset' sentinel and
     // `tenjin send` refuses until the cap is set (require-set-before-first-send).
-    expect(d.sendMaxAmount).toEqual({ value: 'unset', source: 'default' });
+    expect(d.sendMaxAmount).toMatchObject({ value: 'unset', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
@@ -100,14 +126,14 @@ describe('runConfigList', () => {
     expect(bad.code).toBe('USAGE');
   });
 
-  it('appends a one-line description per key to the human listing (data unchanged)', async () => {
+  it('shows the same spending descriptions in the human listing and machine readback', async () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const text = (humanLines ?? []).join('\n');
-    expect(text).toContain('automatic router daily limit');
+    expect(text).toContain('24-hour budget window');
     expect(text).toContain('Tenjin API base URL the router asks');
-    // The machine shape carries no description field.
+    // Money and provenance remain alongside the meaning an agent needs.
     const d = data as Record<string, Record<string, unknown>>;
-    expect(Object.keys(d.sessionBudget ?? {}).sort()).toEqual(['source', 'value']);
+    expect(Object.keys(d.sessionBudget ?? {}).sort()).toEqual(['description', 'source', 'value']);
   });
 
   it('preserves an unknown key (e.g. a removed shelf block) through set', async () => {
@@ -163,7 +189,7 @@ describe('runConfigGet', () => {
   it('returns the single-key shape for a money key', async () => {
     await runConfigSet({ key: 'maxAutoSpend', value: '1.25' }, makeCtx());
     const { data, humanLines } = await runConfigGet({ key: 'maxAutoSpend' }, makeCtx());
-    expect(data).toEqual({
+    expect(data).toMatchObject({
       key: 'maxAutoSpend',
       value: { atomic: '1250000', usd: '1.25' },
       source: 'file',
@@ -191,7 +217,7 @@ describe('runConfigSet — spend keys', () => {
     ['5', '5000000'],
   ])('stores %s USD as %s atomic', async (input, atomic) => {
     const { data } = await runConfigSet({ key: 'maxAutoSpend', value: input }, makeCtx());
-    expect(data).toEqual({
+    expect(data).toMatchObject({
       key: 'maxAutoSpend',
       value: { atomic, usd: atomicToUsd(atomic) },
       source: 'file',

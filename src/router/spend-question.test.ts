@@ -29,7 +29,7 @@ describe('the spend question', () => {
 
   it('asks the defaults or your own limits, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'Use the defaults ($5 a day, $0.25 a call) or set your own limits. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Either answer also approves the routing fee.',
+      'Use the defaults ($5 per 24-hour budget window across agent sessions, $0.25 a call) or set your own limits. Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits. Either answer also approves the routing fee.',
     );
   });
 

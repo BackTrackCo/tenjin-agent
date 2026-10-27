@@ -4,6 +4,7 @@ import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
 import { SETUP, WALLET, collect, type Registration } from './registration';
+import { installOutput } from '../router/install-output';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -21,8 +22,8 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the defaults ($5 a day, $0.25 a call) instead of asking')
-    .option('--session-budget <usd|none>', 'your own daily limit, or none, instead of asking')
+    .option('--yes', 'accept the defaults ($5 per 24-hour budget window, $0.25 a call)')
+    .option('--session-budget <usd|none>', 'your own 24-hour budget across agent sessions, or none')
     .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
     .addHelpText(
       'after',
@@ -32,7 +33,7 @@ Examples:
   $ tenjin install --project
   $ tenjin install --max-auto-spend 0.50 --session-budget 10
 
-The daily limit is the control, the per-call limit the runaway guard, and the
+The 24-hour budget is shared across agent sessions; the per-call limit is the runaway guard, and the
 wallet balance the hard stop. To turn the router off instead:
   $ tenjin config set router.enabled false
 
@@ -90,7 +91,7 @@ Learn more:
             return one;
           });
         if (o.refresh !== true || harness !== undefined) {
-          return withNote(await installAll(), await note);
+          return installOutput(withNote(await installAll(), await note), ctx, o.refresh === true);
         }
         // `tenjin update` runs this refresh in the new build: a Codex that
         // already has the plugin gets the new hooks too, whatever Claude Code's
@@ -103,7 +104,7 @@ Learn more:
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      "Remove Tenjin's install for where you are: the project install of the folder you are in (from any subfolder), or else your user install. The tenjin marketplace, Tenjin's runtime and its launcher go once no install is left anywhere. Either all of it goes or nothing does, and it says what it keeps: your wallet, spend ledger and config. Run it before `npm uninstall -g tenjin-cli`.",
+      "Remove Tenjin's install for where you are: the project install of the folder you are in (from any subfolder), or else your user install. The tenjin marketplace, Tenjin's runtime and its launcher go once no install is left anywhere. Either all of it goes or nothing does, and it says what it keeps: your wallet, spend ledger and config. If installed through npm, run this before `npm uninstall -g tenjin-cli`.",
     )
     .addOption(hostOverride())
     .option(

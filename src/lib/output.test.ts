@@ -111,6 +111,22 @@ describe('emitFailure', () => {
 describe('updateAvailable on the envelope', () => {
   const signal = { current: '0.1.0-alpha.6', latest: '0.1.0-alpha.7' };
 
+  it('keeps the same envelope and update signal in a compact handoff', () => {
+    const cap = captureIo(false);
+    emitSuccess(cap.io, 'install', { nextSteps: [{ id: 'spend' }] }, [], {
+      compactJson: true,
+      updateAvailable: signal,
+    });
+    expect(cap.stdout().trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(cap.stdout())).toEqual({
+      schemaVersion: SCHEMA_VERSION,
+      command: 'install',
+      ok: true,
+      data: { nextSteps: [{ id: 'spend' }] },
+      updateAvailable: signal,
+    });
+  });
+
   it('rides a success envelope when one is known', () => {
     const cap = captureIo(false);
     emitSuccess(cap.io, 'search', { hits: [] }, [], { updateAvailable: signal });
