@@ -78,7 +78,7 @@ export const SCOPE_RULE =
 const INSTRUCTIONS =
   "When a hook line names a service from Tenjin's router, call it as the line says. " +
   'A line comes at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
-  'one comes back short, or in a delegated task. ' +
+  'a search or a call that comes back short, or in a delegated task. ' +
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
   'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
   'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +

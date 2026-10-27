@@ -48,12 +48,11 @@ import {
  */
 export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
 /**
- * The after-call entries' kill budget, longer than the rest for the one wait
- * a leg makes: a search the pre-call leg is fetching free docs for waits up to
- * `AUGMENT_WAIT_MS` (9 s) for them, and when none came back and the search was
- * short, the gate's 3.5 s follow, with startup to spare (`wire.test.ts` pins
- * the sum). Every other after-call event returns as fast as before, so the
- * number is a ceiling, not a cost.
+ * The after-call entries' kill budget. No after-call leg waits on anything of
+ * its own: a noted search reads one file, and a short call takes one decision,
+ * the slowest a paid one with a deposit (`wire.test.ts` pins it). The number
+ * is a ceiling, not a cost, and lowering it would rewrite both hosts' hook
+ * entries and re-trust Codex's for no change a user sees.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 /** The `alive` leg and the two permission answers do no network work. */

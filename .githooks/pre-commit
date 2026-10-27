@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local mirror of the CI Prettier gate. Auto-wired by the package.json
-# "prepare" script (sets git config core.hooksPath .githooks on install).
+# Local mirror of the CI Prettier gate. Wired by the package.json "githooks"
+# script (`pnpm githooks` sets git config core.hooksPath .githooks).
 echo "tenjin-agent pre-commit: prettier format check"
 if ! pnpm format:check; then
   echo

@@ -117,7 +117,6 @@ const codexDeps = (fetchImpl: typeof fetch) => ({
   dataDir: dir,
   harness: 'codex' as const,
   fetchImpl,
-  prefetch: () => {},
 });
 
 describe('Codex transcript ownership and bounds', () => {
@@ -314,16 +313,12 @@ describe('Codex web events', () => {
     });
     expect(codexRouterEvent({ ...post, tool_response: { changed: 'schema' } })).toMatchObject({
       nativeOutcome: null,
-      search: null,
     });
   });
 
-  it('puts free docs beside the result, since Codex cannot replace it', () => {
-    expect(
-      codexResponse({ hookSpecificOutput: { updatedToolOutput: { results: ['free docs'] } } }),
-    ).toEqual({
-      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'free docs' },
-    });
+  it('passes a line after the call through as additionalContext, and nothing else', () => {
+    const line = { hookEventName: 'PostToolUse', additionalContext: 'a line' };
+    expect(codexResponse({ hookSpecificOutput: line })).toEqual({ hookSpecificOutput: line });
     expect(
       codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, other: 1 }),
     ).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse' } });
@@ -419,6 +414,39 @@ describe('Codex routing through the router', () => {
     expect(String(at(out.response, 'hookSpecificOutput', 'additionalContext'))).toContain(
       CODEX_REQUEST_TOOL,
     );
+  });
+
+  /** The free docs lookup before a search, from the shared fixture. */
+  const freeNote = JSON.parse(
+    readFileSync(join(fixtures, 'wire-hook-execute-note.json'), 'utf8'),
+  ) as { decision: { id: string } };
+
+  it('notes a free lookup on a web.run search, and shows it after the search ran', async () => {
+    const pre = router(freeNote);
+    const before = await runNativeHook(
+      { ...native, tool_use_id: 'call-n', cwd: dir, transcript_path: transcript },
+      codexDeps(pre.fetchImpl),
+    );
+    expect(before).toMatchObject({ response: null, free: true, noted: true });
+    const post = router(paidOffer);
+    const after = await runShortfallHook(
+      {
+        ...native,
+        hook_event_name: 'PostToolUse',
+        tool_use_id: 'call-n',
+        tool_response: 'some results',
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(post.fetchImpl),
+    );
+    expect(post.bodies).toHaveLength(0);
+    const response = codexResponse(after.response);
+    expect(at(response, 'hookSpecificOutput', 'hookEventName')).toBe('PostToolUse');
+    const line = String(at(response, 'hookSpecificOutput', 'additionalContext'));
+    expect(line).toContain('your WebSearch call ran. Optional: Context7 docs, free');
+    expect(line).toContain(`${CODEX_REQUEST_TOOL}({`);
+    expect(line).toContain(freeNote.decision.id);
   });
 
   const batch = {
