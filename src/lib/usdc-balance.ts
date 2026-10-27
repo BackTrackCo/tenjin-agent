@@ -30,6 +30,16 @@ export async function readUsdcBalance(
   rpcUrl: string,
   opts: { timeoutMs: number; fetchImpl?: typeof fetch },
 ): Promise<bigint | null> {
+  return readErc20Balance(USDC_ADDRESS, address, rpcUrl, opts);
+}
+
+/** {@link readUsdcBalance} for any ERC-20 `token` on the chain `rpcUrl` serves. */
+export async function readErc20Balance(
+  token: string,
+  address: string,
+  rpcUrl: string,
+  opts: { timeoutMs: number; fetchImpl?: typeof fetch },
+): Promise<bigint | null> {
   if (!ADDRESS_RE.test(address) || opts.timeoutMs <= 0) return null;
   try {
     const res = await (opts.fetchImpl ?? fetch)(rpcUrl, {
@@ -41,7 +51,7 @@ export async function readUsdcBalance(
         method: 'eth_call',
         params: [
           {
-            to: USDC_ADDRESS,
+            to: token,
             data: `${BALANCE_OF_SELECTOR}${address.slice(2).toLowerCase().padStart(64, '0')}`,
           },
           'latest',

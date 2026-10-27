@@ -28,6 +28,11 @@ vi.mock('../lib/usdc', () => ({
 // Records, for each sidecar write, whether wallet.json already existed: the
 // sidecar must be written before the key is encrypted and committed.
 const sidecarWrites = vi.hoisted(() => [] as Array<{ walletExisted: boolean }>);
+// Transak staging's Base Sepolia read: off the network, zero unless a test says otherwise.
+vi.mock('../lib/test-funds', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/test-funds')>()),
+  readTestFunds: vi.fn(async () => 0n),
+}));
 vi.mock('../lib/passphrase-record', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../lib/passphrase-record')>();
   const { existsSync } = await import('node:fs');
@@ -42,6 +47,7 @@ vi.mock('../lib/passphrase-record', async (importOriginal) => {
 });
 
 import { getUsdcBalance } from '../lib/usdc';
+import { readTestFunds } from '../lib/test-funds';
 import {
   REPAIR_DONE_LINE,
   findPassphraseExports,
@@ -54,6 +60,7 @@ import {
 } from './wallet';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
+const mockedTestFunds = vi.mocked(readTestFunds);
 const isWindows = process.platform === 'win32';
 const PASSPHRASE = 'test-passphrase-123';
 
@@ -1187,41 +1194,22 @@ describe('runWalletBalance', () => {
     expect(getSigner).not.toHaveBeenCalled();
   });
 
-  it("adds a staging server's test funds after the real balance, never in its place", async () => {
+  it('adds Transak staging test funds after the real balance, only when there are some', async () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(address);
     mockedBalance.mockResolvedValue(1_000_000n);
-    const fetchStub = vi.fn(async (url: string | URL | Request) =>
-      String(url).endsWith('/api/transak/test-settlement')
-        ? Response.json({
-            testSettlement: {
-              provider: 'transak',
-              chainId: 84532,
-              token: '0xD733D48f2a7F57D4559F98ae07f87Dab595E3523',
-              symbol: 'TRNSK',
-              decimals: 18,
-            },
-          })
-        : Response.json({
-            jsonrpc: '2.0',
-            id: 1,
-            result: `0x${(25n * 10n ** 18n).toString(16).padStart(64, '0')}`,
-          }),
-    );
-    vi.stubGlobal('fetch', fetchStub);
-    try {
-      const ctx = makeCtx();
-      const res = await runWalletBalance(
-        { ...ctx, flags: { ...ctx.flags, baseUrl: 'http://127.0.0.1:3100' } },
-        { provider },
-      );
-      expect(res.humanLines).toEqual([
-        'Balance: 1 USDC on Base',
-        'Test funds on Base Sepolia: 25 TRNSK (Transak staging)',
-      ]);
-      expect(res.data).toMatchObject({ balance: { usd: '1' } });
-    } finally {
-      vi.unstubAllGlobals();
+    mockedTestFunds.mockResolvedValueOnce(25n * 10n ** 18n);
+    const res = await runWalletBalance(makeCtx(), { provider });
+    expect(mockedTestFunds).toHaveBeenLastCalledWith(address);
+    expect(res.humanLines).toEqual([
+      'Balance: 1 USDC on Base',
+      'Test funds on Base Sepolia: 25 TRNSK (Transak staging)',
+    ]);
+    for (const quiet of [0n, null]) {
+      mockedTestFunds.mockResolvedValueOnce(quiet);
+      const plain = await runWalletBalance(makeCtx(), { provider });
+      expect(plain.humanLines).toEqual(['Balance: 1 USDC on Base']);
+      expect(plain.data).not.toHaveProperty('testFunds');
     }
   });
 

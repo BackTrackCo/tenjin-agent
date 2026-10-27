@@ -9,7 +9,7 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import { forgetRememberedBalance } from '../lib/usdc-balance';
-import { testFundsLines } from '../lib/test-settlement';
+import { readTestFunds, testFundsLine } from '../lib/test-funds';
 import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
@@ -624,8 +624,6 @@ export async function runWalletShow(
   };
 }
 
-const TEST_FUNDS_TIMEOUT_MS = 5_000;
-
 export async function runWalletBalance(
   ctx: CommandContext,
   opts: ResolveWalletProviderOptions = {},
@@ -634,13 +632,14 @@ export async function runWalletBalance(
   const desc = await describeWallet(provider);
 
   const config = await loadRawConfig(ctx.dataDir);
-  const settings = resolveSettings({
+  const rpcUrl = resolveSettings({
     config,
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
-  });
-  const rpcUrl = settings.rpcUrl.value;
+  }).rpcUrl.value;
 
+  // Transak staging's test funds, read beside the USDC balance and never in its place.
+  const testFunds = readTestFunds(desc.address);
   let atomic: bigint;
   try {
     atomic = await getUsdcBalance(desc.address, rpcUrl);
@@ -659,21 +658,18 @@ export async function runWalletBalance(
   const credit = toMoney(
     (await channelCredit(ctx.dataDir, desc.address).catch(() => 0n)).toString(),
   );
-  // A staging server's test funds, shown beside the real balance and never instead.
-  const testFunds = await testFundsLines(desc.address, settings.baseUrl.value, {
-    timeoutMs: Math.min(ctx.flags.timeout, TEST_FUNDS_TIMEOUT_MS),
-  });
+  const testLine = testFundsLine(await testFunds);
   return {
     data: {
       address: desc.address,
       balance,
       routingCredit: credit,
-      ...(testFunds.length > 0 ? { testFunds: testFunds[0] } : {}),
+      ...(testLine !== null ? { testFunds: testLine } : {}),
     },
     humanLines: [
       `Balance: ${balance.usd} USDC on Base` +
         (credit.atomic !== '0' ? ` (+${credit.usd} routing credit)` : ''),
-      ...testFunds,
+      ...(testLine !== null ? [testLine] : []),
       ...(atomic === 0n ? [FUND_COMMAND_LINE] : []),
     ],
   };
