@@ -1,4 +1,3 @@
 {
-  "setup": "pnpm install --frozen-lockfile && pnpm run build",
-  "setup_on_boot": "pnpm run githooks"
+  "setup": "pnpm install --frozen-lockfile"
 }
