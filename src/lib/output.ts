@@ -165,17 +165,9 @@ export function emitWriteNotice(io: Io, text: string): void {
  * covers the OSC-8 hyperlinks pnpm wraps package names in, terminated by BEL
  * or ST — charset selection, and a stray ESC with a single final byte.
  *
- * ONE COPY, because the other reader is the failure lane: `stripAnsi`
- * (`hooks/text.ts`) takes colour off a runner's output before the arm scans it
- * for a diagnostic, and a pattern that misses OSC-8 leaves `]8;;https://…`
- * sitting in front of the very line the start-anchored markers must match.
- * That reader CANNOT call {@link sanitizeForTerminal}: this is only its first
- * clause, and the second strips `\n`, which would flatten the output it is
- * about to split into lines.
- *
- * Safe to share despite the `g` flag: both callers use it through
- * `String.replace`, which starts at 0 and resets `lastIndex`. Do not `test()`
- * or `exec()` it.
+ * Safe to reuse despite the `g` flag: {@link sanitizeForTerminal} uses it
+ * through `String.replace`, which starts at 0 and resets `lastIndex`. Do not
+ * `test()` or `exec()` it.
  */
 export const ANSI_ESCAPE_RE =
   // eslint-disable-next-line no-control-regex

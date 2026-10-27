@@ -11,7 +11,7 @@ import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
-import { RoutingPayer } from './routing-payer';
+import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
@@ -137,6 +137,22 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
     env: { TENJIN_WALLET_KEY: KEY },
     ...(p !== undefined ? { route: p.routeFor.bind(p) } : {}),
   };
+}
+
+/**
+ * Holds the timers and the clock still; file I/O and microtasks keep running.
+ * The budget tests advance it by exactly the wait they model instead of
+ * sleeping 4-6 s each, so a call that outlives its budget never resolves.
+ */
+function holdTime(): void {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+}
+
+/** Resolves when the router starts holding a paid request on its delay timer. */
+function delayArmed(fake: FakeRouter): Promise<void> {
+  return new Promise((resolve) => {
+    fake.onDelayArmed = resolve;
+  });
 }
 
 /** A full garbage collection, without starting Node with `--expose-gc`. */
@@ -389,15 +405,13 @@ describe('the hook legs and the routing fee', () => {
     sent: Promise<void>;
   } {
     let paid = 0;
-    let markSent!: () => void;
-    const sent = new Promise<void>((resolve) => {
-      markSent = resolve;
-    });
+    let onSent!: () => void;
+    const sent = new Promise<void>((resolve) => (onSent = resolve));
     const fetchImpl = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const request = new Request(input, init);
       if (!request.headers.has('payment-signature')) return fake.fetch(request);
       paid += 1;
-      markSent();
+      onSent();
       const signal = init?.signal ?? request.signal;
       setTimeout(collectGarbage, 50);
       return new Promise<Response>((_resolve, reject) => {
@@ -412,8 +426,13 @@ describe('the hook legs and the routing fee', () => {
     const fake = new FakeRouter();
     fake.body = OFFER;
     fake.delayMs = GATE_TIMEOUT_MS + 400;
+    holdTime();
+    const held = delayArmed(fake);
     const started = Date.now();
-    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    const call = runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    await held;
+    await vi.advanceTimersByTimeAsync(fake.delayMs);
+    const answer = await call;
     expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(contextOf(answer)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(answer)).toContain('set aside $0.03 for routing');
@@ -422,22 +441,41 @@ describe('the hook legs and the routing fee', () => {
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');
-  }, 15_000);
+  });
 
   it('lets a deposit that settles past the budget finish in tenjin mcp, and says nothing', async () => {
     const fake = new FakeRouter();
     fake.body = OFFER;
     fake.delayMs = 6_000;
-    const p = payer(fake);
+    // The payer's timers, observed, so the test releases the first call's
+    // deposit only once the second is queued behind it.
+    let onArmed: (() => void) | undefined;
+    const timers: NonNullable<RoutingPayerDeps['timers']> = {
+      setTimeout: ((fn: () => void, ms?: number) => {
+        onArmed?.();
+        return globalThis.setTimeout(fn, ms);
+      }) as typeof setTimeout,
+      clearTimeout: (id) => globalThis.clearTimeout(id),
+    };
+    const p = payer(fake, { timers });
+    holdTime();
+    const held = delayArmed(fake);
     const started = Date.now();
-    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    const firstCall = runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    await held;
+    await vi.advanceTimersByTimeAsync(DEPOSIT_GATE_TIMEOUT_MS);
+    const first = await firstCall;
     // The leg returns at the deposit budget, inside the hook's 5 s, unpaid and silent.
     expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 400);
     expect(systemMessageOf(first)).toBeUndefined();
     fake.delayMs = 0;
     // The next call waits for the first to settle, then pays a voucher from
     // the channel the SDK recorded: no second deposit, no corrective 402.
-    const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    const queued = new Promise<void>((resolve) => (onArmed = resolve));
+    const secondCall = runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    await queued;
+    await vi.advanceTimersByTimeAsync(6_000 - DEPOSIT_GATE_TIMEOUT_MS);
+    const second = await secondCall;
     expect(contextOf(second)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
@@ -446,7 +484,7 @@ describe('the hook legs and the routing fee', () => {
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');
-  }, 20_000);
+  });
 
   it('still names doctor when the router refuses the payment at verify', async () => {
     const fake = new FakeRouter();
@@ -466,14 +504,18 @@ describe('the hook legs and the routing fee', () => {
     // The first call deposits; the next is a plain voucher.
     await runPromptHook(prompt(), deps(fake.fetch, p));
     const hang = paidHangs(fake);
+    holdTime();
     const started = Date.now();
-    await runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
+    const call = runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
+    await hang.sent;
+    await vi.advanceTimersByTimeAsync(GATE_TIMEOUT_MS);
+    await call;
     expect(Date.now() - started).toBeLessThan(GATE_TIMEOUT_MS + 500);
     expect(hang.paid()).toBe(1);
-  }, 15_000);
+  });
 
   it('returns a deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
-    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    holdTime();
     vi.setSystemTime(NOW);
     const fake = new FakeRouter();
     const p = payer(fake);
@@ -495,7 +537,7 @@ describe('the hook legs and the routing fee', () => {
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so it may have landed: it counts.
     expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '30000' });
-  }, 15_000);
+  });
 });
 
 /**

@@ -119,8 +119,7 @@ function buildContext(cmd: Command, io: Io): CommandContext {
  */
 export type ProductRegistration = (registration: Registration) => void;
 
-/** This release's products, in `--help` order. The shelf is deliberately absent:
- *  `./cli/shelf` is not imported, so it is neither bundled nor listed. */
+/** This release's products, in `--help` order. */
 export const PRODUCTS: readonly ProductRegistration[] = [registerCore, registerRouter];
 
 export function buildProgram(

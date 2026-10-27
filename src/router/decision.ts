@@ -517,10 +517,21 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * decision on a query with no id, which only a build that parses them can
  * take: the decision schemas are strict. `jobs` asks for each spec's `job`,
  * for the services that never answer inline, and for `count` on a media
- * offer's line. `bazaar` widens discovery to the open Bazaar and is sent only
- * while `experimental.bazaar` is on.
+ * offer's line. `headers` asks for a spec's `request.headers`, the fixed
+ * headers the catalog sets on a service's call (a provider's beta opt-in),
+ * with the pins those headers unlock: `buildSpecRequest` sends them, and a
+ * build without the token is never sent a spec it would refuse as strict.
+ * `bazaar` widens discovery to the open Bazaar and is sent only while
+ * `experimental.bazaar` is on.
  */
-export const CLIENT_ACCEPTS: readonly string[] = ['catalog', 'spec', 'label', 'fields', 'jobs'];
+export const CLIENT_ACCEPTS: readonly string[] = [
+  'catalog',
+  'spec',
+  'label',
+  'fields',
+  'jobs',
+  'headers',
+];
 export const BAZAAR_ACCEPT = 'bazaar';
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */

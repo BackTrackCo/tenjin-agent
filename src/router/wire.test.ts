@@ -12,7 +12,9 @@ import {
   CLIENT_ACCEPTS,
   parseForTests,
   type SpecOutcome,
+  type ToolSpec,
 } from './decision';
+import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
@@ -153,20 +155,40 @@ describe('the request bodies', () => {
 
   /**
    * WHAT THIS BUILD SAYS IT RUNS. Each token is one the server's README names
-   * as read (`spec`, `catalog`, `label`, `fields`, `jobs`, and `bazaar` behind
-   * its experiment), so the server sends each field this build parses and none
-   * it does not. A token is added only with the parser that takes its fields.
+   * as read (`spec`, `catalog`, `label`, `fields`, `jobs`, `headers`, and
+   * `bazaar` behind its experiment), so the server sends each field this build
+   * parses and none it does not. A token is added only with the parser that
+   * takes its fields.
    */
   it("sends this build's accepts: the contract tokens it parses and runs", () => {
-    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs']);
+    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs', 'headers']);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
       'label',
       'fields',
       'jobs',
+      'headers',
     ]);
-    expect(acceptsFor(true)).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs', 'bazaar']);
-    const read = ['spec', 'catalog', 'label', 'fields', 'jobs', 'discovered', 'bazaar', 'choices'];
+    expect(acceptsFor(true)).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'headers',
+      'bazaar',
+    ]);
+    const read = [
+      'spec',
+      'catalog',
+      'label',
+      'fields',
+      'jobs',
+      'headers',
+      'discovered',
+      'bazaar',
+      'choices',
+    ];
     for (const token of acceptsFor(true)) expect(read).toContain(token);
     // The server's bounds: up to 16 tokens, each 1 to 32 characters.
     expect(acceptsFor(true).length).toBeLessThanOrEqual(16);
@@ -559,6 +581,19 @@ describe('every answer payload on disk', () => {
     const expired = fixture('wire-lookup-expired-id.json');
     expect(String(expired.note)).toContain('unknown or expired');
     expect(parseForTests('tool', expired).success).toBe(true);
+  });
+
+  it("takes a spec's fixed headers and the pins they unlock, and sends both with the call", () => {
+    const payload = fixture('wire-hook-execute-headers.json');
+    expect(parseForTests('hook', payload).success).toBe(true);
+    const spec = (payload.decision as { specs: ToolSpec[] }).specs[0]!;
+    const built = buildSpecRequest(spec, mergedInput(spec, { query: 'x402 agent payments' }));
+    if ('problem' in built) throw new Error(built.problem);
+    expect(built.specHeaders).toEqual({ 'Exa-Beta': 'dynamic-highlights-2026-08-28' });
+    expect(JSON.parse(built.body!)).toMatchObject({
+      query: 'x402 agent payments',
+      contents: { highlights: { dynamic: true, maxTotalCharacters: 5000 } },
+    });
   });
 
   it('takes the label, the short line and the fields on a labelled offer', () => {

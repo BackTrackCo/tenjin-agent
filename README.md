@@ -64,7 +64,7 @@ irm https://tenjin.sh/install.ps1 | iex
 ```
 
 The installer downloads a pinned Node and Tenjin, verifies both, and sets up
-the plugin. Supports macOS, Windows and glibc Linux 2.28+ on x64/arm64.
+the plugin. Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64.
 Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
 Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
 later does not stop it. Add `--project` to `tenjin install` for one project.

@@ -1608,73 +1608,62 @@ describe('the wallet line: can Claude Code unlock it', () => {
 });
 
 describe('the default wallet steps, on a fake keychain', () => {
-  // Real scrypt: the keystore is encrypted and opened for real.
-  const SCRYPT_TIMEOUT_MS = 120_000;
+  it('a TENJIN_WALLET_PASSPHRASE the keychain also holds is a ✓: a saved passphrase opens it', async () => {
+    const { encryptedRecord, KNOWN_PASSPHRASE } = await import('../lib/wallet/test-support');
+    const { writeWalletRecord } = await import('../lib/wallet/store');
+    const { generatePrivateKey } = await import('viem/accounts');
+    const record = await encryptedRecord(generatePrivateKey());
+    await writeWalletRecord(data, record);
+    const exec = async (file: string, args: string[]) => {
+      if (file === 'security' && args[0] === 'find-generic-password') {
+        return { stdout: `${KNOWN_PASSPHRASE}\n`, stderr: '' };
+      }
+      throw new Error(`unexpected ${file} ${args.join(' ')}`);
+    };
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        env: { TENJIN_WALLET_PASSPHRASE: KNOWN_PASSPHRASE },
+        walletExists: undefined,
+        walletAddress: undefined,
+        walletSigning: undefined,
+        walletPassphrase: { platform: 'darwin', isTTY: false, exec },
+      }),
+    );
+    expect(result.humanLines).toContain(`✓ Wallet: ${record.address}`);
+    expect(result.data).toMatchObject({
+      wallet: { status: 'existing', signing: { status: 'ready', source: 'keychain' } },
+    });
+  });
 
-  it(
-    'a TENJIN_WALLET_PASSPHRASE the keychain also holds is a ✓: a saved passphrase opens it',
-    async () => {
-      const { encryptedRecord, KNOWN_PASSPHRASE } = await import('../lib/wallet/test-support');
-      const { writeWalletRecord } = await import('../lib/wallet/store');
-      const { generatePrivateKey } = await import('viem/accounts');
-      const record = await encryptedRecord(generatePrivateKey());
-      await writeWalletRecord(data, record);
-      const exec = async (file: string, args: string[]) => {
-        if (file === 'security' && args[0] === 'find-generic-password') {
-          return { stdout: `${KNOWN_PASSPHRASE}\n`, stderr: '' };
-        }
-        throw new Error(`unexpected ${file} ${args.join(' ')}`);
-      };
-      const result = await runRouterInstall(
-        {},
-        ctx(),
-        deps({
-          env: { TENJIN_WALLET_PASSPHRASE: KNOWN_PASSPHRASE },
-          walletExists: undefined,
-          walletAddress: undefined,
-          walletSigning: undefined,
-          walletPassphrase: { platform: 'darwin', isTTY: false, exec },
-        }),
-      );
-      expect(result.humanLines).toContain(`✓ Wallet: ${record.address}`);
-      expect(result.data).toMatchObject({
-        wallet: { status: 'existing', signing: { status: 'ready', source: 'keychain' } },
-      });
-    },
-    SCRYPT_TIMEOUT_MS,
-  );
-
-  it(
-    'headless Linux with no keyring creates the wallet with its passphrase in the 0600 file',
-    async () => {
-      const { NO_KEYRING_LINE } = await import('../lib/wallet-unlock');
-      const { StoreExecError } = await import('../lib/wallet/passphrase');
-      const result = await runRouterInstall(
-        {},
-        ctx(),
-        deps({
-          createWallet: undefined,
-          walletPassphrase: {
-            platform: 'linux',
-            isTTY: false,
-            exec: async (file: string) => {
-              throw new StoreExecError(file, { code: 'ENOENT', enoent: true });
-            },
+  it('headless Linux with no keyring creates the wallet with its passphrase in the 0600 file', async () => {
+    const { NO_KEYRING_LINE } = await import('../lib/wallet-unlock');
+    const { StoreExecError } = await import('../lib/wallet/passphrase');
+    const result = await runRouterInstall(
+      {},
+      ctx(),
+      deps({
+        createWallet: undefined,
+        walletPassphrase: {
+          platform: 'linux',
+          isTTY: false,
+          exec: async (file: string) => {
+            throw new StoreExecError(file, { code: 'ENOENT', enoent: true });
           },
-        }),
-      );
-      const wallet = (
-        result.data as {
-          wallet: { status: string; passphrase: { store: string; location: string; note: string } };
-        }
-      ).wallet;
-      expect(wallet.status).toBe('created');
-      expect(wallet.passphrase.store).toBe('file');
-      expect(wallet.passphrase.note).toBe(NO_KEYRING_LINE(wallet.passphrase.location));
-      expect(result.humanLines).toContain(`  ${wallet.passphrase.note}`);
-    },
-    SCRYPT_TIMEOUT_MS,
-  );
+        },
+      }),
+    );
+    const wallet = (
+      result.data as {
+        wallet: { status: string; passphrase: { store: string; location: string; note: string } };
+      }
+    ).wallet;
+    expect(wallet.status).toBe('created');
+    expect(wallet.passphrase.store).toBe('file');
+    expect(wallet.passphrase.note).toBe(NO_KEYRING_LINE(wallet.passphrase.location));
+    expect(result.humanLines).toContain(`  ${wallet.passphrase.note}`);
+  });
 
   it.each([
     ['a terminal', true],
