@@ -318,6 +318,33 @@ describe('the prompt hook', () => {
     );
   });
 
+  /** The mod draws `Tenjin offered <label>` under the prompt from this record. */
+  it('keeps an offer record keyed by the prompt for a shown offer, and none for native', async () => {
+    const prompt = 'read https://example.test/spec for me';
+    const record = join(
+      sessionDir(dir, 'sess-1'),
+      `offer-${createHash('sha256').update(`prompt:${prompt}`).digest('hex')}.json`,
+    );
+    const labelled = { ...EXECUTE, decision: { ...EXECUTE.decision, label: 'Firecrawl scrape' } };
+    await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(NATIVE).fetchImpl,
+    });
+    await expect(readFile(record, 'utf8')).rejects.toThrow();
+    await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(labelled).fetchImpl,
+    });
+    expect(JSON.parse(await readFile(record, 'utf8'))).toMatchObject({
+      version: 1,
+      offerId: 'k3f9-abcd',
+      label: 'Firecrawl scrape',
+      priceAtomic: '15000',
+    });
+  });
+
   it('says nothing at all on native', async () => {
     const { fetchImpl } = router(NATIVE);
     const out = await runPromptHook(promptEvent('what is the weather'), {

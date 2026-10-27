@@ -41,6 +41,7 @@ import {
   bindDecision,
   claimRedirect,
   markOffered,
+  promptOfferKey,
   type OfferedTerms,
   newCallId,
   noteSession,
@@ -965,6 +966,16 @@ async function offerOnUserText(
     return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
+  if (hookEventName === 'UserPromptSubmit') {
+    // The mod draws `Tenjin offered <label>` under this prompt from this record.
+    await markOffered(
+      deps.dataDir,
+      localSession(event.sessionId, deps),
+      promptOfferKey(text),
+      offeredTerms(vetted.offer),
+      deps.now?.(),
+    );
+  }
   return {
     action: outcome.action,
     id: outcome.id,

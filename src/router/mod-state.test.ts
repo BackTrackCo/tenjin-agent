@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OfferSpec } from './decision';
 import { MOD_STATE_FILES } from './mod-state';
-import { markOffered, sessionDir } from './progress';
+import { markOffered, promptOfferKey, sessionDir } from './progress';
 import { storeChoices, storeSpecs } from './specs';
 
 /**
@@ -75,6 +75,25 @@ describe('the state contract between the CLI and the mod', () => {
       priceAtomic: '7000',
     });
     expect(sessionDir(dir, 'sess-1')).toBe(join(dir, 'progress', sha256('sess-1')));
+  });
+
+  it('keeps a prompt-time offer record under the session, keyed by the prompt', async () => {
+    await markOffered(dir, 'sess-1', promptOfferKey('find rust runtimes'), {
+      offerId: ID,
+      label: 'Exa search',
+      priceAtomic: '7000',
+    });
+    const path = join(
+      sessionDir(dir, 'sess-1'),
+      `offer-${sha256('prompt:find rust runtimes')}.json`,
+    );
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+      version: 1,
+      at: expect.any(Number),
+      offerId: ID,
+      label: 'Exa search',
+      priceAtomic: '7000',
+    });
   });
 
   it("keeps a choice set beside the line's id, each option's key, label and own id", async () => {

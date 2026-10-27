@@ -111,7 +111,8 @@ interface SavedAugment extends Stamp {
 
 /**
  * THE OFFER RECORD, one per native call a hook redirected, keyed by its
- * `tool_use_id`: when it was made, the offer's id, its `label` when the
+ * `tool_use_id`, and one per prompt the prompt hook made an offer on, keyed by
+ * {@link promptOfferKey}: when it was made, the offer's id, its `label` when the
  * decision carried one, and its price in atomic USDC. Part of the state
  * contract between this CLI and the plugin's mod (`mod-state.ts`), which reads
  * it to draw the redirected row and to find the `request` call that takes the
@@ -260,6 +261,11 @@ export async function markOffered(
     join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
     saved,
   );
+}
+
+/** The offer record's key for an offer the prompt hook made on `prompt`. */
+export function promptOfferKey(prompt: string): string {
+  return `prompt:${prompt}`;
 }
 
 export async function wasOffered(

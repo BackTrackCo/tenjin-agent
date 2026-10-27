@@ -13,6 +13,8 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * - A LOOKUP THAT REPLACED A NATIVE CALL draws where that call stood:
  *   `⏺ ~~Web Search~~("q") · Tenjin offered Exa search` while held, then in
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
+ * - AN OFFER MADE ON THE PROMPT is one dim line under the prompt row,
+ *   `⎿  Tenjin offered Exa search`, the engine's own row drawn above it.
  *
  * An over-limit answer draws nothing, and the `approve` call that runs its
  * quote draws as the lookup's own row. Free router calls and `needs_input`
@@ -42,6 +44,12 @@ const NATIVE_NAMES: Readonly<Record<string, string>> = {
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
+const PROMPTS = { plugin: 'tenjin', key: 'prompts' } as const;
+/** Names a surface gives a lookup with no label of its own; never an offer's. */
+const FALLBACK_LABELS = new Set(['Tenjin', 'Tenjin lookup']);
+/** When the person last sent a prompt: an offer record older than it is an
+ *  earlier prompt's. Module memory, lost on a reload, which then draws nothing. */
+let submittedAt: number | undefined;
 /**
  * Calls of a run the ENGINE expanded (ctrl+o, --verbose), where our rows step
  * aside for the engine's own. The module's own memory, not `$.state`: a drawing may
@@ -145,6 +153,48 @@ export const register: Register = (on) => {
     }
     $.ui.invalidate('ui.render');
     return ran;
+  });
+
+  // A PROMPT-TIME OFFER: the CLI's prompt hook keeps an offer record keyed
+  // `prompt:<the prompt>`, after `prompt.submit` and before `turn.start`.
+  on('prompt.submit', async ($, e, next) => {
+    submittedAt = await $.clock.now();
+    return next(e);
+  });
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined && e.text.length > 0) {
+      const record = await offerFile($, `prompt:${e.text}`);
+      const label = labelOf(record?.label);
+      const offered =
+        label !== undefined &&
+        !FALLBACK_LABELS.has(label) &&
+        record?.priceAtomic !== '0' &&
+        typeof record?.at === 'number' &&
+        record.at >= (submittedAt ?? Infinity);
+      const ref = { ...PROMPTS, id: await sha256Hex(e.text) };
+      if (offered || (await $.state.get(ref)).value) {
+        await $.state.set(ref, offered ? label : '');
+        $.ui.invalidate('ui.render');
+      }
+    }
+    return next(e);
+  });
+
+  // The prompt row as the engine draws it, the offer one dim line beneath.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const { text, task, from } = e.props;
+    if (task !== undefined || from !== undefined) return next(e);
+    const { value: label } = await $.state.get({ ...PROMPTS, id: await sha256Hex(text) });
+    if (label === undefined || label === '') return next(e);
+    const own = await next(e);
+    const { Box, Text } = $.ui.resolve(e);
+    return (
+      <Box flexDirection="column">
+        {own}
+        <Text dimColor wrap="truncate-end">{`${GUTTER}Tenjin offered ${label}`}</Text>
+      </Box>
+    );
   });
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
@@ -426,16 +476,24 @@ async function offerRecord(
   id: string,
   key: string | undefined,
 ): Promise<TenjinHeld | null> {
+  const record = await offerFile($, id);
+  if (record === null) return null;
+  const label = labelOf(record.label);
+  return {
+    offerId: record.offerId as string,
+    key: key ?? '',
+    ...(label !== undefined ? { label } : {}),
+  };
+}
+
+/** The CLI's offer record under `id`, of a version this mod reads; else null. */
+async function offerFile($: Dollar, id: string): Promise<Json | null> {
   const dataDir = await tenjinDataDir($);
   if (dataDir === null) return null;
   const session = await sha256Hex(await $.session.id());
-  const record = await readJson(
-    $,
-    `${dataDir}/progress/${session}/offer-${await sha256Hex(id)}.json`,
-  );
-  if (record?.version !== 1 || typeof record.offerId !== 'string') return null;
-  const label = labelOf(record.label);
-  return { offerId: record.offerId, key: key ?? '', ...(label !== undefined ? { label } : {}) };
+  const path = `${dataDir}/progress/${session}/offer-${await sha256Hex(id)}.json`;
+  const record = await readJson($, path);
+  return record?.version === 1 && typeof record.offerId === 'string' ? record : null;
 }
 
 const row = async ($: Dollar, id: string) => (await $.state.get({ ...ROWS, id })).value;

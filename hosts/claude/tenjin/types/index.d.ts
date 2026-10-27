@@ -36,6 +36,9 @@ declare module 'claude-code' {
       /** `hold:<offer id>` and `take:<offer id>`: the held native call and the
        *  request call taking it up; `ran:<key>`: a native call that ran. */
       links: StateFamily<string>;
+      /** By the SHA-256 of a prompt: the label of the paid offer the CLI made
+       *  on it, or '' when it made none. */
+      prompts: StateFamily<string>;
     };
   }
 }

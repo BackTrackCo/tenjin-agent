@@ -68,6 +68,25 @@ export async function keepOffer(
   );
 }
 
+/** The offer record the prompt hook writes for an offer it made on `prompt`. */
+export async function keepPromptOffer(
+  files: Map<string, string>,
+  prompt: string,
+  record: Record<string, unknown> = {},
+): Promise<void> {
+  files.set(
+    `${DATA}/progress/${await sha256Hex(SESSION)}/offer-${await sha256Hex(`prompt:${prompt}`)}.json`,
+    JSON.stringify({
+      version: 1,
+      at: NOW,
+      offerId: OFFER,
+      label: 'Exa search',
+      priceAtomic: '40000',
+      ...record,
+    }),
+  );
+}
+
 /** An envelope with `status` first, as `JSON.stringify` writes the CLI's. */
 export function envelope(status: string, rest: Record<string, unknown> = {}): string {
   return `summary line${JSON.stringify({ status, supplier: 'api.exa.ai', ...rest })}`;
