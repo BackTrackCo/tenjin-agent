@@ -18,9 +18,30 @@ export const ROUTE_PAID_PATH = '/api/x402-router/route';
 
 /** The flat fee per routing call, atomic USDC ($0.003). */
 export const ROUTING_FEE_ATOMIC = 3_000n;
-/** The production server's default deposit hint: ten routing fees. Used for
- *  offline eligibility; the payer authorizes the SDK's actual deposit amount. */
+/** The production server's default deposit hint, ten routing fees ($0.03):
+ *  the smallest deposit Tenjin signs, so a wallet below it is `wallet_low`. */
 export const CHANNEL_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
+/** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
+ *  `depositMultiplier` (`routing-payer.ts`). */
+export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
+
+/**
+ * THE DEPOSIT TENJIN SIGNS: the ceiling, or the wallet's balance rounded down
+ * to whole routing fees when that is less, and never below the server's hint.
+ * So a big wallet deposits once per ~83 calls, and a small one spends down to
+ * its last whole fees. An unread balance, or no ceiling, signs the hint.
+ */
+export function routingDepositAtomic(o: {
+  walletAtomic: bigint | null;
+  hintAtomic: bigint;
+  maxAtomic: bigint | null;
+}): bigint {
+  if (o.walletAtomic === null || o.maxAtomic === null) return o.hintAtomic;
+  const whole = (o.walletAtomic / ROUTING_FEE_ATOMIC) * ROUTING_FEE_ATOMIC;
+  const sized = whole < o.maxAtomic ? whole : o.maxAtomic;
+  return sized > o.hintAtomic ? sized : o.hintAtomic;
+}
+
 /**
  * The top-up every "fund the wallet" hint names, in USD: the checkout's Apple
  * Pay and Google Pay minimum, which covers the routing deposit and a few
@@ -98,7 +119,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the usual $${usd(CHANNEL_DEPOSIT_ATOMIC)} needed to set aside for routing`,
+    reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} Tenjin needs to set aside for routing`,
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,

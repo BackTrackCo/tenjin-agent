@@ -75,18 +75,25 @@ function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
 }
 
 describe('checkEligibility', () => {
-  it('can pay from a wallet below $0.25 when the normal SDK deposit fits', async () => {
-    await writeWallet();
-    const e = await checkEligibility(
-      input({
-        provider: fakeProvider({ verify: async () => verified('keychain') }),
-        readBalance: async () => 210_000n,
-        policy: { ...POLICY, sessionBudgetAtomic: 500_000n },
-        readSpent: async () => 470_000n,
-      }),
-    );
-    expect(e.canPayRouting).toEqual({ status: 'ready', source: 'keychain' });
-  });
+  it.each<[bigint, string]>([
+    [210_000n, 'ready'],
+    [209_999n, 'blocked'],
+  ])(
+    'evaluates the deposit a $0.21 wallet signs, all of it, against %s of daily room',
+    async (room, status) => {
+      await writeWallet();
+      const e = await checkEligibility(
+        input({
+          provider: fakeProvider({ verify: async () => verified('keychain') }),
+          readBalance: async () => 210_000n,
+          policy: { ...POLICY, sessionBudgetAtomic: 500_000n },
+          readSpent: async () => 500_000n - room,
+        }),
+      );
+      expect(e.canPayRouting.status).toBe(status);
+      if (status === 'blocked') expect(e.canPayRouting).toMatchObject({ reason: 'budget_reached' });
+    },
+  );
 
   it('a verify that throws gives unknown and never rejects', async () => {
     await writeWallet();

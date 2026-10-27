@@ -13,7 +13,13 @@ import {
   type SignVerdict,
   type Verdict,
 } from './eligibility';
-import { CHANNEL_DEPOSIT_ATOMIC, feeRefusal, refusedWhy } from './fee';
+import {
+  CHANNEL_DEPOSIT_ATOMIC,
+  feeRefusal,
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
+  refusedWhy,
+  routingDepositAtomic,
+} from './fee';
 import { UNKNOWN_DETAIL } from './wallet-reasons';
 
 /**
@@ -132,11 +138,15 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // Offline estimate from the production server's deposit hint. The payer
-  // checks the SDK's actual amount again before signing.
+  // The deposit the payer would sign for this balance, from the production
+  // server's hint, evaluated against the whole policy as the payer's is.
   const deposit = evaluateSpendPolicy(input.policy, {
     mode: 'automatic',
-    amountAtomic: CHANNEL_DEPOSIT_ATOMIC,
+    amountAtomic: routingDepositAtomic({
+      walletAtomic: balanceAtomic,
+      hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
+      maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
+    }),
     creator: input.host,
     sessionSpentAtomic: spent ?? 0n,
   });

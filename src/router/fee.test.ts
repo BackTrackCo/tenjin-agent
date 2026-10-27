@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { BatchSettlementEvmScheme } from '@x402/evm/batch-settlement/server';
 import { KEYCHAIN_LOCKED_FIX, REPAIR_CLAUSE } from '../lib/wallet-unlock';
-import { CHANNEL_DEPOSIT_ATOMIC, unpaid, unpaidSentence } from './fee';
+import {
+  CHANNEL_DEPOSIT_ATOMIC,
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
+  routingDepositAtomic,
+  unpaid,
+  unpaidSentence,
+} from './fee';
 import { FakeRouter } from './fee-test-utils';
 import { ASK_FOR_REPAIR, WALLET_REASONS } from './wallet-reasons';
 
@@ -15,6 +21,26 @@ const ALL_KEYS = [
   'payment_failed',
   'fee_required',
 ];
+
+describe('routingDepositAtomic', () => {
+  const size = (
+    walletAtomic: bigint | null,
+    maxAtomic: bigint | null = MAX_CHANNEL_DEPOSIT_ATOMIC,
+  ) => routingDepositAtomic({ walletAtomic, hintAtomic: CHANNEL_DEPOSIT_ATOMIC, maxAtomic });
+
+  it('signs the smaller of the ceiling and the balance in whole fees, never below the hint', () => {
+    expect(size(10_000_000n)).toBe(250_000n);
+    expect(size(210_000n)).toBe(210_000n);
+    expect(size(70_000n)).toBe(69_000n);
+    expect(size(60_500n)).toBe(60_000n);
+    expect(size(31_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  });
+
+  it('signs the hint when the balance or the ceiling is unknown', () => {
+    expect(size(null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(size(10_000_000n, null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  });
+});
 
 describe('UNPAID wallet entries', () => {
   it('keeps offline eligibility aligned with the pinned server SDK deposit hint', async () => {
@@ -60,7 +86,7 @@ describe('unpaidSentence', () => {
     no_wallet:
       'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the usual $0.03 needed to set aside for routing), so Tenjin is not routing calls until that is fixed. Fund it with `tenjin wallet fund 5`.',
+      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Fund it with `tenjin wallet fund 5`.',
     fee_required:
       'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:

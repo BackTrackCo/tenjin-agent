@@ -1,6 +1,6 @@
 import { DEFAULT_MAX_AUTO_SPEND, DEFAULT_SESSION_BUDGET } from '../lib/config';
 import { toMoney } from '../lib/money';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
+import { MAX_CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, usd } from './fee';
 
 /**
  * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: the defaults, or
@@ -42,7 +42,7 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 }
 
 /** The routing fee's terms, as the selector names them. */
-export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from funds set aside in deposits of usually $${usd(CHANNEL_DEPOSIT_ATOMIC)}. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.`;
+export const ROUTING_FEE_TERMS = `Routing costs $${usd(ROUTING_FEE_ATOMIC)} a call, paid from funds Tenjin sets aside, up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time and less from a smaller balance. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.`;
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either answer also approves the routing fee.';

@@ -214,7 +214,7 @@ describe('the hook legs and the routing fee', () => {
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.25 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -435,7 +435,7 @@ describe('the hook legs and the routing fee', () => {
     const answer = await call;
     expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(contextOf(answer)).toContain('CoinMarketCap fits this');
-    expect(systemMessageOf(answer)).toContain('set aside $0.03 for routing');
+    expect(systemMessageOf(answer)).toContain('set aside $0.25 for routing');
     expect(fake.deposits).toBe(1);
     expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
     const ledger = await readSpendSummary(dir);
@@ -536,7 +536,7 @@ describe('the hook legs and the routing fee', () => {
     expect(Date.now() - started).toBe(DEPOSIT_GATE_TIMEOUT_MS);
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so it may have landed: it counts.
-    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '30000' });
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
   });
 });
 

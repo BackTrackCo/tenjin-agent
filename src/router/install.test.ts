@@ -59,7 +59,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.003 a call, paid from funds set aside in deposits of usually $0.03. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.';
+  'Routing costs $0.003 a call, paid from funds Tenjin sets aside, up to $0.25 at a time and less from a smaller balance. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 a day, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
