@@ -79,6 +79,7 @@ interface RenderedValue {
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
+  description?: string;
   /** The file a router key came from, when one did. */
   path?: string;
 }
@@ -132,13 +133,13 @@ const KEY_WIDTH = Math.max(
 
 /**
  * A one-line human description per key, appended (dim) to the bare `config`
- * listing only. Machine `data` is unchanged; these are humanLines decoration.
+ * listing. Spending descriptions also accompany machine readback.
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
   maxAutoSpend:
     'automatic router limit per call, the runaway guard: at least 0.25 (the default); router.enabled false turns the router off',
   sessionBudget:
-    'automatic router daily limit, the main control (5 by default): 0 blocks automatic spend, none removes the ceiling',
+    'automatic router limit per 24-hour budget window, shared across agent sessions (5 by default): 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
@@ -1085,7 +1086,13 @@ function renderSetting(
   stored: string | string[] | boolean,
   source: Provenance,
 ): RenderedSetting {
-  return { ...renderValue(key, stored), source };
+  return {
+    ...renderValue(key, stored),
+    source,
+    ...(['maxAutoSpend', 'sessionBudget', 'sendMaxAmount'].includes(key)
+      ? { description: KEY_DESCRIPTIONS[key] }
+      : {}),
+  };
 }
 
 /**

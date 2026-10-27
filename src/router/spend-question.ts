@@ -50,7 +50,7 @@ export const FEE_APPROVAL = 'Either answer also approves the routing fee.';
 const DEFAULTS_USD = limitsUsd(ROUTER_DEFAULTS);
 
 /** The question, for the agent to put to the person as written. */
-export const SPEND_QUESTION = `Use the defaults ($${DEFAULTS_USD.sessionBudget} a day, $${DEFAULTS_USD.maxAutoSpend} a call) or set your own limits.`;
+export const SPEND_QUESTION = `Use the defaults ($${DEFAULTS_USD.sessionBudget} per 24-hour budget window across agent sessions, $${DEFAULTS_USD.maxAutoSpend} a call) or set your own limits.`;
 
 /** The question with the fee terms either answer approves. */
 export function spendChoiceQuestion(): string {
@@ -81,7 +81,7 @@ export function spendOptions(install: string): SpendOption[] {
       label: 'Set my own limits',
       recommended: false,
       ask: [
-        'The most Tenjin may pay in a day, in USD, or none for no daily limit',
+        'The most Tenjin may pay per 24-hour budget window across agent sessions, in USD, or none for no limit',
         'The most it may pay for one call, in USD, at least 0.25',
       ],
       command: `${install} --max-auto-spend <usd> --session-budget <usd|none>`,

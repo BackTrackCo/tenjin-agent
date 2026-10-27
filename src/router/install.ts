@@ -69,7 +69,6 @@ import {
   spendChoiceQuestion,
   spendOptions,
   FEE_APPROVAL,
-  type SpendOption,
 } from './spend-question';
 import { shQuote } from './plugin-files';
 import { underAgentHarness } from '../lib/session';
@@ -1120,7 +1119,7 @@ function runtimeNotices(rt: RuntimeSetup, home: string): string[] {
 
 /** The one rule for every step the agent relays from install. */
 export const SHOW_NOT_RUN =
-  'Show the person addresses as written, and never ask them to run a command.';
+  'Run the command yourself. Show an address only when requested or needed for recovery; storage and PATH details only for recovery.';
 
 /**
  * An agent runs install with `--json` or in a shell with no terminal, so the
@@ -1136,12 +1135,11 @@ function spendStep(args: RouterInstallArgs, command: string): QuestionStep {
 /** The same question, for an install an agent runs again as `command`. */
 export function spendStepFor(command: string): QuestionStep {
   const options = spendOptions(command);
-  const [byDefault, custom] = options as [SpendOption, SpendOption];
   return {
     id: 'spend',
     question: spendChoiceQuestion(),
     options,
-    next: `${process.platform === 'win32' ? 'Use PowerShell for these commands. ' : ''}In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
+    next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once, with these options and the defaults recommended. The defaults are already in effect. Run the selected option's command alone, filling in any requested amounts, then read its complete result for the next action. Do not repeat an answered question. ${SHOW_NOT_RUN}`,
   };
 }
 
@@ -1253,7 +1251,7 @@ async function fundStep(
     };
   }
   const show =
-    'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
+    'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
   return {
     step: {
       id: 'fund',
@@ -1267,7 +1265,7 @@ async function fundStep(
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell for this command. ' : ''}The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${command}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${command}\` without this yes. ${SHOW_NOT_RUN}`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Offer funding again only on request. ${SHOW_NOT_RUN}`,
       address,
       show,
     },

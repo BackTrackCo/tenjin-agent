@@ -61,7 +61,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 const FEE_TERMS =
   'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
 /** What a run that could not ask prints for the agent that ran it. */
-const QUESTION = `Use the defaults ($5 a day, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
+const QUESTION = `Use the defaults ($5 per 24-hour budget window across agent sessions, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
   '  Automatic router: up to $0.25 per call; daily limit $5 a day',
   `  Ask the person in this session: ${QUESTION}`,
@@ -155,7 +155,7 @@ describe('tenjin install', () => {
               label: 'Set my own limits',
               recommended: false,
               ask: [
-                'The most Tenjin may pay in a day, in USD, or none for no daily limit',
+                'The most Tenjin may pay per 24-hour budget window across agent sessions, in USD, or none for no limit',
                 'The most it may pay for one call, in USD, at least 0.25',
               ],
               command: 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
@@ -168,16 +168,11 @@ describe('tenjin install', () => {
     expect(result.data).not.toHaveProperty('spend.approval');
     const approval = spendStepOf(result)!;
     expect(approval.options).toHaveLength(2);
-    expect(approval.next).toMatch(
-      /^In this session, ask the person this question with your question tool, offering these two options/,
-    );
+    expect(approval.next).toContain('Ask this question once');
     expect(approval.next).toContain('The defaults are already in effect.');
-    expect(approval.next).toContain('Use the defaults: run `tenjin install --yes`.');
-    expect(approval.next).toContain(
-      'then run `tenjin install --max-auto-spend <usd> --session-budget <usd|none>` with their amounts',
-    );
-    expect(approval.next).toContain('never joined with another command');
-    expect(approval.next).toContain('never ask them to run a command');
+    expect(approval.next).toContain("Run the selected option's command alone");
+    expect(approval.next).toContain('read its complete result');
+    expect(approval.next).toContain('Show an address only when requested or needed for recovery');
     expect(approval.next).not.toMatch(/terminal|config set|wallet fund|no automatic/i);
     // Outside an agent harness the spend question is the only step handed over.
     expect((result.data as { nextSteps: { id: string }[] }).nextSteps.map((q) => q.id)).toEqual([
@@ -433,7 +428,7 @@ function amounts(answers: (string | null)[]) {
   });
 }
 
-const SELECTOR = `Use the defaults ($5 a day, $0.25 a call) or set your own limits.\n${FEE_TERMS}\nEither answer also approves the routing fee.`;
+const SELECTOR = `Use the defaults ($5 per 24-hour budget window across agent sessions, $0.25 a call) or set your own limits.\n${FEE_TERMS}\nEither answer also approves the routing fee.`;
 
 describe('install asks a person the spend question once', () => {
   it('"Use the defaults" names the routing fee and writes $0.25 a call and $5 a day', async () => {
@@ -1201,7 +1196,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
     const show =
-      'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
+      'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
     expect(fund).toMatchObject({
       question: 'Add $5 to Tenjin now?',
       options: [
@@ -1212,9 +1207,10 @@ describe('install run by an agent asks each question where its answer is needed'
       show,
     });
     expect(fund).not.toHaveProperty('url');
-    expect(fund.next).toContain('The install is done.');
-    expect(fund.next).toContain('Never run `tenjin wallet fund 5` without this yes.');
-    expect(fund.next).toContain('never ask them to run a command');
+    expect(fund.next).toContain('Ask this question once.');
+    expect(fund.next).toContain('Run it only after their yes.');
+    expect(fund.next).toContain('Run the command yourself.');
+    expect(fund.next).toContain('Offer funding again only on request.');
     expect(result.humanLines).toEqual(
       expect.arrayContaining([
         '  Ask the person: Add $5 to Tenjin now?',

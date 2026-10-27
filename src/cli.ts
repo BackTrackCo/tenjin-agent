@@ -158,6 +158,7 @@ export function buildProgram(
       const result = await run(ctx);
       emitSuccess(ctx.io, command, result.data, result.humanLines, {
         json: ctx.flags.json,
+        compactJson: result.compactJson,
         updateAvailable,
       });
     } catch (err) {
