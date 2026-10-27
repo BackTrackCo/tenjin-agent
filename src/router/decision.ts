@@ -604,15 +604,17 @@ export function buildBrowseBody(request: {
   };
 }
 
-/** A browse row's id, answered with that tool's spec under a fresh offer id. */
+/** A browse row's spec, or a query bound to that selected free tool. */
 export function buildToolSpecBody(request: {
   tool: string;
+  query?: string;
   accepts: readonly string[];
   harness?: Harness;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
     tool: request.tool,
+    ...(request.query !== undefined ? { query: request.query } : {}),
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
   };
@@ -832,10 +834,11 @@ export async function requestBrowse(
   );
 }
 
-/** `{tool}`: a browse row's spec, kept by the caller under the answer's id. */
+/** `{tool}` reads a spec; `{tool, query}` binds a free lookup without paid routing. */
 export async function requestToolSpec(
   tool: string,
   deps: Omit<DecisionDeps, 'route'>,
+  query?: string,
 ): Promise<DecisionOutcome<ToolResponse>> {
   return readDecision(
     await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
@@ -844,7 +847,8 @@ export async function requestToolSpec(
       blockRedirects: true,
       jsonBody: buildToolSpecBody({
         tool,
-        accepts: acceptsFor(deps.acceptsBazaar === true),
+        ...(query !== undefined ? { query } : {}),
+        accepts: [...acceptsFor(deps.acceptsBazaar === true), 'free-query'],
         harness: deps.harness ?? 'claude',
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),

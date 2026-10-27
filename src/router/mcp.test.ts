@@ -49,6 +49,7 @@ import { CliError } from '../lib/errors';
 import { unlockDetails } from '../lib/wallet-unlock';
 import { readObservations } from './router-observation';
 import { createRouterObserver, type RouterObserver } from './router-observer';
+import docsLookup from './fixtures/wire-lookup-free-query.json';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -99,6 +100,85 @@ function router(body: unknown): typeof fetch {
 }
 
 describe('the router MCP server', () => {
+  it.each(['missing', 'unfunded'])(
+    'dispatches a selected free docs lookup with a %s wallet without asking the routing payer',
+    async (walletState) => {
+      const fake = new FakeRouter();
+      const payer = new RoutingPayer(
+        payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())),
+      );
+      vi.spyOn(payer, 'prewarm').mockResolvedValue(undefined);
+      const routeFor = vi
+        .spyOn(payer, 'routeFor')
+        .mockRejectedValue(new Error('free docs must not route'));
+      const provider = testWalletProvider();
+      const getSigner = vi.spyOn(provider, 'getSigner');
+      if (walletState === 'missing')
+        getSigner.mockRejectedValue(new CliError('WALLET_MISSING', 'No wallet exists.'));
+      const readBalance = vi.fn(async () => 0n);
+      const auth = authorizer();
+      const calls: { url: string; body?: unknown; payment: string | null }[] = [];
+      const fetchImpl: typeof fetch = async (url, init) => {
+        calls.push({
+          url: String(url),
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+          payment: new Headers(init?.headers).get('payment-signature'),
+        });
+        if (calls.length === 1) return Response.json(docsLookup);
+        if (String(url) !== docsLookup.decision.contract.request.url)
+          throw new Error('unexpected docs destination');
+        return new Response('Use z.email() to validate an email address.', {
+          headers: { 'content-type': 'text/plain' },
+        });
+      };
+      const server = buildRouterMcpServer({
+        dataDir: dir,
+        payer,
+        handlerDeps: {
+          cwd: dir,
+          provider,
+          authorizer: auth,
+          fetchImpl,
+          payDeps: { fetchImpl, provider, readBalance },
+        },
+      });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'test', version: '0.0.0' });
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        const called = await client.callTool({
+          name: 'request',
+          arguments: { tool: 'context7-docs', query: docsLookup.decision.contract.arguments.query },
+        });
+        expect(called.isError).toBe(false);
+        expect(envelopeOf(called)).toMatchObject({
+          status: 'fulfilled',
+          cost: ['provider price 0 USD'],
+          result: expect.stringContaining('Use z.email()'),
+        });
+        expect(calls).toHaveLength(2);
+        expect(calls[0]).toMatchObject({
+          url: 'https://tenjin.sh/api/x402-router',
+          body: {
+            tool: 'context7-docs',
+            query: docsLookup.decision.contract.arguments.query,
+            accepts: expect.arrayContaining(['free-query']),
+          },
+        });
+        expect(calls.every((call) => call.payment === null)).toBe(true);
+        expect(routeFor).not.toHaveBeenCalled();
+        expect(fake.log).toEqual([]);
+        expect(fake.deposits).toBe(0);
+        expect(getSigner).not.toHaveBeenCalled();
+        expect(readBalance).not.toHaveBeenCalled();
+        expect(auth.authorize).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+  );
+
   it('advertises one request tool and answers it, then closes cleanly', async () => {
     const fetchImpl = router({
       schemaVersion: 1,
@@ -1079,8 +1159,9 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
-      // Deciding is free now, and the instructions say so.
-      expect(request.description).toContain('Deciding what to route is free');
+      expect(request.description).toContain('General routing costs $0.003 per call');
+      expect(request.description).toContain('{tool: "<row id>", query: "<what to look up>"}');
+      expect(request.description).toContain('it needs no funds or routing fee');
     } finally {
       await client.close();
       await server.close();

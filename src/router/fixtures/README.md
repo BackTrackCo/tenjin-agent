@@ -20,13 +20,14 @@ any model call. While the fee is `required`, the free route answers `{packet}`
 and `{query}` with `fee_required` first, with or without `spec` (The paid path,
 below). The outcome report is the one form that carries no `accepts`.
 
-| call    | request                                                        | answer                                                                                                                      |
-| ------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts}`      | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
-| tool    | `{schemaVersion, query, id?, accepts}`                         | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
-| browse  | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
-| by id   | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
+| call        | request                                                        | answer                                                                                                                      |
+| ----------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| hook        | `{schemaVersion, packet, gateHint?, sessionId?, accepts}`      | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
+| tool        | `{schemaVersion, query, id?, accepts}`                         | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
+| browse      | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
+| by id       | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
+| free lookup | `{schemaVersion, tool, query, accepts}`                        | `execute` with the selected free service's zero-price contract; paid or unknown ids answer `needs_input`, with no rerouting |
+| outcome     | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
 catalog task id, such as `web research`, at most 64 characters),
@@ -89,6 +90,8 @@ gate is offered only the tasks whose capabilities a client runs.
   shows the line after it, so the line is the conditional one a `nativeOutcome`
   gets: `If WebSearch couldn't get this, call request({query, id}) …`, with the
   search's own query.
+- `free-query`: on a `tool` read, names the selected free lookup's
+  `{tool, query}` form instead of pointing at a general routing query.
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above.
@@ -98,8 +101,11 @@ A browse (`browse`, any words, or empty for everything) answers rows of
 runs, former list services included, best match first, or grouped by kind
 when empty. `price` is as a person reads it (`1¢`, `free`). No
 gate, no Jev, no row stored. A row's id sent as `tool` answers its spec under
-a fresh offer id, stored as a query's pick is; the free docs row has no spec
-and answers `needs_input` (`spec_missing`), pointing at `request({query})`.
+a fresh offer id, stored as a query's pick is. For a client that sends
+`free-query`, the free docs row instead asks for
+`request({tool: "context7-docs", query: "<what to look up>"})`. That form binds
+only the selected free service, with no routing fee or wallet. Older clients
+keep the `spec_missing` response pointing at `request({query})`.
 
 ## The paid path
 
@@ -321,6 +327,8 @@ ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 | `wire-browse-request.json`                 | a browse of the tool list                                                                 |
 | `wire-browse.json`                         | the browse answer: its rows                                                               |
 | `wire-tool-request-by-id.json`             | a browse row's id sent as `tool`                                                          |
+| `wire-tool-request-free-query.json`        | a selected free tool with its query, without paid routing                                 |
+| `wire-lookup-free-query.json`              | its zero-price execution contract, with no model call or expired-id note                  |
 | `wire-lookup-spec-by-id.json`              | tool answer for it: the row's spec under a fresh id, labelled, with the fields            |
 | `wire-outcome-via.json`                    | an outcome report naming the path that made the call, `via`                               |
 | `wire-hook-request-catalog.json`           | the hook from a client that sends `catalog` (and `bazaar`)                                |

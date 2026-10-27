@@ -256,6 +256,31 @@ describe('runPay, tenjin lane', () => {
     expect(authorizer.authorize).not.toHaveBeenCalled();
   });
 
+  it.each(['0', '100000'])(
+    'never opens a wallet for a free lookup that answers 402 with amount %s',
+    async (amount) => {
+      const fixture = buildPaymentRequired({ amount });
+      const { fetch, calls } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      ]);
+      const provider = testWalletProvider();
+      const getSigner = vi.fn(async () => {
+        throw new Error('a free lookup must not open a wallet');
+      });
+      const authorizer = fakeAuthorizer('allow');
+      await expect(
+        runPay(
+          { url: TENJIN_URL, terms: { source: 'free docs', maxAmountAtomic: '0' }, admit: planned },
+          makeCtx(),
+          { ...PUBLIC_DNS, fetchImpl: fetch, provider: { ...provider, getSigner }, authorizer },
+        ),
+      ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH', details: { status: 402 } });
+      expect(calls).toHaveLength(1);
+      expect(getSigner).not.toHaveBeenCalled();
+      expect(authorizer.authorize).not.toHaveBeenCalled();
+    },
+  );
+
   it('never attaches SIWX or session credentials', async () => {
     const fixture = buildPaymentRequired();
     const { fetch, calls } = scriptedFetch([

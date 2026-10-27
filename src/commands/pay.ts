@@ -316,6 +316,17 @@ async function executePay(
     );
   }
 
+  if (router && BigInt(args.terms!.maxAmountAtomic!) === 0n) {
+    throw new CliError(
+      'REGISTRY_MISMATCH',
+      'This lookup was advertised as free, but the endpoint requires payment.',
+      {
+        fix: 'Nothing was signed or paid. Use your usual tools for this lookup.',
+        details: { status: 402 },
+      },
+    );
+  }
+
   const paymentRequired = decodeChallenge(probe, url);
   // The client is built BEFORE the wallet is opened on purpose: selection needs
   // only the registered networks and the policies, never a key, so an

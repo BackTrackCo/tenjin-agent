@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "tool": "context7-docs",
+  "query": "Zod v4 email & URL validation",
+  "accepts": ["spec", "free-query"]
+}
