@@ -228,7 +228,11 @@ describe('Codex automatic hooks', () => {
     const server = await connect(fake, { walletBalance: async () => 20_000n }, routed);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({ systemMessage: expect.stringContaining('`tenjin wallet fund 5`') });
+      expect(out).toEqual({
+        systemMessage: expect.stringContaining('could not pay its $0.003 fee'),
+      });
+      expect(out?.systemMessage).toContain('Your usual tools still work.');
+      expect(out?.systemMessage).not.toContain('tenjin wallet fund');
       expect(fake.paidRequests()).toBe(0);
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
         'prompt: fee unpaid: wallet_low',

@@ -117,7 +117,7 @@ export function registerRouter(reg: Registration): void {
 
   leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
     .description(
-      'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force.',
+      'Report the current 24-hour budget window from spend.json, shared across agent sessions: what has settled, what is reserved by a request still in flight, and the per-call and budget caps in force.',
     )
     .action(async function (this: Command) {
       await runCommand('status', this, async (ctx) => {

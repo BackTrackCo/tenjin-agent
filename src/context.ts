@@ -27,6 +27,8 @@ export interface CommandContext {
 export interface CommandResult {
   data: unknown;
   humanLines?: string[];
+  /** One-line JSON for the default agent install handoff; not part of `data`. */
+  compactJson?: boolean;
 }
 
 export type CommandRun = (ctx: CommandContext) => Promise<CommandResult>;

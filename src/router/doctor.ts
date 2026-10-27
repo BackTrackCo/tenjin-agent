@@ -1391,7 +1391,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
     limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
     budget_reached:
-      'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
+      'Room comes back when the 24-hour budget window resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
   };
   return {
@@ -1426,8 +1426,8 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       name: 'spend',
       status: 'fail',
       required: true,
-      detail: 'The daily limit is 0, so positive payments are refused even with --yes.',
-      fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
+      detail: 'The 24-hour budget is 0, so positive payments are refused even with --yes.',
+      fix: 'Choose a 24-hour budget with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
   if (maxAutoSpendAtomic === 0n) {
@@ -1441,8 +1441,8 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
   }
   const budget =
     sessionBudgetAtomic === null
-      ? 'no daily ceiling'
-      : `${toMoney(sessionBudgetAtomic.toString()).usd} USD a day`;
+      ? 'no 24-hour budget ceiling'
+      : `${toMoney(sessionBudgetAtomic.toString()).usd} USD per 24-hour budget window`;
   return {
     name: 'spend',
     status: sessionBudgetAtomic === null ? 'warn' : 'ok',

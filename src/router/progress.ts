@@ -16,8 +16,8 @@ import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
  * mark and the redirect claims, and both only ever make a hook say less: losing
  * either routes a call exactly as a session with no record would, and a claim
  * that cannot be written denies nothing. The free-docs
- * records are the same kind: a lost augment marker is a search with no docs
- * added, and a lost query claim is one more free fetch.
+ * records are the same kind: a lost note record is a search with no line
+ * after it, and a lost query claim is one more line.
  *
  * KEYED TO THE SESSION, NEVER GUESSED FROM IT. A record lives under the SHA-256
  * of the harness's own `session_id`, so the renderer for one session cannot see
@@ -43,12 +43,10 @@ const OFFER_PREFIX = 'offer-';
 const SESSION_FILE = 'session.json';
 /** A pre-call redirect, one file per agent and target in the session. */
 const REDIRECT_PREFIX = 'redirect-';
-/** A search the pre-call hook is adding free docs to, keyed by its `tool_use_id`. */
-const AUGMENT_PREFIX = 'augment-';
-/** What the docs prefetch got, beside its marker. The provider's text sets its
- *  size, so it is never read as a record: it ages by its mtime. */
-const AUGMENT_BODY_SUFFIX = '.docs';
-/** One agent's search query that was augmented, so the same one is not fetched twice. */
+/** A search the pre-call hook noted a free lookup on, keyed by its `tool_use_id`. */
+const NOTE_PREFIX = 'note-';
+/** One agent's search query that was noted, one file per window, so the same
+ *  one is not noted twice. */
 const QUERY_PREFIX = 'query-';
 /** Call records are named by a 64-hex digest and nothing else is read as one. */
 const CALL_FILE_RE = /^[a-f0-9]{64}\.json$/;
@@ -66,8 +64,8 @@ export const RECENT_MS = 10_000;
 export const EXPIRY_MS = 10 * 60_000;
 /** How recently a session must have been touched to claim an id-less request. */
 export const SESSION_ACTIVE_MS = 10 * 60_000;
-/** How long one agent's identical search is not given the same docs again. */
-export const AUGMENT_REPEAT_MS = 5 * 60_000;
+/** How long one agent's identical search is not given the same note again. */
+export const NOTE_REPEAT_MS = 5 * 60_000;
 /** Above this many files a session directory is reported rather than scanned. */
 const MAX_RECORDS = 256;
 /** A ceiling on the root scan. {@link pruneSessions} keeps it far below this:
@@ -75,6 +73,8 @@ const MAX_RECORDS = 256;
 const MAX_SESSIONS = 4_096;
 /** A record larger than this is damaged or not ours; it is skipped unread. */
 const MAX_RECORD_BYTES = 4_096;
+/** An offer id as a record keeps one: the server's opaque handle. */
+const OFFER_ID_RE = /^[\w.:-]{1,200}$/;
 
 export type ProgressPhase = 'routing' | 'calling' | 'done';
 
@@ -102,11 +102,21 @@ interface SavedProgress extends Stamp {
   price?: string;
 }
 
-/** A search being given free docs, and whose docs they are: the service's
- *  `label` when the decision carried one, else its provider's name. */
-interface SavedAugment extends Stamp {
-  provider: string;
-  label?: string;
+/**
+ * THE NOTE RECORD, one per WebSearch the pre-call hook let run with a free
+ * offer, keyed by its `tool_use_id`: the offer's id and the server's line,
+ * which the after-call hook shows once the search has run. The CLI's alone:
+ * the mod draws nothing on the search.
+ */
+interface SavedNote extends Stamp {
+  offerId: string;
+  line: string;
+}
+
+/** What a note record names: the offer and its line. */
+export interface NotedOffer {
+  offerId: string;
+  line: string;
 }
 
 /**
@@ -250,7 +260,7 @@ export async function markOffered(
   const saved: SavedOffer = {
     version: 1,
     at: now,
-    ...(offer.offerId !== undefined && /^[\w.:-]{1,200}$/.test(offer.offerId)
+    ...(offer.offerId !== undefined && OFFER_ID_RE.test(offer.offerId)
       ? { offerId: offer.offerId }
       : {}),
     ...(offer.label !== undefined ? { label: sanitize(offer.label, 32) } : {}),
@@ -274,74 +284,72 @@ export async function wasOffered(
 }
 
 /**
- * FREE DOCS BESIDE A SEARCH. The pre-call hook marks the search it let run with
- * a free offer, by the harness's own `tool_use_id` and with the provider's name
- * for the line the after-call hook writes, and returns where the prefetch puts
- * what it got: beside the marker, under the same key. Null when the marker could
- * not be written, since nothing could then find the body.
+ * A FREE LOOKUP NOTED ON A SEARCH. The pre-call hook keeps the server's line
+ * under the harness's own `tool_use_id`, for the after-call hook to show once
+ * the search has run. False when nothing was written: the offer id is not an
+ * id, the record would pass the 4,096-byte bound every read here holds, or
+ * the write failed. That search then gets no line and no tail.
  */
-export async function markAugment(
+export async function markNoted(
   dataDir: string,
   sessionId: string,
   toolUseId: string,
-  docs: { provider: string; label?: string },
+  note: NotedOffer,
   now = Date.now(),
-): Promise<string | null> {
-  const base = join(sessionDir(dataDir, sessionId), `${AUGMENT_PREFIX}${digest(toolUseId)}`);
-  const saved: SavedAugment = {
-    version: 1,
-    at: now,
-    provider: sanitize(docs.provider, 60),
-    ...(docs.label !== undefined ? { label: sanitize(docs.label, 32) } : {}),
-  };
-  return (await write(`${base}.json`, saved)) ? `${base}${AUGMENT_BODY_SUFFIX}` : null;
-}
-
-/** The marker {@link markAugment} left for this call, or null when it left none. */
-export async function augmentOf(
-  dataDir: string,
-  sessionId: string,
-  toolUseId: string,
-  now = Date.now(),
-): Promise<{ at: number; provider: string; label?: string; body: string } | null> {
-  const base = join(sessionDir(dataDir, sessionId), `${AUGMENT_PREFIX}${digest(toolUseId)}`);
-  const row = await readJson(`${base}.json`);
-  const stamp = stampOf(row);
-  if (row === null || stamp === null || now - stamp.at > EXPIRY_MS) return null;
-  const provider = typeof row.provider === 'string' ? sanitize(row.provider, 60) : '';
-  const label = typeof row.label === 'string' ? sanitize(row.label, 32) : '';
-  return {
-    at: stamp.at,
-    provider,
-    ...(label !== '' ? { label } : {}),
-    body: `${base}${AUGMENT_BODY_SUFFIX}`,
-  };
+): Promise<boolean> {
+  if (!OFFER_ID_RE.test(note.offerId) || !note.line.includes(note.offerId)) return false;
+  const saved: SavedNote = { version: 1, at: now, offerId: note.offerId, line: note.line };
+  if (Buffer.byteLength(JSON.stringify(saved), 'utf8') > MAX_RECORD_BYTES) return false;
+  return write(notePath(dataDir, sessionId, toolUseId), saved);
 }
 
 /**
- * ONE FETCH PER QUERY. True when this agent has not had this exact search
- * augmented in the last {@link AUGMENT_REPEAT_MS}, and the claim is now its:
- * the create is exclusive, so two parallel copies of one search fetch once.
+ * The note {@link markNoted} left for this call, or null: none, expired,
+ * damaged, or a line that does not carry its own offer id. What is on disk is
+ * input, so every field is checked again.
  */
-export async function claimQuery(
+export async function noteOf(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  now = Date.now(),
+): Promise<NotedOffer | null> {
+  const row = await readJson(notePath(dataDir, sessionId, toolUseId));
+  const stamp = stampOf(row);
+  if (row === null || stamp === null || now - stamp.at > EXPIRY_MS) return null;
+  const { offerId, line } = row;
+  if (typeof offerId !== 'string' || !OFFER_ID_RE.test(offerId)) return null;
+  if (typeof line !== 'string' || /[\p{Cc}\p{Cf}]/u.test(line) || !line.includes(offerId)) {
+    return null;
+  }
+  return { offerId, line };
+}
+
+function notePath(dataDir: string, sessionId: string, toolUseId: string): string {
+  return join(sessionDir(dataDir, sessionId), `${NOTE_PREFIX}${digest(toolUseId)}.json`);
+}
+
+/**
+ * ONE NOTE PER QUERY. True, once, when this agent has not had this exact
+ * search noted in the last {@link NOTE_REPEAT_MS}, and the claim is now its.
+ * The same window-named exclusive create as {@link claimRedirect}, so two
+ * parallel copies of one search get one note, after the window too.
+ */
+export async function claimNote(
   dataDir: string,
   sessionId: string,
   agentId: string | undefined,
   query: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const key = digest(JSON.stringify([agentId ?? '', query]));
-  const path = join(sessionDir(dataDir, sessionId), `${QUERY_PREFIX}${key}.json`);
-  const stamp: Stamp = { version: 1, at: now };
-  try {
-    await writeFileAtomicExclusive(path, JSON.stringify(stamp), { mode: 0o600, dirMode: 0o700 });
-    return true;
-  } catch {
-    // Taken: by a recent search, which wins, or by an old one, which does not.
-  }
-  const last = await readStamp(path);
-  if (last === null || now - last.at <= AUGMENT_REPEAT_MS) return false;
-  return write(path, stamp);
+  return claimOnce(
+    (window) => {
+      const key = digest(JSON.stringify([agentId ?? '', query, window]));
+      return join(sessionDir(dataDir, sessionId), `${QUERY_PREFIX}${key}.json`);
+    },
+    NOTE_REPEAT_MS,
+    now,
+  );
 }
 
 /**
@@ -387,19 +395,35 @@ export async function claimRedirect(
   target: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const window = Math.floor(now / EXPIRY_MS);
-  const previous = await readStamp(redirectPath(dataDir, sessionId, agentId, target, window - 1));
-  if (previous !== null && now - previous.at <= EXPIRY_MS) return false;
+  return claimOnce(
+    (window) => redirectPath(dataDir, sessionId, agentId, target, window),
+    EXPIRY_MS,
+    now,
+  );
+}
+
+/**
+ * The one create both claims make: the file named by the `span` window `now`
+ * falls in, refused while the previous window's claim is inside its span. A
+ * claim that cannot be written is false.
+ */
+async function claimOnce(
+  pathFor: (window: number) => string,
+  span: number,
+  now: number,
+): Promise<boolean> {
+  const window = Math.floor(now / span);
+  const previous = await readStamp(pathFor(window - 1));
+  if (previous !== null && now - previous.at <= span) return false;
   const stamp: Stamp = { version: 1, at: now };
   try {
-    await writeFileAtomicExclusive(
-      redirectPath(dataDir, sessionId, agentId, target, window),
-      JSON.stringify(stamp),
-      { mode: 0o600, dirMode: 0o700 },
-    );
+    await writeFileAtomicExclusive(pathFor(window), JSON.stringify(stamp), {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
     return true;
   } catch {
-    // Taken in this window, which is always inside EXPIRY_MS, or not writable.
+    // Taken in this window, which is always inside the span, or not writable.
     return false;
   }
 }
@@ -569,12 +593,12 @@ export async function pruneProgress(directory: string, now = Date.now()): Promis
 /**
  * A FILE THAT IS NOT A WHOLE RECORD is aged by its mtime, never read as one: a
  * temp file between its write and its rename (every writer here names them
- * `.<name>.<suffix>`), and a docs body, whose size is the provider's. Read as
- * records they are damaged, and the prune deleted them out from under a
- * parallel hook's rename.
+ * `.<name>.<suffix>`). Read as a record it is damaged, and the prune deleted
+ * it out from under a parallel hook's rename. A docs body an older build left
+ * (`augment-*.docs`) reads as damaged, and goes.
  */
 function agesByMtime(name: string): boolean {
-  return name.startsWith('.') || (name.startsWith(AUGMENT_PREFIX) && !name.endsWith('.json'));
+  return name.startsWith('.');
 }
 
 async function mtimeOf(path: string): Promise<Stamp | null> {
@@ -731,8 +755,8 @@ function line(row: SavedProgress, now: number): string {
   );
 }
 
-/** Whether it landed. Every caller but the augment marker ignores the answer. */
-async function write(path: string, body: Stamp | SavedProgress | SavedAugment): Promise<boolean> {
+/** Whether it landed. Every caller but the note record ignores the answer. */
+async function write(path: string, body: Stamp | SavedProgress | SavedNote): Promise<boolean> {
   try {
     await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
     return true;

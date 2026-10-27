@@ -81,12 +81,20 @@ describe('UNPAID wallet entries', () => {
 });
 
 describe('unpaidSentence', () => {
-  // User-visible notices keep the funding and recovery action with the reason.
+  it('explains automatic unfunded routing without reopening checkout, while doctor retains its fix', () => {
+    expect(unpaidSentence('wallet_low', 'agent')).toContain('could not pay its $0.003 fee');
+    expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
+      /wallet fund|send USDC|add funds|checkout/i,
+    );
+    expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
+    expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
+  });
+  // User-visible notices keep the current routing terms and recovery action with the reason.
   const EXPECTED: Record<string, string> = {
     no_wallet:
       'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Fund it with `tenjin wallet fund 5`.',
+      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
     fee_required:
       'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
@@ -94,12 +102,12 @@ describe('unpaidSentence', () => {
     limit_below_deposit:
       'Tenjin routing could not pay its $0.003 fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     budget_reached:
-      'Tenjin routing could not pay its $0.003 fee (the daily spend limit has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the 24-hour budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     not_allowlisted:
       'Tenjin routing could not pay its $0.003 fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
   };
 
-  it('includes the current routing terms and recovery guidance', () => {
+  it('keeps actionable reasons, with no funding imperative in automatic fallback', () => {
     for (const [why, sentence] of Object.entries(EXPECTED)) {
       expect(unpaidSentence(why), why).toBe(sentence);
     }

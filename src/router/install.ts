@@ -69,7 +69,6 @@ import {
   spendChoiceQuestion,
   spendOptions,
   FEE_APPROVAL,
-  type SpendOption,
 } from './spend-question';
 import { shQuote } from './plugin-files';
 import { underAgentHarness } from '../lib/session';
@@ -109,7 +108,7 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the free routing gate, beside this session's id. When the gate offers free library docs for a search, that search query also goes to Tenjin's docs lookup, which asks Context7.",
+  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the free routing gate, beside this session's id. When your assistant calls the free library docs lookup, its query goes to Tenjin's docs lookup, which asks Context7.",
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];
@@ -1120,7 +1119,7 @@ function runtimeNotices(rt: RuntimeSetup, home: string): string[] {
 
 /** The one rule for every step the agent relays from install. */
 export const SHOW_NOT_RUN =
-  'Show the person addresses as written, and never ask them to run a command.';
+  'When the selected option includes a command, run it yourself; never ask the person to run it. Show an address only when requested or needed for recovery; storage and PATH details only for recovery.';
 
 /**
  * An agent runs install with `--json` or in a shell with no terminal, so the
@@ -1136,12 +1135,11 @@ function spendStep(args: RouterInstallArgs, command: string): QuestionStep {
 /** The same question, for an install an agent runs again as `command`. */
 export function spendStepFor(command: string): QuestionStep {
   const options = spendOptions(command);
-  const [byDefault, custom] = options as [SpendOption, SpendOption];
   return {
     id: 'spend',
     question: spendChoiceQuestion(),
     options,
-    next: `${process.platform === 'win32' ? 'Use PowerShell for these commands. ' : ''}In this session, ask the person this question with your question tool, offering these two options in order with the defaults marked recommended. The defaults are already in effect. Use the defaults: run \`${byDefault.command}\`. Set my own limits: ask for the most per day in USD (or none for no daily limit) and the most per call in USD (at least 0.25), then run \`${custom.command}\` with their amounts. Run the command alone, never joined with another command, and do not ask again a question its output repeats. ${SHOW_NOT_RUN}`,
+    next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once, with these options and the defaults recommended. The defaults are already in effect. Run the selected option's command alone, filling in any requested amounts, then read its complete result for the next action. Do not repeat an answered question. ${SHOW_NOT_RUN}`,
   };
 }
 
@@ -1253,7 +1251,7 @@ async function fundStep(
     };
   }
   const show =
-    'You can ask your agent to add funds to Tenjin later. Paid tools need funds; your usual tools keep working.';
+    'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
   return {
     step: {
       id: 'fund',
@@ -1267,7 +1265,7 @@ async function fundStep(
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell for this command. ' : ''}The install is done. Ask the person this question with your question tool. On "Add $${SUGGESTED_FUND_USD}", run \`${command}\` alone, in the same turn, then follow its nextStep. On "Not now", run nothing and show the person this for later: ${show} The address is an alternative only if they ask to transfer funds directly. Never run \`${command}\` without this yes. ${SHOW_NOT_RUN}`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Offer funding again only on request. ${SHOW_NOT_RUN}`,
       address,
       show,
     },
@@ -1306,7 +1304,7 @@ export async function approveLimits(
   const ask = deps.promptAmount ?? promptAmount;
   const sessionBudget = await askLimit(
     ask,
-    'Most it may pay in a day, in USD, or none',
+    'Most it may pay per 24-hour budget window, in USD, or none',
     '5',
     'day',
   );
@@ -1392,7 +1390,7 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
       policy.sessionBudgetAtomic === null
-        ? 'no daily ceiling'
+        ? 'no 24-hour budget ceiling'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
 }
@@ -1536,10 +1534,9 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
-  const daily =
-    s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+  const daily = s.policy.sessionBudgetAtomic === null ? 'none' : `$${limits.sessionBudget}`;
   const spend = [
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; 24-hour budget ${daily}`,
     ...(s.spendAsk !== undefined
       ? [
           `  Ask the person in this session: ${s.spendAsk.question}`,

@@ -152,8 +152,8 @@ describe('routingFeeRow', () => {
     [
       'budget_reached',
       routing(READY, { feeRefusal: 'budget_reached' }),
-      'the daily spend limit has no room left for the routing fee or its deposit, so Tenjin is not routing calls',
-      'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
+      'the 24-hour budget has no room left for the routing fee or its deposit, so Tenjin is not routing calls',
+      'Room comes back when the 24-hour budget window resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     ],
     [
       'not_allowlisted',

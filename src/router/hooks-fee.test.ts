@@ -240,7 +240,7 @@ describe('the hook legs and the routing fee', () => {
     [
       'the wallet holds less than the deposit',
       { walletBalance: async () => 20_000n },
-      '`tenjin wallet fund 5`',
+      'Your usual tools still work.',
     ],
     [
       'the wallet cannot be unlocked',
@@ -283,6 +283,7 @@ describe('the hook legs and the routing fee', () => {
       expect(contextOf(first)).toContain('CoinMarketCap fits this');
       expect(systemMessageOf(first)).toContain('could not pay its $0.003 fee');
       expect(systemMessageOf(first)).toContain(fix);
+      expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
       expect(fake.paidRequests()).toBe(0);
       expect(fake.log.at(-1)).toBe('POST /api/x402-router unpaid');
@@ -598,7 +599,9 @@ describe('wallet notices', () => {
     let balance = 20_000n;
     const p = payer(fake, { walletBalance: async () => balance });
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(low)).toContain('`tenjin wallet fund 5`');
+    expect(systemMessageOf(low)).toContain('could not pay its $0.003 fee');
+    expect(systemMessageOf(low)).toContain('Your usual tools still work.');
+    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
     balance = 10_000_000n;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);

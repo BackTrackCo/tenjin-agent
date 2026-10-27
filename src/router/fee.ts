@@ -128,7 +128,7 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
   budget_reached: {
-    reason: 'the daily spend limit has no room left for the routing fee or its deposit',
+    reason: 'the 24-hour budget has no room left for the routing fee or its deposit',
     fix: 'Run `tenjin doctor`.',
   },
   not_allowlisted: {
@@ -177,7 +177,14 @@ export function depositSentence(amountAtomic: bigint): string {
 export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person'): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
+  // An automatic fallback explains the missing funds without reopening checkout.
+  // Explicit balance/payment/doctor results retain `unpaid().fix`.
+  const fix =
+    why === 'wallet_low'
+      ? 'Your usual tools still work.'
+      : reader === 'agent'
+        ? agentFixFor(why, u.fix)
+        : u.fix;
   return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 
