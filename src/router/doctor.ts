@@ -80,10 +80,6 @@ import {
  *
  * EVERY FIX IS A STEP THE AGENT TAKES IN THE SESSION: a command it runs, or a
  * slash command the person types there. None sends anyone out of Claude Code.
- *
- * THE SHELF'S DOCTOR IS NOT THIS ONE. It stays with the product it belongs to
- * (`src/commands/doctor.ts`, unregistered), and this one reports the router's
- * own wiring.
  */
 
 export type { RouterCheck };

@@ -1,8 +1,5 @@
 dist/
 pnpm-lock.yaml
-# Vendored verbatim from tenjin.sh/skills.md; must stay byte-identical to the
-# source. Never reformat.
-skills/
 # Rewritten by the changesets release action in its own JSON style
 # (multi-line arrays), which prettier disagrees with. Bot-owned, not ours.
 .changeset/pre.json

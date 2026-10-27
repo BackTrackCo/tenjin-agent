@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,13 +10,8 @@ import {
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
   DEFAULT_BAZAAR_REGISTRIES,
-  HOOK_ARMS,
-  LOOP_CONFIG_KEYS,
-  TEAM_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
-  parseLoopValue,
-  parsePublicFallbackFlag,
-  resolveLoopConfig,
+  parseOnOffFlag,
 } from './config';
 import { CliError } from './errors';
 
@@ -45,6 +40,37 @@ describe('loadConfig', () => {
   it('throws CONFIG_INVALID on malformed JSON', async () => {
     await writeFile(configFile(), '{ not json');
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+  });
+
+  // Every key an earlier release wrote and this one no longer reads: the
+  // shelf's blocks, team mode and the harness record. A machine that ran the
+  // shelf keeps its file, so it must load, resolve and stay in force as is.
+  it('loads a file that still carries the removed shelf keys, and reads the rest', async () => {
+    const legacy = {
+      maxAutoSpend: '500000',
+      baseUrl: 'https://router.example',
+      publicShelfUrl: 'https://tenjin.sh',
+      shelfBypassSecret: 'door-key',
+      evalCohort: true,
+      publish: { mode: 'full-auto', defaultPrice: '100000', ackServerWarnings: 'on' },
+      hooks: { prompt: false, 'web-search': true, primer: false },
+      loop: { human_wait_ms: 2500, tool_wait_ms: 4000, idle_exit_min: 30, port: null },
+      team: { publicFallback: 'off' },
+      install: { harness: ['shared'], grantDeclined: ['Bash(tenjin search:*)'] },
+      router: { enabled: false },
+    };
+    await writeFile(configFile(), JSON.stringify(legacy));
+
+    const raw = await loadRawConfig(dir);
+    expect(raw).toMatchObject(legacy);
+    const cfg = await loadConfig(dir);
+    expect(cfg.maxAutoSpend).toBe('500000');
+    expect(cfg.router).toEqual({ enabled: false, context: 'session' });
+    expect(cfg.install).toEqual({ routerProjects: [] });
+    const s = resolveSettings({ config: raw, flags: {}, env: {} });
+    expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
+    expect(s.maxAutoSpend).toEqual({ value: '500000', source: 'file' });
+    expect(Object.keys(s)).not.toContain('publicShelfUrl');
   });
 
   it('throws CONFIG_INVALID with the code on a schema violation', async () => {
@@ -130,15 +156,15 @@ describe('writeConfig', () => {
   });
 
   /**
-   * config.json holds `shelfBypassSecret`, the team shelf's shared door key, so
-   * it is a secret file and gets the 0600 every other secret in this tree gets.
-   * dirMode 0o700 is not the backstop it looks like: node's recursive mkdir does
-   * not chmod a directory that already exists, so a data dir a devcontainer
-   * volume or a restored backup created at 0755 leaves a 0644 config readable
-   * by anyone on the box.
+   * config.json can hold an RPC provider's key inside `rpcUrl`, so it gets the
+   * 0600 every other secret in this tree gets. dirMode 0o700 is not the
+   * backstop it looks like: node's recursive mkdir does not chmod a directory
+   * that already exists, so a data dir a devcontainer volume or a restored
+   * backup created at 0755 leaves a 0644 config readable by anyone on the box.
    */
+  const WITH_KEY = { ...CONFIG_DEFAULTS, rpcUrl: 'https://base.example/v2/rpc-key-abc123' };
   it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
-    await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+    await writeConfig(dir, WITH_KEY);
     expect((await stat(configFile())).mode & 0o777).toBe(0o600);
   });
 
@@ -147,325 +173,44 @@ describe('writeConfig', () => {
     async () => {
       await mkdir(dir, { recursive: true });
       await chmod(dir, 0o755);
-      await writeConfig(dir, { ...CONFIG_DEFAULTS, shelfBypassSecret: 'shelf-secret-abc123' });
+      await writeConfig(dir, WITH_KEY);
       expect((await stat(configFile())).mode & 0o777).toBe(0o600);
     },
   );
 });
 
-describe('publish block', () => {
-  const PUBLISH_DEFAULTS = {
-    mode: 'review',
-    defaultPrice: '100000',
-    ackServerWarnings: 'mode',
-  } as const;
-
-  it('defaults publish to review / $0.10 atomic / mode-derived server acks', async () => {
-    expect(CONFIG_DEFAULTS.publish).toEqual(PUBLISH_DEFAULTS);
-    expect((await loadConfig(dir)).publish).toEqual(PUBLISH_DEFAULTS);
-  });
-
-  it('merges a partial publish block per-subkey (keeps the defaults it omits)', async () => {
-    await writeFile(configFile(), JSON.stringify({ publish: { mode: 'review' } }));
-    expect((await loadConfig(dir)).publish).toEqual(PUBLISH_DEFAULTS);
-  });
-
-  // The key only ever LOOSENS what a yes covers, so a `.tenjin.json` a cloned
-  // repo carries must not be able to set it: global config or the default.
-  it('takes publish.ackServerWarnings from the global config only', async () => {
-    expect(resolveSettings({ config: {}, flags: {}, env: {} }).publishAckServerWarnings).toEqual({
-      value: 'mode',
-      source: 'default',
-    });
-    expect(
-      resolveSettings({
-        config: { publish: { ackServerWarnings: 'off' } },
-        flags: {},
-        env: {},
-        project: { publish: { ackServerWarnings: 'on' } } as never,
-      }).publishAckServerWarnings,
-    ).toEqual({ value: 'off', source: 'file' });
-  });
-
-  it('resolveSettings exposes publishMode and publishDefaultPrice', async () => {
-    await writeFile(
-      configFile(),
-      JSON.stringify({ publish: { mode: 'review', defaultPrice: '250000' } }),
-    );
-    const config = await loadRawConfig(dir);
-    const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.publishMode).toEqual({ value: 'review', source: 'file' });
-    expect(s.publishDefaultPrice).toEqual({ value: '250000', source: 'file' });
-  });
-});
-
-describe('hooks block: seven booleans, one per arm', () => {
-  // A vanilla install turns the whole loop on: every arm is on until someone
-  // says otherwise, and each is one `config set` from inert.
-  it('defaults every arm on, read at run time by the daemon', async () => {
-    const cfg = await loadConfig(dir);
-    for (const arm of HOOK_ARMS) {
-      expect(CONFIG_DEFAULTS.hooks[arm]).toBe(true);
-      expect(cfg.hooks[arm]).toBe(true);
-    }
-  });
-
-  it('merges a partial hooks block per-arm (keeps the defaults it omits)', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { 'web-search': false } }));
-    const cfg = await loadConfig(dir);
-    expect(cfg.hooks['web-search']).toBe(false);
-    expect(cfg.hooks.prompt).toBe(true);
-    expect(cfg.hooks.publish).toBe(true);
-  });
-
-  it('resolveSettings exposes every arm, file over default', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { publish: false } }));
-    const config = await loadRawConfig(dir);
-    const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooks.publish).toEqual({ value: false, source: 'file' });
-    expect(s.hooks.prompt).toEqual({ value: true, source: 'default' });
-  });
-
-  it('rejects a hook value that is not a boolean', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { publish: 'sometimes' } }));
-    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
-  });
-});
-
 describe('install block', () => {
-  it('defaults to no recorded harness, decline or wired project', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({
-      harness: [],
-      grantDeclined: [],
-      routerProjects: [],
-    });
-    expect((await loadConfig(dir)).install).toEqual({
-      harness: [],
-      grantDeclined: [],
-      routerProjects: [],
-    });
+  it('defaults to no wired project', async () => {
+    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [] });
+    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [] });
   });
 
-  it('reads back the recorded targets', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'codex'] } }));
-    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'codex']);
-  });
-
-  it.each([
-    [['shared'], ['codex']],
-    [
-      ['claude', 'shared'],
-      ['claude', 'codex'],
-    ],
-    [['codex', 'shared'], ['codex']],
-    [
-      ['shared', 'claude', 'shared', 'codex', 'claude'],
-      ['claude', 'codex'],
-    ],
-    [[], []],
-  ])('normalizes the stored harnesses %j at the raw read edge', async (harness, expected) => {
-    const stored = { install: { harness } };
-    await writeFile(configFile(), JSON.stringify(stored));
-
-    expect((await loadRawConfig(dir)).install?.harness).toEqual(expected);
-    expect((await loadConfig(dir)).install.harness).toEqual(expected);
-    // Reading is not a config write: the next locked writer performs the durable
-    // migration, while read-only commands leave the operator's file untouched.
-    expect(JSON.parse(await readFile(configFile(), 'utf8'))).toEqual(stored);
-  });
-
-  it('reads back a recorded grant decline as the exact declined rules', async () => {
-    await writeFile(
-      configFile(),
-      JSON.stringify({ install: { grantDeclined: ['Bash(tenjin search:*)'] } }),
-    );
-    expect((await loadConfig(dir)).install.grantDeclined).toEqual(['Bash(tenjin search:*)']);
-  });
-
-  it('does not alias the pre-release decline key', async () => {
-    await writeFile(
-      configFile(),
-      JSON.stringify({ install: { freeVerbsDeclined: ['Bash(tenjin search:*)'] } }),
-    );
-    expect((await loadConfig(dir)).install.grantDeclined).toEqual([]);
-  });
-
-  it('rejects a boolean grant decline instead of carrying a pre-release shape', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { grantDeclined: true } }));
-    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
-  });
-
-  it('rejects a harness name install could not have written', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['shared', 'cursor'] } }));
-    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+  it('reads back the wired projects', async () => {
+    await writeFile(configFile(), JSON.stringify({ install: { routerProjects: ['/p/a'] } }));
+    expect((await loadConfig(dir)).install.routerProjects).toEqual(['/p/a']);
   });
 
   it('is not a `config set` key: it is never rendered as a scalar', () => {
     expect(CONFIG_KEYS as readonly string[]).not.toContain('install');
-    expect(CONFIG_KEYS as readonly string[]).not.toContain('publish');
   });
 });
 
-describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => {
-  const LOOP_DEFAULTS = {
-    human_wait_ms: 2500,
-    tool_wait_ms: 4000,
-    idle_exit_min: 30,
-    port: null,
-  } as const;
-
-  it('defaults to the two budget numbers, two daemon knobs, and public fallback on', async () => {
-    expect(CONFIG_DEFAULTS.loop).toEqual(LOOP_DEFAULTS);
-    expect(CONFIG_DEFAULTS.team).toEqual({ publicFallback: 'on' });
-    const cfg = await loadConfig(dir);
-    expect(cfg.loop).toEqual(LOOP_DEFAULTS);
-    expect(cfg.team).toEqual({ publicFallback: 'on' });
+describe('parseOnOffFlag', () => {
+  it('accepts on and off', () => {
+    expect(parseOnOffFlag('on', 'experimental.bazaar')).toBe('on');
+    expect(parseOnOffFlag('off', 'experimental.bazaar')).toBe('off');
   });
 
-  it('merges a partial loop/team block per subkey (keeps the defaults it omits)', async () => {
-    await writeFile(
-      configFile(),
-      JSON.stringify({ loop: { port: 31000 }, team: { publicFallback: 'off' } }),
-    );
-    const cfg = await loadConfig(dir);
-    expect(cfg.loop).toEqual({ ...LOOP_DEFAULTS, port: 31000 });
-    expect(cfg.team).toEqual({ publicFallback: 'off' });
-  });
-
-  it('resolveLoopConfig keeps an explicit port over the null default', () => {
-    expect(resolveLoopConfig({ loop: { port: 0 } }).port).toBe(0);
-    expect(resolveLoopConfig({}).port).toBeNull();
-  });
-
-  it.each([
-    ['loop.tool_wait_ms 0', { loop: { tool_wait_ms: 0 } }],
-    ['loop.port 70000', { loop: { port: 70000 } }],
-    ['team.publicFallback "maybe"', { team: { publicFallback: 'maybe' } }],
-  ])('rejects %s with CONFIG_INVALID', async (_label, raw) => {
-    await writeFile(configFile(), JSON.stringify(raw));
+  it('rejects anything else with USAGE naming the key', () => {
     let caught: unknown;
     try {
-      await loadConfig(dir);
+      parseOnOffFlag('maybe', 'experimental.bazaar');
     } catch (e) {
       caught = e;
     }
-    expect(caught).toBeInstanceOf(CliError);
-    expect((caught as CliError).code).toBe('CONFIG_INVALID');
-  });
-
-  // A newer CLI's loop key must survive an older binary's load + persist, the
-  // same reason the outer object passes unknown keys through.
-  it('passes an unknown loop subkey through loadRawConfig and drops it from the effective config', async () => {
-    await writeFile(
-      configFile(),
-      JSON.stringify({ loop: { tool_wait_ms: 9000, future_knob: 'x' } }),
-    );
-    const raw = await loadRawConfig(dir);
-    expect(raw.loop).toEqual({ tool_wait_ms: 9000, future_knob: 'x' });
-    expect(await loadConfig(dir)).toMatchObject({
-      loop: { ...LOOP_DEFAULTS, tool_wait_ms: 9000 },
-    });
-    expect((await loadConfig(dir)).loop).not.toHaveProperty('future_knob');
-  });
-
-  it('resolveSettings reports file vs default per loop subkey', async () => {
-    await writeFile(configFile(), JSON.stringify({ loop: { port: 31000, human_wait_ms: 900 } }));
-    const config = await loadRawConfig(dir);
-    const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.loop.port).toEqual({ value: 31000, source: 'file' });
-    expect(s.loop.human_wait_ms).toEqual({ value: 900, source: 'file' });
-    expect(s.loop.tool_wait_ms).toEqual({ value: 4000, source: 'default' });
-    expect(s.loop.idle_exit_min).toEqual({ value: 30, source: 'default' });
-  });
-
-  it('resolveSettings reports a file-set null port as file, not default', async () => {
-    await writeFile(configFile(), JSON.stringify({ loop: { port: null } }));
-    const config = await loadRawConfig(dir);
-    const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.loop.port).toEqual({ value: null, source: 'file' });
-  });
-
-  it('resolveSettings reports teamPublicFallback file vs default', async () => {
-    const fresh = resolveSettings({ config: await loadRawConfig(dir), flags: {}, env: {} });
-    expect(fresh.teamPublicFallback).toEqual({ value: 'on', source: 'default' });
-
-    await writeFile(configFile(), JSON.stringify({ team: { publicFallback: 'off' } }));
-    const set = resolveSettings({ config: await loadRawConfig(dir), flags: {}, env: {} });
-    expect(set.teamPublicFallback).toEqual({ value: 'off', source: 'file' });
-  });
-
-  it('exposes the dotted keys and keeps the blocks out of the scalar list', () => {
-    expect(LOOP_CONFIG_KEYS).toEqual([
-      'loop.human_wait_ms',
-      'loop.tool_wait_ms',
-      'loop.idle_exit_min',
-      'loop.port',
-    ]);
-    expect(TEAM_CONFIG_KEYS).toEqual(['team.publicFallback']);
-    expect(CONFIG_KEYS as readonly string[]).not.toContain('loop');
-    expect(CONFIG_KEYS as readonly string[]).not.toContain('team');
-  });
-
-  describe('parseLoopValue', () => {
-    const usage = (fn: () => unknown): CliError => {
-      let caught: unknown;
-      try {
-        fn();
-      } catch (e) {
-        caught = e;
-      }
-      expect(caught).toBeInstanceOf(CliError);
-      expect((caught as CliError).code).toBe('USAGE');
-      return caught as CliError;
-    };
-
-    it('accepts a positive integer string for every key', () => {
-      for (const key of LOOP_CONFIG_KEYS) expect(parseLoopValue(key, '12')).toBe(12);
-    });
-
-    it('accepts "null" and "auto" for loop.port only', () => {
-      expect(parseLoopValue('loop.port', 'null')).toBeNull();
-      expect(parseLoopValue('loop.port', 'auto')).toBeNull();
-      expect(parseLoopValue('loop.port', '0')).toBe(0);
-      expect(parseLoopValue('loop.port', '65535')).toBe(65535);
-      for (const key of LOOP_CONFIG_KEYS) {
-        if (key === 'loop.port') continue;
-        usage(() => parseLoopValue(key, 'null'));
-        usage(() => parseLoopValue(key, 'auto'));
-      }
-    });
-
-    it.each(['-1', 'abc', '1.5', '', '0'])('rejects %j for a budget key with USAGE', (value) => {
-      const err = usage(() => parseLoopValue('loop.tool_wait_ms', value));
-      expect(err.fix).toBe('Use a positive integer.');
-    });
-
-    it('rejects a port outside 0..65535 and names the derive spelling', () => {
-      const err = usage(() => parseLoopValue('loop.port', '70000'));
-      expect(err.fix).toContain('"null"');
-      usage(() => parseLoopValue('loop.port', '-1'));
-      usage(() => parseLoopValue('loop.port', '1.5'));
-    });
-  });
-
-  describe('parsePublicFallbackFlag', () => {
-    it('accepts on and off', () => {
-      expect(parsePublicFallbackFlag('on', 'team.publicFallback')).toBe('on');
-      expect(parsePublicFallbackFlag('off', 'team.publicFallback')).toBe('off');
-    });
-
-    it('rejects anything else with USAGE naming the key', () => {
-      let caught: unknown;
-      try {
-        parsePublicFallbackFlag('maybe', 'team.publicFallback');
-      } catch (e) {
-        caught = e;
-      }
-      expect(caught).toBeInstanceOf(CliError);
-      expect((caught as CliError).code).toBe('USAGE');
-      expect((caught as CliError).message).toContain('team.publicFallback');
-      expect((caught as CliError).fix).toBe('Use "on" or "off".');
-    });
+    expect((caught as CliError).code).toBe('USAGE');
+    expect((caught as CliError).message).toContain('experimental.bazaar');
+    expect((caught as CliError).fix).toBe('Use "on" or "off".');
   });
 });
 
