@@ -127,7 +127,6 @@ export function loadStep(
   settingsInstallPresent: boolean,
   env: NodeJS.ProcessEnv = {},
   command = 'tenjin',
-  relayFinish = false,
 ): string {
   if (
     env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' ||
@@ -137,14 +136,6 @@ export function loadStep(
       "choose New session in Claude Desktop's Code tab for this same folder so Tenjin loads. " +
       "Before switching, give the person one short ready-to-paste continuation prompt filled with this conversation's task, progress and next action; " +
       `carry over the person's funding and spending choices, and have the next session check Tenjin with \`${command} doctor\`${process.platform === 'win32' ? ' in PowerShell' : ''} before continuing`
-    );
-  }
-  if (!settingsInstallPresent && relayFinish) {
-    return (
-      'When no unanswered question remains, relay this message: "Tenjin is installed. ' +
-      'It shares relevant task context to find tools when active. Run `/reload-plugins` here to continue." ' +
-      'Omit the sharing sentence if it was already shared. Include any unresolved warning or fix from this result. ' +
-      'After the reload, confirm Tenjin’s tools are active before claiming setup is complete, then continue the person’s task.'
     );
   }
   return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
@@ -623,7 +614,6 @@ export async function runRouterInstall(
       ctx.io.isTTY,
       command,
       env,
-      !ctx.flags.json && !ctx.io.isTTY && asksAgent,
     ),
     nextSteps,
     ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
@@ -1023,32 +1013,14 @@ function nextStep(
   tty: boolean,
   command: string,
   env: NodeJS.ProcessEnv,
-  compactAgent = false,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const relayFinish =
-    compactAgent &&
-    plugin.method === 'plugin' &&
-    claude.meetsFloor &&
-    claude.version !== null &&
-    wallet.signing?.status === 'ready' &&
-    wallet.shellOnly === undefined &&
-    wallet.passphrase?.durable !== false;
-  const steps = todaysSteps(
-    plugin,
-    claude,
-    wallet,
-    migration,
-    asksQuestion,
-    command,
-    env,
-    relayFinish,
-  );
+  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command, env);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
   }
-  return steps.join(relayFinish ? '. ' : ', then ');
+  return steps.join(', then ');
 }
 
 function todaysSteps(
@@ -1059,15 +1031,10 @@ function todaysSteps(
   asksQuestion: boolean,
   command: string,
   env: NodeJS.ProcessEnv,
-  relayFinish: boolean,
 ): string[] {
   const steps: string[] = [];
   if (asksQuestion) {
-    steps.push(
-      relayFinish
-        ? 'Resolve the current unanswered question in nextSteps first, using its offered answers and command; read each returned result before continuing. On "Not now", run no command'
-        : 'ask the person the question in nextSteps, then run what the answer names',
-    );
+    steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
     steps.push(`fund the wallet with \`${command} wallet fund ${SUGGESTED_FUND_USD}\``);
   }
@@ -1079,9 +1046,7 @@ function todaysSteps(
     return steps;
   }
   if (!claude.meetsFloor) steps.unshift('run `claude update`');
-  steps.push(
-    loadStep(settingsInstallStays(migration) || !claude.meetsFloor, env, command, relayFinish),
-  );
+  steps.push(loadStep(settingsInstallStays(migration) || !claude.meetsFloor, env, command));
   return steps;
 }
 
