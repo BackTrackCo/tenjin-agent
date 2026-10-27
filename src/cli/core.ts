@@ -270,7 +270,7 @@ Examples:
     'wallet',
     'create, show, fund, repair and send from the local wallet',
   ).description(
-    'Manage the local x402 payment wallet used for paid reads and publishing. The private key is generated on this machine, stored encrypted, and never printed.',
+    'Manage the local x402 payment wallet the router and `tenjin pay` spend from. The private key is generated on this machine, stored encrypted, and never printed.',
   );
   addGlobalFlags(wallet.command('create'))
     .summary('create a new local wallet')
@@ -371,9 +371,9 @@ Examples:
     });
 
   // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
-  // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
-  // surface gains a send trigger (both exclusions are pinned by tests). It lives
-  // under `wallet` with every other verb that operates on the wallet.
+  // router's MCP tools (src/router/mcp.ts) and the plugin's skill; no
+  // model-facing surface gains a send trigger. It lives under `wallet` with
+  // every other verb that operates on the wallet.
   addGlobalFlags(wallet.command('send <amount> <token> <to>'))
     .summary('move funds out of the wallet (escape hatch)')
     .description(

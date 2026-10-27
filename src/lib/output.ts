@@ -118,10 +118,7 @@ export function emitFailure(
     if (cliErr.fix !== undefined) {
       lines.push(paint(io, 'dim', `fix: ${sanitizeForTerminal(cliErr.fix)}`));
     }
-    // Scan findings are the one detail shape a human needs inline: without them
-    // an interactive publish hitting NEEDS_CONFIRMATION / PUBLISH_BLOCKED sees
-    // the count but not WHICH lines tripped. Every other shape is machine-only.
-    lines.push(...findingLines(io, cliErr.details));
+    // `details` is machine-only: a human sees the message and the fix.
     writeLines(io.stdout, lines);
     return cliErr;
   }
@@ -220,27 +217,6 @@ export function sanitizeForTerminal(text: string): string {
   );
 }
 
-/**
- * The same strip, for text that ships to OTHER PEOPLE rather than to this
- * terminal: a post's title, its public excerpt, and every free-text field of the
- * answer card a buyer reads before paying.
- *
- * The threat is the same one {@link sanitizeForTerminal} closes, one hop further
- * out. None of this text is necessarily typed by the person publishing: a card
- * question can be prefilled from a stored search, and every field can arrive over
- * MCP from an agent that read them off a fetched page. `trim()` removes neither a
- * CSI sequence nor a right-to-left override, so without this a payload rides into
- * the marketplace and renders in every future reader's terminal.
- *
- * Newlines and tabs fold to a single space FIRST, because these are all
- * single-line display fields and a bare strip would join the words on either side
- * of a line break into one. NOT for the post BODY: that is the author's document,
- * markdown and all, and rewriting it is not this function's business.
- */
-export function sanitizeWireText(text: string): string {
-  return sanitizeForTerminal(text.replace(/[\r\n\t]+/g, ' ')).trim();
-}
-
 /** CliError passes through; every other thrown value becomes an INTERNAL CliError. */
 export function normalizeError(err: unknown): CliError {
   if (err instanceof CliError) return err;
@@ -251,55 +227,6 @@ export function normalizeError(err: unknown): CliError {
 /** True in human-first mode: a TTY without --json. Otherwise the JSON envelope wins. */
 function humanMode(io: Io, opts: EmitOptions): boolean {
   return io.isTTY && opts.json !== true;
-}
-
-/**
- * Render `details.findings` (the scan-finding projection publish attaches to
- * NEEDS_CONFIRMATION / PUBLISH_BLOCKED) as one dim line per finding:
- * `  <check> (line N): <excerpt>`. The excerpt is already masked for secret
- * findings at the source; sanitize it anyway since it can echo file content.
- * Returns [] for any other details shape, so no other error leaks a detail dump.
- *
- * A finding the SERVER gate contributed carries a `source`, and the marker is
- * printed because it is the difference between "fix your file" and "the
- * marketplace refused this": the detector may be one this release predates, so
- * the line has to stand on the server's own words rather than on recognition.
- * The tier rides the same line, for the payloads that mix block and warn.
- */
-function findingLines(io: Io, details: unknown): string[] {
-  if (typeof details !== 'object' || details === null || !('findings' in details)) return [];
-  const { findings } = details as { findings: unknown };
-  if (!Array.isArray(findings) || findings.length === 0) return [];
-  const rendered: string[] = [];
-  for (const f of findings) {
-    if (typeof f !== 'object' || f === null) continue;
-    const { check, line, excerpt, source, severity } = f as {
-      check?: unknown;
-      line?: unknown;
-      excerpt?: unknown;
-      source?: unknown;
-      severity?: unknown;
-    };
-    if (typeof check !== 'string' || typeof line !== 'number' || typeof excerpt !== 'string') {
-      continue;
-    }
-    const from = source === 'server' ? ' [server]' : source === 'both' ? ' [local+server]' : '';
-    // THE TIER IS PRINTED because one payload can mix them: a `scan_blocked`
-    // envelope ships the block finding alongside the warns the same pass found,
-    // and without the tier nothing on the page says which one is the refusal.
-    // An open string, sanitized like the rest: the server owns its own tier names.
-    const tier = typeof severity === 'string' && severity.length > 0 ? `${severity}, ` : '';
-    // The detector id is sanitized too: on a server finding it is a name this
-    // release may never have seen, so it is untrusted text like the excerpt.
-    rendered.push(
-      paint(
-        io,
-        'dim',
-        `  ${sanitizeForTerminal(check)}${from} (${sanitizeForTerminal(tier)}line ${line}): ${sanitizeForTerminal(excerpt)}`,
-      ),
-    );
-  }
-  return rendered;
 }
 
 function writeJson(stream: NodeJS.WritableStream, value: unknown): void {

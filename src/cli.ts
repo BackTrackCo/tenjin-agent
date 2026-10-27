@@ -59,10 +59,10 @@ function addGlobalFlags(cmd: Command): Command {
  * One top-level command: filed under its heading, summarized in the one line
  * `tenjin --help` shows for it, and carrying the global flags. The heading goes
  * on the command itself rather than through commander's `commandsGroup()`
- * default so commands can be declared in the order that reads best (`read`
- * before `buy`) instead of in heading order. `helpCommand(false)` drops the
- * implicit `help [command]` INSIDE a group (`tenjin hooks help enable` is a
- * third spelling of one thing); the root keeps it, see {@link rootHelpCommand}.
+ * default so commands can be declared in the order that reads best instead of
+ * in heading order. `helpCommand(false)` drops the implicit `help [command]`
+ * INSIDE a group (`tenjin wallet help show` is a third spelling of one thing);
+ * the root keeps it, see {@link rootHelpCommand}.
  */
 function leaf(program: Command, group: string, nameAndArgs: string, summary: string): Command {
   return addGlobalFlags(
