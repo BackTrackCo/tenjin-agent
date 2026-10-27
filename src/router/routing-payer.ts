@@ -705,10 +705,11 @@ export class RoutingPayer {
 
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size and the refusals. It signs {@link routingDepositAtomic}: up to the
-   * SDK's ceiling, sized down to a smaller wallet. A wallet below the SDK's
-   * hint, or a spend the authorizer denies (the per-call limit, the daily
-   * budget, the creator allowlist), refuses it and the call is not paid.
+   * size and the refusals. It signs {@link routingDepositAtomic}: the SDK's
+   * ceiling (cap × multiplier) from a wallet holding twice it, else the
+   * server's hint. A wallet below the hint, or a spend the authorizer denies
+   * (the per-call limit, the daily budget, the creator allowlist), refuses it
+   * and the call is not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;

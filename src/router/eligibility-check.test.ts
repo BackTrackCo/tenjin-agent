@@ -75,17 +75,19 @@ function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
 }
 
 describe('checkEligibility', () => {
-  it.each<[bigint, string]>([
-    [210_000n, 'ready'],
-    [209_999n, 'blocked'],
+  it.each<[string, bigint, bigint, string]>([
+    ['$0.21 wallet, room for its $0.03', 210_000n, 30_000n, 'ready'],
+    ['$0.21 wallet, room one unit short', 210_000n, 29_999n, 'blocked'],
+    ['$0.50 wallet, room for its $0.25', 500_000n, 250_000n, 'ready'],
+    ['$0.50 wallet, room one unit short', 500_000n, 249_999n, 'blocked'],
   ])(
-    'evaluates the deposit a $0.21 wallet signs, all of it, against %s of daily room',
-    async (room, status) => {
+    'evaluates the deposit the wallet signs against the daily room: %s',
+    async (_label, balance, room, status) => {
       await writeWallet();
       const e = await checkEligibility(
         input({
           provider: fakeProvider({ verify: async () => verified('keychain') }),
-          readBalance: async () => 210_000n,
+          readBalance: async () => balance,
           policy: { ...POLICY, sessionBudgetAtomic: 500_000n },
           readSpent: async () => 500_000n - room,
         }),

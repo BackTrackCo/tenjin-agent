@@ -155,21 +155,38 @@ function unlockFails(reason: UnlockReason): () => Promise<never> {
 }
 
 describe('RoutingPayer', () => {
-  // tenjin#1032: the smaller of the ceiling and the balance in whole fees.
-  it.each<[string, bigint, bigint]>([
-    ['$10 wallet signs the $0.25 ceiling', 10_000_000n, 250_000n],
-    ['$0.21 wallet signs all of it', 210_000n, 210_000n],
-    ['$0.07 wallet signs its 23 whole fees', 70_000n, 69_000n],
-    ['$0.0605 wallet signs $0.06', 60_500n, 60_000n],
-    ['$0.03 wallet signs the server hint', 30_000n, 30_000n],
-  ])('sizes the deposit to the wallet: a %s', async (_label, walletAtomic, signed) => {
+  // tenjin#1032: the ceiling only when as much stays in the wallet, which pays
+  // the tools routing suggests; otherwise the server's ten-fee hint.
+  it.each<[string, bigint, bigint, bigint]>([
+    ['$10 wallet signs the $0.25 ceiling', 10_000_000n, 250_000n, 9_750_000n],
+    ['$0.50 wallet signs the $0.25 ceiling', 500_000n, 250_000n, 250_000n],
+    ['$0.49 wallet signs the $0.03 hint', 490_000n, 30_000n, 460_000n],
+    ['$0.21 wallet signs the $0.03 hint', 210_000n, 30_000n, 180_000n],
+    ['$0.07 wallet signs the $0.03 hint', 70_000n, 30_000n, 40_000n],
+    ['$0.03 wallet signs the $0.03 hint', 30_000n, 30_000n, 0n],
+  ])('sizes the deposit to the wallet: a %s', async (_label, walletAtomic, signed, kept) => {
     const router = new FakeRouter();
     const result = await routeOnce(payer(router, { walletAtomic }), router);
     expect(result.status).toBe('decided');
     expect(unpaidWhy(result)).toBeUndefined();
     expect([...router.channels.values()][0]?.balance).toBe(signed);
+    expect(walletAtomic - signed).toBe(kept);
     expect((await readSpendSummary(dir))?.committedAtomic).toBe(signed.toString());
   });
+
+  // The threshold is twice the SDK's ceiling, so a cap change moves it.
+  const THRESHOLD = 2n * 50_000n * BigInt(DEPOSIT_MULTIPLIER);
+  it.each<[string, bigint, bigint]>([
+    ['at', THRESHOLD, MAX_CHANNEL_DEPOSIT_ATOMIC],
+    ['one unit below', THRESHOLD - 1n, CHANNEL_DEPOSIT_ATOMIC],
+  ])(
+    'signs the ceiling from twice the spend cap times depositMultiplier: %s it',
+    async (_label, walletAtomic, signed) => {
+      const router = new FakeRouter();
+      await routeOnce(payer(router, { walletAtomic }), router);
+      expect([...router.channels.values()][0]?.balance).toBe(signed);
+    },
+  );
 
   it('refuses a $0.02 wallet as wallet_low and signs nothing', async () => {
     const router = new FakeRouter();
@@ -185,15 +202,21 @@ describe('RoutingPayer', () => {
     expect(router.paidRequests()).toBe(0);
   });
 
-  it('keeps the SDK ceiling when the server suggests an oversized deposit', async () => {
-    const router = new FakeRouter({ minDeposit: '1000000' });
-    const result = await routeOnce(payer(router), router);
-    expect(unpaidWhy(result)).toBeUndefined();
-    expect([...router.channels.values()][0]?.balance).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
-    expect((await readSpendSummary(dir))?.committedAtomic).toBe(
-      MAX_CHANNEL_DEPOSIT_ATOMIC.toString(),
-    );
-  });
+  it.each<[string, bigint | null]>([
+    ['a $10 wallet', 10_000_000n],
+    ['an unread balance', null],
+  ])(
+    'keeps the SDK ceiling when the server suggests an oversized deposit: %s',
+    async (_label, walletAtomic) => {
+      const router = new FakeRouter({ minDeposit: '1000000' });
+      const result = await routeOnce(payer(router, { walletAtomic }), router);
+      expect(unpaidWhy(result)).toBeUndefined();
+      expect([...router.channels.values()][0]?.balance).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
+      expect((await readSpendSummary(dir))?.committedAtomic).toBe(
+        MAX_CHANNEL_DEPOSIT_ATOMIC.toString(),
+      );
+    },
+  );
 
   it("signs the server's hint when the wallet balance cannot be read", async () => {
     const router = new FakeRouter();

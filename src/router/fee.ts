@@ -26,10 +26,10 @@ export const CHANNEL_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 
 /**
- * THE DEPOSIT TENJIN SIGNS: the ceiling, or the wallet's balance rounded down
- * to whole routing fees when that is less, and never below the server's hint.
- * So a big wallet deposits once per ~83 calls, and a small one spends down to
- * its last whole fees. An unread balance, or no ceiling, signs the hint.
+ * THE DEPOSIT TENJIN SIGNS: the ceiling only when the wallet holds twice it, so
+ * the ceiling still stays in the wallet for the paid tools routing suggests,
+ * which pay from the wallet, never the channel. Any smaller or unread balance,
+ * or no ceiling, signs the server's hint. The caller refuses a wallet below it.
  */
 export function routingDepositAtomic(o: {
   walletAtomic: bigint | null;
@@ -37,9 +37,7 @@ export function routingDepositAtomic(o: {
   maxAtomic: bigint | null;
 }): bigint {
   if (o.walletAtomic === null || o.maxAtomic === null) return o.hintAtomic;
-  const whole = (o.walletAtomic / ROUTING_FEE_ATOMIC) * ROUTING_FEE_ATOMIC;
-  const sized = whole < o.maxAtomic ? whole : o.maxAtomic;
-  return sized > o.hintAtomic ? sized : o.hintAtomic;
+  return o.walletAtomic >= 2n * o.maxAtomic ? o.maxAtomic : o.hintAtomic;
 }
 
 /**

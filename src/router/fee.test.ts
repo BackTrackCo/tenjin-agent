@@ -28,12 +28,12 @@ describe('routingDepositAtomic', () => {
     maxAtomic: bigint | null = MAX_CHANNEL_DEPOSIT_ATOMIC,
   ) => routingDepositAtomic({ walletAtomic, hintAtomic: CHANNEL_DEPOSIT_ATOMIC, maxAtomic });
 
-  it('signs the smaller of the ceiling and the balance in whole fees, never below the hint', () => {
+  it('signs the ceiling only from a wallet holding twice it, else the hint', () => {
     expect(size(10_000_000n)).toBe(250_000n);
-    expect(size(210_000n)).toBe(210_000n);
-    expect(size(70_000n)).toBe(69_000n);
-    expect(size(60_500n)).toBe(60_000n);
-    expect(size(31_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(size(2n * MAX_CHANNEL_DEPOSIT_ATOMIC)).toBe(250_000n);
+    expect(size(2n * MAX_CHANNEL_DEPOSIT_ATOMIC - 1n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(size(210_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(size(70_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
   });
 
   it('signs the hint when the balance or the ceiling is unknown', () => {
