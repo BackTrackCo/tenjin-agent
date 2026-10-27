@@ -437,7 +437,7 @@ export async function runCodexInstall(
         ? `Codex plugin: left as it was (Codex ${version})`
         : `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
       ...runtimeLines(ctx, rt, home),
-      `Automatic router: up to $${effective.maxAutoSpend} per call; 24-hour budget ${daily}`,
+      `Automatic router: up to $${effective.maxAutoSpend} per call; daily budget ${daily} shared across chats`,
       ...(spendAsk !== undefined
         ? [
             `  Ask the person in this session: ${spendAsk.question}`,

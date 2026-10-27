@@ -217,6 +217,9 @@ describe('main', () => {
     expect(help).toContain('--project');
     expect(help).toContain('--refresh');
     expect(help).toContain('--harness');
+    expect(help).toContain('daily budget shared across chats');
+    expect(help).toContain('resets 24 hours after its window starts');
+    expect(help).toContain('opening a new chat does not reset it');
     for (const gone of ['--bazaar-pay', '--no-grant', '--publish-mode', '--status-line'])
       expect(help).not.toContain(gone);
   });

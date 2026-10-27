@@ -125,12 +125,12 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 
 `tenjin install` creates a wallet on your machine that holds USDC on Base. Its key never leaves your machine, and Tenjin never holds your funds. Payments run over [x402](https://www.x402.org) ([whitepaper](https://www.x402.org/x402-whitepaper.pdf), [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome)).
 
-| Limit              | Default | Change it                             |
-| ------------------ | ------- | ------------------------------------- |
-| Per 24-hour window | $5      | `tenjin config set sessionBudget 2`   |
-| Per call           | $0.25   | `tenjin config set maxAutoSpend 0.50` |
+| Limit        | Default | Change it                             |
+| ------------ | ------- | ------------------------------------- |
+| Daily budget | $5      | `tenjin config set sessionBudget 2`   |
+| Per call     | $0.25   | `tenjin config set maxAutoSpend 0.50` |
 
-The automatic budget window is shared across agent sessions. When the window ends, its counted automatic spend resets.
+The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
 - Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Browsing tools and their specs is free.
