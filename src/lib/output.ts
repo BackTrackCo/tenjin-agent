@@ -35,6 +35,8 @@ export function defaultIo(): Io {
 export interface EmitOptions {
   /** The global --json flag. When true, the JSON envelope is emitted even at a TTY. */
   json?: boolean;
+  /** Keep a complete agent handoff on one line, including through `tail`. */
+  compactJson?: boolean;
   /**
    * "A newer tenjin-cli exists", from the daily check's cache. Rides the
    * envelope so the AGENT running the command learns it; the human at a TTY
@@ -100,7 +102,7 @@ export function emitSuccess(
     writeLines(io.stdout, humanLines);
     return;
   }
-  writeJson(io.stdout, buildSuccessEnvelope(command, data, opts.updateAvailable));
+  writeJson(io.stdout, buildSuccessEnvelope(command, data, opts.updateAvailable), opts.compactJson);
 }
 
 /**
@@ -308,8 +310,8 @@ function findingLines(io: Io, details: unknown): string[] {
   return rendered;
 }
 
-function writeJson(stream: NodeJS.WritableStream, value: unknown): void {
-  stream.write(`${JSON.stringify(value, null, 2)}\n`);
+function writeJson(stream: NodeJS.WritableStream, value: unknown, compact = false): void {
+  stream.write(`${JSON.stringify(value, null, compact ? undefined : 2)}\n`);
 }
 
 function writeLines(stream: NodeJS.WritableStream, lines: string[]): void {

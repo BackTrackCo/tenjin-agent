@@ -321,6 +321,8 @@ describe('routing outcomes that buy nothing', () => {
     expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
+    expect(result.summary).toMatch(/^Use your usual tools:/);
+    expect(result.summary).not.toContain('No paid lookup needed');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
   });
