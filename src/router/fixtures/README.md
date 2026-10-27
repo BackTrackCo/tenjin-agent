@@ -79,10 +79,16 @@ gate is offered only the tasks whose capabilities a client runs.
 - `fields`: each spec carries `holds` (`{WebSearch?, WebFetch?}`, the input
   field that takes a pending search's query or fetch's URL) and `output`
   (`json`, `text`, or `media`, whose links the client saves; an open-Bazaar
-  listing is `media`). The hook's `execute` answer carries `delivery`:
-  `augment` for the free docs lookup before a search, with `augmentUrl`, the
-  GET the client makes to put the docs above the search's own results, and
-  `offer` for every line the client shows.
+  listing is `media`). The hook's `execute` answer carries `delivery`: for
+  the free docs lookup before a search, `note` to a client that also sends
+  `note`, else `augment` with `augmentUrl`, the GET the client makes to put
+  the docs above the search's own results; `offer` for every other line the
+  client shows.
+- `note`: with `fields`, the free docs lookup before a search comes as
+  `delivery: "note"` with no `augmentUrl`. The client lets the search run and
+  shows the line after it, so the line is the conditional one a `nativeOutcome`
+  gets: `If WebSearch couldn't get this, call request({query, id}) …`, with the
+  search's own query.
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above.
@@ -311,6 +317,7 @@ ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 | `wire-hook-execute-labelled.json`          | hook answer for a `label` and `fields` client: the label, the short line, the fields      |
 | `wire-hook-execute-headers.json`           | the same for a `headers` client: the Exa spec with its `Exa-Beta` header                  |
 | `wire-hook-execute-augment.json`           | the free docs lookup before a search, for a `fields` client: `augment` and `augmentUrl`   |
+| `wire-hook-execute-note.json`              | the same for a `fields` and `note` client: `note`, the after-search line, no `augmentUrl` |
 | `wire-browse-request.json`                 | a browse of the tool list                                                                 |
 | `wire-browse.json`                         | the browse answer: its rows                                                               |
 | `wire-tool-request-by-id.json`             | a browse row's id sent as `tool`                                                          |

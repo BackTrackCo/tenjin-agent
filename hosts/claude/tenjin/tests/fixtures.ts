@@ -55,6 +55,18 @@ export async function keepSpec(
   );
 }
 
+/** A free offer's name as `storeLabel` keeps it: a free lookup has no spec. */
+export async function keepLabel(
+  files: Map<string, string>,
+  id: string,
+  label = 'Context7 docs',
+): Promise<void> {
+  files.set(
+    `${DATA}/progress/specs/${await sha256Hex(id)}.label.json`,
+    JSON.stringify({ id, label }),
+  );
+}
+
 /** The offer record the pre-call hook writes for a native call it held (`markOffered`). */
 export async function keepOffer(
   files: Map<string, string>,
