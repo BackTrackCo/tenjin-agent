@@ -12,8 +12,8 @@ import type { Emit, Event, HookInput, HookTool } from './types';
  * carries its task as opaque ciphertext, so there is no work order to look up
  * and no dispatch handoff; a shell PostToolUse carries no exit status, so a
  * failure is known only from an error marker and success is never known; the
- * web tool (`webrun`) maps to `web` only as one plain search, while the router
- * reads any `webrun` call through {@link splitWebrun}.
+ * web tool (`webrun`) maps to `web` only as one plain search; the router reads
+ * `webrun` calls through its own decoder (`src/router/codex-wire.ts`).
  * Other web operations stay `other`; unknown versions are reported by doctor,
  * not used to disable otherwise valid web events.
  */
@@ -83,74 +83,6 @@ function canonicalTool(name: string, input: Record<string, unknown>): HookTool {
     }
   }
   return { name, kind: 'other' };
-}
-
-/** One search or one page open, as the router weighs it. */
-export type WebrunEntry = { tool: 'WebSearch'; query: string } | { tool: 'WebFetch'; url: string };
-
-/**
- * A `webrun` call as the router reads it: the one entry it weighs, the exact
- * rest of the call, and every search and URL in it.
- */
-export interface WebrunSplit {
-  entry: WebrunEntry;
-  /** The input without the entry, filters and all; null when no operation remains. */
-  rest: Record<string, unknown> | null;
-  /** Every search and URL in the call, the entry first. */
-  targets: WebrunEntry[];
-}
-
-const HTTP_URL_RE = /^https?:\/\//i;
-
-const plainSearch = (v: unknown): v is { q: string } =>
-  isRecord(v) &&
-  Object.keys(v).every((key) => key === 'q') &&
-  typeof v.q === 'string' &&
-  v.q.trim().length > 0;
-
-const urlOpen = (v: unknown): v is { ref_id: string } =>
-  isRecord(v) && typeof v.ref_id === 'string' && HTTP_URL_RE.test(v.ref_id.trim());
-
-/**
- * Pure. The entry is the first search that is only `q`, else the first open of
- * an http(s) URL with no `lineno`; null when the call holds neither. The rest
- * is the input minus that one entry, so entry plus rest is the whole call.
- */
-export function splitWebrun(input: Record<string, unknown>): WebrunSplit | null {
-  const searches = Array.isArray(input.search_query) ? (input.search_query as unknown[]) : [];
-  const opens = Array.isArray(input.open) ? (input.open as unknown[]) : [];
-  const s = searches.findIndex(plainSearch);
-  const o =
-    s === -1
-      ? opens.findIndex((v) => urlOpen(v) && Object.keys(v as object).every((k) => k === 'ref_id'))
-      : -1;
-  if (s === -1 && o === -1) return null;
-  const key = s !== -1 ? 'search_query' : 'open';
-  const index = s !== -1 ? s : o;
-  const entry: WebrunEntry =
-    s !== -1
-      ? { tool: 'WebSearch', query: (searches[s] as { q: string }).q }
-      : { tool: 'WebFetch', url: (opens[o] as { ref_id: string }).ref_id.trim() };
-  const rest: Record<string, unknown> = { ...input };
-  const left = (s !== -1 ? searches : opens).filter((_, i) => i !== index);
-  if (left.length === 0) delete rest[key];
-  else rest[key] = left;
-  const others: WebrunEntry[] = [
-    ...searches.flatMap((v, i): WebrunEntry[] =>
-      key === 'search_query' && i === index
-        ? []
-        : isRecord(v) && typeof v.q === 'string' && v.q.trim().length > 0
-          ? [{ tool: 'WebSearch', query: v.q }]
-          : [],
-    ),
-    ...opens.flatMap((v, i): WebrunEntry[] =>
-      (key === 'open' && i === index) || !urlOpen(v)
-        ? []
-        : [{ tool: 'WebFetch', url: v.ref_id.trim() }],
-    ),
-  ];
-  const operations = Object.keys(rest).filter((k) => k !== 'response_length');
-  return { entry, rest: operations.length === 0 ? null : rest, targets: [entry, ...others] };
 }
 
 /**

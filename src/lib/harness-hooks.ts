@@ -1,4 +1,4 @@
-import { chmod, lstat, readFile, realpath, stat } from 'node:fs/promises';
+import { chmod, readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { adapterFor } from '../adapters/registry';
 import { HARNESSES, type HarnessAdapter } from '../adapters/types';
@@ -9,6 +9,7 @@ import { writeFileAtomic } from './atomic-json';
 import { hooksDir, shimBundlePath } from './paths';
 import { HOOK_TOOL } from '../router/hook-tool';
 import { LEGACY_MCP_SERVER_NAME } from '../router/names';
+import { inspectHooksFile } from '../router/hooks-file';
 
 /**
  * Where `tenjin install` writes a harness's hook entries, and the only place
@@ -223,116 +224,6 @@ export function pruneHooks(
     if (!emptiedByUs) next[event] = kept;
   }
   return { next, removed };
-}
-
-export interface HooksInspection {
-  path: string;
-  /** The exact bytes read, so a commit can prove nothing changed underneath it. */
-  raw: string | null;
-  settings: Record<string, unknown>;
-  /** Every event's entries, already known to be a list: {@link inspectHooksFile}
-   *  refuses the file rather than hand a writer a shape it would skip. */
-  hooks: Record<string, unknown[]>;
-}
-
-/** Why a hooks file cannot be written, in the terms {@link skip} renders. */
-export interface HooksRefusal {
-  reason: HooksSkipReason;
-  message: string;
-  path: string;
-}
-
-/**
- * Resolve and read a hooks file. Every refusal lives here, so the shape checks
- * and the write agree by construction. Symlinks are resolved before the write
- * for the same reason lib/harness-permissions.ts resolves them: committing with
- * a rename over a dotfiles-managed link would sever it.
- */
-export async function inspectHooksFile(
-  declaredPath: string,
-): Promise<HooksInspection | { refusal: HooksRefusal }> {
-  const entry = await lstat(declaredPath).catch(() => null);
-  let path = declaredPath;
-  if (entry !== null) {
-    try {
-      path = await realpath(declaredPath);
-    } catch (err) {
-      return {
-        refusal: {
-          reason: 'unresolvable',
-          path: declaredPath,
-          message: `${declaredPath} could not be resolved (${(err as Error).message}); its "hooks" key was left exactly as it is.`,
-        },
-      };
-    }
-  }
-
-  let settings: Record<string, unknown> = {};
-  let raw: string | null = null;
-  if (entry !== null) {
-    try {
-      raw = await readFile(path, 'utf8');
-    } catch (err) {
-      return {
-        refusal: {
-          reason: 'unreadable',
-          path,
-          message: `${path} could not be read (${(err as Error).message}); no hooks were registered.`,
-        },
-      };
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      return {
-        refusal: {
-          reason: 'unparsable',
-          path,
-          message: `${path} is not valid JSON (${(err as Error).message}); its "hooks" key was left exactly as it is.`,
-        },
-      };
-    }
-    if (!isPlainObject(parsed)) {
-      return {
-        refusal: {
-          reason: 'unexpected-shape',
-          path,
-          message: `${path} is not a JSON object; its "hooks" key was left exactly as it is.`,
-        },
-      };
-    }
-    settings = parsed;
-  }
-
-  const hooksValue = settings.hooks;
-  if (hooksValue !== undefined && !isPlainObject(hooksValue)) {
-    return {
-      refusal: {
-        reason: 'unexpected-shape',
-        path,
-        message: `${path} has a "hooks" key that is not an object; its "hooks" key was left exactly as it is.`,
-      },
-    };
-  }
-  // An event whose value is not a list is refused for the same reason a
-  // non-object `hooks` is: a writer would copy it through untouched and
-  // silently drop this event's share of the plan while the receipt still
-  // counted it. A file we do not understand is left alone and reported.
-  const hooks: Record<string, unknown[]> = {};
-  for (const [event, list] of Object.entries(hooksValue ?? {})) {
-    if (!Array.isArray(list)) {
-      return {
-        refusal: {
-          reason: 'unexpected-shape',
-          path,
-          message: `${path} has a "hooks.${event}" that is not an array of entries; its "hooks" key was left exactly as it is.`,
-        },
-      };
-    }
-    hooks[event] = list;
-  }
-  return { path, raw, settings, hooks };
 }
 
 /** Best-effort read of a hooks file's `hooks` object; null for anything unreadable. */

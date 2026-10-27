@@ -1,7 +1,7 @@
 import { webcrypto } from 'node:crypto';
 import { sessionPath } from './paths';
 import { writeFileAtomic } from './atomic-json';
-import { buildSiwxHeader } from './siwx';
+import { buildSiwxHeader, SIWX_CHAIN_ID } from './siwx';
 import { originOf } from './url';
 import {
   isSessionUsable,
@@ -65,13 +65,10 @@ export type {
 } from './session-present';
 
 /**
- * The chain a session delegation is signed over. Writes require Base mainnet per
- * the server's SIWX chain constraint, and a session covers reads and writes
- * alike, so there is exactly ONE session chain id rather than a per-caller
- * choice: the read path and the write path must mint against the same chain or
- * the file they share would flip between two delegations.
+ * The chain a session delegation is signed over: the one chain a sign-in to
+ * Tenjin is signed over, so the read path and the write path mint against it.
  */
-export const SESSION_CHAIN_ID = 'eip155:8453';
+export const SESSION_CHAIN_ID = SIWX_CHAIN_ID;
 
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h; the server clamps to ≤24h.
 

@@ -11,6 +11,13 @@ import type { TenjinSigner } from './wallet/provider';
  */
 export const SIWX_HEADER = 'SIGN-IN-WITH-X';
 
+/**
+ * The chain a sign-in to Tenjin itself is signed over: Base mainnet, which the
+ * server's SIWX chain constraint requires. A sign-in to a seller signs over the
+ * network its live 402 advertised instead.
+ */
+export const SIWX_CHAIN_ID = 'eip155:8453';
+
 export interface BuildSiwxOptions {
   baseUrl: string;
   chainId: string;

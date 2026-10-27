@@ -1,0 +1,19 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000001",
+  "turn_id": "cccccccc-0000-7000-8000-000000000001",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000001.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "webrun",
+  "tool_input": {
+    "search_query": [
+      {
+        "q": "\"codex cli hooks documentation\""
+      }
+    ],
+    "response_length": "short"
+  },
+  "tool_use_id": "exec-23b1f7a1-5b46-40e0-b6a9-c7a851ec3c4a"
+}

@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
-import { inspectHooksFile } from '../lib/harness-hooks';
+import { inspectHooksFile } from './hooks-file';
 
 /**
  * The `statusLine` key in Claude Code's settings file. `install` no longer
