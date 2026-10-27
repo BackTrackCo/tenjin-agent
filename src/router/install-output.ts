@@ -1,6 +1,5 @@
 import type { CommandContext, CommandResult } from '../context';
 import { underAgentHarness } from '../lib/session';
-import { PLUGIN_ID } from './names';
 
 /** The ordinary agent needs the next decision, not successful storage/launcher diagnostics. */
 export function installOutput(
@@ -26,96 +25,51 @@ function handoff(value: unknown): unknown {
     }
     return out;
   }
-  const {
+  const { next, nextSteps, plugin, wallet, claudeCode, runtime, launcher, mcpServer, ...rest } =
+    value;
+  return {
     next,
     nextSteps,
-    plugin,
-    wallet,
-    spend,
-    migration,
-    router,
-    removedSkills,
-    claudeCode,
-    runtime,
-    launcher,
-    mcpServer,
-    ...rest
-  } = value;
-  return {
-    next:
-      typeof next === 'string'
-        ? `${next}. Relay only the current next action; briefly explain sharing once before activation and skip setup recaps or funding offers after Not now.`
-        : next,
-    nextSteps,
     ...rest,
-    spend: spendHandoff(spend),
     plugin: registeredPlugin(plugin),
     wallet: walletHandoff(wallet),
-    ...(record(migration) &&
-    migration.state === 'none' &&
-    !migration.reason &&
-    !migration.fix &&
-    !migration.warning
-      ? {}
-      : { migration }),
-    ...(record(router) && router.status === 'ok' && !router.fix && !router.reason && !router.warning
-      ? {}
-      : { router }),
-    ...(Array.isArray(removedSkills) && removedSkills.length === 0 ? {} : { removedSkills }),
     // Preserve blocked/unknown readiness and every fix; omit only successful diagnostics.
     ...(record(claudeCode) &&
     claudeCode.meetsFloor === true &&
     !claudeCode.fix &&
-    !claudeCode.reason &&
-    !claudeCode.warning
+    !claudeCode.reason
       ? {}
       : { claudeCode }),
     ...(record(runtime) &&
     ['active', 'current', 'kept'].includes(String(runtime.state)) &&
     !runtime.reason &&
-    !runtime.fix &&
-    !runtime.warning
+    !runtime.fix
       ? {}
       : { runtime }),
     ...(record(launcher) &&
     ['written', 'current'].includes(String(launcher.state)) &&
     !launcher.reason &&
-    !launcher.fix &&
-    !launcher.warning
+    !launcher.fix
       ? {}
       : { launcher }),
     ...(record(mcpServer) &&
     mcpServer.status === 'ok' &&
     mcpServer.required === false &&
-    !mcpServer.fix &&
-    !mcpServer.warning
+    !mcpServer.fix
       ? {}
       : { mcpServer }),
   };
 }
 
 function registeredPlugin(value: unknown): unknown {
-  if (value === PLUGIN_ID) return undefined;
   if (
     !record(value) ||
-    !['installed', 'updated', 'current', 'written'].includes(String(value.state)) ||
-    value.reason ||
-    value.fix ||
-    value.warning ||
-    value.fallbackReason ||
-    value.supersededFolder
+    !['installed', 'updated', 'current', 'written'].includes(String(value.state))
   )
     return value;
-  return undefined;
-}
-
-function spendHandoff(value: unknown): unknown {
-  if (!record(value)) return value;
-  const out = { ...value };
-  delete out.set;
-  delete out.kept;
-  if (Array.isArray(out.removed) && out.removed.length === 0) delete out.removed;
-  return out;
+  const registration = { ...value };
+  delete registration.steps;
+  return registration;
 }
 
 function walletHandoff(value: unknown): unknown {
@@ -131,5 +85,5 @@ function walletHandoff(value: unknown): unknown {
   )
     return value;
   if (value.status !== 'created' && value.status !== 'existing') return value;
-  return undefined;
+  return { status: value.status, signing: { status: 'ready' } };
 }

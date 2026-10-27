@@ -8,7 +8,7 @@ import type { CommandContext } from '../context';
 import { aliveDir, runAliveHook } from './alive';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput, type HookKind } from './hook-tool';
-import { NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
+import { DISCLOSURE, NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
 import { fileURLToPath } from 'node:url';
 import { RECONNECT_FIX } from './mcp-processes';
 import {
@@ -199,6 +199,107 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     expect(result.humanLines).toContain(
       `✓ Tenjin is set up for Claude Code (plugin tenjin@tenjin)`,
     );
+  });
+
+  it('hands an ordinary agent a literal reload finish after its pending choices', async () => {
+    const agent = ctx();
+    agent.flags.json = false;
+    let walletCreated = false;
+    const setup = deps({
+      env: env({ CLAUDECODE: '1' }),
+      walletExists: async () => walletCreated,
+      createWallet: async () => {
+        walletCreated = true;
+        return {
+          address: ADDRESS,
+          passphrase: {
+            store: 'file',
+            durable: true,
+            location: '/saved/passphrase',
+            note: 'saved',
+          },
+        };
+      },
+      walletBalance: async () => 0n,
+    });
+    const first = await runRouterInstall({}, agent, setup);
+    const second = await runRouterInstall({ yes: true }, agent, setup);
+    type Handoff = {
+      next: string;
+      nextSteps: { id: string; options: { id: string; command: string | null }[] }[];
+      disclosure: readonly string[];
+    };
+    const spend = first.data as Handoff;
+    const fund = second.data as Handoff;
+    expect(spend.nextSteps.map((step) => step.id)).toEqual(['spend']);
+    expect(fund.nextSteps.map((step) => step.id)).toEqual(['fund']);
+    expect(fund.nextSteps[0]?.options.find((option) => option.id === 'later')?.command).toBeNull();
+    expect(fund.next).toBe(spend.next);
+    expect(fund.next).toContain('Resolve the current unanswered question in nextSteps first');
+    expect(fund.next).toContain('read each returned result before continuing');
+    expect(fund.next).toContain('On "Not now", run no command');
+    expect(fund.next).toContain('When no unanswered question remains, relay this message');
+    expect(fund.next).toContain('Tenjin is installed.');
+    expect(fund.next).toContain('It shares relevant task context to find tools when active.');
+    expect(fund.next).toContain('Run `/reload-plugins` here to continue.');
+    expect(fund.next).toContain(
+      'confirm Tenjin’s tools are active before claiming setup is complete',
+    );
+    expect(fund.next).toContain('Omit the sharing sentence if it was already shared');
+    expect(fund.next).not.toContain('wallet fund');
+    expect(fund.disclosure).toEqual(DISCLOSURE);
+
+    const terminal = ctx();
+    terminal.flags.json = false;
+    terminal.io.isTTY = true;
+    for (const output of [ctx(), terminal]) {
+      const complete = await runRouterInstall({ yes: true }, output, {
+        ...setup,
+        isInteractive: false,
+      });
+      expect((complete.data as Handoff).next).toBe(
+        `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD_STEP}`,
+      );
+    }
+  });
+
+  it.each([
+    ['desktop', "New session in Claude Desktop's Code tab"],
+    ['old-host', 'run `claude update`'],
+    ['unknown-host', RELOAD_STEP],
+    ['wallet-repair', 'run `tenjin wallet repair`'],
+    ['legacy-settings', NEW_SESSION_STEP],
+  ])('preserves the %s action instead of supplying the ordinary finish', async (path, action) => {
+    const agent = ctx();
+    agent.flags.json = false;
+    if (path === 'old-host') await fake.respond('version', '2.1.200 (Claude Code)\n');
+    if (path === 'unknown-host') await fake.respond('version', 'Version unavailable\n');
+    if (path === 'legacy-settings') await writeLegacy();
+    const result = await runRouterInstall(
+      { yes: true },
+      agent,
+      deps({
+        env: env({
+          CLAUDECODE: '1',
+          ...(path === 'desktop' ? { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' } : {}),
+        }),
+        walletBalance: async () => 0n,
+        ...(path === 'wallet-repair'
+          ? {
+              walletSigning: async () => ({
+                signing: {
+                  status: 'blocked',
+                  reason: 'passphrase_missing',
+                  detail: 'No saved passphrase.',
+                },
+              }),
+            }
+          : {}),
+      }),
+    );
+    const { next } = result.data as { next: string };
+    expect(next).toContain(action);
+    expect(next).not.toContain('relay this message');
   });
 
   it('updates the plugin when Claude Code holds an older version of it', async () => {

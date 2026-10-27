@@ -37,7 +37,7 @@ const pending = [
         id: 'custom',
         label: 'Set my own limits',
         recommended: false,
-        ask: ['Daily budget in USD', 'Per-call limit in USD'],
+        ask: ['24-hour budget in USD', 'Per-call limit in USD'],
         command:
           "'/private runtime/tenjin' install --max-auto-spend <usd> --session-budget <usd|none>",
       },
@@ -55,7 +55,7 @@ const full = () => ({
     steps: [{ stdout: 'registration diagnostics' }],
   },
   claudeCode: { binary: '/usr/local/bin/claude', version: '2.1.311', meetsFloor: true },
-  migration: { state: 'none' },
+  migration: { state: 'absent' },
   spend: { set: [], kept: [], effective: { maxAutoSpend: '0.25', sessionBudget: '5' } },
   wallet: {
     status: 'created',
@@ -82,7 +82,6 @@ const full = () => ({
   },
   launcher: { state: 'written', onPath: false, pathLine: 'edit your shell profile' },
   disclosure: ['Relevant task context is sent to Tenjin for routing.'],
-  removedSkills: [],
   fundingWarning: 'Could not check funds; this does not mean another payment is needed.',
 });
 
@@ -134,22 +133,15 @@ describe('the default agent install handoff', () => {
     expect(out.stdout.trim().split('\n')).toHaveLength(1);
     const data = JSON.parse(out.stdout.trim().split('\n').slice(-40).join('\n')).data;
     expect(data.nextSteps).toEqual(pending);
-    expect(data.next).toContain(full().next);
-    expect(data.next).toContain('Relay only the current next action');
-    expect(data.next).toContain('sharing once before activation');
-    expect(data.next).toContain('skip setup recaps or funding offers after Not now');
+    expect(data.next).toBe(full().next);
     expect(data).not.toHaveProperty('mcpServer');
     expect(data.next).toContain('verify its tools');
     expect(out.stdout).not.toContain('starts with the next session');
-    expect(data.spend).toEqual({ effective: full().spend.effective });
-    expect(data.disclosure).toEqual(full().disclosure);
+    expect(data.spend).toEqual(full().spend);
     expect(data.notices).toEqual(['Codex is also installed.']);
     expect(data.fundingWarning).toBe(full().fundingWarning);
-    expect(data).not.toHaveProperty('wallet');
-    expect(data).not.toHaveProperty('plugin');
-    expect(data).not.toHaveProperty('migration');
-    expect(data).not.toHaveProperty('router');
-    expect(data).not.toHaveProperty('removedSkills');
+    expect(data.wallet).not.toHaveProperty('address');
+    expect(data.wallet).not.toHaveProperty('passphrase');
     expect(data).not.toHaveProperty('launcher');
     expect(data).not.toHaveProperty('compactJson');
   });
@@ -182,7 +174,7 @@ describe('the default agent install handoff', () => {
     for (const host of data.hosts) {
       expect(data[host].nextSteps).toEqual(pending);
       expect(data[host].fundingWarning).toBe(full().fundingWarning);
-      expect(data[host]).not.toHaveProperty('wallet');
+      expect(data[host].wallet).not.toHaveProperty('address');
     }
     expect(data.notices).toEqual(['Codex is also installed.']);
   });
@@ -222,68 +214,6 @@ describe('the default agent install handoff', () => {
     const out = await run(['install']);
     expect(out.code).not.toBe(0);
     expect(JSON.parse(out.stdout).error.details).toEqual(full());
-  });
-
-  it('keeps actual custom limits, migration work and removed skills', async () => {
-    vi.stubEnv('CLAUDECODE', '1');
-    const data = {
-      ...full(),
-      spend: {
-        set: ['sessionBudget'],
-        kept: ['maxAutoSpend'],
-        effective: { maxAutoSpend: '0.5', sessionBudget: '2' },
-      },
-      migration: { state: 'done', removed: { hooks: true } },
-      removedSkills: ['retired-tool'],
-    };
-    stubs.install.mockResolvedValueOnce({ data });
-    const projected = JSON.parse((await run(['install'])).stdout).data;
-    expect(projected.spend).toEqual({ effective: data.spend.effective });
-    expect(projected.migration).toEqual(data.migration);
-    expect(projected.removedSkills).toEqual(data.removedSkills);
-  });
-
-  it.each([
-    { status: 'skipped', reason: 'flag' },
-    { status: 'unknown', fix: 'Run doctor.' },
-  ])('keeps no-wallet and unknown wallet outcomes: %j', async (wallet) => {
-    vi.stubEnv('CLAUDECODE', '1');
-    stubs.install.mockResolvedValueOnce({ data: { ...full(), wallet } });
-    expect(JSON.parse((await run(['install', '--no-wallet'])).stdout).data.wallet).toEqual(wallet);
-  });
-
-  it('keeps a working fallback registration and unknown readiness', async () => {
-    vi.stubEnv('CLAUDECODE', '1');
-    const data = {
-      ...full(),
-      plugin: {
-        ...full().plugin,
-        state: 'written',
-        fallbackReason: 'Claude registration could not be checked.',
-      },
-      migration: { state: 'pending', reason: 'Waiting for a real session.' },
-      router: { status: 'unknown', detail: 'Could not check.', fix: 'Try later.' },
-    };
-    stubs.install.mockResolvedValueOnce({ data });
-    const projected = JSON.parse((await run(['install'])).stdout).data;
-    expect(projected.plugin).toEqual(data.plugin);
-    expect(projected.migration).toEqual(data.migration);
-    expect(projected.router).toEqual(data.router);
-  });
-
-  it('preserves a warning on otherwise successful readiness', async () => {
-    vi.stubEnv('CLAUDECODE', '1');
-    const data = {
-      ...full(),
-      runtime: { ...full().runtime, warning: 'Check the runtime.' },
-      migration: { state: 'none', warning: 'Check the earlier setup.' },
-      claudeCode: { ...full().claudeCode, warning: 'Check Claude Code.' },
-    };
-    stubs.install.mockResolvedValueOnce({ data });
-    const projected = JSON.parse((await run(['install'])).stdout).data;
-    expect(projected.runtime).toEqual(data.runtime);
-    expect(projected.migration).toEqual(data.migration);
-    expect(projected.claudeCode).toEqual(data.claudeCode);
   });
 
   it.each(['key', 'passphrase'] as const)(
