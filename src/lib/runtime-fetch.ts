@@ -224,7 +224,11 @@ export async function downloadViaCurl(
           file,
           url,
         ],
-        { env, stdio: 'ignore', windowsHide: true, timeout: o.timeoutMs + 1000 },
+        // In Tenjin's own tmp folder: Windows looks for `curl.exe` in the
+        // working directory before PATH, and Tenjin runs from whatever folder
+        // the person is in, a cloned repository included. The output path is
+        // already absolute.
+        { cwd: o.dir, env, stdio: 'ignore', windowsHide: true, timeout: o.timeoutMs + 1000 },
       );
       child.once('error', () =>
         fail(

@@ -47,11 +47,12 @@
   "files": [
     "dist",
     "docs",
+    "scripts/installers",
     "NOTICE.md"
   ],
   "packageManager": "pnpm@11.11.0",
   "scripts": {
-    "build": "rm -rf dist && tsup",
+    "build": "rm -rf dist .bundle-meta && tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

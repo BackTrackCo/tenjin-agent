@@ -61,6 +61,22 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
+# tenjin.sh builds install.sh and install.ps1 from the templates in npm's
+# `latest` tarball, and answers 503 for a release that carries none. So both
+# must ship byte for byte, and the packed package's own pins must fill every
+# token in them, or this release cannot publish.
+for f in install.sh install.ps1; do
+  cmp -s "./node_modules/tenjin-cli/scripts/installers/$f" "$PKG_DIR/scripts/installers/$f" || {
+    echo "pack-smoke: FAIL — scripts/installers/$f missing from the installed package, or not the repo's" >&2
+    exit 1
+  }
+done
+node "$PKG_DIR/scripts/build-installers.mjs" "$TARBALL" "$PACK_DIR/installers" >/dev/null || {
+  echo "pack-smoke: FAIL — the packed tarball cannot fill the installer templates" >&2
+  exit 1
+}
+echo "pack-smoke: installer templates ship and fill from the packed tarball (ok)"
+
 # 1) --version prints exactly the package.json version.
 GOT_VERSION="$("$BIN" --version)"
 if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
