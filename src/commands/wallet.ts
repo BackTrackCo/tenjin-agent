@@ -9,6 +9,7 @@ import { loadRawConfig, resolveSettings } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { getUsdcBalance } from '../lib/usdc';
 import { forgetRememberedBalance } from '../lib/usdc-balance';
+import { testFundsLines } from '../lib/test-settlement';
 import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
@@ -623,6 +624,8 @@ export async function runWalletShow(
   };
 }
 
+const TEST_FUNDS_TIMEOUT_MS = 5_000;
+
 export async function runWalletBalance(
   ctx: CommandContext,
   opts: ResolveWalletProviderOptions = {},
@@ -631,11 +634,12 @@ export async function runWalletBalance(
   const desc = await describeWallet(provider);
 
   const config = await loadRawConfig(ctx.dataDir);
-  const rpcUrl = resolveSettings({
+  const settings = resolveSettings({
     config,
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
-  }).rpcUrl.value;
+  });
+  const rpcUrl = settings.rpcUrl.value;
 
   let atomic: bigint;
   try {
@@ -655,11 +659,21 @@ export async function runWalletBalance(
   const credit = toMoney(
     (await channelCredit(ctx.dataDir, desc.address).catch(() => 0n)).toString(),
   );
+  // A staging server's test funds, shown beside the real balance and never instead.
+  const testFunds = await testFundsLines(desc.address, settings.baseUrl.value, {
+    timeoutMs: Math.min(ctx.flags.timeout, TEST_FUNDS_TIMEOUT_MS),
+  });
   return {
-    data: { address: desc.address, balance, routingCredit: credit },
+    data: {
+      address: desc.address,
+      balance,
+      routingCredit: credit,
+      ...(testFunds.length > 0 ? { testFunds: testFunds[0] } : {}),
+    },
     humanLines: [
       `Balance: ${balance.usd} USDC on Base` +
         (credit.atomic !== '0' ? ` (+${credit.usd} routing credit)` : ''),
+      ...testFunds,
       ...(atomic === 0n ? [FUND_COMMAND_LINE] : []),
     ],
   };

@@ -1187,6 +1187,44 @@ describe('runWalletBalance', () => {
     expect(getSigner).not.toHaveBeenCalled();
   });
 
+  it("adds a staging server's test funds after the real balance, never in its place", async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    mockedBalance.mockResolvedValue(1_000_000n);
+    const fetchStub = vi.fn(async (url: string | URL | Request) =>
+      String(url).endsWith('/api/transak/test-settlement')
+        ? Response.json({
+            testSettlement: {
+              provider: 'transak',
+              chainId: 84532,
+              token: '0xD733D48f2a7F57D4559F98ae07f87Dab595E3523',
+              symbol: 'TRNSK',
+              decimals: 18,
+            },
+          })
+        : Response.json({
+            jsonrpc: '2.0',
+            id: 1,
+            result: `0x${(25n * 10n ** 18n).toString(16).padStart(64, '0')}`,
+          }),
+    );
+    vi.stubGlobal('fetch', fetchStub);
+    try {
+      const ctx = makeCtx();
+      const res = await runWalletBalance(
+        { ...ctx, flags: { ...ctx.flags, baseUrl: 'http://127.0.0.1:3100' } },
+        { provider },
+      );
+      expect(res.humanLines).toEqual([
+        'Balance: 1 USDC on Base',
+        'Test funds on Base Sepolia: 25 TRNSK (Transak staging)',
+      ]);
+      expect(res.data).toMatchObject({ balance: { usd: '1' } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('says how to fund the wallet at exactly $0, and only then', async () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(address);
