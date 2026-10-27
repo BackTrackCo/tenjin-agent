@@ -5,9 +5,11 @@ export default defineConfig({
     globals: false,
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // Test keystores default to a cheap scrypt cost; production keeps ox's.
+    setupFiles: ['./src/lib/wallet/test-kdf-setup.ts'],
     // The default 5s testTimeout stands globally so a genuine hang (MCP/stdio,
-    // e2e) surfaces fast. The scrypt-heavy wallet suites raise it per-file via
-    // vi.setConfig — real ox scrypt at N=262144 flakes the default under
+    // e2e) surfaces fast. The cheap test scrypt cost keeps the wallet suites
+    // inside it; real ox scrypt at N=262144 flaked the default under
     // parallel load (tenjin-agent#47).
     //
     // This repo's own opt-in into the sig_v1_test key lane (tenjin-agent#267),

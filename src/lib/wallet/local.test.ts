@@ -46,10 +46,6 @@ const emptySecretService: ExecFn = async () => {
   throw secretMiss();
 };
 
-// This suite runs real ox scrypt (N=262144) via encryptedRecord; the 5s default
-// flakes under parallel vitest load (tenjin-agent#47).
-vi.setConfig({ testTimeout: 120000 });
-
 let tmp: string;
 let dataDir: string;
 beforeEach(async () => {
