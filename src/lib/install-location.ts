@@ -120,10 +120,9 @@ export function refuse(moduleDir: string, opts: { check: boolean; spec: string |
 }
 
 /**
- * The published package ships `dist/`, `docs/`, and `skills/` with no `src/`
- * beside them (the `files` array), so a `src/` next to the nearest package.json
- * means a checkout, whose version number says nothing about what HEAD holds.
- * Same test skill-heal uses to keep its hands off working-tree skills.
+ * The published package ships `dist/` and `docs/` with no `src/` beside them
+ * (the `files` array), so a `src/` next to the nearest package.json means a
+ * checkout, whose version number says nothing about what HEAD holds.
  */
 export function isSourceCheckout(moduleDir: string): boolean {
   let dir = moduleDir;
