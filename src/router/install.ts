@@ -1119,7 +1119,7 @@ function runtimeNotices(rt: RuntimeSetup, home: string): string[] {
 
 /** The one rule for every step the agent relays from install. */
 export const SHOW_NOT_RUN =
-  'Run the command yourself. Show an address only when requested or needed for recovery; storage and PATH details only for recovery.';
+  'When the selected option includes a command, run it yourself; never ask the person to run it. Show an address only when requested or needed for recovery; storage and PATH details only for recovery.';
 
 /**
  * An agent runs install with `--json` or in a shell with no terminal, so the
@@ -1304,7 +1304,7 @@ export async function approveLimits(
   const ask = deps.promptAmount ?? promptAmount;
   const sessionBudget = await askLimit(
     ask,
-    'Most it may pay in a day, in USD, or none',
+    'Most it may pay per 24-hour budget window, in USD, or none',
     '5',
     'day',
   );
@@ -1390,7 +1390,7 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
       policy.sessionBudgetAtomic === null
-        ? 'no daily ceiling'
+        ? 'no 24-hour budget ceiling'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
 }
@@ -1534,10 +1534,9 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
-  const daily =
-    s.policy.sessionBudgetAtomic === null ? 'no daily limit' : `$${limits.sessionBudget} a day`;
+  const daily = s.policy.sessionBudgetAtomic === null ? 'none' : `$${limits.sessionBudget}`;
   const spend = [
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily limit ${daily}`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; 24-hour budget ${daily}`,
     ...(s.spendAsk !== undefined
       ? [
           `  Ask the person in this session: ${s.spendAsk.question}`,

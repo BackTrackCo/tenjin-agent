@@ -1314,7 +1314,7 @@ function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
-  if (value === null) return 'none (no daily limit)';
+  if (value === null) return 'none (no 24-hour budget limit)';
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   return value; // 'always', baseUrl, rpcUrl
 }

@@ -419,9 +419,9 @@ export async function runCodexInstall(
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
   const daily =
-    effective.sessionBudget === 'no daily ceiling'
-      ? 'no daily limit'
-      : `$${effective.sessionBudget} a day`;
+    effective.sessionBudget === 'no 24-hour budget ceiling'
+      ? 'none'
+      : `$${effective.sessionBudget}`;
   return {
     data: {
       plugin: CODEX_PLUGIN,
@@ -437,7 +437,7 @@ export async function runCodexInstall(
         ? `Codex plugin: left as it was (Codex ${version})`
         : `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
       ...runtimeLines(ctx, rt, home),
-      `Automatic router: up to $${effective.maxAutoSpend} per call; daily limit ${daily}`,
+      `Automatic router: up to $${effective.maxAutoSpend} per call; 24-hour budget ${daily}`,
       ...(spendAsk !== undefined
         ? [
             `  Ask the person in this session: ${spendAsk.question}`,

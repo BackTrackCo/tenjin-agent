@@ -63,7 +63,7 @@ const FEE_TERMS =
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 per 24-hour budget window across agent sessions, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
-  '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+  '  Automatic router: up to $0.25 per call; 24-hour budget $5',
   `  Ask the person in this session: ${QUESTION}`,
   '  Use the defaults (recommended): tenjin install --yes',
   '  Set my own limits: tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
@@ -195,7 +195,7 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({}, ctx(), deps());
     expect(spendStepOf(result)).toBeUndefined();
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.1 per call; daily limit $5 a day',
+      '  Automatic router: up to $0.1 per call; 24-hour budget $5',
     );
     expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
   });
@@ -446,7 +446,7 @@ describe('install asks a person the spend question once', () => {
       sessionBudget: '5000000',
     });
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.25 per call; daily limit $5 a day',
+      '  Automatic router: up to $0.25 per call; 24-hour budget $5',
     );
   });
 
@@ -458,7 +458,7 @@ describe('install asks a person the spend question once', () => {
       deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
     );
     expect(promptAmount.mock.calls.map(([message]) => message)).toEqual([
-      'Most it may pay in a day, in USD, or none',
+      'Most it may pay per 24-hour budget window, in USD, or none',
       'Most it may pay for one call, in USD, at least 0.25',
     ]);
     expect(await loadRawConfig(data)).toMatchObject({
@@ -466,7 +466,7 @@ describe('install asks a person the spend question once', () => {
       sessionBudget: '2000000',
     });
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.5 per call; daily limit $2 a day',
+      '  Automatic router: up to $0.5 per call; 24-hour budget $2',
     );
   });
 
@@ -704,7 +704,7 @@ describe('the doctor this release registers', () => {
       {
         status: 'ok',
         required: false,
-        detail: 'automatic approval up to 0.25 USD a call, 5 USD a day',
+        detail: 'automatic approval up to 0.25 USD a call, 5 USD per 24-hour budget window',
       },
     ],
     [
@@ -879,7 +879,7 @@ describe('the install readout and the status window', () => {
     );
     const result = await runRouterInstall({}, ctx(), deps());
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('Automatic router: up to $1 per call; daily limit $10 a day');
+    expect(text).toContain('Automatic router: up to $1 per call; 24-hour budget $10');
     expect(text).not.toContain('$0.25');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
@@ -892,7 +892,7 @@ describe('the install readout and the status window', () => {
       JSON.stringify({ maxAutoSpend: '500000', sessionBudget: 'none' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
-    expect(result.humanLines!.join('\n')).toContain('no daily limit');
+    expect(result.humanLines!.join('\n')).toContain('24-hour budget none');
   });
 
   it('status applies the same expiry an authorization would', async () => {
@@ -1209,7 +1209,9 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(fund).not.toHaveProperty('url');
     expect(fund.next).toContain('Ask this question once.');
     expect(fund.next).toContain('Run it only after their yes.');
-    expect(fund.next).toContain('Run the command yourself.');
+    expect(fund.next).toContain(
+      'When the selected option includes a command, run it yourself; never ask the person to run it.',
+    );
     expect(fund.next).toContain('Offer funding again only on request.');
     expect(result.humanLines).toEqual(
       expect.arrayContaining([
