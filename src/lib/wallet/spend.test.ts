@@ -4,12 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLocalSpendAuthorizer } from './spend';
 import { spendLedgerPath } from '../paths';
-import { readSessionFile, type SessionFile } from '../session-present';
-// The session-cache WRITER lives with the mint half by design; a test may cross
-// that line freely (the import pin is on read.ts, not here), and writing the
-// fixture through the production writer is what makes the collision case below
-// exercise the real pairing rather than a hand-rolled file.
-import { saveSessionFile } from '../session-key';
 import type { SpendPolicy } from '../policy';
 
 let dir: string;
@@ -169,32 +163,13 @@ describe('createLocalSpendAuthorizer', () => {
     expect(b.decision).toBe('deny');
   });
 
-  // The ledger used to live in session.json — the SAME file the P-256 session key
-  // is cached in. Two incompatible schemas, and both readers treat a parse failure
-  // as "absent", so each writer silently destroyed the other's file: minting a
-  // session zeroed the spending window, and the next spend deleted the session key.
-  it('leaves a cached session key intact and writes the ledger to spend.json', async () => {
-    const session: SessionFile = {
-      address: '0xabc',
-      origin: 'https://tenjin.blog',
-      delegation: 'D',
-      exp: new Date(2_000_000_000_000).toISOString(),
-      scope: 'read',
-      publicKeyRaw: 'P',
-      privateKeyJwk: { kty: 'EC', crv: 'P-256', d: 'd', x: 'x', y: 'y' },
-    };
-    await saveSessionFile(dir, session);
-
+  it('writes the ledger to spend.json', async () => {
     const auth = createLocalSpendAuthorizer({
       dir,
       policy: policy({ sessionBudgetAtomic: 500_000n }),
     });
     const a = await auth.authorize({ amountAtomic: 300_000n, creator: 'iris' });
     await auth.commit(a.reservationId, 300_000n);
-
-    const state = await readSessionFile(dir);
-    expect(state.kind).toBe('ok');
-    if (state.kind === 'ok') expect(state.file).toEqual(session);
 
     const ledger: unknown = JSON.parse(await readFile(spendLedgerPath(dir), 'utf8'));
     expect(ledger).toMatchObject({ schemaVersion: 2, committedAtomic: '300000' });

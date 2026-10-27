@@ -1,10 +1,9 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 
 /**
- * Claude Code's settings file, read once with every refusal decided here, so
- * the two writers that touch it (`status-line-wiring.ts`, and the removal of
- * the settings-based install in `legacy-install.ts`) agree by construction on
- * what they will and will not write over.
+ * Claude Code's settings file, read once with every refusal decided here, for
+ * the removal of the settings-based install (`legacy-install.ts`), which goes
+ * with it on or after 2026-12-01.
  */
 
 /** Why a settings file is left alone. */

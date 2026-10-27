@@ -380,9 +380,9 @@ describe('stripComments (the scanner the --base-url sweep depends on)', () => {
 describe('no user-facing CLI string coaches --base-url', () => {
   const SRC = fileURLToPath(new URL('.', import.meta.url));
 
-  // `cli.ts` DEFINES the flag (commander needs the literal); `lib/permissions.ts`
-  // is the caveat that discloses it. Both name it deliberately.
-  const ALLOWED = new Set(['cli.ts', 'lib/permissions.ts']);
+  // `cli.ts` DEFINES the flag (commander needs the literal), so it names it
+  // deliberately.
+  const ALLOWED = new Set(['cli.ts']);
 
   function codeLines(file: string): string[] {
     return stripComments(readFileSync(join(SRC, file), 'utf8'));

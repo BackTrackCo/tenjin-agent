@@ -267,8 +267,8 @@ function scriptNear(dir: string, bin: string): string | null {
 
 /**
  * Walk PATH for the manager's shim and turn it into its script. Probes the
- * PATHEXT extensions on win32 for the same reason `onPath` in skill-wiring.ts
- * does: the real file there is `npm.cmd`, never a bare `npm`.
+ * PATHEXT extensions on win32: the real file there is `npm.cmd`, never a bare
+ * `npm`.
  */
 function scriptOnPath(
   bin: string,

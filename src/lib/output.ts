@@ -1,7 +1,6 @@
 import { WriteStream } from 'node:tty';
 import { styleText } from 'node:util';
 import { CliError } from './errors';
-import type { StdinInput } from './stdin';
 import { SCHEMA_VERSION } from '../schemas';
 import type { UpdateAvailable } from '../schemas';
 import type { FailureEnvelope, OutputError, SuccessEnvelope } from '../schemas';
@@ -11,13 +10,9 @@ import type { FailureEnvelope, OutputError, SuccessEnvelope } from '../schemas';
  * so tests drive the CLI in-process with memory buffers and no child process.
  * `isTTY` describes stdout; the separate `--json` flag (passed to the emit
  * functions) is what suppresses human rendering — the two are ANDed, never
- * conflated, so `--json` on a TTY still yields pure machine output. `stdin` is
- * optional for compatibility with command-core contexts that never read it;
- * defaultIo supplies the real stream, and only the CLI forwards that capability
- * to commands that accept Markdown on stdin.
+ * conflated, so `--json` on a TTY still yields pure machine output.
  */
 export interface Io {
-  stdin?: StdinInput;
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
   isTTY: boolean;
@@ -25,7 +20,6 @@ export interface Io {
 
 export function defaultIo(): Io {
   return {
-    stdin: { stream: process.stdin, isTTY: Boolean(process.stdin.isTTY) },
     stdout: process.stdout,
     stderr: process.stderr,
     isTTY: Boolean(process.stdout.isTTY),

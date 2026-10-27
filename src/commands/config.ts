@@ -1,65 +1,36 @@
 import { mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import { CliError } from '../lib/errors';
-import { confirmChoice } from '../lib/clack';
-import type { CodexGrantResult } from '../lib/harness-permissions';
-import {
-  inspectFreeVerbRules,
-  MODE_GATED_RULES,
-  retractModeGatedRules,
-  wireFreeVerbAllowlist,
-  type PermissionsResult,
-} from '../lib/harness-permissions';
-import { modeGatedPointer } from '../lib/permissions';
-import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   RETIRED_PAYMENT_GUIDANCE,
   retiredPaymentKeys,
-  HOOKS_CONFIG_KEYS,
-  PUBLISH_CONFIG_KEYS,
-  PublishModeSchema,
   RawConfigSchema,
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
-  LOOP_CONFIG_KEYS,
-  TEAM_CONFIG_KEYS,
   EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
   loadRawConfig,
   MAX_AUTO_SPEND_FLOOR_ATOMIC,
   MAX_AUTO_SPEND_FLOOR_WHY,
-  parseLoopValue,
-  parsePublicFallbackFlag,
-  parseAckServerWarnings,
+  parseOnOffFlag,
   parseUpdateModeFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
   EffectiveSettings,
-  HookArm,
-  HooksConfigKey,
   PartialConfig,
   Provenance,
-  PublishConfigKey,
-  PublishMode,
   ScalarConfigKey,
   UpdateConfigKey,
-  LoopConfigKey,
-  TeamConfigKey,
   ExperimentalConfigKey,
   RouterConfigKey,
   RouterContext,
 } from '../lib/config';
-import { onPath } from '../lib/skill-wiring';
-import type { Harness, HarnessAdapter } from '../adapters/types';
-import { ADAPTERS } from '../adapters/registry';
-import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { installedHarnessInPlay } from '../lib/harness-presence';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
@@ -84,49 +55,16 @@ interface RenderedSetting extends RenderedValue {
 }
 
 /**
- * Seams for the one `config set` path that touches a file outside the data dir.
- * Tests inject all of them; nothing here is reachable from a flag.
+ * Keys `config get/set` accept and `--json` carries, but the human listing
+ * leaves out. `allowlistCreators` is still enforced on every payment
+ * (lib/policy.ts), so it stays settable; it is not one of the settings the
+ * listing shows.
  */
-export interface ConfigSetDeps {
-  /** Harness lifecycle implementations; tests inject adapters at this boundary. */
-  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
-  /** Home whose `.claude/settings.json` is synced; defaults to os.homedir(). */
-  homeDir?: string;
-  /** Overrides TTY detection, exactly as install's own seam does. */
-  isInteractive?: boolean;
-  /** The yes/no for a loosening write; defaults to the clack confirm (default yes). */
-  confirmRule?: (label: string) => Promise<boolean>;
-  /** Settled harness selection; absent, each registered adapter is detected normally. */
-  harnessesInPlay?: readonly Harness[];
-  /** The retraction-only pass `review` runs; defaults to the real writer. */
-  retractModeGated?: (home: string) => Promise<PermissionsResult>;
-  /** PATH probe for harness detection; defaults to probing `env.PATH`. */
-  which?: (bin: string) => boolean;
-  /** Environment for that probe; defaults to process.env. */
-  env?: NodeJS.ProcessEnv;
-  inspectAllowlist?: typeof inspectFreeVerbRules;
-  wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
-}
-
-/**
- * The shelf's settings. `config get/set` still accept them and `--json` still
- * carries them, but the human listing shows only what the router CLI uses: it
- * ships no shelf command that reads these.
- */
-const SHELF_KEYS: ReadonlySet<string> = new Set<string>([
-  'allowlistCreators',
-  'publicShelfUrl',
-  'shelfBypassSecret',
-  'evalCohort',
-  ...PUBLISH_CONFIG_KEYS,
-  ...HOOKS_CONFIG_KEYS,
-  ...LOOP_CONFIG_KEYS,
-  ...TEAM_CONFIG_KEYS,
-]);
+const UNLISTED_KEYS: ReadonlySet<string> = new Set<string>(['allowlistCreators']);
 
 const KEY_WIDTH = Math.max(
   ...[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS]
-    .filter((key) => !SHELF_KEYS.has(key))
+    .filter((key) => !UNLISTED_KEYS.has(key))
     .map((key) => key.length),
 );
 
@@ -143,36 +81,10 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   baseUrl: 'Tenjin API base URL the router asks',
-  publicShelfUrl:
-    'the public marketplace, consume-only: the second shelf a team-mode search falls through to',
-  shelfBypassSecret:
-    "the team shelf's Vercel protection-bypass secret; setting it is what turns team mode on (printed as set/unset)",
   rpcUrl: 'Base RPC endpoint for balance reads',
-  evalCohort: 'opt in to the search evaluation cohort',
   bazaarRegistries: 'x402 registries used to verify direct-payment listings',
-  'publish.mode': 'review=always ask, auto=ask on findings, full-auto=only hard blocks stop it',
-  'publish.defaultPrice': 'price used when none is given',
-  'publish.ackServerWarnings':
-    "whether a yes covers the MARKETPLACE scan's warn findings: mode=only the ones an earlier render already showed you (full-auto still acks), on=any of them, off=never",
-  'hooks.prompt': 'answer the prompt you just typed with what the shelves already know',
-  'hooks.web-search': 'ask Tenjin before the agent runs a WebSearch',
-  'hooks.web-fetch': 'ask Tenjin before the agent fetches a page',
-  'hooks.subagent':
-    'ask Tenjin with a subagent work order (the most sensitive payload any hook sees) and hand the answer to the child at its start',
-  'hooks.failure': 'answer a failing command with the fix this machine or a shelf already has',
-  'hooks.publish':
-    'the turn-end ask to publish what this turn settled, spoken to you and to each subagent at its own end',
-  'hooks.primer': 'one-paragraph search-first primer at session start',
   'update.mode':
     "auto=update in the background where Tenjin's runtime is set up (else as nudge), nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm",
-  'loop.human_wait_ms':
-    'ms a hook fire may take when a human is waiting on it (prompt, Stop, SessionStart)',
-  'loop.tool_wait_ms': 'ms a hook fire may take when a tool call is waiting on it',
-  'loop.idle_exit_min': 'minutes without a hook fire before the loop daemon exits',
-  'loop.port':
-    "the loop daemon's loopback port; null derives one from the data dir (set only when doctor reports a foreign listener)",
-  'team.publicFallback':
-    'on=a team-shelf miss falls through to the public marketplace, off=team-only (public-only lookup stages are dropped)',
   'router.enabled':
     'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
   'router.context':
@@ -197,14 +109,6 @@ function isExperimentalKey(key: string): key is ExperimentalConfigKey {
   return (EXPERIMENTAL_CONFIG_KEYS as readonly string[]).includes(key);
 }
 
-function isLoopKey(key: string): key is LoopConfigKey {
-  return (LOOP_CONFIG_KEYS as readonly string[]).includes(key);
-}
-
-function isTeamKey(key: string): key is TeamConfigKey {
-  return (TEAM_CONFIG_KEYS as readonly string[]).includes(key);
-}
-
 function isRouterKey(key: string): key is RouterConfigKey {
   return (ROUTER_CONFIG_KEYS as readonly string[]).includes(key);
 }
@@ -218,20 +122,6 @@ function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): Re
 /** Router keys resolve against the directory the command runs in, as a hook would. */
 async function resolveRouterFromContext(ctx: CommandContext): Promise<RouterSettings> {
   return routerSettings({ cwd: process.cwd(), dataDir: ctx.dataDir });
-}
-
-function renderLoopSetting(key: LoopConfigKey, settings: EffectiveSettings): RenderedSetting {
-  const field = key.slice('loop.'.length) as keyof EffectiveSettings['loop'];
-  const { value, source } = settings.loop[field];
-  return { value: value === null ? 'null' : String(value), source };
-}
-
-function isPublishKey(key: string): key is PublishConfigKey {
-  return (PUBLISH_CONFIG_KEYS as readonly string[]).includes(key);
-}
-
-function isHooksKey(key: string): key is HooksConfigKey {
-  return (HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
 }
 
 function isUpdateKey(key: string): key is UpdateConfigKey {
@@ -249,20 +139,10 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
   const data: Record<string, RenderedSetting> = {};
   const humanLines: string[] = [];
   const show = (key: string, line: string) => {
-    if (!SHELF_KEYS.has(key)) humanLines.push(line);
+    if (!UNLISTED_KEYS.has(key)) humanLines.push(line);
   };
   for (const key of CONFIG_KEYS) {
     const entry = renderSetting(key, settings[key].value, settings[key].source);
-    data[key] = entry;
-    show(key, describedLine(key, entry));
-  }
-  for (const key of PUBLISH_CONFIG_KEYS) {
-    const entry = renderPublishSetting(key, settings);
-    data[key] = entry;
-    show(key, describedLine(key, entry, downgradeNote(key, settings)));
-  }
-  for (const key of HOOKS_CONFIG_KEYS) {
-    const entry = renderHooksSetting(key, settings);
     data[key] = entry;
     show(key, describedLine(key, entry));
   }
@@ -270,19 +150,6 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     const entry: RenderedSetting = {
       value: settings.updateMode.value,
       source: settings.updateMode.source,
-    };
-    data[key] = entry;
-    show(key, describedLine(key, entry));
-  }
-  for (const key of LOOP_CONFIG_KEYS) {
-    const entry = renderLoopSetting(key, settings);
-    data[key] = entry;
-    show(key, describedLine(key, entry));
-  }
-  for (const key of TEAM_CONFIG_KEYS) {
-    const entry: RenderedSetting = {
-      value: settings.teamPublicFallback.value,
-      source: settings.teamPublicFallback.source,
     };
     data[key] = entry;
     show(key, describedLine(key, entry));
@@ -309,33 +176,9 @@ export async function runConfigGet(
   { key }: { key: string },
   ctx: CommandContext,
 ): Promise<CommandResult> {
-  if (isPublishKey(key)) {
-    const settings = await resolveFromContext(ctx);
-    const entry = renderPublishSetting(key, settings);
-    return {
-      data: { key, ...entry },
-      humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
-    };
-  }
-  if (isHooksKey(key)) {
-    const entry = renderHooksSetting(key, await resolveFromContext(ctx));
-    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
-  }
   if (isUpdateKey(key)) {
     const { updateMode } = await resolveFromContext(ctx);
     const entry: RenderedSetting = { value: updateMode.value, source: updateMode.source };
-    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
-  }
-  if (isLoopKey(key)) {
-    const entry = renderLoopSetting(key, await resolveFromContext(ctx));
-    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
-  }
-  if (isTeamKey(key)) {
-    const { teamPublicFallback } = await resolveFromContext(ctx);
-    const entry: RenderedSetting = {
-      value: teamPublicFallback.value,
-      source: teamPublicFallback.source,
-    };
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   if (isRouterKey(key)) {
@@ -369,7 +212,6 @@ export async function runConfigSet(
     local,
   }: { key: string; value: string; project?: boolean; local?: boolean },
   ctx: CommandContext,
-  deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
   if (local === true && project !== true) {
     throw new CliError('USAGE', '--local names the personal project file, so it needs --project', {
@@ -384,376 +226,13 @@ export async function runConfigSet(
       fix: `--project applies to ${ROUTER_CONFIG_KEYS.join(' and ')} only; drop it to set ${key} for this machine.`,
     });
   }
-  if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
-  if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
-  if (isLoopKey(key)) return setLoopKey(key, value, ctx);
-  if (isTeamKey(key)) return setTeamKey(key, value, ctx);
   if (isExperimentalKey(key)) return setExperimentalKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
   const entry = renderSetting(configKey, stored, 'file');
-  const warning = await halfWiredTeamShelf(configKey, ctx.dataDir);
-  return {
-    data: { key: configKey, ...entry, ...(warning !== undefined ? { warning } : {}) },
-    humanLines: [formatLine(configKey, entry), ...(warning !== undefined ? [warning] : [])],
-  };
-}
-
-/**
- * The half-wired team shelf, said out loud at the moment it is created.
- *
- * Team mode takes TWO settings — a private deployment in `baseUrl` and its
- * bypass secret — and the setup is two independent commands, so a machine can
- * easily end up with the secret and no shelf (run in the other order, or the
- * secret line alone on a second machine). The CLI fails that state safe to
- * public mode, which means an operator who thinks they are on the team shelf
- * would otherwise get no signal at all: publishes would go to the marketplace
- * under the public gates. Warn, do not refuse — the pair is legitimately
- * half-set between two commands, and refusing would make the documented order
- * the only order.
- *
- * THREE KEYS, not two. `isTeamShelfOrigin` also returns false when `baseUrl`
- * matches `publicShelfUrl`, so pointing `publicShelfUrl` at the team deployment
- * drops the machine out of team mode just as surely as unsetting the secret
- * would. It fails safe and doctor catches it later; this is the warning at the
- * moment it happens, on the third key of the same triple.
- */
-async function halfWiredTeamShelf(
-  configKey: ScalarConfigKey,
-  dataDir: string,
-): Promise<string | undefined> {
-  if (
-    configKey !== 'shelfBypassSecret' &&
-    configKey !== 'baseUrl' &&
-    configKey !== 'publicShelfUrl'
-  ) {
-    return undefined;
-  }
-  const config = await loadRawConfig(dataDir).catch(() => undefined);
-  if (config === undefined) return undefined;
-  const s = resolveSettings({ config, flags: {}, env: {} });
-  if (s.shelfBypassSecret.value.length === 0) return undefined;
-  const baseUrl = s.baseUrl.value;
-  if (isTeamShelfOrigin(new URL(baseUrl).origin, s.publicShelfUrl.value)) return undefined;
-  // WHICH KEY BROKE THE PAIR decides which fix to name. A baseUrl that now
-  // matches publicShelfUrl is not "the marketplace" in any recognizable sense —
-  // it is the operator's own two keys pointed at one place — and telling them to
-  // re-point baseUrl would be advice for the other half of the same collision.
-  const isProduction = isSameDeployment(new URL(baseUrl).origin, PRODUCTION_ORIGIN);
-  const cause = isProduction
-    ? `baseUrl is the public marketplace (${baseUrl})`
-    : `baseUrl and publicShelfUrl are the same shelf (${baseUrl})`;
-  const fix = isProduction
-    ? 'Point baseUrl at the team deployment to finish team mode: `tenjin config set baseUrl <team shelf url>`.'
-    : `A team shelf must differ from the shelf it falls through to: \`tenjin config set publicShelfUrl ${PRODUCTION_ORIGIN}\`.`;
-  return (
-    `Warning: shelfBypassSecret is set, but ${cause}, ` +
-    'so this machine stays in PUBLIC mode — publishes go to the marketplace with the scan’s ' +
-    'warn tier and the confirm cascade on. ' +
-    fix
-  );
-}
-
-/**
- * `config set publish.mode|publish.defaultPrice|publish.ackServerWarnings`. mode
- * and ackServerWarnings validate to their enums; defaultPrice parses decimal USD
- * at the edge into atomic (matching the spend keys). The subkey is merged into
- * the nested publish block, so a sibling subkey (or an unknown one a newer CLI
- * wrote) is preserved.
- */
-async function setPublishKey(
-  key: PublishConfigKey,
-  value: string,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-): Promise<CommandResult> {
-  const entry: RenderedSetting =
-    key === 'publish.mode'
-      ? { value: parsePublishMode(value), source: 'file' }
-      : key === 'publish.ackServerWarnings'
-        ? { value: parseAckServerWarnings(value, key), source: 'file' }
-        : { value: toMoney(parseUsdToAtomic(value)), source: 'file' };
-  const subkey =
-    key === 'publish.mode'
-      ? 'mode'
-      : key === 'publish.ackServerWarnings'
-        ? 'ackServerWarnings'
-        : 'defaultPrice';
-  const stored =
-    key === 'publish.defaultPrice' ? (entry.value as Money).atomic : (entry.value as string);
-  const persistEntry = async (): Promise<void> =>
-    persist(ctx.dataDir, (existing) => ({
-      ...existing,
-      publish: { ...existing.publish, [subkey]: stored },
-    }));
-  const humanLines = [formatLine(key, entry)];
-  if (key !== 'publish.mode') {
-    await persistEntry();
-    return { data: { key, ...entry }, humanLines };
-  }
-
-  // The mode decides whether a publish asks; the harness rule decides whether the
-  // harness asks ANYWAY. Settling one and leaving the other to the next `tenjin
-  // install` is the seam that made publish.mode look broken (tenjin-agent #161),
-  // so the two move together from here too.
-  // Synchronize before committing the mode. A grant writer may refuse after
-  // consent (permissions, concurrent edits, an unwritable parent); persisting
-  // first made the command exit successfully with an unattended mode that its
-  // harness could not carry. Grant-first is also the least-authority failure
-  // order: if a later config write fails, the CLI still resolves the old mode.
-  const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
-  const failure = grantSyncFailure(allowlist);
-  if (failure !== undefined) {
-    throw new CliError(
-      'REFUSED',
-      `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
-      {
-        fix:
-          failure.fix ??
-          `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
-        details: { key, value: entry.value, allowlist },
-      },
-    );
-  }
-  await persistEntry();
-  return {
-    data: { key, ...entry, allowlist },
-    humanLines: [...humanLines, ...allowlistLines(allowlist)],
-  };
-}
-
-/**
- * What `config set publish.mode` did about the harness rule the mode carries.
- * `skipped` names why nothing was written; `pointer` is the line to show when it
- * is the operator's move.
- */
-interface AllowlistSync {
-  byHarness: Partial<Record<Harness, PermissionsResult | CodexGrantResult>>;
-  skipped?: 'not-claude' | 'no-tty' | 'declined' | 'unwritable';
-  pointer?: string;
-}
-
-/** A writer refusal is an error, not informational output: the mode and every
- * harness grant are one operator decision and may not report success apart. */
-function grantSyncFailure(
-  sync: AllowlistSync,
-): { harness: Harness; path: string; reason: string; fix?: string } | undefined {
-  for (const [harness, result] of Object.entries(sync.byHarness) as [
-    Harness,
-    PermissionsResult | CodexGrantResult,
-  ][]) {
-    if ('error' in result && result.error !== undefined) {
-      return { harness, path: result.path, reason: result.error };
-    }
-    if ('warning' in result && result.warning !== undefined) {
-      return {
-        harness,
-        path: result.path ?? '(unknown path)',
-        reason: result.warning,
-        ...(result.fix !== undefined ? { fix: result.fix } : {}),
-      };
-    }
-  }
-  return undefined;
-}
-
-/** Names what the write actually carries: on a machine that never ran `install`,
- *  the free tier is pending too, and a question naming two lines while eleven
- *  land is asking about something else. */
-function publishRuleQuestion(
-  mode: PublishMode,
-  pending: readonly string[],
-  harnesses: readonly Harness[],
-): string {
-  const gated = new Set<string>(MODE_GATED_RULES);
-  const others = pending.filter((rule) => !gated.has(rule)).length;
-  const also =
-    others > 0 ? ` Also adds the ${others} command-grant rule(s) \`tenjin install\` writes.` : '';
-  const targets = harnesses
-    .map((harness) =>
-      harness === 'claude' ? 'Claude Code' : harness === 'codex' ? 'Codex' : harness,
-    )
-    .join(' and ');
-  return (
-    `publish.mode ${mode} is unattended only if ${targets} carries the matching grant for ` +
-    `${MODE_GATED_RULES.join(' and ')}. Update the ${targets} grant now?${also}`
-  );
-}
-
-/**
- * Keep the harness allowlist in step with the mode just written.
- *
- * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
- *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
- *    No TTY, `--json`, or a declined prompt all leave the file alone and return
- *    the pointer instead; nothing here writes on silence.
- *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
- *    the operator has just changed, so it runs unconditionally — the same reason
- *    install sweeps a retired rule without asking. Leaving it behind would keep
- *    publishing pre-cleared after the operator said "ask me first", which is the
- *    failure that matters.
- */
-async function syncPublishRule(
-  mode: PublishMode,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-): Promise<AllowlistSync> {
-  const home = deps.homeDir ?? homedir();
-  const nothing: AllowlistSync = { byHarness: {} };
-
-  const write = async (): Promise<AllowlistSync> => {
-    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
-    if (result.skipped !== undefined) {
-      return {
-        byHarness: { claude: result },
-        skipped: 'unwritable',
-        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
-      };
-    }
-    return { byHarness: { claude: result } };
-  };
-
-  const adapters = deps.adapters ?? ADAPTERS;
-  const env = deps.env ?? process.env;
-  const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  const requested = await loadRawConfig(ctx.dataDir)
-    .then((config) => config.install?.harness ?? [])
-    .catch(() => [] as Harness[]);
-  const inPlay =
-    deps.harnessesInPlay ??
-    (
-      await Promise.all(
-        Object.values(adapters).map(async (adapter) => ({
-          adapter,
-          selected: await installedHarnessInPlay(adapter, home, ctx.dataDir, {
-            env,
-            which,
-            requested,
-          }),
-        })),
-      )
-    )
-      .filter((entry) => entry.selected)
-      .map((entry) => entry.adapter.id);
-  const selectedAdapters = inPlay.map((harness) => adapters[harness]);
-  const isClaude = inPlay.includes('claude');
-
-  const withOtherGrants = async (sync: AllowlistSync): Promise<AllowlistSync> => {
-    const byHarness = { ...sync.byHarness };
-    for (const adapter of selectedAdapters) {
-      if (adapter.id === 'claude' || adapter.registrar.grant === undefined) continue;
-      const result = await adapter.registrar.grant.write(home, mode, env);
-      byHarness[adapter.id] = result;
-    }
-    return { ...sync, byHarness };
-  };
-
-  // Only Claude Code has a settings file of this shape; guessing at another
-  // harness's config is the uninvited write lib/harness-permissions.ts avoids.
-  // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
-  // that nothing reads, so prompting about it is noise and writing to it is an
-  // uninvited edit — and the retraction would sweep a file we never owned.
-  if (selectedAdapters.every((adapter) => adapter.registrar.grant === undefined)) {
-    // No settings file of ours to be missing anything, so the pointer would be
-    // advice about a machine this is not.
-    return { ...nothing, skipped: 'not-claude' };
-  }
-
-  const probe = isClaude
-    ? await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode)
-    : { pending: [] as string[] };
-  const gated = new Set<string>(MODE_GATED_RULES);
-  const missing = (probe.pending ?? []).filter((r) => gated.has(r));
-  // Only ever names rules this machine does not have. A pointer built from the
-  // mode alone told a fully-wired operator to go add what they already had.
-  const pointer = modeGatedPointer(mode, missing) ?? undefined;
-
-  // Tightening runs with no question and with no precondition, through a pass
-  // that can only ever REMOVE. Riding the additive writer made this decline
-  // whenever the free tier was not byte-exact — silently, and in the tightening
-  // direction, on the undo the operator just typed.
-  if (mode === 'review') {
-    const retracted = isClaude
-      ? await (deps.retractModeGated ?? retractModeGatedRules)(home)
-      : undefined;
-    if (retracted?.skipped !== undefined) {
-      return {
-        ...nothing,
-        skipped: 'unwritable',
-        ...(retracted.fix !== undefined ? { pointer: retracted.fix } : {}),
-      };
-    }
-    return await withOtherGrants({
-      byHarness: retracted === undefined ? {} : { claude: retracted },
-    });
-  }
-
-  // SATISFIED BEFORE TTY, and the order is the point: a fully-wired machine has
-  // nothing to ask about and nothing to write, so a `--json` or headless run
-  // there is a no-op rather than a `no-tty` skip carrying a pointer at rules it
-  // already has.
-  if (probe.satisfied !== undefined && selectedAdapters.length === 1 && isClaude) return nothing;
-
-  const canPrompt =
-    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  if (!canPrompt) {
-    return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
-  }
-
-  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
-  const grantable = selectedAdapters
-    .filter((adapter) => adapter.registrar.grant !== undefined)
-    .map((adapter) => adapter.id);
-  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
-    return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
-  }
-  return await withOtherGrants(isClaude ? await write() : nothing);
-}
-
-/** The human rendering of {@link syncPublishRule}, or nothing when it was a no-op. */
-function allowlistLines(sync: AllowlistSync): string[] {
-  const lines: string[] = [];
-  const claude = sync.byHarness.claude as PermissionsResult | undefined;
-  if ((claude?.added.length ?? 0) > 0) {
-    lines.push(`Added ${claude?.added.length ?? 0} harness rule(s) to your allowlist.`);
-  }
-  if ((claude?.removed.length ?? 0) > 0) {
-    lines.push(`Removed ${claude?.removed.join(', ')} from your allowlist.`);
-  }
-  const grant = sync.byHarness.codex as CodexGrantResult | undefined;
-  if (grant !== undefined && grant.error === undefined && grant.wrote) {
-    lines.push(
-      `Codex now allows ${grant.granted.length} tenjin command prefix(es) in ${grant.path}.`,
-    );
-  }
-  if (grant?.error !== undefined) {
-    lines.push(`Codex's grant at ${grant.path} could not be updated (${grant.error}).`);
-  }
-  if (sync.pointer !== undefined) lines.push(sync.pointer);
-  return lines;
-}
-
-/**
- * `config set hooks.<arm>`. Merged into the nested hooks block through the same
- * locked read-modify-write every other set uses, so a subkey a newer CLI wrote
- * survives. The daemon re-stats this file per fire, so every value takes effect
- * on the next prompt with no re-install and no process to restart.
- */
-async function setHooksKey(
-  key: HooksConfigKey,
-  value: string,
-  ctx: CommandContext,
-): Promise<CommandResult> {
-  const arm = key.slice('hooks.'.length) as HookArm;
-  const parsed = parseBoolean(value);
-  await persistHookArm(ctx.dataDir, arm, parsed);
-  const entry: RenderedSetting = { value: parsed, source: 'file' };
-  // NO STALENESS WARNING, and there is nothing left to warn about: every hooks
-  // key is read out of `config.json` by the daemon on each fire, so a value set
-  // here takes effect on the next prompt with nothing to re-install.
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  return { data: { key: configKey, ...entry }, humanLines: [formatLine(configKey, entry)] };
 }
 
 /**
@@ -775,50 +254,13 @@ async function setUpdateKey(
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
-/**
- * `config set loop.*` and `config set team.publicFallback`. The daemon stats
- * `config.json` per fire and reloads on an mtime change, so a set takes effect
- * on the next hook fire with no restart (02-redesign.md §4a).
- */
-async function setLoopKey(
-  key: LoopConfigKey,
-  value: string,
-  ctx: CommandContext,
-): Promise<CommandResult> {
-  const parsed = parseLoopValue(key, value);
-  const field = key.slice('loop.'.length);
-  await persist(ctx.dataDir, (existing) => ({
-    ...existing,
-    loop: { ...existing.loop, [field]: parsed },
-  }));
-  const entry: RenderedSetting = {
-    value: parsed === null ? 'null' : String(parsed),
-    source: 'file',
-  };
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
-}
-
-async function setTeamKey(
-  key: TeamConfigKey,
-  value: string,
-  ctx: CommandContext,
-): Promise<CommandResult> {
-  const parsed = parsePublicFallbackFlag(value, key);
-  await persist(ctx.dataDir, (existing) => ({
-    ...existing,
-    team: { ...existing.team, publicFallback: parsed },
-  }));
-  const entry: RenderedSetting = { value: parsed, source: 'file' };
-  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
-}
-
 /** `config set experimental.bazaar on|off`; turning it on says what it means. */
 async function setExperimentalKey(
   key: ExperimentalConfigKey,
   value: string,
   ctx: CommandContext,
 ): Promise<CommandResult> {
-  const parsed = parsePublicFallbackFlag(value, key);
+  const parsed = parseOnOffFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     experimental: { ...existing.experimental, bazaar: parsed },
@@ -927,40 +369,6 @@ async function mergeProjectRouter(
   });
 }
 
-function parsePublishMode(value: string): string {
-  const parsed = PublishModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid publish mode: ${JSON.stringify(value)}`, {
-    fix: 'Use "review", "auto", or "full-auto".',
-  });
-}
-
-/**
- * The one writer of a `hooks.<arm>` boolean, through the same locked merge-write
- * every `config set` uses, so a sibling arm or an unknown block a newer CLI
- * wrote survives. `config set hooks.<arm>` and `tenjin hooks enable|disable`
- * are two spellings of this call and never two writers.
- */
-export async function persistHookArm(dir: string, arm: HookArm, value: boolean): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    hooks: { ...existing.hooks, [arm]: value },
-  }));
-}
-
-/**
- * Persist just `publish.mode` into the global config through the same locked
- * merge-write every `config set` uses (never a raw overwrite), so a sibling
- * subkey or an unknown block a newer CLI wrote is preserved. Used by `install`'s
- * setup prompt; the mode is a validated PublishMode.
- */
-export async function persistPublishMode(dir: string, mode: PublishMode): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    publish: { ...existing.publish, mode },
-  }));
-}
-
 /**
  * Remember, or forget, a project directory this machine wired with
  * `install --project`. `tenjin update` spawns its refresh from the HOME
@@ -1026,48 +434,9 @@ export async function persistRouterDefaults(
   return result;
 }
 
-/**
- * Record the settled harness selection through the same locked merge-write. It
- * replaces the previous record rather than unioning with it: the last operator
- * answer is the current intent. Doctor still re-probes detection independently;
- * the record keeps a deliberately selected but currently undetected harness in play.
- */
-export async function persistInstallHarness(
-  dir: string,
-  harness: readonly Harness[],
-): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    install: { ...existing.install, harness: [...harness] },
-  }));
-}
-
-/**
- * Record the EXACT free-verb rules `install` declined, through the same locked
- * read-modify-write every `config set` uses. Set to whatever was pending at the
- * moment of `--no-grant`; cleared back to `[]` the moment an install
- * actually wires the allowlist, or finds it already fully satisfied. `--refresh` subtracts this list from what it would otherwise
- * report as pending, so a settled no stays settled per rule — without also
- * silencing a genuinely NEW rule a later version adds (tenjin-agent#234).
- */
-export async function persistGrantDeclined(dir: string, declined: string[]): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    install: { ...existing.install, grantDeclined: declined },
-  }));
-}
-
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
-  // Feed the per-project `.tenjin.json` layer so the publish keys read out what a
-  // real `publish` would resolve (project/env included), not a global-only guess.
-  const project = await loadProjectConfig(process.cwd());
-  return resolveSettings({
-    config,
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-    project: project?.layer,
-  });
+  return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
 }
 
 function assertKey(key: string): ScalarConfigKey {
@@ -1076,7 +445,7 @@ function assertKey(key: string): ScalarConfigKey {
   }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
+    fix: `Valid keys: ${[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
   });
 }
 
@@ -1088,43 +457,7 @@ function renderSetting(
   return { ...renderValue(key, stored), source };
 }
 
-/**
- * The list/get shape for a publish key, read from the resolved effective
- * settings, which now include the per-project `.tenjin.json` layer (see
- * resolveFromContext) so the source reflects what a publish would actually use.
- */
-function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings): RenderedSetting {
-  if (key === 'publish.mode') {
-    return { value: settings.publishMode.value, source: settings.publishMode.source };
-  }
-  if (key === 'publish.ackServerWarnings') {
-    return {
-      value: settings.publishAckServerWarnings.value,
-      source: settings.publishAckServerWarnings.source,
-    };
-  }
-  return {
-    value: toMoney(settings.publishDefaultPrice.value),
-    source: settings.publishDefaultPrice.source,
-  };
-}
-
-/** The list/get shape for a hooks key: the arm's boolean and where it came from. */
-function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
-  const { value, source } = settings.hooks[key.slice('hooks.'.length) as HookArm];
-  return { value, source };
-}
-
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
-  // REDACTED IN THE MACHINE ENVELOPE TOO, not just in the human line. `config
-  // --json` is what an agent reads and what a bug report pastes, and the whole
-  // point of a door key is that it opens the door for whoever holds it. What a
-  // caller actually needs from this key is whether team mode is on, and
-  // set/unset says exactly that. The value is still readable, by the operator,
-  // in ~/.tenjin/config.json.
-  if (key === 'shelfBypassSecret') {
-    return { value: typeof stored === 'string' && stored.length > 0 ? 'set' : 'unset' };
-  }
   if (Array.isArray(stored) || typeof stored === 'boolean') return { value: stored };
   if (key === 'sessionBudget' && stored === 'none') return { value: null };
   if (key === 'maxAutoSpend' || key === 'sessionBudget') return { value: toMoney(stored) };
@@ -1148,15 +481,8 @@ function parseValue(key: ScalarConfigKey, value: string): string | string[] | bo
     case 'allowlistCreators':
       return parseAllowlist(value);
     case 'baseUrl':
-    case 'publicShelfUrl':
     case 'rpcUrl':
       return parseHttpUrl(value);
-    case 'shelfBypassSecret':
-      // A free string: it is whatever Vercel generated. Empty clears it, which
-      // is how team mode is turned back off.
-      return value.trim();
-    case 'evalCohort':
-      return parseBoolean(value);
     case 'bazaarRegistries':
       return parseRegistryList(value);
   }
@@ -1247,8 +573,8 @@ async function persist(
       const existing = await loadRawConfig(dir);
       const merged = merge(existing);
       const validated = RawConfigSchema.parse(merged);
-      // 0600, matching lib/config.ts's `writeConfig`: this file holds
-      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
+      // 0600, matching lib/config.ts's `writeConfig`: `rpcUrl` can carry an RPC
+      // provider's key, and this is the writer `config set` uses to put it
       // there. See that function for why dirMode alone is not enough.
       await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
         mode: 0o600,
@@ -1278,35 +604,17 @@ function formatLine(key: string, entry: RenderedSetting): string {
   return `  ${label}  ${displayValue(entry)}  ${style('dim', `(${entry.source}${where})`)}`;
 }
 
-/** The list variant: the value line, a dim description, and an optional dim note. */
-function describedLine(key: string, entry: RenderedSetting, note?: string): string {
+/** The list variant: the value line and a dim description. */
+function describedLine(key: string, entry: RenderedSetting): string {
   const description = KEY_DESCRIPTIONS[key];
-  let line = formatLine(key, entry);
-  if (description !== undefined) line += `  ${style('dim', `- ${description}`)}`;
-  return withNote(line, note);
-}
-
-/** Append a dim parenthetical note (e.g. the full-auto downgrade) when present. */
-function withNote(line: string, note?: string): string {
-  return note !== undefined ? `${line}  ${style('dim', `(${note})`)}` : line;
-}
-
-/**
- * The `publish.mode` line gains a downgrade note when the effective mode came from
- * a committed `.tenjin.json` asking for `full-auto` (the loosening gate demoted it
- * to `auto`). Human-only; the machine `data` shape is unchanged.
- */
-function downgradeNote(key: PublishConfigKey, settings: EffectiveSettings): string | undefined {
-  if (key !== 'publish.mode' || settings.publishMode.downgradedWarning === undefined) {
-    return undefined;
-  }
-  return 'downgraded from full-auto: committed .tenjin.json (gitignore it to opt in)';
+  const line = formatLine(key, entry);
+  return description !== undefined ? `${line}  ${style('dim', `- ${description}`)}` : line;
 }
 
 function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
-  if (typeof value === 'boolean') return value ? 'true' : 'false'; // evalCohort
+  if (typeof value === 'boolean') return value ? 'true' : 'false'; // router.enabled
   if (value === null) return 'none (no daily limit)';
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   return value; // 'always', baseUrl, rpcUrl

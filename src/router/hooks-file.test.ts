@@ -15,6 +15,13 @@ afterEach(async () => {
 });
 
 describe('inspectHooksFile', () => {
+  it('refuses a settings file it cannot parse', async () => {
+    await writeFile(settingsPath, '{ not json');
+    expect(await inspectHooksFile(settingsPath)).toMatchObject({
+      refusal: { reason: 'unparsable' },
+    });
+  });
+
   it('refuses an event whose entries are not a list, and names it', async () => {
     // Copied through, this event would silently swallow its share of a write
     // while the receipt still counted it.
