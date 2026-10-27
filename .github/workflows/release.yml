@@ -151,13 +151,15 @@ jobs:
       # Build + validate BEFORE publishing so a broken build or failing test
       # can't ship. (The house template validates with publint + attw via
       # test:pkg; this repo doesn't carry those yet, so we gate on the
-      # existing check suite, pnpm audit, the packed-artifact smoke, which
-      # exercises the real published tarball, and the installer smoke, which
-      # runs the generated install.sh against offline fixtures, so a broken
-      # installer template fails here, before the publish it would ship with.)
+      # existing check suite, the bundled-package list, pnpm audit, the
+      # packed-artifact smoke, which exercises the real published tarball, and
+      # the installer smoke, which runs the generated install.sh against offline
+      # fixtures, so a broken installer template fails here, before the publish
+      # it would ship with.)
       - name: Build + validate
         run: |
           pnpm run check
+          node scripts/check-bundled-packages.mjs
           pnpm audit --audit-level=high
           bash scripts/pack-smoke.sh
           node scripts/installer-smoke.mjs
