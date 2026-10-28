@@ -93,8 +93,8 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  'Run a selected free tool with `{tool: "<row id>", query: "<what to look up>"}`; it needs no funds or routing fee. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. General routing costs $0.003 per call, ` +
+  'Run free docs with `{tool: "<row id>", query: "<what to look up>"}`; it needs no funds or routing fee. ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs $0.003 per call, ` +
   'separate from provider charges; a wallet on THIS machine pays them under the local spend ' +
   'policy. A call whose total is over the per-call limit or current 24-hour budget window pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +

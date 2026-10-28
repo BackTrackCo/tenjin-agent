@@ -722,13 +722,14 @@ export type DecisionOutcome<T> =
   | { status: 'skipped'; why: string };
 
 /**
- * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
+ * THE ROUTING CALLS. The hook sends `{ packet }`: the backend runs
  * the gate, and on `execute` stores that packet under an id and answers with
  * each offered service's spec. The tool sends `{ query }`, which the backend
  * answers with the spec of the service its gate picks, or `{ query, id }` for
  * the free docs offer, which has no spec and is bound from the query. Every
  * provider call is built here, from a spec, or for the docs lookup by the
- * backend from the query.
+ * backend from the query. Explicit `{tool, query}` free lookups use
+ * `requestToolSpec` instead, without paid routing.
  */
 export async function requestDecision(
   kind: 'hook',

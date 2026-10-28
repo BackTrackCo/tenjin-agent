@@ -322,6 +322,46 @@ test('a free lookup the CLI named: Calling with its query, then the folded line,
   }
 });
 
+test('a selected free lookup without an offer id draws its named result', async ($, on) => {
+  machine(on);
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['rows'] });
+  });
+  const engine = engineRows(on);
+  const args = { tool: 'context7-docs', query: 'Zod v4 email validation' };
+  const free = envelope('fulfilled', {
+    label: 'Context7 docs',
+    cost: ['provider price 0 USD'],
+    result: 'Use z.email().',
+  });
+  const ended = toolRow('toolu_selected_docs', TOOL, args, free);
+  for (const surface of SURFACES) {
+    for (const props of [groupOf([ended]), ended]) {
+      const ui = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'calls' in props ? 'ToolGroup' : 'ToolUse',
+        props: props as never,
+      });
+      expect(await rowText(ui)).toBe('Called Context7 docs · free (ctrl+o to expand)');
+      expect(await dotOf(ui)).toBeUndefined();
+      expect((await shownLines(ui)).join('')).not.toMatch(MODEL_TEXT);
+      await ui.unmount();
+    }
+    await expandRun($, [ended]);
+    const open = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: ended,
+    });
+    expect(await shownLines(open)).toEqual(['engine row']);
+    expect(engine.seen.at(-1)).toMatchObject({ input: args, output: free });
+    await open.unmount();
+  }
+});
+
 test('a search the CLI noted a free lookup on stays the engine row, its result too', async ($, on) => {
   const engine = engineRows(on);
   const { files } = machine(on);

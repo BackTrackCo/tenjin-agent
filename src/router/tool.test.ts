@@ -2585,6 +2585,91 @@ describe('the tool list, read for free', () => {
     },
   );
 
+  it.each(['0', '100000'])(
+    'refuses a selected free docs 402 of %s without wallet access or paid routing',
+    async (amount) => {
+      const docsUrl = `${ROUTER}/api/docs-lookup?query=Zod`;
+      const { fetchImpl, calls } = net([
+        {
+          url: ROUTER,
+          status: 200,
+          body: decision({
+            capabilityId: 'context7-docs',
+            providerPriceAtomic: '0',
+            contract: { request: { method: 'GET', url: docsUrl, headers: {} } },
+          }),
+        },
+        {
+          url: docsUrl,
+          status: 402,
+          body: {},
+          headers: { 'PAYMENT-REQUIRED': challenge({ amount }) },
+        },
+      ]);
+      const auth = authorizer();
+      const base = deps(fetchImpl, auth);
+      const getSigner = vi.fn(async () => {
+        throw new Error('a free lookup must not open a wallet');
+      });
+      const result = await runRequestTool(
+        { tool: 'context7-docs', query: 'Zod' },
+        {
+          ...base,
+          route,
+          payDeps: { ...base.payDeps, provider: { ...testWalletProvider(), getSigner } },
+        },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.envelope).toMatchObject({ status: 'failed', providerStatus: 402 });
+      expect(result.envelope.reason).toContain('Nothing was signed or paid.');
+      expect(calls).toHaveLength(2);
+      expect(calls.every((call) => !call.paid)).toBe(true);
+      expect(getSigner).not.toHaveBeenCalled();
+      expect(auth.authorize).not.toHaveBeenCalled();
+      expect(route).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not turn an unsupported selected-free response into a funding or routing retry', async () => {
+    const { fetchImpl, calls } = net([
+      {
+        url: ROUTER,
+        status: 200,
+        body: {
+          ...NATIVE,
+          decision: {
+            ...NATIVE.decision,
+            diagnostics: { ...NATIVE.decision.diagnostics, reasonCode: 'fee_required' },
+          },
+        },
+      },
+    ]);
+    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
+    const result = await runRequestTool(
+      { tool: 'context7-docs', query: 'Zod' },
+      { ...deps(fetchImpl), route },
+    );
+    expect(result.envelope).toMatchObject({
+      status: 'needs_input',
+      nextStep: 'Use your own tools for this lookup. Nothing was paid.',
+    });
+    expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).not.toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '  '])('keeps a missing selected-free query on the free form: %j', async (query) => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { tool: 'context7-docs', query },
+      { ...deps(fetchImpl), route },
+    );
+    expect(result.envelope.status).toBe('needs_input');
+    expect(result.summary).toContain('request({tool, query})');
+    expect(calls).toHaveLength(0);
+    expect(route).not.toHaveBeenCalled();
+  });
+
   it.each(['exa-search', 'unknown-tool'])(
     'passes on the refusal of selected tool %s without paid routing',
     async (tool) => {

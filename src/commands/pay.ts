@@ -316,13 +316,15 @@ async function executePay(
     );
   }
 
-  if (router && BigInt(args.terms!.maxAmountAtomic!) === 0n) {
+  // An anonymous free contract has no payee. A zero-price x402 spec still
+  // names one and may need sign-in to re-read an entitled result.
+  if (router && BigInt(args.terms!.maxAmountAtomic!) === 0n && args.terms!.payTo === undefined) {
     throw new CliError(
       'REGISTRY_MISMATCH',
       'This lookup was advertised as free, but the endpoint requires payment.',
       {
         fix: 'Nothing was signed or paid. Use your usual tools for this lookup.',
-        details: { status: 402 },
+        details: { status: 402, advertised: args.terms },
       },
     );
   }

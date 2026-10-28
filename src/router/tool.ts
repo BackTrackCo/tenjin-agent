@@ -153,7 +153,7 @@ import {
  */
 
 export interface RequestToolArgs {
-  /** Optional only beside `input`. */
+  /** The task to route, or the lookup for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
    *  it grants nothing locally, every cap still applies. */
@@ -461,11 +461,9 @@ async function requestTool(
   if (args.browse !== undefined || (args.tool !== undefined && args.query === undefined))
     return readToolList(args, deps);
   if (args.tool !== undefined) {
-    if (
-      (['id', 'input', 'choice', 'count', 'job'] as const).some((key) => args[key] !== undefined) ||
-      args.tool.trim().length === 0 ||
-      args.tool.length > 200
-    )
+    if (args.tool.trim().length === 0 || args.tool.trim().length > 200)
+      return fail('needs_input', '`tool` takes a row id from request({browse}).');
+    if ((['id', 'input', 'choice', 'count', 'job'] as const).some((key) => args[key] !== undefined))
       return fail('needs_input', 'A selected free lookup takes only its tool id and query.');
     if (mask(args.tool) !== args.tool)
       return fail('native', 'the tool id carries a credential-shaped value, so nothing was sent');
@@ -537,6 +535,8 @@ async function requestTool(
   }
   const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0 && input === undefined) {
+    if (args.tool !== undefined)
+      return fail('needs_input', 'Include what to look up in request({tool, query}).');
     return fail(
       'needs_input',
       id !== undefined
@@ -633,7 +633,8 @@ async function requestTool(
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
   // ON THE PAID PATH the payer pays the routing fee with the stock x402
-  // client, and a call it cannot pay takes the free path.
+  // client, and a call it cannot pay takes the free path. Explicit selected
+  // free lookups bypass ask() and bind through requestToolSpec below.
   const ask = async () => {
     const route = (await deps.route?.(settings.baseUrl)) ?? null;
     const outcome = await requestDecision(
@@ -689,8 +690,19 @@ async function requestTool(
     await footer.done('failed');
     return fail(
       'failed',
-      'The selected free tool returned a different service or a paid call, so nothing was sent or paid.',
+      'The answer is not a runnable free lookup for the selected tool. Nothing was sent to a provider or paid.',
+      {
+        nextStep: 'Use your own tools for this lookup.',
+        ...(note !== undefined ? { note } : {}),
+      },
     );
+  }
+
+  if (args.tool !== undefined && isFeeRequired(fresh.decision)) {
+    await footer.done('needs_input');
+    return fail('needs_input', 'This router does not support the selected free lookup.', {
+      nextStep: 'Use your own tools for this lookup. Nothing was paid.',
+    });
   }
 
   // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
@@ -812,8 +824,8 @@ async function requestTool(
  * and keeps it under the fresh offer id the server minted, so `{id, input}`
  * runs it exactly as it runs a hook's offer. Neither is a lookup: no gate call,
  * no routing fee, nothing paid, and the hooks' per-lookup routing is unchanged.
- * Each form is sent alone, and the credential rule every other call follows
- * applies to its words.
+ * This handles the list and spec reads; selected `{tool, query}` lookups run
+ * above. The credential rule every other call follows applies to their words.
  */
 async function readToolList(
   args: RequestToolArgs,
@@ -825,7 +837,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      "`browse` and `tool` are each sent alone: browse the list, then call request({tool}) with one row's id.",
+      'Browse with request({browse}), inspect with request({tool}), or run free docs with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
@@ -886,7 +898,7 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
 function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
     'Call request({tool: "<id>"}) for a tool\'s spec and the call that runs it, free. ' +
-    'A free row runs from request({tool: "<id>", query: "<what to look up>"}) without a routing fee.';
+    'Free docs run from request({tool: "<id>", query: "<what to look up>"}) without a routing fee.';
   if (rows.length === 0) {
     return {
       isError: false,

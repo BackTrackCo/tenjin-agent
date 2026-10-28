@@ -1159,7 +1159,7 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
-      expect(request.description).toContain('General routing costs $0.003 per call');
+      expect(request.description).toContain('Paid routing costs $0.003 per call');
       expect(request.description).toContain('{tool: "<row id>", query: "<what to look up>"}');
       expect(request.description).toContain('it needs no funds or routing fee');
     } finally {

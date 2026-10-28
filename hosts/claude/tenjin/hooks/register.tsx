@@ -356,13 +356,26 @@ async function rowOf(
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
   // A JOB POLL repeats the result and the cost of the call that started it.
-  if (isJobPoll(asRecord(call.input))) return null;
+  const input = asRecord(call.input);
+  if (isJobPoll(input)) return null;
   const envelope = envelopeOf(textOf(call.output));
   const ended =
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
   const label = stored?.label ?? ended.label;
   if (label === undefined) return null;
-  const drawn: TenjinRow = { ...stored, ...ended, label };
+  // A selected free call has no kept offer to supply its price before it runs.
+  const selectedFree =
+    typeof input?.tool === 'string' &&
+    typeof input.query === 'string' &&
+    envelope?.status === 'fulfilled' &&
+    labelOf(envelope.label) !== undefined &&
+    costAtomicOf(envelope.cost) === 0n;
+  const drawn: TenjinRow = {
+    ...stored,
+    ...ended,
+    ...(selectedFree ? priceOf(0n, false) : {}),
+    label,
+  };
   if (drawn.status !== undefined && HIDDEN.has(drawn.status)) return null;
   if (
     drawn.status !== undefined &&
@@ -555,11 +568,15 @@ async function unnamedCharge($: Dollar, id: string, output: unknown): Promise<bo
 
 /** What the envelope's `cost` (`provider price 0.04 USD`) says left the wallet. */
 function paidOf(cost: unknown): string | undefined {
+  const atomic = costAtomicOf(cost);
+  return atomic === undefined || atomic === 0n ? undefined : `$${usd(atomic)}`;
+}
+
+function costAtomicOf(cost: unknown): bigint | undefined {
   const paid = Array.isArray(cost)
     ? /^provider price (\d+\.?\d*) USD$/.exec(String(cost[0]))
     : null;
-  const atomic = paid === null ? 0n : BigInt(Math.round(Number(paid[1]) * 1e6));
-  return atomic === 0n ? undefined : `$${usd(atomic)}`;
+  return paid === null ? undefined : BigInt(Math.round(Number(paid[1]) * 1e6));
 }
 
 /** The request tool's envelope: the JSON block whose `status` comes first. */

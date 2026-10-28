@@ -9,7 +9,7 @@ round trip; copy these files rather than hand-writing an equivalent.
 Change them here, in the same commit as the `wire.ts` change that makes them
 valid, then copy them across. `harness/` is the exception: harness events
 (what Claude Code hands a router hook) that only this client reads, never
-copied. `ROUTER_VERSION` is `2026-10-13.1`.
+copied. `ROUTER_VERSION` is `2026-10-24.1`.
 
 ## The calls
 
@@ -17,8 +17,9 @@ A lookup is calls to ONE route. Every form requires `accepts` to list `spec`:
 each capability needs a client that runs its spec, so a client without it is
 answered `native` with the `client_outdated` diagnostic, on every form, before
 any model call. While the fee is `required`, the free route answers `{packet}`
-and `{query}` with `fee_required` first, with or without `spec` (The paid path,
-below). The outcome report is the one form that carries no `accepts`.
+and a routing `{query}` with `fee_required` first, with or without `spec` (The
+paid path, below). The selected free `{tool, query}` form skips that routing
+fee. The outcome report is the one form that carries no `accepts`.
 
 | call        | request                                                        | answer                                                                                                                      |
 | ----------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -327,9 +328,9 @@ ends is reported `running`, with its `httpStatus` and `ms` and nothing else.
 | `wire-browse-request.json`                 | a browse of the tool list                                                                 |
 | `wire-browse.json`                         | the browse answer: its rows                                                               |
 | `wire-tool-request-by-id.json`             | a browse row's id sent as `tool`                                                          |
+| `wire-lookup-spec-by-id.json`              | tool answer for it: the row's spec under a fresh id, labelled, with the fields            |
 | `wire-tool-request-free-query.json`        | a selected free tool with its query, without paid routing                                 |
 | `wire-lookup-free-query.json`              | its zero-price execution contract, with no model call or expired-id note                  |
-| `wire-lookup-spec-by-id.json`              | tool answer for it: the row's spec under a fresh id, labelled, with the fields            |
 | `wire-outcome-via.json`                    | an outcome report naming the path that made the call, `via`                               |
 | `wire-hook-request-catalog.json`           | the hook from a client that sends `catalog` (and `bazaar`)                                |
 | `wire-hook-discovered-catalog.json`        | hook answer: a former list service as `discovered` under its catalog id, with its fields  |
