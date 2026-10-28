@@ -394,9 +394,10 @@ describe('RoutingPayer', () => {
 
   it('refuses a second deposit the day has no room for, and the call goes free', async () => {
     const router = new FakeRouter();
-    // A $0.25 deposit holds 83 fees; the day has room for one deposit, not two.
+    // A $0.25 deposit holds 83 fees; the day has room for one, and not even
+    // the hint's second deposit.
     const p = payer(router, {
-      policy_: { sessionBudgetAtomic: 2n * MAX_CHANNEL_DEPOSIT_ATOMIC - 1n },
+      policy_: { sessionBudgetAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC + CHANNEL_DEPOSIT_ATOMIC - 1n },
     });
     for (let n = 0; n < Number(MAX_CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_ATOMIC); n += 1) {
       const paid = await routeOnce(p, router);
@@ -481,19 +482,25 @@ describe('RoutingPayer', () => {
     });
   });
 
-  it('refuses the $0.25 deposit under a per-call limit an earlier release left lower', async () => {
+  // A ceiling the spend limits refuse is signed at the hint, before any request.
+  it.each<[string, Partial<SpendPolicy>]>([
+    ['a per-call limit an earlier release left lower', { maxAutoSpendAtomic: 249_999n }],
+    ['$0.10 left in the daily budget', { sessionBudgetAtomic: 100_000n }],
+  ])('deposits the hint under %s, and routes', async (_label, policy_) => {
     const router = new FakeRouter();
-    const p = payer(router, { policy_: { maxAutoSpendAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC - 1n } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
-    expect(router.paidRequests()).toBe(0);
-    expect(router.deposits).toBe(0);
-    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic ?? '0').toBe('0');
+    const result = await routeOnce(payer(router, { policy_ }), router);
+    expect(unpaidWhy(result)).toBeUndefined();
+    expect(router.paidRequests()).toBe(1);
+    expect([...router.channels.values()][0]?.balance).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe(
+      CHANNEL_DEPOSIT_ATOMIC.toString(),
+    );
   });
 
-  it('refuses a deposit the daily budget cannot take, and reserves nothing', async () => {
+  it('refuses a deposit the daily budget cannot take even at the hint, and reserves nothing', async () => {
     const router = new FakeRouter();
-    const p = payer(router, { policy_: { sessionBudgetAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC - 1n } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    const p = payer(router, { policy_: { sessionBudgetAtomic: 10_000n } });
+    expect(unpaidWhy(await routeOnce(p, router))).toBe('budget_reached');
     expect(router.paidRequests()).toBe(0);
     expect((await readSpendSummary(dir, { now: () => clock }))?.reservations ?? []).toEqual([]);
   });

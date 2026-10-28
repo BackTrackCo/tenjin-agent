@@ -9,7 +9,7 @@ import {
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
-import type { SpendPolicy } from '../lib/policy';
+import type { PolicyReason, SpendPolicy } from '../lib/policy';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
@@ -209,6 +209,12 @@ interface SignMemo {
   stamp: string | null;
   address?: string;
 }
+
+/** The spend limits a ceiling deposit falls back to the hint under. */
+const SPEND_LIMITS: ReadonlySet<PolicyReason> = new Set<PolicyReason>([
+  'session_budget_exceeded',
+  'above_auto_spend',
+]);
 
 /** Money and policy refusals that are definite until a person acts. */
 const ROUTING_BLOCKED: ReadonlySet<string> = new Set([
@@ -736,9 +742,10 @@ export class RoutingPayer {
    * size and the refusals. Nothing reads the wallet first. It signs the SDK's
    * ceiling (cap × multiplier, $0.25), or the server's hint once the
    * facilitator answered that the wallet holds less than the ceiling
-   * ({@link routingDepositAtomic}, {@link RoutingPayer.pay}). A spend the
-   * authorizer denies (the per-call limit, the daily budget, the creator
-   * allowlist) refuses it and the call is not paid.
+   * ({@link routingDepositAtomic}, {@link RoutingPayer.pay}). A ceiling the
+   * per-call limit or the daily budget denies is signed at the hint instead. A
+   * deposit the authorizer still denies (those limits, the creator allowlist)
+   * is refused and the call is not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
@@ -747,17 +754,22 @@ export class RoutingPayer {
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
     const hint = BigInt(ctx.depositAmount);
-    const amount = routingDepositAtomic({
+    let amount = routingDepositAtomic({
       short: call.short === true,
       hintAtomic: hint,
       maxAtomic: ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit),
     });
     const authorizer = this.deps.authorizer(policy);
-    const auth = await authorizer.authorize({
-      mode: 'automatic',
-      amountAtomic: amount,
-      creator: call.host,
-    });
+    const authorize = (amountAtomic: bigint) =>
+      authorizer.authorize({ mode: 'automatic', amountAtomic, creator: call.host });
+    let auth = await authorize(amount);
+    // A ceiling the spend limits refuse is signed at the hint instead, before
+    // anything is sent; the allowlist is not a limit, so it refuses outright.
+    if (auth.decision !== 'allow' && amount > hint && SPEND_LIMITS.has(auth.reason)) {
+      await authorizer.release(auth.reservationId);
+      amount = hint;
+      auth = await authorize(amount);
+    }
     if (auth.decision !== 'allow') {
       await authorizer.release(auth.reservationId);
       this.refuse(refusedWhy(auth.reason));
