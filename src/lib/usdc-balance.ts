@@ -1,8 +1,11 @@
-/** Hook-safe balance reads and the advisory funding-notice cache. */
-
-import { readFile, rm } from 'node:fs/promises';
-import { writeFileAtomic } from './atomic-json';
-import { balanceCachePath } from './paths';
+/**
+ * Base USDC's address and one `balanceOf` over plain JSON-RPC, for the
+ * commands that read a balance on request (`tenjin status`, `tenjin doctor`).
+ * No viem on purpose: one `eth_call` needs nothing viem adds. The hooks never
+ * read a balance; the facilitator's check on a deposit is theirs.
+ * `usdc.ts` keeps the viem client for the send path and re-exports the
+ * address from here.
+ */
 
 // Values mirror the app's lib/chain.ts Base mainnet entry (chain 8453).
 export const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -22,7 +25,7 @@ const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
 export async function readUsdcBalance(
   address: string,
   rpcUrl: string,
-  opts: { timeoutMs: number; fetchImpl?: typeof fetch; signal?: AbortSignal },
+  opts: { timeoutMs: number; fetchImpl?: typeof fetch },
 ): Promise<bigint | null> {
   if (!ADDRESS_RE.test(address) || opts.timeoutMs <= 0) return null;
   try {
@@ -41,10 +44,7 @@ export async function readUsdcBalance(
           'latest',
         ],
       }),
-      signal: AbortSignal.any([
-        AbortSignal.timeout(opts.timeoutMs),
-        ...(opts.signal ? [opts.signal] : []),
-      ]),
+      signal: AbortSignal.timeout(opts.timeoutMs),
     });
     if (!res.ok) return null;
     const result = ((await res.json()) as { result?: unknown } | null)?.result;
@@ -83,13 +83,13 @@ export const FALLBACK_RPC_URLS: readonly string[] = [
 export async function readUsdcBalanceWithFallback(
   address: string,
   rpcUrl: string,
-  opts: { timeoutMs: number; fetchImpl?: typeof fetch; signal?: AbortSignal },
+  opts: { timeoutMs: number; fetchImpl?: typeof fetch },
 ): Promise<bigint | null> {
   const urls = sameUrl(rpcUrl, DEFAULT_RPC_URL) ? [rpcUrl, ...FALLBACK_RPC_URLS] : [rpcUrl];
   const deadline = Date.now() + opts.timeoutMs;
   for (const [index, url] of urls.entries()) {
     const left = deadline - Date.now();
-    if (left <= 0 || opts.signal?.aborted) return null;
+    if (left <= 0) return null;
     const timeoutMs = index === urls.length - 1 ? left : Math.ceil(left / 2);
     const balance = await readUsdcBalance(address, url, { ...opts, timeoutMs });
     if (balance !== null) return balance;
@@ -102,64 +102,5 @@ function sameUrl(a: string, b: string): boolean {
     return new URL(a).href === new URL(b).href;
   } catch {
     return a === b;
-  }
-}
-
-/** Funding notices use only observations less than a minute old. */
-export const LAST_KNOWN_BALANCE_MS = 60_000;
-
-/** An explicit balance check or observed funding makes a hook's cached balance obsolete. */
-export async function forgetRememberedBalance(dataDir: string): Promise<void> {
-  await rm(balanceCachePath(dataDir), { force: true }).catch(() => undefined);
-}
-
-/** Read-through cache for advisory notices, never a payment authorization gate.
- * RPC URLs are not stored, since they can contain credentials. */
-export function rememberingBalanceReader(
-  dataDir: string,
-  opts: { now?: () => number; read?: typeof readUsdcBalance } = {},
-): typeof readUsdcBalance {
-  const read = opts.read ?? readUsdcBalanceWithFallback;
-  const now = opts.now ?? Date.now;
-  const path = balanceCachePath(dataDir);
-  return async (address, rpcUrl, readOpts) => {
-    const remembered = await recallBalance(path, address, now());
-    if (remembered !== null) return remembered;
-    const live = await read(address, rpcUrl, readOpts);
-    if (live === null || readOpts.signal?.aborted) return null;
-    const record = {
-      version: 1,
-      address: address.toLowerCase(),
-      atomic: live.toString(),
-      at: now(),
-    };
-    try {
-      await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 });
-    } catch {
-      // A cache that cannot be written is a cache that is not used.
-    }
-    return live;
-  };
-}
-
-/** The remembered balance for this address while it is fresh, else null. */
-async function recallBalance(path: string, address: string, now: number): Promise<bigint | null> {
-  try {
-    const row = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown> | null;
-    if (
-      row?.version !== 1 ||
-      row.address !== address.toLowerCase() ||
-      typeof row.atomic !== 'string' ||
-      !/^\d{1,40}$/.test(row.atomic) ||
-      typeof row.at !== 'number' ||
-      !Number.isFinite(row.at) ||
-      now - row.at < 0 ||
-      now - row.at > LAST_KNOWN_BALANCE_MS
-    ) {
-      return null;
-    }
-    return BigInt(row.atomic);
-  } catch {
-    return null;
   }
 }

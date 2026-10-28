@@ -176,14 +176,13 @@ export function depositSentence(amountAtomic: bigint): string {
 export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person'): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  // An automatic fallback explains the missing funds without reopening checkout.
-  // Explicit balance/payment/doctor results retain `unpaid().fix`.
-  const fix =
-    why === 'wallet_low'
-      ? 'Your usual tools still work.'
-      : reader === 'agent'
-        ? agentFixFor(why, u.fix)
-        : u.fix;
+  // The facilitator refused the ceiling and then the hint's deposit, so the
+  // wallet is near $0: said in dollars, without reopening checkout. Explicit
+  // balance/payment/doctor results retain `unpaid().fix`.
+  if (why === 'wallet_low') {
+    return `Your Tenjin wallet is near $0 (it could not cover a $${usd(CHANNEL_DEPOSIT_ATOMIC)} deposit). Fund it to keep routing. Your usual tools still work.`;
+  }
+  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
   return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 

@@ -608,15 +608,19 @@ describe('wallet notices', () => {
     );
   });
 
-  it('skips the route as wallet_low when the hint is refused too, and says funded once', async () => {
+  it('says the wallet is near $0 only after the ceiling and the hint are refused, then funded once', async () => {
     const fake = new FakeRouter();
     fake.walletAtomic = 20_000n;
     const p = payer(fake);
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(fake.paidRequests()).toBe(2);
-    expect(systemMessageOf(low)).toContain('could not pay its $0.003 fee');
-    expect(systemMessageOf(low)).toContain('Your usual tools still work.');
-    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
+    // The notice comes from the failed retry, with no balance read anywhere.
+    expect(fake.log.filter((l) => l.endsWith(' paid'))).toEqual([
+      'POST /api/x402-router/route paid',
+      'POST /api/x402-router/route paid',
+    ]);
+    expect(systemMessageOf(low)).toBe(
+      'Your Tenjin wallet is near $0 (it could not cover a $0.03 deposit). Fund it to keep routing. Your usual tools still work.',
+    );
     fake.walletAtomic = 10_000_000n;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);

@@ -76,9 +76,9 @@ describe('UNPAID wallet entries', () => {
 
 describe('unpaidSentence', () => {
   it('explains automatic unfunded routing without reopening checkout, while doctor retains its fix', () => {
-    expect(unpaidSentence('wallet_low', 'agent')).toContain('could not pay its $0.003 fee');
+    expect(unpaidSentence('wallet_low', 'agent')).toContain('Your Tenjin wallet is near $0');
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
-      /wallet fund|send USDC|add funds|checkout/i,
+      /wallet fund|send USDC|add funds|checkout|USDC|RPC|channel|facilitator/i,
     );
     expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
     expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
@@ -88,7 +88,7 @@ describe('unpaidSentence', () => {
     no_wallet:
       'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Your Tenjin wallet is near $0 (it could not cover a $0.03 deposit). Fund it to keep routing. Your usual tools still work.',
     fee_required:
       'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
