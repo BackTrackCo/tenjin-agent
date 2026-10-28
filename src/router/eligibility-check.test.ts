@@ -75,6 +75,28 @@ function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
 }
 
 describe('checkEligibility', () => {
+  it.each<[string, bigint, bigint, string]>([
+    ['$0.21 wallet, room for its $0.03', 210_000n, 30_000n, 'ready'],
+    ['$0.21 wallet, room one unit short', 210_000n, 29_999n, 'blocked'],
+    ['$0.25 wallet, room for its $0.25', 250_000n, 250_000n, 'ready'],
+    ['$0.25 wallet, room one unit short', 250_000n, 249_999n, 'blocked'],
+  ])(
+    'evaluates the deposit the wallet signs against the daily room: %s',
+    async (_label, balance, room, status) => {
+      await writeWallet();
+      const e = await checkEligibility(
+        input({
+          provider: fakeProvider({ verify: async () => verified('keychain') }),
+          readBalance: async () => balance,
+          policy: { ...POLICY, sessionBudgetAtomic: 500_000n },
+          readSpent: async () => 500_000n - room,
+        }),
+      );
+      expect(e.canPayRouting.status).toBe(status);
+      if (status === 'blocked') expect(e.canPayRouting).toMatchObject({ reason: 'budget_reached' });
+    },
+  );
+
   it('a verify that throws gives unknown and never rejects', async () => {
     await writeWallet();
     const e = await checkEligibility(

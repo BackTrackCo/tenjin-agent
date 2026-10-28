@@ -1634,8 +1634,7 @@ async function decide(
       ...(route !== null ? { route } : {}),
     },
   );
-  // A DEPOSIT IS NEWS ONCE, when it is taken: it moved money into routing
-  // credit, and the user would otherwise see it only as spend.
+  // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
   if (deposited > 0n) deps.notice?.(depositSentence(deposited));
   const why =

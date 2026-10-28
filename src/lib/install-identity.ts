@@ -6,7 +6,6 @@ import { hasCode } from './errno';
 import { setTenjinIdentity, type TenjinIdentity } from './http';
 import { installIdPath } from './paths';
 import { knownDeploymentOrigins } from './production-origin';
-import { isTeamModeConfig } from './settings';
 
 /**
  * The install id the transport attaches to Tenjin-bound requests (see
@@ -60,20 +59,14 @@ function tryOrigin(url: string): string | undefined {
 }
 
 /**
- * The origins that get the header: Tenjin's own deployments and the base URL
- * this run is pointed at, overrides included (a local dev server is Tenjin too).
- * Not `publicShelfUrl`: its default is already one of Tenjin's deployments, and
- * a custom one may be a host Tenjin does not run.
- *
- * NOT a team shelf. In team mode `baseUrl` is the team's own deployment, which
- * Tenjin does not operate, so on a team machine the base URL is left out unless
- * it is one of Tenjin's own origins anyway. `isTeamModeConfig` reads the file,
- * so a `--base-url` on one run cannot switch that exclusion off.
+ * The origins that get the header: Tenjin's own deployments and the router base
+ * URL this run is pointed at, overrides included (a local dev server is Tenjin
+ * too).
  */
-export function tenjinOrigins(s: { baseUrl: string; teamMode: boolean }): string[] {
+export function tenjinOrigins(s: { baseUrl: string }): string[] {
   const origins = new Set(knownDeploymentOrigins());
   const baseOrigin = tryOrigin(s.baseUrl);
-  if (baseOrigin !== undefined && !s.teamMode) origins.add(baseOrigin);
+  if (baseOrigin !== undefined) origins.add(baseOrigin);
   return [...origins];
 }
 
@@ -110,32 +103,9 @@ export function enableCliIdentity(dir: string, env: NodeJS.ProcessEnv = process.
       origins ??= (async () => {
         const config = await loadRawConfig(dir);
         const s = resolveSettings({ config, flags: { baseUrl: baseUrlFlag }, env });
-        return tenjinOrigins({
-          baseUrl: s.baseUrl.value,
-          teamMode: isTeamModeConfig(config),
-        });
+        return tenjinOrigins({ baseUrl: s.baseUrl.value });
       })();
       return origins;
-    }),
-  );
-}
-
-/**
- * Turn the header on for the loop daemon. No flag or env layer, like the rest
- * of the daemon's config, and re-read per request because the daemon reloads
- * config.json when it changes.
- */
-export function enableDaemonIdentity(
-  dir: string,
-  config: () => { baseUrl: string; publicShelfUrl: string; shelfBypassSecret: string },
-): void {
-  setTenjinIdentity(
-    identityFor(dir, async () => {
-      const c = config();
-      return tenjinOrigins({
-        baseUrl: c.baseUrl,
-        teamMode: isTeamModeConfig(c),
-      });
     }),
   );
 }

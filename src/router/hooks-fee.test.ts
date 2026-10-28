@@ -15,7 +15,13 @@ import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
-import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS, WALLET_UNLOCKED } from './wallet-reasons';
+import {
+  ASK_FOR_REPAIR,
+  REPAIR_CLAUSE,
+  WALLET_FUNDED,
+  WALLET_REASONS,
+  WALLET_UNLOCKED,
+} from './wallet-reasons';
 
 /**
  * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
@@ -201,14 +207,14 @@ describe('the hook legs and the routing fee', () => {
     expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
   });
 
-  it('tells the user once, beside the offer, that the deposit became routing credit', async () => {
+  it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
     const fake = new FakeRouter();
     fake.body = OFFER;
     const p = payer(fake);
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+      'Tenjin set aside $0.25 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -255,7 +261,7 @@ describe('the hook legs and the routing fee', () => {
       {
         policy: async () => ({
           maxAutoSpendAtomic: 250_000n,
-          sessionBudgetAtomic: 100_000n,
+          sessionBudgetAtomic: 20_000n,
           allowlistCreators: [],
         }),
       },
@@ -272,6 +278,7 @@ describe('the hook legs and the routing fee', () => {
       expect(contextOf(first)).toContain('CoinMarketCap fits this');
       expect(systemMessageOf(first)).toContain('could not pay its $0.003 fee');
       expect(systemMessageOf(first)).toContain(fix);
+      expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
       expect(fake.paidRequests()).toBe(0);
       expect(fake.log.at(-1)).toBe('POST /api/x402-router unpaid');
@@ -322,7 +329,9 @@ describe('the hook legs and the routing fee', () => {
     });
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     const notice = systemMessageOf(answer);
-    expect(notice).toContain('the per-call spend limit is below the $0.25 routing deposit');
+    expect(notice).toContain(
+      'the per-call spend limit cannot cover the routing fee or its deposit',
+    );
     expect(notice).toContain('Run `tenjin doctor`.');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
@@ -422,7 +431,7 @@ describe('the hook legs and the routing fee', () => {
     const answer = await call;
     expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(contextOf(answer)).toContain('CoinMarketCap fits this');
-    expect(systemMessageOf(answer)).toContain('into prepaid routing credit');
+    expect(systemMessageOf(answer)).toContain('set aside $0.25 for routing');
     expect(fake.deposits).toBe(1);
     expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
     const ledger = await readSpendSummary(dir);
@@ -502,16 +511,25 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it('returns a deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
+    holdTime();
+    vi.setSystemTime(NOW);
     const fake = new FakeRouter();
     const p = payer(fake);
     const hang = paidHangs(fake);
-    holdTime();
     const started = Date.now();
-    const call = runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
+    let returned = false;
+    const call = runPromptHook(prompt(), {
+      ...deps(fake.fetch, p),
+      fetchImpl: hang.fetchImpl,
+    }).then(() => {
+      returned = true;
+    });
     await hang.sent;
-    await vi.advanceTimersByTimeAsync(DEPOSIT_GATE_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(DEPOSIT_GATE_TIMEOUT_MS - 1);
+    expect(returned).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     await call;
-    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 500);
+    expect(Date.now() - started).toBe(DEPOSIT_GATE_TIMEOUT_MS);
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so it may have landed: it counts.
     expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
@@ -571,14 +589,37 @@ describe('wallet notices', () => {
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
-  it('does not turn an unused balance preflight into a funding warning', async () => {
+  it('says nothing about funding before the facilitator answers', async () => {
     const fake = new FakeRouter();
-    const read = vi.fn(async () => 50_000n);
-    const p = payer(fake, { walletBalance: read });
+    const p = payer(fake);
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(read).not.toHaveBeenCalled();
     expect(systemMessageOf(answer)).not.toContain('wallet fund');
     expect(fake.paidRequests()).toBeGreaterThan(0);
+  });
+
+  it('retries a ceiling the facilitator refuses for the balance at the hint', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 100_000n;
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    expect(fake.paidRequests()).toBe(2);
+    expect(fake.deposits).toBe(1);
+    expect(systemMessageOf(answer)).toBe(
+      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+    );
+  });
+
+  it('skips the route as wallet_low when the hint is refused too, and says funded once', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 20_000n;
+    const p = payer(fake);
+    const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(fake.paidRequests()).toBe(2);
+    expect(systemMessageOf(low)).toContain('could not pay its $0.003 fee');
+    expect(systemMessageOf(low)).toContain('Your usual tools still work.');
+    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
+    fake.walletAtomic = 10_000_000n;
+    const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
   });
 
   it('says nothing for an unlock that ran out of time', async () => {

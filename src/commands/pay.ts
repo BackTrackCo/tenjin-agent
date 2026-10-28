@@ -884,8 +884,8 @@ function operatorHeaders(lines: string[] | undefined, rawBody: boolean): Record<
 /**
  * The router's headers, or a refusal. Two names only: a decision composes
  * `accept` and `content-type`, and everything else on this request is either
- * this command's to set (the payment signature, the user agent, the shelf
- * bypass) or the operator's through `-H`.
+ * this command's to set (the payment signature, the user agent) or the
+ * operator's through `-H`.
  */
 function callerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
   if (headers === undefined) return {};

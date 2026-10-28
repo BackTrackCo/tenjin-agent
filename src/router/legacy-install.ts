@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { inspectHooksFile } from '../lib/harness-hooks';
+import { inspectHooksFile } from './hooks-file';
 import { runClaude, type ClaudeBinary } from './claude-cli';
 import { LEGACY_HOOK_TOOL, LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL } from './names';
 import { classifyStatusLine, decomposeCommand, type StatusLineState } from './status-line-wiring';

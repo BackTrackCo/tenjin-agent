@@ -147,7 +147,6 @@ async function connect(
       getSigner: async () => testSigner(wallet),
       fetchImpl,
       readContract: fake.readContract as never,
-      walletBalance: async () => 10_000_000n,
       warn: () => undefined,
       ...payer,
     },
@@ -195,7 +194,7 @@ describe('Codex automatic hooks', () => {
           hookEventName: 'UserPromptSubmit',
           additionalContext: expect.stringContaining('mcp__router__request'),
         },
-        systemMessage: expect.stringContaining('prepaid routing credit'),
+        systemMessage: expect.stringContaining('set aside $0.25 for routing'),
       });
       const native = await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
       expect(native).toMatchObject({
@@ -238,7 +237,10 @@ describe('Codex automatic hooks', () => {
     );
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
+      expect(out).toEqual({
+        systemMessage: expect.stringContaining('could not pay its $0.003 fee'),
+      });
+      expect(out?.systemMessage).not.toContain('tenjin wallet fund');
       expect(fake.paidRequests()).toBe(0);
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
         'prompt: fee unpaid: limit_below_deposit',

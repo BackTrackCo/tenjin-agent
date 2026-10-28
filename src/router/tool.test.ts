@@ -321,6 +321,8 @@ describe('routing outcomes that buy nothing', () => {
     expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
+    expect(result.summary).toMatch(/^Use your usual tools:/);
+    expect(result.summary).not.toContain('No paid lookup needed');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
   });
@@ -420,7 +422,7 @@ describe('routing outcomes that buy nothing', () => {
   });
 
   it('names a routing deposit once, in the result of the call that took it', async () => {
-    let deposited = 250_000n;
+    let deposited = 30_000n;
     const route = async () => ({
       path: '/api/x402-router/route',
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
@@ -435,14 +437,14 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(
       { query: 'what is the weather' },
       { ...deps(fetchImpl), route },
     );
-    expect(next.summary).not.toContain('routing credit');
+    expect(next.summary).not.toContain('set aside');
   });
 
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
