@@ -321,6 +321,8 @@ describe('routing outcomes that buy nothing', () => {
     expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
+    expect(result.summary).toMatch(/^Use your usual tools:/);
+    expect(result.summary).not.toContain('No paid lookup needed');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
     expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
   });
@@ -420,7 +422,7 @@ describe('routing outcomes that buy nothing', () => {
   });
 
   it('names a routing deposit once, in the result of the call that took it', async () => {
-    let deposited = 250_000n;
+    let deposited = 30_000n;
     const route = async () => ({
       path: '/api/x402-router/route',
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
@@ -435,14 +437,14 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(
       { query: 'what is the weather' },
       { ...deps(fetchImpl), route },
     );
-    expect(next.summary).not.toContain('routing credit');
+    expect(next.summary).not.toContain('set aside');
   });
 
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
@@ -1061,7 +1063,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -2053,7 +2055,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
       harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
@@ -2140,7 +2142,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
       harness: 'claude',
     });
   });
@@ -2507,7 +2509,7 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs'];
+  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'];
   /** A paid routing path that must never be asked. */
   const route = vi.fn(async () => {
     throw new Error('the paid routing path was asked');

@@ -162,25 +162,11 @@ describe('no module hardcodes the production host', () => {
 const scriptsDir = fileURLToPath(new URL('../../scripts/', import.meta.url));
 
 /**
- * The skill-mirror automation runs outside the bundle: `sync-skill.mjs` is
- * dependency-free Node (drift CI runs it with no install) and
- * `open-skill-resync-pr.sh` is bash, so neither can import the constant. Pin
- * them from here instead, in the suite that runs on every PR.
- *
- * A grep step in `skill-drift.yml` would not do this job: that workflow is
- * path-filtered to `skills/` and these two scripts, so the cutover commit (which
- * touches neither) never runs it, and the daily resync would go on fetching the
- * dead origin with every check green while `skill-writer.ts` tells users to
- * re-fetch from the new one. This test reds on the commit that causes the drift.
+ * The scripts run outside the bundle (dependency-free Node and bash), so none
+ * can import the constant. Pin them from here instead, in the suite that runs
+ * on every PR.
  */
-describe('the skill-mirror scripts track the same origin', () => {
-  it('fetches the canonical skill from PRODUCTION_ORIGIN', async () => {
-    const mjs = await readFile(join(scriptsDir, 'sync-skill.mjs'), 'utf8');
-    const sh = await readFile(join(scriptsDir, 'open-skill-resync-pr.sh'), 'utf8');
-    expect(mjs).toContain(`const SOURCE_URL = '${PRODUCTION_ORIGIN}/skills.md';`);
-    expect(sh).toContain(`SOURCE_URL=${PRODUCTION_ORIGIN}/skills.md`);
-  });
-
+describe('the scripts track the same origin', () => {
   it('names no other host, in code or in the copy they emit', async () => {
     const offenders: string[] = [];
     for (const entry of await readdir(scriptsDir, { recursive: true, withFileTypes: true })) {

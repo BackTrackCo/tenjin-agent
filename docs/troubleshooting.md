@@ -69,7 +69,7 @@ Then open a new terminal. Inside Claude Code, the plugin's own `tenjin` is at th
 
 ### Removing Tenjin
 
-Run `tenjin uninstall --all` first, then `npm uninstall -g tenjin-cli`. Uninstall removes the plugin, the runtime and the launcher, and keeps your wallet. If npm went first, `~/.local/bin/tenjin uninstall --all` still works.
+Run `tenjin uninstall --all` to remove the plugin, runtime and launcher; your wallet stays. If you installed with npm, run `npm uninstall -g tenjin-cli` afterward. If you already removed the npm copy, `~/.local/bin/tenjin uninstall --all` still works.
 
 ## Claude Code asks about a new project MCP server named `x402`
 

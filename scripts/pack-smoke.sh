@@ -9,9 +9,7 @@
 # Self-contained and runnable locally (`pnpm --filter tenjin-cli run pack-smoke`)
 # as well as in CI. Paths are derived from this script's location, so the working
 # directory does not matter. Every CLI invocation points TENJIN_DATA_DIR inside a
-# fresh temp dir — never the runner's real ~/.tenjin. The heal legs point it at
-# their sandbox HOME's OWN default (`$HOME/.tenjin`) rather than at a separate
-# temp dir, because the heal stands down on a redirected data dir.
+# fresh temp dir — never the runner's real ~/.tenjin.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +59,22 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
+# tenjin.sh builds install.sh and install.ps1 from the templates in npm's
+# `latest` tarball, and answers 503 for a release that carries none. So both
+# must ship byte for byte, and the packed package's own pins must fill every
+# token in them, or this release cannot publish.
+for f in install.sh install.ps1; do
+  cmp -s "./node_modules/tenjin-cli/scripts/installers/$f" "$PKG_DIR/scripts/installers/$f" || {
+    echo "pack-smoke: FAIL — scripts/installers/$f missing from the installed package, or not the repo's" >&2
+    exit 1
+  }
+done
+node "$PKG_DIR/scripts/build-installers.mjs" "$TARBALL" "$PACK_DIR/installers" >/dev/null || {
+  echo "pack-smoke: FAIL — the packed tarball cannot fill the installer templates" >&2
+  exit 1
+}
+echo "pack-smoke: installer templates ship and fill from the packed tarball (ok)"
+
 # 1) --version prints exactly the package.json version.
 GOT_VERSION="$("$BIN" --version)"
 if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
@@ -69,18 +83,14 @@ if [ "$GOT_VERSION" != "$EXPECTED_VERSION" ]; then
 fi
 echo "pack-smoke: --version -> $GOT_VERSION (ok)"
 
-# The `node:sqlite` check that used to sit here proved tsup kept the `node:`
-# prefix by opening the loop store through the packed doctor. That store is the
-# shelf's and this release registers nothing that reads it, so the same
-# invariant is proved by 1c instead: the packed worker is loaded by URL and
-# imports `node:worker_threads`, so a stripped prefix fails there too.
-
 # 1c) The keystore KDF worker, by its RUNTIME PATH. `keystore-kdf.ts` resolves
 # `./wallet-kdf-worker.mjs` beside its own chunk and hands it to `new Worker`,
 # so a `files` entry or a tsup block that stopped emitting it would leave every
 # wallet unlock throwing at the first signature, with every source-tree test
 # green. Asserted on behaviour: the packed worker derives a key from a keystore
-# on stdin-free workerData and returns the hex the parent expects.
+# on stdin-free workerData and returns the hex the parent expects. It imports
+# `node:worker_threads`, so a build that stripped the `node:` prefix fails here
+# too.
 [ -f "./node_modules/tenjin-cli/dist/wallet-kdf-worker.mjs" ] || {
   echo "pack-smoke: FAIL — dist/wallet-kdf-worker.mjs missing from the installed package" >&2
   exit 1
@@ -249,14 +259,5 @@ printf '%s' "$BOGUS_OUT" | node -e '
   exit 1
 }
 echo "pack-smoke: bogus subcommand -> exit 2, JSON error envelope (ok)"
-
-# The skills the shelf product shipped, and the self-heal that rewrote them, are
-# gone from `files`: this release registers no command that reads them. Their
-# checks go with them rather than asserting over an empty directory.
-
-# The two interrupt lanes that used to live here drove the shelf install's own
-# guard through `--harness` and `--publish-mode`, flags this release's install
-# does not have. The router install holds the config lock only inside the same
-# locked merge-write every `config set` uses, which `src/lib/lock.ts` covers.
 
 echo "pack-smoke: PASS (tenjin-cli@$EXPECTED_VERSION packed, installed, and exercised)"

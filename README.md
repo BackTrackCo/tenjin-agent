@@ -44,7 +44,7 @@ Paste this into Claude Code:
 Install Tenjin from tenjin.sh
 ```
 
-Your install request gives the agent permission to handle setup. It briefly explains task-context sharing before activation and asks about spending limits and adding funds. Follow its final activation instruction, then continue your task.
+Your install request gives the agent permission to handle setup. It briefly explains task-context sharing, asks about spending limits and adding funds, then gives the activation step. Follow that step to continue your original task. Wallet addresses appear only when requested or needed for recovery; storage and PATH details appear only for recovery.
 
 Or from a terminal (Node and npm are not required):
 
@@ -64,7 +64,7 @@ irm https://tenjin.sh/install.ps1 | iex
 ```
 
 The installer downloads a pinned Node and Tenjin, verifies both, and sets up
-the plugin. Supports macOS, Windows and glibc Linux 2.28+ on x64/arm64.
+the plugin. Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64.
 Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
 Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
 later does not stop it. Add `--project` to `tenjin install` for one project.
@@ -74,6 +74,9 @@ Plugin installation uses the default data directory; run without
 Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`. It sets up
 the same private runtime. An installation failure keeps your existing plugin
 registration. Check the reported cause, then retry the install.
+
+Agent-run installs return a compact handoff. `tenjin install --json` installs
+with the full structured result for scripts or troubleshooting.
 
 **Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 
@@ -122,13 +125,15 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 
 `tenjin install` creates a wallet on your machine that holds USDC on Base. Its key never leaves your machine, and Tenjin never holds your funds. Payments run over [x402](https://www.x402.org) ([whitepaper](https://www.x402.org/x402-whitepaper.pdf), [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome)).
 
-| Limit    | Default | Change it                             |
-| -------- | ------- | ------------------------------------- |
-| Per day  | $5      | `tenjin config set sessionBudget 2`   |
-| Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
+| Limit              | Default | Change it                             |
+| ------------------ | ------- | ------------------------------------- |
+| Per 24-hour window | $5      | `tenjin config set sessionBudget 2`   |
+| Per call           | $0.25   | `tenjin config set maxAutoSpend 0.50` |
+
+The automatic budget window is shared across agent sessions. When the window ends, its counted automatic spend resets.
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Browsing tools and their specs is free.
+- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside $0.25 at a time for these fees, or $0.03 while your balance is under $0.50 so the rest stays available for paid tools, and stops routing below $0.03; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
@@ -136,13 +141,13 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 ## Commands
 
 ```bash
-tenjin status                          # your balance, spent today, and your limits
+tenjin status                          # your balance, spending and limits
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine
 tenjin doctor                          # check that a lookup can run
 tenjin update                          # newest version now (it also updates itself daily; `tenjin config set update.mode off` stops that)
 tenjin config set router.enabled false # pause the router
-tenjin uninstall                       # run before `npm uninstall -g`; your wallet stays
+tenjin uninstall                       # your wallet stays; npm installs: then `npm uninstall -g tenjin-cli`
 ```
 
 ## Request a tool

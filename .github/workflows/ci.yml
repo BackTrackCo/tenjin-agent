@@ -44,10 +44,13 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      # check = build + test. Offline contract pins (src/contract.test.ts against
-      # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
-      # (scheduled + dispatch) so a server blip can never red an unrelated PR.
+      # check = build + test.
       - run: pnpm run check
+      # The dist bundles every dependency, so an install's `npm audit` sees none
+      # of them. This fails when the packages in dist differ from the committed
+      # scripts/bundled-packages.json, so one entering or leaving the bundle
+      # shows up in review.
+      - run: node scripts/check-bundled-packages.mjs
       # Supply-chain advisory scan. WARN-ONLY on ordinary PRs: advisories
       # publish against a frozen lockfile, so a blocking gate reds every open PR
       # for drift unrelated to its diff. BLOCKING on the release version PR

@@ -3,7 +3,7 @@ import type { Io } from '../lib/output';
 import type { CommandContext, CommandRun } from '../context';
 
 /**
- * The seam the three product registration modules share.
+ * The seam the product registration modules share.
  *
  * ONE PROGRAM, SEVERAL PRODUCTS. `cli.ts` owns the root command, the global
  * flags and the one output choke point; a product module owns nothing but its
@@ -14,8 +14,6 @@ import type { CommandContext, CommandRun } from '../context';
 
 /** The headings `tenjin --help` files its commands under. */
 export const SETUP = 'Setup:';
-export const SEARCH = 'Search and read:';
-export const PUBLISH = 'Publish:';
 export const WALLET = 'Wallet:';
 export const INTEGRATION = 'Integration:';
 

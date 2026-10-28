@@ -117,6 +117,7 @@ try {
     for (const [name, variable] of [
       ['uname', 'TENJIN_SMOKE_OS'],
       ['getconf', 'TENJIN_SMOKE_LIBC'],
+      ['sw_vers', 'TENJIN_SMOKE_MACOS'],
     ]) {
       const command = join(bin, name);
       writeFileSync(
@@ -191,6 +192,19 @@ try {
       const failed = run({ TENJIN_SMOKE_OS: 'Linux', TENJIN_SMOKE_LIBC: libc });
       if (failed.status === 0 || existsSync(receipt))
         throw new Error(`Unsupported ${libc} reached CLI`);
+    }
+    for (const [macos, refused] of [
+      ['13.4.1', true],
+      ['12', true],
+      ['13.5', false],
+      ['14', false],
+    ]) {
+      // The uname stub answers `-m` too, so an accepted version still stops, at the architecture.
+      const darwin = run({ TENJIN_SMOKE_OS: 'Darwin', TENJIN_SMOKE_MACOS: macos });
+      if (darwin.status === 0 || existsSync(receipt))
+        throw new Error(`Stubbed macOS ${macos} reached CLI`);
+      if (darwin.stderr.includes('macOS 13.5 or newer') !== refused)
+        throw new Error(`macOS ${macos} was ${refused ? 'not ' : ''}refused by version`);
     }
     const interrupted = run({ TENJIN_SMOKE_INTERRUPT: '1' });
     if (interrupted.status === 0 || existsSync(receipt))

@@ -15,8 +15,9 @@ import type { TenjinHeld, TenjinRow } from '../types';
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
  *
  * An over-limit answer draws nothing, and the `approve` call that runs its
- * quote draws as the lookup's own row. Free router calls and `needs_input`
- * answers draw nothing; a charged failure
+ * quote draws as the lookup's own row. A free lookup the CLI named draws the
+ * same row with `free` where the price goes. The router's own calls and
+ * `needs_input` answers draw nothing; a charged failure
  * draws the error dot, the amount and the state, never a success.
  *
  * EXPANDED: wherever the view shows rows in full (ctrl+o, --verbose: the
@@ -25,9 +26,10 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * here included. Its title there is the tool's static one. A row of a run
  * this mod unfolded in the normal view stays compact.
  *
- * READ ONLY: the spec file, the choice set and the offer record (`src/router/mod-state.ts`),
- * and the request tool's own envelope. The mod writes nothing under the data
- * dir and decides nothing about routing or payment.
+ * READ ONLY: the spec file, the choice set, the free label and the offer
+ * record (`src/router/mod-state.ts`), and the request tool's own envelope.
+ * The mod writes nothing under the data dir and decides nothing about routing
+ * or payment.
  */
 
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
@@ -65,6 +67,8 @@ const HIDDEN = new Set(['spec', 'discovered', 'native', 'browse', 'needs_input',
 /** Endings drawn with no state word. */
 const PLAIN = new Set(['fulfilled', 'running']);
 const ERRORS = new Set(['failed', 'interrupted', 'partial']);
+/** What the price slot says for a lookup that costs nothing. */
+const FREE = 'free';
 
 type Dollar = EngineInterface;
 type Json = Record<string, unknown>;
@@ -244,14 +248,15 @@ export const register: Register = (on) => {
   });
 };
 
-/** A paid call before it runs: `{id, input}` with a kept spec, or `{id,
- *  choice, input}` with the choice set kept beside the line's id. Null for the
- *  router's own calls. */
+/** A call before it runs: `{id, input}` with a kept spec, `{id, choice,
+ *  input}` with the choice set kept beside the line's id, or a free `{id,
+ *  query}` whose name the CLI kept. Null for the router's own calls. */
 async function describeCall($: Dollar, e: Json): Promise<TenjinRow | null> {
   const id = typeof e.id === 'string' && e.id.length > 0 ? e.id : undefined;
   const input = asRecord(e.input);
   const dataDir = await tenjinDataDir($);
-  if (id === undefined || input === undefined || dataDir === null) return null;
+  if (id === undefined || dataDir === null) return null;
+  if (input === undefined) return describeFree($, dataDir, id, e.query);
   const read = async (key: string) =>
     readJson($, `${dataDir}/progress/specs/${await sha256Hex(key)}.json`);
   const choice = typeof e.choice === 'string' && e.choice.length > 0 ? e.choice : undefined;
@@ -274,6 +279,29 @@ async function describeCall($: Dollar, e: Json): Promise<TenjinRow | null> {
   return { label, offerId: id, ...priced([spec], takes), ...shownOf([spec], input) };
 }
 
+/**
+ * A free lookup the CLI showed a line for (`{id, query}`): it has no spec, so
+ * its name is the label the CLI kept by its id
+ * (`progress/specs/<sha256(id)>.label.json`), and its input is its `query`.
+ */
+async function describeFree(
+  $: Dollar,
+  dataDir: string,
+  id: string,
+  query: unknown,
+): Promise<TenjinRow | null> {
+  const kept = await readJson($, `${dataDir}/progress/specs/${await sha256Hex(id)}.label.json`);
+  const label = kept?.id === id ? labelOf(kept.label) : undefined;
+  if (label === undefined) return null;
+  const argument = typeof query === 'string' ? shortKey(query) : undefined;
+  return {
+    label,
+    offerId: id,
+    ...priceOf(0n, false),
+    ...(argument !== undefined ? { argument } : {}),
+  };
+}
+
 /** What the specs cost together, `takes` times each: `$0.04`, or `up to $0.05`. */
 function priced(specs: (Json | null)[], takes: bigint): { price?: string } {
   let total = 0n;
@@ -284,6 +312,12 @@ function priced(specs: (Json | null)[], takes: bigint): { price?: string } {
     if (each === undefined) return {};
     total += BigInt(each) * takes;
   }
+  return priceOf(total, varies);
+}
+
+/** The price slot: `$0.04`, `up to $0.05`, or `free`. */
+function priceOf(total: bigint, varies: boolean): { price: string } {
+  if (total === 0n && !varies) return { price: FREE };
   return { price: `${varies ? 'up to ' : ''}$${usd(total)}` };
 }
 
@@ -313,7 +347,8 @@ function endOf(envelope: Json | undefined): Partial<TenjinRow> {
 }
 
 /** A request call's row, or null where it draws nothing: not started, one of
- *  the router's own, sent back for input, free, or drawn on a held call's row. */
+ *  the router's own, sent back for input, ended with nothing paid and not a
+ *  free lookup the CLI named, or drawn on a held call's row. */
 async function rowOf(
   $: Dollar,
   id: string,
@@ -329,7 +364,12 @@ async function rowOf(
   if (label === undefined) return null;
   const drawn: TenjinRow = { ...stored, ...ended, label };
   if (drawn.status !== undefined && HIDDEN.has(drawn.status)) return null;
-  if (drawn.status !== undefined && PLAIN.has(drawn.status) && drawn.paid === undefined)
+  if (
+    drawn.status !== undefined &&
+    PLAIN.has(drawn.status) &&
+    drawn.paid === undefined &&
+    drawn.price !== FREE
+  )
     return null;
   const offer = drawn.offerId;
   if (offer !== undefined && (await link($, `hold:${offer}`)) !== undefined) {

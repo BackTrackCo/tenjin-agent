@@ -1,11 +1,9 @@
 node_modules/
 dist/
+# esbuild metafiles tsup.config.ts writes for scripts/check-bundled-packages.mjs.
+.bundle-meta/
 *.log
 *.tgz
 .eslintcache
 .prettiercache
-__pycache__/
-# The tenjin-agent#267 test-identity key lane's own reporter output — an
-# artifact of the most recent local `vitest run`, never something to commit.
-.vitest-report.json
 installer-artifacts/

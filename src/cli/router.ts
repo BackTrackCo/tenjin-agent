@@ -87,23 +87,22 @@ export function registerRouter(reg: Registration): void {
     .action(async function (this: Command) {
       const ctx = buildContext(this);
       const harness = this.opts().harness as Harness;
-      const { runRouterMcpServer } = await import('../router/mcp');
-      await runRouterMcpServer({
-        dataDir: ctx.dataDir,
-        flags: ctx.flags,
-        harness,
-      });
       // Codex has no SessionStart hook to start the daily background update
-      // from (adding one would change the hooks it trusts), so its server does,
-      // as the session ENDS: the switch rewrites the launcher its hooks run, so
-      // starting it any earlier would move them mid-session. Hooks and server
-      // then both start the next session on the new version.
+      // from, so its server does, as it starts. Code after the server's
+      // `await` never runs: Codex ends the server with a signal. Claude Code's
+      // starts from its SessionStart leg, never from here.
       if (harness === 'codex') {
         (await import('../lib/auto-update')).maybeAutoUpdate({
           dataDir: ctx.dataDir,
           env: process.env,
         });
       }
+      const { runRouterMcpServer } = await import('../router/mcp');
+      await runRouterMcpServer({
+        dataDir: ctx.dataDir,
+        flags: ctx.flags,
+        harness,
+      });
     });
 
   leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")
@@ -118,7 +117,7 @@ export function registerRouter(reg: Registration): void {
 
   leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
     .description(
-      'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force.',
+      'Report the current 24-hour budget window from spend.json, shared across agent sessions: what has settled, what is reserved by a request still in flight, and the per-call and budget caps in force.',
     )
     .action(async function (this: Command) {
       await runCommand('status', this, async (ctx) => {

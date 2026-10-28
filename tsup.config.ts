@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { defineConfig } from 'tsup';
+import { dirname, join, resolve } from 'node:path';
+import { defineConfig, type Options } from 'tsup';
 import {
   MOD_FILES,
   PLUGIN_DIR,
@@ -36,6 +36,28 @@ function writeHosts(): void {
   }
 }
 
+/**
+ * Each build's esbuild metafile, for `scripts/check-bundled-packages.mjs`, which
+ * lists the third-party packages that ship. Written beside `dist`, never in it,
+ * so it stays out of the published package. Only a build into `dist` writes: a
+ * temp-dir build through tsup's `build()` API, which loads this config too,
+ * must not overwrite the shipped build's record.
+ */
+function writeMetafile(name: string): NonNullable<Options['esbuildPlugins']>[number] {
+  return {
+    name: 'write-metafile',
+    setup(build) {
+      const outdir = build.initialOptions.outdir;
+      if (outdir === undefined || resolve(outdir) !== resolve('dist')) return;
+      build.onEnd((result) => {
+        if (result.metafile === undefined) return;
+        mkdirSync('.bundle-meta', { recursive: true });
+        writeFileSync(join('.bundle-meta', `${name}.json`), JSON.stringify(result.metafile));
+      });
+    },
+  };
+}
+
 // commander is CommonJS; bundled into ESM its internal require('events') would
 // hit esbuild's throwing `__require` shim. A real createRequire satisfies that
 // shim's `typeof require` check. This banner lands on every chunk (esbuild
@@ -64,12 +86,9 @@ export default defineConfig([
     // emitted entry must not use node22-only syntax.
     target: 'node20',
     platform: 'node',
-    // tsup strips the `node:` prefix by default, so `import('node:sqlite')`
-    // shipped as `import('sqlite')` — a bare specifier that resolves to nothing —
-    // and every CLI-side store open (doctor, push status, search recording,
-    // publish dedup) failed open while the generated hooks (raw source, never
-    // bundled) worked. `sqlite` is only a builtin under its `node:` name, unlike
-    // `fs`, so the prefix has to survive the bundle. Pinned by a dist test.
+    // tsup strips the `node:` prefix by default, and some builtins (`node:sqlite`,
+    // `node:test`) exist only under their `node:` name, so a stripped import
+    // would ship as a bare specifier that resolves to nothing. Keep the prefix.
     removeNodeProtocol: false,
     splitting: true,
     sourcemap: true,
@@ -81,6 +100,11 @@ export default defineConfig([
     dts: false,
     outDir: 'dist',
     banner,
+    // Keeps `ws` out: viem's webSocket transport (unused; RPC is `http()`) imports isows.
+    esbuildOptions: (options) => {
+      options.alias = { isows: './src/lib/isows-native.ts' };
+    },
+    esbuildPlugins: [writeMetafile('cli')],
     onSuccess: async () => writeHosts(),
   },
   // The keystore KDF worker (src/lib/wallet/keystore-kdf.ts): a single-file
@@ -109,5 +133,6 @@ export default defineConfig([
     dts: false,
     outDir: 'dist',
     outExtension: () => ({ js: '.mjs' }),
+    esbuildPlugins: [writeMetafile('wallet-kdf-worker')],
   },
 ]);
