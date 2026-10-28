@@ -207,14 +207,14 @@ describe('the hook legs and the routing fee', () => {
     expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
   });
 
-  it('tells the user once, beside the offer, that the deposit became routing credit', async () => {
+  it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
     const fake = new FakeRouter();
     fake.body = OFFER;
     const p = payer(fake);
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin moved $0.25 into prepaid routing credit; each routing call uses $0.003.',
+      'Tenjin set aside $0.25 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -239,7 +239,7 @@ describe('the hook legs and the routing fee', () => {
   it.each([
     [
       'the wallet holds less than the deposit',
-      { walletBalance: async () => 50_000n },
+      { walletBalance: async () => 20_000n },
       'Your usual tools still work.',
     ],
     [
@@ -266,7 +266,7 @@ describe('the hook legs and the routing fee', () => {
       {
         policy: async () => ({
           maxAutoSpendAtomic: 250_000n,
-          sessionBudgetAtomic: 100_000n,
+          sessionBudgetAtomic: 20_000n,
           allowlistCreators: [],
         }),
       },
@@ -334,7 +334,9 @@ describe('the hook legs and the routing fee', () => {
     });
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     const notice = systemMessageOf(answer);
-    expect(notice).toContain('the per-call spend limit is below the $0.25 routing deposit');
+    expect(notice).toContain(
+      'the per-call spend limit cannot cover the routing fee or its deposit',
+    );
     expect(notice).toContain('Run `tenjin doctor`.');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
@@ -434,7 +436,7 @@ describe('the hook legs and the routing fee', () => {
     const answer = await call;
     expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(contextOf(answer)).toContain('CoinMarketCap fits this');
-    expect(systemMessageOf(answer)).toContain('into prepaid routing credit');
+    expect(systemMessageOf(answer)).toContain('set aside $0.25 for routing');
     expect(fake.deposits).toBe(1);
     expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
     const ledger = await readSpendSummary(dir);
@@ -514,16 +516,25 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it('returns a deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
+    holdTime();
+    vi.setSystemTime(NOW);
     const fake = new FakeRouter();
     const p = payer(fake);
     const hang = paidHangs(fake);
-    holdTime();
     const started = Date.now();
-    const call = runPromptHook(prompt(), { ...deps(fake.fetch, p), fetchImpl: hang.fetchImpl });
+    let returned = false;
+    const call = runPromptHook(prompt(), {
+      ...deps(fake.fetch, p),
+      fetchImpl: hang.fetchImpl,
+    }).then(() => {
+      returned = true;
+    });
     await hang.sent;
-    await vi.advanceTimersByTimeAsync(DEPOSIT_GATE_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(DEPOSIT_GATE_TIMEOUT_MS - 1);
+    expect(returned).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     await call;
-    expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS + 500);
+    expect(Date.now() - started).toBe(DEPOSIT_GATE_TIMEOUT_MS);
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so it may have landed: it counts.
     expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
@@ -585,7 +596,7 @@ describe('wallet notices', () => {
 
   it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
     const fake = new FakeRouter();
-    let balance = 50_000n;
+    let balance = 20_000n;
     const p = payer(fake, { walletBalance: async () => balance });
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(low)).toContain('could not pay its $0.003 fee');

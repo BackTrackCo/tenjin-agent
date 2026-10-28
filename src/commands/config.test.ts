@@ -226,12 +226,12 @@ describe('runConfigSet — spend keys', () => {
   });
 
   it.each(['0', '0.1', '0.249'])(
-    'refuses a per-call limit of %s USD, below the 0.25 USD floor, and says why',
+    'refuses a per-call limit of %s USD below the 0.25 USD floor and explains how to disable routing',
     async (low) => {
       const err = await caught(() => runConfigSet({ key: 'maxAutoSpend', value: low }, makeCtx()));
       expect(err.code).toBe('USAGE');
       expect(err.message).toBe(`maxAutoSpend ${low} is below the 0.25 USD minimum.`);
-      expect(err.fix).toContain('the routing deposit: below it, routing cannot pay');
+      expect(err.fix).toContain('The per-call limit must be at least $0.25.');
       expect(err.fix).toContain('`tenjin config set router.enabled false`');
       await expect(readFile(configFile(), 'utf8')).rejects.toThrow();
     },

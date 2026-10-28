@@ -38,6 +38,19 @@ const status = (atomic: bigint | null) =>
   });
 
 describe('status, the wallet line', () => {
+  it('keeps usable routing funds visible without asking to fund an empty wallet', async () => {
+    const result = await runRouterStatus(ctx(), {
+      routingCredit: async () => 18_000n,
+      wallet: async () => ({ address: ADDRESS, atomic: 0n }),
+    });
+    expect(result.humanLines).toContain(
+      'set aside for routing: approximately 0.018 USD (~6 calls; local estimate)',
+    );
+    expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
+    expect(result.humanLines?.join('\n')).not.toMatch(/prepaid|routing credit/i);
+    expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
+  });
+
   it('says how to fund a wallet at exactly $0', async () => {
     const result = await status(0n);
     expect(result.humanLines?.slice(0, 3)).toEqual([

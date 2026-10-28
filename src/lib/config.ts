@@ -208,12 +208,11 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 export const DEFAULT_MAX_AUTO_SPEND = '250000';
 export const DEFAULT_SESSION_BUDGET = '5000000';
 
-/** The lowest per-call ceiling anyone can set, atomic USDC ($0.25): the
- *  routing deposit (`CHANNEL_DEPOSIT_ATOMIC`), below which routing cannot pay. */
+/** The lowest configurable per-call ceiling, atomic USDC ($0.25). */
 export const MAX_AUTO_SPEND_FLOOR_ATOMIC = 250_000n;
 /** Why: said by install, `config set` and doctor wherever the floor refuses. */
 export const MAX_AUTO_SPEND_FLOOR_WHY =
-  'The $0.25 minimum is the routing deposit: below it, routing cannot pay at all. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
+  'The per-call limit must be at least $0.25. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,

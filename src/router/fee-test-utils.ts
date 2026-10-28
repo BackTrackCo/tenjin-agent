@@ -61,7 +61,9 @@ export class FakeRouter {
   body: unknown = NATIVE;
   readonly requirement: PaymentRequirements;
 
-  constructor(private readonly opts: { paid?: boolean; amount?: string } = {}) {
+  constructor(
+    private readonly opts: { paid?: boolean; amount?: string; minDeposit?: string } = {},
+  ) {
     this.requirement = {
       scheme: 'batch-settlement',
       network: NETWORK,
@@ -70,6 +72,7 @@ export class FakeRouter {
       payTo: privateKeyToAccount(generatePrivateKey()).address,
       maxTimeoutSeconds: 15,
       extra: {
+        minDeposit: opts.minDeposit ?? (10n * BigInt(opts.amount ?? FEE)).toString(),
         receiverAuthorizer: privateKeyToAccount(generatePrivateKey()).address,
         withdrawDelay: 108_000,
         name: 'USDC',

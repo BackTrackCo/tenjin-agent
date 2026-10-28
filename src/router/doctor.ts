@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join, posix, resolve, sep, win32 } from 'node:path';
 import pkg from '../../package.json';
 import { autoUpdateLine } from '../lib/auto-update';
+import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { hasCode } from '../lib/errno';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -31,7 +32,13 @@ import {
 } from './claude-cli';
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, SUGGESTED_FUND_USD, unpaid, usd } from './fee';
+import {
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
+  ROUTING_FEE_ATOMIC,
+  SUGGESTED_FUND_USD,
+  unpaid,
+  usd,
+} from './fee';
 import { NEW_SESSION_STEP, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
@@ -1362,7 +1369,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;
@@ -1378,7 +1385,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
   const u = unpaid(why);
   const fixes: Record<string, string> = {
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
-    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
     budget_reached:
       'Room comes back when the 24-hour budget window resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
@@ -1406,7 +1413,7 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
 
 /**
  * The two limits: the daily budget is the control, the per-call ceiling the
- * runaway guard. A per-call limit an earlier release left below $0.25 shows
+ * runaway guard. A per-call limit an earlier release left below the deposit shows
  * on the routing-fee row, which names the deposit it refuses.
  */
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
@@ -1425,7 +1432,7 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
     };
   }
   const budget =
