@@ -64,6 +64,8 @@ export class FakeRouter {
   walletAtomic: bigint | null = null;
   /** A 402 reason every deposit is refused with, ahead of the balance check. */
   depositError: string | null = null;
+  /** The `error` a deposit over {@link walletAtomic} is refused with. */
+  insufficientError = INSUFFICIENT;
   readonly requirement: PaymentRequirements;
 
   constructor(
@@ -109,7 +111,7 @@ export class FakeRouter {
     if (payload.type === 'deposit') {
       if (this.depositError !== null) return this.error(url.toString(), this.depositError);
       if (this.walletAtomic !== null && BigInt(payload.deposit!.amount) > this.walletAtomic) {
-        return this.error(url.toString(), INSUFFICIENT);
+        return this.error(url.toString(), this.insufficientError);
       }
     }
     channel.pending = true;

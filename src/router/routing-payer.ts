@@ -1047,11 +1047,24 @@ function signObservation(v: SignVerdict): RouterObservation['sign'] {
 
 /**
  * The facilitator's refusal of a deposit the wallet cannot cover. The SDK names
- * it `invalid_batch_settlement_evm_insufficient_balance`; the suffix is matched,
- * since a facilitator may prefix it differently.
+ * it `invalid_batch_settlement_evm_insufficient_balance`; the code's suffix is
+ * matched, since a facilitator may prefix it differently.
  */
-function isShortOfFunds(error: string | undefined): boolean {
-  return error?.endsWith('insufficient_balance') === true;
+function isShortOfFunds(code: string | undefined): boolean {
+  return code?.endsWith('insufficient_balance') === true;
+}
+
+/**
+ * THE REASON CODE of a 402's `error`, without its detail. The SDK's server
+ * answers a refused payment as `<code>: <detail>` (production:
+ * `invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less
+ * than deposit amount 250000`), and the detail is free text that could name
+ * any code, so only the part before the first `:` is compared.
+ */
+export function reasonCode(error: string | undefined): string | undefined {
+  if (error === undefined) return undefined;
+  const colon = error.indexOf(':');
+  return (colon === -1 ? error : error.slice(0, colon)).trim();
 }
 
 /** {@link paymentError} for a raw 402, read from a copy so the original stays unread. */
@@ -1060,21 +1073,23 @@ async function requiredError(channel: Channel, response: Response): Promise<stri
   try {
     const text = await response.clone().text();
     const body: unknown = text === '' ? undefined : JSON.parse(text);
-    return channel.http.getPaymentRequiredResponse((name) => response.headers.get(name), body)
-      .error;
+    return reasonCode(
+      channel.http.getPaymentRequiredResponse((name) => response.headers.get(name), body).error,
+    );
   } catch {
     return undefined;
   }
 }
 
-/** The `error` a 402's payment-required header carries, if any. */
+/** The reason code ({@link reasonCode}) a 402's payment-required header carries, if any. */
 function paymentError(
   channel: Channel,
   response: Extract<HttpResult, { ok: true }>,
 ): string | undefined {
   try {
-    return channel.http.getPaymentRequiredResponse((name) => response.header(name), response.json)
-      .error;
+    return reasonCode(
+      channel.http.getPaymentRequiredResponse((name) => response.header(name), response.json).error,
+    );
   } catch {
     return undefined;
   }

@@ -26,6 +26,7 @@ import {
   chainReader,
   DEPOSIT_MULTIPLIER,
   FREE_PATH_RESERVE_MS,
+  reasonCode,
   RoutingPayer,
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
@@ -220,6 +221,32 @@ describe('RoutingPayer', () => {
       );
     },
   );
+
+  // Production answers `<code>: <detail>`; only the code is matched.
+  it.each([
+    'invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less than deposit amount 250000',
+    'invalid_batch_settlement_evm_insufficient_balance',
+  ])('retries at the hint on the facilitator reason %j', async (error) => {
+    const router = new FakeRouter();
+    router.insufficientError = error;
+    const result = await routeOnce(payer(router, { walletAtomic: 100_000n }), router);
+    expect(unpaidWhy(result)).toBeUndefined();
+    expect(router.paidRequests()).toBe(2);
+    expect([...router.channels.values()][0]?.balance).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  });
+
+  it('reads the reason code before the detail, which can name another code', () => {
+    expect(reasonCode('invalid_batch_settlement_evm_insufficient_balance: payer balance 0')).toBe(
+      'invalid_batch_settlement_evm_insufficient_balance',
+    );
+    expect(
+      reasonCode(
+        'invalid_batch_settlement_evm_channel_busy: Channel is already processing a request',
+      ),
+    ).toBe('invalid_batch_settlement_evm_channel_busy');
+    expect(reasonCode('invalid_signature: not insufficient_balance')).toBe('invalid_signature');
+    expect(reasonCode(undefined)).toBeUndefined();
+  });
 
   it('does not retry a deposit refused for any other reason', async () => {
     const router = new FakeRouter();
