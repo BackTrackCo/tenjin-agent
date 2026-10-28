@@ -1,9 +1,7 @@
-import { webcrypto } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { declareBuilderCodeExtension } from '@x402/extensions/builder-code';
 import type { PaymentRequired } from '@x402/core/types';
-import type { SessionFile } from './session-present';
 import type { TenjinSigner, WalletProvider } from './wallet/provider';
 
 /** Shared B2 test fixtures: a real (offline) viem signer, a fake wallet provider
@@ -35,40 +33,6 @@ export function testWalletProvider(signer: TenjinSigner = testSigner()): WalletP
     }),
     getSigner: async () => signer,
     diagnostics: async () => ({ warnings: [] }),
-  };
-}
-
-/**
- * A REAL P-256 session file (generated, not canned), plus its public key so a
- * test can verify the signature the CLI produced rather than only its shape.
- * Defaults to a live 1h `read` session bound to the test signer's address and to
- * TEST_ORIGIN, the origin the read fixtures are served from.
- */
-/** The origin every read fixture (and so every session fixture) is bound to. */
-export const TEST_ORIGIN = 'https://tenjin.blog';
-
-export async function testSessionKey(
-  over: Partial<SessionFile> = {},
-): Promise<{ file: SessionFile; publicKey: webcrypto.CryptoKey }> {
-  const subtle = webcrypto.subtle;
-  const pair = (await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
-    'sign',
-    'verify',
-  ])) as webcrypto.CryptoKeyPair;
-  const rawPub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
-  const jwk = (await subtle.exportKey('jwk', pair.privateKey)) as SessionFile['privateKeyJwk'];
-  return {
-    file: {
-      address: testSigner().address.toLowerCase(),
-      origin: TEST_ORIGIN,
-      delegation: 'DELEGATION',
-      exp: new Date(Date.now() + 3_600_000).toISOString(),
-      scope: 'read',
-      publicKeyRaw: Buffer.from(rawPub).toString('base64url'),
-      privateKeyJwk: jwk,
-      ...over,
-    },
-    publicKey: pair.publicKey,
   };
 }
 

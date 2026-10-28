@@ -2,9 +2,8 @@ import type { ErrorCode } from '../schemas';
 
 /**
  * The process exit code is API (spec 10): 0 success, 1 runtime/network, 2 usage,
- * 3 understood-but-refused (policy refusal, publish confirmation/hard-block), 4 a
- * failure AFTER an approved spend or write (a settlement that failed, a publish
- * that failed post-consent).
+ * 3 understood-but-refused (a policy refusal, a payment that needs consent), 4 a
+ * failure AFTER an approved spend (a settlement or a send that failed).
  */
 export type ExitCode = 1 | 2 | 3 | 4;
 
@@ -39,23 +38,13 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   REFUSED: 3,
   NETWORK_ERROR: 1,
   INTERNAL: 1,
-  NOT_IMPLEMENTED: 1,
   POLICY_REFUSED: 3,
   PAYMENT_FAILED: 4,
   RESOURCE_NOT_FOUND: 1,
-  SEARCH_NOT_FOUND: 1,
   RATE_LIMITED: 1,
-  // A publish awaiting confirmation or hard-blocked is understood-but-refused (3),
-  // the same posture as POLICY_REFUSED; a write that failed after approval is a
-  // settlement-class failure (4), like PAYMENT_FAILED.
-  NEEDS_CONFIRMATION: 3,
-  PUBLISH_BLOCKED: 3,
-  PUBLISH_FAILED: 4,
   // A send that reverted or stalled AFTER the human approved it and it was
   // broadcast: the post-decision failure class (4), like PAYMENT_FAILED.
   SEND_FAILED: 4,
-  // A delete the operator confirmed and the server then refused: same class.
-  DELETE_FAILED: 4,
   UPDATE_FAILED: 1,
   // Refused BEFORE any signature existed: the Bazaar lane's fail-closed check.
   REGISTRY_MISMATCH: 3,

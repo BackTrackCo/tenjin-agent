@@ -26,13 +26,13 @@ import {
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
-  CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   payerDir,
   refusedWhy,
   ROUTE_PAID_PATH,
   ROUTING_DEPOSIT_KEY,
   ROUTING_FEE_ATOMIC,
+  routingDepositAtomic,
 } from './fee';
 import { readRouterMemo, writeRouterMemo } from './router-memo';
 import type { RouterObservation } from './router-observation';
@@ -115,7 +115,7 @@ const NOT_CHECKED: SignVerdict = {
  * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
  * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
  * two together are the largest deposit: $0.05 × 5 = $0.25
- * ({@link CHANNEL_DEPOSIT_ATOMIC}). The exact fee is the payment policy's to hold.
+ * (`MAX_CHANNEL_DEPOSIT_ATOMIC`). The exact fee is the payment policy's to hold.
  */
 export const ROUTING_SPEND_CAP = '$0.05';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
@@ -705,21 +705,27 @@ export class RoutingPayer {
 
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size, and the refusals. The deposit is always the SDK's ceiling ($0.25); a
-   * wallet that cannot cover it, or a spend the authorizer denies (the per-call
-   * limit, the daily budget, the creator allowlist), refuses it and the call is
-   * not paid.
+   * size and the refusals. It signs {@link routingDepositAtomic}: the SDK's
+   * ceiling (cap × multiplier) from a wallet holding twice it, else the
+   * server's hint. A wallet below the hint, or a spend the authorizer denies
+   * (the per-call limit, the daily budget, the creator allowlist), refuses it
+   * and the call is not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
-    const amount = BigInt(ctx.maxDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString());
+    const hint = BigInt(ctx.depositAmount);
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
     const payer = this.channel!.payer;
     const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
-    if (wallet !== null && wallet < amount) this.refuse('wallet_low');
+    if (wallet !== null && wallet < hint) this.refuse('wallet_low');
+    const amount = routingDepositAtomic({
+      walletAtomic: wallet,
+      hintAtomic: hint,
+      maxAtomic: ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit),
+    });
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',

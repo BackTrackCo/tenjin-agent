@@ -429,7 +429,7 @@ export async function runRouterInstall(
       { fix: 'Run `tenjin install` to set this machine up.' },
     );
   }
-  // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
+  // The install's gate: a refresh, `--json`, or a run with no terminal on
   // either side asks nothing. An agent's install is that run: its shell has no
   // terminal. Install then writes no spend limit, the defaults ($0.25 a call,
   // $5 a day) hold as they do for any key the file leaves out, and its output hands
@@ -565,7 +565,7 @@ export async function runRouterInstall(
       ],
     };
   }
-  // The shelf install's wallet step, unchanged except that it never asks: a
+  // The wallet step, which never asks here: a
   // lookup cannot be paid without a wallet, so install makes one. A failure is
   // reported, never fatal; everything above is useful without it. It checks
   // that the wallet can SIGN (`verify`), and nothing about routing or funds:
@@ -1390,7 +1390,7 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
       policy.sessionBudgetAtomic === null
-        ? 'no 24-hour budget ceiling'
+        ? 'no daily budget limit'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
 }
@@ -1534,9 +1534,12 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
-  const daily = s.policy.sessionBudgetAtomic === null ? 'none' : `$${limits.sessionBudget}`;
+  const daily =
+    s.policy.sessionBudgetAtomic === null
+      ? limits.sessionBudget
+      : `daily budget $${limits.sessionBudget} shared across chats`;
   const spend = [
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; daily budget ${daily} shared across chats`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; ${daily}`,
     ...(s.spendAsk !== undefined
       ? [
           `  Ask the person in this session: ${s.spendAsk.question}`,

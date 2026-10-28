@@ -37,7 +37,7 @@ const pending = [
         id: 'custom',
         label: 'Set my own limits',
         recommended: false,
-        ask: ['24-hour budget in USD', 'Per-call limit in USD'],
+        ask: ['Daily budget in USD', 'Per-call limit in USD'],
         command:
           "'/private runtime/tenjin' install --max-auto-spend <usd> --session-budget <usd|none>",
       },
