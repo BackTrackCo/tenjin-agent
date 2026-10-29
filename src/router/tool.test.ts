@@ -339,6 +339,8 @@ describe('routing outcomes that buy nothing', () => {
     const route = () => ({
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
       deposited: () => deposited,
+      // The fee the router quoted, which the line names: never a constant.
+      fee: () => 1_000n,
     });
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: NATIVE },
@@ -349,7 +351,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.001. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(

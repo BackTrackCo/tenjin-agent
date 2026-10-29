@@ -1674,10 +1674,10 @@ async function decide(
   }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
-  if (deposited > 0n) deps.notice?.(depositSentence(deposited));
+  if (deposited > 0n) deps.notice?.(depositSentence(deposited, route?.fee?.()));
   if (outcome.status === 'skipped') {
     unpaid?.(outcome.why);
-    await tellOnce(deps, sessionId, outcome.why, now);
+    await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
@@ -1716,8 +1716,14 @@ async function decide(
  * routing. A different reason later in the session is news again (a missing
  * passphrase repaired into a wrong one), the same one is not.
  */
-async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
-  const sentence = unpaidSentence(why);
+async function tellOnce(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  now: number,
+  quotedAtomic?: bigint,
+) {
+  const sentence = unpaidSentence(why, 'person', quotedAtomic);
   if (sentence === null || deps.notice === undefined) return;
   const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
   if (told === 'tell') deps.notice(sentence);

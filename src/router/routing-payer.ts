@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createPublicClient, http, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
+import { decodePaymentRequiredHeader } from '@x402/core/http';
+import type { PaymentRequirements } from '@x402/core/types';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import {
   BatchSettlementEvmScheme,
@@ -19,17 +21,19 @@ import {
   isUnreachable,
   PAYMENT_FAILED,
   DEADLINE_AFTER_PAYMENT_SENT,
+  ROUTE_PAID_PATH,
   RouteSkipped,
   type DecisionRoute,
 } from './decision';
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
+  FEE_ABOVE_CEILING,
   feeRefusal,
   payerDir,
   refusedWhy,
   ROUTING_DEPOSIT_KEY,
-  ROUTING_FEE_ATOMIC,
+  ROUTING_FEE_CEILING_ATOMIC,
   routingDepositAtomic,
 } from './fee';
 import type { RouterObservation } from './router-observation';
@@ -38,7 +42,7 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
  * `tenjin mcp`, never in a hook. The user approved it with the automatic spend
- * limits at install, which name it, and every deposit counts against them.
+ * limits at install, and every deposit counts against them.
  *
  * The shape is the x402 guide's "MCP server with x402": a local stdio MCP
  * server whose tool calls an HTTP API through `wrapFetchWithPayment` over an
@@ -51,6 +55,15 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *
  * What is Tenjin's own, because the SDK has no equivalent:
  *
+ * - THE QUOTE, UNDER A CEILING. The router's 402 is the only price. This pays
+ *   it when it is at or below `ROUTING_FEE_CEILING_ATOMIC`, inside the SDK's
+ *   per-payment cap, the deposit cap and the spend limits; a quote above the
+ *   ceiling is not paid (`fee_above_ceiling`), and is read before the wallet
+ *   is unlocked. Nothing else is pinned: not the payee, not the exact price.
+ *   It pays only the configured router's paid route ({@link RoutingPayer.routeFor}),
+ *   so the ceiling never applies to a provider's 402, which `runPay` checks
+ *   against that service's own spec price. A charge below the quote (batch
+ *   settlement lets the server charge less) is the SDK's to record.
  * - ONE CHANNEL PER WALLET, in the SDK's file storage under the wallet's own
  *   folder, with the SDK's default salt, so every `tenjin mcp` process on the
  *   machine finds the same channel. Calls inside a process take turns on it.
@@ -110,7 +123,7 @@ const NOT_CHECKED: SignVerdict = {
  * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
  * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
  * two together are the largest deposit: $0.05 × 5 = $0.25
- * (`MAX_CHANNEL_DEPOSIT_ATOMIC`). The exact fee is the payment policy's to hold.
+ * (`MAX_CHANNEL_DEPOSIT_ATOMIC`). The fee ceiling is the payment policy's to hold.
  */
 export const ROUTING_SPEND_CAP = '$0.05';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
@@ -207,12 +220,14 @@ interface SignMemo {
   address?: string;
 }
 
-/** Money and policy refusals that are definite until a person acts. */
+/** Money and policy refusals that are definite until something changes: a
+ *  person acts, or the router lowers its quote. */
 const ROUTING_BLOCKED: ReadonlySet<string> = new Set([
   'wallet_low',
   'limit_below_deposit',
   'budget_reached',
   'not_allowlisted',
+  FEE_ABOVE_CEILING,
 ]);
 
 /** Skips that say nothing about whether routing can pay: contention, a
@@ -254,6 +269,8 @@ interface Call {
   result?: HttpResult;
   /** Why a check refused to pay; the wrapper rethrows the error as its own. */
   skipped?: string;
+  /** The routing fee the router's 402 quoted, once read. */
+  quoted?: bigint;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
   /** Whether the router answered any request of this call. */
@@ -263,16 +280,49 @@ interface Call {
   deposits: Deposit[];
 }
 
+/** The routing offers in a 402: `batch-settlement` in canonical USDC on
+ *  Base, with an amount this client can read. */
+function routingOffers(version: number, requirements: PaymentRequirements[]) {
+  return canonicalUsdcOnly(version, requirements).filter(
+    (r) => r.scheme === 'batch-settlement' && /^\d{1,30}$/.test(r.amount),
+  );
+}
+
 /**
- * THE PAYMENT POLICY, the guide's check of the requirement before signing:
- * `batch-settlement` in canonical USDC on Base, at exactly the $0.003 fee.
- * The server's `payTo` is not pinned: the client ships no treasury address, and
- * what the user approved is the fee, which this holds exactly.
+ * THE PAYMENT POLICY, the guide's check of the requirement before signing: a
+ * routing offer at or below the fee ceiling. The server's `payTo` is not
+ * pinned: the client ships no treasury address, and what the user approved
+ * is a fee no higher than the ceiling, which this holds.
  */
 const routingPolicy: PaymentPolicy = (version, requirements) =>
-  canonicalUsdcOnly(version, requirements).filter(
-    (r) => r.scheme === 'batch-settlement' && r.amount === ROUTING_FEE_ATOMIC.toString(),
+  routingOffers(version, requirements).filter(
+    (r) => BigInt(r.amount) <= ROUTING_FEE_CEILING_ATOMIC,
   );
+
+/**
+ * WHAT A 402 QUOTES: the largest routing offer at or below the ceiling, the
+ * one the per-payment checks must allow whichever the SDK picks; else the
+ * smallest above it; null when it carries none this client reads, which the
+ * SDK then refuses as it always did.
+ */
+function quoteOf(asked: Response): bigint | null {
+  const header = asked.headers.get('PAYMENT-REQUIRED');
+  if (header === null) return null;
+  try {
+    const required = decodePaymentRequiredHeader(header);
+    const amounts = routingOffers(required.x402Version, required.accepts).map((r) =>
+      BigInt(r.amount),
+    );
+    const within = amounts.filter((a) => a <= ROUTING_FEE_CEILING_ATOMIC);
+    if (within.length > 0) return within.reduce((a, b) => (b > a ? b : a));
+    return amounts.length > 0 ? amounts.reduce((a, b) => (b < a ? b : a)) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A call to anything but the configured router's paid route is not paid. */
+const NOT_ROUTE = 'not_the_routing_route';
 
 /**
  * The server's refusal of a second payment in flight on one channel. The SDK
@@ -339,11 +389,21 @@ export class RoutingPayer {
     return memo.verdict;
   }
 
-  /** The paid route for one routing call to the router at `baseUrl`. */
+  /**
+   * The paid route for one routing call to the router at `baseUrl`. ONLY
+   * THAT ROUTE IS PAID: a URL on any other origin or path is refused before
+   * anything is sent, so the routing fee's ceiling and channel never meet a
+   * provider's 402.
+   */
   routeFor(baseUrl: string): DecisionRoute {
     const calls: Call[] = [];
+    const route = new URL(ROUTE_PAID_PATH, baseUrl);
     return {
       send: (url, options) => {
+        const target = new URL(url);
+        if (target.origin !== route.origin || target.pathname !== route.pathname) {
+          return Promise.reject(new RouteSkipped(NOT_ROUTE));
+        }
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
@@ -358,6 +418,7 @@ export class RoutingPayer {
           .flatMap((call) => call.deposits)
           .filter((d) => d.state === 'settled')
           .reduce((sum, d) => sum + d.amountAtomic, 0n),
+      fee: () => calls.reduce<bigint | undefined>((last, call) => call.quoted ?? last, undefined),
     };
   }
 
@@ -569,9 +630,21 @@ export class RoutingPayer {
       if (asked.status !== 402) return asked;
       this.paidPathSeenAt = this.now();
       try {
-        // Each fee gets the per-payment checks (`feeRefusal`) before the
-        // wallet is even unlocked, a voucher from a funded channel included.
-        const refused = feeRefusal(await this.deps.policy(), call.host);
+        // THE QUOTE, read before the wallet is even unlocked: one above the
+        // ceiling is not paid, and the rest get the per-payment checks
+        // (`feeRefusal`) at the amount quoted, a voucher from a funded channel
+        // included. With no routing offer to read, the ceiling stands in, and
+        // the SDK refuses the 402 below as it always has.
+        const quoted = quoteOf(asked);
+        if (quoted !== null) call.quoted = quoted;
+        if (quoted !== null && quoted > ROUTING_FEE_CEILING_ATOMIC) {
+          throw new RouteSkipped(FEE_ABOVE_CEILING);
+        }
+        const refused = feeRefusal(
+          await this.deps.policy(),
+          call.host,
+          quoted ?? ROUTING_FEE_CEILING_ATOMIC,
+        );
         if (refused !== null) throw new RouteSkipped(refused);
         call.channel = this.channelFor(await this.signer(call));
         if (until - this.now() <= 0) throw new RouteSkipped('busy');
@@ -615,12 +688,16 @@ export class RoutingPayer {
       this.call = null;
       await this.settleDeposits(call);
     }
-    if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
+    if (call.skipped !== undefined) {
+      throw new RouteSkipped(call.skipped, {
+        ...(call.quoted !== undefined ? { quotedAtomic: call.quoted } : {}),
+      });
+    }
     // The router could not be reached: the call ends as that transport
     // failure, which starts the backoff. A timeout or a reset socket is
     // skipped below, as any other unanswered call is.
     if (!response.ok && !call.answered && isUnreachable(response)) {
-      throw new RouteSkipped(PAYMENT_FAILED, response);
+      throw new RouteSkipped(PAYMENT_FAILED, { unreached: response });
     }
     // No answer, a failed payment or a server error: the call is skipped.
     if (!response.ok) {
