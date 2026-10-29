@@ -551,7 +551,9 @@ describe('every answer payload on disk', () => {
   it('holds a discovered hint to one plain line naming the call and its id', () => {
     const payload = fixture('wire-hook-discovered.json');
     const decision = payload.decision as Record<string, unknown>;
-    expect(Object.keys(decision).sort()).toEqual(['action', 'candidate', 'hint', 'id']);
+    // An open-Bazaar offer carries its one spec too, under the answer's own id.
+    expect(Object.keys(decision).sort()).toEqual(['action', 'candidate', 'hint', 'id', 'specs']);
+    expect((decision.specs as { id: string }[]).map((spec) => spec.id)).toEqual([decision.id]);
     expect(String(decision.hint)).toContain(`id: "${String(decision.id)}"`);
     expect(String(decision.hint)).toContain('input: {');
     const withHint = (hint: string) => ({ ...payload, decision: { ...decision, hint } });

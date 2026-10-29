@@ -353,7 +353,7 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`       |
 | `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`            |
 | `wire-hook-request-ask.json`               | the hook before a question to the user, with `sessionId` and `accepts`                    |
-| `wire-hook-discovered.json`                | hook answer: a discovered service, its candidate and the server's `hint`                  |
+| `wire-hook-discovered.json`                | hook answer: an open-Bazaar service, its candidate, its spec and the `hint`               |
 | `wire-lookup-discovered.json`              | tool fallback answer: the same `discovered` shape with a fresh id                         |
 | `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec |
 | `wire-hook-execute-headers.json`           | the same for a `headers` client: the Exa spec with its `Exa-Beta` header (tenjin#988)     |

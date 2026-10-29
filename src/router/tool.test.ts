@@ -14,7 +14,7 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeChoices, storeSpecs } from './specs';
+import { readSpec, storeChoices, storeSpecs } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTE_PAID_PATH,
@@ -956,9 +956,28 @@ describe('a discovered service', () => {
       },
     ]);
 
-  it('hands the host the server line and the listing, and pays nothing', async () => {
+  it("shows an open-Bazaar answer's spec under its id, keeps it, and pays nothing", async () => {
     const auth = authorizer();
     const answer = await wire('wire-lookup-discovered.json');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'generate a short whoosh sound effect' },
+      deps(fetchImpl, auth),
+    );
+    const id = (answer.decision as { id: string }).id;
+    expect(result).toMatchObject({ isError: false, envelope: { status: 'spec', id } });
+    expect(await readSpec(dir, id)).toMatchObject({ id, provider: 'BlockRun' });
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  /** An answer with no specs, as a router before specs sent: the server's
+   *  line and the seller's listing, and nothing kept to run. */
+  it('hands the host the server line and the listing, and pays nothing', async () => {
+    const auth = authorizer();
+    const wired = await wire('wire-lookup-discovered.json');
+    const bare = { ...(wired.decision as Record<string, unknown>) };
+    delete bare.specs;
+    const answer = { ...wired, decision: bare };
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool(
       { query: 'generate a short whoosh sound effect' },
