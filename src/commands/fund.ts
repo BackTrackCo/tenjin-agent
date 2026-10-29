@@ -2,8 +2,7 @@ import { getAddress, isAddress } from 'viem';
 import { CliError } from '../lib/errors';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { httpRequest, fetchFailureToCliError, type HttpRequestOptions } from '../lib/http';
-import { buildSiwxHeader, SIWX_HEADER } from '../lib/siwx';
-import { SESSION_CHAIN_ID } from '../lib/session-key';
+import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import {
   describeWallet,
   resolveWalletProvider,
@@ -104,7 +103,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // here only disables the wait, it never blocks funding.
   const startBalance = shouldWait ? await balanceOrUndefined(desc, rpcUrl) : undefined;
 
-  const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: SESSION_CHAIN_ID });
+  const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: SIWX_CHAIN_ID });
   const request: HttpRequestOptions = {
     method: 'POST',
     timeoutMs: ctx.flags.timeout,

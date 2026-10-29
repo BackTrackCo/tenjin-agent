@@ -18,7 +18,7 @@ import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fe
  * an authorization that was transmitted is committed, so anything still open
  * here is either in flight or a crash that has not yet aged out.
  *
- * A ROUTING DEPOSIT IS NOT A LOOKUP. It is prepaid credit the routing fee
+ * A ROUTING DEPOSIT IS NOT A LOOKUP. It sets funds aside that the routing fee
  * draws from, so it is shown apart from what lookups cost, with what the
  * channel still holds. It still counts toward the daily limit, like any
  * automatic payment.
@@ -31,7 +31,7 @@ import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fe
 
 export interface StatusDeps {
   now?: () => number;
-  /** Seam for the wallet's routing credit; production reads its channel files. */
+  /** Seam for funds set aside for routing; production reads local channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
    *  null with no wallet. Production reads the chain. */
@@ -136,10 +136,16 @@ export async function runRouterStatus(
     budgetAtomic === null
       ? `automatic spend ${automatic} USD; no daily limit`
       : `counted toward the daily limit: ${automatic} USD of ${toMoney(budgetAtomic.toString()).usd} USD in the rolling 24h window`;
-  const credit = [
-    ...(depositedAtomic > 0n ? [`${toMoney(depositedAtomic.toString()).usd} USD prepaid`] : []),
+  const routingLines = [
+    ...(depositedAtomic > 0n
+      ? [
+          `deposited for routing in the rolling 24h window: ${toMoney(depositedAtomic.toString()).usd} USD`,
+        ]
+      : []),
     ...(depositedAtomic > 0n || creditAtomic > 0n
-      ? [`${data.routingCredit.remaining.usd} USD left (~${data.routingCredit.calls} calls)`]
+      ? [
+          `set aside for routing: approximately ${data.routingCredit.remaining.usd} USD (~${data.routingCredit.calls} calls; local estimate)`,
+        ]
       : []),
   ];
   const walletLines =
@@ -149,14 +155,16 @@ export async function runRouterStatus(
         ? ['wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries']
         : [
             `wallet ${toMoney(wallet.atomic.toString()).usd} USD`,
-            ...(wallet.atomic === 0n ? [FUND_COMMAND_LINE] : []),
+            ...(wallet.atomic === 0n && creditAtomic < ROUTING_FEE_ATOMIC
+              ? [FUND_COMMAND_LINE]
+              : []),
           ];
   return {
     data,
     humanLines: [
       ...walletLines,
-      `lookups ${toMoney(lookupsAtomic.toString()).usd} USD` +
-        (credit.length > 0 ? ` · routing credit ${credit.join(', ')}` : ''),
+      `lookups ${toMoney(lookupsAtomic.toString()).usd} USD`,
+      ...routingLines,
       budgetLine,
       `reserved ${toMoney(reservedAtomic.toString()).usd} USD in ${data.inFlight.length} open request(s)`,
       `automatic router up to ${toMoney(settings.policy.maxAutoSpendAtomic.toString()).usd} USD per call; manual pay always requires consent`,

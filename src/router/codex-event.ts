@@ -1,4 +1,4 @@
-import { decode, splitWebrun } from '../adapters/codex-wire';
+import { decode, splitWebrun } from './codex-wire';
 import type { HookEvent } from './hooks';
 
 /**
@@ -15,7 +15,7 @@ export function codexRouterEvent(raw: unknown): HookEvent | null {
   const common = {
     sessionId: input.session,
     ...(input.cwd ? { cwd: input.cwd } : {}),
-    ...(input.transcript?.path !== undefined ? { transcriptPath: input.transcript.path } : {}),
+    ...(input.transcriptPath !== undefined ? { transcriptPath: input.transcriptPath } : {}),
   };
   if (input.event === 'prompt' && input.prompt !== undefined)
     return { kind: 'prompt', ...common, prompt: input.prompt };

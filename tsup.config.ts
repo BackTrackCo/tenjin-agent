@@ -39,9 +39,9 @@ function writeHosts(): void {
 /**
  * Each build's esbuild metafile, for `scripts/check-bundled-packages.mjs`, which
  * lists the third-party packages that ship. Written beside `dist`, never in it,
- * so it stays out of the published package. Only a build into `dist` writes:
- * tsup's `build()` API (src/daemon/smoke.test.ts) also loads this config for
- * its temp-dir builds, which must not overwrite the shipped build's record.
+ * so it stays out of the published package. Only a build into `dist` writes: a
+ * temp-dir build through tsup's `build()` API, which loads this config too,
+ * must not overwrite the shipped build's record.
  */
 function writeMetafile(name: string): NonNullable<Options['esbuildPlugins']>[number] {
   return {
@@ -86,12 +86,9 @@ export default defineConfig([
     // emitted entry must not use node22-only syntax.
     target: 'node20',
     platform: 'node',
-    // tsup strips the `node:` prefix by default, so `import('node:sqlite')`
-    // shipped as `import('sqlite')` — a bare specifier that resolves to nothing —
-    // and every CLI-side store open (doctor, push status, search recording,
-    // publish dedup) failed open while the generated hooks (raw source, never
-    // bundled) worked. `sqlite` is only a builtin under its `node:` name, unlike
-    // `fs`, so the prefix has to survive the bundle. Pinned by a dist test.
+    // tsup strips the `node:` prefix by default, and some builtins (`node:sqlite`,
+    // `node:test`) exist only under their `node:` name, so a stripped import
+    // would ship as a bare specifier that resolves to nothing. Keep the prefix.
     removeNodeProtocol: false,
     splitting: true,
     sourcemap: true,

@@ -22,8 +22,8 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the defaults ($5 per 24-hour budget window, $0.25 a call)')
-    .option('--session-budget <usd|none>', 'your own 24-hour budget across agent sessions, or none')
+    .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $0.25 a call)')
+    .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
     .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
     .addHelpText(
       'after',
@@ -33,8 +33,9 @@ Examples:
   $ tenjin install --project
   $ tenjin install --max-auto-spend 0.50 --session-budget 10
 
-The 24-hour budget is shared across agent sessions; the per-call limit is the runaway guard, and the
-wallet balance the hard stop. To turn the router off instead:
+The daily budget is shared across chats. Its spending counter resets 24 hours after its window starts;
+opening a new chat does not reset it. The per-call limit bounds each call, and the wallet balance is
+the hard stop. To turn the router off instead:
   $ tenjin config set router.enabled false
 
 Learn more:
@@ -214,7 +215,7 @@ Examples:
 
   const config = leaf(SETUP, 'config', 'read and set config values').description(
     'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default). ' +
-      'maxAutoSpend caps automatic router spending per call; sessionBudget caps it within a 24-hour budget window, across agent sessions. ' +
+      'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
       'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends.',
   );
   config.addHelpText(
@@ -271,7 +272,7 @@ Examples:
     'wallet',
     'create, show, fund, repair and send from the local wallet',
   ).description(
-    'Manage the local x402 payment wallet used for paid reads and publishing. The private key is generated on this machine, stored encrypted, and never printed.',
+    'Manage the local x402 payment wallet the router and `tenjin pay` spend from. The private key is generated on this machine, stored encrypted, and never printed.',
   );
   addGlobalFlags(wallet.command('create'))
     .summary('create a new local wallet')
@@ -372,9 +373,9 @@ Examples:
     });
 
   // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
-  // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
-  // surface gains a send trigger (both exclusions are pinned by tests). It lives
-  // under `wallet` with every other verb that operates on the wallet.
+  // router's MCP tools (src/router/mcp.ts) and the plugin's skill; no
+  // model-facing surface gains a send trigger. It lives under `wallet` with
+  // every other verb that operates on the wallet.
   addGlobalFlags(wallet.command('send <amount> <token> <to>'))
     .summary('move funds out of the wallet (escape hatch)')
     .description(

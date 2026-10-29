@@ -59,11 +59,11 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.003 a call, paid from channel deposits of up to $0.25 that stay yours until spent; each deposit counts against these limits.';
+  'Routing costs $0.003 a call, paid from funds Tenjin sets aside: $0.25 at a time, or $0.03 while your balance is under $0.50. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.';
 /** What a run that could not ask prints for the agent that ran it. */
-const QUESTION = `Use the defaults ($5 per 24-hour budget window across agent sessions, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
+const QUESTION = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
-  '  Automatic router: up to $0.25 per call; 24-hour budget $5',
+  '  Automatic router: up to $0.25 per call; daily budget $5 shared across chats',
   `  Ask the person in this session: ${QUESTION}`,
   '  Use the defaults (recommended): tenjin install --yes',
   '  Set my own limits: tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
@@ -155,7 +155,7 @@ describe('tenjin install', () => {
               label: 'Set my own limits',
               recommended: false,
               ask: [
-                'The most Tenjin may pay per 24-hour budget window across agent sessions, in USD, or none for no limit',
+                'Daily budget shared across chats, in USD, or none for no limit',
                 'The most it may pay for one call, in USD, at least 0.25',
               ],
               command: 'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
@@ -195,7 +195,7 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({}, ctx(), deps());
     expect(spendStepOf(result)).toBeUndefined();
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.1 per call; 24-hour budget $5',
+      '  Automatic router: up to $0.1 per call; daily budget $5 shared across chats',
     );
     expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
   });
@@ -428,7 +428,7 @@ function amounts(answers: (string | null)[]) {
   });
 }
 
-const SELECTOR = `Use the defaults ($5 per 24-hour budget window across agent sessions, $0.25 a call) or set your own limits.\n${FEE_TERMS}\nEither answer also approves the routing fee.`;
+const SELECTOR = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits.\n${FEE_TERMS}\nEither answer also approves the routing fee.`;
 
 describe('install asks a person the spend question once', () => {
   it('"Use the defaults" names the routing fee and writes $0.25 a call and $5 a day', async () => {
@@ -446,7 +446,7 @@ describe('install asks a person the spend question once', () => {
       sessionBudget: '5000000',
     });
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.25 per call; 24-hour budget $5',
+      '  Automatic router: up to $0.25 per call; daily budget $5 shared across chats',
     );
   });
 
@@ -458,7 +458,7 @@ describe('install asks a person the spend question once', () => {
       deps({ isInteractive: true, promptLimits: async () => 'own' as const, promptAmount }),
     );
     expect(promptAmount.mock.calls.map(([message]) => message)).toEqual([
-      'Most it may pay per 24-hour budget window, in USD, or none',
+      'Daily budget shared across chats, in USD, or none',
       'Most it may pay for one call, in USD, at least 0.25',
     ]);
     expect(await loadRawConfig(data)).toMatchObject({
@@ -466,7 +466,7 @@ describe('install asks a person the spend question once', () => {
       sessionBudget: '2000000',
     });
     expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.5 per call; 24-hour budget $2',
+      '  Automatic router: up to $0.5 per call; daily budget $2 shared across chats',
     );
   });
 
@@ -704,7 +704,7 @@ describe('the doctor this release registers', () => {
       {
         status: 'ok',
         required: false,
-        detail: 'automatic approval up to 0.25 USD a call, 5 USD per 24-hour budget window',
+        detail: 'automatic approval up to 0.25 USD a call, 5 USD daily budget, shared across chats',
       },
     ],
     [
@@ -879,7 +879,7 @@ describe('the install readout and the status window', () => {
     );
     const result = await runRouterInstall({}, ctx(), deps());
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('Automatic router: up to $1 per call; 24-hour budget $10');
+    expect(text).toContain('Automatic router: up to $1 per call; daily budget $10');
     expect(text).not.toContain('$0.25');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
@@ -892,7 +892,10 @@ describe('the install readout and the status window', () => {
       JSON.stringify({ maxAutoSpend: '500000', sessionBudget: 'none' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
-    expect(result.humanLines!.join('\n')).toContain('24-hour budget none');
+    expect(result.humanLines!.join('\n')).toContain('no daily budget limit');
+    expect(result.data).toMatchObject({
+      spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
+    });
   });
 
   it('status applies the same expiry an authorization would', async () => {
@@ -998,7 +1001,7 @@ describe('daily limit readouts', () => {
   );
 });
 
-it('status shows the routing deposit as prepaid credit, apart from lookups, and counts both', async () => {
+it('status separates routing deposits in the spend window from the remaining routing funds', async () => {
   const now = Date.now();
   await writeFile(
     join(data, 'spend.json'),
@@ -1028,13 +1031,15 @@ it('status shows the routing deposit as prepaid credit, apart from lookups, and 
     },
     routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
   });
-  expect(result.humanLines?.slice(0, 2)).toEqual([
-    'lookups 0.05 USD · routing credit 0.25 USD prepaid, 0.24 USD left (~80 calls)',
+  expect(result.humanLines?.slice(0, 4)).toEqual([
+    'lookups 0.05 USD',
+    'deposited for routing in the rolling 24h window: 0.25 USD',
+    'set aside for routing: approximately 0.24 USD (~80 calls; local estimate)',
     'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
   ]);
 });
 
-it('status shows no routing credit before any deposit', async () => {
+it('status shows no funds set aside before any deposit', async () => {
   const { runRouterStatus } = await import('./status');
   const result = await runRouterStatus(ctx(), {
     wallet: async () => null,
@@ -1127,7 +1132,7 @@ describe('install applies the spend answer an agent relays, in one command', () 
     )) as CliError;
     expect(err.message).toBe('--max-auto-spend 0.1: The per-call limit is at least $0.25.');
     expect(err.fix).toBe(
-      'Give 0.25 USD or more, for example `--max-auto-spend 0.5`. The $0.25 minimum is the routing deposit: below it, routing cannot pay at all. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.',
+      'Give 0.25 USD or more, for example `--max-auto-spend 0.5`. The per-call limit must be at least $0.25. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.',
     );
   });
 
@@ -1212,7 +1217,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(fund.next).toContain(
       'When the selected option includes a command, run it yourself; never ask the person to run it.',
     );
-    expect(fund.next).toContain('Offer funding again only on request.');
+    expect(fund.next).toContain('Do not offer funding again unless requested.');
     expect(result.humanLines).toEqual(
       expect.arrayContaining([
         '  Ask the person: Add $5 to Tenjin now?',

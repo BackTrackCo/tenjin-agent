@@ -108,7 +108,7 @@ describe('routingFeeRow', () => {
       status: 'ok',
       required: false,
       detail:
-        '$0.003 a call, paid from channel deposits of up to $0.25 that count against the spend limits',
+        '$0.003 a call, paid from funds set aside up to $0.25 at a time; deposits count against the spend limits',
     };
     expect(routingFeeRow({ canPayRouting: routing(READY) }, 'tenjin.sh')).toEqual(ok);
     expect(
@@ -133,8 +133,8 @@ describe('routingFeeRow', () => {
   it.each<[string, Verdict, string, string]>([
     [
       'wallet_low',
-      routing(READY, { balanceAtomic: 100_000n }),
-      'the wallet holds less than the $0.25 routing deposit, so Tenjin is not routing calls',
+      routing(READY, { balanceAtomic: 20_000n }),
+      'the wallet holds less than the $0.03 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
       'Fund it with `tenjin wallet fund 5`.',
     ],
     [
@@ -146,14 +146,14 @@ describe('routingFeeRow', () => {
     [
       'limit_below_deposit',
       routing(READY, { depositRefusal: 'limit_below_deposit' }),
-      'the per-call spend limit is below the $0.25 routing deposit, so Tenjin is not routing calls',
+      'the per-call spend limit cannot cover the routing fee or its deposit, so Tenjin is not routing calls',
       'Raise it with `tenjin config set maxAutoSpend 0.25`.',
     ],
     [
       'budget_reached',
       routing(READY, { feeRefusal: 'budget_reached' }),
-      'the 24-hour budget has no room left for the routing fee or its deposit, so Tenjin is not routing calls',
-      'Room comes back when the 24-hour budget window resets, or raise it with `tenjin config set sessionBudget <usd>`.',
+      'the daily budget has no room left for the routing fee or its deposit, so Tenjin is not routing calls',
+      'Room comes back when the daily budget resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     ],
     [
       'not_allowlisted',
@@ -621,7 +621,7 @@ describe('runRouterDoctor, with its seams injected', () => {
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({
       detail:
-        'the wallet holds less than the $0.25 routing deposit, so Tenjin is not routing calls',
+        'the wallet holds less than the $0.03 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
       fix: 'Fund it with `tenjin wallet fund 5`.',
     });
     expect((out as { humanLines: string[] }).humanLines.at(-1)).toBe(

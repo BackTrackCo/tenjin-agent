@@ -429,7 +429,7 @@ export async function runRouterInstall(
       { fix: 'Run `tenjin install` to set this machine up.' },
     );
   }
-  // The shelf install's gate: a refresh, `--json`, or a run with no terminal on
+  // The install's gate: a refresh, `--json`, or a run with no terminal on
   // either side asks nothing. An agent's install is that run: its shell has no
   // terminal. Install then writes no spend limit, the defaults ($0.25 a call,
   // $5 a day) hold as they do for any key the file leaves out, and its output hands
@@ -565,7 +565,7 @@ export async function runRouterInstall(
       ],
     };
   }
-  // The shelf install's wallet step, unchanged except that it never asks: a
+  // The wallet step, which never asks here: a
   // lookup cannot be paid without a wallet, so install makes one. A failure is
   // reported, never fatal; everything above is useful without it. It checks
   // that the wallet can SIGN (`verify`), and nothing about routing or funds:
@@ -1265,7 +1265,7 @@ async function fundStep(
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Offer funding again only on request. ${SHOW_NOT_RUN}`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Do not offer funding again unless requested. ${SHOW_NOT_RUN}`,
       address,
       show,
     },
@@ -1304,7 +1304,7 @@ export async function approveLimits(
   const ask = deps.promptAmount ?? promptAmount;
   const sessionBudget = await askLimit(
     ask,
-    'Most it may pay per 24-hour budget window, in USD, or none',
+    'Daily budget shared across chats, in USD, or none',
     '5',
     'day',
   );
@@ -1390,7 +1390,7 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
       policy.sessionBudgetAtomic === null
-        ? 'no 24-hour budget ceiling'
+        ? 'no daily budget limit'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
 }
@@ -1534,9 +1534,12 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
-  const daily = s.policy.sessionBudgetAtomic === null ? 'none' : `$${limits.sessionBudget}`;
+  const daily =
+    s.policy.sessionBudgetAtomic === null
+      ? limits.sessionBudget
+      : `daily budget $${limits.sessionBudget} shared across chats`;
   const spend = [
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; 24-hour budget ${daily}`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; ${daily}`,
     ...(s.spendAsk !== undefined
       ? [
           `  Ask the person in this session: ${s.spendAsk.question}`,

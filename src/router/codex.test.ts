@@ -675,6 +675,12 @@ describe('Codex install, uninstall and doctor', () => {
     const out = await runCodexInstall({ maxAutoSpend: '0.5', sessionBudget: 'none' }, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
     expect(config).toMatchObject({ maxAutoSpend: '500000', sessionBudget: 'none' });
+    expect(out.humanLines).toContain(
+      'Automatic router: up to $0.5 per call; no daily budget limit',
+    );
+    expect(out.data).toMatchObject({
+      spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
+    });
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 

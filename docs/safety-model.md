@@ -43,7 +43,7 @@ After policy confirmation and immediately before signing, the actual signer's US
 
 ## Secret redaction
 
-Every router packet is masked before it leaves the machine: provider token shapes, private keys in and out of PEM framing, connection URIs with an embedded password, BIP-39 recovery phrases, and TOTP provisioning URIs. The rules live as data in `src/lib/redact-rules.json`, the one table every redaction surface in the CLI reads. A finding never carries the matched secret: it is a detector id, a tier, offsets, and a masked excerpt.
+Every router packet is masked before it leaves the machine: provider token shapes, private keys in and out of PEM framing, connection URIs with an embedded password, BIP-39 recovery phrases, and TOTP provisioning URIs. The rules live as data in `src/lib/redact-rules.json`, the one table the CLI's redaction reads. A mask never keeps the matched secret: each match is replaced by a type marker and a redaction count.
 
 ## Permission boundaries
 
