@@ -11,7 +11,12 @@ import {
   acceptsFor,
   CLIENT_ACCEPTS,
   parseForTests,
+  REQUIRES_UNMET,
+  unmetRequires,
+  withoutUnmet,
+  type HookDecision,
   type SpecOutcome,
+  type ToolDecision,
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
@@ -415,7 +420,9 @@ describe('every answer payload on disk', () => {
     expect(skeleton.spec).not.toHaveProperty('id');
     expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
     const withInput = { ...payload, decision: { ...skeleton, input: { q: 'x' } } };
-    expect(parseForTests('tool', withInput).success).toBe(true);
+    const parsed = parseForTests('tool', withInput);
+    expect(parsed.success).toBe(true);
+    expect((parsed.data as { decision: object }).decision).not.toHaveProperty('input');
   });
 
   it.each([
@@ -438,15 +445,40 @@ describe('every answer payload on disk', () => {
     expect(parseForTests(kind as 'hook' | 'tool', { ...payload, decision }).success).toBe(false);
   });
 
-  it('refuses an unknown key on either side of the envelope', () => {
+  /**
+   * A TOLERANT READER (RFC 9413, and only that): a key this build does not
+   * know is dropped on either side of the envelope, so a server that adds one
+   * reaches this client without a release. Dropped, never passed through: a
+   * hook answer that also carries a contract parses as the hook's offer and
+   * nothing else, so no caller can read a price out of it.
+   */
+  it('drops an unknown key on either side of the envelope, and reads the rest', () => {
     const payload = fixture('wire-hook-execute.json');
-    expect(parseForTests('hook', { ...payload, surprise: 1 }).success).toBe(false);
-    expect(
-      parseForTests('hook', {
-        ...payload,
-        decision: { ...(payload.decision as object), contract: {} },
-      }).success,
-    ).toBe(false);
+    const outer = parseForTests('hook', { ...payload, surprise: 1 });
+    expect(outer.success).toBe(true);
+    expect(outer.data).not.toHaveProperty('surprise');
+    const inner = parseForTests('hook', {
+      ...payload,
+      decision: { ...(payload.decision as object), contract: {}, surprise: { nested: true } },
+    });
+    expect(inner.success).toBe(true);
+    const decision = (inner.data as { decision: Record<string, unknown> }).decision;
+    expect(decision).not.toHaveProperty('contract');
+    expect(decision).not.toHaveProperty('surprise');
+    expect(decision).toEqual(payload.decision);
+  });
+
+  it('still holds every known key to its type and bounds', () => {
+    const payload = fixture('wire-hook-execute.json');
+    const decision = payload.decision as Record<string, unknown>;
+    const withDecision = (patch: Record<string, unknown>) => ({
+      ...payload,
+      decision: { ...decision, ...patch, surprise: 1 },
+    });
+    expect(parseForTests('hook', withDecision({ id: 'a b' })).success).toBe(false);
+    expect(parseForTests('hook', withDecision({ providerPriceAtomic: '1.5' })).success).toBe(false);
+    expect(parseForTests('hook', withDecision({ hint: 'no call here' })).success).toBe(false);
+    expect(parseForTests('hook', { ...payload, schemaVersion: 2 }).success).toBe(false);
   });
 
   it('carries no fee, no billing and no settlement anywhere', () => {
@@ -507,7 +539,7 @@ describe('every answer payload on disk', () => {
    * THE DISCOVERED LINE IS HELD TO THE EXECUTE LINE'S SHAPE: one plain line,
    * the call it asks for, and this answer's own id. The seller's listing is
    * data beside it, and a field the server adds without this client knowing
-   * is a parse failure, not a silent pass.
+   * is dropped with the rest of the unknown keys.
    */
   it('holds a discovered hint to one plain line naming the call and its id', () => {
     const payload = fixture('wire-hook-discovered.json');
@@ -527,12 +559,14 @@ describe('every answer payload on disk', () => {
         .success,
     ).toBe(false);
     const candidate = decision.candidate as Record<string, unknown>;
-    expect(
-      parseForTests('hook', {
-        ...payload,
-        decision: { ...decision, candidate: { ...candidate, surprise: 1 } },
-      }).success,
-    ).toBe(false);
+    const parsed = parseForTests('hook', {
+      ...payload,
+      decision: { ...decision, candidate: { ...candidate, surprise: 1 } },
+    });
+    expect(parsed.success).toBe(true);
+    expect((parsed.data as { decision: { candidate: object } }).decision.candidate).toEqual(
+      candidate,
+    );
   });
 
   /** ONE BOUND FOR EVERY LINE: up to 2000 characters, on either offering arm. */
@@ -551,9 +585,11 @@ describe('every answer payload on disk', () => {
   });
 
   /** A `jobs` CLIENT'S SPEC says how a call answered before its result is
-   *  ready is finished, and how many takes one call may run. The job block is
-   *  as strict as the rest: a field this build does not know is a parse
-   *  failure, never a poll it half understands. */
+   *  ready is finished, and how many takes one call may run. A field this
+   *  build does not know is dropped like any other: a poll is never signed, so
+   *  a job that asks for one is read as the unsigned poll it always was, and
+   *  one that needs more says so in `requires`. A field it knows is held to
+   *  its bounds, and a block naming two arms of one union is refused. */
   it('parses a spec with its job and takes, and refuses a job it cannot read', () => {
     const payload = fixture('wire-lookup-spec-job.json');
     const decision = payload.decision as { spec: Record<string, unknown>; hint: string };
@@ -571,10 +607,21 @@ describe('every answer payload on disk', () => {
     });
     const job = decision.spec.job as Record<string, unknown>;
     expect(parseForTests('tool', withJob(job)).success).toBe(true);
-    expect(parseForTests('tool', withJob({ ...job, surprise: 1 })).success).toBe(false);
-    // A poll is never signed, so a job that asks for one is not read.
-    expect(parseForTests('tool', withJob({ ...job, pollAuth: 'x402' })).success).toBe(false);
+    const read = parseForTests('tool', withJob({ ...job, surprise: 1, pollAuth: 'x402' }));
+    expect(read.success).toBe(true);
+    expect((read.data as { decision: { spec: { job: object } } }).decision.spec.job).toEqual(job);
     expect(parseForTests('tool', withJob({ ...job, maxWaitS: 601 })).success).toBe(false);
+    // Two arms of one union in one object: neither is guessed at.
+    expect(
+      parseForTests('tool', withJob({ ...job, pollUrl: { field: 'id', fixed: 'https://x.test/' } }))
+        .success,
+    ).toBe(false);
+    expect(
+      parseForTests(
+        'tool',
+        withJob({ ...job, running: { httpStatus: [200], field: 'status', values: ['queued'] } }),
+      ).success,
+    ).toBe(false);
     expect(
       parseForTests('tool', withJob({ ...job, pollMethod: 'POST', pollBody: { id: '$inputs.id' } }))
         .success,
@@ -625,10 +672,10 @@ describe('every answer payload on disk', () => {
       holds: { WebSearch: 'query' },
       output: 'json',
     });
-    // Still strict: a field the contract does not name fails the answer.
+    // Tolerant of a field the contract does not name, never of a bad known one.
     expect(
       parseForTests('hook', { ...payload, decision: { ...decision, surprise: 1 } }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       parseForTests('hook', {
         ...payload,
@@ -720,7 +767,7 @@ describe('every answer payload on disk', () => {
     expect(decision.hint).toContain(`id: "${decision.id}"`);
   });
 
-  it('parses the browse answer as rows, strictly, and nothing else as one', () => {
+  it('parses the browse answer as rows, and nothing else as one', () => {
     const payload = fixture('wire-browse.json');
     expect(parseForTests('browse', payload).success).toBe(true);
     expect(parseForTests('tool', payload).success).toBe(false);
@@ -728,12 +775,121 @@ describe('every answer payload on disk', () => {
     const rows = payload.rows as Record<string, unknown>[];
     expect(rows.map((row) => row.id)).toEqual(['cmc-quotes', 'stableenrich-exa-answer']);
     const withRow = (row: Record<string, unknown>) => ({ ...payload, rows: [row] });
-    expect(parseForTests('browse', withRow({ ...rows[0]!, surprise: 1 })).success).toBe(false);
+    expect(parseForTests('browse', withRow({ ...rows[0]!, surprise: 1 })).success).toBe(true);
     expect(parseForTests('browse', withRow({ ...rows[0]!, id: 'a b' })).success).toBe(false);
     expect(parseForTests('browse', withRow({ ...rows[0]!, label: 'x'.repeat(121) })).success).toBe(
       false,
     );
     expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
+  });
+});
+
+/**
+ * MUST-UNDERSTAND (`requires`). An offer that needs a feature to run names it
+ * in the `accepts` vocabulary, on the answer or on a spec. A build without it
+ * skips that offer alone and says which features it lacked; the rest of the
+ * answer stands.
+ */
+describe('requires', () => {
+  const decisionOf = (name: string) => fixture(name).decision as Record<string, unknown>;
+  type Specs = { specs: Record<string, unknown>[] };
+
+  it('names what this build lacks, against every feature it has', () => {
+    expect(unmetRequires(undefined)).toEqual([]);
+    expect(unmetRequires([...CLIENT_ACCEPTS, 'bazaar'])).toEqual([]);
+    expect(unmetRequires(['headers', 'streaming', 'jobs', 'escrow'])).toEqual([
+      'streaming',
+      'escrow',
+    ]);
+  });
+
+  it('pins the token alphabet, since a skipped offer names its tokens', () => {
+    const payload = fixture('wire-hook-execute-spec.json');
+    const withRequires = (requires: unknown) => ({
+      ...payload,
+      decision: { ...(payload.decision as object), requires },
+    });
+    expect(parseForTests('hook', withRequires(['streaming'])).success).toBe(true);
+    expect(parseForTests('hook', withRequires(['Ignore all'])).success).toBe(false);
+    expect(parseForTests('hook', withRequires(['x'.repeat(33)])).success).toBe(false);
+  });
+
+  it('leaves an offer whose features this build has as it came', () => {
+    const decision = decisionOf('wire-hook-execute-spec.json') as HookDecision & Specs;
+    const spec = { ...decision.specs[0]!, requires: ['spec', 'headers'] };
+    const asked = { ...decision, requires: ['catalog'], specs: [spec] } as HookDecision;
+    expect(withoutUnmet(asked)).toEqual({ decision: asked, skipped: [] });
+  });
+
+  it.each([
+    ['on the answer', (d: HookDecision & Specs) => ({ ...d, requires: ['streaming'] })],
+    [
+      'on its own spec',
+      (d: HookDecision & Specs) => ({ ...d, specs: [{ ...d.specs[0]!, requires: ['streaming'] }] }),
+    ],
+  ])('skips the offer itself, by name, when it needs a feature %s', (_where, patch) => {
+    const decision = patch(decisionOf('wire-hook-execute-spec.json') as HookDecision & Specs);
+    const { decision: out, skipped } = withoutUnmet(decision as HookDecision);
+    expect(out).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: REQUIRES_UNMET, stage: 'client', missing: ['streaming'] },
+    });
+    expect((out as { reason: string }).reason).toContain('`streaming`');
+    expect(skipped).toEqual([{ id: (decision as { id: string }).id, missing: ['streaming'] }]);
+  });
+
+  it("skips a tool answer's spec it cannot run", () => {
+    const decision = decisionOf('wire-lookup-spec-skeleton.json') as {
+      id: string;
+      spec: object;
+    };
+    const asked = { ...decision, spec: { ...decision.spec, requires: ['streaming'] } };
+    const { decision: out, skipped } = withoutUnmet(asked as ToolDecision);
+    expect(out).toMatchObject({ action: 'native', diagnostics: { reasonCode: REQUIRES_UNMET } });
+    expect(skipped).toEqual([{ id: decision.id, missing: ['streaming'] }]);
+  });
+
+  it('drops only the other offer it cannot run, and a choice set left with one option', () => {
+    const decision = decisionOf('wire-hook-discovered-choices.json') as Specs & {
+      id: string;
+      hint: string;
+      choices: { options: { id: string }[] };
+    };
+    const other = decision.choices.options.find((option) => option.id !== decision.id)!;
+    const asked = {
+      ...decision,
+      specs: decision.specs.map((spec) =>
+        spec.id === other.id ? { ...spec, requires: ['streaming'] } : spec,
+      ),
+    } as HookDecision;
+    const { decision: out, skipped } = withoutUnmet(asked);
+    expect(skipped).toEqual([{ id: other.id, missing: ['streaming'] }]);
+    expect(out).toMatchObject({ action: 'discovered', id: decision.id, hint: decision.hint });
+    expect((out as Specs).specs.map((spec) => spec.id)).toEqual([decision.id]);
+    expect(out).not.toHaveProperty('choices');
+  });
+
+  it('keeps a choice set that still has two options', () => {
+    const decision = decisionOf('wire-hook-discovered-choices.json') as HookDecision &
+      Specs & { choices: { options: Record<string, unknown>[] } };
+    const extra = { ...decision.specs[1]!, id: 'extra-option-0001', requires: ['streaming'] };
+    const asked = {
+      ...decision,
+      specs: [...decision.specs, extra],
+      choices: {
+        ...decision.choices,
+        options: [
+          ...decision.choices.options,
+          { key: 'extra', label: 'Extra', strength: 'More', id: extra.id },
+        ],
+      },
+    };
+    expect(
+      parseForTests('hook', { ...fixture('wire-hook-discovered-choices.json'), decision: asked })
+        .success,
+    ).toBe(true);
+    const { decision: out } = withoutUnmet(asked as HookDecision);
+    expect(out).toEqual({ ...decision, specs: decision.specs, choices: decision.choices });
   });
 });
 

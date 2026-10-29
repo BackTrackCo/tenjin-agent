@@ -2613,7 +2613,9 @@ describe('the tool list, read for free', () => {
   });
 
   it('reads an answer it cannot parse as a failure, with nothing paid', async () => {
-    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: { ...BROWSE, surprise: 1 } }]);
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: { ...BROWSE, schemaVersion: 2 } },
+    ]);
     const result = await runRequestTool({ browse: 'prices' }, deps(fetchImpl));
     expect(result).toMatchObject({
       isError: true,
@@ -2662,6 +2664,26 @@ describe('the tool list, read for free', () => {
       capabilityId: 'cmc-quotes',
       label: 'CoinMarketCap quotes',
     });
+  });
+
+  it('skips a spec that needs a feature this build lacks, by name, and keeps nothing', async () => {
+    const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
+    const served = {
+      ...BY_ID,
+      decision: { ...decision, spec: { ...decision.spec, requires: ['streaming'] } },
+    };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: served }]);
+    const result = await runRequestTool({ tool: 'cmc-quotes' }, deps(fetchImpl));
+    expect(result).toMatchObject({
+      isError: false,
+      envelope: { status: 'native', reasonCode: 'requires_unmet', missing: ['streaming'] },
+    });
+    expect(result.summary).toContain('`streaming`');
+    const ran = await runRequestTool(
+      { id: decision.id, input: { symbol: 'BTC' } },
+      deps(net([]).fetchImpl),
+    );
+    expect(ran.envelope).toMatchObject({ status: 'needs_input' });
   });
 
   it("passes on the server's needs_input for a row with no spec, and keeps nothing", async () => {

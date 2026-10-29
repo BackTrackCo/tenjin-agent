@@ -267,12 +267,14 @@ describe('one free decision', () => {
   });
 
   /**
-   * STRICT, so a field in the wrong place fails loudly rather than being
-   * dropped into a shape check that then blames the whole response. Diagnostics
-   * nested one level deeper than the client expected shipped three times.
+   * TOLERANT OF WHAT IT DOES NOT KNOW, NEVER OF A KNOWN FIELD MISSING. A field
+   * in the wrong place is dropped as unknown, and the answer then lacks the
+   * field it needs, so it fails by name. Diagnostics nested one level deeper
+   * than the client expected shipped three times.
    */
-  it('refuses a body with a field in the wrong place', async () => {
-    const { fetchImpl } = net({ ...NATIVE, action: 'native' });
+  it('refuses a body with a required field in the wrong place', async () => {
+    const { diagnostics, ...decision } = NATIVE.decision;
+    const { fetchImpl } = net({ ...NATIVE, decision: { ...decision, detail: { diagnostics } } });
     const outcome = await requestDecision(
       'hook',
       { packet: packetForText('q') },
