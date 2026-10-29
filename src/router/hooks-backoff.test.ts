@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runHookKind } from './hook-command';
@@ -88,9 +90,9 @@ function socketError(code: string): TypeError {
 /** A fetch that answers only when its signal aborts, as a slow router does. */
 const hangs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
   new Promise<Response>((_resolve, reject) => {
-    new Request(input, init).signal.addEventListener('abort', () =>
-      reject(new DOMException('The operation was aborted.', 'AbortError')),
-    );
+    const signal = init?.signal ?? new Request(input, init).signal;
+    if (signal.aborted) return reject(signal.reason);
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   })) as typeof fetch;
 
 const prompt = () => ({
@@ -166,6 +168,12 @@ describe('the routing legs back off a router they cannot reach', () => {
         throw socketError('ECONNREFUSED');
       }
       secondStarted();
+      // A copied Request signal can be collected before the budget aborts.
+      // Exercise the same GC case as the paid-fetch fixture in hooks-fee.
+      setTimeout(() => {
+        setFlagsFromString('--expose-gc');
+        (runInNewContext('gc') as () => void)();
+      }, 50);
       return hangs(input, init);
     }) as typeof fetch;
     await Promise.all([

@@ -256,6 +256,31 @@ describe('runPay, tenjin lane', () => {
     expect(authorizer.authorize).not.toHaveBeenCalled();
   });
 
+  it.each(['0', '100000'])(
+    'never opens a wallet for a free lookup that answers 402 with amount %s',
+    async (amount) => {
+      const fixture = buildPaymentRequired({ amount });
+      const { fetch, calls } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      ]);
+      const provider = testWalletProvider();
+      const getSigner = vi.fn(async () => {
+        throw new Error('a free lookup must not open a wallet');
+      });
+      const authorizer = fakeAuthorizer('allow');
+      await expect(
+        runPay(
+          { url: TENJIN_URL, terms: { source: 'free docs', maxAmountAtomic: '0' }, admit: planned },
+          makeCtx(),
+          { ...PUBLIC_DNS, fetchImpl: fetch, provider: { ...provider, getSigner }, authorizer },
+        ),
+      ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH', details: { status: 402 } });
+      expect(calls).toHaveLength(1);
+      expect(getSigner).not.toHaveBeenCalled();
+      expect(authorizer.authorize).not.toHaveBeenCalled();
+    },
+  );
+
   it('never attaches SIWX or session credentials', async () => {
     const fixture = buildPaymentRequired();
     const { fetch, calls } = scriptedFetch([
@@ -592,6 +617,37 @@ function siwxFixture(
 }
 
 describe('runPay, the sign-in-with-x extension', () => {
+  it.each(['execute', 'quote'] as const)(
+    'preserves zero-price x402 sign-in during %s without authorizing payment',
+    async (action) => {
+      const { fetch, calls } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '0').header }),
+        json(200, { answer: 'yours already' }),
+      ]);
+      const admit = vi.fn(planned);
+      const terms = {
+        source: 'router',
+        maxAmountAtomic: '0',
+        payTo: LIVE_ACCEPT.payTo,
+        network: LIVE_ACCEPT.network,
+        asset: LIVE_ACCEPT.asset,
+      };
+      const authorizer = fakeAuthorizer('allow');
+      const deps = { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer };
+      if (action === 'quote') {
+        expect(await quoteRouterCall({ url: TENJIN_URL, terms }, makeCtx(), deps)).toBe(0n);
+      } else {
+        const result = await runPay({ url: TENJIN_URL, terms, admit }, makeCtx(), deps);
+        expect(result.data).toMatchObject({ paid: false, entitled: true });
+      }
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.headers['sign-in-with-x']).toBeDefined();
+      expect(calls.every((call) => call.headers['payment-signature'] === undefined)).toBe(true);
+      expect(admit).not.toHaveBeenCalled();
+      expect(authorizer.authorize).not.toHaveBeenCalled();
+    },
+  );
+
   it('an entitled wallet re-reads free, with the signature bound to the target host', async () => {
     const fixture = siwxFixture(TENJIN_URL);
     const { fetch, calls } = scriptedFetch([

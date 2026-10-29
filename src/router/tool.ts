@@ -153,7 +153,7 @@ import {
  */
 
 export interface RequestToolArgs {
-  /** Optional only beside `input`. */
+  /** The task to route, or the lookup for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
    *  it grants nothing locally, every cap still applies. */
@@ -169,8 +169,8 @@ export interface RequestToolArgs {
   /** A free browse of the tool list: the need in a few words, or `""` for
    *  every tool by kind. Sent alone; nothing is paid. */
   browse?: string;
-  /** A browse row's id: that tool's spec, kept under a fresh offer id for
-   *  `{id, input}` to run. Sent alone; nothing is paid. */
+  /** A browse row's id: alone, its spec for `{id, input}`; with a query,
+   *  an explicitly selected free lookup, without paid routing. */
   tool?: string;
   /** Several takes of one media call, 2 to 5, each its own payment, where the
    *  spec allows them. The whole set meets the spend policy before any is
@@ -458,7 +458,16 @@ async function requestTool(
   // user marked private: nothing is sent and nothing is paid.
   const off = await routerOff(deps);
   if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  if (args.browse !== undefined || args.tool !== undefined) return readToolList(args, deps);
+  if (args.browse !== undefined || (args.tool !== undefined && args.query === undefined))
+    return readToolList(args, deps);
+  if (args.tool !== undefined) {
+    if (args.tool.trim().length === 0 || args.tool.trim().length > 200)
+      return fail('needs_input', '`tool` takes a row id from request({browse}).');
+    if ((['id', 'input', 'choice', 'count', 'job'] as const).some((key) => args[key] !== undefined))
+      return fail('needs_input', 'A selected free lookup takes only its tool id and query.');
+    if (mask(args.tool) !== args.tool)
+      return fail('native', 'the tool id carries a credential-shaped value, so nothing was sent');
+  }
   // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
   // its record, with nothing built and nothing paid.
   if (args.job !== undefined && args.job.length > 0) {
@@ -526,6 +535,8 @@ async function requestTool(
   }
   const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0 && input === undefined) {
+    if (args.tool !== undefined)
+      return fail('needs_input', 'Include what to look up in request({tool, query}).');
     return fail(
       'needs_input',
       id !== undefined
@@ -622,7 +633,8 @@ async function requestTool(
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
   // ON THE PAID PATH the payer pays the routing fee with the stock x402
-  // client, and a call it cannot pay takes the free path.
+  // client, and a call it cannot pay takes the free path. Explicit selected
+  // free lookups bypass ask() and bind through requestToolSpec below.
   const ask = async () => {
     const route = (await deps.route?.(settings.baseUrl)) ?? null;
     const outcome = await requestDecision(
@@ -632,12 +644,16 @@ async function requestTool(
     );
     return { route, outcome };
   };
-  const first = await ask();
+  const first =
+    args.tool !== undefined
+      ? { route: null, outcome: await requestToolSpec(args.tool.trim(), decisionDeps, query) }
+      : await ask();
   let fresh = first.outcome;
   // The machine's "no paid path" memo sent this call to the free path, which
   // now asks for the fee: the memo is stale, so ask once more on the paid path.
   if (
     deps.route !== undefined &&
+    args.tool === undefined &&
     first.route === null &&
     fresh.status === 'decided' &&
     isFeeRequired(fresh.decision)
@@ -662,6 +678,32 @@ async function requestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  if (
+    args.tool !== undefined &&
+    decision.action !== 'native' &&
+    decision.action !== 'needs_input' &&
+    (decision.action !== 'execute' ||
+      decision.capabilityId !== args.tool.trim() ||
+      BigInt(decision.providerPriceAtomic) !== 0n)
+  ) {
+    await footer.done('failed');
+    return fail(
+      'failed',
+      'The answer is not a runnable free lookup for the selected tool. Nothing was sent to a provider or paid.',
+      {
+        nextStep: 'Use your own tools for this lookup.',
+        ...(note !== undefined ? { note } : {}),
+      },
+    );
+  }
+
+  if (args.tool !== undefined && isFeeRequired(fresh.decision)) {
+    await footer.done('needs_input');
+    return fail('needs_input', 'This router does not support the selected free lookup.', {
+      nextStep: 'Use your own tools for this lookup. Nothing was paid.',
+    });
+  }
 
   // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
   // which is wrong for this one: what stops routing here is a routing fee this
@@ -782,8 +824,8 @@ async function requestTool(
  * and keeps it under the fresh offer id the server minted, so `{id, input}`
  * runs it exactly as it runs a hook's offer. Neither is a lookup: no gate call,
  * no routing fee, nothing paid, and the hooks' per-lookup routing is unchanged.
- * Each form is sent alone, and the credential rule every other call follows
- * applies to its words.
+ * This handles the list and spec reads; selected `{tool, query}` lookups run
+ * above. The credential rule every other call follows applies to their words.
  */
 async function readToolList(
   args: RequestToolArgs,
@@ -795,7 +837,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      "`browse` and `tool` are each sent alone: browse the list, then call request({tool}) with one row's id.",
+      'Browse with request({browse}), inspect with request({tool}), or run free docs with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
@@ -856,7 +898,7 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
 function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
     'Call request({tool: "<id>"}) for a tool\'s spec and the call that runs it, free. ' +
-    'A free row with no spec runs from request({query}).';
+    'Free docs run from request({tool: "<id>", query: "<what to look up>"}) without a routing fee.';
   if (rows.length === 0) {
     return {
       isError: false,

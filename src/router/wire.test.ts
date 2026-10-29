@@ -228,6 +228,17 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  it('keeps the selected free tool beside its query, byte for byte', () => {
+    const canonical = fixture('wire-tool-request-free-query.json');
+    expect(
+      buildToolSpecBody({
+        tool: canonical.tool as string,
+        query: canonical.query as string,
+        accepts: canonical.accepts as string[],
+      }),
+    ).toEqual(canonical);
+  });
+
   it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
     const canonical = fixture('wire-outcome-request.json');
     expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
@@ -292,7 +303,12 @@ describe('the request bodies', () => {
       // A browse row's id is its own form; every other tool request is a query.
       const body =
         typeof canonical.tool === 'string'
-          ? buildToolSpecBody({ tool: canonical.tool, accepts, harness: 'claude' })
+          ? buildToolSpecBody({
+              tool: canonical.tool,
+              ...(typeof canonical.query === 'string' ? { query: canonical.query } : {}),
+              accepts,
+              harness: 'claude',
+            })
           : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }

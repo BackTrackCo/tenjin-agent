@@ -93,9 +93,9 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
-  'route is free, or a flat $0.003 routing fee; a wallet on ' +
-  'THIS machine pays it and the provider under the local spend ' +
+  'Run free docs with `{tool: "<row id>", query: "<what to look up>"}`; it needs no funds or routing fee. ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs $0.003 per call, ` +
+  'separate from provider charges; a wallet on THIS machine pays them under the local spend ' +
   'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin wallet fund` ' +
@@ -266,7 +266,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .describe(
             `${SCOPE_RULE} Carry the inputs and constraints your task gives for that lookup, ` +
               'and nothing else. Send this for a task no line offered, or with an id when the ' +
-              'line asks for a query; an offer that has a spec takes `input` instead.',
+              'line asks for a query; send it with `tool` to run a selected free tool. An offer that has a spec takes `input` instead.',
           ),
         id: z
           .string()
@@ -303,8 +303,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Sent alone: a row's id from `browse`. Returns that tool's spec under a fresh id, " +
-              'which `{id, input}` then runs. Free.',
+            "A row's id from `browse`. Alone, returns its spec under a fresh id for `{id, input}`. " +
+              'With `query`, runs that selected free tool without a routing fee. Paid tools take their spec, not a query.',
           ),
         count: z
           .number()
