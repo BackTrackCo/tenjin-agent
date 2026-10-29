@@ -55,11 +55,11 @@
             "type": "boolean"
           },
           "slug": {
-            "description": "One or more comma-separated cryptocurrency slugs. Example: \"bitcoin,ethereum\".",
+            "description": "One or more comma-separated cryptocurrency slugs. Example: \"bitcoin,ethereum\". A slug names exactly one coin, unlike a symbol.",
             "type": "string"
           },
           "symbol": {
-            "description": "One or more comma-separated cryptocurrency symbols. Example: \"BTC,ETH\".",
+            "description": "One or more comma-separated cryptocurrency symbols. Example: \"BTC,ETH\". A symbol can name several coins: each comes back as a list of every coin using it, inactive ones included, so read the entry with is_active 1 and the lowest cmc_rank, or pass slug or id to name one coin.",
             "type": "string"
           }
         },

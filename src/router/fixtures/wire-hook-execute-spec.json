@@ -47,9 +47,8 @@
             },
             "type": {
               "type": "string",
-              "enum": ["lite", "auto"],
-              "default": "lite",
-              "description": "Search tier, the agent's choice per task: lite ($0.004) is Exa 3.0's cost tier on the same index as auto and found the same answers on single-shot factual questions in 586 ms median, so it is the default; auto ($0.007) spends more compute per query for hard or ambiguous research; fast and instant are retired, and the deep tiers price above this listing"
+              "enum": ["auto", "fast", "instant"],
+              "description": "Search mode: auto (the default) balances quality and speed, fast and instant trade depth for speed"
             },
             "category": {
               "type": "string",
@@ -101,7 +100,7 @@
         "example": {
           "numResults": 10,
           "query": "example search query",
-          "type": "lite"
+          "type": "auto"
         },
         "returns": "JSON {results:[{title, url, publishedDate, highlights[]}]}: up to numResults pages, each with about 500 characters of highlights, not the full text",
         "returnsExample": {

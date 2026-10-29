@@ -30,10 +30,10 @@ import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
 import { MAX_BINARY_BODY_BYTES } from '../lib/http';
 
 /**
- * The wire, pinned to bytes. These payloads are the SHARED ones: the same
- * shapes live beside tenjin's `lib/x402-router/`, which parses them with the
- * schemas this client writes against, so a rename on either side fails a test
- * in both repos instead of 400ing a lookup in production.
+ * The wire, pinned to bytes. These payloads are the canonical set: tenjin's
+ * `lib/x402-router/` parses the same files with the schemas it writes
+ * against, so a rename on either side fails a test in both repos instead of
+ * 400ing a lookup in production.
  *
  * THEY ARE READ FROM THE DIRECTORY, never from a hand-written import list. A
  * payload the canonical set gains and a list never names is how a nested field
