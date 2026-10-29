@@ -3045,7 +3045,7 @@ describe('a discovered service', () => {
     const entry = (n: number, provider: string, usd: string, id: string) =>
       `${n}) ${provider} (finds a work email), POST https://${provider.toLowerCase()}.test/x , ` +
       `about $${usd} per call. Input: {name: string}. To use it, call request({id: "${id}", input: {...}}).`;
-    const list = (second: string, alternative = '') => ({
+    const list = (second: string) => ({
       ...DISCOVERED,
       decision: {
         ...DISCOVERED.decision,
@@ -3053,7 +3053,7 @@ describe('a discovered service', () => {
         hint:
           'Tenjin router found pay-per-call services for this step, no API key needed: ' +
           `${entry(1, 'OneShot', '0.005', ID)} ${entry(2, 'PDL', second, '04d63d65-cdbb-4a30')} ` +
-          `Tenjin reviewed these listings. Use your judgement: pick one.${alternative}`,
+          'Tenjin reviewed these listings. Use your judgement: pick one.',
       },
     });
     const shown = async (body: unknown): Promise<string> => {
@@ -3066,30 +3066,10 @@ describe('a discovered service', () => {
         .hookSpecificOutput.additionalContext;
     };
 
-    it('says which price is over the limit and to prefer one within it', async () => {
-      expect(await shown(list('0.28'))).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit\.$/,
-      );
-    });
-
-    it('adds nothing when every listed service fits', async () => {
-      expect(await shown(list('0.03'))).not.toContain('Note:');
-    });
-
-    /** The server writes a curated alternative's price plain ("$0.30"), not
-     *  "about $0.30"; a dollar amount inside quotes is a seller's or the
-     *  user's words, never a price. */
-    it("reads a curated alternative's plain price, and never a quoted amount", async () => {
-      const curated =
-        " Alternative from Tenjin's catalog: Hunter (finds a work email, $0.30): " +
-        'request({query: <name and company>, id: "k3f9-abcd"}).';
-      expect(await shown(list('0.03', curated))).toMatch(
-        / Note: \$0\.30 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
-      );
-      const seller =
-        ' Alternative from Coinbase\'s Bazaar (unreviewed): "Pricey" (its listing says ' +
-        '"plans from $500 a month"), about $0.03: request({id: "x-1", input: {...}})';
-      expect(await shown(list('0.03', seller))).not.toContain('Note:');
+    /** PRICES ARE FIELDS, NEVER PROSE: an offer that carries no specs gets no
+     *  note, whatever dollar amounts its line quotes. */
+    it('reads no price out of the line itself', async () => {
+      expect(await shown(list('0.28'))).not.toContain('Note:');
     });
 
     /** WITH SPECS THE FIELDS SAY IT: each other service's `priceAtomic`,
@@ -3124,29 +3104,6 @@ describe('a discovered service', () => {
         / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
       );
       expect(await shown(offered('30000', 'about $0.28 per call'))).not.toContain('Note:');
-    });
-
-    /** A Tenjin list entry's or curated alternative's description is prose,
-     *  unquoted: a dollar amount in it is the service's words, not its price. */
-    it('never reads a dollar amount in an unquoted description as a price', async () => {
-      const described = (body: ReturnType<typeof list>) => ({
-        ...body,
-        decision: {
-          ...body.decision,
-          hint: body.decision.hint.replaceAll(
-            '(finds a work email)',
-            '(finds a work email; seats elsewhere from $500/month)',
-          ),
-        },
-      });
-      const curated =
-        " Alternative from Tenjin's catalog: Hunter (finds a work email, plans from $1000 a year, $0.03): " +
-        'request({query: <name and company>, id: "k3f9-abcd"}).';
-      expect(await shown(described(list('0.03', curated)))).not.toContain('Note:');
-      const over = await shown(described(list('0.28', curated)));
-      expect(over).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
-      );
     });
   });
 

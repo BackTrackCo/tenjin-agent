@@ -10,6 +10,7 @@ import {
   buildToolSpecBody,
   acceptsFor,
   CLIENT_ACCEPTS,
+  MAX_SPEC_TIMEOUT_S,
   parseForTests,
   REQUIRES_UNMET,
   unmetRequires,
@@ -25,6 +26,8 @@ import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { STDIN_TIMEOUT_MS } from './hook-command';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
+import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
+import { MAX_BINARY_BODY_BYTES } from '../lib/http';
 
 /**
  * The wire, pinned to bytes. These payloads are the SHARED ones: the same
@@ -632,6 +635,30 @@ describe('every answer payload on disk', () => {
         decision: { ...decision, spec: { ...decision.spec, takes: { max: 6 } } },
       }).success,
     ).toBe(false);
+  });
+
+  /** A SPEC'S OWN LIMITS: a deadline in seconds no longer than the paid
+   *  leg's ceiling, and a file cap no larger than the one every call had. */
+  it("bounds a spec's timeoutS and maxBytes", () => {
+    expect(MAX_SPEC_TIMEOUT_S * 1000).toBe(MAX_PAID_LEG_TIMEOUT_MS);
+    const payload = fixture('wire-lookup-spec-skeleton.json');
+    const decision = payload.decision as { spec: Record<string, unknown> };
+    const withSpec = (patch: Record<string, unknown>) => ({
+      ...payload,
+      decision: { ...decision, spec: { ...decision.spec, ...patch } },
+    });
+    expect(parseForTests('tool', withSpec({ timeoutS: 60, maxBytes: 1_048_576 })).success).toBe(
+      true,
+    );
+    for (const bad of [
+      { timeoutS: 0 },
+      { timeoutS: MAX_SPEC_TIMEOUT_S + 1 },
+      { timeoutS: 1.5 },
+      { maxBytes: 0 },
+      { maxBytes: MAX_BINARY_BODY_BYTES + 1 },
+    ]) {
+      expect(parseForTests('tool', withSpec(bad)).success, JSON.stringify(bad)).toBe(false);
+    }
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {

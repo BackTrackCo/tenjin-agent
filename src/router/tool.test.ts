@@ -1212,6 +1212,29 @@ describe('a discovered service', () => {
     expect(new Uint8Array(await readFile(savedTo))).toEqual(audio);
   });
 
+  /** A SPEC'S FILE CAP holds the body it brings back: one over it is not kept. */
+  it("keeps no binary body over the spec's own maxBytes", async () => {
+    await kept({ maxBytes: 4 });
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0xff, 0xfb, 0x90]);
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: null,
+        raw: audio,
+        headers: { 'content-type': 'audio/mpeg' },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).not.toBe('fulfilled');
+    expect(String(result.envelope.reason)).toContain('over the 0 MB cap');
+    expect(await readdir(join(dir, 'downloads')).catch(() => [])).toEqual([]);
+  });
+
   /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
    *  (v2 or v1), never from what the seller wrote in its body. */
   it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(

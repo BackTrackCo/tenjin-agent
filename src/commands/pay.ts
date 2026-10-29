@@ -136,6 +136,12 @@ export interface PayArgs {
   quote?: boolean;
   /** The router's body, already encoded; sent byte for byte. Needs POST, PUT or PATCH. */
   rawBody?: string;
+  /** The provider's own deadline for each leg, from its spec, in place of
+   *  `--timeout`: the probe's, and the least the paid leg waits. */
+  timeoutMs?: number;
+  /** The largest binary body kept, from the provider's spec; absent, the
+   *  transport's own cap. */
+  maxBytes?: number;
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
@@ -265,8 +271,9 @@ async function executePay(
     ...callerHeaders(args.headers),
   };
 
+  const legTimeoutMs = args.timeoutMs ?? ctx.flags.timeout;
   const fetchOpts = {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: legTimeoutMs,
     // Both legs: the probe's 402 is money-path input, and the paid retry
     // carries a signed header (which pins redirects on its own; this pins the
     // probe too, so the challenge always comes from the URL that was gated).
@@ -277,6 +284,7 @@ async function executePay(
     // A router lookup can buy a file (a sound, an image): its bytes are kept
     // whole for the tool to save, never decoded as text.
     ...(router ? { binaryBody: true as const } : {}),
+    ...(args.maxBytes !== undefined ? { maxBinaryBytes: args.maxBytes } : {}),
     method,
   };
 
@@ -529,7 +537,7 @@ async function executePay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
-  const paidTimeoutMs = paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout);
+  const paidTimeoutMs = paidLegTimeoutMs(effectiveRequirement, legTimeoutMs);
   const paid = await httpRequest(url, {
     ...fetchOpts,
     timeoutMs: paidTimeoutMs,

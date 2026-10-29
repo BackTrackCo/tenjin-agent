@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { fetchFailureToCliError, httpRequest } from '../lib/http';
+import { fetchFailureToCliError, httpRequest, MAX_BINARY_BODY_BYTES } from '../lib/http';
 import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
@@ -270,6 +270,11 @@ export const JobSchema = z
   .refine((job) => !job.pollBody || job.pollMethod === 'POST', 'only a POST poll has a body');
 export type Job = z.infer<typeof JobSchema>;
 
+/** A spec's `timeoutS` ceiling: the paid leg's own (`MAX_PAID_LEG_TIMEOUT_MS`
+ *  in `commands/pay.ts`), so no spec can hold a call longer than a seller's
+ *  402 already may. */
+export const MAX_SPEC_TIMEOUT_S = 120;
+
 /**
  * A REQUEST SPEC: the offered service's real contract, sent beside the line only
  * because this build asks for it (`accepts: ["spec"]`). The hook stores it by
@@ -327,6 +332,13 @@ export const ToolSpecSchema = z.object({
   /** A media service that runs several takes of one call: `count` up to `max`. */
   takes: z.object({ max: z.number().int().min(2).max(5) }).optional(),
   requires: RequiresSchema,
+  /** The provider call's own deadline in seconds: the unpaid probe's, and
+   *  the least the paid leg waits. Absent, the CLI's `--timeout`. */
+  timeoutS: z.number().int().min(1).max(MAX_SPEC_TIMEOUT_S).optional(),
+  /** The largest file the call may bring back, in bytes: a binary result,
+   *  and each file a media result links to. Absent, and at most, the
+   *  {@link MAX_BINARY_BODY_BYTES} every call had. */
+  maxBytes: z.number().int().min(1).max(MAX_BINARY_BODY_BYTES).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 
