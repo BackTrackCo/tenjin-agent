@@ -1336,7 +1336,8 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
 /**
  * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: `canPayRouting`, the
  * verdict the payer and the hooks reach on the same facts, in TODAY'S words
- * (S5). Never a failure: a call the fee cannot pay takes the free path.
+ * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
+ * tools run.
  *
  * - ready: today's ok row, byte for byte;
  * - blocked by money or policy: today's `unpaid` detail, and today's fix
@@ -1478,8 +1479,8 @@ const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
  *
  * Exit codes keep their meaning (S11): no wallet, a wallet.json `describe`
  * cannot read, and an invalid TENJIN_WALLET_KEY fail as required, exactly as
- * before. A wallet that is there but cannot be unlocked only warns: lookups
- * still run on the free path, and the fix is a person's, never `agentFix`
+ * before. A wallet that is there but cannot be unlocked only warns: the
+ * native tools still run, and the fix is a person's, never `agentFix`
  * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
  * file (B1, S3). A check that could not answer is said as not checked.
  */
