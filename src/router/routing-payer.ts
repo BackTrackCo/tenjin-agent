@@ -17,7 +17,6 @@ import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
   CHANNEL_BUSY,
   isUnreachable,
-  PAID_PATH_ABSENT,
   PAYMENT_FAILED,
   DEADLINE_AFTER_PAYMENT_SENT,
   RouteSkipped,
@@ -29,12 +28,10 @@ import {
   feeRefusal,
   payerDir,
   refusedWhy,
-  ROUTE_PAID_PATH,
   ROUTING_DEPOSIT_KEY,
   ROUTING_FEE_ATOMIC,
   routingDepositAtomic,
 } from './fee';
-import { readRouterMemo, writeRouterMemo } from './router-memo';
 import type { RouterObservation } from './router-observation';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
@@ -58,8 +55,8 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   folder, with the SDK's default salt, so every `tenjin mcp` process on the
  *   machine finds the same channel. Calls inside a process take turns on it.
  *   Two sessions paying at the same moment meet the server's refusal of a
- *   second payment in flight on one channel (`channel_busy`): that call takes
- *   the free path. A stale total after such a meeting is the SDK's to resync
+ *   second payment in flight on one channel (`channel_busy`): that call is
+ *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
  *   and reserves it through the local spend authorizer, so it counts against
@@ -76,13 +73,11 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   the call returns, and the request finishes in the background
  *   ({@link DETACHED_CEILING_MS} at most) so the SDK's channel records it; a
  *   deposit in it was counted in the spend ledger when it was sent.
- * - THE FREE PATH. A call this cannot pay (a refusal above, a failed or
- *   refused payment, a server error) throws `RouteSkipped` with the reason,
- *   and the caller sends it to the free path. The server is asked before the
- *   wallet is unlocked, so a server with no paid path (the fee off) costs no
- *   unlock and no notice; it is remembered in the machine's `router-memo`
- *   for an hour, or until the free path answers `fee_required`, so each call
- *   is not a wasted round trip.
+ * - A CALL THIS CANNOT PAY (a refusal above, a failed or refused payment, a
+ *   server error) throws `RouteSkipped` with the reason, and the caller skips
+ *   it: the native tool runs, with no second request. The server is asked
+ *   before the wallet is unlocked, so a router that charges nothing (the fee
+ *   off, in development) costs no unlock and no notice.
  * - A WALLET THAT CANNOT SIGN skips with its classified reason
  *   (`classifyUnlockError`): a definite one (no wallet, a wrong or missing
  *   passphrase, a corrupt file) or an unknown one (a keychain that did not
@@ -94,8 +89,8 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   is never remembered as a block: the next call tries again.
  * - THE UNLOCK IS ONE FLIGHT, BOUNDED IN ITS WAIT, NEVER IN ITS READ. Every
  *   caller (and the prewarm) awaits the same unlock, each only up to its own
- *   call's budget less the free path's reserve (`unlock_timeout`), so the
- *   call still routes unpaid. Nothing here aborts the unlock or the
+ *   call's budget less the paid call's reserve (`unlock_timeout`). Nothing
+ *   here aborts the unlock or the
  *   store read under it, so an OS unlock dialog stays up, and whatever it
  *   answers is the next call's (B3).
  *
@@ -126,8 +121,9 @@ const DEPOSIT_EXTRA_MS = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS;
 /** How long a paid request still out at its call's deadline may run on. */
 export const DETACHED_CEILING_MS = 15_000;
 
-/** A server that answers no paid path is asked again after an hour. */
-const ABSENT_TTL_MS = 60 * 60_000;
+/** How long after this process last saw a 402 a wallet known not to sign
+ *  sends nothing: the 402 is then certain. */
+const FEE_SEEN_TTL_MS = 60 * 60_000;
 /**
  * HOW LONG A DEFINITE SIGN BLOCK IS BELIEVED without unlocking again, unless
  * the wallet file or the passphrase sidecar changes first (`unlockStamp`): a
@@ -135,11 +131,11 @@ const ABSENT_TTL_MS = 60 * 60_000;
  */
 export const SIGNER_RECHECK_MS = 60_000;
 /**
- * THE FREE PATH'S SHARE OF A CALL'S BUDGET: a call waiting on an unlock stops
- * waiting this long before its budget ends, so the unpaid route still fits
- * in what is left (an unknown verdict never skips a routing attempt).
+ * THE PAID CALL'S SHARE OF ITS BUDGET: a call waiting on an unlock stops
+ * waiting this long before its budget ends, since an unlock that lands later
+ * leaves no time to sign and send the payment and read its answer.
  */
-export const FREE_PATH_RESERVE_MS = 1_000;
+export const PAID_CALL_RESERVE_MS = 1_000;
 /** The wallet balance read before a deposit, inside the caller's budget.
  *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
 export const BALANCE_TIMEOUT_MS = 1_000;
@@ -219,11 +215,10 @@ const ROUTING_BLOCKED: ReadonlySet<string> = new Set([
   'not_allowlisted',
 ]);
 
-/** Skips that say nothing about whether routing can pay: contention, a server
- *  with no paid path, a payment already out, a callback outside a call. */
+/** Skips that say nothing about whether routing can pay: contention, a
+ *  payment already out, a callback outside a call. */
 const ROUTING_SILENT: ReadonlySet<string> = new Set([
   CHANNEL_BUSY,
-  PAID_PATH_ABSENT,
   'busy',
   DEADLINE_AFTER_PAYMENT_SENT,
   'no_call',
@@ -344,18 +339,10 @@ export class RoutingPayer {
     return memo.verdict;
   }
 
-  /**
-   * The paid path for one call, or null for the free path for an hour after
-   * the server answered no paid path. That answer is the machine's `router-memo`,
-   * so every `tenjin mcp` process shares it.
-   */
-  async routeFor(baseUrl: string): Promise<DecisionRoute | null> {
-    if (await readRouterMemo(this.deps.dataDir, 'paid-path-absent', baseUrl, this.now())) {
-      return null;
-    }
+  /** The paid route for one routing call to the router at `baseUrl`. */
+  routeFor(baseUrl: string): DecisionRoute {
     const calls: Call[] = [];
     return {
-      path: ROUTE_PAID_PATH,
       send: (url, options) => {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
@@ -562,7 +549,7 @@ export class RoutingPayer {
     // certain and nothing could answer it, so nothing is sent. Before this
     // process has seen a 402, the server is asked first as always (a fee that
     // is off costs no unlock), and an unknown verdict never gets here.
-    if (this.paidPathSeenAt !== null && this.now() - this.paidPathSeenAt < ABSENT_TTL_MS) {
+    if (this.paidPathSeenAt !== null && this.now() - this.paidPathSeenAt < FEE_SEEN_TTL_MS) {
       const blocked = await this.freshBlock();
       if (blocked !== null) {
         this.last = call;
@@ -629,29 +616,21 @@ export class RoutingPayer {
       await this.settleDeposits(call);
     }
     if (call.skipped !== undefined) throw new RouteSkipped(call.skipped);
-    // The router could not be reached: the free path is on the same host, so
-    // the call ends as that transport failure. A timeout or a reset socket
-    // takes the free path below, as any other unanswered call does.
+    // The router could not be reached: the call ends as that transport
+    // failure, which starts the backoff. A timeout or a reset socket is
+    // skipped below, as any other unanswered call is.
     if (!response.ok && !call.answered && isUnreachable(response)) {
       throw new RouteSkipped(PAYMENT_FAILED, response);
     }
-    // No answer, a failed payment or a server error: the free path takes it.
+    // No answer, a failed payment or a server error: the call is skipped.
     if (!response.ok) {
       // A payment went out and the call's time ended before its answer did,
       // detached or with the body still arriving: no fault, it was charged.
       const late = call.detached === true || (call.paid && response.kind === 'timeout');
       throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED);
     }
-    if (!call.paid && response.status === 404) {
-      // The server has no paid path: the free path, asked again in an hour.
-      await writeRouterMemo(this.deps.dataDir, 'paid-path-absent', url, {
-        now: this.now(),
-        ttlMs: ABSENT_TTL_MS,
-      });
-      throw new RouteSkipped(PAID_PATH_ABSENT);
-    }
     // Another session's call was in flight on the channel: nothing was
-    // charged, and this call takes the free path.
+    // charged, and this call is skipped.
     if (response.status === 402) {
       throw new RouteSkipped(
         call.channel !== undefined && paymentError(call.channel, response) === CHANNEL_BUSY_ERROR
@@ -754,9 +733,9 @@ export class RoutingPayer {
    *
    * A definite block the memo still believes skips before any unlock
    * ({@link freshBlock}). Otherwise the call joins the one unlock in flight
-   * (or starts it) and waits for it only until {@link FREE_PATH_RESERVE_MS}
-   * before its own budget ends, then skips with `unlock_timeout`, leaving the
-   * free path its time. THE BUDGET BOUNDS THE WAIT, NEVER THE READ
+   * (or starts it) and waits for it only until {@link PAID_CALL_RESERVE_MS}
+   * before its own budget ends, then skips with `unlock_timeout`. THE BUDGET
+   * BOUNDS THE WAIT, NEVER THE READ
    * (B3): the unlock runs on, unaborted, its store read under no deadline, so
    * an OS unlock dialog stays up; its answer lands in the memo, and a signer
    * nobody was left waiting for is the next call's.
@@ -774,7 +753,7 @@ export class RoutingPayer {
     else {
       this.waiters += 1;
       try {
-        signer = await this.waitFor(this.unlock(), call.until - FREE_PATH_RESERVE_MS);
+        signer = await this.waitFor(this.unlock(), call.until - PAID_CALL_RESERVE_MS);
       } catch (err) {
         if (err instanceof RouteSkipped) throw err;
         this.warn(err instanceof Error ? err.message : String(err));

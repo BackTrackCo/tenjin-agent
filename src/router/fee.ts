@@ -1,20 +1,18 @@
 import { join } from 'node:path';
 import { formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
-import type { DecisionRoute } from './decision';
+import { NO_PAYER, type DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
 /**
- * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call on the paid
- * path pays $0.003 over x402 `batch-settlement`, and the stock SDK client in
- * `tenjin mcp` does all of it (`routing-payer.ts`). Everything else, `tenjin
- * hook` included, is the free path exactly as before this fee existed.
+ * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call goes to the
+ * paid route and pays $0.003 over x402 `batch-settlement`, and the stock SDK
+ * client in `tenjin mcp` does all of it (`routing-payer.ts`). Nothing else
+ * pays it: a call without that payer is skipped when the route asks for it.
  *
  * Hook-safe: `tenjin hook` loads this module, and its chunk graph stays free
  * of the wallet and the x402 SDK (`dist-chunks.test.ts`).
  */
-
-export const ROUTE_PAID_PATH = '/api/x402-router/route';
 
 /** The flat fee per routing call, atomic USDC ($0.003). */
 export const ROUTING_FEE_ATOMIC = 3_000n;
@@ -81,27 +79,16 @@ export function feeRefusal(policy: SpendPolicy, host: string): string | null {
   return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
 }
 
-/** The paid path for this call, or null for the free path. `tenjin mcp` passes
- *  its payer's; absent, every call is free. */
-export type RouteFor = (baseUrl: string) => Promise<DecisionRoute | null>;
-
-/** The free path's reason code once the server routes only paid calls. */
-export const FEE_REQUIRED = 'fee_required';
-
-/** Whether a decision is the free path's `fee_required` answer. */
-export function isFeeRequired(response: unknown): boolean {
-  const decision = (response as { decision?: { action?: unknown; diagnostics?: unknown } })
-    ?.decision;
-  const diagnostics = decision?.diagnostics as { reasonCode?: unknown } | undefined;
-  return decision?.action === 'native' && diagnostics?.reasonCode === FEE_REQUIRED;
-}
+/** The payer's route for a call to the router at `baseUrl`. `tenjin mcp`
+ *  passes its payer's; absent, a call goes unpaid. */
+export type RouteFor = (baseUrl: string) => DecisionRoute;
 
 /**
  * WHY A CALL WAS NOT PAID, for the user: the reason and the fix, keyed by the
- * payer's skip reason (or `fee_required`, when the free path answered it and
- * nothing else explains why). Null for a reason that is no fault and needs no
- * fix: another session's call on the channel, a server with no paid path, or
- * a call queued past its own budget, or a payment still out when the call's
+ * payer's skip reason (or `no_payer`, when the route asked for the fee and
+ * nothing could pay it). Null for a reason that is no fault and needs no
+ * fix: another session's call on the channel, or a call queued past its own
+ * budget, or a payment still out when the call's
  * budget ran out (it finishes in the background), or an unlock that did not
  * finish inside the call's budget (it keeps running, and the next call gets
  * its answer).
@@ -137,14 +124,13 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     reason: 'the routing payment failed',
     fix: 'Run `tenjin doctor`.',
   },
-  [FEE_REQUIRED]: {
-    reason: 'the router now charges it, and this session cannot pay it',
+  [NO_PAYER]: {
+    reason: 'the router charges it, and this session cannot pay it',
     fix: 'Run `tenjin doctor`.',
   },
 };
 const NO_FAULT = new Set([
   'channel_busy',
-  'paid_path_absent',
   'busy',
   'no_call',
   'deadline_after_payment_sent',

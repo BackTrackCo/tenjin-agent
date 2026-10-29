@@ -67,8 +67,7 @@ import {
   type PlanStop,
   type QuotedCall,
 } from './plan';
-import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
-import { clearRouterMemo } from './router-memo';
+import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -111,8 +110,8 @@ import {
 } from './job-store';
 
 /**
- * The `request` tool: one free decision per lookup, then ONE payment, to the
- * provider.
+ * The `request` tool: one routing decision per lookup, then ONE payment, to
+ * the provider.
  *
  * AN OFFER WITH A SPEC RUNS HERE, IN ONE CALL. The hook keeps each offered
  * service's spec by its id, and its line is the skeleton of the call:
@@ -200,8 +199,8 @@ export interface RequestToolDeps {
   cwd?: string;
   /** Clock seam for a saved file's name. */
   now?: () => number;
-  /** The paid path, passed by `tenjin mcp`. Absent, the routing call takes
-   *  the free path. */
+  /** The payer's route, passed by `tenjin mcp`. Absent, the routing call goes
+   *  unpaid, and a router that asks for the fee skips it. */
   route?: RouteFor;
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
@@ -265,9 +264,9 @@ export async function runRequestTool(
       ? call
       : {
           ...call,
-          route: async (baseUrl) => {
-            const picked = await route(baseUrl);
-            if (picked !== null) routes.push(picked);
+          route: (baseUrl) => {
+            const picked = route(baseUrl);
+            routes.push(picked);
             return picked;
           },
         },
@@ -621,37 +620,22 @@ async function requestTool(
   // with no id the gate picks a service and answers with its spec. An id the
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
-  // ON THE PAID PATH the payer pays the routing fee with the stock x402
-  // client, and a call it cannot pay takes the free path.
-  const ask = async () => {
-    const route = (await deps.route?.(settings.baseUrl)) ?? null;
-    const outcome = await requestDecision(
-      'tool',
-      { query, ...(id !== undefined ? { id } : {}) },
-      { ...decisionDeps, ...(route !== null ? { route } : {}) },
-    );
-    return { route, outcome };
-  };
-  const first = await ask();
-  let fresh = first.outcome;
-  // The machine's "no paid path" memo sent this call to the free path, which
-  // now asks for the fee: the memo is stale, so ask once more on the paid path.
-  if (
-    deps.route !== undefined &&
-    first.route === null &&
-    fresh.status === 'decided' &&
-    isFeeRequired(fresh.decision)
-  ) {
-    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
-    fresh = (await ask()).outcome;
-  }
+  // ON THE PAID ROUTE the payer pays the routing fee with the stock x402
+  // client. A call it cannot pay is answered here at once: nothing was
+  // routed, and the agent uses its own tools.
+  const route = deps.route?.(settings.baseUrl);
+  const fresh = await requestDecision(
+    'tool',
+    { query, ...(id !== undefined ? { id } : {}) },
+    { ...decisionDeps, ...(route !== undefined ? { route } : {}) },
+  );
   if (fresh.status === 'skipped') {
     await footer.done('native');
     return fail(
       'native',
       fresh.why === DEADLINE_AFTER_PAYMENT_SENT
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
-        : `${unpaidSentence(fresh.why, 'agent') ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
+        : `${unpaidSentence(fresh.why, 'agent') ?? `The routing fee was not paid for this call (${fresh.why}).`} Nothing was routed and no provider was paid.`,
       { nextStep: 'Use your own tools for this one.' },
     );
   }
@@ -662,20 +646,6 @@ async function requestTool(
     });
   }
   const { decision, note } = fresh.decision;
-
-  // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
-  // which is wrong for this one: what stops routing here is a routing fee this
-  // call could not pay, for the reason the payer gave.
-  if (isFeeRequired(fresh.decision)) {
-    // The fee is on: the next call asks for the paid path again.
-    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
-    await footer.done('native');
-    return fail(
-      'native',
-      unpaidSentence(fresh.freePath ?? FEE_REQUIRED, 'agent') ?? unpaidSentence(FEE_REQUIRED)!,
-      { nextStep: 'Tell the user this once, and use your own tools for now.' },
-    );
-  }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
   // shown with the skeleton of the next call, `request({id, input})`. Nothing

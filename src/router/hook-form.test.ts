@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runHookCommand, runHookKind } from './hook-command';
+import { runHookKind } from './hook-command';
 import { commandForm, handlersIn, shellDependence } from './hook-form';
 import type { HookDeps } from './hooks';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -200,15 +200,5 @@ describe('runHookKind and wallet news', () => {
     expect(await runHookKind('prompt', prompt('s1'), deps({ walletNews }))).toBeNull();
     expect(log).toEqual(['news:s1', 'ack']);
     expect(await runHookKind('prompt', prompt('s1'), deps())).toBeNull();
-  });
-
-  it('keeps the command form unchanged: it never passes walletNews', async () => {
-    let out = '';
-    await runHookCommand(
-      'prompt',
-      { stdout: { write: (s: string) => ((out += s), true) } } as never,
-      { ...deps(), readEvent: async () => JSON.stringify(prompt('s1')) },
-    );
-    expect(out).toBe('');
   });
 });

@@ -11,7 +11,7 @@ import {
 import { FakeRouter } from './fee-test-utils';
 import { ASK_FOR_REPAIR, WALLET_REASONS } from './wallet-reasons';
 
-/** Every key the routing payer can skip with, and the free path's own. */
+/** Every key the routing payer can skip with, and a call with no payer's. */
 const ALL_KEYS = [
   ...Object.keys(WALLET_REASONS),
   'wallet_low',
@@ -19,7 +19,7 @@ const ALL_KEYS = [
   'budget_reached',
   'not_allowlisted',
   'payment_failed',
-  'fee_required',
+  'no_payer',
 ];
 
 describe('routingDepositAtomic', () => {
@@ -95,8 +95,8 @@ describe('unpaidSentence', () => {
       'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
       'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
-    fee_required:
-      'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+    no_payer:
+      'Tenjin routing could not pay its $0.003 fee (the router charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
       'Tenjin routing could not pay its $0.003 fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     limit_below_deposit:

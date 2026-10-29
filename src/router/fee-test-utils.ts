@@ -9,7 +9,8 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
+import { ROUTE_PAID_PATH } from './decision';
+import { ROUTING_FEE_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -86,8 +87,10 @@ export class FakeRouter {
     const url = new URL(request.url);
     const signature = request.headers.get('payment-signature');
     this.log.push(`${request.method} ${url.pathname} ${signature ? 'paid' : 'unpaid'}`);
-    if (url.pathname !== ROUTE_PAID_PATH) return json(this.body, 200);
-    if (this.opts.paid === false) return json({}, 404);
+    // The fee off (development): the paid route answers with no 402.
+    if (url.pathname !== ROUTE_PAID_PATH || this.opts.paid === false) {
+      return json(this.body, 200);
+    }
     if (signature === null) return this.required(url.toString());
     const payload = decodePaymentSignatureHeader(signature).payload as {
       type: 'deposit' | 'voucher';
