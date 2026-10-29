@@ -6,13 +6,14 @@ parses the same files with its own parser, so a shape only one side validates
 is a contract only one side keeps. Four divergences so far (`pendingCall`, the
 grouped arguments, the nested `diagnostics`, and three files copied by hand
 that drifted by 2026-10-28) each cost a round trip; read these files rather
-than hand-writing an equivalent. Until the server's CI reads them from here,
-`tenjin` keeps a copy, refreshed from this one.
+than hand-writing an equivalent. `tenjin`'s CI reads them from this repo's
+`main` and checks the server's requests and answers against them. That is the
+only copy, so a fixture change here is a contract change.
 
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
-`2026-10-29.1`.
+`2026-10-29.2`.
 
 ## The calls
 
@@ -104,11 +105,11 @@ gate is offered only the tasks whose capabilities a client runs.
 - `headers` (client side only, until tenjin#988 lands): a spec carries
   `request.headers`, fixed headers the catalog sets on a service's call (a
   provider's beta opt-in), and the pins those headers unlock.
-- `tolerant` (client side only, until the server reads it): the client reads
-  answers as below (Reading an answer): it drops a field it does not know and
-  honors `requires`. Every field added after it, `requires` included, goes
-  only to a client that sends it; any other client, every release before it
-  among them, reads strictly and gets today's shape.
+- `tolerant`: the client reads answers as below (Reading an answer): it drops
+  a field it does not know and honors `requires`. Every field added after it
+  goes only to a client that sends it (see The warm and tolerant exchanges);
+  any other client, every release before it among them, reads strictly and
+  gets today's shape.
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above.
@@ -344,6 +345,30 @@ default. The client runs each chosen option from its own spec as its own
 payment and reports each outcome under that option's id. Without `catalog` or
 `"choices"` the answer is unchanged: no `choices`, and at most four specs.
 
+## The warm and tolerant exchanges
+
+Two pairs pin a request and the answer it gets:
+
+- **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the paid route's
+  carrier for a channel deposit. This client's background top-up sends it, and
+  nothing else does: a routing call never carries a deposit. The server
+  answers it in code, with no gate and nothing stored, so it settles at 0 and
+  only the deposit riding it moves money. A server without the form answers
+  anything else (a 400 for the unknown field, which settles nothing), and this
+  client then lets the deposit ride its next paid call for an hour. A
+  `tolerant` client's `warm` answer also carries `honored`.
+- **`tolerant`** (`wire-tool-request-by-id-tolerant.json`,
+  `wire-lookup-spec-tolerant.json`): a browse row's id from a client whose
+  `accepts` lists `tolerant`, and the server's answer. Only such a client is
+  sent the fields added since. `honored`, on the hook, tool, browse, by-id and
+  `warm` answers, names the request fields the answer used: the parsed
+  request's own fields, in the form's order, without `gateHint` and `input`,
+  which no answer applies, and without any field the form does not name. On a
+  spec, `requires`, `timeoutS` and `maxBytes` appear where the service sets
+  them: the AiSpace clip `requires` `jobs`, and no service sets `timeoutS` or
+  `maxBytes` yet. Without `tolerant`, the same request gets the same answer
+  without them.
+
 ## The set
 
 | file                                       | what it pins                                                                              |
@@ -391,6 +416,8 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
 | `wire-warm-request.json`                   | the paid route's `warm` call, which carries a channel deposit                             |
 | `wire-warm.json`                           | the `warm` answer: no decision                                                            |
+| `wire-tool-request-by-id-tolerant.json`    | a browse row's id from a `tolerant` client (and `jobs`, `label`, `fields`)                |
+| `wire-lookup-spec-tolerant.json`           | tool answer for it: `honored`, and the row's spec with its `job` and `requires: ["jobs"]` |
 
 Two rules the fixtures exist to hold:
 

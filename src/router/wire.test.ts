@@ -269,6 +269,30 @@ describe('the request bodies', () => {
     expect(parseForTests('tool', answer).success).toBe(false);
   });
 
+  /**
+   * THE TOLERANT EXCHANGE: what this build sends for a browse row's id, and
+   * the answer only a `tolerant` client gets, with `honored` and the spec's
+   * `requires`. The reader keeps what it knows and drops `honored`.
+   */
+  it('sends the tolerant by-id request byte for byte, and reads its answer with requires kept', () => {
+    const canonical = fixture('wire-tool-request-by-id-tolerant.json');
+    expect(
+      buildToolSpecBody({
+        tool: canonical.tool as string,
+        accepts: acceptsFor(false),
+        harness: 'claude',
+      }),
+    ).toEqual(canonical);
+    const answer = fixture('wire-lookup-spec-tolerant.json');
+    expect(answer.honored).toEqual(['schemaVersion', 'tool', 'accepts', 'harness']);
+    const parsed = parseForTests('tool', answer);
+    expect(parsed.success).toBe(true);
+    const read = parsed.data as { honored?: unknown; decision: { spec: ToolSpec } };
+    expect(read).not.toHaveProperty('honored');
+    expect(read.decision.spec.requires).toEqual(['jobs']);
+    expect(unmetRequires(read.decision.spec.requires)).toEqual([]);
+  });
+
   it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
     const canonical = fixture('wire-outcome-request.json');
     expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
