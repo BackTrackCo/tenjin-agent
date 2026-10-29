@@ -127,7 +127,7 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     fix: 'Run `tenjin doctor`.',
   },
   budget_reached: {
-    reason: 'the 24-hour budget has no room left for the routing fee or its deposit',
+    reason: 'the daily budget has no room left for the routing fee or its deposit',
     fix: 'Run `tenjin doctor`.',
   },
   not_allowlisted: {

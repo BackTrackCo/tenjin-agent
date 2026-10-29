@@ -55,9 +55,7 @@ describe('runConfigList', () => {
       string,
       { value: unknown; source: string; description?: string }
     >;
-    expect(settings.sessionBudget?.description).toMatch(
-      /24-hour budget window.*across agent sessions/,
-    );
+    expect(settings.sessionBudget?.description).toMatch(/daily budget shared across chats/);
     expect(settings.maxAutoSpend?.description).toContain('per call');
     expect(settings.sendMaxAmount?.description).toContain('unset = send refuses');
     expect(settings.sessionBudget?.source).toBe('default');
@@ -129,7 +127,7 @@ describe('runConfigList', () => {
   it('shows the same spending descriptions in the human listing and machine readback', async () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const text = (humanLines ?? []).join('\n');
-    expect(text).toContain('24-hour budget window');
+    expect(text).toContain('daily budget shared across chats');
     expect(text).toContain('Tenjin API base URL the router asks');
     // Money and provenance remain alongside the meaning an agent needs.
     const d = data as Record<string, Record<string, unknown>>;

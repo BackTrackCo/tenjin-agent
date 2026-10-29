@@ -1265,7 +1265,7 @@ async function fundStep(
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Offer funding again only on request. ${SHOW_NOT_RUN}`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Do not offer funding again unless requested. ${SHOW_NOT_RUN}`,
       address,
       show,
     },
@@ -1304,7 +1304,7 @@ export async function approveLimits(
   const ask = deps.promptAmount ?? promptAmount;
   const sessionBudget = await askLimit(
     ask,
-    'Most it may pay per 24-hour budget window, in USD, or none',
+    'Daily budget shared across chats, in USD, or none',
     '5',
     'day',
   );
@@ -1390,7 +1390,7 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
     maxAutoSpend: toMoney(policy.maxAutoSpendAtomic.toString()).usd,
     sessionBudget:
       policy.sessionBudgetAtomic === null
-        ? 'no 24-hour budget ceiling'
+        ? 'no daily budget limit'
         : toMoney(policy.sessionBudgetAtomic.toString()).usd,
   };
 }
@@ -1534,9 +1534,12 @@ function lines(
   const ok = paint(ctx.io, 'green', '✓');
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const limits = effectiveLimits(s.policy);
-  const daily = s.policy.sessionBudgetAtomic === null ? 'none' : `$${limits.sessionBudget}`;
+  const daily =
+    s.policy.sessionBudgetAtomic === null
+      ? limits.sessionBudget
+      : `daily budget $${limits.sessionBudget} shared across chats`;
   const spend = [
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; 24-hour budget ${daily}`,
+    `  Automatic router: up to $${limits.maxAutoSpend} per call; ${daily}`,
     ...(s.spendAsk !== undefined
       ? [
           `  Ask the person in this session: ${s.spendAsk.question}`,
