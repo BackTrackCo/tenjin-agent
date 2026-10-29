@@ -12,7 +12,7 @@ than hand-writing an equivalent. Until the server's CI reads them from here,
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
-`2026-10-24.1`.
+`2026-10-29.1`.
 
 ## The calls
 
@@ -30,6 +30,7 @@ below). The outcome report is the one form that carries no `accepts`.
 | browse  | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
 | by id   | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
 | outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
+| warm    | `{schemaVersion, warm: true, accepts}`                         | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; it carries a channel deposit          |
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
 catalog task id, such as `web research`, at most 64 characters),
@@ -159,17 +160,23 @@ and answers `needs_input` (`spec_missing`), pointing at `request({query})`.
 
 ## The paid path
 
-`POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms,
-behind x402
-`batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). The 402 is the
+`POST /api/x402-router/route` takes the hook, the tool's `{query, id?}` forms
+and `warm`, behind x402
+`batch-settlement` quoting 3000 atomic USDC (`maxTimeoutSeconds` 15,
+`extra.minDeposit` 30000). The 402 is the
 only price: this client pays any quote at or below its ceiling of 3000 atomic
 USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the user's spend limits,
 pays nothing above it, and pins no payee. With the fee `off`, the route answers
 with no 402. An answer from
-a completed Jev gate settles that fee; any other answer settles at 0, which
+a completed Jev gate settles that fee (1000, under the 3000 quote); any other
+answer, `warm` included, settles at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an
-`{id, input}` there is a 400. A new channel's deposit rides its first paid
-call. The free route answers `{packet}` and `{query}` with `native` and the
+`{id, input}` there is a 400. A routing call never carries a deposit: this
+client's background top-up sends `warm` for it alone, sized to the smallest of
+`extra.minDeposit`, the wallet and the per-call limit and never below ten
+quoted fees. A router that answers `warm` with anything else has no form, and
+for an hour a deposit rides the next paid call instead. The free route answers
+`{packet}` and `{query}` with `native` and the
 `fee_required` diagnostic, telling the agent to update tenjin-cli. Outcome
 reports, `browse` and `tool` stay on the free route.
 
@@ -382,6 +389,8 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
 | `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
 | `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
+| `wire-warm-request.json`                   | the paid route's `warm` call, which carries a channel deposit                             |
+| `wire-warm.json`                           | the `warm` answer: no decision                                                            |
 
 Two rules the fixtures exist to hold:
 

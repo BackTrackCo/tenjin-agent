@@ -8,8 +8,10 @@ import {
   buildOutcomeBody,
   buildToolBody,
   buildToolSpecBody,
+  buildWarmBody,
   acceptsFor,
   CLIENT_ACCEPTS,
+  isWarmAnswer,
   MAX_SPEC_TIMEOUT_S,
   parseForTests,
   REQUIRES_UNMET,
@@ -23,6 +25,7 @@ import {
 import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
+import type { Harness } from './names';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { STDIN_TIMEOUT_MS } from './hook-command';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
@@ -238,6 +241,32 @@ describe('the request bodies', () => {
     expect(
       buildToolBody({ query: canonical.query as string, accepts: canonical.accepts as string[] }),
     ).toEqual(canonical);
+  });
+
+  /**
+   * THE BACKGROUND TOP-UP'S CARRIER (tenjin#1046): the paid route's `warm`
+   * call, byte for byte, and its answer, which carries no decision. A router
+   * without the form answers anything else, which the top-up reads as absent.
+   */
+  it('sends warm byte for byte, and reads its answer and nothing else as warm', () => {
+    const canonical = fixture('wire-warm-request.json');
+    expect(
+      buildWarmBody({
+        accepts: canonical.accepts as string[],
+        harness: canonical.harness as Harness,
+      }),
+    ).toEqual(canonical);
+    expect(buildWarmBody()).toEqual({ schemaVersion: 1, warm: true });
+    expect(JSON.stringify(canonical)).not.toMatch(/billing|admission|payment/i);
+    const answer = fixture('wire-warm.json');
+    expect(isWarmAnswer(answer)).toBe(true);
+    expect(isWarmAnswer({ ...answer, surprise: 1 })).toBe(true);
+    expect(isWarmAnswer({ ...answer, warm: false })).toBe(false);
+    expect(isWarmAnswer(fixture('wire-hook-native.json'))).toBe(false);
+    expect(isWarmAnswer({ error: { code: 'bad_request', message: 'warm' } })).toBe(false);
+    // A warm answer is no decision on either call.
+    expect(parseForTests('hook', answer).success).toBe(false);
+    expect(parseForTests('tool', answer).success).toBe(false);
   });
 
   it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {

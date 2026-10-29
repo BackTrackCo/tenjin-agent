@@ -740,6 +740,36 @@ export function buildToolSpecBody(request: {
   };
 }
 
+/**
+ * THE PAID ROUTE'S `warm` CALL, a channel deposit's carrier. The payer's
+ * background top-up sends it and nothing else does: the batch-settlement spec
+ * has no deposit-only payload, so the deposit rides a paid request the server
+ * answers in code, with no gate and nothing stored, and settles at $0.
+ */
+export function buildWarmBody(
+  extras: { accepts?: readonly string[]; harness?: Harness } = {},
+): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    warm: true,
+    ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
+    ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
+  };
+}
+
+/** The `warm` answer, read tolerantly like every answer: no decision. */
+const WarmResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  routerVersion: z.string().min(1).max(64),
+  warm: z.literal(true),
+});
+
+/** Whether a body is the `warm` answer. A router without the form answers
+ *  anything else: a 400 for an unknown field, or a decision. */
+export function isWarmAnswer(body: unknown): boolean {
+  return WarmResponseSchema.safeParse(body).success;
+}
+
 /** The parsers, exposed so the shared wire fixtures are checked against the
  *  same schemas production parses with rather than against a copy of them. */
 export function parseForTests(
@@ -794,29 +824,53 @@ export interface DecisionDeps {
 export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
   /** What this route's calls deposited into the routing channel and the
-   *  router took, 0n for none: the caller says so once, where it is read. */
+   *  router took, with any background top-up not said yet, 0n for none: the
+   *  caller says so once, where it is read. */
   deposited?: () => bigint;
   /** The routing fee the router last quoted this route's calls, atomic
    *  USDC, for a line that names it; undefined before any quote. */
   fee?: () => bigint | undefined;
 }
 
+/**
+ * What a skip knows about the money behind it, for the one sentence that says
+ * it: the fee the router quoted, when the payer read one, and for `wallet_low`
+ * the balance the background top-up read and the deposit it fell short of.
+ */
+export interface SkipFacts {
+  quotedAtomic?: bigint;
+  balanceAtomic?: bigint;
+  depositAtomic?: bigint;
+}
+
 /** The paid route gave this call no answer: the wallet locked, low or over
- *  its spend limits, the fee quoted above the ceiling, the channel busy, or
- *  the payment failed. */
+ *  its spend limits, the fee quoted above the ceiling, the channel busy or
+ *  being topped up, or the payment failed. */
 export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
-   *  ({@link isUnreachable}), so the call reads as that transport failure.
-   *  `quotedAtomic`: the fee the router quoted, when the payer read one. */
+   *  ({@link isUnreachable}), so the call reads as that transport failure. */
   readonly unreached: FetchJsonFailure | undefined;
   readonly quotedAtomic: bigint | undefined;
+  readonly balanceAtomic: bigint | undefined;
+  readonly depositAtomic: bigint | undefined;
   constructor(
     readonly why: string,
-    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint } = {},
+    opts: { unreached?: FetchJsonFailure } & SkipFacts = {},
   ) {
     super(`routing fee not paid: ${why}`);
     this.unreached = opts.unreached;
     this.quotedAtomic = opts.quotedAtomic;
+    this.balanceAtomic = opts.balanceAtomic;
+    this.depositAtomic = opts.depositAtomic;
+  }
+
+  /** The facts it carries, with no undefined keys. */
+  facts(): SkipFacts {
+    return {
+      ...(this.quotedAtomic !== undefined ? { quotedAtomic: this.quotedAtomic } : {}),
+      ...(this.balanceAtomic !== undefined ? { balanceAtomic: this.balanceAtomic } : {}),
+      ...(this.depositAtomic !== undefined ? { depositAtomic: this.depositAtomic } : {}),
+    };
   }
 }
 
@@ -829,6 +883,13 @@ export const PAYMENT_FAILED = 'payment_failed';
 export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
 /** The route asked for the fee, and this call had no payer to pay it. */
 export const NO_PAYER = 'no_payer';
+/** The channel needed a deposit, and this process's background top-up did
+ *  not land inside the call's budget: no fault, the next call pays. */
+export const TOPPING_UP = 'topping_up';
+/** The channel needed a deposit, which only the background top-up makes, and
+ *  this process's could not make it now (another session's top-up of the same
+ *  wallet is in flight, or the channel was busy): no fault. */
+export const DEPOSIT_DEFERRED = 'deposit_deferred';
 
 export type DecisionOutcome<T> =
   /** `skipped`: offers in it this build cannot run, already taken out
@@ -845,9 +906,9 @@ export type DecisionOutcome<T> =
       noAnswer?: true;
     }
   /** The routing fee was not paid ({@link RouteSkipped}, {@link NO_PAYER}):
-   *  nothing was routed, and the native tool runs. `quotedAtomic`: the fee
-   *  the router quoted, when the payer read one. */
-  | { status: 'skipped'; why: string; quotedAtomic?: bigint };
+   *  nothing was routed, and the native tool runs, with what the skip knew
+   *  ({@link SkipFacts}). */
+  | ({ status: 'skipped'; why: string } & SkipFacts);
 
 /**
  * ONE ROUTING CALL, IN TWO FORMS, ON THE PAID ROUTE. The hook sends
@@ -912,11 +973,7 @@ export async function requestDecision(
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
     if (err.unreached !== undefined) return readOffer(err.unreached, schema);
-    return {
-      status: 'skipped',
-      why: err.why,
-      ...(err.quotedAtomic !== undefined ? { quotedAtomic: err.quotedAtomic } : {}),
-    };
+    return { status: 'skipped', why: err.why, ...err.facts() };
   }
   if (deps.route === undefined && response.ok && response.status === 402) {
     return { status: 'skipped', why: NO_PAYER };
