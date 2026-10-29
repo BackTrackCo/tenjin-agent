@@ -96,7 +96,7 @@ const INSTRUCTIONS =
   `${SCOPE_RULE} Call it alone and wait for its result. Deciding what to ` +
   'route is free, or a flat $0.003 routing fee; a wallet on ' +
   'THIS machine pays it and the provider under the local spend ' +
-  'policy. A call whose total is over the per-call limit or current 24-hour budget window pays ' +
+  'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin wallet fund` ' +
   '(with $5 or more), give them the link and follow its `nextStep`. If the host automatically ' +

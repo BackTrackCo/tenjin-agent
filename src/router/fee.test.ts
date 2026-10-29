@@ -102,7 +102,7 @@ describe('unpaidSentence', () => {
     limit_below_deposit:
       'Tenjin routing could not pay its $0.003 fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     budget_reached:
-      'Tenjin routing could not pay its $0.003 fee (the 24-hour budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin routing could not pay its $0.003 fee (the daily budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     not_allowlisted:
       'Tenjin routing could not pay its $0.003 fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
   };

@@ -77,7 +77,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   maxAutoSpend:
     'automatic router limit per call, the runaway guard: at least 0.25 (the default); router.enabled false turns the router off',
   sessionBudget:
-    'automatic router limit per 24-hour budget window, shared across agent sessions (5 by default): 0 blocks automatic spend, none removes the ceiling',
+    'automatic router daily budget shared across chats (5 by default): 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
     'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
@@ -622,7 +622,7 @@ function displayValue(entry: RenderedSetting): string {
   const { value } = entry;
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // router.enabled
-  if (value === null) return 'none (no 24-hour budget limit)';
+  if (value === null) return 'none (no limit)';
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   return value; // 'always', baseUrl, rpcUrl
 }

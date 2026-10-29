@@ -410,7 +410,8 @@ export async function runCodexInstall(
   }
 
   // Read back after the write, as the Claude install does.
-  const effective = effectiveLimits((await resolveContextSettings(ctx)).policy);
+  const { policy } = await resolveContextSettings(ctx);
+  const effective = effectiveLimits(policy);
   // Run again by the agent in Codex, a bare install finds Codex itself.
   const install = [
     `${continuationCommand(rt)} install`,
@@ -419,9 +420,9 @@ export async function runCodexInstall(
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
   const daily =
-    effective.sessionBudget === 'no 24-hour budget ceiling'
-      ? 'none'
-      : `$${effective.sessionBudget}`;
+    policy.sessionBudgetAtomic === null
+      ? effective.sessionBudget
+      : `daily budget $${effective.sessionBudget} shared across chats`;
   return {
     data: {
       plugin: CODEX_PLUGIN,
@@ -437,7 +438,7 @@ export async function runCodexInstall(
         ? `Codex plugin: left as it was (Codex ${version})`
         : `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
       ...runtimeLines(ctx, rt, home),
-      `Automatic router: up to $${effective.maxAutoSpend} per call; 24-hour budget ${daily}`,
+      `Automatic router: up to $${effective.maxAutoSpend} per call; ${daily}`,
       ...(spendAsk !== undefined
         ? [
             `  Ask the person in this session: ${spendAsk.question}`,
