@@ -133,7 +133,7 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each routing call costs a small flat fee the router quotes, even when no tool is suggested, separate from provider charges. Tenjin sets aside $0.25 at a time for these fees, or $0.03 while your balance is under $0.50 so the rest stays available for paid tools, and stops routing below $0.03; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
+- Each routing call costs a small flat fee the router quotes, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees in the background, the router's suggested amount at a time (currently $0.03, never more than $0.25), so the rest stays available for paid tools, and stops routing while the wallet holds less than ten fees; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)

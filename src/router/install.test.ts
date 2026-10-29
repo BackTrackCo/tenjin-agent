@@ -59,7 +59,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Tenjin charges a small flat fee per routing call, never more than $0.003, paid from funds it sets aside: $0.25 at a time, or $0.03 while your balance is under $0.50. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.';
+  'Tenjin charges a small flat fee per routing call, never more than $0.003, paid from funds it sets aside, at most $0.25 at a time. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
