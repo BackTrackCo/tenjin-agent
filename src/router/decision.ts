@@ -632,8 +632,12 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * headers the catalog sets on a service's call (a provider's beta opt-in),
  * with the pins those headers unlock: `buildSpecRequest` sends them. A build
  * without a token would drop the field as unknown, so a spec that cannot run
- * without it lists the token in `requires`. `bazaar` widens discovery to the
- * open Bazaar and is sent only while `experimental.bazaar` is on.
+ * without it lists the token in `requires`. `tolerant` says this build reads
+ * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}):
+ * a server sends a new field, `requires` included, only to a client that
+ * lists it, and today's shape to one that does not, which is every release
+ * from before it and reads strictly. `bazaar` widens discovery to the open
+ * Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
   'catalog',
@@ -643,6 +647,7 @@ export const CLIENT_ACCEPTS: readonly string[] = [
   'jobs',
   'headers',
   'note',
+  'tolerant',
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
 

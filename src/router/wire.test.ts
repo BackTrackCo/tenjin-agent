@@ -163,9 +163,9 @@ describe('the request bodies', () => {
   /**
    * WHAT THIS BUILD SAYS IT RUNS. Each token is one the server's README names
    * as read (`spec`, `catalog`, `label`, `fields`, `jobs`, `headers`, `note`,
-   * and `bazaar` behind its experiment), so the server sends each field this
-   * build parses and none it does not. A token is added only with the parser
-   * that takes its fields.
+   * `tolerant`, and `bazaar` behind its experiment), so the server sends each
+   * field this build parses and none it does not. A token is added only with
+   * the parser that takes its fields.
    */
   it("sends this build's accepts: the contract tokens it parses and runs", () => {
     expect(CLIENT_ACCEPTS).toEqual([
@@ -176,6 +176,7 @@ describe('the request bodies', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
     ]);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
@@ -184,6 +185,7 @@ describe('the request bodies', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
     ]);
     expect(acceptsFor(true)).toEqual([
       'catalog',
@@ -193,6 +195,7 @@ describe('the request bodies', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
       'bazaar',
     ]);
     const read = [
@@ -203,6 +206,7 @@ describe('the request bodies', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
       'discovered',
       'bazaar',
       'choices',
@@ -659,6 +663,14 @@ describe('every answer payload on disk', () => {
     ]) {
       expect(parseForTests('tool', withSpec(bad)).success, JSON.stringify(bad)).toBe(false);
     }
+  });
+
+  /** TOLERANT, ASKED FOR ON EVERY CALL: the server sends a new field, or
+   *  `requires`, only to a client that lists it, Bazaar or not. */
+  it('lists tolerant in what it accepts, with the open Bazaar and without it', () => {
+    expect(acceptsFor(false)).toContain('tolerant');
+    expect(acceptsFor(true)).toContain('tolerant');
+    expect(unmetRequires(['tolerant'])).toEqual([]);
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {

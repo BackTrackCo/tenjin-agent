@@ -2964,7 +2964,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -3096,6 +3096,7 @@ describe('a discovered service', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3116,6 +3117,7 @@ describe('a discovered service', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
       'bazaar',
     ]);
   });
@@ -3405,7 +3407,7 @@ describe('a question to the user', () => {
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
     expect(body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
     });
   });
 

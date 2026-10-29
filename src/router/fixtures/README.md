@@ -103,6 +103,11 @@ gate is offered only the tasks whose capabilities a client runs.
 - `headers` (client side only, until tenjin#988 lands): a spec carries
   `request.headers`, fixed headers the catalog sets on a service's call (a
   provider's beta opt-in), and the pins those headers unlock.
+- `tolerant` (client side only, until the server reads it): the client reads
+  answers as below (Reading an answer): it drops a field it does not know and
+  honors `requires`. Every field added after it, `requires` included, goes
+  only to a client that sends it; any other client, every release before it
+  among them, reads strictly and gets today's shape.
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above.
@@ -126,8 +131,8 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
   when the offer is the answer's own (its `requires`, its own spec, or a
   `spec` answer's spec), the client treats the answer as `native` with the
   reason code `requires_unmet` and the missing tokens in `missing`. This
-  client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`
-  and `bazaar`. Send `requires` for a field whose absence changes what the
+  client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`,
+  `tolerant` and `bazaar`. Send `requires` for a field whose absence changes what the
   call is (a header it must send, a new kind of payment or streaming); a
   field a client may ignore needs none.
 
