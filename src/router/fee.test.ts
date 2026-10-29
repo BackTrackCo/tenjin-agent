@@ -24,22 +24,35 @@ const ALL_KEYS = [
 ];
 
 describe('routingDepositAtomic', () => {
-  const size = (
-    walletAtomic: bigint | null,
-    maxAtomic: bigint | null = MAX_CHANNEL_DEPOSIT_ATOMIC,
-  ) => routingDepositAtomic({ walletAtomic, hintAtomic: CHANNEL_DEPOSIT_ATOMIC, maxAtomic });
+  /** tenjin#1046: the smallest of the hint, the wallet and the per-call
+   *  limit, never below ten quoted fees, never above the SDK's ceiling. */
+  const size = (o: {
+    hint?: bigint;
+    quote?: bigint;
+    wallet?: bigint | null;
+    perCall?: bigint;
+    needed?: bigint;
+  }) =>
+    routingDepositAtomic({
+      hintAtomic: o.hint ?? CHANNEL_DEPOSIT_ATOMIC,
+      quoteAtomic: o.quote ?? 3_000n,
+      walletAtomic: o.wallet === undefined ? 10_000_000n : o.wallet,
+      perCallAtomic: o.perCall ?? 250_000n,
+      maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
+      ...(o.needed !== undefined ? { neededAtomic: o.needed } : {}),
+    });
 
-  it('signs the ceiling only from a wallet holding twice it, else the hint', () => {
-    expect(size(10_000_000n)).toBe(250_000n);
-    expect(size(2n * MAX_CHANNEL_DEPOSIT_ATOMIC)).toBe(250_000n);
-    expect(size(2n * MAX_CHANNEL_DEPOSIT_ATOMIC - 1n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    expect(size(210_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    expect(size(70_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-  });
-
-  it('signs the hint when the balance or the ceiling is unknown', () => {
-    expect(size(null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    expect(size(10_000_000n, null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  it.each<[string, Parameters<typeof size>[0], bigint]>([
+    ['the hint, from a big wallet', {}, CHANNEL_DEPOSIT_ATOMIC],
+    ['the hint, with the balance unread', { wallet: null }, CHANNEL_DEPOSIT_ATOMIC],
+    ['a wallet below the hint, all of it', { quote: 1_000n, wallet: 20_000n }, 20_000n],
+    ['a per-call limit below the hint', { quote: 1_000n, perCall: 15_000n }, 15_000n],
+    ['ten quoted fees, over a smaller wallet', { quote: 1_000n, wallet: 4_000n }, 10_000n],
+    ['ten quoted fees, over a smaller limit', { perCall: 2_000n }, 30_000n],
+    ['what the next voucher needs, over the floor', { needed: 40_000n }, 40_000n],
+    ['a bigger hint, up to the ceiling', { hint: 1_000_000n }, MAX_CHANNEL_DEPOSIT_ATOMIC],
+  ])('signs %s', (_label, o, signed) => {
+    expect(size(o)).toBe(signed);
   });
 });
 
@@ -112,6 +125,19 @@ describe('unpaidSentence', () => {
     for (const [why, sentence] of Object.entries(EXPECTED)) {
       expect(unpaidSentence(why), why).toBe(sentence);
     }
+  });
+
+  it('names the balance a low wallet holds and the deposit it fell short of, when read', () => {
+    expect(
+      unpaidSentence('wallet_low', 'person', { balanceAtomic: 0n, depositAtomic: 10_000n }),
+    ).toBe(
+      'Tenjin could not pay the routing fee (the wallet holds $0.00, less than the $0.01 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+    );
+  });
+
+  it('says nothing for a deposit the background top-up has not made yet', () => {
+    expect(unpaidSentence('topping_up')).toBeNull();
+    expect(unpaidSentence('deposit_deferred')).toBeNull();
   });
 
   it('names the quoted fee in the deposit line, and no fee when none was read', () => {

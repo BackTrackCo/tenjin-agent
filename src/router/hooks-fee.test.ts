@@ -11,7 +11,8 @@ import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
-import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
+import { RoutingPayer, TOP_UP_BACKOFF_MS, type RoutingPayerDeps } from './routing-payer';
+import { writeRouterMemo } from './router-memo';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import {
@@ -149,6 +150,12 @@ function collectGarbage(): void {
   (runInNewContext('gc') as () => void)();
 }
 
+/** A router with no `warm` form, as a top-up would have learned it: a
+ *  deposit rides the leg that needs it, as it did before the form. */
+async function noWarm(): Promise<void> {
+  await writeRouterMemo(dir, 'warm-absent', BASE, { now: 0, ttlMs: Number.MAX_SAFE_INTEGER });
+}
+
 function systemMessageOf(response: unknown): string | undefined {
   return (response as { systemMessage?: string } | null)?.systemMessage;
 }
@@ -189,18 +196,22 @@ describe('the hook legs and the routing fee', () => {
     expect(JSON.parse(out)).toEqual({ systemMessage: STALE_HOOK_LINE });
   });
 
-  it('pays the routing fee through the payer: an inline deposit, then vouchers', async () => {
+  it('pays the routing fee through the payer: the prompt never deposits, the top-up does', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
     await runPromptHook(prompt(), deps(fake.fetch, p));
     await runPromptHook(prompt(), deps(fake.fetch, p));
     expect(fake.log).toEqual([
       'POST /api/x402-router/route unpaid',
+      // The background top-up, which the leg waits for inside its budget.
+      'POST /api/x402-router/route warm unpaid',
+      'POST /api/x402-router/route warm paid',
+      'POST /api/x402-router/route unpaid',
       'POST /api/x402-router/route paid',
       'POST /api/x402-router/route unpaid',
       'POST /api/x402-router/route paid',
     ]);
-    expect(fake.deposits).toBe(1);
+    expect(fake.depositedOn).toEqual(['warm']);
     expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
   });
 
@@ -211,7 +222,7 @@ describe('the hook legs and the routing fee', () => {
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.25 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -233,11 +244,16 @@ describe('the hook legs and the routing fee', () => {
     expect(answers).toEqual([null, null]);
   });
 
-  it.each([
+  const ASK = 'POST /api/x402-router/route unpaid';
+  /** The top-up's 402, which a refusal before signing ends at. */
+  const WARM_ASK = 'POST /api/x402-router/route warm unpaid';
+  it.each<[string, Partial<RoutingPayerDeps>, string, string[]]>([
     [
       'the wallet holds less than the deposit',
       { walletBalance: async () => 20_000n },
-      'Your usual tools still work.',
+      // The balance the top-up read, named once.
+      'the wallet holds $0.02, less than the $0.03 Tenjin needs to set aside for routing',
+      [ASK, WARM_ASK],
     ],
     [
       'the wallet cannot be unlocked',
@@ -248,6 +264,7 @@ describe('the hook legs and the routing fee', () => {
       },
       // Unclassified: the person is pointed at doctor, never at the variable.
       '`tenjin doctor`',
+      [ASK],
     ],
     [
       'the machine has no wallet',
@@ -257,6 +274,7 @@ describe('the hook legs and the routing fee', () => {
         },
       },
       '`tenjin doctor`',
+      [ASK],
     ],
     [
       'the daily budget has no room for the deposit',
@@ -268,10 +286,11 @@ describe('the hook legs and the routing fee', () => {
         }),
       },
       '`tenjin doctor`',
+      [ASK, WARM_ASK],
     ],
   ])(
-    'skips the call in one request when %s, and tells the user once per session',
-    async (_label, opts, fix) => {
+    'skips the call, paying nothing, when %s, and tells the user once per session',
+    async (_label, opts, says, log) => {
       const fake = new FakeRouter();
       fake.body = OFFER;
       const p = payer(fake, opts);
@@ -279,18 +298,19 @@ describe('the hook legs and the routing fee', () => {
       // Nothing was routed: no offer, and the native tool runs.
       expect(contextOf(first)).toBeUndefined();
       expect(systemMessageOf(first)).toContain('could not pay');
-      expect(systemMessageOf(first)).toContain(fix);
+      expect(systemMessageOf(first)).toContain(says);
       expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
-      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
-      // Not again in this session.
+      expect(fake.log).toEqual(log);
+      // Not again in this session, and no second top-up while it is held off.
       const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
       expect(contextOf(second)).toBeUndefined();
       expect(systemMessageOf(second)).toBeUndefined();
+      expect(fake.log.filter((l) => l === WARM_ASK)).toHaveLength(log.includes(WARM_ASK) ? 1 : 0);
       expect(fake.paidRequests()).toBe(0);
       // A new session is told once too.
       const other = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
-      expect(systemMessageOf(other)).toContain(fix);
+      expect(systemMessageOf(other)).toContain(says);
     },
   );
 
@@ -358,12 +378,15 @@ describe('the hook legs and the routing fee', () => {
 
   it('skips the call when the payment fails, and names doctor', async () => {
     const fake = new FakeRouter();
-    const p = payer(fake);
     const fails = paidFails(fake);
+    const p = payer(fake, { fetchImpl: fails });
     const answer = await runHookKind('prompt', prompt('sess-fails'), deps(fails, p));
-    // The 402, then the paid request that failed (answered before the fake
-    // saw it), and nothing after.
-    expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+    // The leg's 402, the top-up's 402, then its paid `warm` that failed
+    // (answered before the fake saw it), and nothing after.
+    expect(fake.log).toEqual([
+      'POST /api/x402-router/route unpaid',
+      'POST /api/x402-router/route warm unpaid',
+    ]);
     expect(systemMessageOf(answer)).toContain('the routing payment failed');
     expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
     // The deposit the server refused is released, not counted.
@@ -399,7 +422,8 @@ describe('the hook legs and the routing fee', () => {
     return { fetchImpl, paid: () => paid, sent };
   }
 
-  it('gives a deposit call the longer budget: a settle at about 4 s is paid and names only the deposit', async () => {
+  it('gives an inline deposit the longer budget on a router with no warm form: a settle at about 4 s is paid and names only the deposit', async () => {
+    await noWarm();
     const fake = new FakeRouter();
     fake.body = OFFER;
     fake.delayMs = GATE_TIMEOUT_MS + 400;
@@ -412,15 +436,16 @@ describe('the hook legs and the routing fee', () => {
     const answer = await call;
     expect(Date.now() - started).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(contextOf(answer)).toContain('CoinMarketCap fits this');
-    expect(systemMessageOf(answer)).toContain('set aside $0.25 for routing');
-    expect(fake.deposits).toBe(1);
+    expect(systemMessageOf(answer)).toContain('set aside $0.03 for routing');
+    expect(fake.depositedOn).toEqual(['call']);
     expect(fake.log.at(-1)).toBe('POST /api/x402-router/route paid');
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');
   });
 
-  it('lets a deposit that settles past the budget finish in tenjin mcp, and says nothing', async () => {
+  it('lets an inline deposit that settles past the budget finish in tenjin mcp, and says nothing', async () => {
+    await noWarm();
     const fake = new FakeRouter();
     fake.body = OFFER;
     fake.delayMs = 6_000;
@@ -491,7 +516,8 @@ describe('the hook legs and the routing fee', () => {
     expect(hang.paid()).toBe(1);
   });
 
-  it('returns a deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
+  it('returns an inline deposit call that gets no answer inside the gate budget, and counts the deposit', async () => {
+    await noWarm();
     holdTime();
     vi.setSystemTime(NOW);
     const fake = new FakeRouter();
@@ -513,7 +539,7 @@ describe('the hook legs and the routing fee', () => {
     expect(Date.now() - started).toBe(DEPOSIT_GATE_TIMEOUT_MS);
     expect(hang.paid()).toBe(1);
     // It went out and no answer came, so it may have landed: it counts.
-    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '250000' });
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '30000' });
   });
 });
 
@@ -573,14 +599,19 @@ describe('wallet notices', () => {
   it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
     const fake = new FakeRouter();
     let balance = 20_000n;
-    const p = payer(fake, { walletBalance: async () => balance });
+    let clock = NOW;
+    const p = payer(fake, { walletBalance: async () => balance, now: () => clock });
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(low)).toContain('could not pay');
     expect(systemMessageOf(low)).toContain('Your usual tools still work.');
     expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
     balance = 10_000_000n;
+    // The balance is read only by the next top-up, once the refused one's
+    // backoff ends: then the prompt pays, and the funding is said once.
+    clock += TOP_UP_BACKOFF_MS[0]!;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
+    expect(systemMessageOf(paid)).toContain('Tenjin set aside $0.03 for routing.');
   });
 
   it('says nothing for an unlock that ran out of time', async () => {

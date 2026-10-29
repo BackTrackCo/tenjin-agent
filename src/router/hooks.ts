@@ -20,7 +20,7 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestDecision, ROUTE_PAID_PATH, type HookDecision } from './decision';
+import { requestDecision, ROUTE_PAID_PATH, type HookDecision, type SkipFacts } from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -1677,7 +1677,7 @@ async function decide(
   if (deposited > 0n) deps.notice?.(depositSentence(deposited, route?.fee?.()));
   if (outcome.status === 'skipped') {
     unpaid?.(outcome.why);
-    await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
+    await tellOnce(deps, sessionId, outcome.why, now, outcome);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
@@ -1721,9 +1721,9 @@ async function tellOnce(
   sessionId: string,
   why: string,
   now: number,
-  quotedAtomic?: bigint,
+  facts: SkipFacts = {},
 ) {
-  const sentence = unpaidSentence(why, 'person', quotedAtomic);
+  const sentence = unpaidSentence(why, 'person', facts);
   if (sentence === null || deps.notice === undefined) return;
   const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
   if (told === 'tell') deps.notice(sentence);

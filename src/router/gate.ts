@@ -12,7 +12,8 @@
  * The hook's whole budget is 5 s (`ROUTE_HOOK_TIMEOUT_SECONDS`, the timeout
  * `install` writes for each routing leg), and the decision gets 3.5 s of it.
  * Inside `tenjin mcp` those 3.5 s hold the paid path too: the 402, the SDK's
- * chain read, the wallet read before a deposit and the paid request. The
+ * chain read and the paid request, or a wait for the background top-up that
+ * funds the channel (`routing-payer.ts`). The
  * command form (`tenjin hook`, always free) waits up to 1 s for stdin first. Either way 500 ms are left for startup, the
  * transcript read and the reply; `wire.test.ts` pins the sums.
  * The expected wait is about 1 s: the backend answers on the gate question and
@@ -32,6 +33,7 @@ export const GATE_TIMEOUT_MS = 3_500;
  * deposit in a row (5.0 s measured on Base), so 3.5 s cut it short. It is the
  * leg's 5 s less the 500 ms for startup, the transcript read and the reply,
  * so the leg still never runs past the timeout `install` writes; `wire.test.ts`
- * pins that.
+ * pins that. A leg carries a deposit only while the router has no `warm`
+ * form: otherwise the background top-up makes every deposit.
  */
 export const DEPOSIT_GATE_TIMEOUT_MS = 4_500;

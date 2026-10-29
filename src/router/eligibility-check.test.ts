@@ -78,8 +78,9 @@ describe('checkEligibility', () => {
   it.each<[string, bigint, bigint, string]>([
     ['$0.21 wallet, room for its $0.03', 210_000n, 30_000n, 'ready'],
     ['$0.21 wallet, room one unit short', 210_000n, 29_999n, 'blocked'],
-    ['$0.50 wallet, room for its $0.25', 500_000n, 250_000n, 'ready'],
-    ['$0.50 wallet, room one unit short', 500_000n, 249_999n, 'blocked'],
+    // tenjin#1046: a big wallet signs the hint too, not the $0.25 ceiling.
+    ['$0.50 wallet, room for its $0.03', 500_000n, 30_000n, 'ready'],
+    ['$0.50 wallet, room one unit short', 500_000n, 29_999n, 'blocked'],
   ])(
     'evaluates the deposit the wallet signs against the daily room: %s',
     async (_label, balance, room, status) => {

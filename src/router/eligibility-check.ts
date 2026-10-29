@@ -139,13 +139,16 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit the payer would sign for this balance, from the production
-  // server's hint, evaluated against the whole policy as the payer's is.
+  // The deposit the payer's top-up would sign for this balance, from the
+  // production server's hint and with no quote to go on but the ceiling,
+  // evaluated against the whole policy as the payer's is.
   const deposit = evaluateSpendPolicy(input.policy, {
     mode: 'automatic',
     amountAtomic: routingDepositAtomic({
-      walletAtomic: balanceAtomic,
       hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
+      quoteAtomic: ROUTING_FEE_CEILING_ATOMIC,
+      walletAtomic: balanceAtomic,
+      perCallAtomic: input.policy.maxAutoSpendAtomic,
       maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
     }),
     creator: input.host,

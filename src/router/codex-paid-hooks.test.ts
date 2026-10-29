@@ -186,22 +186,26 @@ describe('Codex automatic hooks', () => {
           hookEventName: 'UserPromptSubmit',
           additionalContext: expect.stringContaining('mcp__router__request'),
         },
-        systemMessage: expect.stringContaining('set aside $0.25 for routing'),
+        systemMessage: expect.stringContaining('set aside $0.03 for routing'),
       });
       const native = await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Nothing went to the free path: one deposit, then a voucher.
+      // Nothing went to the free path, and no leg carried the deposit: the
+      // background top-up did, then each leg paid a voucher.
       expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route warm unpaid',
+        'POST /api/x402-router/route warm paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
       ]);
-      expect(fake.deposits).toBe(1);
+      expect(fake.depositedOn).toEqual(['warm']);
       // The deposit counts against the daily budget, as an MCP lookup's does.
-      expect((await readSpendSummary(dir))?.committedAtomic).toBe('250000');
+      expect((await readSpendSummary(dir))?.committedAtomic).toBe('30000');
     } finally {
       await server.close();
     }
@@ -214,7 +218,12 @@ describe('Codex automatic hooks', () => {
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
       expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
-      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+      // The leg's 402, and the top-up's, which read the balance and stopped.
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route warm unpaid',
+      ]);
+      expect(out?.systemMessage).toContain('the wallet holds $0.02');
       expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin wallet fund');
       expect(fake.paidRequests()).toBe(0);
@@ -252,7 +261,7 @@ describe('Codex automatic hooks', () => {
         codexEvent('prompt', { transcript_path: null }),
       );
       expect(out).toMatchObject({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit' } });
-      expect(fake.paidRequests()).toBe(1);
+      expect(fake.settledFees).toBe(1);
     } finally {
       await server.close();
     }

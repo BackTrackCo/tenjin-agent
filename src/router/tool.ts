@@ -40,10 +40,12 @@ import {
 } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
+  DEPOSIT_DEFERRED,
   reportSpecOutcome,
   requestBrowse,
   requestDecision,
   requestToolSpec,
+  TOPPING_UP,
   type BrowseRow,
   type DecisionOutcome,
   type SpecOutcome,
@@ -632,11 +634,14 @@ async function requestTool(
   );
   if (fresh.status === 'skipped') {
     await footer.done('native');
+    const { why } = fresh;
     return fail(
       'native',
-      fresh.why === DEADLINE_AFTER_PAYMENT_SENT
+      why === DEADLINE_AFTER_PAYMENT_SENT
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
-        : `${unpaidSentence(fresh.why, 'agent', fresh.quotedAtomic) ?? `The routing fee was not paid for this call (${fresh.why}).`} Nothing was routed and no provider was paid.`,
+        : why === TOPPING_UP || why === DEPOSIT_DEFERRED
+          ? 'Tenjin is setting funds aside for routing fees in the background, and they had not landed when this call needed them. Nothing was routed and no provider was paid.'
+          : `${unpaidSentence(why, 'agent', fresh) ?? `The routing fee was not paid for this call (${why}).`} Nothing was routed and no provider was paid.`,
       { nextStep: 'Use your own tools for this one.' },
     );
   }
