@@ -179,6 +179,12 @@ export const TOP_UP_TIMEOUT_MS = 15_000;
 /** How long a refused or failed top-up holds off the next, by how many in a
  *  row have failed; the last repeats. Contention backs off nothing. */
 export const TOP_UP_BACKOFF_MS: readonly number[] = [30_000, 120_000, 600_000];
+/**
+ * A WALLET TOO LOW stops at 2 minutes: a new user funds it in the browser and
+ * comes back in the same sitting, and the retry is one background balance
+ * read, so the next prompt after funding should not wait out 10 minutes.
+ */
+export const WALLET_LOW_BACKOFF_MS: readonly number[] = [30_000, 120_000];
 
 /** How long after this process last saw a 402 a wallet known not to sign
  *  sends nothing: the 402 is then certain. */
@@ -1024,11 +1030,13 @@ export class RoutingPayer {
   }
 
   /** A top-up not paid: the next one waits out the backoff, unless the cause
-   *  was contention or a payment still out, which back off nothing. */
+   *  was contention or a payment still out, which back off nothing. A wallet
+   *  too low has the shorter schedule ({@link WALLET_LOW_BACKOFF_MS}). */
   private refusedTopUp(skip: RouteSkipped): TopUp {
     if (!ROUTING_SILENT.has(skip.why)) {
       const count = (this.failed?.count ?? 0) + 1;
-      const wait = TOP_UP_BACKOFF_MS[Math.min(count, TOP_UP_BACKOFF_MS.length) - 1]!;
+      const steps = skip.why === 'wallet_low' ? WALLET_LOW_BACKOFF_MS : TOP_UP_BACKOFF_MS;
+      const wait = steps[Math.min(count, steps.length) - 1]!;
       this.failed = { skip, count, until: this.now() + wait };
     }
     return { status: 'refused', skip };

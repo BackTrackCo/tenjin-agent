@@ -719,6 +719,31 @@ describe('RoutingPayer', () => {
     expect(router.deposits).toBe(1);
   });
 
+  it.each<[string, PayerOpts, number]>([
+    ['a wallet too low stops at 2 minutes', { walletAtomic: 0n }, 120_000],
+    [
+      'a budget refusal goes on to 10 minutes',
+      { policy_: { sessionBudgetAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n } },
+      600_000,
+    ],
+  ])('backs refused top-ups off 30 s, then 2 min, then: %s', async (_label, opts, third) => {
+    const router = new FakeRouter();
+    const p = payer(router, opts);
+    const topUps = () => router.log.filter((l) => l.endsWith(' warm unpaid')).length;
+    for (const [n, wait] of [30_000, 120_000, third].entries()) {
+      // The call that needs a deposit starts a top-up, which is refused.
+      await routeOnce(p, router);
+      expect(topUps()).toBe(n + 1);
+      // A moment before its backoff ends, the next call starts none.
+      clock += wait - 1;
+      await routeOnce(p, router);
+      expect(topUps()).toBe(n + 1);
+      clock += 1;
+    }
+    await routeOnce(p, router);
+    expect(topUps()).toBe(4);
+  });
+
   it('remembers a router with no warm form for an hour, and deposits on the call itself meanwhile', async () => {
     const router = new FakeRouter({ warm: false });
     const warned: string[] = [];
