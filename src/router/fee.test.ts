@@ -62,7 +62,7 @@ describe('routingDepositAtomic', () => {
 });
 
 describe('UNPAID wallet entries', () => {
-  it("keeps offline eligibility aligned with the server's explicit $0.05 hint (extra.minDeposit 50000)", async () => {
+  it("pins the constant to the router's announced $0.05 hint (extra.minDeposit 50000)", async () => {
     const scheme = new BatchSettlementEvmScheme('0x0000000000000000000000000000000000000001');
     const requirement = { ...new FakeRouter().requirement, extra: { minDeposit: '50000' } };
     expect(CHANNEL_DEPOSIT_ATOMIC).toBe(BigInt(await scheme.resolveMinDepositHint(requirement)));
