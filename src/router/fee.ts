@@ -37,9 +37,9 @@ import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 export const ROUTING_FEE_CEILING_ATOMIC = 3_000n;
 /** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
 export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
-/** The deposit hint ($0.03) when a 402 carries no `extra.minDeposit`: the
+/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`: the
  *  production server's own, and the one doctor sizes from with no 402. */
-export const CHANNEL_DEPOSIT_ATOMIC = 30_000n;
+export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;

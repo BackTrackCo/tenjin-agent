@@ -10,7 +10,7 @@ import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { ROUTE_PAID_PATH } from './decision';
-import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -97,9 +97,10 @@ export class FakeRouter {
       payTo: privateKeyToAccount(generatePrivateKey()).address,
       maxTimeoutSeconds: 15,
       extra: {
+        // The hint the production server announces explicitly, whatever it quotes.
         ...(opts.minDeposit === null
           ? {}
-          : { minDeposit: opts.minDeposit ?? (10n * BigInt(opts.amount ?? FEE)).toString() }),
+          : { minDeposit: opts.minDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString() }),
         receiverAuthorizer: privateKeyToAccount(generatePrivateKey()).address,
         withdrawDelay: 108_000,
         name: 'USDC',

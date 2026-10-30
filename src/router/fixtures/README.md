@@ -167,7 +167,7 @@ and answers `needs_input` (`spec_missing`), pointing at `request({query})`.
 `POST /api/x402-router/route` takes the hook, the tool's `{query, id?}` forms
 and `warm`, behind x402
 `batch-settlement` quoting 3000 atomic USDC (`maxTimeoutSeconds` 15,
-`extra.minDeposit` 30000). The 402 is the
+`extra.minDeposit` 50000). The 402 is the
 only price: this client pays any quote at or below its ceiling of 3000 atomic
 USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the user's spend limits,
 pays nothing above it, and pins no payee. With the fee `off`, the route answers

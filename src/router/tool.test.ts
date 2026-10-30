@@ -354,7 +354,7 @@ describe('routing outcomes that buy nothing', () => {
   });
 
   it('names a routing deposit once, in the result of the call that took it', async () => {
-    let deposited = 30_000n;
+    let deposited = 50_000n;
     const route = () => ({
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
       deposited: () => deposited,
@@ -368,7 +368,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(

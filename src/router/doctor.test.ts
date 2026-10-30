@@ -134,7 +134,7 @@ describe('routingFeeRow', () => {
     [
       'wallet_low',
       routing(READY, { balanceAtomic: 20_000n }),
-      'the wallet holds less than the $0.03 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
+      'the wallet holds less than the $0.05 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
       'Fund it with `tenjin wallet fund 5`.',
     ],
     [
@@ -621,7 +621,7 @@ describe('runRouterDoctor, with its seams injected', () => {
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({
       detail:
-        'the wallet holds less than the $0.03 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
+        'the wallet holds less than the $0.05 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
       fix: 'Fund it with `tenjin wallet fund 5`.',
     });
     expect((out as { humanLines: string[] }).humanLines.at(-1)).toBe(

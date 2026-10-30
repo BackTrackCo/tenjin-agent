@@ -183,7 +183,7 @@ describe('Codex automatic hooks', () => {
           hookEventName: 'UserPromptSubmit',
           additionalContext: expect.stringContaining('mcp__router__request'),
         },
-        systemMessage: expect.stringContaining('set aside $0.03 for routing'),
+        systemMessage: expect.stringContaining('set aside $0.05 for routing'),
       });
       const native = await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
       expect(native).toMatchObject({
@@ -202,7 +202,7 @@ describe('Codex automatic hooks', () => {
       ]);
       expect(fake.depositedOn).toEqual(['warm']);
       // The deposit counts against the daily budget, as an MCP lookup's does.
-      expect((await readSpendSummary(dir))?.committedAtomic).toBe('30000');
+      expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
     } finally {
       await server.close();
     }
