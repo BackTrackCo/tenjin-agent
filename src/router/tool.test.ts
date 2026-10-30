@@ -36,9 +36,10 @@ vi.mock('../commands/pay', async (importOriginal) => {
 });
 
 /**
- * The `request` tool after the fee: ONE free decision, then ONE payment, to the
- * provider. The id is the fast path and the query is always sent, so every test
- * here is about which decision ran, what it cost, and what the host is told.
+ * The `request` tool: one routing decision on the paid route (unpaid here,
+ * unless a test passes a route), then one payment per take, to the provider.
+ * The id is the fast path and the query is always sent, so every test here is
+ * about which decision ran, what it cost, and what the host is told.
  */
 
 let dir: string;

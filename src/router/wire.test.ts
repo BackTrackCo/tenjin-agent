@@ -160,11 +160,11 @@ describe('the request bodies', () => {
   });
 
   /**
-   * WHAT THIS BUILD SAYS IT RUNS. Each token is one the server's README names
-   * as read (`spec`, `catalog`, `label`, `fields`, `jobs`, `headers`, `note`,
-   * `tolerant`, and `bazaar` behind its experiment), so the server sends each
-   * field this build parses and none it does not. A token is added only with
-   * the parser that takes its fields.
+   * WHAT THIS BUILD SAYS IT RUNS. Each token is one the wire README names
+   * (`spec`, `catalog`, `label`, `fields`, `jobs`, `note`, `bazaar` behind its
+   * experiment, and the client-side `headers` and `tolerant`, until the server
+   * reads them), so the server sends each field this build parses and none it
+   * does not. A token is added only with the parser that takes its fields.
    */
   it("sends this build's accepts: the contract tokens it parses and runs", () => {
     expect(CLIENT_ACCEPTS).toEqual([
@@ -344,10 +344,10 @@ describe('the request bodies', () => {
 
 /**
  * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an `execute`
- * with no contract parsed and reached the host as a routine `needs_input`, a
- * non-execute with no diagnostics parsed with nothing to act on, and a hook
- * answer carrying a contract parsed as though the hook had quoted a price. Each
- * fixture must now match exactly one variant of exactly one parser.
+ * with no contract parsed and reached the host as a routine `needs_input`, and
+ * a non-execute with no diagnostics parsed with nothing to act on. Each fixture
+ * must match a variant of its own call's parser, and an `execute` the other's
+ * not at all.
  */
 describe('every answer payload on disk', () => {
   const hookAnswers = readdirSync(dir).filter(

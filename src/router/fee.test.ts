@@ -91,7 +91,7 @@ describe('unpaidSentence', () => {
     expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
     expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
   });
-  // User-visible notices keep the current routing terms and recovery action with the reason.
+  // User-visible notices name the reason and its recovery action, and no fee amount.
   const EXPECTED: Record<string, string> = {
     no_wallet:
       'Tenjin could not pay the routing fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',

@@ -337,7 +337,7 @@ describe('RoutingPayer', () => {
     );
   });
 
-  it('refuses a second deposit the day has no room for, and the call goes free', async () => {
+  it('refuses a second deposit the day has no room for, and skips the call', async () => {
     const router = new FakeRouter();
     // A $0.25 deposit holds 83 fees; the day has room for one deposit, not two.
     const p = payer(router, {

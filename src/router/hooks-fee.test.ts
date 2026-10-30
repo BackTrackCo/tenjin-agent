@@ -31,14 +31,6 @@ import {
 
 const BASE = 'https://router.test';
 const NOW = 1_800_000_000_000;
-const NATIVE = {
-  schemaVersion: 1,
-  routerVersion: 'v',
-  decision: {
-    action: 'native',
-    diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
-  },
-};
 /** A router's offer. */
 const OFFER = {
   schemaVersion: 1,
@@ -74,12 +66,9 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** A router whose every call answers `status` with `body` (native), and
- *  records what it was sent. */
-function router(
-  body: unknown = NATIVE,
-  status = 200,
-): {
+/** A router whose every call asks for the fee (a 402), and records what it
+ *  was sent. */
+function feeAsked(): {
   fetchImpl: typeof fetch;
   calls: { url: string; signature: string | null }[];
 } {
@@ -89,10 +78,7 @@ function router(
       url: String(input),
       signature: new Headers(init?.headers).get('payment-signature'),
     });
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    });
+    return new Response('{}', { status: 402, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   return { fetchImpl, calls };
 }
@@ -321,7 +307,7 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it('skips a leg with no payer when the paid route asks for the fee, and says so once', async () => {
-    const { fetchImpl, calls } = router({}, 402);
+    const { fetchImpl, calls } = feeAsked();
     const first = await runHookKind('prompt', prompt(), deps(fetchImpl));
     expect(contextOf(first)).toBeUndefined();
     expect(systemMessageOf(first)).toContain('the router charges it');
