@@ -19,11 +19,12 @@ import { WALLET_UNLOCKED } from './wallet-reasons';
  * THE COMMAND FORM, KEPT AS A STUB. Both plugins route through the `hook`
  * tool of `tenjin mcp` ({@link runHookKind}), the one process that holds the
  * wallet and pays the routing fee every routing call costs. A command entry
- * is a hand-written one or a plugin copy from an older build, which cannot
- * pay, so it routes nothing: it tells the person once per session to run
- * `tenjin install`, in the `systemMessage` the harness shows them (Codex
- * too), and says nothing after that. Deleting the commands would leave such a
- * setup failing silently.
+ * is a hand-written one, a settings install's or a plugin copy from an older
+ * build, which cannot pay, so it routes nothing: it tells the person once per
+ * session to ask their agent to set Tenjin up again, in the `systemMessage`
+ * the harness shows them (Codex too), and says nothing after that, nor in a
+ * Claude Code session the plugin serves. Deleting the commands would leave
+ * such a setup failing silently.
  *
  * The harness writes its event on stdin and reads a JSON object (or nothing)
  * from stdout, so these commands bypass the CLI's envelope entirely. They
@@ -39,10 +40,12 @@ const STDIN_TIMEOUT_MS = 1_000;
 
 export type { HookKind };
 
-/** What a command entry says, once per session. */
+/** What a command entry says, once per session. The person is never handed a
+ *  command: their agent runs install, which names a Claude Code update first
+ *  where the plugin needs one (a settings install below 2.1.287 is kept). */
 export const STALE_HOOK_LINE =
-  "Tenjin's hooks in this setup are from an older version and no longer route. " +
-  'Run `tenjin install` to set them up again; your usual tools still work.';
+  "Tenjin's hooks in this setup are from an older version and no longer route; your usual tools still work. " +
+  'Ask your agent to set Tenjin up again, updating Claude Code or Codex first if Tenjin needs a newer one.';
 
 export interface HookCommandDeps extends Pick<HookDeps, 'dataDir' | 'harness' | 'now'> {
   /** Test seam for the harness event; production reads stdin. */

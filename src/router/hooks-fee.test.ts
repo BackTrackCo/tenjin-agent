@@ -155,8 +155,8 @@ function paidFails(fake: FakeRouter): typeof fetch {
 
 describe('the hook legs and the routing fee', () => {
   /** THE COMMAND FORM IS A STUB: it cannot pay, so it routes nothing, and
-   *  tells the person once per session to set the hooks up again. */
-  it('routes nothing in the command form, and tells the person once to run tenjin install', async () => {
+   *  tells the person once per session to set Tenjin up again. */
+  it('routes nothing in the command form, and tells the person once to set Tenjin up again', async () => {
     let out = '';
     const io = { stdout: { write: (s: string) => ((out += s), true) } } as never;
     const run = (session: string) =>
@@ -167,7 +167,8 @@ describe('the hook legs and the routing fee', () => {
       });
     await run('sess-1');
     expect(JSON.parse(out)).toEqual({ systemMessage: STALE_HOOK_LINE });
-    expect(STALE_HOOK_LINE).toContain('`tenjin install`');
+    // The person's words: never a command to run.
+    expect(STALE_HOOK_LINE).not.toContain('`');
     out = '';
     await run('sess-1');
     expect(out).toBe('');

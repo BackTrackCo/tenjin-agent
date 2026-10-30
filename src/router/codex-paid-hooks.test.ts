@@ -270,7 +270,7 @@ describe('Codex automatic hooks', () => {
 });
 
 describe('a Codex plugin copy from an older build', () => {
-  it('tells the user once to run tenjin install, in the field Codex shows, and routes nothing', async () => {
+  it('tells the user once to set Tenjin up again, in the field Codex shows, and routes nothing', async () => {
     const run = async () => {
       let out = '';
       await runHookCommand({ stdout: { write: (s: string) => ((out += s), true) } } as never, {

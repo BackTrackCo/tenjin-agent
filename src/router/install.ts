@@ -452,11 +452,13 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
-  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
-  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
-  // on any version and would silence the settings install in every session,
-  // leaving the machine unrouted. So nothing is registered until `claude
-  // update`, and the settings install keeps routing, and no runtime is set up.
+  // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
+  // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
+  // any version and would silence the settings install in every session,
+  // leaving the machine unrouted and the person untold. So nothing is
+  // registered until `claude update`, the settings install stays as it is
+  // (its `tenjin hook` commands, where it wrote those, only tell the person
+  // to set Tenjin up again), and no runtime is set up.
   const deferred = !claude.meetsFloor && legacy.present;
   const rt = deferred ? null : await setUpRuntime();
   requireRuntime(rt);
@@ -536,7 +538,7 @@ export async function runRouterInstall(
   const notices = refreshNotices(plugin, claude, migration, rt, home);
   if (args.refresh === true) {
     // A refresh that could not register the plugin is not a converged install,
-    // unless the settings install it would replace still routes here.
+    // unless the settings install it would replace is still here.
     if (plugin.state === 'failed' && migration.state !== 'pending') {
       throw new CliError(
         'REFUSED',
@@ -1041,7 +1043,7 @@ function todaysSteps(
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');
     steps.push(
-      `run \`${command} install\` again; until then the earlier Tenjin setup keeps routing as before`,
+      `run \`${command} install\` again; until then the earlier Tenjin setup stays as it is`,
     );
     return steps;
   }
@@ -1063,7 +1065,7 @@ function deferredRegistration(scope: PluginScope, claude: ClaudeCodeState): Plug
     state: 'deferred',
     version: pkg.version,
     steps: [],
-    reason: `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, which the plugin needs, so it was not registered and the earlier settings setup keeps routing`,
+    reason: `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, which the plugin needs, so it was not registered and the earlier settings setup stays as it is`,
   };
 }
 
@@ -1094,7 +1096,7 @@ function refreshNotices(
   const out: string[] = [];
   if (plugin.state === 'deferred') {
     out.push(
-      `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, so the Tenjin plugin was not registered and the earlier settings setup keeps routing. Run \`claude update\`, then \`tenjin install\`.`,
+      `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, so the Tenjin plugin was not registered and the earlier settings setup stays as it is. Run \`claude update\`, then \`tenjin install\`.`,
     );
   } else if (plugin.state !== 'failed' && settingsInstallStays(migration)) {
     out.push(

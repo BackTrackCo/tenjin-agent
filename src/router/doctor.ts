@@ -646,7 +646,7 @@ async function sameDirAsAny(paths: string[], dir: string): Promise<boolean> {
 
 /**
  * The plugin: listed and enabled at this CLI's version and stamped by a
- * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still has a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -661,7 +661,7 @@ async function pluginCheck(
           name,
           status: 'warn',
           required: false,
-          detail: `${detail}; the settings install of an earlier release still routes here`,
+          detail: `${detail}; the settings install of an earlier release is still here`,
           fix: claude.meetsFloor
             ? `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`
             : `Run \`claude update\`, then \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
@@ -1294,7 +1294,7 @@ async function migrationCheck(
         detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
         fix: claude.meetsFloor
           ? `To load the plugin, ${NEW_SESSION_STEP}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
-          : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
+          : 'Run `claude update`, then `tenjin install`: until then the old entries stay.',
       };
 }
 
