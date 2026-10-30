@@ -158,14 +158,14 @@ function unlockFails(reason: UnlockReason): () => Promise<never> {
 
 describe('RoutingPayer', () => {
   // tenjin#1032: the ceiling only when as much stays in the wallet, which pays
-  // the tools routing suggests; otherwise the server's ten-fee hint.
+  // the tools routing suggests; otherwise the server's $0.05 hint.
   it.each<[string, bigint, bigint, bigint]>([
     ['$10 wallet signs the $0.25 ceiling', 10_000_000n, 250_000n, 9_750_000n],
     ['$0.50 wallet signs the $0.25 ceiling', 500_000n, 250_000n, 250_000n],
-    ['$0.49 wallet signs the $0.03 hint', 490_000n, 30_000n, 460_000n],
-    ['$0.21 wallet signs the $0.03 hint', 210_000n, 30_000n, 180_000n],
-    ['$0.07 wallet signs the $0.03 hint', 70_000n, 30_000n, 40_000n],
-    ['$0.03 wallet signs the $0.03 hint', 30_000n, 30_000n, 0n],
+    ['$0.49 wallet signs the $0.05 hint', 490_000n, 50_000n, 440_000n],
+    ['$0.21 wallet signs the $0.05 hint', 210_000n, 50_000n, 160_000n],
+    ['$0.07 wallet signs the $0.05 hint', 70_000n, 50_000n, 20_000n],
+    ['$0.05 wallet signs the $0.05 hint', 50_000n, 50_000n, 0n],
   ])('sizes the deposit to the wallet: a %s', async (_label, walletAtomic, signed, kept) => {
     const router = new FakeRouter();
     const result = await routeOnce(payer(router, { walletAtomic }), router);
@@ -190,14 +190,14 @@ describe('RoutingPayer', () => {
     },
   );
 
-  it('refuses a $0.02 wallet as wallet_low and signs nothing', async () => {
+  it('refuses a $0.04 wallet as wallet_low and signs nothing', async () => {
     const router = new FakeRouter();
-    const p = payer(router, { walletAtomic: 20_000n });
+    const p = payer(router, { walletAtomic: 40_000n });
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');
     expect(router.paidRequests()).toBe(0);
   });
 
-  it("refuses a wallet below the server's hint, not below a fixed $0.03", async () => {
+  it("refuses a wallet below the server's hint, not below a fixed $0.05", async () => {
     const router = new FakeRouter({ minDeposit: '90000' });
     const p = payer(router, { walletAtomic: 89_999n });
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');

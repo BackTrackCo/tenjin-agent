@@ -30,9 +30,9 @@ import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 export const ROUTING_FEE_CEILING_ATOMIC = 3_000n;
 /** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
 export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
-/** The production server's default deposit hint ($0.03): the smallest
+/** The production server's default deposit hint ($0.05): the smallest
  *  deposit Tenjin signs, so a wallet below it is `wallet_low`. */
-export const CHANNEL_DEPOSIT_ATOMIC = 30_000n;
+export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;

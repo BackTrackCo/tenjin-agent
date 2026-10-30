@@ -59,7 +59,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Each routing call pays a quoted fee, at most $0.003, from funds set aside ($0.25 at a time, or $0.03 under a $0.50 balance) and names your wallet address. Unused funds remain yours; each deposit counts against these limits once.';
+  'Each routing call pays a quoted fee, at most $0.003, from funds set aside ($0.25 at a time, or $0.05 under a $0.50 balance) and names your wallet address. Unused funds remain yours; each deposit counts against these limits once.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
