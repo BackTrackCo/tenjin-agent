@@ -825,10 +825,11 @@ describe('every answer payload on disk', () => {
 });
 
 /**
- * MUST-UNDERSTAND (`requires`). An offer that needs a feature to run names it
- * in the `accepts` vocabulary, on the answer or on a spec. A build without it
- * skips that offer alone and says which features it lacked; the rest of the
- * answer stands.
+ * MUST-UNDERSTAND (`requires`), A BACKSTOP. An offer that needs a feature to
+ * run names it in the `accepts` vocabulary, on the answer or on a spec. The
+ * server sends only tokens the client listed, so a build that meets one it
+ * lacks fails safe: anything the answer's line names becomes a named
+ * `native`, and a spec the line does not name is only dropped.
  */
 describe('requires', () => {
   const decisionOf = (name: string) => fixture(name).decision as Record<string, unknown>;
@@ -889,10 +890,9 @@ describe('requires', () => {
     expect(skipped).toEqual([{ id: decision.id, missing: ['streaming'] }]);
   });
 
-  it('drops only the other offer it cannot run, and a choice set left with one option', () => {
+  it('fails safe to native when a choice the line offers needs a feature it lacks', () => {
     const decision = decisionOf('wire-hook-discovered-choices.json') as Specs & {
       id: string;
-      hint: string;
       choices: { options: { id: string }[] };
     };
     const other = decision.choices.options.find((option) => option.id !== decision.id)!;
@@ -903,33 +903,37 @@ describe('requires', () => {
       ),
     } as HookDecision;
     const { decision: out, skipped } = withoutUnmet(asked);
+    expect(out).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: REQUIRES_UNMET, missing: ['streaming'] },
+    });
     expect(skipped).toEqual([{ id: other.id, missing: ['streaming'] }]);
-    expect(out).toMatchObject({ action: 'discovered', id: decision.id, hint: decision.hint });
-    expect((out as Specs).specs.map((spec) => spec.id)).toEqual([decision.id]);
-    expect(out).not.toHaveProperty('choices');
   });
 
-  it('keeps a choice set that still has two options', () => {
-    const decision = decisionOf('wire-hook-discovered-choices.json') as HookDecision &
-      Specs & { choices: { options: Record<string, unknown>[] } };
-    const extra = { ...decision.specs[1]!, id: 'extra-option-0001', requires: ['streaming'] };
-    const asked = {
-      ...decision,
-      specs: [...decision.specs, extra],
-      choices: {
-        ...decision.choices,
-        options: [
-          ...decision.choices.options,
-          { key: 'extra', label: 'Extra', strength: 'More', id: extra.id },
-        ],
-      },
+  const withAlternative = (named: boolean) => {
+    const decision = decisionOf('wire-hook-execute-spec.json') as Specs & { hint: string };
+    const alternative = { ...decision.specs[0]!, id: 'alt-offer-0001', requires: ['streaming'] };
+    return {
+      decision,
+      asked: {
+        ...decision,
+        hint: named ? `${decision.hint} Or request({id: "alt-offer-0001"}).` : decision.hint,
+        specs: [...decision.specs, alternative],
+      } as HookDecision,
     };
-    expect(
-      parseForTests('hook', { ...fixture('wire-hook-discovered-choices.json'), decision: asked })
-        .success,
-    ).toBe(true);
-    const { decision: out } = withoutUnmet(asked as HookDecision);
-    expect(out).toEqual({ ...decision, specs: decision.specs, choices: decision.choices });
+  };
+
+  it('fails safe to native when the line names a dropped spec', () => {
+    const { decision: out, skipped } = withoutUnmet(withAlternative(true).asked);
+    expect(out).toMatchObject({ action: 'native', diagnostics: { reasonCode: REQUIRES_UNMET } });
+    expect(skipped).toEqual([{ id: 'alt-offer-0001', missing: ['streaming'] }]);
+  });
+
+  it('only drops a spec the line does not name, and keeps the rest of the answer', () => {
+    const { decision, asked } = withAlternative(false);
+    const { decision: out, skipped } = withoutUnmet(asked);
+    expect(out).toEqual(decision);
+    expect(skipped).toEqual([{ id: 'alt-offer-0001', missing: ['streaming'] }]);
   });
 });
 

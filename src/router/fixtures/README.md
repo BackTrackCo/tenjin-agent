@@ -124,12 +124,16 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
 - An offer that a client must understand to run says so in `requires`: an
   array of up to 16 `accepts` tokens (`^[a-z][a-z0-9_-]{0,31}$`), on an
   offering answer (`execute`, `discovered`) or on any spec, the `spec`
-  answer's included. A client without a listed feature skips that offer
-  alone. A spec in `specs` it cannot run is dropped, with any `choices`
-  option that runs it (and the set, once fewer than two options are left);
-  when the offer is the answer's own (its `requires`, its own spec, or a
-  `spec` answer's spec), the client treats the answer as `native` with the
-  reason code `requires_unmet` and the missing tokens in `missing`. This
+  answer's included.
+- **`requires` is a backstop.** The server sends only `requires` tokens that
+  the client lists in `accepts`, and leaves out any offer whose tokens it does
+  not; `accepts` is the filter. A client that still meets an unmet token fails
+  safe: when the answer's line names what it cannot run (the answer's own
+  offer, through its `requires`, its own spec or a `spec` answer's spec;
+  another spec whose id the line carries; or any option of its `choices`),
+  the client treats the whole answer as `native` with the reason code
+  `requires_unmet` and the missing tokens in `missing`. A spec it cannot run
+  that the line does not name is only dropped. This
   client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`,
   `tolerant` and `bazaar`. Send `requires` for a field whose absence changes what the
   call is (a header it must send, a new kind of payment or streaming); a

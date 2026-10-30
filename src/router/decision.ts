@@ -553,12 +553,15 @@ export interface SkippedOffer {
 }
 
 /**
- * EACH OFFER THIS BUILD CANNOT RUN, SKIPPED ALONE. A spec whose `requires`
- * names a feature this build lacks is dropped, with any choice that runs it
- * (and the set, once fewer than two choices are left); the rest of the answer
- * stands. When that offer is the answer's own (its `requires`, its own spec,
- * or a `spec` answer's spec), nothing is left to show, so the answer becomes
- * a `native` that names the missing features: a named skip, never a guess.
+ * A BACKSTOP, NOT A FILTER. The server sends only `requires` tokens a client
+ * lists in `accepts`, so a client meets an unmet one only when that rule was
+ * broken, and then it fails safe. A spec whose `requires` names a feature this
+ * build lacks is dropped. When the answer's line names what was dropped (the
+ * answer's own offer, through its `requires`, its own spec or a `spec`
+ * answer's spec; another spec whose id the line carries; or any option of its
+ * choice set), the line can no longer be shown as written, so the whole
+ * answer becomes a `native` that names the missing features: a named skip,
+ * never a guess. A dropped spec the line does not name is only dropped.
  */
 export function withoutUnmet<T extends HookDecision | ToolDecision>(
   decision: T,
@@ -582,14 +585,19 @@ export function withoutUnmet<T extends HookDecision | ToolDecision>(
     return missing.length > 0 ? [{ id: spec.id, missing }] : [];
   });
   if (skipped.length === 0) return { decision, skipped };
-  const gone = new Set(skipped.map((s) => s.id));
-  const kept = { ...decision, specs: specs.filter((spec) => !gone.has(spec.id)) };
-  if (kept.action === 'discovered' && kept.choices !== undefined) {
-    const options = kept.choices.options.filter((option) => !gone.has(option.id));
-    if (options.length < 2) delete kept.choices;
-    else kept.choices = { ...kept.choices, options };
+  const options = new Set(
+    decision.action === 'discovered' ? (decision.choices?.options ?? []).map((o) => o.id) : [],
+  );
+  const hint = 'hint' in decision ? decision.hint : '';
+  if (skipped.some((s) => options.has(s.id) || hint.includes(s.id))) {
+    const missing = [...new Set(skipped.flatMap((s) => s.missing))];
+    return { decision: unmetRefusal(missing) as T, skipped };
   }
-  return { decision: kept as T, skipped };
+  const gone = new Set(skipped.map((s) => s.id));
+  return {
+    decision: { ...decision, specs: specs.filter((spec) => !gone.has(spec.id)) } as T,
+    skipped,
+  };
 }
 
 function unmetRefusal(missing: string[]) {
