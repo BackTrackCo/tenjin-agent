@@ -48,7 +48,7 @@ export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 export const DEPOSIT_FLOOR_FEES = 10n;
 
 /**
- * THE DEPOSIT TENJIN SIGNS (tenjin#1046): the smallest of the server's hint
+ * THE DEPOSIT TENJIN SIGNS: the smallest of the server's hint
  * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
  * wallet holding more than the hint keeps the rest for the paid tools routing
  * suggests, which pay from the wallet, never the channel; one between the

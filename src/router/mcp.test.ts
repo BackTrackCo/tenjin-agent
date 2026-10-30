@@ -1129,7 +1129,7 @@ describe('a free answer on a machine with no wallet', () => {
 });
 
 /**
- * THE SESSION'S FIRST TOP-UP (tenjin#1046): `tenjin mcp` funds a channel that
+ * THE SESSION'S FIRST TOP-UP: `tenjin mcp` funds a channel that
  * cannot cover a fee once its prewarm unlock settles, so the first prompt
  * meets no deposit; where the router is off it sends nothing.
  */

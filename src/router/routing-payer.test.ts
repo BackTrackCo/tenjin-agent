@@ -179,7 +179,7 @@ function unlockFails(reason: UnlockReason): () => Promise<never> {
 }
 
 describe('RoutingPayer', () => {
-  // tenjin#1046: the smallest of the server's hint, the wallet and the
+  // The deposit: the smallest of the server's hint, the wallet and the
   // per-call limit, never below ten quoted fees; the rest stays in the
   // wallet, which pays the tools routing suggests.
   it.each<[string, { amount?: string; walletAtomic: bigint; perCall?: bigint }, bigint]>([

@@ -20,10 +20,10 @@ import type { RoutingPayerDeps } from './routing-payer';
  * charged amount, and the channel state the client no longer copies), and a
  * stale voucher with a corrective 402 carrying the last voucher the wallet
  * signed, which the SDK's recovery checks. It serves one pending request per
- * channel, as the real server does. It answers the `warm` form the way
- * tenjin#1050 does (its answer, settled at $0, with any deposit on it), or,
- * as a router from before it, with a 400 and nothing settled. No money moves
- * and no network is touched.
+ * channel, as the real server does. It answers the `warm` form the way a
+ * router with the form does (its answer, settled at $0, with any deposit on
+ * it), or, as a router from before the form, with a 400 and nothing settled.
+ * No money moves and no network is touched.
  */
 
 export const NETWORK = 'eip155:84532';
@@ -50,7 +50,7 @@ interface Channel {
   pending: boolean;
 }
 
-/** The `warm` answer, as tenjin#1050 sends it. */
+/** The `warm` answer, as a router with the form sends it. */
 export const WARM = { schemaVersion: 1, routerVersion: 'test', warm: true };
 
 export class FakeRouter {

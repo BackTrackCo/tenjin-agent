@@ -242,7 +242,7 @@ describe('the request bodies', () => {
   });
 
   /**
-   * THE BACKGROUND TOP-UP'S CARRIER (tenjin#1046): the paid route's `warm`
+   * THE BACKGROUND TOP-UP'S CARRIER: the paid route's `warm`
    * call, byte for byte, and its answer, which carries no decision. A router
    * without the form answers anything else, which the top-up reads as absent.
    */

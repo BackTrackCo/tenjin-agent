@@ -25,7 +25,7 @@ const ALL_KEYS = [
 ];
 
 describe('routingDepositAtomic', () => {
-  /** tenjin#1046: the smallest of the hint, the wallet and the per-call
+  /** The deposit: the smallest of the hint, the wallet and the per-call
    *  limit, never below ten quoted fees, never above the SDK's ceiling. */
   const size = (o: {
     hint?: bigint;

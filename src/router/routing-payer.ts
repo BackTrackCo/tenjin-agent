@@ -88,7 +88,7 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   second payment in flight on one channel (`channel_busy`): that call is
  *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
- * - A ROUTING CALL NEVER CARRIES A DEPOSIT (tenjin#1046). A prompt's hook leg
+ * - A ROUTING CALL NEVER CARRIES A DEPOSIT. A prompt's hook leg
  *   has 3.5 s and a deposit settles on chain in about 5, so the channel is
  *   funded in the background instead ({@link RoutingPayer.topUpIfLow}): one
  *   `warm` call to the paid route, which the server answers in code and
