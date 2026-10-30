@@ -136,6 +136,12 @@ export interface PayArgs {
   quote?: boolean;
   /** The router's body, already encoded; sent byte for byte. Needs POST, PUT or PATCH. */
   rawBody?: string;
+  /** The provider's own deadline for each leg, from its spec, in place of
+   *  `--timeout`: the probe's, and the least the paid leg waits. */
+  timeoutMs?: number;
+  /** The largest binary body kept, from the provider's spec; absent, the
+   *  transport's own cap. */
+  maxBytes?: number;
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
@@ -265,8 +271,9 @@ async function executePay(
     ...callerHeaders(args.headers),
   };
 
+  const legTimeoutMs = args.timeoutMs ?? ctx.flags.timeout;
   const fetchOpts = {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: legTimeoutMs,
     // Both legs: the probe's 402 is money-path input, and the paid retry
     // carries a signed header (which pins redirects on its own; this pins the
     // probe too, so the challenge always comes from the URL that was gated).
@@ -277,6 +284,7 @@ async function executePay(
     // A router lookup can buy a file (a sound, an image): its bytes are kept
     // whole for the tool to save, never decoded as text.
     ...(router ? { binaryBody: true as const } : {}),
+    ...(args.maxBytes !== undefined ? { maxBinaryBytes: args.maxBytes } : {}),
     method,
   };
 
@@ -529,7 +537,12 @@ async function executePay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
-  const paidTimeoutMs = paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout);
+  // A spec's deadline may lengthen this leg, never shorten it: the
+  // authorization has left, and a cut here loses a result already paid for.
+  const paidTimeoutMs = paidLegTimeoutMs(
+    effectiveRequirement,
+    Math.max(legTimeoutMs, ctx.flags.timeout),
+  );
   const paid = await httpRequest(url, {
     ...fetchOpts,
     timeoutMs: paidTimeoutMs,
@@ -650,8 +663,9 @@ async function executePay(
  * off a provider advertising 360 s of work and threw its answer away. The
  * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
  * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
- * and it never shortens what the user asked for with `--timeout`. The probe
- * leg keeps the CLI timeout: nothing is at stake there.
+ * and it never shortens what the user asked for with `--timeout`, nor does a
+ * spec's `timeoutS`. The probe leg takes the spec's deadline, else the CLI
+ * timeout: nothing is at stake there.
  */
 export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
 
@@ -724,7 +738,7 @@ async function assertBalanceCovers(
  * leg's own, with nothing sent but the probe and that re-read.
  */
 export async function quoteRouterCall(
-  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody'> & {
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody' | 'timeoutMs'> & {
     terms: AdvertisedTerms;
   },
   ctx: CommandContext,
@@ -737,7 +751,7 @@ export async function quoteRouterCall(
   }
   const headers = { ...specHeaders(args.specHeaders), ...callerHeaders(args.headers) };
   const probe = await httpRequest(url, {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
     blockRedirects: true,
     binaryBody: true,
     method: resolveMethod(args),
@@ -772,7 +786,7 @@ export async function quoteRouterCall(
     resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
   );
   const recheck = await httpRequest(url, {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
     blockRedirects: true,
     binaryBody: true,
     method: resolveMethod(args),
