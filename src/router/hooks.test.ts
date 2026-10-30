@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   HINT_SOURCE,
+  hookOutcome,
   NEAR_EMPTY_BYTES,
   promptSkipReason,
   runAnswerHook,
@@ -1774,6 +1775,19 @@ describe('what the hook leaves for the status line', () => {
     });
 
     expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: no_payer');
+  });
+
+  it('names an offer this build skipped as such, never as the router choosing native tools', () => {
+    const skipped = {
+      action: 'native' as const,
+      diagnostics: {
+        reasonCode: 'requires_unmet',
+        stage: 'client',
+        missing: ['x'],
+        nextAction: '',
+      },
+    };
+    expect(hookOutcome(skipped)).toBe('native tools (offer needs newer tenjin)');
   });
 
   it('names the native search stage the way the demo does', async () => {

@@ -537,7 +537,12 @@ async function executePay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
-  const paidTimeoutMs = paidLegTimeoutMs(effectiveRequirement, legTimeoutMs);
+  // A spec's deadline may lengthen this leg, never shorten it: the
+  // authorization has left, and a cut here loses a result already paid for.
+  const paidTimeoutMs = paidLegTimeoutMs(
+    effectiveRequirement,
+    Math.max(legTimeoutMs, ctx.flags.timeout),
+  );
   const paid = await httpRequest(url, {
     ...fetchOpts,
     timeoutMs: paidTimeoutMs,
@@ -658,8 +663,9 @@ async function executePay(
  * off a provider advertising 360 s of work and threw its answer away. The
  * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
  * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
- * and it never shortens what the user asked for with `--timeout`. The probe
- * leg keeps the CLI timeout: nothing is at stake there.
+ * and it never shortens what the user asked for with `--timeout`, nor does a
+ * spec's `timeoutS`. The probe leg takes the spec's deadline, else the CLI
+ * timeout: nothing is at stake there.
  */
 export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
 
@@ -732,7 +738,7 @@ async function assertBalanceCovers(
  * leg's own, with nothing sent but the probe and that re-read.
  */
 export async function quoteRouterCall(
-  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody'> & {
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody' | 'timeoutMs'> & {
     terms: AdvertisedTerms;
   },
   ctx: CommandContext,
@@ -745,7 +751,7 @@ export async function quoteRouterCall(
   }
   const headers = { ...specHeaders(args.specHeaders), ...callerHeaders(args.headers) };
   const probe = await httpRequest(url, {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
     blockRedirects: true,
     binaryBody: true,
     method: resolveMethod(args),
@@ -780,7 +786,7 @@ export async function quoteRouterCall(
     resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
   );
   const recheck = await httpRequest(url, {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
     blockRedirects: true,
     binaryBody: true,
     method: resolveMethod(args),

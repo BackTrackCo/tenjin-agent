@@ -378,7 +378,7 @@ describe('RoutingPayer', () => {
     expect((await readSpendSummary(dir))?.committedAtomic).toBe(CHANNEL_DEPOSIT_ATOMIC.toString());
   });
 
-  it('refuses a second deposit the day has no room for, and the call is skipped', async () => {
+  it('refuses a second deposit the day has no room for, and skips the call', async () => {
     const router = new FakeRouter();
     // A $0.03 deposit holds 10 fees; the day has room for one deposit, not two.
     const p = payer(router, { policy_: { sessionBudgetAtomic: 2n * CHANNEL_DEPOSIT_ATOMIC - 1n } });

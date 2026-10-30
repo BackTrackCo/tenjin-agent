@@ -97,11 +97,10 @@ gate is offered only the tasks whose capabilities a client runs.
   search's own query.
 - `jobs`: a listed service's spec carries `job` when its seller can answer
   before the result is ready (Job specs, below), and `takes: {max}` when its
-  task makes media, the most takes one call's `count` may run (5). A service
-  that never answers inline is offered at all, and a media offer's line names
-  `count` after its call (`COUNT_LINE` in `policy.ts`), before the list's menu,
-  dropped past the hint's bound.
-
+  task makes media, the most takes one call's `count` may run (5). Only to such
+  a client is a service that never answers inline offered at all, and a media
+  offer's line names `count` after its call (`COUNT_LINE` in `policy.ts`),
+  before the list's menu, dropped past the hint's bound.
 - `headers` (client side only, until tenjin#988 lands): a spec carries
   `request.headers`, fixed headers the catalog sets on a service's call (a
   provider's beta opt-in), and the pins those headers unlock.
@@ -127,12 +126,16 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
 - An offer that a client must understand to run says so in `requires`: an
   array of up to 16 `accepts` tokens (`^[a-z][a-z0-9_-]{0,31}$`), on an
   offering answer (`execute`, `discovered`) or on any spec, the `spec`
-  answer's included. A client without a listed feature skips that offer
-  alone. A spec in `specs` it cannot run is dropped, with any `choices`
-  option that runs it (and the set, once fewer than two options are left);
-  when the offer is the answer's own (its `requires`, its own spec, or a
-  `spec` answer's spec), the client treats the answer as `native` with the
-  reason code `requires_unmet` and the missing tokens in `missing`. This
+  answer's included.
+- **`requires` is a backstop.** The server sends only `requires` tokens that
+  the client lists in `accepts`, and leaves out any offer whose tokens it does
+  not; `accepts` is the filter. A client that still meets an unmet token fails
+  safe: when the answer's line names what it cannot run (the answer's own
+  offer, through its `requires`, its own spec or a `spec` answer's spec;
+  another spec whose id the line carries; or any option of its `choices`),
+  the client treats the whole answer as `native` with the reason code
+  `requires_unmet` and the missing tokens in `missing`. A spec it cannot run
+  that the line does not name is only dropped. This
   client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`,
   `tolerant` and `bazaar`. Send `requires` for a field whose absence changes what the
   call is (a header it must send, a new kind of payment or streaming); a
@@ -329,6 +332,15 @@ and audio). Every poll is sent unsigned:
   running job whatever `running` says. Such a service needs `jobs`
   (`minContract`), so no other client is offered it.
 
+How this client runs a job: a poll is never signed, since a take's one payment
+is its submit, and no payment header goes to a poll, status or complete URL. A
+status URL an answer names is held to the submit's host over HTTPS and refused
+unpolled otherwise. A poll's 404 or 410 is a job the seller no longer has; a 402
+ends it `failed` with nothing signed (the seller asked to be paid again for a
+result already paid for), and any other 4xx ends it `failed` in the seller's
+words. A paid call still running when the call's 300 s wait ends is reported
+`running`, with its `httpStatus` and `ms` and nothing else.
+
 ## Compare choices
 
 A client that sends `catalog`, or adds `"choices"` beside `discovered`, may get
@@ -379,9 +391,6 @@ Two pairs pin a request and the answer it gets:
 
 | file                                       | what it pins                                                                              |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `wire-gate-request.json`                   | the free gate request, including a pending native call                                    |
-| `wire-decision-request.json`               | the hook call: a packet, no query                                                         |
-| `wire-decision-request-narrowed.json`      | the tool call: the query and the id                                                       |
 | `wire-hook-execute.json`                   | hook answer for the free docs lookup: no spec, the `request({query, id})` line            |
 | `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                              |
 | `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                                   |
@@ -434,8 +443,9 @@ Two rules the fixtures exist to hold:
   That is the intended shape: they sit on the union's non-execute arms so a
   contractless outcome without diagnostics does not typecheck.
 
-There is no `billing` block and no fee. The decision is free; the one payment in
-a lookup is the caller's own, to the provider.
+There is no `billing` block in an answer. The routing fee rides the paid route's
+x402 headers (The paid path, above); every other payment in a lookup is the
+caller's own, to the provider.
 
 ## Bounds both sides enforce
 
@@ -463,6 +473,10 @@ Take these from here; do not re-derive them.
 | `packet.nativeOutcome`          | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content`                                    |
 | `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                                                                                                                                                                          |
 | `job`                           | integers `everyS` 1 to 30, `maxWaitS` 1 to 600, `keepH` 1 to 48; a field name 1 to 64 of `[A-Za-z0-9_]`, no leading digit; a header 1 to 64 of `[A-Za-z0-9-]`; `httpStatus` and `values` 1 to 8 entries     |
+| `takes.max`                     | 2 to 5                                                                                                                                                                                                      |
+| `requires`                      | up to 16 tokens, each matching `^[a-z][a-z0-9_-]{0,31}$`                                                                                                                                                    |
+| `timeoutS`                      | an integer, 1 to 120                                                                                                                                                                                        |
+| `maxBytes`                      | an integer, 1 to 209715200                                                                                                                                                                                  |
 | `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                  |
 | `id`                            | a uuid the server minted; a client never invents one                                                                                                                                                        |
 | id lifetime                     | 15 minutes from the hook call that created it                                                                                                                                                               |

@@ -45,6 +45,7 @@ import {
   requestBrowse,
   requestDecision,
   requestToolSpec,
+  TOP_UP_UNAVAILABLE,
   TOPPING_UP,
   type BrowseRow,
   type DecisionOutcome,
@@ -112,8 +113,8 @@ import {
 } from './job-store';
 
 /**
- * The `request` tool: one routing decision per lookup, then ONE payment, to
- * the provider.
+ * The `request` tool: one routing decision per lookup, paid its routing fee
+ * by `tenjin mcp`'s payer, then one payment per take to the provider.
  *
  * AN OFFER WITH A SPEC RUNS HERE, IN ONE CALL. The hook keeps each offered
  * service's spec by its id, and its line is the skeleton of the call:
@@ -642,7 +643,9 @@ async function requestTool(
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
         : why === TOPPING_UP || why === DEPOSIT_DEFERRED
           ? 'Tenjin is setting funds aside for routing fees in the background, and they had not landed when this call needed them. Nothing was routed and no provider was paid.'
-          : `${unpaidSentence(why, 'agent', fresh) ?? `The routing fee was not paid for this call (${why}).`} Nothing was routed and no provider was paid.`,
+          : why === TOP_UP_UNAVAILABLE
+            ? 'Tenjin could not set funds aside for routing fees just now (the router was busy or out of reach); it tries again shortly. Nothing was routed and no provider was paid.'
+            : `${unpaidSentence(why, 'agent', fresh) ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, or the wallet was still unlocking); the next call usually routes.'} Nothing was routed and no provider was paid.`,
       { nextStep: 'Use your own tools for this one.' },
     );
   }

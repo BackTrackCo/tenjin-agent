@@ -124,11 +124,8 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
 }
 
 /** The production server with only the network and the signer faked. */
-async function connect(
-  fake: FakeRouter,
-  payer: Partial<RoutingPayerDeps> = {},
-  fetchImpl: typeof fetch = fake.fetch,
-) {
+async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
+  const fetchImpl = fake.fetch;
   const server = await createRouterMcpServer({
     dataDir: dir,
     harness: 'codex',

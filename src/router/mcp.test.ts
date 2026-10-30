@@ -90,7 +90,8 @@ function authorizer(): SpendAuthorizer {
   };
 }
 
-/** The one free decision this server asks for; no 402, nothing signed. */
+/** The one decision this server asks for, from a router with the fee off:
+ *  no 402, nothing signed. */
 function router(body: unknown): typeof fetch {
   return (async () =>
     new Response(JSON.stringify(body), {
@@ -1087,9 +1088,10 @@ describe('what the tool tells the model to send', () => {
 });
 
 /**
- * ROUTING IS FREE, SO A WALLET IS THE PAYING LEG'S PROBLEM. The handler used to
- * open the wallet before the tool ran, which meant a machine with no wallet, or
- * a locked one, could not even be told that its own tools cover the task.
+ * A WALLET IS THE PAYING LEG'S PROBLEM. The handler used to open the wallet
+ * before the tool ran, which meant a machine with no wallet, or a locked one,
+ * could not even be told that its own tools cover the task. Here the router
+ * charges nothing (the fee off), so the decision reaches the tool unpaid.
  */
 describe('a free answer on a machine with no wallet', () => {
   it('delivers a native decision without ever opening one', async () => {

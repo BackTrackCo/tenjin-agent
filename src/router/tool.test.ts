@@ -36,9 +36,10 @@ vi.mock('../commands/pay', async (importOriginal) => {
 });
 
 /**
- * The `request` tool after the fee: ONE free decision, then ONE payment, to the
- * provider. The id is the fast path and the query is always sent, so every test
- * here is about which decision ran, what it cost, and what the host is told.
+ * The `request` tool: one routing decision on the paid route (unpaid here,
+ * unless a test passes a route), then one payment per take, to the provider.
+ * The id is the fast path and the query is always sent, so every test here is
+ * about which decision ran, what it cost, and what the host is told.
  */
 
 let dir: string;
@@ -313,6 +314,20 @@ describe('routing outcomes that buy nothing', () => {
     expect(String(result.envelope.reason)).not.toContain('could not pay');
   });
 
+  it('says a busy routing payment plainly, never by its code', async () => {
+    const route = () => ({
+      send: async (): Promise<never> => {
+        throw new RouteSkipped('channel_busy');
+      },
+    });
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(net([]).fetchImpl), route },
+    );
+    expect(String(result.envelope.reason)).toContain('the next call usually routes');
+    expect(String(result.envelope.reason)).not.toContain('channel_busy');
+  });
+
   /** The tool's text is the model's: a wallet reason carries its agentFix (B1). */
   it("skips at once, with the model's ask-the-person fix, when the payer cannot pay", async () => {
     const { fetchImpl, calls } = net([]);
@@ -351,7 +366,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.001. Unused funds remain yours.',
+      'Tenjin set aside $0.03 for routing. Each routing decision costs at most $0.001. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(
@@ -1163,7 +1178,7 @@ describe('a discovered service', () => {
       deps(fetchImpl),
     );
     expect(result.envelope.status).not.toBe('fulfilled');
-    expect(String(result.envelope.reason)).toContain('over the 0 MB cap');
+    expect(String(result.envelope.reason)).toContain('over the 4-byte cap');
     expect(await readdir(join(dir, 'downloads')).catch(() => [])).toEqual([]);
   });
 

@@ -74,8 +74,9 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
  * A TOLERANT READER, AND ONLY THAT (RFC 9413). A field this build does not
  * know is dropped, never a failure: a server that adds one reaches every
  * released client without a release or a deploy order. A field it does know
- * keeps its type, its bounds and its checks, and an object naming the known
- * fields of two arms of one union is still refused. An offer that a client
+ * keeps its type, its bounds and its checks, and a job's `pollUrl` or
+ * `running` naming the keys of both its arms is still refused (an answer's
+ * own arms are told apart by `action`). An offer that a client
  * must understand to run says so in `requires` ({@link withoutUnmet}).
  *
  * The two calls ask different questions and get different answers, so they get
@@ -335,8 +336,9 @@ export const ToolSpecSchema = z.object({
    *  the least the paid leg waits. Absent, the CLI's `--timeout`. */
   timeoutS: z.number().int().min(1).max(MAX_SPEC_TIMEOUT_S).optional(),
   /** The largest file the call may bring back, in bytes: a binary result,
-   *  and each file a media result links to. Absent, and at most, the
-   *  {@link MAX_BINARY_BODY_BYTES} every call had. */
+   *  and each file a media result links to, though not yet a job's polled
+   *  result. Absent, and at most, the {@link MAX_BINARY_BODY_BYTES} every
+   *  call had. */
   maxBytes: z.number().int().min(1).max(MAX_BINARY_BODY_BYTES).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
@@ -511,7 +513,7 @@ const ToolResponseSchema = envelope(ToolDecisionSchema);
 /**
  * ONE ROW OF THE TOOL LIST, as the free browse answers it: the tool's id, its
  * display name (a list entry's upstream name runs to 120 characters), what it
- * does, its price as the server writes it, and its kind. Strict like every
+ * does, its price as the server writes it, and its kind. Read like every
  * answer here, with the server's own bounds. The id is the one field the model
  * sends back, so its alphabet is pinned; the text is flattened to one line
  * where it is shown (`tool.ts`).
@@ -552,12 +554,15 @@ export interface SkippedOffer {
 }
 
 /**
- * EACH OFFER THIS BUILD CANNOT RUN, SKIPPED ALONE. A spec whose `requires`
- * names a feature this build lacks is dropped, with any choice that runs it
- * (and the set, once fewer than two choices are left); the rest of the answer
- * stands. When that offer is the answer's own (its `requires`, its own spec,
- * or a `spec` answer's spec), nothing is left to show, so the answer becomes
- * a `native` that names the missing features: a named skip, never a guess.
+ * A BACKSTOP, NOT A FILTER. The server sends only `requires` tokens a client
+ * lists in `accepts`, so a client meets an unmet one only when that rule was
+ * broken, and then it fails safe. A spec whose `requires` names a feature this
+ * build lacks is dropped. When the answer's line names what was dropped (the
+ * answer's own offer, through its `requires`, its own spec or a `spec`
+ * answer's spec; another spec whose id the line carries; or any option of its
+ * choice set), the line can no longer be shown as written, so the whole
+ * answer becomes a `native` that names the missing features: a named skip,
+ * never a guess. A dropped spec the line does not name is only dropped.
  */
 export function withoutUnmet<T extends HookDecision | ToolDecision>(
   decision: T,
@@ -581,21 +586,26 @@ export function withoutUnmet<T extends HookDecision | ToolDecision>(
     return missing.length > 0 ? [{ id: spec.id, missing }] : [];
   });
   if (skipped.length === 0) return { decision, skipped };
-  const gone = new Set(skipped.map((s) => s.id));
-  const kept = { ...decision, specs: specs.filter((spec) => !gone.has(spec.id)) };
-  if (kept.action === 'discovered' && kept.choices !== undefined) {
-    const options = kept.choices.options.filter((option) => !gone.has(option.id));
-    if (options.length < 2) delete kept.choices;
-    else kept.choices = { ...kept.choices, options };
+  const options = new Set(
+    decision.action === 'discovered' ? (decision.choices?.options ?? []).map((o) => o.id) : [],
+  );
+  const hint = 'hint' in decision ? decision.hint : '';
+  if (skipped.some((s) => options.has(s.id) || hint.includes(s.id))) {
+    const missing = [...new Set(skipped.flatMap((s) => s.missing))];
+    return { decision: unmetRefusal(missing) as T, skipped };
   }
-  return { decision: kept as T, skipped };
+  const gone = new Set(skipped.map((s) => s.id));
+  return {
+    decision: { ...decision, specs: specs.filter((spec) => !gone.has(spec.id)) } as T,
+    skipped,
+  };
 }
 
 function unmetRefusal(missing: string[]) {
   const named = missing.map((token) => `\`${token}\``).join(', ');
   return {
     action: 'native' as const,
-    reason: `This offer needs ${named}, which this build of tenjin-cli does not have, so it was skipped and nothing was paid.`,
+    reason: `This offer needs ${named}, which this build of tenjin-cli does not have, so it was skipped and no provider was paid.`,
     diagnostics: {
       reasonCode: REQUIRES_UNMET,
       stage: 'client',
@@ -634,10 +644,10 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * with the pins those headers unlock: `buildSpecRequest` sends them. A build
  * without a token would drop the field as unknown, so a spec that cannot run
  * without it lists the token in `requires`. `tolerant` says this build reads
- * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}):
- * a server sends a new field, `requires` included, only to a client that
- * lists it, and today's shape to one that does not, which is every release
- * from before it and reads strictly. `bazaar` widens discovery to the open
+ * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}).
+ * Once the server reads it (tenjin R2), it sends a new field, `requires`
+ * included, only to a client that lists it, and today's shape to one that
+ * does not, which is every release from before it and reads strictly. `bazaar` widens discovery to the open
  * Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
@@ -821,7 +831,8 @@ export interface DecisionDeps {
 }
 
 /** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
- *  no paid answer for the call, which then is skipped. */
+ *  no paid answer for the call, which then is skipped, or read as the
+ *  transport failure it carries in `unreached`. */
 export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
   /** What this route's own calls deposited into the routing channel and the

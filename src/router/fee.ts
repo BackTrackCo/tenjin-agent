@@ -197,7 +197,9 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
  * the daily limit ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint, feeAtomic?: bigint): string {
-  const each = feeAtomic !== undefined ? ` Each routing decision costs $${usd(feeAtomic)}.` : '';
+  // At most: the router may charge less than it quotes.
+  const each =
+    feeAtomic !== undefined ? ` Each routing decision costs at most $${usd(feeAtomic)}.` : '';
   return `Tenjin set aside $${usd(amountAtomic)} for routing.${each} Unused funds remain yours.`;
 }
 

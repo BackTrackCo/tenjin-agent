@@ -32,7 +32,13 @@ import {
 } from './claude-cli';
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
-import { MAX_CHANNEL_DEPOSIT_ATOMIC, SUGGESTED_FUND_USD, unpaid, usd } from './fee';
+import {
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
+  ROUTING_FEE_CEILING_ATOMIC,
+  SUGGESTED_FUND_USD,
+  unpaid,
+  usd,
+} from './fee';
 import { NEW_SESSION_STEP, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
@@ -318,8 +324,9 @@ export async function runRouterDoctor(
     env,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  // A probe the router answered ends the routing legs' backoff at once.
-  if (probe.status === 'ok') {
+  // A probe the router answered ends the routing legs' backoff at once: ok,
+  // or a warning about the fee it quoted.
+  if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
   } else {
@@ -1364,7 +1371,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `a small flat fee per call, the router's quote, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
+      detail: `a small flat fee per call, the router's quote and never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;
