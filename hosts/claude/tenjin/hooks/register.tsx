@@ -50,7 +50,7 @@ const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
 const TOOLS = { plugin: 'tenjin', key: 'tools' } as const;
-const TOOLS_COMMAND = 'tenjin-tools';
+const TOOLS_PANE = 'tenjin-tools';
 const PAGE_SIZE = 10;
 /**
  * Calls of a run the ENGINE expanded (ctrl+o, --verbose), where our rows step
@@ -95,17 +95,8 @@ type Shape = {
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
 export const register: Register = (on) => {
-  on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'tenjin-tools',
-      description: 'Inspect enabled and disabled Tenjin tools and their settings',
-      argumentHint: '[filter]',
-    });
-    return next(e);
-  });
-
-  on('command.run', { command: 'tenjin-tools' }, async ($, e) => {
-    const opened = await $.ui.open({ id: TOOLS_COMMAND, title: 'Tenjin tools' });
+  on('command.run', { command: 'tenjin:tools' }, async ($, e) => {
+    const opened = await $.ui.open({ id: TOOLS_PANE, title: 'Tenjin tools' });
     const inspection = await inspectTools($, e.args ?? '');
     return {
       text: opened.isPlaced ? 'Tenjin tools opened. Refresh after changing settings.' : inspection,
@@ -173,7 +164,7 @@ export const register: Register = (on) => {
             key="tools-close"
             label="Close"
             role="dismiss"
-            onPress={() => $.ui.close({ id: TOOLS_COMMAND })}
+            onPress={() => $.ui.close({ id: TOOLS_PANE })}
           />
         </Box>
       </Box>

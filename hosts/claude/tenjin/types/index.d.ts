@@ -33,7 +33,7 @@ export type TenjinHeld = {
   price?: string;
 };
 
-/** The read-only tool inspection, rendered by /tenjin-tools. */
+/** The read-only tool inspection, rendered by /tenjin:tools. */
 export type TenjinTools = {
   filter: string;
   header: string[];

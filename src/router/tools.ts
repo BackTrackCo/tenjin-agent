@@ -62,7 +62,7 @@ function ruleReason(rule: AccessRule, rules: RuleReadback[], listing: DirectoryL
   return `Excluded by your restriction. ${readback?.text ?? 'Your settings allow other services only.'}`;
 }
 
-/** One read-only projection for the CLI and /tenjin-tools. No task text is sent:
+/** One read-only projection for the CLI and /tenjin:tools. No task text is sent:
  * the only network request is the free directory, without routing or payment. */
 export async function runTools(
   { filter = '' }: { filter?: string },

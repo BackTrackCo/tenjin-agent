@@ -17,17 +17,11 @@ const PANE = {
 
 function engine(on: Parameters<TestBody>[1], placed = true) {
   machine(on);
-  const commands: string[] = [];
-  on('command.register', (_$, e) => {
-    commands.push(e.name);
-    return { value: { command: e.name } };
-  });
   on('session.start', (_$, e) => ({ cwd: e.cwd }));
   on('ui.open', () => ({
     value: placed ? { isPlaced: true } : { isPlaced: false, reason: 'no-surface' },
   }));
   on('ui.close', () => ({ value: undefined }));
-  return commands;
 }
 
 function inspection(
@@ -37,8 +31,8 @@ function inspection(
   return JSON.stringify({ status: 'inspection', view: { header, lines } });
 }
 
-test('/tenjin-tools registers and opens a read-only inspection on terminal and Desktop', async ($, on) => {
-  const commands = engine(on);
+test('/tenjin:tools opens a read-only inspection on terminal and Desktop', async ($, on) => {
+  engine(on);
   const calls: unknown[] = [];
   on('tool.call', { tool: TOOL }, (_$, e) => {
     calls.push({ inspect: e.inspect, input: e.input, query: e.query });
@@ -51,8 +45,7 @@ test('/tenjin-tools registers and opens a read-only inspection on terminal and D
     };
   });
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true });
-  expect(commands).toEqual(['tenjin-tools']);
-  await $.command.run({ command: 'tenjin-tools' });
+  await $.command.run({ command: 'tenjin:tools' });
   expect(calls).toEqual([{ inspect: '', input: undefined, query: undefined }]);
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface });
@@ -79,7 +72,7 @@ test('search and refresh read new state, with pages for every tool', async ($, o
       ),
     };
   });
-  await $.command.run({ command: 'tenjin-tools' });
+  await $.command.run({ command: 'tenjin:tools' });
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' });
   expect(await ui.find({ type: 'Text', text: 'tool 11' })).toBeUndefined();
   await ui.press({ key: 'tools-next' });
@@ -99,14 +92,14 @@ test('a missing pane placement prints the inspection instead', async ($, on) => 
     result: {},
     text: inspection(['Exa search — disabled']),
   }));
-  const result = await $.command.run({ command: 'tenjin-tools' });
+  const result = await $.command.run({ command: 'tenjin:tools' });
   expect(result.text).toContain('Exa search — disabled');
 });
 
 test('an unavailable or older MCP server gives a visible recovery action', async ($, on) => {
   engine(on);
   on('tool.call', { tool: TOOL }, () => ({ result: {}, text: '{"status":"needs_input"}' }));
-  await $.command.run({ command: 'tenjin-tools' });
+  await $.command.run({ command: 'tenjin:tools' });
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' });
   expect((await shownLines(ui)).join('\n')).toContain('ask your agent to run tenjin tools');
   expect(await ui.find({ key: 'tools-refresh' })).toBeDefined();

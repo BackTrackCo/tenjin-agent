@@ -108,7 +108,7 @@ const INSTRUCTIONS =
   "provider's whole response is saved to the file at `fullResultPath`. " +
   'Before asking the user to get an API key or account for a one-off task, call it with ' +
   'that operation: it can find a pay-per-call service. ' +
-  'Use /tenjin-tools in Claude Code, or `tenjin tools`, to inspect enabled and disabled tools and their settings. ' +
+  'Use /tenjin:tools in Claude Code, or `tenjin tools`, to inspect enabled and disabled tools and their settings. ' +
   '`{inspect: ""}` returns that read-only inspection, even while paused; a filter stays local. ' +
   'For callable tools, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +

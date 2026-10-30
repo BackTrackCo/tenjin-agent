@@ -119,7 +119,7 @@ export function registerRouter(reg: Registration): void {
   leaf(SETUP, 'tools', 'inspect enabled and disabled tools and their settings')
     .argument('[filter...]', 'filter tools by name, task, source or state')
     .description(
-      'The read-only view behind /tenjin-tools in Claude Code. Includes disabled tools and their reasons, preferences and automatic use. Reads the free catalog without routing or paying; cached offline results are marked unverified.',
+      'The read-only view behind /tenjin:tools in Claude Code. Includes disabled tools and their reasons, preferences and automatic use. Reads the free catalog without routing or paying; cached offline results are marked unverified.',
     )
     .action(async function (this: Command, filter: string[]) {
       await runCommand('tools', this, async (ctx) => {
