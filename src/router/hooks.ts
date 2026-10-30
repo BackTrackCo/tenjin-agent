@@ -884,12 +884,13 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 }
 
 /**
- * `tenjin hook answer` (PostToolUse on `AskUserQuestion`). THE USER JUST
- * ANSWERED, which is a user turn in all but name: an answer like "I can get an
- * API key" is exactly when a pay-per-call service would do instead. So it is
- * routed the way a prompt is, with the answers as the current message and the
- * session's history before them, and an offer is added beside the answers the
- * host reads next. Anything else is no output at all.
+ * The answer leg (PostToolUse on `AskUserQuestion`), run by `tenjin mcp`'s
+ * `hook` tool. THE USER JUST ANSWERED, which is a user turn in all but name: an
+ * answer like "I can get an API key" is exactly when a pay-per-call service
+ * would do instead. So it is routed the way a prompt is, with the answers as
+ * the current message and the session's history before them, and an offer is
+ * added beside the answers the host reads next. Anything else is no output at
+ * all.
  */
 export async function runAnswerHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1152,11 +1153,12 @@ async function routeNativeCall(
 }
 
 /**
- * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). PER-LOOKUP
- * ROUTING BEFORE THE CALL, exactly as main: a clear offer denies the native
- * call with the server's hint as the reason, carrying the id so the redirected
- * call runs the decision just made. Anything else, including silence, a slow
- * backend and a `needs_input`, lets the call run with no output at all.
+ * The native leg (PreToolUse on `WebSearch|WebFetch`), run by `tenjin mcp`'s
+ * `hook` tool. PER-LOOKUP ROUTING BEFORE THE CALL, exactly as main: a clear
+ * offer denies the native call with the server's hint as the reason, carrying
+ * the id so the redirected call runs the decision just made. Anything else,
+ * including silence, a slow backend and a `needs_input`, lets the call run with
+ * no output at all.
  *
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
@@ -1290,13 +1292,13 @@ function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): Na
 }
 
 /**
- * `tenjin hook ask` (PreToolUse on `AskUserQuestion`). THE HOST IS ABOUT TO
- * ASK THE USER FOR SOMETHING, often an API key or an account for a one-off
- * step, which is the moment a pay-per-call service could answer instead. The
- * questions and their options ride as the pending call, and an offer denies
- * the question once with the server's line: never twice for the same
- * question, and a free offer never denies anything. The host can ask again,
- * and that question runs.
+ * The ask leg (PreToolUse on `AskUserQuestion`), run by `tenjin mcp`'s `hook`
+ * tool. THE HOST IS ABOUT TO ASK THE USER FOR SOMETHING, often an API key or an
+ * account for a one-off step, which is the moment a pay-per-call service could
+ * answer instead. The questions and their options ride as the pending call, and
+ * an offer denies the question once with the server's line: never twice for the
+ * same question, and a free offer never denies anything. The host can ask
+ * again, and that question runs.
  *
  * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
  * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
@@ -1337,14 +1339,15 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
 }
 
 /**
- * `tenjin hook shortfall` (PostToolUse and PostToolUseFailure on
- * `WebSearch|WebFetch`). THE FREE TOOL HAS ALREADY RUN, and a result that is
- * fine ends here: no router call, no footer, no added latency. Only a clear
- * shortfall ({@link shortfallOf}) asks for one routing decision, with what the
- * harness reported riding in the packet as `nativeOutcome`, and only an offer
- * (`execute` or `discovered`) says anything. A call the pre-call arm already redirected is not
- * offered on again. Two lines ask the router nothing: a PDF WebFetch saved
- * whole, where the agent is pointed at the file, and a noted search.
+ * The shortfall leg (PostToolUse and PostToolUseFailure on
+ * `WebSearch|WebFetch`), run by `tenjin mcp`'s `hook` tool. THE FREE TOOL HAS
+ * ALREADY RUN, and a result that is fine ends here: no router call, no footer,
+ * no added latency. Only a clear shortfall ({@link shortfallOf}) asks for one
+ * routing decision, with what the harness reported riding in the packet as
+ * `nativeOutcome`, and only an offer (`execute` or `discovered`) says anything.
+ * A call the pre-call arm already redirected is not offered on again. Two lines
+ * ask the router nothing: a PDF WebFetch saved whole, where the agent is
+ * pointed at the file, and a noted search.
  *
  * A SEARCH THE PRE-CALL ARM NOTED A FREE LOOKUP ON gets that line now, read
  * from disk, framed as the option it is, under this event's own name, and the
@@ -1457,12 +1460,13 @@ export interface DelegationHookOutcome {
 }
 
 /**
- * `tenjin hook agent` (PreToolUse on `Agent|Task`). The one moment a subagent's
- * whole assignment is visible: its task prompt IS the current message, and the
- * parent's own turn is the history, so the router decides on exactly what the
- * subagent will do. On a clear offer, it is appended to that task as
- * one optional line, which reaches the subagent as part of its instructions
- * from its parent, before it starts. Anything else is no output at all.
+ * The agent leg (PreToolUse on `Agent|Task`), run by `tenjin mcp`'s `hook`
+ * tool. The one moment a subagent's whole assignment is visible: its task
+ * prompt IS the current message, and the parent's own turn is the history, so
+ * the router decides on exactly what the subagent will do. On a clear offer, it
+ * is appended to that task as one optional line, which reaches the subagent as
+ * part of its instructions from its parent, before it starts. Anything else is
+ * no output at all.
  *
  * The subagent will be the payer, so the same auto-execute rule applies here.
  */

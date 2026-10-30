@@ -189,7 +189,7 @@ describe('Codex automatic hooks', () => {
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Nothing went to the free path: one deposit, then a voucher.
+      // Every call went to the paid route: one deposit, then a voucher.
       expect(fake.log).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',

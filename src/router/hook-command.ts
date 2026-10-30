@@ -69,8 +69,10 @@ export async function runHookCommand(io: Io, deps: HookCommandDeps): Promise<voi
     }
     const sessionId = sessionIdOf(event);
     if (sessionId === null) return;
-    // Its own once-per-session marker, which leaves the reason told last
-    // (`noticeFor`'s `.current`) to the wallet notices that read it.
+    // The session's once-per-session marker under `router/notices/`, which
+    // builds up to alpha.31 also wrote for their unpaid-fee notice: a session
+    // one of those told already hears nothing more. It leaves the reason told
+    // last (`noticeFor`'s `.current`) to the wallet notices that read it.
     if (await firstNoticeFor(deps.dataDir, sessionId, deps.now?.() ?? Date.now())) {
       response = { systemMessage: STALE_HOOK_LINE };
     }

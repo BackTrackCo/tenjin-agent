@@ -15,14 +15,14 @@ export interface RouterCheck {
 }
 
 /**
- * One cheap request to the paid route every routing call takes, in the `warm`
- * form, which never runs a gate: nothing is signed and no Jev request is
- * spent. The paywall answers a request with no payment 402 before it reads
- * the body, so a 402 is the route live and charging, and its quote is read:
- * one above `ROUTING_FEE_CEILING_ATOMIC` warns, since every routing call is
- * then skipped. A 200 is the route live with the fee off, and a 400 one with
- * no `warm` form refusing the body; a 404 is the route switched off, and a
- * 5xx a route erroring. `doctor` fails on it; `install` only warns.
+ * One cheap request to the paid route every routing call takes, in the server's
+ * `warm` form, which asks for no routing decision: this probe signs nothing and
+ * sends no prompt. The paywall answers a request with no payment 402 before it
+ * reads the body, so a 402 is the route live and charging, and its quote is
+ * read: one above `ROUTING_FEE_CEILING_ATOMIC` warns, since every routing call
+ * is then skipped. A 200 is the route live with the fee off, and a 400 one with
+ * no `warm` form refusing the body; a 404 is the route switched off, and a 5xx
+ * a route erroring. `doctor` fails on it; `install` only warns.
  *
  * A refusal is blamed on the layer that sent it. A proxy, firewall or VPN that
  * blocks the host is not the origin asking for credentials, and on the

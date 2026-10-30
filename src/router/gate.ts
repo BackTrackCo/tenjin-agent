@@ -12,8 +12,9 @@
  * The hook's whole budget is 5 s (`ROUTE_HOOK_TIMEOUT_SECONDS`, the timeout
  * `install` writes for each routing leg), and the decision gets 3.5 s of it.
  * Inside `tenjin mcp` those 3.5 s hold the paid route too: the 402, the SDK's
- * chain read, the wallet read before a deposit and the paid request. 500 ms
- * are left for startup, the transcript read and the reply; `wire.test.ts`
+ * chain read, the wallet read before a deposit and the paid request. 1.5 s
+ * are left for startup, the transcript read and the reply, and 500 ms on a
+ * call that carries a deposit ({@link DEPOSIT_GATE_TIMEOUT_MS}); `wire.test.ts`
  * pins the sums.
  * The expected wait is about 1 s: the backend answers on the gate question and
  * binds afterwards.

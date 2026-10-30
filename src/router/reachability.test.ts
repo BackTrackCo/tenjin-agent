@@ -79,7 +79,7 @@ describe('probeRouter on the paid route', () => {
 });
 
 describe('probeRouter', () => {
-  it('passes on the route refusing the empty body', async () => {
+  it('passes on a route with no `warm` form refusing the body', async () => {
     const check = await probe(answer(400, { 'x-vercel-id': 'iad1::x' }));
     expect(check).toMatchObject({ status: 'ok', detail: `${PROD}/api/x402-router/route is live` });
   });

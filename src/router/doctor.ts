@@ -325,7 +325,8 @@ export async function runRouterDoctor(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
   // A probe the router answered ends the routing legs' backoff at once: ok,
-  // or a warning about the fee it quoted.
+  // or a warning about its 402 (a quote above the ceiling, or one this CLI
+  // cannot read).
   if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
