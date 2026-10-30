@@ -1,9 +1,8 @@
-import { setTimeout as delay } from 'node:timers/promises';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
-import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-balance';
+import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
@@ -51,7 +50,7 @@ import type { CommandContext, CommandResult } from '../context';
  * Direct third-party payments require acknowledgement of registry warnings.
  * Router calls retain their advertised-price and supplied-term hard checks,
  * and each is signed only against its call's spend plan (`admit`).
- * Every positive payment checks the actual signer's balance before signing.
+ * Signing is offline; the facilitator verifies funds when the seller submits payment.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
@@ -172,6 +171,7 @@ export interface PaidLeg {
 
 export interface PayDeps {
   fetchImpl?: typeof fetch;
+  /** Legacy injection seam, no longer consulted: exact payment signing is offline. */
   readBalance?: typeof readUsdcBalance;
   provider?: WalletProvider;
   authorizer?: SpendAuthorizer;
@@ -515,7 +515,6 @@ async function executePay(
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
-    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
@@ -661,55 +660,6 @@ export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs:
     return cliTimeoutMs;
   }
   return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
-}
-
-/**
- * THE WALLET HOLDS THE AMOUNT, read live, or a refusal before anything is
- * signed. Live, never the hooks' remembered balance: a minute-old read can
- * count funds the wallet has since spent. The default RPC's public fallbacks
- * are live reads too.
- */
-async function assertBalanceCovers(
-  address: string,
-  amountAtomic: bigint,
-  rpcUrl: string,
-  ctx: CommandContext,
-  deps: PayDeps,
-): Promise<void> {
-  if (amountAtomic <= 0n) return;
-  // One retry across a rate-limit interval, within the original read deadline.
-  const deadline = Date.now() + ctx.flags.timeout;
-  const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
-  let balance = await readBalance(address, rpcUrl, {
-    timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
-  });
-  if (balance === null && Date.now() < deadline) {
-    await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
-    const remaining = deadline - Date.now();
-    if (remaining > 0) balance = await readBalance(address, rpcUrl, { timeoutMs: remaining });
-  }
-  if (balance === null) {
-    throw new CliError('REFUSED', 'The wallet balance could not be read; no payment was signed.', {
-      fix: 'Check the configured Base rpcUrl and retry when it is available.',
-      details: { reason: 'balance_unavailable', address },
-    });
-  }
-  if (balance < amountAtomic) {
-    const short = toMoney((amountAtomic - balance).toString()).usd;
-    throw new CliError(
-      'REFUSED',
-      `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
-      {
-        fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
-        details: {
-          reason: 'insufficient_funds',
-          address,
-          balanceAtomic: balance.toString(),
-          requiredAtomic: amountAtomic.toString(),
-        },
-      },
-    );
-  }
 }
 
 /**

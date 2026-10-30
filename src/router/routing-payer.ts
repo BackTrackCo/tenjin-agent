@@ -26,6 +26,7 @@ import {
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
+  canRetryDepositAtHint,
   feeRefusal,
   payerDir,
   refusedWhy,
@@ -68,8 +69,12 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   answered 4xx or 5xx gives it back. The deposit is the spend: each fee
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
+ * - THE FACILITATOR IS THE BALANCE CHECK. Nothing reads the wallet before a
+ *   deposit: the first is the SDK's ceiling, and a 402 whose reason ends in
+ *   `insufficient_balance` signs one more at the SDK's own deposit size (the
+ *   server's hint), once. Refused again, the call is skipped as `wallet_low`.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
- *   caller's, and the SDK's chain reads and the wallet read are each cut at
+ *   caller's, and the SDK's chain reads are each cut at
  *   what is left of it, so a leg returns inside the hook's 5 s. A call that
  *   carries a deposit gets {@link DEPOSIT_GATE_TIMEOUT_MS} in place of the
  *   gate's 3.5 s. A payment already sent when the time runs out is not cut:
@@ -140,12 +145,9 @@ export const SIGNER_RECHECK_MS = 60_000;
  * in what is left (an unknown verdict never skips a routing attempt).
  */
 export const FREE_PATH_RESERVE_MS = 1_000;
-/** The wallet balance read before a deposit, inside the caller's budget.
- *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
-export const BALANCE_TIMEOUT_MS = 1_000;
 /**
  * THE SDK'S CHAIN READS: `recoverChannel` on a process's first call and the
- * recovery after a corrective 402. Bounded like the wallet read, with no
+ * recovery after a corrective 402. Persisted channels skip recovery. With no
  * retries and never past the call's own budget, so a slow RPC costs the call
  * its routing rather than holding the prompt.
  */
@@ -177,8 +179,6 @@ export interface RoutingPayerDeps {
   policy: () => Promise<SpendPolicy>;
   /** The local spend authorizer over that policy (`createLocalSpendAuthorizer`). */
   authorizer: (policy: SpendPolicy) => SpendAuthorizer;
-  /** The wallet's USDC balance, or null when it cannot be read. */
-  walletBalance: (address: string, timeoutMs: number) => Promise<bigint | null>;
   /** Chain reads for the SDK's channel recovery. */
   readContract?: ChainRead;
   fetchImpl?: typeof fetch;
@@ -239,6 +239,8 @@ interface Deposit {
   authorizer: SpendAuthorizer;
   reservationId: string | undefined;
   amountAtomic: bigint;
+  /** Signed at the server's hint, the smallest deposit Tenjin signs. */
+  atHint: boolean;
   /** The ledger key its exposure is committed under when it is sent. */
   key: string;
   state: 'signed' | 'sent' | 'settled' | 'refused';
@@ -251,6 +253,9 @@ interface Call {
   until: number;
   /** The SDK sized a deposit for this call. */
   deposit?: boolean;
+  /** The facilitator found the wallet below the ceiling: the next deposit
+   *  signs the hint. Set once, so a call retries once. */
+  short?: boolean;
   /** Its payment was out when its budget ended: it finishes in the background. */
   detached?: boolean;
   /** Its budget ended before anything was paid. */
@@ -612,7 +617,27 @@ export class RoutingPayer {
         else if (deposit !== undefined) deposit.state = 'settled';
         return response;
       };
-      return wrapFetchWithPayment(watched, call.channel.http)(request);
+      const pays = wrapFetchWithPayment(watched, call.channel.http);
+      // The body is read once per send, so the one retry gets its own copy.
+      const again = request.clone();
+      const response = await pays(request);
+      // THE FACILITATOR IS THE BALANCE CHECK. A ceiling deposit it refused
+      // for the balance is signed once more at the server's hint, inside the
+      // same budget; its 402 is the wrapper's first answer again, so the
+      // retry costs no unpaid round trip.
+      const refused = call.deposits.at(-1);
+      if (
+        call.short === true ||
+        refused?.state !== 'refused' ||
+        refused.atHint ||
+        !isShortOfFunds(await requiredError(call.channel, response)) ||
+        call.until - this.now() <= 0
+      ) {
+        return response;
+      }
+      call.short = true;
+      asked = response;
+      return pays(again);
     };
     this.call = call;
     this.last = call;
@@ -650,13 +675,17 @@ export class RoutingPayer {
       });
       throw new RouteSkipped(PAID_PATH_ABSENT);
     }
-    // Another session's call was in flight on the channel: nothing was
-    // charged, and this call takes the free path.
+    // Another session's call was in flight on the channel (nothing was
+    // charged), or the facilitator found the wallet below even the hint's
+    // deposit: nothing is routed. Any other refusal is a failed payment.
     if (response.status === 402) {
+      const error = call.channel === undefined ? undefined : paymentError(call.channel, response);
       throw new RouteSkipped(
-        call.channel !== undefined && paymentError(call.channel, response) === CHANNEL_BUSY_ERROR
+        error === CHANNEL_BUSY_ERROR
           ? CHANNEL_BUSY
-          : PAYMENT_FAILED,
+          : isShortOfFunds(error) && call.deposits.at(-1)?.atHint === true
+            ? 'wallet_low'
+            : PAYMENT_FAILED,
       );
     }
     if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED);
@@ -705,33 +734,37 @@ export class RoutingPayer {
 
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size and the refusals. It signs {@link routingDepositAtomic}: the SDK's
-   * ceiling (cap × multiplier) from a wallet holding twice it, else the
-   * server's hint. A wallet below the hint, or a spend the authorizer denies
-   * (the per-call limit, the daily budget, the creator allowlist), refuses it
-   * and the call is not paid.
+   * size and the refusals. Nothing reads the wallet first. It signs the SDK's
+   * ceiling (cap × multiplier, $0.25), or the server's hint once the
+   * facilitator answered that the wallet holds less than the ceiling
+   * ({@link routingDepositAtomic}, {@link RoutingPayer.pay}). A ceiling the
+   * per-call limit or the daily budget denies is signed at the hint instead. A
+   * deposit the authorizer still denies (those limits, the creator allowlist)
+   * is refused and the call is not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
-    const hint = BigInt(ctx.depositAmount);
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
-    const payer = this.channel!.payer;
-    const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
-    if (wallet !== null && wallet < hint) this.refuse('wallet_low');
-    const amount = routingDepositAtomic({
-      walletAtomic: wallet,
+    const hint = BigInt(ctx.depositAmount);
+    let amount = routingDepositAtomic({
+      short: call.short === true,
       hintAtomic: hint,
       maxAtomic: ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit),
     });
     const authorizer = this.deps.authorizer(policy);
-    const auth = await authorizer.authorize({
-      mode: 'automatic',
-      amountAtomic: amount,
-      creator: call.host,
-    });
+    const authorize = (amountAtomic: bigint) =>
+      authorizer.authorize({ mode: 'automatic', amountAtomic, creator: call.host });
+    let auth = await authorize(amount);
+    // A ceiling the spend limits refuse is signed at the hint instead, before
+    // anything is sent; the allowlist is not a limit, so it refuses outright.
+    if (auth.decision !== 'allow' && canRetryDepositAtHint(amount, hint, auth.reason)) {
+      await authorizer.release(auth.reservationId);
+      amount = hint;
+      auth = await authorize(amount);
+    }
     if (auth.decision !== 'allow') {
       await authorizer.release(auth.reservationId);
       this.refuse(refusedWhy(auth.reason));
@@ -740,6 +773,7 @@ export class RoutingPayer {
       authorizer,
       reservationId: auth.reservationId,
       amountAtomic: amount,
+      atHint: amount <= hint,
       key: `${ROUTING_DEPOSIT_KEY}${auth.reservationId ?? randomUUID()}`,
       state: 'signed',
     });
@@ -1018,14 +1052,51 @@ function signObservation(v: SignVerdict): RouterObservation['sign'] {
   return { status: 'unknown', reason: v.reason, detail: v.detail };
 }
 
-/** The `error` a 402's payment-required header carries, if any. */
+/**
+ * The facilitator's refusal of a deposit the wallet cannot cover. The SDK names
+ * it `invalid_batch_settlement_evm_insufficient_balance`; the code's suffix is
+ * matched, since a facilitator may prefix it differently.
+ */
+function isShortOfFunds(code: string | undefined): boolean {
+  return code?.endsWith('insufficient_balance') === true;
+}
+
+/**
+ * THE REASON CODE of a 402's `error`, without its detail. The SDK's server
+ * answers a refused payment as `<code>: <detail>` (production:
+ * `invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less
+ * than deposit amount 250000`), and the detail is free text that could name
+ * any code, so only the part before the first `:` is compared.
+ */
+export function reasonCode(error: string | undefined): string | undefined {
+  if (error === undefined) return undefined;
+  const colon = error.indexOf(':');
+  return (colon === -1 ? error : error.slice(0, colon)).trim();
+}
+
+/** {@link paymentError} for a raw 402, read from a copy so the original stays unread. */
+async function requiredError(channel: Channel, response: Response): Promise<string | undefined> {
+  if (response.status !== 402) return undefined;
+  try {
+    const text = await response.clone().text();
+    const body: unknown = text === '' ? undefined : JSON.parse(text);
+    return reasonCode(
+      channel.http.getPaymentRequiredResponse((name) => response.headers.get(name), body).error,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** The reason code ({@link reasonCode}) a 402's payment-required header carries, if any. */
 function paymentError(
   channel: Channel,
   response: Extract<HttpResult, { ok: true }>,
 ): string | undefined {
   try {
-    return channel.http.getPaymentRequiredResponse((name) => response.header(name), response.json)
-      .error;
+    return reasonCode(
+      channel.http.getPaymentRequiredResponse((name) => response.header(name), response.json).error,
+    );
   } catch {
     return undefined;
   }

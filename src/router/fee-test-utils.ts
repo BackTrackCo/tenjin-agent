@@ -27,6 +27,7 @@ export const FEE = ROUTING_FEE_ATOMIC.toString();
 export const BASE = 'https://router.test';
 export const MISMATCH = 'invalid_batch_settlement_evm_cumulative_amount_mismatch';
 export const BUSY = 'invalid_batch_settlement_evm_channel_busy';
+export const INSUFFICIENT = 'invalid_batch_settlement_evm_insufficient_balance';
 
 /** A tool-form decision with nothing to buy. */
 export const NATIVE = {
@@ -59,6 +60,12 @@ export class FakeRouter {
   onDelayArmed?: () => void;
   /** The body a settled paid call answers with. */
   body: unknown = NATIVE;
+  /** The wallet the facilitator verifies a deposit against; null checks nothing. */
+  walletAtomic: bigint | null = null;
+  /** A 402 reason every deposit is refused with, ahead of the balance check. */
+  depositError: string | null = null;
+  /** The `error` a deposit over {@link walletAtomic} is refused with. */
+  insufficientError = INSUFFICIENT;
   readonly requirement: PaymentRequirements;
 
   constructor(
@@ -100,6 +107,12 @@ export class FakeRouter {
     if (channel.pending) return this.error(url.toString(), BUSY);
     if (BigInt(payload.voucher.maxClaimableAmount) !== channel.charged + ROUTING_FEE_ATOMIC) {
       return this.corrective(url.toString(), id, channel);
+    }
+    if (payload.type === 'deposit') {
+      if (this.depositError !== null) return this.error(url.toString(), this.depositError);
+      if (this.walletAtomic !== null && BigInt(payload.deposit!.amount) > this.walletAtomic) {
+        return this.error(url.toString(), this.insufficientError);
+      }
     }
     channel.pending = true;
     try {
@@ -231,7 +244,7 @@ export const TEST_POLICY: SpendPolicy = {
 
 /**
  * A payer's deps against `router`, with the real local spend authorizer over
- * `dataDir`'s ledger and a wallet holding $10.
+ * `dataDir`'s ledger.
  */
 export function payerDeps(
   router: FakeRouter,
@@ -249,7 +262,6 @@ export function payerDeps(
         policy,
         ...(overrides.now !== undefined ? { now: overrides.now } : {}),
       }),
-    walletBalance: async () => 10_000_000n,
     readContract: router.readContract as never,
     fetchImpl: router.fetch,
     warn: () => undefined,

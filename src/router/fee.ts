@@ -19,25 +19,38 @@ export const ROUTE_PAID_PATH = '/api/x402-router/route';
 /** The flat fee per routing call, atomic USDC ($0.003). */
 export const ROUTING_FEE_ATOMIC = 3_000n;
 /** The production server's default deposit hint, ten routing fees ($0.03):
- *  the smallest deposit Tenjin signs, so a wallet below it is `wallet_low`. */
+ *  the smallest deposit Tenjin signs, so a wallet the facilitator finds below
+ *  it is `wallet_low`. */
 export const CHANNEL_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 
 /**
- * THE DEPOSIT TENJIN SIGNS: the ceiling only when the wallet holds twice it, so
- * the ceiling still stays in the wallet for the paid tools routing suggests,
- * which pay from the wallet, never the channel. Any smaller or unread balance,
- * or no ceiling, signs the server's hint. The caller refuses a wallet below it.
+ * THE DEPOSIT TENJIN SIGNS: the SDK's ceiling ($0.25), unless the wallet is
+ * known to hold less than it, then the SDK's own deposit size (the server's
+ * hint, $0.03). The payer learns that from the facilitator's
+ * `insufficient_balance` on the ceiling and retries once; `tenjin doctor`
+ * from the balance it reads. No ceiling signs the hint.
  */
 export function routingDepositAtomic(o: {
-  walletAtomic: bigint | null;
-  hintAtomic: bigint;
+  short: boolean;
   maxAtomic: bigint | null;
+  hintAtomic: bigint;
 }): bigint {
-  if (o.walletAtomic === null || o.maxAtomic === null) return o.hintAtomic;
-  return o.walletAtomic >= 2n * o.maxAtomic ? o.maxAtomic : o.hintAtomic;
+  return o.short || o.maxAtomic === null ? o.hintAtomic : o.maxAtomic;
+}
+
+/** A smaller deposit can satisfy spend limits, but never other policy refusals. */
+export function canRetryDepositAtHint(
+  amountAtomic: bigint,
+  hintAtomic: bigint,
+  reason: PolicyReason,
+): boolean {
+  return (
+    amountAtomic > hintAtomic &&
+    (reason === 'session_budget_exceeded' || reason === 'above_auto_spend')
+  );
 }
 
 /**
@@ -175,14 +188,13 @@ export function depositSentence(amountAtomic: bigint): string {
 export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person'): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  // An automatic fallback explains the missing funds without reopening checkout.
-  // Explicit balance/payment/doctor results retain `unpaid().fix`.
-  const fix =
-    why === 'wallet_low'
-      ? 'Your usual tools still work.'
-      : reader === 'agent'
-        ? agentFixFor(why, u.fix)
-        : u.fix;
+  // The facilitator refused the ceiling and then the hint's deposit, so the
+  // wallet is near $0: said in dollars, without reopening checkout. Explicit
+  // balance/payment/doctor results retain `unpaid().fix`.
+  if (why === 'wallet_low') {
+    return `Your Tenjin wallet is near $0 (it could not cover a $${usd(CHANNEL_DEPOSIT_ATOMIC)} deposit). Fund it to keep routing. Your usual tools still work.`;
+  }
+  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
   return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 

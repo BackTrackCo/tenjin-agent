@@ -15,7 +15,6 @@ import { readPassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { readUnlockRecord } from '../router/router-observation';
 import { payerDir } from '../router/fee';
-import { rememberingBalanceReader } from '../lib/usdc-balance';
 
 // Balance is the only path that hits the chain; mock the RPC read so the whole
 // suite stays offline and deterministic. viem's key derivation stays real.
@@ -1147,20 +1146,6 @@ describe('runWalletBalance', () => {
       'Balance: 0 USDC on Base',
       'Set aside for routing: approximately $0.018 (local estimate).',
     ]);
-  });
-
-  it('refreshes routing eligibility after funds arrive without waiting for the cached zero to expire', async () => {
-    const address = privateKeyToAccount(generatePrivateKey()).address;
-    const { provider } = fakeRemoteProvider(address);
-    let onChain = 0n;
-    const read = rememberingBalanceReader(dataDir, { read: async () => onChain });
-    const check = () => read(address, 'https://rpc.example', { timeoutMs: 100 });
-    expect(await check()).toBe(0n);
-    onChain = 5_000_000n;
-    expect(await check()).toBe(0n);
-    mockedBalance.mockResolvedValue(onChain);
-    await runWalletBalance(makeCtx(), { provider });
-    expect(await check()).toBe(onChain);
   });
 
   it('returns dual-form money from the on-chain read', async () => {

@@ -9,7 +9,6 @@ import {
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import { getUsdcBalance } from '../lib/usdc';
-import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
 import { addressQrLines } from '../lib/qr';
@@ -177,7 +176,6 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       ? await pollForFunds(ctx, desc, rpcUrl, startBalance, opts)
       : undefined;
   if (funded !== undefined) {
-    await forgetRememberedBalance(ctx.dataDir);
     emitWriteNotice(ctx.io, 'USDC arrived - you can close the checkout tab.');
   }
   const pollStatus: FundPollStatus = !shouldWait

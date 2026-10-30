@@ -238,11 +238,6 @@ describe('the hook legs and the routing fee', () => {
 
   it.each([
     [
-      'the wallet holds less than the deposit',
-      { walletBalance: async () => 20_000n },
-      'Your usual tools still work.',
-    ],
-    [
       'the wallet cannot be unlocked',
       {
         getSigner: async () => {
@@ -594,15 +589,39 @@ describe('wallet notices', () => {
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
-  it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
+  it('says nothing about funding before the facilitator answers', async () => {
     const fake = new FakeRouter();
-    let balance = 20_000n;
-    const p = payer(fake, { walletBalance: async () => balance });
+    const p = payer(fake);
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(answer)).not.toContain('wallet fund');
+    expect(fake.paidRequests()).toBeGreaterThan(0);
+  });
+
+  it('retries a ceiling the facilitator refuses for the balance at the hint', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 100_000n;
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    expect(fake.paidRequests()).toBe(2);
+    expect(fake.deposits).toBe(1);
+    expect(systemMessageOf(answer)).toBe(
+      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+    );
+  });
+
+  it('says the wallet is near $0 only after the ceiling and the hint are refused, then funded once', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 20_000n;
+    const p = payer(fake);
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(low)).toContain('could not pay its $0.003 fee');
-    expect(systemMessageOf(low)).toContain('Your usual tools still work.');
-    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
-    balance = 10_000_000n;
+    // The notice comes from the failed retry, with no balance read anywhere.
+    expect(fake.log.filter((l) => l.endsWith(' paid'))).toEqual([
+      'POST /api/x402-router/route paid',
+      'POST /api/x402-router/route paid',
+    ]);
+    expect(systemMessageOf(low)).toBe(
+      'Your Tenjin wallet is near $0 (it could not cover a $0.03 deposit). Fund it to keep routing. Your usual tools still work.',
+    );
+    fake.walletAtomic = 10_000_000n;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
   });

@@ -23,22 +23,16 @@ const ALL_KEYS = [
 ];
 
 describe('routingDepositAtomic', () => {
-  const size = (
-    walletAtomic: bigint | null,
-    maxAtomic: bigint | null = MAX_CHANNEL_DEPOSIT_ATOMIC,
-  ) => routingDepositAtomic({ walletAtomic, hintAtomic: CHANNEL_DEPOSIT_ATOMIC, maxAtomic });
+  const size = (short: boolean, maxAtomic: bigint | null = MAX_CHANNEL_DEPOSIT_ATOMIC) =>
+    routingDepositAtomic({ short, hintAtomic: CHANNEL_DEPOSIT_ATOMIC, maxAtomic });
 
-  it('signs the ceiling only from a wallet holding twice it, else the hint', () => {
-    expect(size(10_000_000n)).toBe(250_000n);
-    expect(size(2n * MAX_CHANNEL_DEPOSIT_ATOMIC)).toBe(250_000n);
-    expect(size(2n * MAX_CHANNEL_DEPOSIT_ATOMIC - 1n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    expect(size(210_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    expect(size(70_000n)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  it('signs the ceiling first, and the hint once the wallet is known to be short of it', () => {
+    expect(size(false)).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
+    expect(size(true)).toBe(CHANNEL_DEPOSIT_ATOMIC);
   });
 
-  it('signs the hint when the balance or the ceiling is unknown', () => {
-    expect(size(null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    expect(size(10_000_000n, null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
+  it('signs the hint when there is no ceiling', () => {
+    expect(size(false, null)).toBe(CHANNEL_DEPOSIT_ATOMIC);
   });
 });
 
@@ -82,9 +76,9 @@ describe('UNPAID wallet entries', () => {
 
 describe('unpaidSentence', () => {
   it('explains automatic unfunded routing without reopening checkout, while doctor retains its fix', () => {
-    expect(unpaidSentence('wallet_low', 'agent')).toContain('could not pay its $0.003 fee');
+    expect(unpaidSentence('wallet_low', 'agent')).toContain('Your Tenjin wallet is near $0');
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
-      /wallet fund|send USDC|add funds|checkout/i,
+      /wallet fund|send USDC|add funds|checkout|USDC|RPC|channel|facilitator/i,
     );
     expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
     expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
@@ -94,7 +88,7 @@ describe('unpaidSentence', () => {
     no_wallet:
       'Tenjin routing could not pay its $0.003 fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin routing could not pay its $0.003 fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Your Tenjin wallet is near $0 (it could not cover a $0.03 deposit). Fund it to keep routing. Your usual tools still work.',
     fee_required:
       'Tenjin routing could not pay its $0.003 fee (the router now charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
