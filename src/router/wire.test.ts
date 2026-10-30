@@ -25,7 +25,6 @@ import {
 import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
-import type { Harness } from './names';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { STDIN_TIMEOUT_MS } from './hook-command';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
@@ -249,16 +248,14 @@ describe('the request bodies', () => {
    * without the form answers anything else, which the top-up reads as absent.
    */
   it('sends warm byte for byte, and reads its answer and nothing else as warm', () => {
+    // What the top-up really sends: this build's accepts, `tolerant` included,
+    // so the answer carries `honored`.
     const canonical = fixture('wire-warm-request.json');
-    expect(
-      buildWarmBody({
-        accepts: canonical.accepts as string[],
-        harness: canonical.harness as Harness,
-      }),
-    ).toEqual(canonical);
+    expect(buildWarmBody({ accepts: acceptsFor(false), harness: 'claude' })).toEqual(canonical);
     expect(buildWarmBody()).toEqual({ schemaVersion: 1, warm: true });
     expect(JSON.stringify(canonical)).not.toMatch(/billing|admission|payment/i);
     const answer = fixture('wire-warm.json');
+    expect(answer.honored).toEqual(['schemaVersion', 'warm', 'accepts', 'harness']);
     expect(isWarmAnswer(answer)).toBe(true);
     expect(isWarmAnswer({ ...answer, surprise: 1 })).toBe(true);
     expect(isWarmAnswer({ ...answer, warm: false })).toBe(false);
