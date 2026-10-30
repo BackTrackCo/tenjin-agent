@@ -9,9 +9,9 @@ export interface KeystoreDerivationOptions {
 }
 
 /**
- * Ox's asynchronous KDF yields microtasks, which can starve Node timers for the
- * entire derivation. Keep its exact parameters/encoding in a disposable worker:
- * native OpenSSL scrypt rejects the existing N=262144,r=1,p=8 wallet format.
+ * Scrypt's CPU work stays in a disposable worker so timers remain responsive.
+ * The worker accelerates the existing wallet parameters with hash-wasm and
+ * retains Ox for other shapes; native OpenSSL scrypt rejects N=262144,r=1,p=8.
  * No credential-store operation or payment signature runs in this worker.
  */
 export async function deriveKeystoreKey(
