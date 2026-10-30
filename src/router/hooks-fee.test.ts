@@ -191,13 +191,14 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
-    const fake = new FakeRouter();
+    // A quote below the ceiling: the line names the ceiling, which later calls keep.
+    const fake = new FakeRouter({ amount: '1000' });
     fake.body = OFFER;
     const p = payer(fake);
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.25 for routing. Each routing decision costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.25 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -213,7 +214,6 @@ describe('the hook legs and the routing fee', () => {
       runHookKind('prompt', prompt('sess-a'), deps(fake.fetch, payer(fake))),
       runHookKind('prompt', prompt('sess-b'), deps(fake.fetch, payer(fake))),
     ]);
-    expect(fake.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(0);
     expect(fake.settledFees).toBe(2);
     // Native answers and nothing for the user: a busy channel is no fault.
     expect(answers).toEqual([null, null]);

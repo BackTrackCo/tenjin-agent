@@ -1549,11 +1549,16 @@ function lines(
         ]
       : []),
   ];
+  // A warning is the router answering with a 402 this CLI does not pay.
   const router =
     s.router.status === 'ok'
       ? []
       : [
-          warn(`The router did not answer: ${s.router.detail}`),
+          warn(
+            s.router.status === 'warn'
+              ? s.router.detail
+              : `The router did not answer: ${s.router.detail}`,
+          ),
           ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
         ];
   return [

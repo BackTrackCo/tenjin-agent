@@ -1679,8 +1679,10 @@ async function decide(
   }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
-  if (deposited > 0n) deps.notice?.(depositSentence(deposited, route?.fee?.()));
+  if (deposited > 0n) deps.notice?.(depositSentence(deposited));
   if (outcome.status === 'skipped') {
+    // The router answered (its 402, say) before the skip: it is reachable.
+    if (outcome.answered === true) await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
     unpaid?.(outcome.why);
     await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);

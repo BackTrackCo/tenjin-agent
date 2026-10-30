@@ -386,7 +386,6 @@ export class RoutingPayer {
           .flatMap((call) => call.deposits)
           .filter((d) => d.state === 'settled')
           .reduce((sum, d) => sum + d.amountAtomic, 0n),
-      fee: () => calls.reduce<bigint | undefined>((last, call) => call.quoted ?? last, undefined),
     };
   }
 
@@ -657,8 +656,11 @@ export class RoutingPayer {
       this.call = null;
       await this.settleDeposits(call);
     }
+    // A skip after the router answered says so: it is reachable.
+    const answered = { answered: call.answered };
     if (call.skipped !== undefined) {
       throw new RouteSkipped(call.skipped, {
+        ...answered,
         ...(call.quoted !== undefined ? { quotedAtomic: call.quoted } : {}),
       });
     }
@@ -673,7 +675,7 @@ export class RoutingPayer {
       // A payment went out and the call's time ended before its answer did,
       // detached or with the body still arriving: no fault, it was charged.
       const late = call.detached === true || (call.paid && response.kind === 'timeout');
-      throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED);
+      throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED, answered);
     }
     // Another session's call was in flight on the channel: nothing was
     // charged, and this call is skipped.
@@ -682,9 +684,10 @@ export class RoutingPayer {
         call.channel !== undefined && paymentError(call.channel, response) === CHANNEL_BUSY_ERROR
           ? CHANNEL_BUSY
           : PAYMENT_FAILED,
+        answered,
       );
     }
-    if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED);
+    if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED, answered);
     // A fee paid and answered: routing works, whatever was said before.
     if (call.paid && response.status < 400)
       this.report({ routing: { status: 'ready', at: this.now() } });

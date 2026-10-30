@@ -807,9 +807,6 @@ export interface DecisionRoute {
   /** What this route's calls deposited into the routing channel and the
    *  router took, 0n for none: the caller says so once, where it is read. */
   deposited?: () => bigint;
-  /** The routing fee the router last quoted this route's calls, atomic
-   *  USDC, for a line that names it; undefined before any quote. */
-  fee?: () => bigint | undefined;
 }
 
 /** The paid route gave this call no answer: the wallet locked, low or over
@@ -818,16 +815,19 @@ export interface DecisionRoute {
 export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
    *  ({@link isUnreachable}), so the call reads as that transport failure.
-   *  `quotedAtomic`: the fee the router quoted, when the payer read one. */
+   *  `quotedAtomic`: the fee the router quoted, when the payer read one.
+   *  `answered`: the router answered a request of this call (its 402, say). */
   readonly unreached: FetchJsonFailure | undefined;
   readonly quotedAtomic: bigint | undefined;
+  readonly answered: boolean;
   constructor(
     readonly why: string,
-    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint } = {},
+    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint; answered?: boolean } = {},
   ) {
     super(`routing fee not paid: ${why}`);
     this.unreached = opts.unreached;
     this.quotedAtomic = opts.quotedAtomic;
+    this.answered = opts.answered === true;
   }
 }
 
@@ -857,8 +857,9 @@ export type DecisionOutcome<T> =
     }
   /** The routing fee was not paid ({@link RouteSkipped}, {@link NO_PAYER}):
    *  nothing was routed, and the native tool runs. `quotedAtomic`: the fee
-   *  the router quoted, when the payer read one. */
-  | { status: 'skipped'; why: string; quotedAtomic?: bigint };
+   *  the router quoted, when the payer read one. `answered`: the router
+   *  answered first, so it is reachable. */
+  | { status: 'skipped'; why: string; quotedAtomic?: bigint; answered?: true };
 
 /**
  * ONE ROUTING CALL, IN TWO FORMS, ON THE PAID ROUTE. The hook sends
@@ -927,10 +928,11 @@ export async function requestDecision(
       status: 'skipped',
       why: err.why,
       ...(err.quotedAtomic !== undefined ? { quotedAtomic: err.quotedAtomic } : {}),
+      ...(err.answered ? { answered: true as const } : {}),
     };
   }
   if (deps.route === undefined && response.ok && response.status === 402) {
-    return { status: 'skipped', why: NO_PAYER };
+    return { status: 'skipped', why: NO_PAYER, answered: true };
   }
   return readOffer(response, schema);
 }

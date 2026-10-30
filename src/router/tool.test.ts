@@ -301,7 +301,9 @@ describe('routing outcomes that buy nothing', () => {
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
     expect(String(result.envelope.reason)).toContain('could not pay');
     expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
-    expect(result.envelope.nextStep).toBe('Use your own tools for this one.');
+    expect(result.envelope.nextStep).toBe(
+      'Tell the user this once, and use your own tools for now.',
+    );
     expect(result.summary).toMatch(/^Use your usual tools:/);
     expect(result.summary).not.toContain('No paid lookup needed');
   });
@@ -346,7 +348,9 @@ describe('routing outcomes that buy nothing', () => {
     expect(reason).toContain(WALLET_REASONS.passphrase_missing.reason);
     expect(reason).toContain(ASK_FOR_REPAIR);
     expect(reason).not.toContain(REPAIR_CLAUSE);
-    expect(result.envelope.nextStep).toBe('Use your own tools for this one.');
+    expect(result.envelope.nextStep).toBe(
+      'Tell the user this once, and use your own tools for now.',
+    );
   });
 
   it('names a routing deposit once, in the result of the call that took it', async () => {
@@ -354,8 +358,6 @@ describe('routing outcomes that buy nothing', () => {
     const route = () => ({
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
       deposited: () => deposited,
-      // The fee the router quoted, which the line names: never a constant.
-      fee: () => 1_000n,
     });
     const { fetchImpl } = net([
       { url: ROUTER, status: 200, body: NATIVE },
@@ -366,7 +368,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs at most $0.001. Unused funds remain yours.',
+      'Tenjin set aside $0.03 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(

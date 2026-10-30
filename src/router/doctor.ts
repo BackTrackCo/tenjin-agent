@@ -1346,7 +1346,8 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
  * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
  * tools run.
  *
- * - ready: today's ok row, byte for byte;
+ * - ready: ok, with the fee's terms; whether the router's live quote is
+ *   within the ceiling is the router check's to say;
  * - blocked by money or policy: today's `unpaid` detail, and today's fix
  *   (`fixes[why]`, else fee.ts's own);
  * - blocked because the wallet cannot sign: the WALLET_REASONS fragment and
@@ -1371,7 +1372,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `a small flat fee per call, the router's quote and never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
+      detail: `the router's quote, paid only when it is at most $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call, from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;

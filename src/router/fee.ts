@@ -163,15 +163,13 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 
 /**
  * The one line said when a routing call's deposit went through: the money is
- * funds set aside for the next routing fees, not a lookup it bought, and the
- * fee is the one the router quoted, when one was read. It still counts toward
- * the daily limit ({@link feeRefusal}).
+ * funds set aside for the next routing fees, not a lookup it bought. Each fee
+ * from it is the router's quote at that call, so the line names the ceiling,
+ * the one bound every later call keeps. It still counts toward the daily limit
+ * ({@link feeRefusal}).
  */
-export function depositSentence(amountAtomic: bigint, feeAtomic?: bigint): string {
-  // At most: the router may charge less than it quotes.
-  const each =
-    feeAtomic !== undefined ? ` Each routing decision costs at most $${usd(feeAtomic)}.` : '';
-  return `Tenjin set aside $${usd(amountAtomic)} for routing.${each} Unused funds remain yours.`;
+export function depositSentence(amountAtomic: bigint): string {
+  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing call costs at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}. Unused funds remain yours.`;
 }
 
 /**
