@@ -545,7 +545,8 @@ export class RoutingPayer {
         calls
           .flatMap((call) => call.deposits)
           .filter((d) => d.state === 'settled')
-          .reduce((sum, d) => sum + d.amountAtomic, 0n) + this.takeToppedUp(),
+          .reduce((sum, d) => sum + d.amountAtomic, 0n),
+      toppedUp: () => this.takeToppedUp(),
       fee: () =>
         calls.reduce<bigint | undefined>((last, call) => call.quoted ?? last, undefined) ??
         this.quoted,

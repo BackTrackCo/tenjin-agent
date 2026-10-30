@@ -252,7 +252,8 @@ export async function runRequestTool(
 ): Promise<RequestToolResult> {
   // A ROUTING DEPOSIT IS SAID WHERE THE AGENT READS IT: once, in the result of
   // the call that took it, beside whatever that call answered. A hook leg says
-  // it in its `systemMessage` instead.
+  // it in its `systemMessage` instead, and a background top-up's is the hook
+  // leg's alone (`toppedUp`), so the person is the one told.
   const routes: DecisionRoute[] = [];
   const { route } = deps;
   const call: RequestToolDeps = {

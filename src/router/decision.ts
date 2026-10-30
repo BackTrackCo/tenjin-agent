@@ -824,10 +824,14 @@ export interface DecisionDeps {
  *  no paid answer for the call, which then is skipped. */
 export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
-  /** What this route's calls deposited into the routing channel and the
-   *  router took, with any background top-up not said yet, 0n for none: the
+  /** What this route's own calls deposited into the routing channel and the
+   *  router took (only on a router with no `warm` form), 0n for none: the
    *  caller says so once, where it is read. */
   deposited?: () => bigint;
+  /** What the payer's background top-ups deposited since this was last
+   *  read, 0n for none, and taken by the read. Only a hook leg reads it, so
+   *  the person is told, in its `systemMessage`. */
+  toppedUp?: () => bigint;
   /** The routing fee the router last quoted this route's calls, else any
    *  call's in this process, atomic USDC, for a line that names it; undefined
    *  before any quote. */

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind, STALE_HOOK_LINE } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
+import { requestDecision } from './decision';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
@@ -228,6 +229,29 @@ describe('the hook legs and the routing fee', () => {
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
+  });
+
+  it("tells the person about a start top-up on the next hook leg, never in a tool call's result", async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    await p.prewarm();
+    await p.topUpIfLow(BASE);
+    expect(fake.depositedOn).toEqual(['warm']);
+    // The agent's `request` call routes first: its result reads only `deposited`.
+    const tool = p.routeFor(BASE);
+    const ctx = {
+      flags: { json: true, timeout: 5_000 },
+      dataDir: dir,
+      io: { stdout: null, stderr: null, isTTY: false },
+    } as never;
+    await requestDecision(
+      'tool',
+      { query: 'q' },
+      { ctx, baseUrl: BASE, fetchImpl: fake.fetch, timeoutMs: 3_500, route: tool },
+    );
+    expect(tool.deposited?.()).toBe(0n);
+    const leg = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(leg)).toContain('Tenjin set aside $0.03 for routing.');
   });
 
   it("skips, and says nothing, when another session's call holds the channel", async () => {

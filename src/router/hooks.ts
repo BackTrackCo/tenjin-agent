@@ -1674,7 +1674,9 @@ async function decide(
     );
   }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
-  const deposited = route?.deposited?.() ?? 0n;
+  // A background top-up's is said here alone, never in a tool's result, so the
+  // person reads it.
+  const deposited = (route?.deposited?.() ?? 0n) + (route?.toppedUp?.() ?? 0n);
   if (deposited > 0n) deps.notice?.(depositSentence(deposited, route?.fee?.()));
   if (outcome.status === 'skipped') {
     unpaid?.(outcome.why);

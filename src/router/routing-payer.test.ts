@@ -535,7 +535,7 @@ describe('RoutingPayer', () => {
     expect(router.log).toEqual([]);
   });
 
-  it('tells the next route what the top-up deposited, so the deposit is said once', async () => {
+  it('tells the next route what the top-up deposited, apart from its own calls, once', async () => {
     const router = new FakeRouter();
     const p = payer(router);
     const decideOn = async () => {
@@ -545,11 +545,11 @@ describe('RoutingPayer', () => {
         { query: 'q' },
         { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs: 3_500, route },
       );
-      return route.deposited?.();
+      return [route.deposited?.(), route.toppedUp?.()];
     };
-    expect(await decideOn()).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(await decideOn()).toEqual([0n, CHANNEL_DEPOSIT_ATOMIC]);
     // The next call pays a voucher from that deposit: nothing new to say.
-    expect(await decideOn()).toBe(0n);
+    expect(await decideOn()).toEqual([0n, 0n]);
     expect(router.deposits).toBe(1);
   });
 
