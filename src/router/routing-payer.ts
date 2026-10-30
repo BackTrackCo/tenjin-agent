@@ -29,6 +29,7 @@ import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTE_PAID_PATH,
   RouteSkipped,
+  TOP_UP_UNAVAILABLE,
   TOPPING_UP,
   type DecisionRoute,
   type SkipFacts,
@@ -295,6 +296,16 @@ const ROUTING_SILENT: ReadonlySet<string> = new Set([
   'no_call',
   TOPPING_UP,
   DEPOSIT_DEFERRED,
+  TOP_UP_UNAVAILABLE,
+]);
+
+/** Top-up refusals that back the next one off nothing: contention, a
+ *  payment still out, a callback outside a call. */
+const NO_BACKOFF: ReadonlySet<string> = new Set([
+  CHANNEL_BUSY,
+  'busy',
+  DEADLINE_AFTER_PAYMENT_SENT,
+  'no_call',
 ]);
 
 interface Channel {
@@ -522,18 +533,16 @@ export class RoutingPayer {
         } catch (err) {
           // ITS OWN SDK ASKED FOR A DEPOSIT, which only the top-up makes: once
           // that lands, the call is made once more, as a voucher. The top-up's
-          // refusal (a low wallet, a failed payment) is this call's reason too.
+          // refusal is this call's reason too (a low wallet, a failed payment;
+          // contention or an unavailable router, no fault), as a skip of its
+          // own: never the top-up's transport failure, since this call reached
+          // the router. A payment still out is on its way, and stays deferred.
           const flight = this.lastTopUp;
           if (!(err instanceof RouteSkipped) || err.why !== DEPOSIT_DEFERRED || flight === null) {
             throw err;
           }
           const outcome = await this.waitForTopUp(flight, until, sent);
           if (outcome === null) throw new RouteSkipped(TOPPING_UP);
-          if (outcome.status === 'refused' && !ROUTING_SILENT.has(outcome.skip.why)) {
-            throw outcome.skip;
-          }
-          // Contention ended the top-up: that is the reason, not a deposit on
-          // its way. A payment still out is on its way, and stays deferred.
           if (outcome.status === 'refused' && outcome.skip.why !== DEADLINE_AFTER_PAYMENT_SENT) {
             throw new RouteSkipped(outcome.skip.why, outcome.skip.facts());
           }
@@ -940,7 +949,8 @@ export class RoutingPayer {
   private deferral(call: Call): never {
     const failed = this.backedOff();
     if (failed !== null) {
-      call.facts = failed.facts();
+      // A refusal said again: not the balance it read, which may be old now.
+      call.facts = failed.quotedAtomic !== undefined ? { quotedAtomic: failed.quotedAtomic } : {};
       this.refuse(failed.why);
     }
     void this.topUp(call.router, this.channel!.payer);
@@ -1016,8 +1026,12 @@ export class RoutingPayer {
           true,
         );
       } catch (err) {
-        if (err instanceof RouteSkipped) return this.refusedTopUp(err);
-        throw err;
+        if (!(err instanceof RouteSkipped)) throw err;
+        // No connection reached the router: no fault, as on any call.
+        if (err.unreached !== undefined) {
+          return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE));
+        }
+        return this.refusedTopUp(err);
       }
       this.toppedUp += calls
         .flatMap((call) => call.deposits)
@@ -1028,11 +1042,11 @@ export class RoutingPayer {
         this.failed = null;
         return { status: 'done' };
       }
-      // A rate limit is no answer about the form: it backs off like a failure.
+      // A rate limit is no answer about the form: it backs off, and is no
+      // fault, as on any call.
       if (status === 429) {
-        this.note(PAYMENT_FAILED, calls.at(-1) ?? null, sent, undefined, true);
-        this.reportRouting(PAYMENT_FAILED);
-        return this.refusedTopUp(new RouteSkipped(PAYMENT_FAILED));
+        this.note(TOP_UP_UNAVAILABLE, calls.at(-1) ?? null, sent, undefined, true);
+        return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE));
       }
       await writeRouterMemo(dataDir, 'warm-absent', router, {
         now: this.now(),
@@ -1058,7 +1072,7 @@ export class RoutingPayer {
    *  refusal on the other schedule starts it from its first step, so a server
    *  error just after a funded wallet waits 30 s, not 10 min. */
   private refusedTopUp(skip: RouteSkipped): TopUp {
-    if (!ROUTING_SILENT.has(skip.why)) {
+    if (!NO_BACKOFF.has(skip.why)) {
       const steps = skip.why === 'wallet_low' ? WALLET_LOW_BACKOFF_MS : TOP_UP_BACKOFF_MS;
       const count = this.failed?.steps === steps ? this.failed.count + 1 : 1;
       const wait = steps[Math.min(count, steps.length) - 1]!;

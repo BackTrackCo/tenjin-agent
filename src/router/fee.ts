@@ -4,6 +4,7 @@ import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib
 import {
   DEPOSIT_DEFERRED,
   NO_PAYER,
+  TOP_UP_UNAVAILABLE,
   TOPPING_UP,
   type DecisionRoute,
   type SkipFacts,
@@ -178,6 +179,7 @@ const NO_FAULT = new Set([
   'unlock_timeout',
   TOPPING_UP,
   DEPOSIT_DEFERRED,
+  TOP_UP_UNAVAILABLE,
 ]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */

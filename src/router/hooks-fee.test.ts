@@ -332,9 +332,13 @@ describe('the hook legs and the routing fee', () => {
       expect(systemMessageOf(second)).toBeUndefined();
       expect(fake.log.filter((l) => l === WARM_ASK)).toHaveLength(log.includes(WARM_ASK) ? 1 : 0);
       expect(fake.paidRequests()).toBe(0);
-      // A new session is told once too.
+      // A new session is told once too, without a balance read before it:
+      // the reason alone, as a refusal said again.
       const other = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
-      expect(systemMessageOf(other)).toContain(says);
+      expect(systemMessageOf(other)).toContain(
+        says.startsWith('the wallet holds $') ? 'the wallet holds less than' : says,
+      );
+      expect(systemMessageOf(other)).not.toContain('$0.02');
     },
   );
 

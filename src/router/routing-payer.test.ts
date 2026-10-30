@@ -724,11 +724,14 @@ describe('RoutingPayer', () => {
     expect(outcome).toMatchObject({ status: 'skipped', why: 'wallet_low', balanceAtomic: 0n });
     expect(warned.filter((l) => l.includes('top-up wallet_low'))).toHaveLength(1);
     // Funded within the backoff: the next call still gets the refusal, with
-    // no second balance read and no top-up.
+    // no second balance read and no top-up, and not the balance read before:
+    // it may be old now.
     walletAtomic = 10_000_000n;
     const asked = router.log.filter((l) => l.includes(' warm ')).length;
     expect(reads).toBe(1);
-    expect(unpaidWhy(await routeOnce(p, router))).toBe('wallet_low');
+    const again = await routeOnce(p, router);
+    expect(unpaidWhy(again)).toBe('wallet_low');
+    expect(again).not.toHaveProperty('balanceAtomic');
     expect(router.log.filter((l) => l.includes(' warm '))).toHaveLength(asked);
     expect(reads).toBe(1);
     // Past it, the call that needs a deposit starts the next top-up and pays.
@@ -761,6 +764,44 @@ describe('RoutingPayer', () => {
     await routeOnce(p, router);
     expect(topUps()).toBe(4);
   });
+
+  it.each<[string, () => Promise<Response>]>([
+    ['a rate limit', async () => new Response('{}', { status: 429 })],
+    [
+      'no connection',
+      async () => {
+        throw Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+        });
+      },
+    ],
+  ])(
+    'skips with no notice and no unreachable pause when the top-up meets %s, and backs off',
+    async (_label, answer) => {
+      const router = new FakeRouter();
+      let warms = 0;
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const request = new Request(input, init);
+        if (!(await request.clone().text()).includes('"warm":true')) return router.fetch(request);
+        warms += 1;
+        return answer();
+      };
+      const p = payer(router, { fetchImpl });
+      const call = () =>
+        requestDecision(
+          'tool',
+          { query: 'q' },
+          { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs: 3_500, route: p.routeFor(BASE) },
+        );
+      // A skip of its own, never the router "unreachable": this call reached it.
+      expect(await call()).toMatchObject({ status: 'skipped', why: 'top_up_unavailable' });
+      expect(unpaidSentence('top_up_unavailable')).toBeNull();
+      expect(warms).toBe(1);
+      // Held off: the next call that needs a deposit sends no second top-up.
+      expect(await call()).toMatchObject({ status: 'skipped', why: 'top_up_unavailable' });
+      expect(warms).toBe(1);
+    },
+  );
 
   it('starts the 10-minute schedule from 30 s when a server error follows wallet_low refusals', async () => {
     const router = new FakeRouter();

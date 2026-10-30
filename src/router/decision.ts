@@ -894,6 +894,11 @@ export const NO_PAYER = 'no_payer';
  *  not land inside the call's budget: no fault. The next call pays from it if
  *  it lands, or gets its refusal if it was refused. */
 export const TOPPING_UP = 'topping_up';
+/** The background top-up got no usable answer: the router rate-limited it,
+ *  or no connection reached it. No fault, as on any routing call, and never
+ *  the machine-wide unreachable pause: the call it served reached the router.
+ *  The top-up is tried again after its backoff. */
+export const TOP_UP_UNAVAILABLE = 'top_up_unavailable';
 /** The channel needed a deposit, which only the background top-up makes, and
  *  this process's could not make it now (another session's top-up of the same
  *  wallet is in flight, or the channel was busy): no fault. */
