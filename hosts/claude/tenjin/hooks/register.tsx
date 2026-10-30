@@ -1,6 +1,6 @@
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
 
-import type { TenjinHeld, TenjinRow } from '../types';
+import type { TenjinHeld, TenjinRow, TenjinTools } from '../types';
 
 /**
  * THE TENJIN MOD: one line per paid lookup, drawn from documented props only.
@@ -49,6 +49,9 @@ const NATIVE_NAMES: Readonly<Record<string, string>> = {
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
+const TOOLS = { plugin: 'tenjin', key: 'tools' } as const;
+const TOOLS_PANE = 'tenjin-tools';
+const PAGE_SIZE = 10;
 /**
  * Calls of a run the ENGINE expanded (ctrl+o, --verbose), where our rows step
  * aside for the engine's own. The module's own memory, not `$.state`: a drawing may
@@ -68,7 +71,15 @@ const SHOWN_MAX_CHARS = 80;
 const ENVELOPE = '{"status":"';
 const SECRET_NAME = /(api[_-]?key|token|secret|passw|authorization|cookie|private[_-]?key)/i;
 /** Answers that ran nothing the person paid for: the router's own, or a retry ahead. */
-const HIDDEN = new Set(['spec', 'discovered', 'native', 'browse', 'needs_input', 'needs_approval']);
+const HIDDEN = new Set([
+  'spec',
+  'discovered',
+  'native',
+  'browse',
+  'inspection',
+  'needs_input',
+  'needs_approval',
+]);
 /** Endings drawn with no state word. */
 const PLAIN = new Set(['fulfilled', 'running']);
 const ERRORS = new Set(['failed', 'interrupted', 'partial']);
@@ -84,7 +95,84 @@ type Shape = {
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
 export const register: Register = (on) => {
+  on('command.run', { command: 'tenjin:tools' }, async ($, e) => {
+    const opened = await $.ui.open({ id: TOOLS_PANE, title: 'Tenjin tools' });
+    const inspection = await inspectTools($, e.args ?? '');
+    return {
+      text: opened.isPlaced ? 'Tenjin tools opened. Refresh after changing settings.' : inspection,
+    };
+  });
+
+  on('ui.render', { component: 'Pane', requestId: 'tenjin-tools' }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e);
+    const Input = e.surface === 'mobile' ? undefined : $.ui.resolve(e).Input;
+    const snapshot = await $.state.get(TOOLS);
+    const { value } = snapshot;
+    if (value === undefined || value.loading) return <Text>Loading Tenjin tools…</Text>;
+    const pages = Math.max(1, Math.ceil(value.lines.length / PAGE_SIZE));
+    const page = Math.min(value.page, pages - 1);
+    const move = async (offset: number) => {
+      await $.state.set(
+        TOOLS,
+        { ...value, page: Math.max(0, Math.min(pages - 1, page + offset)) },
+        {
+          ifVersion: snapshot.version,
+        },
+      );
+    };
+    return (
+      <Box flexDirection="column">
+        {Input !== undefined && (
+          <Input
+            key="tools-filter"
+            label="Filter tools"
+            value={value.filter}
+            placeholder="Name, task, source or state"
+            submitLabel="search"
+            onSubmit={async (filter) => {
+              await inspectTools($, filter);
+            }}
+          />
+        )}
+        {value.header.map((line) => (
+          <Text>{line}</Text>
+        ))}
+        <Box marginTop={1} flexDirection="column">
+          {value.lines.length === 0 ? (
+            <Text>No matching tools.</Text>
+          ) : (
+            value.lines
+              .slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+              .map((line) => <Text>{line}</Text>)
+          )}
+        </Box>
+        <Box marginTop={1}>
+          {page > 0 && <Button key="tools-previous" label="Previous" onPress={() => move(-1)} />}
+          <Text>
+            {' '}
+            Page {page + 1} of {pages}{' '}
+          </Text>
+          {page + 1 < pages && <Button key="tools-next" label="Next" onPress={() => move(1)} />}
+          <Button
+            key="tools-refresh"
+            label="Refresh"
+            onPress={async () => {
+              await inspectTools($, value.filter);
+            }}
+          />
+          <Button
+            key="tools-close"
+            label="Close"
+            role="dismiss"
+            onPress={() => $.ui.close({ id: TOOLS_PANE })}
+          />
+        </Box>
+      </Box>
+    );
+  });
+
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {
+    if (e.inspect !== undefined) return next(e);
     // The swap's own `decide` call is drawn on the native call's row.
     if (e.decide !== undefined) return next(e);
     const row = await describeCall($, e);
@@ -258,6 +346,44 @@ export const register: Register = (on) => {
     return held === null ? next(e) : <Box display="none" />;
   });
 };
+
+async function inspectTools($: Dollar, filter: string): Promise<string> {
+  const pending: TenjinTools = {
+    filter: clean(filter, 1000),
+    header: [],
+    lines: [],
+    page: 0,
+    loading: true,
+  };
+  const saved = await $.state.set(TOOLS, pending);
+  let view: TenjinTools;
+  try {
+    const answer = await $.tool.call({ tool: REQUEST_TOOL, inspect: pending.filter });
+    const envelope = envelopeOf(answer.text);
+    const result = asRecord(envelope?.view);
+    const lines = (value: unknown) =>
+      Array.isArray(value) && value.every((line) => typeof line === 'string');
+    if (envelope?.status !== 'inspection' || !lines(result?.header) || !lines(result?.lines))
+      throw new Error('No inspection was returned.');
+    view = {
+      ...pending,
+      loading: false,
+      header: (result!.header as string[]).map((line) => clean(line, 1000)),
+      lines: (result!.lines as string[]).map((line) => clean(line, 1000)),
+    };
+  } catch {
+    view = {
+      ...pending,
+      loading: false,
+      header: [
+        'Tool inspection could not be loaded. Refresh to try again, or ask your agent to run tenjin tools.',
+      ],
+    };
+  }
+  // A newer search or refresh owns the pane if this request finishes late.
+  await $.state.set(TOOLS, view, { ifVersion: saved.version });
+  return [...view.header, ...view.lines].join('\n');
+}
 
 /** How often a native call being answered in place is redrawn, so its row
  *  names the pick once the CLI has recorded it. */

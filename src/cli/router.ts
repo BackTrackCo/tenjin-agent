@@ -116,6 +116,18 @@ export function registerRouter(reg: Registration): void {
       await runStatusLine(io, { dataDir: ctx.dataDir });
     });
 
+  leaf(SETUP, 'tools', 'inspect enabled and disabled tools and their settings')
+    .argument('[filter...]', 'filter tools by name, task, source or state')
+    .description(
+      'The read-only view behind /tenjin:tools in Claude Code. Includes disabled tools and their reasons, preferences and automatic use. Reads the free catalog without routing or paying; cached offline results are marked unverified.',
+    )
+    .action(async function (this: Command, filter: string[]) {
+      await runCommand('tools', this, async (ctx) => {
+        const { runTools } = await import('../router/tools');
+        return runTools({ filter: filter.join(' ') }, ctx);
+      });
+    });
+
   leaf(SETUP, 'status', 'what this machine has spent, and what is still open')
     .description(
       'Report the rolling 24h spend window from spend.json: what has settled, what is reserved by a request still in flight, and the per-call and per-day caps in force.',
