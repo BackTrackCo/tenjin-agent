@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createPublicClient, http, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
-import { decodePaymentRequiredHeader } from '@x402/core/http';
-import type { PaymentRequirements } from '@x402/core/types';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import {
   BatchSettlementEvmScheme,
@@ -15,7 +13,6 @@ import type { SpendPolicy } from '../lib/policy';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
-import { canonicalUsdcOnly } from '../lib/x402-pay';
 import {
   CHANNEL_BUSY,
   isUnreachable,
@@ -37,6 +34,7 @@ import {
   routingDepositAtomic,
 } from './fee';
 import type { RouterObservation } from './router-observation';
+import { quoteOf, routingOffers } from './routing-quote';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 /**
@@ -280,14 +278,6 @@ interface Call {
   deposits: Deposit[];
 }
 
-/** The routing offers in a 402: `batch-settlement` in canonical USDC on
- *  Base, with an amount this client can read. */
-function routingOffers(version: number, requirements: PaymentRequirements[]) {
-  return canonicalUsdcOnly(version, requirements).filter(
-    (r) => r.scheme === 'batch-settlement' && /^\d{1,30}$/.test(r.amount),
-  );
-}
-
 /**
  * THE PAYMENT POLICY, the guide's check of the requirement before signing: a
  * routing offer at or below the fee ceiling. The server's `payTo` is not
@@ -298,28 +288,6 @@ const routingPolicy: PaymentPolicy = (version, requirements) =>
   routingOffers(version, requirements).filter(
     (r) => BigInt(r.amount) <= ROUTING_FEE_CEILING_ATOMIC,
   );
-
-/**
- * WHAT A 402 QUOTES: the largest routing offer at or below the ceiling, the
- * one the per-payment checks must allow whichever the SDK picks; else the
- * smallest above it; null when it carries none this client reads, which the
- * SDK then refuses as it always did.
- */
-function quoteOf(asked: Response): bigint | null {
-  const header = asked.headers.get('PAYMENT-REQUIRED');
-  if (header === null) return null;
-  try {
-    const required = decodePaymentRequiredHeader(header);
-    const amounts = routingOffers(required.x402Version, required.accepts).map((r) =>
-      BigInt(r.amount),
-    );
-    const within = amounts.filter((a) => a <= ROUTING_FEE_CEILING_ATOMIC);
-    if (within.length > 0) return within.reduce((a, b) => (b > a ? b : a));
-    return amounts.length > 0 ? amounts.reduce((a, b) => (b < a ? b : a)) : null;
-  } catch {
-    return null;
-  }
-}
 
 /** A call to anything but the configured router's paid route is not paid. */
 const NOT_ROUTE = 'not_the_routing_route';
@@ -635,7 +603,8 @@ export class RoutingPayer {
         // (`feeRefusal`) at the amount quoted, a voucher from a funded channel
         // included. With no routing offer to read, the ceiling stands in, and
         // the SDK refuses the 402 below as it always has.
-        const quoted = quoteOf(asked);
+        const challenge = asked.headers;
+        const quoted = quoteOf((name) => challenge.get(name));
         if (quoted !== null) call.quoted = quoted;
         if (quoted !== null && quoted > ROUTING_FEE_CEILING_ATOMIC) {
           throw new RouteSkipped(FEE_ABOVE_CEILING);

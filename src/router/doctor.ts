@@ -324,8 +324,9 @@ export async function runRouterDoctor(
     env,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  // A probe the router answered ends the routing legs' backoff at once.
-  if (probe.status === 'ok') {
+  // A probe the router answered ends the routing legs' backoff at once: ok,
+  // or a warning about the fee it quoted.
+  if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
   } else {
