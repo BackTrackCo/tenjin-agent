@@ -20,7 +20,7 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestDecision, ROUTE_PAID_PATH, type HookDecision } from './decision';
+import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -1623,6 +1623,10 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
     return `fee unpaid: ${unpaid}`;
   }
   if (decision === null) return 'native tools (router unavailable)';
+  // An offer this build skipped is not the router choosing native tools.
+  if (decision.action === 'native' && decision.diagnostics.reasonCode === REQUIRES_UNMET) {
+    return 'native tools (offer needs newer tenjin)';
+  }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }

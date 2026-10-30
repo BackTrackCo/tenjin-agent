@@ -596,7 +596,7 @@ function unmetRefusal(missing: string[]) {
   const named = missing.map((token) => `\`${token}\``).join(', ');
   return {
     action: 'native' as const,
-    reason: `This offer needs ${named}, which this build of tenjin-cli does not have, so it was skipped and nothing was paid.`,
+    reason: `This offer needs ${named}, which this build of tenjin-cli does not have, so it was skipped and no provider was paid.`,
     diagnostics: {
       reasonCode: REQUIRES_UNMET,
       stage: 'client',

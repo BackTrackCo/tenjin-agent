@@ -11,7 +11,7 @@ import type { Io } from '../lib/output';
 import { sessionServedByPlugin } from './alive';
 import type { HookKind } from './hook-tool';
 import { launchedByPlugin } from './names';
-import { noticeFor, settleCurrent } from './notice-markers';
+import { firstNoticeFor, noticeFor, settleCurrent } from './notice-markers';
 import { WALLET_UNLOCKED } from './wallet-reasons';
 
 /**
@@ -43,8 +43,6 @@ export type { HookKind };
 export const STALE_HOOK_LINE =
   "Tenjin's hooks in this setup are from an older version and no longer route. " +
   'Run `tenjin install` to set them up again; your usual tools still work.';
-/** The notice marker's reason for {@link STALE_HOOK_LINE}. */
-const STALE_HOOK = 'stale_hook_command';
 
 export interface HookCommandDeps extends Pick<HookDeps, 'dataDir' | 'harness' | 'now'> {
   /** Test seam for the harness event; production reads stdin. */
@@ -68,8 +66,9 @@ export async function runHookCommand(io: Io, deps: HookCommandDeps): Promise<voi
     }
     const sessionId = sessionIdOf(event);
     if (sessionId === null) return;
-    const now = deps.now?.() ?? Date.now();
-    if ((await noticeFor(deps.dataDir, sessionId, STALE_HOOK, now)) === 'tell') {
+    // Its own once-per-session marker, which leaves the reason told last
+    // (`noticeFor`'s `.current`) to the wallet notices that read it.
+    if (await firstNoticeFor(deps.dataDir, sessionId, deps.now?.() ?? Date.now())) {
       response = { systemMessage: STALE_HOOK_LINE };
     }
   } catch {

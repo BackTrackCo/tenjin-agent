@@ -732,7 +732,7 @@ async function assertBalanceCovers(
  * leg's own, with nothing sent but the probe and that re-read.
  */
 export async function quoteRouterCall(
-  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody'> & {
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody' | 'timeoutMs'> & {
     terms: AdvertisedTerms;
   },
   ctx: CommandContext,
@@ -745,7 +745,7 @@ export async function quoteRouterCall(
   }
   const headers = { ...specHeaders(args.specHeaders), ...callerHeaders(args.headers) };
   const probe = await httpRequest(url, {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
     blockRedirects: true,
     binaryBody: true,
     method: resolveMethod(args),
@@ -780,7 +780,7 @@ export async function quoteRouterCall(
     resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
   );
   const recheck = await httpRequest(url, {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
     blockRedirects: true,
     binaryBody: true,
     method: resolveMethod(args),
