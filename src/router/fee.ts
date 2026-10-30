@@ -142,7 +142,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} Tenjin needs to set aside for routing`,
+    reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
