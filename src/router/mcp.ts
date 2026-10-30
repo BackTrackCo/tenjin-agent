@@ -225,8 +225,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
   // session is idle so a paid lookup does not wait 2.3 s for it, and its
   // rejection is swallowed: a machine with no wallet still browses the tool
-  // list and reads specs, which are free, and is told why it cannot route
-  // where it asks. With a payer it is
+  // list and reads specs, which are free, and where the router charges for
+  // routing it is told why it cannot route. With a payer it is
   // the payer's: the same single-flight unlock its calls await, whose verdict
   // the hooks gate on and the observer records. The request tool's provider is
   // not unlocked a second time beside it: both share the wallet layer's signer

@@ -110,8 +110,8 @@ import {
 } from './job-store';
 
 /**
- * The `request` tool: one routing decision per lookup, then ONE payment, to
- * the provider.
+ * The `request` tool: one routing decision per lookup, paid its routing fee
+ * by `tenjin mcp`'s payer, then one payment per take to the provider.
  *
  * AN OFFER WITH A SPEC RUNS HERE, IN ONE CALL. The hook keeps each offered
  * service's spec by its id, and its line is the skeleton of the call:

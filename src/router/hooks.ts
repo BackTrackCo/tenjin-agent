@@ -563,8 +563,8 @@ export interface HookDeps {
   notice?: (line: string) => void;
   /**
    * Inside `tenjin mcp`: the payer's in-memory sign verdict (what its last
-   * unlock said, no I/O). Absent (`tenjin hook <kind>`, which cannot unlock),
-   * it is decided from the wallet's files alone ({@link spendShortfall}).
+   * unlock said, no I/O). Absent (a caller with no payer, which cannot
+   * unlock), it is decided from the wallet's files alone ({@link spendShortfall}).
    */
   signer?: () => SignVerdict;
   /**
@@ -628,8 +628,8 @@ function gateDeadline(deps: HookDeps): number {
  *   as the creator the way `pay` names it. Only `allow` runs alone. Nothing is
  *   reserved, and the amount actually signed is still `gateSpend`'s to cap.
  * - A WALLET THAT CANNOT SIGN. Inside `tenjin mcp` that is the payer's own
- *   verdict ({@link HookDeps.signer}); as `tenjin hook <kind>`, which cannot
- *   unlock, it is `canSign` over the wallet's files alone (`readWalletFacts`):
+ *   verdict ({@link HookDeps.signer}); with no payer, which cannot unlock,
+ *   it is `canSign` over the wallet's files alone (`readWalletFacts`):
  *   no wallet and no key, a malformed TENJIN_WALLET_KEY, a wallet.json nobody
  *   can read, or the saved passphrase file gone while TENJIN_WALLET_PASSPHRASE
  *   is unset. Approval cannot unlock a wallet mid-session, so this one
@@ -643,7 +643,7 @@ function gateDeadline(deps: HookDeps): number {
  *
  * ONLY A DEFINITE BLOCK OR A BALANCE READ BELOW THE PRICE WITHHOLDS. An
  * unknown signer (a keychain that did not answer, an unlock not tried yet,
- * every command-mode leg with a readable wallet) still offers: only `blocked`
+ * every payer-less leg with a readable wallet) still offers: only `blocked`
  * gates (`eligibility.ts`). A balance that cannot be read (an RPC that fails,
  * rate-limits or runs past the gate's budget) leaves the policy to decide
  * alone, as before this check. Base's public RPC refused the sixth `eth_call`
@@ -862,7 +862,8 @@ export interface PromptHookOutcome {
 }
 
 /**
- * `tenjin hook prompt` (UserPromptSubmit). One routing decision from the user's
+ * The prompt leg (UserPromptSubmit), run by `tenjin mcp`'s `hook` tool. One
+ * routing decision from the user's
  * own words. Only an offer (`execute`, or a `discovered` service) gets a line:
  * the server's hint, attributed. `native`, `needs_input` and a decision that
  * failed or timed out are silence:

@@ -21,7 +21,7 @@ export function registerRouter(reg: Registration): void {
 
   const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by your agent host)')
     .description(
-      "Hook commands an older Tenjin setup wrote. Tenjin's Claude Code and Codex plugins route through `tenjin mcp` instead, which pays the routing fee. Each command reads one hook event on stdin, routes nothing, and tells the person once per session to run `tenjin install`. You never run these by hand.",
+      "The handlers Tenjin's plugins run, and the ones an older setup wrote. `alive` marks a session the Claude Code plugin serves. `prompt`, `native`, `shortfall`, `agent`, `ask` and `answer` are left from older setups: the plugins route through `tenjin mcp`, which pays the routing fee, so each of these reads one hook event on stdin, routes nothing, and tells the person once per session to run `tenjin install`. You never run these by hand.",
     )
     .helpCommand(false);
   // Normally answered by the fast path in `index.ts`, before the command tree

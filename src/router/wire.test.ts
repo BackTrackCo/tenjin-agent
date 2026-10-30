@@ -24,7 +24,6 @@ import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
-import { STDIN_TIMEOUT_MS } from './hook-command';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
 import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
 import { MAX_BINARY_BODY_BYTES } from '../lib/http';
@@ -950,12 +949,6 @@ describe('the hook time budget', () => {
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
     // The chain read and the wallet read leave the requests time of their own.
     expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
-  });
-
-  /** The command form, always free, waits for stdin before the gate. */
-  it('fits stdin plus the decision inside the same timeout', () => {
-    const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
-    expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 
   /** The after-call leg waits for nothing of its own: a noted search reads

@@ -33,9 +33,9 @@ import { WALLET_UNLOCKED } from './wallet-reasons';
  */
 
 const MAX_EVENT_BYTES = 1_000_000;
-/** The command form's wait for its event. The harness writes the event
- *  immediately, so this is a liveness check rather than a budget to spend. */
-export const STDIN_TIMEOUT_MS = 1_000;
+/** The stub's wait for its event: the harness writes it at once, so this is
+ *  a liveness check, and the stub calls nothing after it. */
+const STDIN_TIMEOUT_MS = 1_000;
 
 export type { HookKind };
 

@@ -73,8 +73,9 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
  * A TOLERANT READER, AND ONLY THAT (RFC 9413). A field this build does not
  * know is dropped, never a failure: a server that adds one reaches every
  * released client without a release or a deploy order. A field it does know
- * keeps its type, its bounds and its checks, and an object naming the known
- * fields of two arms of one union is still refused. An offer that a client
+ * keeps its type, its bounds and its checks, and a job's `pollUrl` or
+ * `running` naming the keys of both its arms is still refused (an answer's
+ * own arms are told apart by `action`). An offer that a client
  * must understand to run says so in `requires` ({@link withoutUnmet}).
  *
  * The two calls ask different questions and get different answers, so they get
@@ -334,8 +335,9 @@ export const ToolSpecSchema = z.object({
    *  the least the paid leg waits. Absent, the CLI's `--timeout`. */
   timeoutS: z.number().int().min(1).max(MAX_SPEC_TIMEOUT_S).optional(),
   /** The largest file the call may bring back, in bytes: a binary result,
-   *  and each file a media result links to. Absent, and at most, the
-   *  {@link MAX_BINARY_BODY_BYTES} every call had. */
+   *  and each file a media result links to, though not yet a job's polled
+   *  result. Absent, and at most, the {@link MAX_BINARY_BODY_BYTES} every
+   *  call had. */
   maxBytes: z.number().int().min(1).max(MAX_BINARY_BODY_BYTES).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
@@ -510,7 +512,7 @@ const ToolResponseSchema = envelope(ToolDecisionSchema);
 /**
  * ONE ROW OF THE TOOL LIST, as the free browse answers it: the tool's id, its
  * display name (a list entry's upstream name runs to 120 characters), what it
- * does, its price as the server writes it, and its kind. Strict like every
+ * does, its price as the server writes it, and its kind. Read like every
  * answer here, with the server's own bounds. The id is the one field the model
  * sends back, so its alphabet is pinned; the text is flattened to one line
  * where it is shown (`tool.ts`).
@@ -633,10 +635,10 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * with the pins those headers unlock: `buildSpecRequest` sends them. A build
  * without a token would drop the field as unknown, so a spec that cannot run
  * without it lists the token in `requires`. `tolerant` says this build reads
- * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}):
- * a server sends a new field, `requires` included, only to a client that
- * lists it, and today's shape to one that does not, which is every release
- * from before it and reads strictly. `bazaar` widens discovery to the open
+ * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}).
+ * Once the server reads it (tenjin R2), it sends a new field, `requires`
+ * included, only to a client that lists it, and today's shape to one that
+ * does not, which is every release from before it and reads strictly. `bazaar` widens discovery to the open
  * Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
@@ -790,7 +792,8 @@ export interface DecisionDeps {
 }
 
 /** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
- *  no paid answer for the call, which then is skipped. */
+ *  no paid answer for the call, which then is skipped, or read as the
+ *  transport failure it carries in `unreached`. */
 export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
   /** What this route's calls deposited into the routing channel and the
