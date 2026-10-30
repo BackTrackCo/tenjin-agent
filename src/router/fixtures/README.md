@@ -6,9 +6,9 @@ parses the same files with its own parser, so a shape only one side validates
 is a contract only one side keeps. Four divergences so far (`pendingCall`, the
 grouped arguments, the nested `diagnostics`, and three files copied by hand
 that drifted by 2026-10-28) each cost a round trip; read these files rather
-than hand-writing an equivalent. `tenjin`'s CI reads them from this repo's
-`main` and checks the server's requests and answers against them. That is the
-only copy, so a fixture change here is a contract change.
+than hand-writing an equivalent. A fixture change here is a contract change.
+Until the server's CI reads them from this repo's `main`, `tenjin` keeps a
+copy, refreshed from this one.
 
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
@@ -31,7 +31,7 @@ below). The outcome report is the one form that carries no `accepts`.
 | browse  | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
 | by id   | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
 | outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
-| warm    | `{schemaVersion, warm: true, accepts}`                         | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
+| warm    | `{schemaVersion, warm: true, accepts, harness?}`               | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
 catalog task id, such as `web research`, at most 64 characters),
@@ -429,7 +429,7 @@ Two pairs pin a request and the answer it gets:
 | `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
 | `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
 | `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
-| `wire-warm-request.json`                   | the paid route's `warm` call, which carries a channel deposit                             |
+| `wire-warm-request.json`                   | the paid route's `warm` call; its payment is a deposit when one is due, else a voucher    |
 | `wire-warm.json`                           | the `warm` answer: no decision                                                            |
 | `wire-tool-request-by-id-tolerant.json`    | a browse row's id from a `tolerant` client (and `jobs`, `label`, `fields`)                |
 | `wire-lookup-spec-tolerant.json`           | tool answer for it: `honored`, and the row's spec with its `job` and `requires: ["jobs"]` |
