@@ -550,11 +550,7 @@ export class RoutingPayer {
           return await once();
         }
       },
-      deposited: () =>
-        calls
-          .flatMap((call) => call.deposits)
-          .filter((d) => d.state === 'settled')
-          .reduce((sum, d) => sum + d.amountAtomic, 0n),
+      deposited: () => settledIn(calls),
       toppedUp: () => this.takeToppedUp(),
       fee: () =>
         calls.reduce<bigint | undefined>((last, call) => call.quoted ?? last, undefined) ??
@@ -578,13 +574,15 @@ export class RoutingPayer {
     await this.topUpWhenDue(new URL(ROUTE_PAID_PATH, baseUrl).toString(), memo.address);
   }
 
-  /** Resolves once no top-up is in flight or about to start: for the tests,
-   *  and for anything that must not end the process mid-deposit. */
+  /** Resolves once no top-up is in flight or about to start, and no payment
+   *  is still finishing in the background: for `tenjin mcp`'s exit and the
+   *  tests, anything that must not end the process mid-deposit. */
   async idle(): Promise<void> {
     for (;;) {
       const pending = this.pending;
       await pending;
       await this.topping;
+      await this.tail;
       if (pending === this.pending && this.topping === null) return;
     }
   }
@@ -1031,12 +1029,15 @@ export class RoutingPayer {
         if (err.unreached !== undefined) {
           return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE));
         }
+        // A DEPOSIT STILL OUT at the budget finishes in the background (the
+        // detached request is `tail`): it is said once its answer lands.
+        if (err.why === DEADLINE_AFTER_PAYMENT_SENT) {
+          const late = this.tail;
+          this.track(late.then(() => void (this.toppedUp += settledIn(calls))));
+        }
         return this.refusedTopUp(err);
       }
-      this.toppedUp += calls
-        .flatMap((call) => call.deposits)
-        .filter((d) => d.state === 'settled')
-        .reduce((sum, d) => sum + d.amountAtomic, 0n);
+      this.toppedUp += settledIn(calls);
       const status = response.ok ? response.status : 0;
       if (status >= 200 && status < 300 && response.ok && isWarmAnswer(response.json)) {
         this.failed = null;
@@ -1419,6 +1420,14 @@ export class RoutingPayer {
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
   }
+}
+
+/** What the deposits of `calls` that settled put into the channel. */
+function settledIn(calls: Call[]): bigint {
+  return calls
+    .flatMap((call) => call.deposits)
+    .filter((d) => d.state === 'settled')
+    .reduce((sum, d) => sum + d.amountAtomic, 0n);
 }
 
 /**

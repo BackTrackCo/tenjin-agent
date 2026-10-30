@@ -34,6 +34,7 @@ import {
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
   SIGNER_RECHECK_MS,
+  TOP_UP_TIMEOUT_MS,
   WALLET_LOW_BACKOFF_MS,
   type PayerObservation,
   type RoutingPayerDeps,
@@ -663,6 +664,26 @@ describe('RoutingPayer', () => {
       'POST /api/x402-router/route unpaid',
       'POST /api/x402-router/route paid',
     ]);
+  });
+
+  it('says a top-up deposit that lands after its own budget, once it lands', async () => {
+    const router = new FakeRouter();
+    const p = payer(router, { now: () => Date.now() });
+    await p.prewarm();
+    holdTime();
+    router.delayMs = TOP_UP_TIMEOUT_MS + 2_000;
+    const held = delayArmed(router);
+    const topping = p.topUpIfLow(BASE);
+    await held;
+    // The budget ends with the deposit out: the top-up returns, nothing to say yet.
+    await vi.advanceTimersByTimeAsync(TOP_UP_TIMEOUT_MS);
+    await topping;
+    expect(p.routeFor(BASE).toppedUp?.()).toBe(0n);
+    // It lands, and the next leg says it.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await p.idle();
+    expect(router.deposits).toBe(1);
+    expect(p.routeFor(BASE).toppedUp?.()).toBe(CHANNEL_DEPOSIT_ATOMIC);
   });
 
   it('skips a call whose budget ends before the top-up in flight lands, as no fault', async () => {
