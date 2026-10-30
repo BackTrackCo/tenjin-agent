@@ -108,7 +108,7 @@ describe('routingFeeRow', () => {
       status: 'ok',
       required: false,
       detail:
-        '$0.003 a call, paid from funds set aside up to $0.25 at a time; deposits count against the spend limits',
+        "a small flat fee per call, the router's quote and never more than $0.003, paid from funds set aside up to $0.25 at a time; deposits count against the spend limits",
     };
     expect(routingFeeRow({ canPayRouting: routing(READY) }, 'tenjin.sh')).toEqual(ok);
     expect(

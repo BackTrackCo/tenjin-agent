@@ -18,6 +18,7 @@ import {
   feeRefusal,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
   refusedWhy,
+  ROUTING_FEE_CEILING_ATOMIC,
   routingDepositAtomic,
 } from './fee';
 import { UNKNOWN_DETAIL } from './wallet-reasons';
@@ -151,7 +152,8 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
     sessionSpentAtomic: spent ?? 0n,
   });
   const routing = canPayRouting({
-    feeRefusal: feeRefusal(input.policy, input.host),
+    // No quote to go on here: the ceiling, the most a call would pay.
+    feeRefusal: feeRefusal(input.policy, input.host, ROUTING_FEE_CEILING_ATOMIC),
     sign,
     creditAtomic,
     depositRefusal: deposit.decision === 'allow' ? null : refusedWhy(deposit.reason),

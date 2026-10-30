@@ -21,7 +21,7 @@ export function registerRouter(reg: Registration): void {
 
   const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by your agent host)')
     .description(
-      "The handlers Tenjin's Claude Code and Codex plugins run. Each reads one hook event on stdin and writes the harness response, or nothing, on stdout. You never run these by hand.",
+      "The handlers Tenjin's plugins run, and the ones an older setup wrote. `alive` marks a session the Claude Code plugin serves. `prompt`, `native`, `shortfall`, `agent`, `ask` and `answer` are left from older setups: the plugins route through `tenjin mcp`, which pays the routing fee, so each of these reads one hook event on stdin, routes nothing, and tells the person once per session to run `tenjin install`. You never run these by hand.",
     )
     .helpCommand(false);
   // Normally answered by the fast path in `index.ts`, before the command tree
@@ -37,15 +37,12 @@ export function registerRouter(reg: Registration): void {
       await aliveMain({ dataDir: ctx.dataDir, version: pkg.version });
     });
   for (const [name, summary] of [
-    ['prompt', 'UserPromptSubmit: build the session packet and ask the free gate'],
-    ['native', 'PreToolUse on WebSearch|WebFetch: allow the call, or redirect it'],
-    [
-      'shortfall',
-      'PostToolUse(Failure) on WebSearch|WebFetch: offer a paid lookup when the result came back short',
-    ],
-    ['agent', "PreToolUse on Agent|Task: append any paid offer to the subagent's task"],
-    ['ask', 'PreToolUse on AskUserQuestion: allow the question, or redirect it once'],
-    ['answer', "PostToolUse on AskUserQuestion: offer a paid lookup beside the user's answers"],
+    ['prompt', 'UserPromptSubmit, from an older setup: tell the person to run `tenjin install`'],
+    ['native', 'PreToolUse on WebSearch|WebFetch, from an older setup: the same'],
+    ['shortfall', 'PostToolUse(Failure) on WebSearch|WebFetch, from an older setup: the same'],
+    ['agent', 'PreToolUse on Agent|Task, from an older setup: the same'],
+    ['ask', 'PreToolUse on AskUserQuestion, from an older setup: the same'],
+    ['answer', 'PostToolUse on AskUserQuestion, from an older setup: the same'],
   ] as const) {
     addGlobalFlags(hook.command(name))
       .addOption(harnessOption())
@@ -53,12 +50,9 @@ export function registerRouter(reg: Registration): void {
       .action(async function (this: Command) {
         const ctx = buildContext(this);
         const { runHookCommand } = await import('../router/hook-command');
-        // The flag rides too, so `--base-url` reaches the gate the same way it
-        // reaches every other command; the env layer is read inside.
-        await runHookCommand(name, io, {
+        await runHookCommand(io, {
           dataDir: ctx.dataDir,
           harness: this.opts().harness as Harness,
-          ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
         });
       });
   }
@@ -82,7 +76,7 @@ export function registerRouter(reg: Registration): void {
     .addOption(new Option('--plugin', 'started by the Tenjin Claude Code plugin').hideHelp())
     .addOption(harnessOption().hideHelp())
     .description(
-      "Run the local stdio MCP server that carries the `request` tool: one free routing decision per lookup, then the provider call, built here from the offer's spec and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
+      "Run the local stdio MCP server that carries the `request` tool: one routing decision per lookup, paid with a small routing fee, then the provider call, built here from the offer's spec and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
     )
     .action(async function (this: Command) {
       const ctx = buildContext(this);

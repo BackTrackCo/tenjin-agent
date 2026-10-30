@@ -12,12 +12,15 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
-import { requestDecision } from './decision';
+import { decodePaymentRequiredHeader, encodePaymentRequiredHeader } from '@x402/core/http';
+import { requestDecision, RouteSkipped } from './decision';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
+  FEE_ABOVE_CEILING,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
   payerDir,
-  ROUTING_FEE_ATOMIC,
+  ROUTING_FEE_CEILING_ATOMIC,
+  unpaidSentence,
 } from './fee';
 import { BASE, FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
@@ -25,7 +28,7 @@ import { WALLET_REASONS } from './wallet-reasons';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
-  FREE_PATH_RESERVE_MS,
+  PAID_CALL_RESERVE_MS,
   RoutingPayer,
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
@@ -115,7 +118,6 @@ const ctx = (): CommandContext => ({
 
 /** One routing call the way the hook and the tool make it. */
 async function routeOnce(p: RoutingPayer, router: FakeRouter) {
-  const route = await p.routeFor(BASE);
   return requestDecision(
     'tool',
     { query: 'q' },
@@ -124,20 +126,20 @@ async function routeOnce(p: RoutingPayer, router: FakeRouter) {
       baseUrl: BASE,
       fetchImpl: router.fetch,
       timeoutMs: 3_500,
-      ...(route !== null ? { route } : {}),
+      route: p.routeFor(BASE),
     },
   );
 }
 
-/** Why the paid path did not answer a call: the free path's reason, or the skip's. */
+/** Why the payer did not pay a call, or undefined for a call it answered. */
 function unpaidWhy(outcome: Awaited<ReturnType<typeof routeOnce>>): string | undefined {
-  return outcome.status === 'skipped' ? outcome.why : outcome.freePath;
+  return outcome.status === 'skipped' ? outcome.why : undefined;
 }
 
-/** A call the paid path could not take, answered on the free path, unpaid. */
-function tookFreePath(outcome: Awaited<ReturnType<typeof routeOnce>>, router: FakeRouter) {
-  expect(outcome.status).toBe('decided');
-  expect(router.log.at(-1)).toBe('POST /api/x402-router unpaid');
+/** A call the payer could not pay: skipped, and nothing asked of the free route. */
+function skippedWhy(outcome: Awaited<ReturnType<typeof routeOnce>>, router: FakeRouter) {
+  expect(outcome.status).toBe('skipped');
+  expect(router.log.filter((l) => !l.startsWith('POST /api/x402-router/route'))).toEqual([]);
   return unpaidWhy(outcome);
 }
 
@@ -191,14 +193,14 @@ describe('RoutingPayer', () => {
   it('refuses a $0.02 wallet as wallet_low and signs nothing', async () => {
     const router = new FakeRouter();
     const p = payer(router, { walletAtomic: 20_000n });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_low');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');
     expect(router.paidRequests()).toBe(0);
   });
 
   it("refuses a wallet below the server's hint, not below a fixed $0.03", async () => {
     const router = new FakeRouter({ minDeposit: '90000' });
     const p = payer(router, { walletAtomic: 89_999n });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_low');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');
     expect(router.paidRequests()).toBe(0);
   });
 
@@ -246,7 +248,7 @@ describe('RoutingPayer', () => {
   it('deposits once per 83 billed calls from a big wallet, counting vouchers once', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { sessionBudgetAtomic: 2n * MAX_CHANNEL_DEPOSIT_ATOMIC } });
-    const perDeposit = Number(MAX_CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_ATOMIC);
+    const perDeposit = Number(MAX_CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_CEILING_ATOMIC);
     expect(perDeposit).toBe(83);
     for (let n = 0; n < perDeposit; n += 1) {
       expect(unpaidWhy(await routeOnce(p, router))).toBeUndefined();
@@ -260,18 +262,14 @@ describe('RoutingPayer', () => {
     );
   });
 
-  it('takes the free path while the server answers no paid path, and asks again in an hour', async () => {
+  it('routes on the paid route, unpaid, while the fee is off', async () => {
     const router = new FakeRouter({ paid: false });
     const p = payer(router);
-    expect(await routeOnce(p, router)).toMatchObject({
-      status: 'decided',
-      freePath: 'paid_path_absent',
-    });
-    // Kept for an hour: the next call does not ask again.
-    expect(await p.routeFor(BASE)).toBeNull();
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect((await routeOnce(p, router)).status).toBe('decided');
     expect(router.log).toEqual([
       'POST /api/x402-router/route unpaid',
-      'POST /api/x402-router unpaid',
+      'POST /api/x402-router/route unpaid',
     ]);
   });
 
@@ -296,11 +294,11 @@ describe('RoutingPayer', () => {
       }),
       router,
     );
-    expect(tookFreePath(after, router)).toBe('limit_below_deposit');
+    expect(skippedWhy(after, router)).toBe('limit_below_deposit');
     expect(router.settledFees).toBe(1);
     expect(unlocks).toBe(0);
     // The same payer, too.
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('limit_below_deposit');
     expect(router.settledFees).toBe(1);
   });
 
@@ -316,7 +314,7 @@ describe('RoutingPayer', () => {
     expect(router.settledFees).toBe(1);
     // The channel still holds the deposit; the user changes the policy.
     policy = { ...TEST_POLICY, ...change };
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe(why);
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe(why);
     expect(router.settledFees).toBe(1);
     expect(router.paidRequests()).toBe(1);
   });
@@ -339,20 +337,20 @@ describe('RoutingPayer', () => {
     );
   });
 
-  it('refuses a second deposit the day has no room for, and the call goes free', async () => {
+  it('refuses a second deposit the day has no room for, and skips the call', async () => {
     const router = new FakeRouter();
     // A $0.25 deposit holds 83 fees; the day has room for one deposit, not two.
     const p = payer(router, {
       policy_: { sessionBudgetAtomic: 2n * MAX_CHANNEL_DEPOSIT_ATOMIC - 1n },
     });
-    for (let n = 0; n < Number(MAX_CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_ATOMIC); n += 1) {
+    for (let n = 0; n < Number(MAX_CHANNEL_DEPOSIT_ATOMIC / ROUTING_FEE_CEILING_ATOMIC); n += 1) {
       const paid = await routeOnce(p, router);
       expect(paid.status).toBe('decided');
       expect(unpaidWhy(paid)).toBeUndefined();
     }
     expect(router.deposits).toBe(1);
     const paidBefore = router.paidRequests();
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('budget_reached');
     expect(router.paidRequests()).toBe(paidBefore);
     expect(router.deposits).toBe(1);
     // The deposit counted once; the fees paid from it did not count again.
@@ -364,22 +362,137 @@ describe('RoutingPayer', () => {
   it('makes no deposit for a fee a daily limit of 0 refuses', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { sessionBudgetAtomic: 0n } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('budget_reached');
     expect(router.paidRequests()).toBe(0);
     expect(router.deposits).toBe(0);
   });
 
-  it('pays nothing to a 402 asking more than the approved fee', async () => {
-    const router = new FakeRouter({ amount: '30000' });
-    expect(tookFreePath(await routeOnce(payer(router), router), router)).toBe('payment_failed');
-    expect(router.paidRequests()).toBe(0);
+  /**
+   * THE SERVER QUOTES, THE CEILING CAPS. Whatever the router's 402 asks at or
+   * below the ceiling is paid, inside the spend limits; a quote above it is
+   * not paid at all, is named with its price, and is read before the wallet
+   * is unlocked.
+   */
+  it.each([['1000'], ['2999'], [ROUTING_FEE_CEILING_ATOMIC.toString()]])(
+    'pays a quote of %s atomic, at or below the ceiling, and names it',
+    async (amount) => {
+      const router = new FakeRouter({ amount });
+      const p = payer(router);
+      const route = p.routeFor(BASE);
+      for (let i = 0; i < 2; i += 1) {
+        const outcome = await requestDecision(
+          'tool',
+          { query: 'q' },
+          { ctx: ctx(), baseUrl: BASE, fetchImpl: router.fetch, timeoutMs: 3_500, route },
+        );
+        expect(outcome.status).toBe('decided');
+      }
+      expect(router.settledFees).toBe(2);
+      expect([...router.channels.values()][0]!.charged).toBe(2n * BigInt(amount));
+      expect(route.fee?.()).toBe(BigInt(amount));
+    },
+  );
+
+  it('pays nothing to a quote above the ceiling, says why with its price, and never unlocks', async () => {
+    const router = new FakeRouter({ amount: (ROUTING_FEE_CEILING_ATOMIC + 1n).toString() });
+    let unlocks = 0;
+    const p = payer(router, { getSigner: async () => ((unlocks += 1), testSigner(wallet)) });
+    const outcome = await routeOnce(p, router);
+    expect(skippedWhy(outcome, router)).toBe(FEE_ABOVE_CEILING);
+    expect(outcome).toMatchObject({ quotedAtomic: ROUTING_FEE_CEILING_ATOMIC + 1n });
+    expect(router.log).toEqual(['POST /api/x402-router/route unpaid']);
+    expect(unlocks).toBe(0);
+    expect(unpaidSentence(FEE_ABOVE_CEILING, 'person', ROUTING_FEE_CEILING_ATOMIC + 1n)).toBe(
+      'Tenjin could not pay the routing fee (the router quoted $0.003001 a call, more than this install agreed to pay), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+    );
+  });
+
+  it('pays the offer within the ceiling when a 402 also offers one above it', async () => {
+    const router = new FakeRouter({ amount: '2000' });
+    const above = { ...router.requirement, amount: '9000' };
+    const both = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const response = await router.fetch(input, init);
+      const header = response.headers.get('PAYMENT-REQUIRED');
+      if (response.status !== 402 || header === null) return response;
+      const required = decodePaymentRequiredHeader(header);
+      return new Response('{}', {
+        status: 402,
+        headers: {
+          'content-type': 'application/json',
+          'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
+            ...required,
+            accepts: [above, ...required.accepts],
+          }),
+        },
+      });
+    }) as typeof fetch;
+    const outcome = await requestDecision(
+      'tool',
+      { query: 'q' },
+      {
+        ctx: ctx(),
+        baseUrl: BASE,
+        fetchImpl: both,
+        timeoutMs: 3_500,
+        route: payer(router).routeFor(BASE),
+      },
+    );
+    expect(outcome.status).toBe('decided');
+    expect([...router.channels.values()][0]!.charged).toBe(2000n);
+  });
+
+  it('checks a voucher against the per-call limit at the quote, not the ceiling', async () => {
+    const router = new FakeRouter({ amount: '1000' });
+    let maxAutoSpendAtomic = 250_000n;
+    const p = payer(router, { policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic }) });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    // Below the ceiling, above the quote: the funded channel still pays.
+    maxAutoSpendAtomic = 2_000n;
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    // Below the quote: refused before anything is signed.
+    maxAutoSpendAtomic = 999n;
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('limit_below_deposit');
+    expect(router.settledFees).toBe(2);
+  });
+
+  /**
+   * A CHARGE BELOW THE QUOTE IS NO FAULT. Batch settlement lets the server
+   * charge less than it quoted (the $0.001 charge under today's $0.003
+   * quote): the SDK records the lower charge, and the next voucher builds on
+   * it with no corrective 402.
+   */
+  it('takes a charge below the quote as paid, and builds the next voucher on it', async () => {
+    const router = new FakeRouter({ amount: '3000', charge: '1000' });
+    const p = payer(router);
+    for (let i = 0; i < 3; i += 1) {
+      expect(unpaidWhy(await routeOnce(p, router))).toBeUndefined();
+    }
+    expect(router.settledFees).toBe(3);
+    expect(router.paidRequests()).toBe(3);
+    expect([...router.channels.values()][0]!.charged).toBe(3_000n);
+    expect(router.deposits).toBe(1);
+  });
+
+  it('pays only the configured router: any other origin or path is refused unsent', async () => {
+    const router = new FakeRouter();
+    const route = payer(router).routeFor(BASE);
+    for (const url of [
+      'https://provider.test/api/x402-router/route',
+      `${BASE}/api/x402-router`,
+      `${BASE}/v1/search`,
+    ]) {
+      await expect(route.send(url, { method: 'POST', timeoutMs: 3_500 })).rejects.toBeInstanceOf(
+        RouteSkipped,
+      );
+    }
+    expect(router.log).toEqual([]);
   });
 
   it('tells each route what its own call deposited, so the deposit is said once', async () => {
     const router = new FakeRouter();
     const p = payer(router);
     const decideOn = async () => {
-      const route = (await p.routeFor(BASE))!;
+      const route = p.routeFor(BASE);
       await requestDecision(
         'tool',
         { query: 'q' },
@@ -419,7 +532,7 @@ describe('RoutingPayer', () => {
     }).get(files[0]!.replace('.json', ''));
     expect(stored).toMatchObject({
       balance: MAX_CHANNEL_DEPOSIT_ATOMIC.toString(),
-      chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
+      chargedCumulativeAmount: (2n * ROUTING_FEE_CEILING_ATOMIC).toString(),
     });
     // The deposit is an automatic payment in the spend ledger; the fees are not.
     expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
@@ -431,7 +544,7 @@ describe('RoutingPayer', () => {
   it('refuses the $0.25 deposit under a per-call limit an earlier release left lower', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { maxAutoSpendAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC - 1n } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('limit_below_deposit');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('limit_below_deposit');
     expect(router.paidRequests()).toBe(0);
     expect(router.deposits).toBe(0);
     expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic ?? '0').toBe('0');
@@ -440,7 +553,7 @@ describe('RoutingPayer', () => {
   it('refuses a deposit the daily budget cannot take, and reserves nothing', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { sessionBudgetAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC - 1n } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('budget_reached');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('budget_reached');
     expect(router.paidRequests()).toBe(0);
     expect((await readSpendSummary(dir, { now: () => clock }))?.reservations ?? []).toEqual([]);
   });
@@ -470,13 +583,13 @@ describe('RoutingPayer', () => {
     const router = new FakeRouter();
     const fetchImpl = paidAnswer(router, answer);
     const p = payer(router, { fetchImpl });
-    const route = (await p.routeFor(BASE))!;
+    const route = p.routeFor(BASE);
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
       { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs: 3_500, route },
     );
-    expect(tookFreePath(outcome, router)).toBe('payment_failed');
+    expect(skippedWhy(outcome, router)).toBe('payment_failed');
     expect(await readSpendSummary(dir, { now: () => clock })).toMatchObject({
       committedAtomic: committed,
       reservations: [],
@@ -491,7 +604,7 @@ describe('RoutingPayer', () => {
       throw new TypeError('fetch failed');
     });
     const p = payer(router, { fetchImpl });
-    const route = (await p.routeFor(BASE))!;
+    const route = p.routeFor(BASE);
     await requestDecision(
       'tool',
       { query: 'q' },
@@ -507,7 +620,7 @@ describe('RoutingPayer', () => {
     await routeOnce(p, router);
     router.abortAfterSettle = true;
     const lost = await routeOnce(p, router);
-    expect(tookFreePath(lost, router)).toBe('payment_failed');
+    expect(skippedWhy(lost, router)).toBe('payment_failed');
     expect(router.settledFees).toBe(2);
     const paidBefore = router.paidRequests();
     const next = await routeOnce(p, router);
@@ -517,13 +630,13 @@ describe('RoutingPayer', () => {
     // last voucher, and the retry was charged once.
     expect(router.settledFees).toBe(3);
     expect(router.deposits).toBe(1);
-    expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
+    expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_CEILING_ATOMIC);
   });
 
-  it('retries a reset socket on the free path, on a fresh connection, unpaid', async () => {
+  it('skips a call whose socket reset, with no second request, unpaid', async () => {
     const router = new FakeRouter();
     const p = payer(router);
-    const route = await p.routeFor(BASE);
+    const route = p.routeFor(BASE);
     let resets = 0;
     const resetOnce: typeof fetch = async (input, init) => {
       if (resets === 0) {
@@ -537,9 +650,10 @@ describe('RoutingPayer', () => {
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
-      { ctx: ctx(), baseUrl: BASE, fetchImpl: resetOnce, timeoutMs: 3_500, route: route! },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl: resetOnce, timeoutMs: 3_500, route },
     );
-    expect(tookFreePath(outcome, router)).toBe('payment_failed');
+    expect(skippedWhy(outcome, router)).toBe('payment_failed');
+    expect(router.log).toEqual([]);
     expect(router.settledFees).toBe(0);
   });
 
@@ -557,7 +671,7 @@ describe('RoutingPayer', () => {
     expect(await readdir(payerDir(dir, wallet.address))).toEqual(['client']);
   });
 
-  it("takes the free path, unpaid, when another process's call is in flight on the channel", async () => {
+  it("skips a call, unpaid, when another process's call is in flight on the channel", async () => {
     const router = new FakeRouter();
     await routeOnce(payer(router), router);
     router.delayMs = 200;
@@ -565,12 +679,9 @@ describe('RoutingPayer', () => {
       routeOnce(payer(router), router),
       routeOnce(payer(router), router),
     ]);
-    expect(outcomes.map((o) => o.status)).toEqual(['decided', 'decided']);
-    expect(outcomes.map((o) => (o.status === 'decided' ? o.freePath : null)).sort()).toEqual([
-      'channel_busy',
-      undefined,
-    ]);
-    expect(router.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(1);
+    expect(outcomes.map((o) => o.status).sort()).toEqual(['decided', 'skipped']);
+    expect(outcomes.map(unpaidWhy).sort()).toEqual(['channel_busy', undefined]);
+    expect(router.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(0);
     expect(router.channels.size).toBe(1);
     expect(router.deposits).toBe(1);
     // The refused voucher was charged nothing; the next call continues the total.
@@ -578,7 +689,7 @@ describe('RoutingPayer', () => {
     router.delayMs = 0;
     expect((await routeOnce(payer(router), router)).status).toBe('decided');
     expect(router.settledFees).toBe(3);
-    expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_ATOMIC);
+    expect([...router.channels.values()][0]!.charged).toBe(3n * ROUTING_FEE_CEILING_ATOMIC);
   });
 
   it('takes turns inside one process: parallel calls share one channel and never collide', async () => {
@@ -601,7 +712,7 @@ describe('RoutingPayer', () => {
     const p = payer(router, { now: () => Date.now(), timers });
     await routeOnce(p, router);
     router.delayMs = 300;
-    const route = (await p.routeFor(BASE))!;
+    const route = p.routeFor(BASE);
     holdTime();
     const call = (timeoutMs: number) =>
       requestDecision(
@@ -647,7 +758,7 @@ describe('RoutingPayer', () => {
         now: () => Date.now(),
         readContract: chainReader('http://rpc.test', hangingRpc.fetchFn),
       });
-      const route = (await p.routeFor(BASE))!;
+      const route = p.routeFor(BASE);
       const started = Date.now();
       const outcome = await requestDecision(
         'tool',
@@ -681,19 +792,16 @@ describe('RoutingPayer', () => {
       const router = new FakeRouter({ paid: false });
       let unlocks = 0;
       const p = payer(router, { getSigner: () => ((unlocks += 1), fail()) });
-      expect(unpaidWhy(await routeOnce(p, router))).toBe('paid_path_absent');
+      expect((await routeOnce(p, router)).status).toBe('decided');
       expect(unlocks).toBe(0);
     },
   );
 
-  it('takes the free path with no wallet once the server charges the fee', async () => {
+  it('skips a call with no wallet once the server charges the fee, in one request', async () => {
     const router = new FakeRouter();
     const p = payer(router, { getSigner: noWallet });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('no_wallet');
-    expect(router.log).toEqual([
-      'POST /api/x402-router/route unpaid',
-      'POST /api/x402-router unpaid',
-    ]);
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('no_wallet');
+    expect(router.log).toEqual(['POST /api/x402-router/route unpaid']);
   });
 
   it('pays nothing when the wallet cannot be unlocked, and an unclassified failure is wallet_locked', async () => {
@@ -705,7 +813,7 @@ describe('RoutingPayer', () => {
       },
       warn: (line) => warned.push(line),
     });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_locked');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_locked');
     expect(router.paidRequests()).toBe(0);
     // The error's own message is still the one diagnostic line.
     expect(warned.join('\n')).toContain('passphrase needed');
@@ -725,21 +833,21 @@ describe('RoutingPayer', () => {
   ])('skips with the classified reason when the unlock fails with %s', async (reason) => {
     const router = new FakeRouter();
     const p = payer(router, { getSigner: unlockFails(reason) });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe(reason);
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe(reason);
     expect(router.paidRequests()).toBe(0);
   });
 
   it('signs no deposit from a wallet that cannot cover it', async () => {
     const router = new FakeRouter();
     const p = payer(router, { walletAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('wallet_low');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');
     expect(router.paidRequests()).toBe(0);
   });
 
   it('applies the creator allowlist to a deposit', async () => {
     const router = new FakeRouter();
     const p = payer(router, { policy_: { allowlistCreators: ['someone.else'] } });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('not_allowlisted');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('not_allowlisted');
     expect(router.paidRequests()).toBe(0);
   });
 
@@ -756,7 +864,7 @@ describe('RoutingPayer and the call budget', () => {
     const warned: string[] = [];
     const p = payer(router, { now: () => Date.now(), warn: (line) => warned.push(line), timers });
     const call = async (timeoutMs: number) => {
-      const route = (await p.routeFor(BASE))!;
+      const route = p.routeFor(BASE);
       return requestDecision(
         'tool',
         { query: 'q' },
@@ -796,7 +904,7 @@ describe('RoutingPayer and the call budget', () => {
     expect(router.paidRequests()).toBe(2);
     expect(await storedChannel()).toMatchObject({
       balance: MAX_CHANNEL_DEPOSIT_ATOMIC.toString(),
-      chargedCumulativeAmount: (2n * ROUTING_FEE_ATOMIC).toString(),
+      chargedCumulativeAmount: (2n * ROUTING_FEE_CEILING_ATOMIC).toString(),
     });
     expect((await readSpendSummary(dir))?.reservations).toEqual([]);
     expect(warned.join('\n')).toMatch(
@@ -833,7 +941,7 @@ describe('RoutingPayer and the call budget', () => {
       return router.fetch(request);
     };
     const { p, warned } = timed(router);
-    const route = (await p.routeFor(BASE))!;
+    const route = p.routeFor(BASE);
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
@@ -881,7 +989,7 @@ describe('RoutingPayer and the call budget', () => {
       });
     };
     const { p } = timed(router);
-    const route = (await p.routeFor(BASE))!;
+    const route = p.routeFor(BASE);
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
@@ -901,7 +1009,7 @@ describe('RoutingPayer and the call budget', () => {
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     try {
       const p = payer(new FakeRouter(), { now: () => Date.now(), fetchImpl: fetch });
-      const route = (await p.routeFor(base))!;
+      const route = p.routeFor(base);
       const started = Date.now();
       const outcome = await requestDecision(
         'tool',
@@ -920,7 +1028,7 @@ describe('RoutingPayer and the call budget', () => {
 describe('RoutingPayer and the wallet verdict', () => {
   /** One call on its own budget, in real time. */
   async function callWith(p: RoutingPayer, router: FakeRouter, timeoutMs: number) {
-    const route = (await p.routeFor(BASE))!;
+    const route = p.routeFor(BASE);
     return requestDecision(
       'tool',
       { query: 'q' },
@@ -944,15 +1052,15 @@ describe('RoutingPayer and the wallet verdict', () => {
     expect(p.signVerdict()).toMatchObject({ status: 'unknown', reason: 'not_checked' });
   });
 
-  it('leaves the free path its share of the budget while an unlock never answers', async () => {
+  it('stops waiting for an unlock before the paid call has no time left', async () => {
     const router = new FakeRouter();
     const getSigner = vi.fn(() => new Promise<TenjinSigner>(() => undefined));
     const p = payer(router, { now: () => Date.now(), getSigner });
     void p.prewarm();
     const started = Date.now();
-    const outcome = await callWith(p, router, FREE_PATH_RESERVE_MS + 300);
-    expect(tookFreePath(outcome, router)).toBe('unlock_timeout');
-    expect(Date.now() - started).toBeLessThan(FREE_PATH_RESERVE_MS + 300);
+    const outcome = await callWith(p, router, PAID_CALL_RESERVE_MS + 300);
+    expect(skippedWhy(outcome, router)).toBe('unlock_timeout');
+    expect(Date.now() - started).toBeLessThan(PAID_CALL_RESERVE_MS + 300);
     expect(getSigner).toHaveBeenCalledTimes(1);
   });
 
@@ -977,7 +1085,7 @@ describe('RoutingPayer and the wallet verdict', () => {
     );
     const p = payer(router, { now: () => Date.now(), getSigner });
     expect(unpaidWhy(await callWith(p, router, 200))).toBe('unlock_timeout');
-    // The person answers the unlock dialog after the call took the free path.
+    // The person answers the unlock dialog after the call was skipped.
     answer(testSigner(wallet));
     await vi.waitFor(() => expect(p.signVerdict().status).toBe('ready'));
     const next = await callWith(p, router, 3_500);
@@ -998,31 +1106,31 @@ describe('RoutingPayer and the wallet verdict', () => {
       getSigner: () => ((unlocks += 1), fail()),
       unlockStamp: async () => stamp,
     });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(unlocks).toBe(1);
 
     // After the 402 and the block: nothing is sent on the paid path, nothing unlocked.
     let from = router.log.length;
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(paidPathSince(router, from)).toEqual([]);
     expect(unlocks).toBe(1);
     clock += SIGNER_RECHECK_MS - 1;
     from = router.log.length;
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(paidPathSince(router, from)).toEqual([]);
     expect(unlocks).toBe(1);
 
     // A repair rewrites the sidecar: the next call checks again at once.
     stamp = '1:2';
     from = router.log.length;
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(2);
 
     // A minute later, too.
     clock += SIGNER_RECHECK_MS;
     from = router.log.length;
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_wrong');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(3);
   });
@@ -1072,7 +1180,7 @@ describe('RoutingPayer and the wallet verdict', () => {
     const p = payer(router, { getSigner: () => ((unlocks += 1), fail()) });
     await p.prewarm();
     expect(p.signVerdict()).toMatchObject({ status: 'blocked', reason: 'passphrase_missing' });
-    expect(tookFreePath(await routeOnce(p, router), router)).toBe('passphrase_missing');
+    expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_missing');
     expect(router.log[0]).toBe('POST /api/x402-router/route unpaid');
     // The 402 met the memo: the block skipped the unlock, not the request.
     expect(unlocks).toBe(1);
@@ -1087,7 +1195,7 @@ describe('RoutingPayer and the wallet verdict', () => {
       const p = payer(router, { getSigner: () => ((unlocks += 1), fail()) });
       for (let n = 1; n <= 3; n += 1) {
         const from = router.log.length;
-        expect(tookFreePath(await routeOnce(p, router), router)).toBe(reason);
+        expect(skippedWhy(await routeOnce(p, router), router)).toBe(reason);
         expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
         expect(unlocks).toBe(n);
       }
@@ -1157,12 +1265,34 @@ describe('RoutingPayer and the wallet verdict', () => {
     const greedySeen: PayerObservation[] = [];
     await routeOnce(payer(greedy, { observe: (u) => greedySeen.push(u) }), greedy);
     expect(greedySeen.map((u) => u.routing).filter(Boolean)).toEqual([
+      { status: 'blocked', reason: FEE_ABOVE_CEILING, at: clock },
+    ]);
+
+    const failing = new FakeRouter();
+    const failingSeen: PayerObservation[] = [];
+    const fails = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.headers.has('payment-signature')) return new Response('{}', { status: 502 });
+      return failing.fetch(request);
+    }) as typeof fetch;
+    await requestDecision(
+      'tool',
+      { query: 'q' },
+      {
+        ctx: ctx(),
+        baseUrl: BASE,
+        fetchImpl: fails,
+        timeoutMs: 3_500,
+        route: payer(failing, { observe: (u) => failingSeen.push(u) }).routeFor(BASE),
+      },
+    );
+    expect(failingSeen.map((u) => u.routing).filter(Boolean)).toEqual([
       { status: 'unknown', reason: 'payment_failed', at: clock },
     ]);
 
-    const absent = new FakeRouter({ paid: false });
-    const absentSeen: PayerObservation[] = [];
-    await routeOnce(payer(absent, { observe: (u) => absentSeen.push(u) }), absent);
-    expect(absentSeen).toEqual([]);
+    const off = new FakeRouter({ paid: false });
+    const offSeen: PayerObservation[] = [];
+    await routeOnce(payer(off, { observe: (u) => offSeen.push(u) }), off);
+    expect(offSeen).toEqual([]);
   });
 });

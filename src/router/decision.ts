@@ -6,27 +6,25 @@ import type { Packet } from './context';
 import type { Harness } from './names';
 
 /**
- * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
- * nothing. Inside `tenjin mcp`, while the server answers its paid path, the
- * same body goes to that path through the stock x402 client
- * ({@link DecisionRoute}, `routing-payer.ts`); a call that path cannot take
- * falls back to the free path. The rest of this note describes the free path,
- * which is unchanged.
+ * ONE ROUTING PATH, ONE DECISION PER LOOKUP. Every routing call, the hook's
+ * and the `request` tool's, goes to the paid route ({@link ROUTE_PAID_PATH}).
+ * Inside `tenjin mcp` the payer sends it through the stock x402 client and
+ * pays the routing fee its 402 quotes ({@link DecisionRoute},
+ * `routing-payer.ts`); a call it cannot pay is skipped at once, with no second
+ * request. The free route ({@link ROUTER_PATH}) keeps only what stays free:
+ * browse, a browse row's spec and the outcome report.
  *
- * The routing decision costs nothing and nobody signs for it. The hook asks for
- * it from the user's own words, the backend answers with what it would do and
- * what the provider charges, and the only payment on the wire is the one
- * `runPay` makes to that provider. That deletes the router fee and everything
- * built to carry it: the 402 probe, the requirements cache, the stale-quote
- * retry, the settlement accounting and one Base settlement of about 1.5 s from
- * every paid lookup.
- *
- * The bounded packet travels with the hook request and the backend keeps it
- * against the decision id until that id expires. What this client keeps is
- * each offer's spec, by its id (`specs.ts`).
+ * The backend answers with what it would do and what the provider charges,
+ * and the provider is paid by `runPay`, from a spec, under the local spend
+ * policy. The bounded packet travels with the hook request and the backend
+ * keeps it against the decision id until that id expires. What this client
+ * keeps is each offer's spec, by its id (`specs.ts`).
  */
 
+/** The free route: browse, a browse row's spec, and the outcome report. */
 export const ROUTER_PATH = '/api/x402-router';
+/** The paid route, behind x402: every routing call. */
+export const ROUTE_PAID_PATH = '/api/x402-router/route';
 
 /**
  * The request the server builds and this client sends verbatim. Query assembly,
@@ -796,76 +794,85 @@ export interface DecisionDeps {
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
-  /** The paid path, when `tenjin mcp` takes it: the body goes to `path` and is
-   *  sent by `send`, which pays the routing fee with the stock x402 client.
-   *  Absent is the free path. */
+  /** The payer, inside `tenjin mcp`: it sends the call and pays the routing
+   *  fee with the stock x402 client. Absent, the call goes unpaid. */
   route?: DecisionRoute;
 }
 
-/** How a routing call reaches the paid path. `send` throws
- *  {@link RouteSkipped} when it has no paid answer for the call, which then
- *  takes the free path. */
+/** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
+ *  no paid answer for the call, which then is skipped, or read as the
+ *  transport failure it carries in `unreached`. */
 export interface DecisionRoute {
-  path: string;
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
   /** What this route's calls deposited into the routing channel and the
    *  router took, 0n for none: the caller says so once, where it is read. */
   deposited?: () => bigint;
+  /** The routing fee the router last quoted this route's calls, atomic
+   *  USDC, for a line that names it; undefined before any quote. */
+  fee?: () => bigint | undefined;
 }
 
-/** The paid path gave this call no answer: the wallet locked, low or over
- *  its spend limits, the channel busy, or the payment failed. */
+/** The paid route gave this call no answer: the wallet locked, low or over
+ *  its spend limits, the fee quoted above the ceiling, the channel busy, or
+ *  the payment failed. */
 export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
-   *  ({@link isUnreachable}), so the free path, on the same host, is not
-   *  tried and the call reads as that transport failure. */
+   *  ({@link isUnreachable}), so the call reads as that transport failure.
+   *  `quotedAtomic`: the fee the router quoted, when the payer read one. */
+  readonly unreached: FetchJsonFailure | undefined;
+  readonly quotedAtomic: bigint | undefined;
   constructor(
     readonly why: string,
-    readonly unreached?: FetchJsonFailure,
+    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint } = {},
   ) {
     super(`routing fee not paid: ${why}`);
+    this.unreached = opts.unreached;
+    this.quotedAtomic = opts.quotedAtomic;
   }
 }
 
 /** Another session's call was in flight on the wallet's routing channel. */
 export const CHANNEL_BUSY = 'channel_busy';
-/** The server answered no paid path. */
-export const PAID_PATH_ABSENT = 'paid_path_absent';
 /** The paid call got no answer, a refused payment or a server error. */
 export const PAYMENT_FAILED = 'payment_failed';
 /** The payment went out and the call's budget ran out before its answer:
  *  no fault. `tenjin mcp` lets the request finish, so it is recorded. */
 export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
+/** The route asked for the fee, and this call had no payer to pay it. */
+export const NO_PAYER = 'no_payer';
 
 export type DecisionOutcome<T> =
-  /** `freePath`: the paid path skipped the call for this reason and it went
-   *  to the free path instead, unpaid. `skipped`: offers in it this build
-   *  cannot run, already taken out ({@link withoutUnmet}). */
-  | { status: 'decided'; decision: T; freePath?: string; skipped?: SkippedOffer[] }
-  /** On the free path nothing was paid and nothing could be, so a failure here
-   *  costs the turn a routing answer and nothing else. */
+  /** `skipped`: offers in it this build cannot run, already taken out
+   *  ({@link withoutUnmet}). */
+  | { status: 'decided'; decision: T; skipped?: SkippedOffer[] }
+  /** No routing answer: the turn goes without one. */
   | {
       status: 'failed';
       reason: string;
       errorCode?: string;
-      freePath?: string;
       /** The router could not be reached at all ({@link isUnreachable}). */
       unreachable?: true;
       /** No answer came back at all: a transport failure or a timeout. */
       noAnswer?: true;
     }
-  /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
-   *  for the free path: the native tool runs. */
-  | { status: 'skipped'; why: string };
+  /** The routing fee was not paid ({@link RouteSkipped}, {@link NO_PAYER}):
+   *  nothing was routed, and the native tool runs. `quotedAtomic`: the fee
+   *  the router quoted, when the payer read one. */
+  | { status: 'skipped'; why: string; quotedAtomic?: bigint };
 
 /**
- * ONE FREE CALL, IN TWO FORMS. The hook sends `{ packet }`: the backend runs
- * the gate, and on `execute` stores that packet under an id and answers with
- * each offered service's spec. The tool sends `{ query }`, which the backend
- * answers with the spec of the service its gate picks, or `{ query, id }` for
- * the free docs offer, which has no spec and is bound from the query. Every
- * provider call is built here, from a spec, or for the docs lookup by the
- * backend from the query.
+ * ONE ROUTING CALL, IN TWO FORMS, ON THE PAID ROUTE. The hook sends
+ * `{ packet }`: the backend runs the gate, and on `execute` stores that packet
+ * under an id and answers with each offered service's spec. The tool sends
+ * `{ query }`, which the backend answers with the spec of the service its gate
+ * picks, or `{ query, id }` for the free docs offer, which has no spec and is
+ * bound from the query. Every provider call is built here, from a spec, or for
+ * the docs lookup by the backend from the query.
+ *
+ * ONE REQUEST, PAID OR SKIPPED. A call the payer cannot pay is `skipped` at
+ * once: no second request, on any route. With no payer the call goes unpaid,
+ * and a route that asks for the fee (a 402) is a skip with {@link NO_PAYER};
+ * a route that charges nothing (the fee off, in development) answers it.
  */
 export async function requestDecision(
   kind: 'hook',
@@ -888,7 +895,7 @@ export async function requestDecision(
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
-  const url = new URL(deps.route?.path ?? ROUTER_PATH, deps.baseUrl).toString();
+  const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
@@ -909,36 +916,21 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const started = Date.now();
   const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
   let response: HttpResult;
   try {
     response = await (deps.route?.send ?? httpRequest)(url, options);
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
-    if (err.unreached !== undefined) return readDecision(err.unreached, schema);
-    const left = options.timeoutMs - (Date.now() - started);
-    if (left <= 0) return { status: 'skipped', why: err.why };
-    // A CALL THE PAID PATH COULD NOT TAKE STILL ROUTES, on the free path,
-    // unpaid, inside what is left of its budget, and says why.
-    response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
-      ...options,
-      timeoutMs: left,
-    });
-    const free = readOffer(response, schema);
-    // A failure here ran on what a paid attempt left of the budget, so it says
-    // nothing about the router being down: it never starts the backoff.
-    if (free.status === 'failed') {
-      return {
-        status: 'failed',
-        reason: free.reason,
-        ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
-        // Still no answer, which must not end another call's backoff.
-        ...(free.noAnswer === true ? { noAnswer: true as const } : {}),
-        freePath: err.why,
-      };
-    }
-    return free.status === 'skipped' ? free : { ...free, freePath: err.why };
+    if (err.unreached !== undefined) return readOffer(err.unreached, schema);
+    return {
+      status: 'skipped',
+      why: err.why,
+      ...(err.quotedAtomic !== undefined ? { quotedAtomic: err.quotedAtomic } : {}),
+    };
+  }
+  if (deps.route === undefined && response.ok && response.status === 402) {
+    return { status: 'skipped', why: NO_PAYER };
   }
   return readOffer(response, schema);
 }
@@ -949,7 +941,7 @@ export async function requestDecision(
  * row's id with that tool's spec under a fresh offer id, exactly as a query
  * with no id is answered. Neither makes a gate call on the server, neither is
  * charged the routing fee, and neither pays anything here, so both always take
- * the free path: `deps.route` is never read.
+ * the free route: `deps.route` is never read.
  */
 export async function requestBrowse(
   browse: string,
@@ -1054,8 +1046,7 @@ function readDecision<T extends z.ZodTypeAny>(
   response: HttpResult,
   schema: T,
 ): DecisionOutcome<z.infer<T>> {
-  // A transport failure says its own reason; nothing was paid either way,
-  // because there is nothing to pay for on this route.
+  // A transport failure says its own reason.
   if (!response.ok) {
     return {
       status: 'failed',
@@ -1121,7 +1112,7 @@ const RESET_CODES = new Set(['ECONNRESET', 'UND_ERR_SOCKET']);
  * and no status came back. Never the call's own timeout: that is the gate's
  * few seconds, and a slow decision or a cold start must not take the router
  * away from every session. Never a status, even with a body that failed to
- * read, and never a reset socket, which the free path retries on a fresh one.
+ * read, and never a reset socket, which a fresh connection usually gets past.
  */
 export function isUnreachable(failure: FetchJsonFailure): boolean {
   return (

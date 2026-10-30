@@ -112,7 +112,7 @@ describe('the permissions doc matches the product this release ships', () => {
     expect(PERMISSIONS_DOC).toContain('mode 0600');
     expect(PERMISSIONS_DOC).toContain('tenjin wallet repair');
     const line = PERMISSIONS_DOC.split('\n').find((l) =>
-      l.startsWith('- A routing call that cannot be paid takes the free path'),
+      l.startsWith("- Every routing call goes to the router's paid route."),
     );
     expect(line).toBeDefined();
     expect(line).toContain('`tenjin wallet repair`');

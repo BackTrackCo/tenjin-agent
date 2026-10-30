@@ -34,7 +34,7 @@ import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
 import {
   MAX_CHANNEL_DEPOSIT_ATOMIC,
-  ROUTING_FEE_ATOMIC,
+  ROUTING_FEE_CEILING_ATOMIC,
   SUGGESTED_FUND_USD,
   unpaid,
   usd,
@@ -324,8 +324,9 @@ export async function runRouterDoctor(
     env,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  // A probe the router answered ends the routing legs' backoff at once.
-  if (probe.status === 'ok') {
+  // A probe the router answered ends the routing legs' backoff at once: ok,
+  // or a warning about the fee it quoted.
+  if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
   } else {
@@ -1342,7 +1343,8 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
 /**
  * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: `canPayRouting`, the
  * verdict the payer and the hooks reach on the same facts, in TODAY'S words
- * (S5). Never a failure: a call the fee cannot pay takes the free path.
+ * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
+ * tools run.
  *
  * - ready: today's ok row, byte for byte;
  * - blocked by money or policy: today's `unpaid` detail, and today's fix
@@ -1369,7 +1371,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
+      detail: `a small flat fee per call, the router's quote and never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;
@@ -1484,8 +1486,8 @@ const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
  *
  * Exit codes keep their meaning (S11): no wallet, a wallet.json `describe`
  * cannot read, and an invalid TENJIN_WALLET_KEY fail as required, exactly as
- * before. A wallet that is there but cannot be unlocked only warns: lookups
- * still run on the free path, and the fix is a person's, never `agentFix`
+ * before. A wallet that is there but cannot be unlocked only warns: the
+ * native tools still run, and the fix is a person's, never `agentFix`
  * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
  * file (B1, S3). A check that could not answer is said as not checked.
  */
