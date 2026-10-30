@@ -8,8 +8,10 @@ import {
   buildOutcomeBody,
   buildToolBody,
   buildToolSpecBody,
+  buildWarmBody,
   acceptsFor,
   CLIENT_ACCEPTS,
+  isWarmAnswer,
   MAX_SPEC_TIMEOUT_S,
   parseForTests,
   REQUIRES_UNMET,
@@ -239,6 +241,54 @@ describe('the request bodies', () => {
     ).toEqual(canonical);
   });
 
+  /**
+   * THE BACKGROUND TOP-UP'S CARRIER: the paid route's `warm`
+   * call, byte for byte, and its answer, which carries no decision. A router
+   * without the form answers anything else, which the top-up reads as absent.
+   */
+  it('sends warm byte for byte, and reads its answer and nothing else as warm', () => {
+    // What the top-up really sends: this build's accepts, `tolerant` included,
+    // so the answer carries `honored`.
+    const canonical = fixture('wire-warm-request.json');
+    expect(buildWarmBody({ accepts: acceptsFor(false), harness: 'claude' })).toEqual(canonical);
+    expect(buildWarmBody()).toEqual({ schemaVersion: 1, warm: true });
+    expect(JSON.stringify(canonical)).not.toMatch(/billing|admission|payment/i);
+    const answer = fixture('wire-warm.json');
+    expect(answer.honored).toEqual(['schemaVersion', 'warm', 'accepts', 'harness']);
+    expect(isWarmAnswer(answer)).toBe(true);
+    expect(isWarmAnswer({ ...answer, surprise: 1 })).toBe(true);
+    expect(isWarmAnswer({ ...answer, warm: false })).toBe(false);
+    expect(isWarmAnswer(fixture('wire-hook-native.json'))).toBe(false);
+    expect(isWarmAnswer({ error: { code: 'bad_request', message: 'warm' } })).toBe(false);
+    // A warm answer is no decision on either call.
+    expect(parseForTests('hook', answer).success).toBe(false);
+    expect(parseForTests('tool', answer).success).toBe(false);
+  });
+
+  /**
+   * THE TOLERANT EXCHANGE: what this build sends for a browse row's id, and
+   * the answer only a `tolerant` client gets, with `honored` and the spec's
+   * `requires`. The reader keeps what it knows and drops `honored`.
+   */
+  it('sends the tolerant by-id request byte for byte, and reads its answer with requires kept', () => {
+    const canonical = fixture('wire-tool-request-by-id-tolerant.json');
+    expect(
+      buildToolSpecBody({
+        tool: canonical.tool as string,
+        accepts: acceptsFor(false),
+        harness: 'claude',
+      }),
+    ).toEqual(canonical);
+    const answer = fixture('wire-lookup-spec-tolerant.json');
+    expect(answer.honored).toEqual(['schemaVersion', 'tool', 'accepts', 'harness']);
+    const parsed = parseForTests('tool', answer);
+    expect(parsed.success).toBe(true);
+    const read = parsed.data as { honored?: unknown; decision: { spec: ToolSpec } };
+    expect(read).not.toHaveProperty('honored');
+    expect(read.decision.spec.requires).toEqual(['jobs']);
+    expect(unmetRequires(read.decision.spec.requires)).toEqual([]);
+  });
+
   it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
     const canonical = fixture('wire-outcome-request.json');
     expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
@@ -336,6 +386,7 @@ describe('the request bodies', () => {
       'wire-browse-request.json',
       'wire-tool-request-by-id.json',
       'wire-hook-request-harness.json',
+      'wire-tool-request-by-id-tolerant.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }

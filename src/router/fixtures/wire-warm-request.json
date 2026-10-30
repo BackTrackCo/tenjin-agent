@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "warm": true,
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "headers", "note", "tolerant"],
+  "harness": "claude"
+}

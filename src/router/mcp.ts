@@ -30,7 +30,13 @@ import {
 import type { HookDeps } from './hooks';
 import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { createRouterObserver, type RouterObserver } from './router-observer';
-import { chainReader, RoutingPayer, type RoutingPayerDeps } from './routing-payer';
+import {
+  chainReader,
+  RoutingPayer,
+  TOP_UP_TIMEOUT_MS,
+  type RoutingPayerDeps,
+} from './routing-payer';
+import { routerSettings } from './settings';
 import {
   runApproveTool,
   runRequestTool,
@@ -583,26 +589,61 @@ function toolResult(result: RequestToolResult): CallToolResult {
  * The `tenjin mcp` entry: connect over stdio and stay up until the client
  * disconnects. SDK 1.29.0's transport does not resolve on stdin's end, so the
  * process also watches stdin itself; without it the process would linger.
+ * Then, or on SIGTERM, it waits for a deposit in flight before it ends
+ * ({@link drained}).
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
-  const server = await createRouterMcpServer(opts);
+  const { server, payer } = await createRouterMcp({ ...opts, topUpAtStart: true });
   await server.connect(new StdioServerTransport());
-  await new Promise<void>((resolve) => {
-    server.server.onclose = () => resolve();
-    process.stdin.once('end', resolve);
-    process.stdin.once('close', resolve);
-  });
+  let ended!: () => void;
+  const end = new Promise<void>((resolve) => (ended = resolve));
+  server.server.onclose = ended;
+  process.stdin.once('end', ended);
+  process.stdin.once('close', ended);
+  // Held through the wait below, so a SIGTERM then does not cut it short.
+  process.once('SIGTERM', ended);
+  await end;
+  await drained(payer);
+  process.off('SIGTERM', ended);
+}
+
+/**
+ * A SESSION THAT ENDS MID-DEPOSIT STILL RECORDS IT. The process waits for a
+ * top-up in flight, or a payment still finishing, before it exits: at most
+ * the top-up's own budget, the 15 s a detached payment already gets. A
+ * deposit cut off here would settle with the SDK's channel file never told,
+ * and the next session would sign a second one; it would also go unsaid.
+ */
+async function drained(payer: RoutingPayer): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    payer.idle(),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, TOP_UP_TIMEOUT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /**
  * The server `tenjin mcp` runs, with the production observer and payer unless
  * they are passed. `payerDeps` overrides single payer seams (the network, the
- * signer) and keeps the rest of the production wiring.
+ * signer) and keeps the rest of the production wiring. `topUpAtStart`, which
+ * `runRouterMcpServer` sets, funds a routing channel that cannot cover a fee
+ * in the background once the prewarm unlock settles ({@link topUpAtStart}).
  */
 export async function createRouterMcpServer(
-  opts: RouterMcpOptions & { payerDeps?: Partial<RoutingPayerDeps> } = {},
+  opts: RouterMcpOptions & { payerDeps?: Partial<RoutingPayerDeps>; topUpAtStart?: boolean } = {},
 ): Promise<McpServer> {
-  const { payerDeps, ...rest } = opts;
+  return (await createRouterMcp(opts)).server;
+}
+
+/** {@link createRouterMcpServer}, with the payer it built, which `tenjin mcp`
+ *  waits on before it exits. */
+async function createRouterMcp(
+  opts: RouterMcpOptions & { payerDeps?: Partial<RoutingPayerDeps>; topUpAtStart?: boolean } = {},
+): Promise<{ server: McpServer; payer: RoutingPayer }> {
+  const { payerDeps, topUpAtStart: atStart, ...rest } = opts;
   const ctx = buildContext(rest);
   const env = rest.env ?? process.env;
   const observer =
@@ -617,8 +658,30 @@ export async function createRouterMcpServer(
       cwd: process.cwd(),
       env,
     });
-  const payer = rest.payer ?? (await routingPayer(ctx, observer, payerDeps));
-  return buildRouterMcpServer({ ...rest, payer, observer });
+  const payer =
+    rest.payer ??
+    (await routingPayer(ctx, observer, { harness: rest.harness ?? 'claude', ...payerDeps }));
+  const server = buildRouterMcpServer({ ...rest, payer, observer });
+  if (atStart === true) void topUpAtStart(ctx, payer, rest.handlerDeps?.cwd ?? process.cwd());
+  return { server, payer };
+}
+
+/**
+ * THE SESSION'S FIRST TOP-UP, in the background and best effort: where the
+ * router is on for this directory, a routing channel that cannot cover the
+ * next fee (a new one included) is funded once the prewarm unlock settles, so
+ * the first prompt finds it ready rather than meeting the deposit. Where it is
+ * off nothing is sent, and no money is set aside for routing nobody uses.
+ */
+async function topUpAtStart(ctx: CommandContext, payer: RoutingPayer, cwd: string): Promise<void> {
+  try {
+    const { enabled } = await routerSettings({ cwd, dataDir: ctx.dataDir });
+    if (!enabled.value) return;
+    const settings = await resolveContextSettings(ctx);
+    await payer.topUpIfLow(settings.baseUrl);
+  } catch {
+    // Best effort: a call that needs the deposit starts the top-up itself.
+  }
 }
 
 /**
