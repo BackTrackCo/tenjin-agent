@@ -8,7 +8,8 @@ import type { HookDeps } from './hooks';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
-import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
+import { requestDecision, ROUTER_PATH, RouteSkipped } from './decision';
+import { ROUTE_PAID_PATH } from './fee';
 
 /**
  * THE ROUTING LEGS' BACKOFF. A call that could not reach the router (a
@@ -175,8 +176,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(await memo()).toMatchObject({ until: clock + UNREACHABLE_BACKOFF_MS });
   });
 
-  it('skips a call the payer could not pay, with no second request', async () => {
-    let calls = 0;
+  it('keeps "no answer" on a failed free-path fallback, so it ends no backoff', async () => {
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
@@ -184,18 +184,17 @@ describe('the routing legs back off a router they cannot reach', () => {
         ctx: { flags: { json: true, timeout: 3_500 }, dataDir: dir } as never,
         baseUrl: BASE,
         fetchImpl: (async () => {
-          calls += 1;
           throw socketError('ECONNRESET');
         }) as typeof fetch,
         route: {
+          path: ROUTE_PAID_PATH,
           send: async () => {
             throw new RouteSkipped('payment_failed');
           },
         },
       },
     );
-    expect(outcome).toEqual({ status: 'skipped', why: 'payment_failed' });
-    expect(calls).toBe(0);
+    expect(outcome).toMatchObject({ status: 'failed', noAnswer: true, freePath: 'payment_failed' });
   });
 
   it('does not start it on an answer whose body failed to read', async () => {
@@ -223,7 +222,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     },
   );
 
-  it('skips a paid call whose socket reset, with no second request, and starts nothing', async () => {
+  it('retries a reset socket on the free path, on a fresh connection, and starts nothing', async () => {
     const fake = new FakeRouter();
     const seen: string[] = [];
     const resetOnPaid = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -234,20 +233,19 @@ describe('the routing legs back off a router they cannot reach', () => {
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
     await runHookKind('prompt', prompt(), deps(resetOnPaid, p));
-    expect(seen).toEqual([ROUTE_PAID_PATH]);
+    expect(seen).toEqual([ROUTE_PAID_PATH, ROUTER_PATH]);
     expect(await memo()).toBeNull();
   });
 
-  it('does not start it from a paid call the router answered with a 5xx', async () => {
+  it('does not start it from the free path a paid attempt fell back to', async () => {
     const fake = new FakeRouter();
-    const seen: string[] = [];
-    const paidErrs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      seen.push(new URL(new Request(input, init).url).pathname);
-      return new Response('{}', { status: 503 });
+    const paidErrsFreeRefuses = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const path = new URL(new Request(input, init).url).pathname;
+      if (path === ROUTE_PAID_PATH) return new Response('{}', { status: 503 });
+      throw socketError('ECONNREFUSED');
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
-    await runHookKind('prompt', prompt(), deps(paidErrs, p));
-    expect(seen).toEqual([ROUTE_PAID_PATH]);
+    await runHookKind('prompt', prompt(), deps(paidErrsFreeRefuses, p));
     expect(await memo()).toBeNull();
   });
 
@@ -263,7 +261,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(await readRouterMemo(dir, 'unreachable', BASE, Date.now())).toBeNull();
   });
 
-  it('starts it from a paid call too', async () => {
+  it('starts it from the paid path too, without trying the free path on the same host', async () => {
     const fake = new FakeRouter();
     const r = router();
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));

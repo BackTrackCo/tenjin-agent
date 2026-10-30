@@ -9,8 +9,7 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
-import { ROUTE_PAID_PATH } from './decision';
-import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { ROUTE_PAID_PATH, ROUTING_FEE_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -24,8 +23,7 @@ import type { RoutingPayerDeps } from './routing-payer';
  */
 
 export const NETWORK = 'eip155:84532';
-/** What the fake quotes by default: the ceiling, the fee today's router quotes. */
-export const FEE = ROUTING_FEE_CEILING_ATOMIC.toString();
+export const FEE = ROUTING_FEE_ATOMIC.toString();
 export const BASE = 'https://router.test';
 export const MISMATCH = 'invalid_batch_settlement_evm_cumulative_amount_mismatch';
 export const BUSY = 'invalid_batch_settlement_evm_channel_busy';
@@ -63,19 +61,9 @@ export class FakeRouter {
   body: unknown = NATIVE;
   readonly requirement: PaymentRequirements;
 
-  /** What each settled call is charged: the quote unless `charge` says less,
-   *  as batch settlement lets the server charge below its quote. */
-  private readonly charge: bigint;
-
   constructor(
-    private readonly opts: {
-      paid?: boolean;
-      amount?: string;
-      charge?: string;
-      minDeposit?: string;
-    } = {},
+    private readonly opts: { paid?: boolean; amount?: string; minDeposit?: string } = {},
   ) {
-    this.charge = BigInt(opts.charge ?? opts.amount ?? FEE);
     this.requirement = {
       scheme: 'batch-settlement',
       network: NETWORK,
@@ -98,10 +86,8 @@ export class FakeRouter {
     const url = new URL(request.url);
     const signature = request.headers.get('payment-signature');
     this.log.push(`${request.method} ${url.pathname} ${signature ? 'paid' : 'unpaid'}`);
-    // The fee off (development): the paid route answers with no 402.
-    if (url.pathname !== ROUTE_PAID_PATH || this.opts.paid === false) {
-      return json(this.body, 200);
-    }
+    if (url.pathname !== ROUTE_PAID_PATH) return json(this.body, 200);
+    if (this.opts.paid === false) return json({}, 404);
     if (signature === null) return this.required(url.toString());
     const payload = decodePaymentSignatureHeader(signature).payload as {
       type: 'deposit' | 'voucher';
@@ -112,10 +98,7 @@ export class FakeRouter {
     const channel = this.channels.get(id) ?? { balance: 0n, charged: 0n, pending: false };
     this.channels.set(id, channel);
     if (channel.pending) return this.error(url.toString(), BUSY);
-    if (
-      BigInt(payload.voucher.maxClaimableAmount) !==
-      channel.charged + BigInt(this.requirement.amount)
-    ) {
+    if (BigInt(payload.voucher.maxClaimableAmount) !== channel.charged + ROUTING_FEE_ATOMIC) {
       return this.corrective(url.toString(), id, channel);
     }
     channel.pending = true;
@@ -133,7 +116,7 @@ export class FakeRouter {
         maxClaimableAmount: payload.voucher.maxClaimableAmount,
         signature: payload.voucher.signature,
       };
-      channel.charged += this.charge;
+      channel.charged += ROUTING_FEE_ATOMIC;
       this.settledFees += 1;
     } finally {
       channel.pending = false;
@@ -147,7 +130,7 @@ export class FakeRouter {
         success: true,
         transaction: '0x',
         network: NETWORK,
-        extra: { chargedAmount: this.charge.toString(), channelState: this.state(id, channel) },
+        extra: { chargedAmount: FEE, channelState: this.state(id, channel) },
       }),
     });
   };

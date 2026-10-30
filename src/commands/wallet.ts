@@ -13,7 +13,7 @@ import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { channelCredit } from '../router/channel-credit';
-import { FUND_COMMAND_LINE, FUNDING_LINE, ROUTING_FEE_CEILING_ATOMIC } from '../router/fee';
+import { FUND_COMMAND_LINE, FUNDING_LINE, ROUTING_FEE_ATOMIC } from '../router/fee';
 import { markUnlockPending } from '../router/router-observation';
 import {
   commitLocalWallet,
@@ -661,9 +661,7 @@ export async function runWalletBalance(
       ...(credit.atomic !== '0'
         ? [`Set aside for routing: approximately $${credit.usd} (local estimate).`]
         : []),
-      ...(atomic === 0n && BigInt(credit.atomic) < ROUTING_FEE_CEILING_ATOMIC
-        ? [FUND_COMMAND_LINE]
-        : []),
+      ...(atomic === 0n && BigInt(credit.atomic) < ROUTING_FEE_ATOMIC ? [FUND_COMMAND_LINE] : []),
     ],
   };
 }

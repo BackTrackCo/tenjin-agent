@@ -21,9 +21,9 @@ import {
   toolNamed,
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
-import { runHookKind } from './hook-command';
+import { runHookCommand } from './hook-command';
 import { readChoices, readSpec } from './specs';
-import { ROUTE_PAID_PATH } from './decision';
+import { ROUTER_PATH } from './decision';
 import {
   claimRedirect,
   renderProgress,
@@ -269,10 +269,10 @@ describe('the prompt hook', () => {
     // harness actually exposes; every other word, id included, is the server's.
     expect(line).toBe(SEEN);
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
-    // One call, on the paid route, carrying the packet and nothing else.
+    // One free call, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
-    expect(sent.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
+    expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
     // The route reads a STRICT object: an extra field is a 400, which is a
     // turn with no hint.
     expect(Object.keys(sent.body).sort()).toEqual([
@@ -960,10 +960,23 @@ describe('the pre-call hook', () => {
     expect(after.response).not.toBeNull();
   });
 
-  it('is what the hook tool answers for a `native` leg', async () => {
+  it('is what `tenjin hook native` prints', async () => {
     const { fetchImpl } = router(EXECUTE);
+    const written: string[] = [];
+    const io = {
+      stdout: { write: (chunk: string) => written.push(chunk) },
+      stderr: { write: () => true },
+      isTTY: false,
+    } as never;
     const event = await preCall('https://example.test/spec');
-    expect(await runHookKind('native', event, { dataDir: dir, baseUrl: BASE, fetchImpl })).toEqual({
+    await runHookCommand('native', io, {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      readEvent: async () => JSON.stringify(event),
+    });
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!)).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
@@ -1766,7 +1779,13 @@ describe('what the hook leaves for the status line', () => {
   });
 
   it('names an unpaid routing fee as unpaid, never as the router choosing native tools', async () => {
-    const fetchImpl = (async () => Response.json({}, { status: 402 })) as typeof fetch;
+    const { fetchImpl } = router({
+      ...NATIVE,
+      decision: {
+        ...NATIVE.decision,
+        diagnostics: { ...NATIVE.decision.diagnostics, reasonCode: 'fee_required' },
+      },
+    });
 
     await runPromptHook(promptEvent('what is the current price of ETH in USD'), {
       dataDir: dir,
@@ -1774,7 +1793,7 @@ describe('what the hook leaves for the status line', () => {
       fetchImpl,
     });
 
-    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: no_payer');
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: fee_required');
   });
 
   it('names an offer this build skipped as such, never as the router choosing native tools', () => {
@@ -2790,16 +2809,25 @@ describe('a free lookup noted after a search', () => {
     expect(post.calls).toHaveLength(0);
   });
 
-  it('is what the hook tool answers for a `shortfall` leg', async () => {
+  it('is what `tenjin hook shortfall` prints', async () => {
     await before('next.js middleware matcher', 'toolu_1');
+    const written: string[] = [];
+    const io = {
+      stdout: { write: (chunk: string) => written.push(chunk) },
+      stderr: { write: () => true },
+      isTTY: false,
+    } as never;
     const event = {
       ...((await readableEvent('next.js middleware matcher', 'WebSearch')) as object),
       tool_use_id: 'toolu_1',
       tool_response: SEARCH,
     };
-    expect(await runHookKind('shortfall', event, deps(EXECUTE).deps)).toEqual(
-      noted(NOTE_HINT).response,
-    );
+    await runHookCommand('shortfall', io, {
+      ...deps(EXECUTE).deps,
+      readEvent: async () => JSON.stringify(event),
+    });
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!)).toEqual(noted(NOTE_HINT).response);
   });
 
   it("notes one agent's identical search once in five minutes, and each agent's own", async () => {
@@ -3589,7 +3617,7 @@ describe('a question to the user', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('is what the hook tool answers for `ask` and `answer` legs', async () => {
+  it('is what `tenjin hook ask` and `tenjin hook answer` print', async () => {
     for (const [kind, event, expected] of [
       ['ask', await askEvent(), { hookEventName: 'PreToolUse', permissionDecision: 'deny' }],
       [
@@ -3599,12 +3627,20 @@ describe('a question to the user', () => {
       ],
     ] as const) {
       await rm(join(dir, 'progress'), { recursive: true, force: true });
-      const answer = await runHookKind(kind, event, {
+      const written: string[] = [];
+      const io = {
+        stdout: { write: (chunk: string) => written.push(chunk) },
+        stderr: { write: () => true },
+        isTTY: false,
+      } as never;
+      await runHookCommand(kind, io, {
         dataDir: dir,
         baseUrl: BASE,
         fetchImpl: router(DISCOVERED).fetchImpl,
+        readEvent: async () => JSON.stringify(event),
       });
-      expect(answer).toMatchObject({ hookSpecificOutput: expected });
+      expect(written).toHaveLength(1);
+      expect(JSON.parse(written[0]!)).toMatchObject({ hookSpecificOutput: expected });
     }
   });
 });

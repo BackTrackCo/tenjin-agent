@@ -2,7 +2,7 @@ import type { PolicyReason } from '../lib/policy';
 import type { WalletFacts } from '../lib/wallet-facts';
 import type { WalletVerification } from '../lib/wallet/provider';
 import { DEFINITE_UNLOCK, type SigningSource, type UnlockReason } from '../lib/wallet-unlock';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC, unpaid } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, unpaid } from './fee';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 /**
@@ -151,7 +151,7 @@ export function canSign(f: SignFacts): SignVerdict {
 export function canPayRouting(r: RoutingFacts): Verdict {
   if (r.feeRefusal !== null) return moneyBlocked(r.feeRefusal);
   if (r.sign.status === 'blocked') return r.sign;
-  if ((r.creditAtomic ?? 0n) >= ROUTING_FEE_CEILING_ATOMIC) return r.sign;
+  if ((r.creditAtomic ?? 0n) >= ROUTING_FEE_ATOMIC) return r.sign;
   if (r.depositRefusal !== null) return moneyBlocked(r.depositRefusal);
   if (r.balanceAtomic !== null && r.balanceAtomic < CHANNEL_DEPOSIT_ATOMIC) {
     return moneyBlocked('wallet_low');

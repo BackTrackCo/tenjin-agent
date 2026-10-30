@@ -8,7 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { FakeRouter, testSigner } from './fee-test-utils';
-import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
+import { runHookCommand } from './hook-command';
 import { createRouterMcpServer } from './mcp';
 import { renderProgress } from './progress';
 import type { RoutingPayerDeps } from './routing-payer';
@@ -28,6 +28,15 @@ const SESSION = '01a1658a-1223-73f1-91f9-62ecb164c700';
 const HOOKS = fileURLToPath(new URL('../../hosts/codex/tenjin/hooks/hooks.json', import.meta.url));
 const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const wallet = privateKeyToAccount(generatePrivateKey());
+/** What the free path answers every form since the fee became required. */
+const FEE_REQUIRED = {
+  schemaVersion: 1,
+  routerVersion: 'test',
+  decision: {
+    action: 'native',
+    diagnostics: { reasonCode: 'fee_required', stage: 'capability', missing: [], nextAction: '' },
+  },
+};
 
 let dir: string;
 let homeDir: string;
@@ -124,8 +133,11 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
 }
 
 /** The production server with only the network and the signer faked. */
-async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
-  const fetchImpl = fake.fetch;
+async function connect(
+  fake: FakeRouter,
+  payer: Partial<RoutingPayerDeps> = {},
+  fetchImpl: typeof fetch = fake.fetch,
+) {
   const server = await createRouterMcpServer({
     dataDir: dir,
     harness: 'codex',
@@ -207,11 +219,18 @@ describe('Codex automatic hooks', () => {
   it('show the real reason when the fee cannot be paid, and record it as unpaid', async () => {
     const fake = new FakeRouter();
     fake.body = await offer();
-    const server = await connect(fake, { walletBalance: async () => 20_000n });
+    // The live free path since the fee is required: native, `fee_required`.
+    const free = fake.fetch;
+    const routed = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      new URL(input instanceof Request ? input.url : String(input)).pathname === '/api/x402-router'
+        ? Response.json(FEE_REQUIRED)
+        : free(input, init)) as typeof fetch;
+    const server = await connect(fake, { walletBalance: async () => 20_000n }, routed);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
-      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+      expect(out).toEqual({
+        systemMessage: expect.stringContaining('could not pay its $0.003 fee'),
+      });
       expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin wallet fund');
       expect(fake.paidRequests()).toBe(0);
@@ -270,17 +289,27 @@ describe('Codex automatic hooks', () => {
 });
 
 describe('a Codex plugin copy from an older build', () => {
-  it('tells the user once to run tenjin install, in the field Codex shows, and routes nothing', async () => {
+  it('tells the user once why its command legs offer nothing, in the field Codex shows', async () => {
+    const feeRequired = (async () => Response.json(FEE_REQUIRED)) as typeof fetch;
     const run = async () => {
       let out = '';
-      await runHookCommand({ stdout: { write: (s: string) => ((out += s), true) } } as never, {
-        dataDir: dir,
-        harness: 'codex',
-        readEvent: async () => JSON.stringify(codexEvent('prompt')),
-      });
+      await runHookCommand(
+        'prompt',
+        { stdout: { write: (s: string) => ((out += s), true) } } as never,
+        {
+          dataDir: dir,
+          harness: 'codex',
+          baseUrl: BASE,
+          fetchImpl: feeRequired,
+          warn: () => undefined,
+          readEvent: async () => JSON.stringify(codexEvent('prompt')),
+        },
+      );
       return out;
     };
-    expect(JSON.parse(await run())).toEqual({ systemMessage: STALE_HOOK_LINE });
+    expect(JSON.parse(await run())).toEqual({
+      systemMessage: expect.stringContaining('`tenjin doctor`'),
+    });
     expect(await run()).toBe('');
   });
 });

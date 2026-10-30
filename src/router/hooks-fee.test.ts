@@ -6,13 +6,14 @@ import { runInNewContext } from 'node:vm';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
-import { runHookCommand, runHookKind, STALE_HOOK_LINE } from './hook-command';
+import { runHookCommand, runHookKind } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
-import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { ROUTING_FEE_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
 import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
+import { readRouterMemo, writeRouterMemo } from './router-memo';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import {
   ASK_FOR_REPAIR,
@@ -23,15 +24,38 @@ import {
 } from './wallet-reasons';
 
 /**
- * The hook legs and the routing fee: every routing call goes to the paid
- * route, and inside `tenjin mcp` (which passes its payer as `route`) the stock
- * SDK client pays it. A call it cannot pay is skipped in one request; the
- * command form (`tenjin hook`) routes nothing.
+ * The hook legs on each side of the routing fee: inside `tenjin mcp` (which
+ * passes its payer as `route`) the stock SDK client pays on the paid path; the
+ * command form (`tenjin hook`) is always the free path.
  */
 
 const BASE = 'https://router.test';
 const NOW = 1_800_000_000_000;
-/** A router's offer. */
+const NATIVE = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
+  },
+};
+/** The free path's answer once the server routes only paid calls. */
+const FEE_REQUIRED_ANSWER = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    reason:
+      'Tenjin routing needs a newer tenjin-cli. Tell the user to run `npm i -g tenjin-cli@latest`.',
+    diagnostics: {
+      reasonCode: 'fee_required',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Update tenjin-cli (run `npm i -g tenjin-cli@latest`).',
+    },
+  },
+};
+/** A free router's offer. */
 const OFFER = {
   schemaVersion: 1,
   routerVersion: 'v',
@@ -66,9 +90,8 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** A router whose every call asks for the fee (a 402), and records what it
- *  was sent. */
-function feeAsked(): {
+/** A free router: every call answers `body` (native), and records what it was sent. */
+function router(body: unknown = NATIVE): {
   fetchImpl: typeof fetch;
   calls: { url: string; signature: string | null }[];
 } {
@@ -78,7 +101,10 @@ function feeAsked(): {
       url: String(input),
       signature: new Headers(init?.headers).get('payment-signature'),
     });
-    return new Response('{}', { status: 402, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
   }) as typeof fetch;
   return { fetchImpl, calls };
 }
@@ -154,25 +180,16 @@ function paidFails(fake: FakeRouter): typeof fetch {
 }
 
 describe('the hook legs and the routing fee', () => {
-  /** THE COMMAND FORM IS A STUB: it cannot pay, so it routes nothing, and
-   *  tells the person once per session to set the hooks up again. */
-  it('routes nothing in the command form, and tells the person once to run tenjin install', async () => {
+  it('takes the free path in the command form', async () => {
+    const { fetchImpl, calls } = router();
     let out = '';
-    const io = { stdout: { write: (s: string) => ((out += s), true) } } as never;
-    const run = (session: string) =>
-      runHookCommand(io, {
-        dataDir: dir,
-        now: () => NOW,
-        readEvent: async () => JSON.stringify(prompt(session)),
-      });
-    await run('sess-1');
-    expect(JSON.parse(out)).toEqual({ systemMessage: STALE_HOOK_LINE });
-    expect(STALE_HOOK_LINE).toContain('`tenjin install`');
-    out = '';
-    await run('sess-1');
+    await runHookCommand(
+      'prompt',
+      { stdout: { write: (s: string) => ((out += s), true) } } as never,
+      { ...deps(fetchImpl), readEvent: async () => JSON.stringify(prompt()) },
+    );
+    expect(calls).toEqual([{ url: `${BASE}/api/x402-router`, signature: null }]);
     expect(out).toBe('');
-    await run('sess-2');
-    expect(JSON.parse(out)).toEqual({ systemMessage: STALE_HOOK_LINE });
   });
 
   it('pays the routing fee through the payer: an inline deposit, then vouchers', async () => {
@@ -187,7 +204,7 @@ describe('the hook legs and the routing fee', () => {
       'POST /api/x402-router/route paid',
     ]);
     expect(fake.deposits).toBe(1);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
   });
 
   it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
@@ -197,7 +214,7 @@ describe('the hook legs and the routing fee', () => {
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.25 for routing. Each routing decision costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.25 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -205,7 +222,7 @@ describe('the hook legs and the routing fee', () => {
     expect(fake.deposits).toBe(1);
   });
 
-  it("skips, and says nothing, when another session's call holds the channel", async () => {
+  it("takes the free path, and says nothing, when another session's call holds the channel", async () => {
     const fake = new FakeRouter();
     await runPromptHook(prompt(), deps(fake.fetch, payer(fake)));
     fake.delayMs = 200;
@@ -213,7 +230,7 @@ describe('the hook legs and the routing fee', () => {
       runHookKind('prompt', prompt('sess-a'), deps(fake.fetch, payer(fake))),
       runHookKind('prompt', prompt('sess-b'), deps(fake.fetch, payer(fake))),
     ]);
-    expect(fake.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(0);
+    expect(fake.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(1);
     expect(fake.settledFees).toBe(2);
     // Native answers and nothing for the user: a busy channel is no fault.
     expect(answers).toEqual([null, null]);
@@ -256,24 +273,24 @@ describe('the hook legs and the routing fee', () => {
       '`tenjin doctor`',
     ],
   ])(
-    'skips the call in one request when %s, and tells the user once per session',
+    'routes on the free path when %s, and tells the user once per session',
     async (_label, opts, fix) => {
       const fake = new FakeRouter();
       fake.body = OFFER;
       const p = payer(fake, opts);
       const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-      // Nothing was routed: no offer, and the native tool runs.
-      expect(contextOf(first)).toBeUndefined();
-      expect(systemMessageOf(first)).toContain('could not pay');
+      // The free path's offer still reaches the model.
+      expect(contextOf(first)).toContain('CoinMarketCap fits this');
+      expect(systemMessageOf(first)).toContain('could not pay its $0.003 fee');
       expect(systemMessageOf(first)).toContain(fix);
       expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
-      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
-      // Not again in this session.
-      const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-      expect(contextOf(second)).toBeUndefined();
-      expect(systemMessageOf(second)).toBeUndefined();
       expect(fake.paidRequests()).toBe(0);
+      expect(fake.log.at(-1)).toBe('POST /api/x402-router unpaid');
+      // Not again in this session, though the free path keeps routing.
+      const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+      expect(contextOf(second)).toContain('CoinMarketCap fits this');
+      expect(systemMessageOf(second)).toBeUndefined();
       // A new session is told once too.
       const other = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
       expect(systemMessageOf(other)).toContain(fix);
@@ -283,40 +300,24 @@ describe('the hook legs and the routing fee', () => {
   it.each([
     ['no wallet', () => new CliError('WALLET_MISSING', 'no wallet')],
     ['a wallet it cannot unlock', () => new Error('passphrase needed')],
-  ])('routes on the paid route with the fee off, on a machine with %s', async (_label, error) => {
+  ])('says nothing about a fee that is off, on a machine with %s', async (_label, error) => {
     const fake = new FakeRouter({ paid: false });
     fake.body = OFFER;
-    let unlocks = 0;
     const p = payer(fake, {
       getSigner: async () => {
-        unlocks += 1;
         throw error();
       },
     });
-    // The prewarm a real `tenjin mcp` starts is not this test's: only calls count.
     for (let i = 0; i < 2; i += 1) {
       const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
       expect(contextOf(answer)).toContain('CoinMarketCap fits this');
       expect(systemMessageOf(answer)).toBeUndefined();
     }
+    // Asked once, then the free path alone for the hour.
     expect(fake.log).toEqual([
       'POST /api/x402-router/route unpaid',
-      'POST /api/x402-router/route unpaid',
-    ]);
-    expect(unlocks).toBe(0);
-  });
-
-  it('skips a leg with no payer when the paid route asks for the fee, and says so once', async () => {
-    const { fetchImpl, calls } = feeAsked();
-    const first = await runHookKind('prompt', prompt(), deps(fetchImpl));
-    expect(contextOf(first)).toBeUndefined();
-    expect(systemMessageOf(first)).toContain('the router charges it');
-    expect(systemMessageOf(first)).toContain('`tenjin doctor`');
-    const second = await runHookKind('prompt', prompt(), deps(fetchImpl));
-    expect(second).toBeNull();
-    expect(calls).toEqual([
-      { url: `${BASE}/api/x402-router/route`, signature: null },
-      { url: `${BASE}/api/x402-router/route`, signature: null },
+      'POST /api/x402-router unpaid',
+      'POST /api/x402-router unpaid',
     ]);
   });
 
@@ -342,18 +343,55 @@ describe('the hook legs and the routing fee', () => {
     expect(fake.paidRequests()).toBe(0);
   });
 
-  it('skips the call when the payment fails, and names doctor', async () => {
+  it('takes the free path when the payment fails, and names doctor', async () => {
     const fake = new FakeRouter();
     const p = payer(fake);
     const fails = paidFails(fake);
     const answer = await runHookKind('prompt', prompt('sess-fails'), deps(fails, p));
-    // The 402, then the paid request that failed (answered before the fake
-    // saw it), and nothing after.
-    expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+    // The 402, the paid request that failed (answered before the fake saw it),
+    // then the free path.
+    expect(fake.log).toEqual([
+      'POST /api/x402-router/route unpaid',
+      'POST /api/x402-router unpaid',
+    ]);
     expect(systemMessageOf(answer)).toContain('the routing payment failed');
     expect(systemMessageOf(answer)).toContain('`tenjin doctor`');
     // The deposit the server refused is released, not counted.
     expect((await readSpendSummary(dir))?.committedAtomic ?? '0').toBe('0');
+  });
+
+  it('asks for the paid path again as soon as the free path answers fee_required', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake, { now: () => NOW });
+    // The router answered no paid path a moment ago, before the fee turned on.
+    await writeRouterMemo(dir, 'paid-path-absent', BASE, { now: NOW, ttlMs: 3_600_000 });
+    expect(await p.routeFor(BASE)).toBeNull();
+    const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
+    const answer = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    // Stale news, not a fault: the session's one notice is not used up on it.
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(await readRouterMemo(dir, 'paid-path-absent', BASE, NOW)).toBeNull();
+    expect(await p.routeFor(BASE)).not.toBeNull();
+  });
+
+  it('says once when the free path answers fee_required and nothing could pay, in the command form too', async () => {
+    const { fetchImpl } = router(FEE_REQUIRED_ANSWER);
+    let out = '';
+    const io = { stdout: { write: (line: string) => ((out += line), true) } } as never;
+    await runHookCommand('prompt', io, {
+      ...deps(fetchImpl),
+      readEvent: async () => JSON.stringify(prompt('sess-codex')),
+    });
+    const said = JSON.parse(out) as { systemMessage?: string };
+    expect(said.systemMessage).toContain('the router now charges it');
+    expect(said.systemMessage).toContain('`tenjin doctor`');
+    expect(JSON.stringify(said)).not.toContain('npm i -g');
+    out = '';
+    await runHookCommand('prompt', io, {
+      ...deps(fetchImpl),
+      readEvent: async () => JSON.stringify(prompt('sess-codex')),
+    });
+    expect(out).toBe('');
   });
 
   /**
@@ -443,7 +481,7 @@ describe('the hook legs and the routing fee', () => {
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
     expect(fake.paidRequests()).toBe(2);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_ATOMIC);
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');
@@ -561,7 +599,7 @@ describe('wallet notices', () => {
     let balance = 20_000n;
     const p = payer(fake, { walletBalance: async () => balance });
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(low)).toContain('could not pay');
+    expect(systemMessageOf(low)).toContain('could not pay its $0.003 fee');
     expect(systemMessageOf(low)).toContain('Your usual tools still work.');
     expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
     balance = 10_000_000n;

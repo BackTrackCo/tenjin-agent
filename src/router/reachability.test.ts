@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { INSTALL_ID_HEADER, setTenjinIdentity } from '../lib/http';
 import { probeRouter } from './reachability';
 
@@ -25,63 +24,10 @@ const probe = (
   proxySupported = true,
 ) => probeRouter(baseUrl, { timeoutMs: 1000, fetchImpl, env, proxySupported });
 
-/** A 402 as the router's paywall sends it, quoting `amount` atomic USDC. */
-const charging = (amount: string) =>
-  answer(402, {
-    'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
-      x402Version: 2,
-      resource: { url: `${PROD}/api/x402-router/route`, description: 'routing', mimeType: '' },
-      accepts: [
-        {
-          scheme: 'batch-settlement',
-          network: 'eip155:8453',
-          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-          amount,
-          payTo: '0x1111111111111111111111111111111111111111',
-          maxTimeoutSeconds: 15,
-          extra: {},
-        },
-      ],
-    }),
-  });
-
-describe('probeRouter on the paid route', () => {
-  it('asks the paid route in the warm form, which runs no gate', async () => {
-    let sent: { url: string; body: unknown } | undefined;
-    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      sent = { url: String(input), body: JSON.parse(String(init?.body)) };
-      return new Response('{}', { status: 400 });
-    }) as typeof fetch;
-    await probe(fetchImpl);
-    expect(sent).toEqual({
-      url: `${PROD}/api/x402-router/route`,
-      body: { schemaVersion: 1, warm: true },
-    });
-  });
-
-  it('passes on a 402 quoting within the ceiling, and on the fee off', async () => {
-    expect(await probe(charging('1000'))).toMatchObject({ status: 'ok' });
-    expect(await probe(charging('3000'))).toMatchObject({ status: 'ok' });
-    expect(await probe(answer(200))).toMatchObject({ status: 'ok' });
-  });
-
-  it('warns on a quote above the ceiling, naming it, or a 402 it cannot read', async () => {
-    const above = await probe(charging('3001'));
-    expect(above).toMatchObject({ status: 'warn', required: true });
-    expect(above.detail).toContain('quotes $0.003001 a routing call, more than the $0.003');
-    expect(await probe(answer(402))).toMatchObject({ status: 'warn' });
-  });
-
-  it('fails on the paid route switched off or erroring', async () => {
-    expect(await probe(answer(404))).toMatchObject({ status: 'fail' });
-    expect(await probe(answer(503))).toMatchObject({ status: 'fail' });
-  });
-});
-
 describe('probeRouter', () => {
   it('passes on the route refusing the empty body', async () => {
     const check = await probe(answer(400, { 'x-vercel-id': 'iad1::x' }));
-    expect(check).toMatchObject({ status: 'ok', detail: `${PROD}/api/x402-router/route is live` });
+    expect(check).toMatchObject({ status: 'ok', detail: `${PROD}/api/x402-router is live` });
   });
 
   it('does not count the machine as an install', async () => {
@@ -165,7 +111,7 @@ describe('probeRouter', () => {
   it('on production, a 401 the deployment sent is a refusal, not a wrong base URL', async () => {
     const check = await probe(answer(401, { 'x-vercel-id': 'iad1::x' }));
     expect(check).toMatchObject({
-      detail: `${PROD}/api/x402-router/route refused this machine (401)`,
+      detail: `${PROD}/api/x402-router refused this machine (401)`,
       fix: 'Try again later.',
     });
   });
@@ -176,7 +122,7 @@ describe('probeRouter', () => {
       'https://preview.example.test',
     );
     expect(check.detail).toBe(
-      'https://preview.example.test/api/x402-router/route is not a Tenjin router (it asked for credentials)',
+      'https://preview.example.test/api/x402-router is not a Tenjin router (it asked for credentials)',
     );
     expect(check.fix).toBe(
       'Set the router URL with `tenjin config set baseUrl https://tenjin.sh`.',

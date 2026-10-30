@@ -30,7 +30,7 @@ import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { runAliveHook, sessionServedByPlugin } from './alive';
-import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
+import { runHookCommand } from './hook-command';
 import { hookToolInput } from './hook-tool';
 import type { OfferSpec } from './decision';
 import {
@@ -89,8 +89,7 @@ function authorizer(): SpendAuthorizer {
   };
 }
 
-/** The one decision this server asks for, from a router with the fee off:
- *  no 402, nothing signed. */
+/** The one free decision this server asks for; no 402, nothing signed. */
 function router(body: unknown): typeof fetch {
   return (async () =>
     new Response(JSON.stringify(body), {
@@ -487,9 +486,8 @@ describe('the hook tool', () => {
         arguments: substituted('prompt', promptEvent('sess-hook', transcript)),
       });
       const text = (called.content as { text: string }[])[0]!.text;
-      // No payer in this server: the paid route, unpaid, which a router
-      // charging nothing answers.
-      expect(log).toEqual(['POST /api/x402-router/route']);
+      // No payer in this server, so the free path ran.
+      expect(log).toEqual(['POST /api/x402-router']);
       expect(JSON.parse(text)).toMatchObject({
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
@@ -567,14 +565,15 @@ describe('the hook tool', () => {
 
   it('the command form of a settings install stays silent there too', async () => {
     await runAliveHook({ session_id: 'sess-cmd' }, { dataDir: dir, version: 'test' });
+    const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
     const written: string[] = [];
     const io = {
       stdout: { write: (s: string) => written.push(s) },
       stderr: { write: () => true },
       isTTY: false,
-    } as unknown as Parameters<typeof runHookCommand>[0];
+    } as unknown as Parameters<typeof runHookCommand>[1];
     const run = (session: string) =>
-      runHookCommand(io, {
+      runHookCommand('prompt', io, {
         dataDir: dir,
         env: {},
         readEvent: async () =>
@@ -584,20 +583,35 @@ describe('the hook tool', () => {
             cwd: dir,
             prompt: 'what is the current price of ETH in USD',
           }),
+        baseUrl: 'https://router.test',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        warn: () => undefined,
       });
     await run('sess-cmd');
     expect(written).toEqual([]);
-    // A session the plugin does not serve hears, once, to set the hooks up again.
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // A session the plugin does not serve still routes through the old entry.
     await run('sess-other');
-    expect(written.map((line) => JSON.parse(line) as unknown)).toEqual([
-      { systemMessage: STALE_HOOK_LINE },
-    ]);
+    expect(fetchImpl).toHaveBeenCalled();
   });
 
   it("tells the user once, in the hook's systemMessage, when the fee cannot be paid", async () => {
     const { homeDir, transcript } = await home('sess-told');
-    // The paid route asks for the fee, and this server has no payer.
-    const feeRequired = (async () => Response.json({}, { status: 402 })) as typeof fetch;
+    // The server takes only paid calls, and this server has no payer.
+    const feeRequired = (async () =>
+      Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'fee_required',
+            stage: 'capability',
+            missing: [],
+            nextAction: 'native',
+          },
+        },
+      })) as typeof fetch;
     const server = buildRouterMcpServer({
       dataDir: dir,
       homeDir,
@@ -799,18 +813,13 @@ describe('the payer verdict and the wallet news', () => {
    * hook env `env`. Returns the answer and how many times the hook legs asked
    * the payer for its verdict (this test's own calls left out).
    */
-  async function promptLeg(
-    payer: RoutingPayer,
-    env: NodeJS.ProcessEnv,
-    obs = observer(),
-    router = new FakeRouter(),
-  ) {
+  async function promptLeg(payer: RoutingPayer, env: NodeJS.ProcessEnv, obs = observer()) {
     const homeDir = join(dir, 'home');
     const project = join(homeDir, '.claude', 'projects', '-repo');
     await mkdir(project, { recursive: true });
     const transcript = join(project, 'sess-wired.jsonl');
     await writeFile(transcript, '');
-    const fake = router;
+    const fake = new FakeRouter();
     fake.body = OFFER;
     const server = buildRouterMcpServer({
       dataDir: dir,
@@ -878,13 +887,10 @@ describe('the payer verdict and the wallet news', () => {
     expect(providerSpy.getSigner).toBe(0);
     await vi.waitFor(() => expect(payer.signVerdict().status).toBe('blocked'));
     // A valid key in the hook env: the files alone would say ready and offer.
-    // The router charges no fee here, so the offer comes back and only the
-    // verdict withholds it.
     const { answer, asked, served } = await promptLeg(
       payer,
       { TENJIN_WALLET_KEY: generatePrivateKey() },
       obs,
-      new FakeRouter({ paid: false }),
     );
     expect(asked).toBeGreaterThan(0);
     expect(answer.hookSpecificOutput?.additionalContext ?? '').not.toContain(
@@ -988,7 +994,7 @@ describe('the base URL the MCP server routes against', () => {
       if (prior === undefined) delete process.env.TENJIN_BASE_URL;
       else process.env.TENJIN_BASE_URL = prior;
     }
-    expect(seen[0]).toBe('https://env.example.test/api/x402-router/route');
+    expect(seen[0]).toBe('https://env.example.test/api/x402-router');
     expect(seen.every((u) => !u.startsWith('https://file.example.test'))).toBe(true);
   });
 });
@@ -1073,9 +1079,8 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
-      // Routing costs a fee the server quotes, so no amount is written here.
-      expect(request.description).toContain('Routing costs a small flat fee');
-      expect(request.description).not.toMatch(/\$0\.\d/);
+      // Deciding is free now, and the instructions say so.
+      expect(request.description).toContain('Deciding what to route is free');
     } finally {
       await client.close();
       await server.close();
@@ -1084,10 +1089,9 @@ describe('what the tool tells the model to send', () => {
 });
 
 /**
- * A WALLET IS THE PAYING LEG'S PROBLEM. The handler used to open the wallet
- * before the tool ran, which meant a machine with no wallet, or a locked one,
- * could not even be told that its own tools cover the task. Here the router
- * charges nothing (the fee off), so the decision reaches the tool unpaid.
+ * ROUTING IS FREE, SO A WALLET IS THE PAYING LEG'S PROBLEM. The handler used to
+ * open the wallet before the tool ran, which meant a machine with no wallet, or
+ * a locked one, could not even be told that its own tools cover the task.
  */
 describe('a free answer on a machine with no wallet', () => {
   it('delivers a native decision without ever opening one', async () => {

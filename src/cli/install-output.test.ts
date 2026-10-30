@@ -68,7 +68,7 @@ const full = () => ({
     },
     signing: { status: 'ready', source: 'file' },
   },
-  router: { status: 'ok', detail: 'https://tenjin.sh/api/x402-router/route is live' },
+  router: { status: 'ok', detail: 'https://tenjin.sh/api/x402-router is live' },
   mcpServer: {
     status: 'ok',
     required: false,

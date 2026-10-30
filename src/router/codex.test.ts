@@ -22,7 +22,7 @@ import {
   type CodexRun,
   type CodexSetupDeps,
 } from './codex-install';
-import { runHookKind } from './hook-command';
+import { runHookCommand } from './hook-command';
 import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
@@ -522,13 +522,23 @@ describe('Codex routing through the router', () => {
     }
   });
 
-  /** One routing leg as the Codex plugin's `mcp_tool` hook runs it, in
-   *  Codex's answer shape. */
-  async function hookRun(kind: 'prompt' | 'native', event: unknown) {
+  /** One hook command run, its stdout captured. */
+  async function hookRun(kind: 'prompt' | 'native', event: unknown, extra: object = {}) {
+    const writes: string[] = [];
+    const io = {
+      stdout: { write: (s: string) => (writes.push(s), true) } as unknown as NodeJS.WritableStream,
+      stderr: process.stderr,
+      isTTY: false,
+    };
     const { fetchImpl } = router(paidOffer);
-    return codexResponse(
-      await runHookKind(kind, event, { dataDir: dir, harness: 'codex', fetchImpl }),
-    );
+    await runHookCommand(kind, io, {
+      dataDir: dir,
+      harness: 'codex',
+      readEvent: async () => JSON.stringify(event),
+      fetchImpl,
+      ...extra,
+    });
+    return writes.length === 0 ? null : (JSON.parse(writes[0]!) as unknown);
   }
   // Built per test: `dir` and `transcript` are set in beforeEach.
   const promptEvent = () => ({

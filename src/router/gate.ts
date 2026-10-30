@@ -1,20 +1,20 @@
 /**
  * THE HOOK'S TIME BUDGET, which is the only thing this module still owns.
  *
- * There is no separate gate call any more: the hook asks the paid route,
- * `POST /api/x402-router/route`, for the one decision, and the backend answers
- * as soon as the native-versus-paid question is settled, binding whatever it
- * chose in the background. What used to live here, the `/prepare` client and the
+ * There is no separate gate call any more: the hook asks `POST
+ * /api/x402-router` for the one free decision, and the backend answers as soon
+ * as the native-versus-paid question is settled, binding whatever it chose in
+ * the background. What used to live here, the `/prepare` client and the
  * category-shaped hint validator, went with that second round trip.
  */
 
 /**
  * The hook's whole budget is 5 s (`ROUTE_HOOK_TIMEOUT_SECONDS`, the timeout
  * `install` writes for each routing leg), and the decision gets 3.5 s of it.
- * Inside `tenjin mcp` those 3.5 s hold the paid route too: the 402, the SDK's
- * chain read, the wallet read before a deposit and the paid request. 500 ms
- * are left for startup, the transcript read and the reply; `wire.test.ts`
- * pins the sums.
+ * Inside `tenjin mcp` those 3.5 s hold the paid path too: the 402, the SDK's
+ * chain read, the wallet read before a deposit and the paid request. The
+ * command form (`tenjin hook`, always free) waits up to 1 s for stdin first. Either way 500 ms are left for startup, the
+ * transcript read and the reply; `wire.test.ts` pins the sums.
  * The expected wait is about 1 s: the backend answers on the gate question and
  * binds afterwards.
  *
