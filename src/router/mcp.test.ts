@@ -1157,15 +1157,19 @@ describe('the top-up at the start of tenjin mcp', () => {
       flags: { baseUrl: 'https://router.test' },
       payer,
       observer,
+      // `router.*` resolves from this test's own git root, never the suite's cwd.
+      handlerDeps: { cwd: dir },
       topUpAtStart: true,
     });
     return { fake, payer, server };
   }
 
   it('funds a new channel in the background, with no prompt asking, where the router is on', async () => {
-    const { fake, server } = await started({ maxAutoSpend: '250000' });
+    const { fake, payer, server } = await started({ maxAutoSpend: '250000' });
     try {
       await vi.waitFor(() => expect(fake.depositedOn).toEqual(['warm']));
+      // Its channel write and memo clear land before the folder goes.
+      await payer.idle();
       expect(fake.log).toEqual([
         'POST /api/x402-router/route warm unpaid',
         'POST /api/x402-router/route warm paid',

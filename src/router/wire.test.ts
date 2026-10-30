@@ -390,6 +390,7 @@ describe('the request bodies', () => {
       'wire-browse-request.json',
       'wire-tool-request-by-id.json',
       'wire-hook-request-harness.json',
+      'wire-tool-request-by-id-tolerant.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }

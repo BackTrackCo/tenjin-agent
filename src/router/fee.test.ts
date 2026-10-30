@@ -50,7 +50,11 @@ describe('routingDepositAtomic', () => {
     ['ten quoted fees, over a smaller wallet', { quote: 1_000n, wallet: 4_000n }, 10_000n],
     ['ten quoted fees, over a smaller limit', { perCall: 2_000n }, 30_000n],
     ['what the next voucher needs, over the floor', { needed: 40_000n }, 40_000n],
-    ['a bigger hint, up to the ceiling', { hint: 1_000_000n }, MAX_CHANNEL_DEPOSIT_ATOMIC],
+    [
+      'a bigger hint, up to the ceiling',
+      { hint: 1_000_000n, perCall: 1_000_000n },
+      MAX_CHANNEL_DEPOSIT_ATOMIC,
+    ],
   ])('signs %s', (_label, o, signed) => {
     expect(size(o)).toBe(signed);
   });

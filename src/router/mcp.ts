@@ -623,7 +623,7 @@ export async function createRouterMcpServer(
     rest.payer ??
     (await routingPayer(ctx, observer, { harness: rest.harness ?? 'claude', ...payerDeps }));
   const server = buildRouterMcpServer({ ...rest, payer, observer });
-  if (atStart === true) void topUpAtStart(ctx, payer);
+  if (atStart === true) void topUpAtStart(ctx, payer, rest.handlerDeps?.cwd ?? process.cwd());
   return server;
 }
 
@@ -634,9 +634,9 @@ export async function createRouterMcpServer(
  * the first prompt finds it ready rather than meeting the deposit. Where it is
  * off nothing is sent, and no money is set aside for routing nobody uses.
  */
-async function topUpAtStart(ctx: CommandContext, payer: RoutingPayer): Promise<void> {
+async function topUpAtStart(ctx: CommandContext, payer: RoutingPayer, cwd: string): Promise<void> {
   try {
-    const { enabled } = await routerSettings({ cwd: process.cwd(), dataDir: ctx.dataDir });
+    const { enabled } = await routerSettings({ cwd, dataDir: ctx.dataDir });
     if (!enabled.value) return;
     const settings = await resolveContextSettings(ctx);
     await payer.topUpIfLow(settings.baseUrl);

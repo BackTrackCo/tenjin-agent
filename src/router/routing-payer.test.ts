@@ -34,7 +34,7 @@ import {
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
   SIGNER_RECHECK_MS,
-  TOP_UP_BACKOFF_MS,
+  WALLET_LOW_BACKOFF_MS,
   type PayerObservation,
   type RoutingPayerDeps,
 } from './routing-payer';
@@ -46,6 +46,10 @@ import {
  */
 
 const wallet = privateKeyToAccount(generatePrivateKey());
+/** A second wallet, the same on every unlock, as the wallet layer's signer
+ *  cache makes it. A fresh key per `getSigner` call would make the top-up's own
+ *  unlock sign for a different wallet than the call that waited for it. */
+const otherWallet = privateKeyToAccount(generatePrivateKey());
 
 let dir: string;
 let clock: number;
@@ -53,8 +57,15 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-payer-'));
   clock = 1_800_000_000_000;
 });
+/** Every payer a test made, so a background top-up it left running ends
+ *  before that test's folder is removed. */
+const made: RoutingPayer[] = [];
 afterEach(async () => {
   vi.useRealTimers();
+  await Promise.race([
+    Promise.all(made.splice(0).map((p) => p.idle())),
+    new Promise((resolve) => setTimeout(resolve, 2_000)),
+  ]);
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -98,7 +109,7 @@ type PayerOpts = Partial<RoutingPayerDeps> & {
 
 function payer(router: FakeRouter, opts: PayerOpts = {}): RoutingPayer {
   const { policy_, walletAtomic, ...rest } = opts;
-  return new RoutingPayer(
+  const p = new RoutingPayer(
     payerDeps(router, dir, wallet, {
       policy: async () => ({ ...TEST_POLICY, ...policy_ }),
       walletBalance: async () => (walletAtomic === undefined ? 10_000_000n : walletAtomic),
@@ -106,6 +117,8 @@ function payer(router: FakeRouter, opts: PayerOpts = {}): RoutingPayer {
       ...rest,
     }),
   );
+  made.push(p);
+  return p;
 }
 
 const ctx = (): CommandContext => ({
@@ -227,7 +240,9 @@ describe('RoutingPayer', () => {
     'keeps the SDK ceiling when the server suggests an oversized deposit: %s',
     async (_label, walletAtomic) => {
       const router = new FakeRouter({ minDeposit: '1000000' });
-      const result = await routeOnce(payer(router, { walletAtomic }), router);
+      // A per-call limit above the cap, so the cap alone holds the deposit.
+      const p = payer(router, { walletAtomic, policy_: { maxAutoSpendAtomic: 1_000_000n } });
+      const result = await routeOnce(p, router);
       expect(unpaidWhy(result)).toBeUndefined();
       expect([...router.channels.values()][0]?.balance).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
       expect((await readSpendSummary(dir))?.committedAtomic).toBe(
@@ -257,7 +272,7 @@ describe('RoutingPayer', () => {
     const first = payer(router, { policy_: budget });
     const second = payer(router, {
       policy_: budget,
-      getSigner: async () => testSigner(privateKeyToAccount(generatePrivateKey())),
+      getSigner: async () => testSigner(otherWallet),
     });
     const results = await Promise.all([routeOnce(first, router), routeOnce(second, router)]);
     expect(results.map(unpaidWhy).filter(Boolean)).toEqual(['budget_reached']);
@@ -699,9 +714,10 @@ describe('RoutingPayer', () => {
   it('holds the next top-up off after a refusal, and says the refusal on the calls that need it', async () => {
     const router = new FakeRouter();
     let walletAtomic = 0n;
+    let reads = 0;
     const warned: string[] = [];
     const p = payer(router, {
-      walletBalance: async () => walletAtomic,
+      walletBalance: async () => ((reads += 1), walletAtomic),
       warn: (l) => warned.push(l),
     });
     const outcome = await routeOnce(p, router);
@@ -711,10 +727,12 @@ describe('RoutingPayer', () => {
     // no second balance read and no top-up.
     walletAtomic = 10_000_000n;
     const asked = router.log.filter((l) => l.includes(' warm ')).length;
+    expect(reads).toBe(1);
     expect(unpaidWhy(await routeOnce(p, router))).toBe('wallet_low');
     expect(router.log.filter((l) => l.includes(' warm '))).toHaveLength(asked);
+    expect(reads).toBe(1);
     // Past it, the call that needs a deposit starts the next top-up and pays.
-    clock += TOP_UP_BACKOFF_MS[0]!;
+    clock += WALLET_LOW_BACKOFF_MS[0]!;
     expect((await routeOnce(p, router)).status).toBe('decided');
     expect(router.deposits).toBe(1);
   });
@@ -744,6 +762,34 @@ describe('RoutingPayer', () => {
     expect(topUps()).toBe(4);
   });
 
+  it('starts the 10-minute schedule from 30 s when a server error follows wallet_low refusals', async () => {
+    const router = new FakeRouter();
+    let walletAtomic = 0n;
+    let failing = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (failing && request.headers.has('payment-signature')) {
+        return new Response('{}', { status: 502 });
+      }
+      return router.fetch(request);
+    };
+    const p = payer(router, { walletBalance: async () => walletAtomic, fetchImpl });
+    const topUps = () => router.log.filter((l) => l.endsWith(' warm unpaid')).length;
+    for (let n = 0; n < 3; n += 1) {
+      expect(unpaidWhy(await routeOnce(p, router))).toBe('wallet_low');
+      clock += 120_000;
+    }
+    // Funded, and the next top-up meets a server error.
+    walletAtomic = 10_000_000n;
+    failing = true;
+    expect(unpaidWhy(await routeOnce(p, router))).toBe('payment_failed');
+    const before = topUps();
+    failing = false;
+    clock += 30_000;
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(topUps()).toBe(before + 1);
+  });
+
   it('remembers a router with no warm form for an hour, and deposits on the call itself meanwhile', async () => {
     const router = new FakeRouter({ warm: false });
     const warned: string[] = [];
@@ -771,7 +817,7 @@ describe('RoutingPayer', () => {
     );
     // Another process within the hour, on a new wallet, deposits on its call and sends no warm.
     const other = payer(router, {
-      getSigner: async () => testSigner(privateKeyToAccount(generatePrivateKey())),
+      getSigner: async () => testSigner(otherWallet),
     });
     const before = router.log.length;
     expect((await routeOnce(other, router)).status).toBe('decided');
@@ -791,7 +837,7 @@ describe('RoutingPayer', () => {
     const fresh = new FakeRouter();
     const p = payer(fresh, {
       policy_: { maxAutoSpendAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n },
-      getSigner: async () => testSigner(privateKeyToAccount(generatePrivateKey())),
+      getSigner: async () => testSigner(otherWallet),
     });
     expect(skippedWhy(await routeOnce(p, fresh), fresh)).toBe('limit_below_deposit');
     expect(fresh.paidRequests()).toBe(0);

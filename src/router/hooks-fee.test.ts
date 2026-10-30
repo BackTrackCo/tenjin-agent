@@ -11,7 +11,7 @@ import { runPromptHook, type HookDeps } from './hooks';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
-import { RoutingPayer, TOP_UP_BACKOFF_MS, type RoutingPayerDeps } from './routing-payer';
+import { RoutingPayer, WALLET_LOW_BACKOFF_MS, type RoutingPayerDeps } from './routing-payer';
 import { writeRouterMemo } from './router-memo';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
@@ -26,8 +26,8 @@ import {
 /**
  * The hook legs and the routing fee: every routing call goes to the paid
  * route, and inside `tenjin mcp` (which passes its payer as `route`) the stock
- * SDK client pays it. A call it cannot pay is skipped in one request; the
- * command form (`tenjin hook`) routes nothing.
+ * SDK client pays it. A call it cannot pay is skipped, with no request to any
+ * other route; the command form (`tenjin hook`) routes nothing.
  */
 
 const BASE = 'https://router.test';
@@ -608,7 +608,7 @@ describe('wallet notices', () => {
     balance = 10_000_000n;
     // The balance is read only by the next top-up, once the refused one's
     // backoff ends: then the prompt pays, and the funding is said once.
-    clock += TOP_UP_BACKOFF_MS[0]!;
+    clock += WALLET_LOW_BACKOFF_MS[0]!;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
     expect(systemMessageOf(paid)).toContain('Tenjin set aside $0.03 for routing.');

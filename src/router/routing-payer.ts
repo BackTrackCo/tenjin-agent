@@ -181,8 +181,10 @@ export const TOP_UP_TIMEOUT_MS = 15_000;
 export const TOP_UP_BACKOFF_MS: readonly number[] = [30_000, 120_000, 600_000];
 /**
  * A WALLET TOO LOW stops at 2 minutes: a new user funds it in the browser and
- * comes back in the same sitting, and the retry is one background balance
- * read, so the next prompt after funding should not wait out 10 minutes.
+ * comes back in the same sitting. Each retry is a top-up (its 402 and the
+ * balance read, and the deposit once funded), started by the first prompt
+ * that needs a deposit once the wait ends, so routing resumes within about
+ * 2 minutes of funding, not 10.
  */
 export const WALLET_LOW_BACKOFF_MS: readonly number[] = [30_000, 120_000];
 
@@ -320,7 +322,7 @@ interface Call {
   carrier?: boolean;
   /** When the caller's budget ends; later once the SDK sizes an inline deposit. */
   until: number;
-  /** The SDK sized a deposit for this call. */
+  /** The SDK asked for a deposit on this call, made or deferred. */
   deposit?: boolean;
   /** What a refusal knew, for its sentence: a low wallet's balance. */
   facts?: SkipFacts;
@@ -432,7 +434,12 @@ export class RoutingPayer {
    *  deposit waits on. */
   private lastTopUp: Promise<TopUp> | null = null;
   /** The last top-up's refusal, which holds the next off until `until`. */
-  private failed: { skip: RouteSkipped; count: number; until: number } | null = null;
+  private failed: {
+    skip: RouteSkipped;
+    steps: readonly number[];
+    count: number;
+    until: number;
+  } | null = null;
   /** What settled top-ups deposited that no leg has said yet. */
   private toppedUp = 0n;
   /** The fee the router last quoted any call, for a line with no quote of its own. */
@@ -525,6 +532,11 @@ export class RoutingPayer {
           if (outcome.status === 'refused' && !ROUTING_SILENT.has(outcome.skip.why)) {
             throw outcome.skip;
           }
+          // Contention ended the top-up: that is the reason, not a deposit on
+          // its way. A payment still out is on its way, and stays deferred.
+          if (outcome.status === 'refused' && outcome.skip.why !== DEADLINE_AFTER_PAYMENT_SENT) {
+            throw new RouteSkipped(outcome.skip.why, outcome.skip.facts());
+          }
           if (outcome.status !== 'done' && outcome.status !== 'absent') throw err;
           return await once();
         }
@@ -586,7 +598,7 @@ export class RoutingPayer {
    *  call gives up at its own deadline (`busy`) rather than wait out the
    *  call ahead of it, and then never starts. The deadline covers the wait
    *  only: once a call runs, its own budget applies. */
-  private turn<T>(run: () => Promise<T>, until: number, sent: number): Promise<T> {
+  private turn<T>(run: () => Promise<T>, until: number, sent: number, carrier = false): Promise<T> {
     let gaveUp = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const go = () => {
@@ -602,7 +614,7 @@ export class RoutingPayer {
         () => {
           gaveUp = true;
           // It never ran, so `noted` cannot say it: its one line is here.
-          this.note('busy', null, sent);
+          this.note('busy', null, sent, undefined, carrier);
           reject(new RouteSkipped('busy'));
         },
         Math.max(0, until - this.now()),
@@ -612,21 +624,27 @@ export class RoutingPayer {
   }
 
   /** One stderr line for a call the paid path did not answer; a detached
-   *  one says it when its request ends. */
-  private async noted(sent: number, run: () => Promise<HttpResult>): Promise<HttpResult> {
+   *  one says it when its request ends. `carrier`: the top-up's own call. */
+  private async noted(
+    sent: number,
+    run: () => Promise<HttpResult>,
+    carrier = false,
+  ): Promise<HttpResult> {
     this.last = null;
     try {
       return await run();
     } catch (err) {
       // Set by `run`, which the narrowing above cannot see.
       const call = this.last as Call | null;
-      if (err instanceof RouteSkipped && call?.detached !== true) this.note(err.why, call, sent);
+      if (err instanceof RouteSkipped && call?.detached !== true) {
+        this.note(err.why, call, sent, undefined, carrier);
+      }
       if (err instanceof RouteSkipped) this.reportRouting(err.why);
       throw err;
     }
   }
 
-  private note(why: string, call: Call | null, sent: number, late?: string): void {
+  private note(why: string, call: Call | null, sent: number, late?: string, carrier = false): void {
     const result = call?.result;
     const cause =
       late ??
@@ -651,7 +669,7 @@ export class RoutingPayer {
           : result?.ok === true
             ? 'answer'
             : 'challenge';
-    const what = call?.carrier === true ? `top-up ${why}` : why;
+    const what = carrier || call?.carrier === true ? `top-up ${why}` : why;
     this.warn(`${what} (cause ${cause}, ${this.now() - sent}ms, stage ${stage})`);
   }
 
@@ -991,9 +1009,10 @@ export class RoutingPayer {
       let response: HttpResult;
       try {
         response = await this.turn(
-          () => this.noted(sent, () => this.pay(router, options, until, calls, true)),
+          () => this.noted(sent, () => this.pay(router, options, until, calls, true), true),
           until,
           sent,
+          true,
         );
       } catch (err) {
         if (err instanceof RouteSkipped) return this.refusedTopUp(err);
@@ -1010,9 +1029,8 @@ export class RoutingPayer {
       }
       // A rate limit is no answer about the form: it backs off like a failure.
       if (status === 429) {
-        this.warn(
-          `top-up ${PAYMENT_FAILED} (cause http 429, ${this.now() - sent}ms, stage voucher)`,
-        );
+        this.note(PAYMENT_FAILED, calls.at(-1) ?? null, sent, undefined, true);
+        this.reportRouting(PAYMENT_FAILED);
         return this.refusedTopUp(new RouteSkipped(PAYMENT_FAILED));
       }
       await writeRouterMemo(dataDir, 'warm-absent', router, {
@@ -1025,19 +1043,25 @@ export class RoutingPayer {
       );
       return { status: 'absent' };
     } finally {
-      await clearRouterMemo(dataDir, 'topping-up', router);
+      // Another wallet's marker, written over this one meanwhile, stays.
+      const now = this.now();
+      if ((await readRouterMemo(dataDir, 'topping-up', router, now))?.detail === payer) {
+        await clearRouterMemo(dataDir, 'topping-up', router);
+      }
     }
   }
 
   /** A top-up not paid: the next one waits out the backoff, unless the cause
    *  was contention or a payment still out, which back off nothing. A wallet
-   *  too low has the shorter schedule ({@link WALLET_LOW_BACKOFF_MS}). */
+   *  too low has the shorter schedule ({@link WALLET_LOW_BACKOFF_MS}); a
+   *  refusal on the other schedule starts it from its first step, so a server
+   *  error just after a funded wallet waits 30 s, not 10 min. */
   private refusedTopUp(skip: RouteSkipped): TopUp {
     if (!ROUTING_SILENT.has(skip.why)) {
-      const count = (this.failed?.count ?? 0) + 1;
       const steps = skip.why === 'wallet_low' ? WALLET_LOW_BACKOFF_MS : TOP_UP_BACKOFF_MS;
+      const count = this.failed?.steps === steps ? this.failed.count + 1 : 1;
       const wait = steps[Math.min(count, steps.length) - 1]!;
-      this.failed = { skip, count, until: this.now() + wait };
+      this.failed = { skip, steps, count, until: this.now() + wait };
     }
     return { status: 'refused', skip };
   }
@@ -1094,7 +1118,8 @@ export class RoutingPayer {
 
   /** Work that runs on after its caller returns, for {@link idle}. */
   private track(work: Promise<unknown>): void {
-    this.pending = Promise.all([this.pending, work.catch(() => undefined)]);
+    // Settled to undefined, so no result is kept alive by the next one.
+    this.pending = Promise.all([this.pending, work.catch(() => undefined)]).then(() => undefined);
   }
 
   /**
@@ -1115,12 +1140,14 @@ export class RoutingPayer {
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
-    if (call.carrier !== true && !(await this.warmAbsent(call.router))) this.deferral(call);
     if (call.deposit !== true) {
       call.deposit = true;
-      // AN INLINE DEPOSIT GETS THE LONGER BUDGET, once per call.
+      // AN INLINE DEPOSIT GETS THE LONGER BUDGET, once per call, before the
+      // memo read below, so the call's deadline cannot pass during it. A
+      // deferred call ends at once, whatever its budget says.
       if (call.carrier !== true) call.until += DEPOSIT_EXTRA_MS;
     }
+    if (call.carrier !== true && !(await this.warmAbsent(call.router))) this.deferral(call);
     const policy = await this.deps.policy();
     const quote = BigInt(ctx.requestAmount);
     const left = call.until - this.now();
