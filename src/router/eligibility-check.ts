@@ -14,6 +14,7 @@ import {
   type Verdict,
 } from './eligibility';
 import {
+  canRetryDepositAtHint,
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
@@ -138,18 +139,25 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit the payer would end on for this balance (the ceiling, or the
-  // hint below it), evaluated against the whole policy as the payer's is.
-  const deposit = evaluateSpendPolicy(input.policy, {
-    mode: 'automatic',
-    amountAtomic: routingDepositAtomic({
-      short: balanceAtomic !== null && balanceAtomic < MAX_CHANNEL_DEPOSIT_ATOMIC,
-      maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
-      hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
-    }),
-    creator: input.host,
-    sessionSpentAtomic: spent ?? 0n,
+  const amount = routingDepositAtomic({
+    short: balanceAtomic !== null && balanceAtomic < MAX_CHANNEL_DEPOSIT_ATOMIC,
+    maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
+    hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
   });
+  const evaluateDeposit = (amountAtomic: bigint) =>
+    evaluateSpendPolicy(input.policy, {
+      mode: 'automatic',
+      amountAtomic,
+      creator: input.host,
+      sessionSpentAtomic: spent ?? 0n,
+    });
+  let deposit = evaluateDeposit(amount);
+  if (
+    deposit.decision !== 'allow' &&
+    canRetryDepositAtHint(amount, CHANNEL_DEPOSIT_ATOMIC, deposit.reason)
+  ) {
+    deposit = evaluateDeposit(CHANNEL_DEPOSIT_ATOMIC);
+  }
   const routing = canPayRouting({
     feeRefusal: feeRefusal(input.policy, input.host),
     sign,

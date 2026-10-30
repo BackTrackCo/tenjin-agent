@@ -41,6 +41,18 @@ export function routingDepositAtomic(o: {
   return o.short || o.maxAtomic === null ? o.hintAtomic : o.maxAtomic;
 }
 
+/** A smaller deposit can satisfy spend limits, but never other policy refusals. */
+export function canRetryDepositAtHint(
+  amountAtomic: bigint,
+  hintAtomic: bigint,
+  reason: PolicyReason,
+): boolean {
+  return (
+    amountAtomic > hintAtomic &&
+    (reason === 'session_budget_exceeded' || reason === 'above_auto_spend')
+  );
+}
+
 /**
  * The top-up every "fund the wallet" hint names, in USD: the checkout's Apple
  * Pay and Google Pay minimum, which covers the routing deposit and a few

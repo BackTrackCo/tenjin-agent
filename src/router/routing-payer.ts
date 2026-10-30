@@ -9,7 +9,7 @@ import {
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
-import type { PolicyReason, SpendPolicy } from '../lib/policy';
+import type { SpendPolicy } from '../lib/policy';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
@@ -26,6 +26,7 @@ import {
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
+  canRetryDepositAtHint,
   feeRefusal,
   payerDir,
   refusedWhy,
@@ -209,12 +210,6 @@ interface SignMemo {
   stamp: string | null;
   address?: string;
 }
-
-/** The spend limits a ceiling deposit falls back to the hint under. */
-const SPEND_LIMITS: ReadonlySet<PolicyReason> = new Set<PolicyReason>([
-  'session_budget_exceeded',
-  'above_auto_spend',
-]);
 
 /** Money and policy refusals that are definite until a person acts. */
 const ROUTING_BLOCKED: ReadonlySet<string> = new Set([
@@ -765,7 +760,7 @@ export class RoutingPayer {
     let auth = await authorize(amount);
     // A ceiling the spend limits refuse is signed at the hint instead, before
     // anything is sent; the allowlist is not a limit, so it refuses outright.
-    if (auth.decision !== 'allow' && amount > hint && SPEND_LIMITS.has(auth.reason)) {
+    if (auth.decision !== 'allow' && canRetryDepositAtHint(amount, hint, auth.reason)) {
       await authorizer.release(auth.reservationId);
       amount = hint;
       auth = await authorize(amount);

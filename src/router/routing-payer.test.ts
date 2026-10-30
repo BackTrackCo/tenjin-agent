@@ -13,6 +13,7 @@ import { readSpendSummary } from '../lib/wallet/spend';
 import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
 import { requestDecision } from './decision';
+import { checkEligibility } from './eligibility-check';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
@@ -494,6 +495,55 @@ describe('RoutingPayer', () => {
     expect([...router.channels.values()][0]?.balance).toBe(CHANNEL_DEPOSIT_ATOMIC);
     expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe(
       CHANNEL_DEPOSIT_ATOMIC.toString(),
+    );
+  });
+
+  it.each<[string, Partial<SpendPolicy>, string | undefined]>([
+    ['$0.10 daily budget', { sessionBudgetAtomic: 100_000n }, undefined],
+    ['$0.10 per-call limit', { maxAutoSpendAtomic: 100_000n }, undefined],
+    ['daily budget below the hint', { sessionBudgetAtomic: 29_999n }, 'budget_reached'],
+    [
+      'router outside the allowlist',
+      { sessionBudgetAtomic: 100_000n, allowlistCreators: ['someone-else'] },
+      'not_allowlisted',
+    ],
+  ])('doctor and the payer agree with a $0.25 wallet and %s', async (_label, policy_, why) => {
+    const router = new FakeRouter();
+    const policy = { ...TEST_POLICY, ...policy_ };
+    const eligibility = await checkEligibility({
+      dataDir: dir,
+      env: {},
+      policy,
+      rpcUrl: 'https://rpc.test',
+      host: new URL(BASE).host,
+      timeoutMs: 1_000,
+      provider: {
+        id: 'test',
+        describe: async () => ({
+          address: wallet.address,
+          provider: 'test',
+          credentialSource: 'env',
+          policyEnforcement: 'client-only',
+        }),
+        getSigner: async () => testSigner(wallet),
+        verify: async () => ({ status: 'verified', detail: 'test', source: 'key-env' }),
+        diagnostics: async () => ({ warnings: [] }),
+      },
+      readBalance: async () => MAX_CHANNEL_DEPOSIT_ATOMIC,
+      readCredit: async () => 0n,
+      readSpent: async () => 0n,
+    });
+    expect(eligibility.canPayRouting).toMatchObject(
+      why === undefined ? { status: 'ready' } : { status: 'blocked', reason: why },
+    );
+    const result = await routeOnce(
+      payer(router, { policy_, walletAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC }),
+      router,
+    );
+    expect(unpaidWhy(result)).toBe(why);
+    expect(router.deposits).toBe(why === undefined ? 1 : 0);
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic ?? '0').toBe(
+      why === undefined ? CHANNEL_DEPOSIT_ATOMIC.toString() : '0',
     );
   });
 
