@@ -12,7 +12,7 @@ describe('the spend question', () => {
   });
 
   it('floors the per-call limit at the largest routing deposit, and defaults it there', () => {
-    // A funded wallet deposits $0.25: a lower ceiling would refuse it.
+    // A deposit the router asks for can reach $0.25: a lower ceiling would refuse it.
     expect(MAX_AUTO_SPEND_FLOOR_ATOMIC).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
     expect(BigInt(ROUTER_DEFAULTS.maxAutoSpend)).toBeGreaterThanOrEqual(
       MAX_AUTO_SPEND_FLOOR_ATOMIC,

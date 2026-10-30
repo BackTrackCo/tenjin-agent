@@ -1628,9 +1628,10 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
 
 /** The one routing call, its packet SEALED (masked and bounded): a path that
  *  skips the mask does not typecheck. It goes to the paid route, whose fee
- *  the payer in `tenjin mcp` pays; a call it cannot pay is skipped at once,
- *  the native tool runs, and the first such call in a session tells the user
- *  why and what fixes it.
+ *  the payer in `tenjin mcp` pays; a call it cannot pay is skipped (after
+ *  waiting for the background top-up when its channel needs a deposit), the
+ *  native tool runs, and the first such call in a session tells the user why
+ *  and what fixes it.
  *
  *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the

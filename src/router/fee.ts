@@ -48,9 +48,10 @@ export const DEPOSIT_FLOOR_FEES = 10n;
 
 /**
  * THE DEPOSIT TENJIN SIGNS (tenjin#1046): the smallest of the server's hint
- * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so the
- * rest of the wallet stays for the paid tools routing suggests, which pay
- * from the wallet, never the channel. Never below {@link DEPOSIT_FLOOR_FEES}
+ * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
+ * wallet holding more than the hint keeps the rest for the paid tools routing
+ * suggests, which pay from the wallet, never the channel; one between the
+ * floor and the hint deposits all it holds. Never below {@link DEPOSIT_FLOOR_FEES}
  * quoted fees or what the next voucher needs, and never above the SDK's
  * ceiling. A balance that could not be read bounds nothing. The caller
  * refuses a wallet below the result (`wallet_low`), and the spend authorizer
@@ -186,8 +187,9 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 }
 
 /**
- * The one line said when a deposit went through, on the next leg after the
- * background top-up that made it: the money is
+ * The one line said when a deposit went through: on the next leg after the
+ * background top-up that made it, or on the call that carried it on a router
+ * with no `warm` form. The money is
  * funds set aside for the next routing fees, not a lookup it bought, and the
  * fee is the one the router quoted, when one was read. It still counts toward
  * the daily limit ({@link feeRefusal}).
@@ -204,7 +206,7 @@ export function depositSentence(amountAtomic: bigint, feeAtomic?: bigint): strin
  * the person to act and never for the passphrase, and any other reason's own.
  * A quote above the ceiling names the price quoted, when the payer read one;
  * a wallet too low names its balance and the deposit it fell short of, when
- * the background top-up read them. This sentence, said once per session, is
+ * they were read for a deposit. This sentence, said once per session, is
  * where the person sees that balance.
  */
 export function unpaidSentence(

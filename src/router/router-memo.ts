@@ -17,9 +17,10 @@ import { writeFileAtomic } from '../lib/atomic-json';
  *   the background ({@link TOPPING_UP_MEMO_MS}), so another one on the same
  *   wallet does not send a second deposit at the same moment.
  * - `warm-absent`: the router answered the background top-up's `warm` call
- *   with something other than its answer, so it has no `warm` form (an older
- *   server). For {@link WARM_ABSENT_MS} a deposit rides the next paid call,
- *   as it did before the form existed.
+ *   with a 2xx that is not the `warm` answer, or a 3xx or 4xx other than a
+ *   402 or 429 (an older server answers 400), so it has no `warm` form. For
+ *   {@link WARM_ABSENT_MS} a deposit rides the next paid call, as it did
+ *   before the form existed. A 402, 429, 5xx or no answer backs off instead.
  *
  * A memo is a file written atomically and read with the clock: one older than
  * its window, or dated in the future, reads as absent, so nothing cleans up

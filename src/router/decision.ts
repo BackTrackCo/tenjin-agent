@@ -10,8 +10,9 @@ import type { Harness } from './names';
  * and the `request` tool's, goes to the paid route ({@link ROUTE_PAID_PATH}).
  * Inside `tenjin mcp` the payer sends it through the stock x402 client and
  * pays the routing fee its 402 quotes ({@link DecisionRoute},
- * `routing-payer.ts`); a call it cannot pay is skipped at once, with no second
- * request. The free route ({@link ROUTER_PATH}) keeps only what stays free:
+ * `routing-payer.ts`); a call it cannot pay is skipped, with no request to any
+ * other route. One whose channel needs a deposit waits for the payer's
+ * background top-up inside its budget first. The free route ({@link ROUTER_PATH}) keeps only what stays free:
  * browse, a browse row's spec and the outcome report.
  *
  * The backend answers with what it would do and what the provider charges,
@@ -827,15 +828,17 @@ export interface DecisionRoute {
    *  router took, with any background top-up not said yet, 0n for none: the
    *  caller says so once, where it is read. */
   deposited?: () => bigint;
-  /** The routing fee the router last quoted this route's calls, atomic
-   *  USDC, for a line that names it; undefined before any quote. */
+  /** The routing fee the router last quoted this route's calls, else any
+   *  call's in this process, atomic USDC, for a line that names it; undefined
+   *  before any quote. */
   fee?: () => bigint | undefined;
 }
 
 /**
  * What a skip knows about the money behind it, for the one sentence that says
  * it: the fee the router quoted, when the payer read one, and for `wallet_low`
- * the balance the background top-up read and the deposit it fell short of.
+ * the balance read for the deposit (by the background top-up, or by the call's
+ * own on a router with no `warm` form) and the deposit it fell short of.
  */
 export interface SkipFacts {
   quotedAtomic?: bigint;
@@ -884,7 +887,8 @@ export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
 /** The route asked for the fee, and this call had no payer to pay it. */
 export const NO_PAYER = 'no_payer';
 /** The channel needed a deposit, and this process's background top-up did
- *  not land inside the call's budget: no fault, the next call pays. */
+ *  not land inside the call's budget: no fault. The next call pays from it if
+ *  it lands, or gets its refusal if it was refused. */
 export const TOPPING_UP = 'topping_up';
 /** The channel needed a deposit, which only the background top-up makes, and
  *  this process's could not make it now (another session's top-up of the same

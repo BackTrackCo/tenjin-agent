@@ -61,7 +61,7 @@ export class FakeRouter {
   warms = 0;
   /** What carried each settled deposit: the top-up's `warm` call, or a routing call. */
   readonly depositedOn: ('warm' | 'call')[] = [];
-  /** Every request, as `METHOD path paid|unpaid`. */
+  /** Every request, as `METHOD path [warm] paid|unpaid`. */
   readonly log: string[] = [];
   /** Settle the next paid answer, then drop the connection before it is read. */
   abortAfterSettle = false;

@@ -31,7 +31,7 @@ below). The outcome report is the one form that carries no `accepts`.
 | browse  | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
 | by id   | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
 | outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
-| warm    | `{schemaVersion, warm: true, accepts}`                         | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; it carries a channel deposit          |
+| warm    | `{schemaVersion, warm: true, accepts}`                         | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
 catalog task id, such as `web research`, at most 64 characters),
@@ -175,8 +175,10 @@ answer, `warm` included, settles at 0, which
 `{id, input}` there is a 400. A routing call never carries a deposit: this
 client's background top-up sends `warm` for it alone, sized to the smallest of
 `extra.minDeposit`, the wallet and the per-call limit and never below ten
-quoted fees. A router that answers `warm` with anything else has no form, and
-for an hour a deposit rides the next paid call instead. The free route answers
+quoted fees. A router that answers `warm` with a 2xx that is not the `warm`
+answer, or a 3xx or 4xx other than a 402 or 429, has no form, and for an hour
+a deposit rides the next paid call instead; a 402, 429, 5xx or no answer backs
+off. The free route answers
 `{packet}` and `{query}` with `native` and the
 `fee_required` diagnostic, telling the agent to update tenjin-cli. Outcome
 reports, `browse` and `tool` stay on the free route.
@@ -351,11 +353,15 @@ Two pairs pin a request and the answer it gets:
 
 - **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the paid route's
   carrier for a channel deposit. This client's background top-up sends it, and
-  nothing else does: a routing call never carries a deposit. The server
-  answers it in code, with no gate and nothing stored, so it settles at 0 and
-  only the deposit riding it moves money. A server without the form answers
-  anything else (a 400 for the unknown field, which settles nothing), and this
-  client then lets the deposit ride its next paid call for an hour. A
+  nothing else does: a routing call never carries a deposit. Its payment is a
+  deposit when the channel needs one, and a voucher when it no longer does (a
+  channel another process funded meanwhile), so the server must take either.
+  The server answers it in code, with no gate and nothing stored, so it
+  settles at 0 and only a deposit riding it moves money. A server without the
+  form answers a 400 for the unknown field, which settles nothing; this client
+  reads that, any other 4xx or 3xx except a 402 or 429, and a 2xx that is not
+  the `warm` answer as no form, and lets the deposit ride its next paid call
+  for an hour. A
   `tolerant` client's `warm` answer also carries `honored`.
 - **`tolerant`** (`wire-tool-request-by-id-tolerant.json`,
   `wire-lookup-spec-tolerant.json`): a browse row's id from a client whose
@@ -424,7 +430,7 @@ Two rules the fixtures exist to hold:
 - **In an offer, the line and its `specs` name the same ids.** A caller cannot
   approve one service and run another. A compare choice's line names the
   decision's id and `choices` names the rest, each with its spec.
-- **Every non-execute answer carries `diagnostics`, nested inside `decision`.**
+- **Every non-execute decision carries `diagnostics`, nested inside it.**
   That is the intended shape: they sit on the union's non-execute arms so a
   contractless outcome without diagnostics does not typecheck.
 
