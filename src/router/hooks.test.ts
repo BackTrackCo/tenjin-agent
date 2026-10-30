@@ -805,11 +805,6 @@ describe('shortfallOf', () => {
   });
 });
 
-/**
- * OLD INSTALLS KEEP WORKING. Every alpha install carries PreToolUse on
- * `WebSearch|WebFetch` running `tenjin hook native`; after a CLI update and
- * before a refresh, that command must be a hook with no opinion.
- */
 /** The same call as the harness reports it BEFORE it runs: no response yet. */
 async function preCall(
   subject: string,

@@ -1077,9 +1077,10 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).toContain('one concrete external lookup');
       expect(SCOPE_RULE).toContain('A mixed turn is not one lookup');
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
-      // Routing costs a fee the server quotes, so no amount is written here.
-      expect(request.description).toContain('Routing costs a small flat fee');
-      expect(request.description).not.toMatch(/\$0\.\d/);
+      // The router quotes the fee; the only amount written here is this CLI's ceiling.
+      expect(request.description).toContain(
+        'Routing costs a fee the router quotes, never more than $0.003 a call;',
+      );
     } finally {
       await client.close();
       await server.close();

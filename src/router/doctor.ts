@@ -325,7 +325,8 @@ export async function runRouterDoctor(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
   // A probe the router answered ends the routing legs' backoff at once: ok,
-  // or a warning about the fee it quoted.
+  // or a warning about its 402 (a quote above the ceiling, or one this CLI
+  // cannot read).
   if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
@@ -646,7 +647,7 @@ async function sameDirAsAny(paths: string[], dir: string): Promise<boolean> {
 
 /**
  * The plugin: listed and enabled at this CLI's version and stamped by a
- * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still has a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -661,7 +662,7 @@ async function pluginCheck(
           name,
           status: 'warn',
           required: false,
-          detail: `${detail}; the settings install of an earlier release still routes here`,
+          detail: `${detail}; the settings install of an earlier release is still here`,
           fix: claude.meetsFloor
             ? `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`
             : `Run \`claude update\`, then \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
@@ -1294,7 +1295,7 @@ async function migrationCheck(
         detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
         fix: claude.meetsFloor
           ? `To load the plugin, ${NEW_SESSION_STEP}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
-          : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
+          : 'Run `claude update`, then `tenjin install`: until then the old entries stay.',
       };
 }
 
@@ -1346,7 +1347,8 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
  * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
  * tools run.
  *
- * - ready: today's ok row, byte for byte;
+ * - ready: ok, with the fee's terms; whether the router's live quote is
+ *   within the ceiling is the router check's to say;
  * - blocked by money or policy: today's `unpaid` detail, and today's fix
  *   (`fixes[why]`, else fee.ts's own);
  * - blocked because the wallet cannot sign: the WALLET_REASONS fragment and
@@ -1371,7 +1373,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `a small flat fee per call, the router's quote and never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
+      detail: `the router's quote, paid only when it is at most $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call, from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;

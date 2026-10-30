@@ -21,7 +21,7 @@ export function registerRouter(reg: Registration): void {
 
   const hook = leaf(INTEGRATION, 'hook', 'run one harness hook handler (called by your agent host)')
     .description(
-      "The handlers Tenjin's plugins run, and the ones an older setup wrote. `alive` marks a session the Claude Code plugin serves. `prompt`, `native`, `shortfall`, `agent`, `ask` and `answer` are left from older setups: the plugins route through `tenjin mcp`, which pays the routing fee, so each of these reads one hook event on stdin, routes nothing, and tells the person once per session to run `tenjin install`. You never run these by hand.",
+      "The handlers Tenjin's plugins run, and the ones an older setup wrote. `alive` marks a session the Claude Code plugin serves. `prompt`, `native`, `shortfall`, `agent`, `ask` and `answer` are left from older setups: the plugins route through `tenjin mcp`, which pays the routing fee, so each of these reads one hook event on stdin, routes nothing, and tells the person once per session to ask their agent to set Tenjin up again (nothing in a session the Claude Code plugin serves). You never run these by hand.",
     )
     .helpCommand(false);
   // Normally answered by the fast path in `index.ts`, before the command tree
@@ -37,7 +37,7 @@ export function registerRouter(reg: Registration): void {
       await aliveMain({ dataDir: ctx.dataDir, version: pkg.version });
     });
   for (const [name, summary] of [
-    ['prompt', 'UserPromptSubmit, from an older setup: tell the person to run `tenjin install`'],
+    ['prompt', 'UserPromptSubmit, from an older setup: tell the person to set Tenjin up again'],
     ['native', 'PreToolUse on WebSearch|WebFetch, from an older setup: the same'],
     ['shortfall', 'PostToolUse(Failure) on WebSearch|WebFetch, from an older setup: the same'],
     ['agent', 'PreToolUse on Agent|Task, from an older setup: the same'],

@@ -276,9 +276,8 @@ export async function runRequestTool(
         },
   );
   const deposited = routes.reduce((sum, r) => sum + (r.deposited?.() ?? 0n), 0n);
-  const fee = routes.reduce<bigint | undefined>((last, r) => r.fee?.() ?? last, undefined);
   return deposited > 0n
-    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited, fee)}` }
+    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
     : result;
 }
 
@@ -637,6 +636,10 @@ async function requestTool(
   if (fresh.status === 'skipped') {
     await footer.done('native');
     const { why } = fresh;
+    // A reason that lasts (money, the wallet, a limit, the fee's price) is
+    // the user's to hear once; a busy channel, a slow unlock or a top-up still
+    // on its way is not.
+    const lasting = unpaidSentence(why, 'agent', fresh);
     return fail(
       'native',
       why === DEADLINE_AFTER_PAYMENT_SENT
@@ -645,8 +648,13 @@ async function requestTool(
           ? 'Tenjin is setting funds aside for routing fees in the background, and they had not landed when this call needed them. Nothing was routed and no provider was paid.'
           : why === TOP_UP_UNAVAILABLE
             ? 'Tenjin could not set funds aside for routing fees just now (the router was busy or out of reach); it tries again shortly. Nothing was routed and no provider was paid.'
-            : `${unpaidSentence(why, 'agent', fresh) ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, or the wallet was still unlocking); the next call usually routes.'} Nothing was routed and no provider was paid.`,
-      { nextStep: 'Use your own tools for this one.' },
+            : `${lasting ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, or the wallet was still unlocking); the next call usually routes.'} Nothing was routed and no provider was paid.`,
+      {
+        nextStep:
+          lasting !== null
+            ? 'Tell the user this once, and use your own tools for now.'
+            : 'Use your own tools for this one.',
+      },
     );
   }
   if (fresh.status === 'failed') {

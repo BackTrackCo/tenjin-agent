@@ -189,8 +189,8 @@ describe('Codex automatic hooks', () => {
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Nothing went to the free path, and no leg carried the deposit: the
-      // background top-up did, then each leg paid a voucher.
+      // Every call went to the paid route, and no leg carried the deposit:
+      // the background top-up did, then each leg paid a voucher.
       expect(fake.log).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route warm unpaid',
@@ -279,7 +279,7 @@ describe('Codex automatic hooks', () => {
 });
 
 describe('a Codex plugin copy from an older build', () => {
-  it('tells the user once to run tenjin install, in the field Codex shows, and routes nothing', async () => {
+  it('tells the user once to set Tenjin up again, in the field Codex shows, and routes nothing', async () => {
     const run = async () => {
       let out = '';
       await runHookCommand({ stdout: { write: (s: string) => ((out += s), true) } } as never, {

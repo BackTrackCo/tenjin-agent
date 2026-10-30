@@ -111,7 +111,7 @@ The router names the tool and its price, and your agent calls it.
 | Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
 | PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-Provider prices above exclude Tenjin's small flat fee per routing call. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
+Provider prices above exclude Tenjin's routing fee, quoted per call and never more than $0.003. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
 ## How it works
 
@@ -133,7 +133,7 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each routing call costs a small flat fee the router quotes, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees in the background (with the next routing call, on an older router), the router's suggested amount at a time (currently $0.03, never more than $0.25), so the rest stays available for paid tools, and stops routing once those funds run out while the wallet holds less than ten fees; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
+- Each routing call costs a fee the router quotes, never more than $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees in the background (with the next routing call, on an older router), the router's suggested amount at a time (currently $0.03, never more than $0.25), so the rest stays available for paid tools, and stops routing once those funds run out while the wallet holds less than ten fees; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)

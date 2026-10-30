@@ -14,7 +14,7 @@ import { readUsdcBalance } from '../lib/usdc-balance';
 import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
-import type { RouteFor } from './fee';
+import { ROUTING_FEE_CEILING_ATOMIC, usd, type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitCodexHookEvent, admitHookEvent } from './hook-session';
@@ -99,8 +99,9 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Routing costs a small ` +
-  'flat fee; a wallet on THIS machine pays it and the provider under the local spend ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Routing costs a fee the router ` +
+  `quotes, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call; a wallet on THIS ` +
+  'machine pays it and the provider under the local spend ' +
   'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin wallet fund` ' +

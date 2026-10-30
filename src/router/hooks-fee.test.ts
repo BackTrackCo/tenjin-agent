@@ -163,8 +163,8 @@ function paidFails(fake: FakeRouter): typeof fetch {
 
 describe('the hook legs and the routing fee', () => {
   /** THE COMMAND FORM IS A STUB: it cannot pay, so it routes nothing, and
-   *  tells the person once per session to set the hooks up again. */
-  it('routes nothing in the command form, and tells the person once to run tenjin install', async () => {
+   *  tells the person once per session to set Tenjin up again. */
+  it('routes nothing in the command form, and tells the person once to set Tenjin up again', async () => {
     let out = '';
     const io = { stdout: { write: (s: string) => ((out += s), true) } } as never;
     const run = (session: string) =>
@@ -175,7 +175,8 @@ describe('the hook legs and the routing fee', () => {
       });
     await run('sess-1');
     expect(JSON.parse(out)).toEqual({ systemMessage: STALE_HOOK_LINE });
-    expect(STALE_HOOK_LINE).toContain('`tenjin install`');
+    // The person's words: never a command to run.
+    expect(STALE_HOOK_LINE).not.toContain('`');
     out = '';
     await run('sess-1');
     expect(out).toBe('');
@@ -203,13 +204,15 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
-    const fake = new FakeRouter();
+    // A quote below the ceiling: the line names the ceiling, which later calls
+    // keep. The fake's hint is ten such quotes, $0.01, and that is the deposit.
+    const fake = new FakeRouter({ amount: '1000' });
     fake.body = OFFER;
     const p = payer(fake);
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.01 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -248,7 +251,6 @@ describe('the hook legs and the routing fee', () => {
       runHookKind('prompt', prompt('sess-a'), deps(fake.fetch, payer(fake))),
       runHookKind('prompt', prompt('sess-b'), deps(fake.fetch, payer(fake))),
     ]);
-    expect(fake.log.filter((l) => l === 'POST /api/x402-router unpaid')).toHaveLength(0);
     expect(fake.settledFees).toBe(2);
     // Native answers and nothing for the user: a busy channel is no fault.
     expect(answers).toEqual([null, null]);

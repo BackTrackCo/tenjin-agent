@@ -108,7 +108,8 @@ describe('unpaidSentence', () => {
     expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
     expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
   });
-  // User-visible notices name the reason and its recovery action, and no fee amount.
+  // User-visible notices name the reason and its recovery action, and no fee
+  // amount: only a quote above the ceiling is named, with the price the payer read.
   const EXPECTED: Record<string, string> = {
     no_wallet:
       'Tenjin could not pay the routing fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
@@ -124,6 +125,8 @@ describe('unpaidSentence', () => {
       'Tenjin could not pay the routing fee (the daily budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     not_allowlisted:
       'Tenjin could not pay the routing fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+    fee_above_ceiling:
+      'Tenjin could not pay the routing fee (the router asks more per call than this install agreed to pay), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
   };
 
   it('keeps actionable reasons, with no funding imperative in automatic fallback', () => {
@@ -145,12 +148,9 @@ describe('unpaidSentence', () => {
     expect(unpaidSentence('deposit_deferred')).toBeNull();
   });
 
-  it('names the quoted fee in the deposit line, and no fee when none was read', () => {
-    expect(depositSentence(30_000n, 1_000n)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs at most $0.001. Unused funds remain yours.',
-    );
+  it('names the ceiling in the deposit line, the bound every later call keeps', () => {
     expect(depositSentence(30_000n)).toBe(
-      'Tenjin set aside $0.03 for routing. Unused funds remain yours.',
+      'Tenjin set aside $0.03 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
   });
 

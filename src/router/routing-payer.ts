@@ -421,7 +421,8 @@ export class RoutingPayer {
   } | null = null;
   /** What settled top-ups deposited that no leg has said yet. */
   private toppedUp = 0n;
-  /** The fee the router last quoted any call, for a line with no quote of its own. */
+  /** The fee the router last quoted any call: the mark a start top-up holds
+   *  the channel to, before this process has a call's own quote. */
   private quoted: bigint | undefined;
   /** Background work a test or a shutdown can wait out ({@link idle}). */
   private pending: Promise<unknown> = Promise.resolve();
@@ -504,15 +505,17 @@ export class RoutingPayer {
           // refusal is this call's reason too (a low wallet, a failed payment;
           // contention or an unavailable router, no fault), as a skip of its
           // own: never the top-up's transport failure, since this call reached
-          // the router. A payment still out is on its way, and stays deferred.
+          // the router (its 402 asked for the deposit), which each skip says.
+          // A payment still out is on its way, and stays deferred.
           const flight = this.lastTopUp;
           if (!(err instanceof RouteSkipped) || err.why !== DEPOSIT_DEFERRED || flight === null) {
             throw err;
           }
+          const answered = { answered: err.answered };
           const outcome = await this.waitForTopUp(flight, until, sent);
-          if (outcome === null) throw new RouteSkipped(TOPPING_UP);
+          if (outcome === null) throw new RouteSkipped(TOPPING_UP, answered);
           if (outcome.status === 'refused' && outcome.skip.why !== DEADLINE_AFTER_PAYMENT_SENT) {
-            throw new RouteSkipped(outcome.skip.why, outcome.skip.facts());
+            throw new RouteSkipped(outcome.skip.why, { ...answered, ...outcome.skip.facts() });
           }
           if (outcome.status !== 'done' && outcome.status !== 'absent') throw err;
           return await once();
@@ -520,9 +523,6 @@ export class RoutingPayer {
       },
       deposited: () => settledIn(calls),
       toppedUp: () => this.takeToppedUp(),
-      fee: () =>
-        calls.reduce<bigint | undefined>((last, call) => call.quoted ?? last, undefined) ??
-        this.quoted,
     };
   }
 
@@ -832,8 +832,11 @@ export class RoutingPayer {
       this.call = null;
       await this.settleDeposits(call);
     }
+    // A skip after the router answered says so: it is reachable.
+    const answered = { answered: call.answered };
     if (call.skipped !== undefined) {
       throw new RouteSkipped(call.skipped, {
+        ...answered,
         ...(call.quoted !== undefined ? { quotedAtomic: call.quoted } : {}),
         ...call.facts,
       });
@@ -849,7 +852,7 @@ export class RoutingPayer {
       // A payment went out and the call's time ended before its answer did,
       // detached or with the body still arriving: no fault, it was charged.
       const late = call.detached === true || (call.paid && response.kind === 'timeout');
-      throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED);
+      throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED, answered);
     }
     // Another session's call was in flight on the channel: nothing was
     // charged, and this call is skipped.
@@ -858,9 +861,10 @@ export class RoutingPayer {
         call.channel !== undefined && paymentError(call.channel, response) === CHANNEL_BUSY_ERROR
           ? CHANNEL_BUSY
           : PAYMENT_FAILED,
+        answered,
       );
     }
-    if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED);
+    if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED, answered);
     // A fee paid and answered: routing works, whatever was said before.
     if (call.paid && response.status < 400) {
       this.report({ routing: { status: 'ready', at: this.now() } });
@@ -1016,7 +1020,7 @@ export class RoutingPayer {
       // fault, as on any call.
       if (status === 429) {
         this.note(TOP_UP_UNAVAILABLE, calls.at(-1) ?? null, sent, undefined, true);
-        return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE));
+        return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE, { answered: true }));
       }
       await writeRouterMemo(dataDir, 'warm-absent', router, {
         now: this.now(),

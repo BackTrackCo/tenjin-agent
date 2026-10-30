@@ -416,7 +416,7 @@ describe('RoutingPayer', () => {
    * is unlocked.
    */
   it.each([['1000'], ['2999'], [ROUTING_FEE_CEILING_ATOMIC.toString()]])(
-    'pays a quote of %s atomic, at or below the ceiling, and names it',
+    'pays a quote of %s atomic, at or below the ceiling',
     async (amount) => {
       const router = new FakeRouter({ amount });
       const p = payer(router);
@@ -431,7 +431,6 @@ describe('RoutingPayer', () => {
       }
       expect(router.settledFees).toBe(2);
       expect([...router.channels.values()][0]!.charged).toBe(2n * BigInt(amount));
-      expect(route.fee?.()).toBe(BigInt(amount));
     },
   );
 
@@ -742,7 +741,13 @@ describe('RoutingPayer', () => {
       warn: (l) => warned.push(l),
     });
     const outcome = await routeOnce(p, router);
-    expect(outcome).toMatchObject({ status: 'skipped', why: 'wallet_low', balanceAtomic: 0n });
+    // The call's own 402 asked for the deposit, so its skip says the router answered.
+    expect(outcome).toMatchObject({
+      status: 'skipped',
+      why: 'wallet_low',
+      balanceAtomic: 0n,
+      answered: true,
+    });
     expect(warned.filter((l) => l.includes('top-up wallet_low'))).toHaveLength(1);
     // Funded within the backoff: the next call still gets the refusal, with
     // no second balance read and no top-up, and not the balance read before:
@@ -1254,7 +1259,11 @@ describe('RoutingPayer and the call budget', () => {
     router.delayMs = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 600;
     const { call, warned } = timed(router);
     const started = Date.now();
-    expect(await call(200)).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    expect(await call(200)).toEqual({
+      status: 'skipped',
+      why: 'deadline_after_payment_sent',
+      answered: true,
+    });
     expect(Date.now() - started).toBeLessThan(DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS + 500);
     router.delayMs = 0;
     // Queued behind the late answer, then a voucher from the recorded channel.
@@ -1277,7 +1286,11 @@ describe('RoutingPayer and the call budget', () => {
     expect((await call(3_500)).status).toBe('decided');
     router.delayMs = 600;
     const started = Date.now();
-    expect(await call(200)).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    expect(await call(200)).toEqual({
+      status: 'skipped',
+      why: 'deadline_after_payment_sent',
+      answered: true,
+    });
     // Not lengthened: no deposit rode on it.
     expect(Date.now() - started).toBeLessThan(500);
     router.delayMs = 0;
@@ -1358,7 +1371,11 @@ describe('RoutingPayer and the call budget', () => {
       { ctx: ctx(), baseUrl: BASE, fetchImpl: stallPaid, timeoutMs: 200, route },
     );
     expect(router.settledFees).toBe(2);
-    expect(outcome).toEqual({ status: 'skipped', why: 'deadline_after_payment_sent' });
+    expect(outcome).toEqual({
+      status: 'skipped',
+      why: 'deadline_after_payment_sent',
+      answered: true,
+    });
   });
 
   it("bounds the body read by the call's deadline once the headers arrive", async () => {

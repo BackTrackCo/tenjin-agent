@@ -238,7 +238,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(await memo()).toBeNull();
   });
 
-  it('does not start it from a paid call the router answered with a 5xx', async () => {
+  it('ends it, and starts none, on a paid call the router answered with a 5xx', async () => {
     const fake = new FakeRouter();
     const seen: string[] = [];
     const paidErrs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -246,9 +246,11 @@ describe('the routing legs back off a router they cannot reach', () => {
       return new Response('{}', { status: 503 });
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
+    await writeRouterMemo(dir, 'unreachable', BASE, { now: clock - 120_000, ttlMs: 60_000 });
     await runHookKind('prompt', prompt(), deps(paidErrs, p));
     expect(seen).toEqual([ROUTE_PAID_PATH]);
-    expect(await memo()).toBeNull();
+    // The skip came after an answer, so the router is reachable: the memo goes.
+    expect(await readdir(join(dir, 'router-memo'))).toEqual([]);
   });
 
   it('does not start it from a paid call queued behind another until its budget ran out', async () => {
