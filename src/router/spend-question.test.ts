@@ -29,7 +29,7 @@ describe('the spend question', () => {
 
   it('asks the defaults or your own limits, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. Tenjin charges a small flat fee per routing call, never more than $0.003, paid from funds it sets aside ($0.25 at a time, or $0.03 below a $0.50 balance) in a payment that names your wallet address. Unused funds remain yours; each deposit counts against these limits once. Either answer also approves the routing fee.',
+      'Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. Each routing call pays a quoted fee, at most $0.003, from funds set aside ($0.25 at a time, or $0.03 under a $0.50 balance) and names your wallet address. Unused funds remain yours; each deposit counts against these limits once. Either answer also approves the routing fee.',
     );
   });
 
