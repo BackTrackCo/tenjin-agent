@@ -85,7 +85,7 @@ export class FakeRouter {
       payTo: privateKeyToAccount(generatePrivateKey()).address,
       maxTimeoutSeconds: 15,
       extra: {
-        // The hint the production server announces explicitly, whatever it quotes.
+        // The $0.05 hint the router's update announces, whatever it quotes.
         ...(opts.minDeposit === null
           ? {}
           : { minDeposit: opts.minDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString() }),
