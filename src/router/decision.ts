@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { fetchFailureToCliError, httpRequest, MAX_BINARY_BODY_BYTES } from '../lib/http';
+import { fetchFailureToCliError, httpRequest } from '../lib/http';
 import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
@@ -66,17 +66,10 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 /**
  * ONE VARIANT PER ANSWER, DISCRIMINATED ON THE ACTION. Optional fields made
  * every shape legal: an `execute` with no contract parsed and came back to the
- * host as a routine `needs_input`, and a non-execute with no diagnostics
- * parsed with nothing to act on. Each of those is drift the shared fixtures
- * exist to catch, so each is a parse failure that names itself.
- *
- * A TOLERANT READER, AND ONLY THAT (RFC 9413). A field this build does not
- * know is dropped, never a failure: a server that adds one reaches every
- * released client without a release or a deploy order. A field it does know
- * keeps its type, its bounds and its checks, and a job's `pollUrl` or
- * `running` naming the keys of both its arms is still refused (an answer's
- * own arms are told apart by `action`). An offer that a client
- * must understand to run says so in `requires` ({@link withoutUnmet}).
+ * host as a routine `needs_input`, a non-execute with no diagnostics parsed
+ * with nothing to act on, and a hook answer carrying a contract parsed as
+ * though the hook had quoted a price. Each of those is drift the shared
+ * fixtures exist to catch, so each is now a parse failure that names itself.
  *
  * The two calls ask different questions and get different answers, so they get
  * different parsers. The HOOK asks whether a paid lookup is worth offering: an
@@ -94,7 +87,7 @@ const IdSchema = z
   );
 
 /** Every non-execute answer carries these, beside the action they explain. */
-const RefusedSchema = z.object({
+const RefusedSchema = z.strictObject({
   reason: z.string().max(2_000).optional(),
   diagnostics: DiagnosticsSchema,
 });
@@ -115,22 +108,6 @@ const LabelSchema = z.string().min(1).max(32);
 /** What a surface names a lookup whose decision carries no `label`. */
 export const UNLABELLED = 'Tenjin lookup';
 
-/**
- * WHAT AN OFFER NEEDS THIS CLIENT TO UNDERSTAND, in the `accepts` vocabulary,
- * on an offering answer or on any spec: a must-understand list, like JWS
- * `crit` (RFC 7515 §4.1.11). The tolerant reader drops a field it does not
- * know, which is right for a field a client may ignore and wrong for one that
- * changes what a call is (a header it must send, a new kind of payment). Such
- * an offer names that feature here, and a build without it skips that offer
- * alone, by name, rather than run it half understood ({@link withoutUnmet}).
- * The same bounds as `accepts`, with the alphabet pinned: a token is named
- * in the model's text when its offer is skipped.
- */
-const RequiresSchema = z
-  .array(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/))
-  .max(16)
-  .optional();
-
 const CapabilityFields = {
   capabilityId: z.string().min(1).max(200),
   category: z.string().min(1).max(64),
@@ -141,7 +118,6 @@ const CapabilityFields = {
   /** What the provider charges, atomic USDC. The `request` tool refuses a live
    *  402 above it; `gateSpend` still caps the amount actually signed. */
   providerPriceAtomic: z.string().regex(/^\d+$/),
-  requires: RequiresSchema,
 };
 
 /**
@@ -178,7 +154,7 @@ function checkHint(decision: { id: string; hint: string }, ctx: z.RefinementCtx)
  * the host builds the `input` and the tool call pays through the same `runPay`
  * path and caps as a curated lookup.
  */
-const DiscoveredCandidateSchema = z.object({
+const DiscoveredCandidateSchema = z.strictObject({
   source: z.string().min(1).max(64),
   provider: z.string().min(1).max(120),
   url: z.string().min(1).max(2_048),
@@ -187,22 +163,17 @@ const DiscoveredCandidateSchema = z.object({
   providerPriceAtomic: z.string().regex(/^\d+$/),
   network: z.string().min(1).max(64),
   payTo: z.string().min(1).max(200),
-  input: z.object({
+  input: z.strictObject({
     location: z.enum(['body', 'query']),
     schema: z.record(z.string(), z.unknown()),
   }),
 });
 
-/** A key that belongs to another arm of the same union. The tolerant reader
- *  drops a key it does not know; this one it knows, so an object naming the
- *  keys of both arms is refused rather than read as whichever arm is first. */
-const OtherArm = z.never().optional();
-
 /** A field name a job reads from an answer or writes into a poll body. */
 const JobField = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/);
 
 /** A body field whose value names a state: Treza's `status: "running"`. */
-const JobFieldStateSchema = z.object({
+const JobFieldStateSchema = z.strictObject({
   field: JobField,
   values: z.array(z.string().min(1).max(64)).min(1).max(8),
 });
@@ -222,24 +193,23 @@ export const POLL_REFERENCE = /^\$(input|result)\.([A-Za-z_][A-Za-z0-9_]{0,63})$
  * still checked here against the submit's host (`jobs.ts`).
  */
 export const JobSchema = z
-  .object({
+  .strictObject({
     pollUrl: z.union([
       z
-        .object({
+        .strictObject({
           field: JobField.optional(),
           header: z
             .string()
             .regex(/^[A-Za-z0-9-]{1,64}$/)
             .optional(),
-          fixed: OtherArm,
         })
         .refine((at) => at.field !== undefined || at.header !== undefined, 'a field or a header'),
-      z.object({ fixed: z.string().min(1).max(2_048), field: OtherArm, header: OtherArm }),
+      z.strictObject({ fixed: z.string().min(1).max(2_048) }),
     ]),
     /** Sent once like a poll after the result is saved, never after a save
      *  that failed: it frees the seller's copy (AiSpace's `/complete`). Its
      *  answer is ignored. */
-    completeUrl: z.object({ fixed: z.string().min(1).max(2_048) }).optional(),
+    completeUrl: z.strictObject({ fixed: z.string().min(1).max(2_048) }).optional(),
     pollMethod: z.enum(['GET', 'POST']),
     pollBody: z
       .record(JobField, z.unknown())
@@ -253,12 +223,8 @@ export const JobSchema = z
       )
       .optional(),
     running: z.union([
-      z.object({
-        httpStatus: z.array(z.number().int().min(200).max(299)).min(1).max(8),
-        field: OtherArm,
-        values: OtherArm,
-      }),
-      JobFieldStateSchema.extend({ httpStatus: OtherArm }),
+      z.strictObject({ httpStatus: z.array(z.number().int().min(200).max(299)).min(1).max(8) }),
+      JobFieldStateSchema,
     ]),
     failed: JobFieldStateSchema.optional(),
     everyS: z.number().int().min(1).max(30),
@@ -269,11 +235,6 @@ export const JobSchema = z
   .refine((job) => !job.pollBody || job.pollMethod === 'POST', 'only a POST poll has a body');
 export type Job = z.infer<typeof JobSchema>;
 
-/** A spec's `timeoutS` ceiling: the paid leg's own (`MAX_PAID_LEG_TIMEOUT_MS`
- *  in `commands/pay.ts`), so no spec can hold a call longer than a seller's
- *  402 already may. */
-export const MAX_SPEC_TIMEOUT_S = 120;
-
 /**
  * A REQUEST SPEC: the offered service's real contract, sent beside the line only
  * because this build asks for it (`accepts: ["spec"]`). The hook stores it by
@@ -282,14 +243,14 @@ export const MAX_SPEC_TIMEOUT_S = 120;
  * is the server's, and so is checked like the rest of the answer: the payee and
  * price still meet the live 402 and the spend policy in `runPay`.
  */
-export const ToolSpecSchema = z.object({
+export const ToolSpecSchema = z.strictObject({
   capabilityId: z.string().min(1).max(200),
   provider: z.string().min(1).max(120),
   /** The display name, on a catalog service's spec; a Bazaar spec has none. */
   label: LabelSchema.optional(),
   /** The input field that takes a pending search's query or fetch's URL. */
   holds: z
-    .object({
+    .strictObject({
       WebSearch: z.string().min(1).max(64).optional(),
       WebFetch: z.string().min(1).max(64).optional(),
     })
@@ -304,7 +265,7 @@ export const ToolSpecSchema = z.object({
   payTo: z.string().min(1).max(200),
   network: z.string().min(1).max(64),
   asset: z.string().min(1).max(200),
-  request: z.object({
+  request: z.strictObject({
     method: z.enum(['GET', 'POST']),
     url: z.string().min(1).max(2_048),
     fields: z.record(z.string(), z.enum(['path', 'query', 'body'])),
@@ -329,16 +290,7 @@ export const ToolSpecSchema = z.object({
   /** How a call answered before its result is ready is finished. */
   job: JobSchema.optional(),
   /** A media service that runs several takes of one call: `count` up to `max`. */
-  takes: z.object({ max: z.number().int().min(2).max(5) }).optional(),
-  requires: RequiresSchema,
-  /** The provider call's own deadline in seconds: the unpaid probe's, and
-   *  the least the paid leg waits. Absent, the CLI's `--timeout`. */
-  timeoutS: z.number().int().min(1).max(MAX_SPEC_TIMEOUT_S).optional(),
-  /** The largest file the call may bring back, in bytes: a binary result,
-   *  and each file a media result links to, though not yet a job's polled
-   *  result. Absent, and at most, the {@link MAX_BINARY_BODY_BYTES} every
-   *  call had. */
-  maxBytes: z.number().int().min(1).max(MAX_BINARY_BODY_BYTES).optional(),
+  takes: z.strictObject({ max: z.number().int().min(2).max(5) }).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 
@@ -367,13 +319,13 @@ const PlainLine = (max: number) =>
  * not a release here. `input` names the open fields the options share, the
  * only ones an `all` call may carry.
  */
-export const ChoicesSchema = z.object({
+export const ChoicesSchema = z.strictObject({
   group: PlainLine(64),
   default: PlainLine(64),
   input: z.array(PlainLine(64)).min(1).max(16),
   options: z
     .array(
-      z.object({
+      z.strictObject({
         key: PlainLine(64),
         label: PlainLine(120),
         strength: PlainLine(300),
@@ -382,7 +334,7 @@ export const ChoicesSchema = z.object({
     )
     .min(2)
     .max(4),
-  all: z.object({ totalAtomic: z.string().regex(/^\d+$/) }),
+  all: z.strictObject({ totalAtomic: z.string().regex(/^\d+$/) }),
 });
 export type Choices = z.infer<typeof ChoicesSchema>;
 
@@ -417,7 +369,7 @@ function checkChoices(
 /** The same answer on both calls: the hook's offer, and the tool's answer
  *  when a query with no id found a service nobody curated. */
 const DiscoveredSchema = z
-  .object({
+  .strictObject({
     action: z.literal('discovered'),
     id: IdSchema,
     candidate: DiscoveredCandidateSchema,
@@ -426,14 +378,13 @@ const DiscoveredSchema = z
     hint: z.string().min(1).max(2_000),
     specs: SpecsSchema,
     choices: ChoicesSchema.optional(),
-    requires: RequiresSchema,
   })
   .superRefine(checkHint)
   .superRefine(checkChoices);
 
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
-    .object({
+    .strictObject({
       action: z.literal('execute'),
       id: IdSchema,
       ...CapabilityFields,
@@ -469,7 +420,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
 ]);
 
 const ToolDecisionSchema = z.discriminatedUnion('action', [
-  z.object({
+  z.strictObject({
     action: z.literal('execute'),
     ...CapabilityFields,
     contract: ContractSchema,
@@ -478,15 +429,17 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
    * A query with no id, answered with the spec of the service the server
    * picked under a fresh `id`: kept like a hook's, and never run in the same
    * call. `hint` is the line, with the skeleton of the next call:
-   * `request({id, input: {...}})` with the required fields. What it needs
-   * this client to understand is its spec's `requires`.
+   * `request({id, input: {...}})` with the required fields. `input` is what a
+   * router from before the binder's removal still sends on a bound pick: it
+   * is accepted so that answer parses, and never read, so it never runs.
    */
   z
-    .object({
+    .strictObject({
       action: z.literal('spec'),
       id: IdSchema,
       spec: ToolSpecSchema,
       hint: z.string().min(1).max(2_000),
+      input: z.record(z.string(), z.unknown()).optional(),
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -495,7 +448,7 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
 ]);
 
 function envelope<T extends z.ZodTypeAny>(decision: T) {
-  return z.object({
+  return z.strictObject({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
     decision,
@@ -512,12 +465,12 @@ const ToolResponseSchema = envelope(ToolDecisionSchema);
 /**
  * ONE ROW OF THE TOOL LIST, as the free browse answers it: the tool's id, its
  * display name (a list entry's upstream name runs to 120 characters), what it
- * does, its price as the server writes it, and its kind. Read like every
+ * does, its price as the server writes it, and its kind. Strict like every
  * answer here, with the server's own bounds. The id is the one field the model
  * sends back, so its alphabet is pinned; the text is flattened to one line
  * where it is shown (`tool.ts`).
  */
-const BrowseRowSchema = z.object({
+const BrowseRowSchema = z.strictObject({
   id: z
     .string()
     .min(1)
@@ -531,7 +484,7 @@ const BrowseRowSchema = z.object({
 });
 export type BrowseRow = z.infer<typeof BrowseRowSchema>;
 
-const BrowseResponseSchema = z.object({
+const BrowseResponseSchema = z.strictObject({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
   rows: z.array(BrowseRowSchema).max(200),
@@ -542,78 +495,6 @@ export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
 export type HookDecision = HookResponse['decision'];
 export type ToolDecision = ToolResponse['decision'];
-
-/** The reason code of an offer this build skipped for a feature it lacks. */
-export const REQUIRES_UNMET = 'requires_unmet';
-
-/** An offer skipped for features this build lacks, named by its id. */
-export interface SkippedOffer {
-  id: string;
-  missing: string[];
-}
-
-/**
- * A BACKSTOP, NOT A FILTER. The server sends only `requires` tokens a client
- * lists in `accepts`, so a client meets an unmet one only when that rule was
- * broken, and then it fails safe. A spec whose `requires` names a feature this
- * build lacks is dropped. When the answer's line names what was dropped (the
- * answer's own offer, through its `requires`, its own spec or a `spec`
- * answer's spec; another spec whose id the line carries; or any option of its
- * choice set), the line can no longer be shown as written, so the whole
- * answer becomes a `native` that names the missing features: a named skip,
- * never a guess. A dropped spec the line does not name is only dropped.
- */
-export function withoutUnmet<T extends HookDecision | ToolDecision>(
-  decision: T,
-): { decision: T; skipped: SkippedOffer[] } {
-  if (decision.action === 'native' || decision.action === 'needs_input') {
-    return { decision, skipped: [] };
-  }
-  const specs = 'specs' in decision ? (decision.specs ?? []) : [];
-  const own = [
-    ...unmetRequires('requires' in decision ? decision.requires : undefined),
-    ...(decision.action === 'spec' ? unmetRequires(decision.spec.requires) : []),
-    ...('id' in decision ? unmetRequires(specs.find((s) => s.id === decision.id)?.requires) : []),
-  ];
-  if (own.length > 0) {
-    const missing = [...new Set(own)];
-    const id = 'id' in decision ? decision.id : decision.capabilityId;
-    return { decision: unmetRefusal(missing) as T, skipped: [{ id, missing }] };
-  }
-  const skipped = specs.flatMap((spec) => {
-    const missing = unmetRequires(spec.requires);
-    return missing.length > 0 ? [{ id: spec.id, missing }] : [];
-  });
-  if (skipped.length === 0) return { decision, skipped };
-  const options = new Set(
-    decision.action === 'discovered' ? (decision.choices?.options ?? []).map((o) => o.id) : [],
-  );
-  const hint = 'hint' in decision ? decision.hint : '';
-  if (skipped.some((s) => options.has(s.id) || hint.includes(s.id))) {
-    const missing = [...new Set(skipped.flatMap((s) => s.missing))];
-    return { decision: unmetRefusal(missing) as T, skipped };
-  }
-  const gone = new Set(skipped.map((s) => s.id));
-  return {
-    decision: { ...decision, specs: specs.filter((spec) => !gone.has(spec.id)) } as T,
-    skipped,
-  };
-}
-
-function unmetRefusal(missing: string[]) {
-  const named = missing.map((token) => `\`${token}\``).join(', ');
-  return {
-    action: 'native' as const,
-    reason: `This offer needs ${named}, which this build of tenjin-cli does not have, so it was skipped and no provider was paid.`,
-    diagnostics: {
-      reasonCode: REQUIRES_UNMET,
-      stage: 'client',
-      missing,
-      nextAction:
-        'Use your own tools for this one. A newer tenjin-cli (`tenjin update`) can run it.',
-    },
-  };
-}
 
 /** Which call this is, and therefore which answer is legal for it. */
 export type CallKind = 'hook' | 'tool' | 'browse';
@@ -635,19 +516,15 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * `discovered` in its place gets the same services under their
  * `discovered:tenjin:` ids. `spec` asks for each offered service's request
  * spec beside its line, and for the picked service's spec in place of a
- * decision on a query with no id, which only a build that runs them can
- * take. `jobs` asks for each spec's `job`,
+ * decision on a query with no id, which only a build that parses them can
+ * take: the decision schemas are strict. `jobs` asks for each spec's `job`,
  * for the services that never answer inline, and for `count` on a media
  * offer's line. `headers` asks for a spec's `request.headers`, the fixed
  * headers the catalog sets on a service's call (a provider's beta opt-in),
- * with the pins those headers unlock: `buildSpecRequest` sends them. A build
- * without a token would drop the field as unknown, so a spec that cannot run
- * without it lists the token in `requires`. `tolerant` says this build reads
- * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}).
- * Once the server reads it (tenjin R2), it sends a new field, `requires`
- * included, only to a client that lists it, and today's shape to one that
- * does not, which is every release from before it and reads strictly. `bazaar` widens discovery to the open
- * Bazaar and is sent only while `experimental.bazaar` is on.
+ * with the pins those headers unlock: `buildSpecRequest` sends them, and a
+ * build without the token is never sent a spec it would refuse as strict.
+ * `bazaar` widens discovery to the open Bazaar and is sent only while
+ * `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
   'catalog',
@@ -657,19 +534,8 @@ export const CLIENT_ACCEPTS: readonly string[] = [
   'jobs',
   'headers',
   'note',
-  'tolerant',
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
-
-/** Every feature this build has, which a `requires` list is read against:
- *  `bazaar` included, which it runs whether or not it asks for one. */
-const CLIENT_FEATURES: ReadonlySet<string> = new Set([...CLIENT_ACCEPTS, BAZAAR_ACCEPT]);
-
-/** The features a `requires` list names that this build lacks; none when it
- *  has them all. */
-export function unmetRequires(requires: readonly string[] | undefined): string[] {
-  return (requires ?? []).filter((token) => !CLIENT_FEATURES.has(token));
-}
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
 export function acceptsFor(bazaar: boolean): string[] {
@@ -752,12 +618,8 @@ export function buildToolSpecBody(request: {
 
 /** The parsers, exposed so the shared wire fixtures are checked against the
  *  same schemas production parses with rather than against a copy of them. */
-export function parseForTests(
-  kind: CallKind,
-  value: unknown,
-): { success: boolean; data?: unknown } {
-  const parsed = schemaFor(kind).safeParse(value);
-  return parsed.success ? { success: true, data: parsed.data } : { success: false };
+export function parseForTests(kind: CallKind, value: unknown): { success: boolean } {
+  return { success: schemaFor(kind).safeParse(value).success };
 }
 
 function schemaFor(kind: CallKind) {
@@ -842,9 +704,7 @@ export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
 export const NO_PAYER = 'no_payer';
 
 export type DecisionOutcome<T> =
-  /** `skipped`: offers in it this build cannot run, already taken out
-   *  ({@link withoutUnmet}). */
-  | { status: 'decided'; decision: T; skipped?: SkippedOffer[] }
+  | { status: 'decided'; decision: T }
   /** No routing answer: the turn goes without one. */
   | {
       status: 'failed';
@@ -923,7 +783,7 @@ export async function requestDecision(
     response = await (deps.route?.send ?? httpRequest)(url, options);
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
-    if (err.unreached !== undefined) return readOffer(err.unreached, schema);
+    if (err.unreached !== undefined) return readDecision(err.unreached, schema);
     return {
       status: 'skipped',
       why: err.why,
@@ -934,7 +794,7 @@ export async function requestDecision(
   if (deps.route === undefined && response.ok && response.status === 402) {
     return { status: 'skipped', why: NO_PAYER, answered: true };
   }
-  return readOffer(response, schema);
+  return readDecision(response, schema);
 }
 
 /**
@@ -970,7 +830,7 @@ export async function requestToolSpec(
   tool: string,
   deps: Omit<DecisionDeps, 'route'>,
 ): Promise<DecisionOutcome<ToolResponse>> {
-  return readOffer(
+  return readDecision(
     await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       method: 'POST',
       timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
@@ -983,7 +843,7 @@ export async function requestToolSpec(
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     ToolResponseSchema,
-  ) as DecisionOutcome<ToolResponse>;
+  );
 }
 
 /** Why a call from a spec stopped before anything was signed: the input did
@@ -1075,22 +935,6 @@ function readDecision<T extends z.ZodTypeAny>(
     return { status: 'failed', reason: 'The router returned a decision this build cannot read.' };
   }
   return { status: 'decided', decision: parsed.data as z.infer<T> };
-}
-
-/** A hook or tool answer, read, with each offer this build cannot run taken
- *  out ({@link withoutUnmet}). */
-function readOffer(
-  response: HttpResult,
-  schema: typeof HookResponseSchema | typeof ToolResponseSchema,
-): DecisionOutcome<HookResponse | ToolResponse> {
-  const read = readDecision<z.ZodType<HookResponse | ToolResponse>>(response, schema);
-  if (read.status !== 'decided') return read;
-  const { decision, skipped } = withoutUnmet(read.decision.decision);
-  return {
-    ...read,
-    decision: { ...read.decision, decision } as HookResponse | ToolResponse,
-    ...(skipped.length > 0 ? { skipped } : {}),
-  };
 }
 
 /** `{ error: { code, message } }`, the envelope every Tenjin route answers a

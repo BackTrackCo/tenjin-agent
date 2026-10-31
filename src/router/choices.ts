@@ -725,8 +725,6 @@ async function quoteTake(
         headers: built.headers,
         ...(built.specHeaders !== undefined ? { specHeaders: built.specHeaders } : {}),
         ...(built.body !== undefined ? { rawBody: built.body } : {}),
-        // The probe the call itself makes waits as long as its spec says.
-        ...(spec.timeoutS !== undefined ? { timeoutMs: spec.timeoutS * 1000 } : {}),
         terms: specTerms(spec),
       },
       deps.ctx,

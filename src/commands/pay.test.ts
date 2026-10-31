@@ -472,38 +472,6 @@ describe('runPay, paid-leg timeout', () => {
     ).rejects.toBeInstanceOf(CliError);
   });
 
-  it("takes a spec's own deadline for the probe in place of the CLI timeout", async () => {
-    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
-    const fetch = slowFetch(
-      [json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }), json(200, { answer: 'paid' })],
-      [150, 0],
-    );
-    const result = await runPay({ url: TENJIN_URL, timeoutMs: 1_000 }, makeCtx({ timeout: 50 }), {
-      ...PUBLIC_DNS,
-      fetchImpl: fetch,
-      provider: testWalletProvider(),
-      authorizer: fakeAuthorizer('allow'),
-    });
-    expect((result.data as { paid: boolean }).paid).toBe(true);
-  });
-
-  it("never lets a spec's shorter deadline cut the paid leg after payment", async () => {
-    // No advertised bound, so the paid leg's floor alone decides its wait.
-    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 0 });
-    const fetch = slowFetch(
-      [json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }), json(200, { answer: 'paid' })],
-      [0, 150],
-    );
-    // The spec asks for 50 ms; the CLI timeout of 1 s still holds the paid leg.
-    const result = await runPay({ url: TENJIN_URL, timeoutMs: 50 }, makeCtx({ timeout: 1_000 }), {
-      ...PUBLIC_DNS,
-      fetchImpl: fetch,
-      provider: testWalletProvider(),
-      authorizer: fakeAuthorizer('allow'),
-    });
-    expect((result.data as { paid: boolean }).paid).toBe(true);
-  });
-
   it('clamps the advertised bound and never goes below the CLI timeout', () => {
     const req = (maxTimeoutSeconds: number) =>
       ({

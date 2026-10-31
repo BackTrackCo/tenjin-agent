@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { toMoney } from '../lib/money';
+import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
@@ -20,7 +20,7 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
+import { requestDecision, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -788,15 +788,39 @@ async function vetOffer<T extends OfferDecision>(
   return { withheld: shortfall.withheld };
 }
 
+/** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
+ *  there: "about $0.28 per call" in a list entry, "about $0.03: request(" or
+ *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
+ *  a curated alternative, and "$0.30 via https://" for a curated offer's own
+ *  (already checked as a field, so it fits). A dollar amount anywhere else is
+ *  a description's words ("seats from $500/month"), never a price. Read only
+ *  for an offer that carries no specs: every other one names each service's
+ *  price as a field. */
+const LISTED_PRICE_RE =
+  /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
+
+/** A JSON string in the hint: the user's query, an id, or a seller's own words.
+ *  A dollar amount there is data ("a laptop under $1000"), never a price. */
+const QUOTED_RE = /"(?:[^"\\]|\\.)*"/g;
+
 /**
  * The other services an offer names, by price in atomic USDC: every spec
- * beside the offer's own (its line and its specs name the same ids). A price
- * is a field, never the line's prose: an offer with no specs names none.
+ * beside the offer's own (its line and its specs name the same ids), or, for
+ * an offer with no specs, each price the line quotes.
  */
 function listedPrices(offer: OfferDecision): bigint[] {
-  return (offer.specs ?? [])
-    .filter((spec) => spec.id !== offer.id)
-    .map((spec) => BigInt(spec.priceAtomic));
+  if (offer.specs !== undefined) {
+    return offer.specs
+      .filter((spec) => spec.id !== offer.id)
+      .map((spec) => BigInt(spec.priceAtomic));
+  }
+  return [...offer.hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].flatMap((match) => {
+    try {
+      return [BigInt(parseUsdToAtomic((match[1] ?? match[2]) as string))];
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** A listed price as a line quotes one: dollars with at least two decimals. */
@@ -1627,10 +1651,6 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
     return `fee unpaid: ${unpaid}`;
   }
   if (decision === null) return 'native tools (router unavailable)';
-  // An offer this build skipped is not the router choosing native tools.
-  if (decision.action === 'native' && decision.diagnostics.reasonCode === REQUIRES_UNMET) {
-    return 'native tools (offer needs newer tenjin)';
-  }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }
@@ -1676,11 +1696,6 @@ async function decide(
       ...(route !== undefined ? { route } : {}),
     },
   );
-  for (const { id, missing } of outcome.status === 'decided' ? (outcome.skipped ?? []) : []) {
-    warn(
-      `tenjin hook: offer ${id} needs ${missing.join(', ')}, which this build lacks, so it was skipped`,
-    );
-  }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
   if (deposited > 0n) deps.notice?.(depositSentence(deposited));

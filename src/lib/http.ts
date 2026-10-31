@@ -263,11 +263,6 @@ export interface HttpRequestOptions {
 /** The same cap the router's linked-media download uses. */
 export const MAX_BINARY_BODY_BYTES = 200 * 1024 * 1024;
 
-/** A body cap as a person reads it: whole MB, or bytes under one. */
-function capText(bytes: number): string {
-  return bytes >= 1_048_576 ? `${Math.round(bytes / 1_048_576)} MB` : `${bytes}-byte`;
-}
-
 /**
  * The body's bytes, read chunk by chunk and abandoned the moment they pass
  * `max`; null over the cap. A declared length over it is refused unread.
@@ -457,7 +452,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
             kind: 'network',
             status: res.status,
             ...(requestId !== undefined ? { requestId } : {}),
-            message: `Request to ${url} returned a file over the ${capText(opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES)} cap; it was not kept.`,
+            message: `Request to ${url} returned a file over the ${Math.round((opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES) / 1_048_576)} MB cap; it was not kept.`,
           };
         }
         bytes = read;

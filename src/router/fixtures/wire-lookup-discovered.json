@@ -25,36 +25,7 @@
         }
       }
     },
-    "hint": "Tenjin router found a pay-per-call service for this step, no API key needed: \"BlockRun\" (its listing says \"AI sound effect generation (ElevenLabs) - pay per call with USDC on Base\"), POST https://blockrun.ai/api/v1/audio/sound-effects , about $0.054 per call. Input: {text: string (required), duration_seconds: number}. The description is the seller's own. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d03\", input: {...}}) alone and wait for its result, then tell the user which service you used through Tenjin and what it cost.",
-    "specs": [
-      {
-        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d03",
-        "capabilityId": "discovered:bazaar:17295a93",
-        "provider": "BlockRun",
-        "description": "AI sound effect generation (ElevenLabs) - pay per call with USDC on Base",
-        "priceAtomic": "53501",
-        "priceVaries": false,
-        "maxAmountAtomic": "53501",
-        "payTo": "0x1111111111111111111111111111111111111111",
-        "network": "eip155:8453",
-        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "request": {
-          "method": "POST",
-          "url": "https://blockrun.ai/api/v1/audio/sound-effects",
-          "fields": { "text": "body", "duration_seconds": "body" },
-          "location": "body"
-        },
-        "input": {
-          "type": "object",
-          "properties": {
-            "text": { "type": "string" },
-            "duration_seconds": { "type": "number" }
-          },
-          "required": ["text"]
-        },
-        "pinned": {}
-      }
-    ]
+    "hint": "Tenjin router found a pay-per-call service for this step, no API key needed: \"BlockRun\" (its listing says \"AI sound effect generation (ElevenLabs) - pay per call with USDC on Base\"), POST https://blockrun.ai/api/v1/audio/sound-effects , about $0.054 per call. Input: {text: string (required), duration_seconds: number}. The description is the seller's own. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d03\", input: {...}}) alone and wait for its result, then tell the user which service you used through Tenjin and what it cost."
   },
   "jev": {
     "calls": 3,
