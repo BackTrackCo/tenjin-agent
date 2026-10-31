@@ -20,9 +20,9 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
+import { requestDecision, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
-import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
@@ -57,7 +57,7 @@ import { routerSettings, type RouterSettings } from './settings';
 
 /**
  * The six hook handlers. Between them they do exactly three things: build and
- * seal the packet, ask for one free decision, and say one thing back to the
+ * seal the packet, ask for one routing decision, and say one thing back to the
  * harness. Before an `execute` is shown where nobody can approve it, they also
  * read what the wallet's files say (`readWalletFacts`) and its USDC balance
  * from the RPC (`spendShortfall`). A free offer on a search keeps its line on
@@ -68,11 +68,11 @@ import { routerSettings, type RouterSettings } from './settings';
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
  * hooks run on every prompt and after every native search, and their cost is
  * the product's floor.
- * On the free path the decision costs nothing. The paid path exists only when
- * these handlers run inside `tenjin mcp`, behind Claude Code's `mcp_tool` hook
- * entries: that process passes its payer as {@link HookDeps.route}, and the
- * payer, not this file, signs and pays (`routing-payer.ts`). Run as
- * `tenjin hook <kind>`, every call is free.
+ * Every routing call goes to the paid route. These handlers run inside
+ * `tenjin mcp`, behind the plugins' `mcp_tool` hook entries: that process
+ * passes its payer as {@link HookDeps.route}, and the payer, not this file,
+ * signs and pays (`routing-payer.ts`). The `tenjin hook <kind>` command form
+ * runs none of them (`hook-command.ts`).
  *
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
  * leaves the prompt and the native result unchanged; the cause goes to
@@ -555,16 +555,16 @@ export interface HookDeps {
    * protocol channel.
    */
   warn?: (line: string) => void;
-  /** The paid path, passed by `tenjin mcp`. Absent (`tenjin hook <kind>`),
-   *  every call takes the free path. */
+  /** The payer's route, passed by `tenjin mcp`. Absent, a call goes unpaid,
+   *  and a router that asks for the fee skips it. */
   route?: RouteFor;
   /** A line for the user beside this leg's answer (`runHookKind` puts it in
    *  the hook's `systemMessage`). */
   notice?: (line: string) => void;
   /**
    * Inside `tenjin mcp`: the payer's in-memory sign verdict (what its last
-   * unlock said, no I/O). Absent (`tenjin hook <kind>`, which cannot unlock),
-   * it is decided from the wallet's files alone ({@link spendShortfall}).
+   * unlock said, no I/O). Absent (a caller with no payer, which cannot
+   * unlock), it is decided from the wallet's files alone ({@link spendShortfall}).
    */
   signer?: () => SignVerdict;
   /**
@@ -628,8 +628,8 @@ function gateDeadline(deps: HookDeps): number {
  *   as the creator the way `pay` names it. Only `allow` runs alone. Nothing is
  *   reserved, and the amount actually signed is still `gateSpend`'s to cap.
  * - A WALLET THAT CANNOT SIGN. Inside `tenjin mcp` that is the payer's own
- *   verdict ({@link HookDeps.signer}); as `tenjin hook <kind>`, which cannot
- *   unlock, it is `canSign` over the wallet's files alone (`readWalletFacts`):
+ *   verdict ({@link HookDeps.signer}); with no payer, which cannot unlock,
+ *   it is `canSign` over the wallet's files alone (`readWalletFacts`):
  *   no wallet and no key, a malformed TENJIN_WALLET_KEY, a wallet.json nobody
  *   can read, or the saved passphrase file gone while TENJIN_WALLET_PASSPHRASE
  *   is unset. Approval cannot unlock a wallet mid-session, so this one
@@ -643,7 +643,7 @@ function gateDeadline(deps: HookDeps): number {
  *
  * ONLY A DEFINITE BLOCK OR A BALANCE READ BELOW THE PRICE WITHHOLDS. An
  * unknown signer (a keychain that did not answer, an unlock not tried yet,
- * every command-mode leg with a readable wallet) still offers: only `blocked`
+ * every payer-less leg with a readable wallet) still offers: only `blocked`
  * gates (`eligibility.ts`). A balance that cannot be read (an RPC that fails,
  * rate-limits or runs past the gate's budget) leaves the policy to decide
  * alone, as before this check. Base's public RPC refused the sixth `eth_call`
@@ -886,7 +886,8 @@ export interface PromptHookOutcome {
 }
 
 /**
- * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
+ * The prompt leg (UserPromptSubmit), run by `tenjin mcp`'s `hook` tool. One
+ * routing decision from the user's
  * own words. Only an offer (`execute`, or a `discovered` service) gets a line:
  * the server's hint, attributed. `native`, `needs_input` and a decision that
  * failed or timed out are silence:
@@ -907,12 +908,13 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 }
 
 /**
- * `tenjin hook answer` (PostToolUse on `AskUserQuestion`). THE USER JUST
- * ANSWERED, which is a user turn in all but name: an answer like "I can get an
- * API key" is exactly when a pay-per-call service would do instead. So it is
- * routed the way a prompt is, with the answers as the current message and the
- * session's history before them, and an offer is added beside the answers the
- * host reads next. Anything else is no output at all.
+ * The answer leg (PostToolUse on `AskUserQuestion`), run by `tenjin mcp`'s
+ * `hook` tool. THE USER JUST ANSWERED, which is a user turn in all but name: an
+ * answer like "I can get an API key" is exactly when a pay-per-call service
+ * would do instead. So it is routed the way a prompt is, with the answers as
+ * the current message and the session's history before them, and an offer is
+ * added beside the answers the host reads next. Anything else is no output at
+ * all.
  */
 export async function runAnswerHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1042,7 +1044,7 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
 
 /**
  * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
- * agent's tool list, the packet from the right transcript, one free decision,
+ * agent's tool list, the packet from the right transcript, one routing decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
  * as `offer`; everything else is the reason there is none. `repeated` is the
  * pre-call arm's one-block rule, asked only of an offer that would be shown;
@@ -1175,11 +1177,12 @@ async function routeNativeCall(
 }
 
 /**
- * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). PER-LOOKUP
- * ROUTING BEFORE THE CALL, exactly as main: a clear offer denies the native
- * call with the server's hint as the reason, carrying the id so the redirected
- * call runs the decision just made. Anything else, including silence, a slow
- * backend and a `needs_input`, lets the call run with no output at all.
+ * The native leg (PreToolUse on `WebSearch|WebFetch`), run by `tenjin mcp`'s
+ * `hook` tool. PER-LOOKUP ROUTING BEFORE THE CALL, exactly as main: a clear
+ * offer denies the native call with the server's hint as the reason, carrying
+ * the id so the redirected call runs the decision just made. Anything else,
+ * including silence, a slow backend and a `needs_input`, lets the call run with
+ * no output at all.
  *
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
@@ -1313,13 +1316,13 @@ function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): Na
 }
 
 /**
- * `tenjin hook ask` (PreToolUse on `AskUserQuestion`). THE HOST IS ABOUT TO
- * ASK THE USER FOR SOMETHING, often an API key or an account for a one-off
- * step, which is the moment a pay-per-call service could answer instead. The
- * questions and their options ride as the pending call, and an offer denies
- * the question once with the server's line: never twice for the same
- * question, and a free offer never denies anything. The host can ask again,
- * and that question runs.
+ * The ask leg (PreToolUse on `AskUserQuestion`), run by `tenjin mcp`'s `hook`
+ * tool. THE HOST IS ABOUT TO ASK THE USER FOR SOMETHING, often an API key or an
+ * account for a one-off step, which is the moment a pay-per-call service could
+ * answer instead. The questions and their options ride as the pending call, and
+ * an offer denies the question once with the server's line: never twice for the
+ * same question, and a free offer never denies anything. The host can ask
+ * again, and that question runs.
  *
  * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
  * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
@@ -1360,14 +1363,15 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
 }
 
 /**
- * `tenjin hook shortfall` (PostToolUse and PostToolUseFailure on
- * `WebSearch|WebFetch`). THE FREE TOOL HAS ALREADY RUN, and a result that is
- * fine ends here: no router call, no footer, no added latency. Only a clear
- * shortfall ({@link shortfallOf}) asks for one free decision, with what the
- * harness reported riding in the packet as `nativeOutcome`, and only an offer
- * (`execute` or `discovered`) says anything. A call the pre-call arm already redirected is not
- * offered on again. Two lines ask the router nothing: a PDF WebFetch saved
- * whole, where the agent is pointed at the file, and a noted search.
+ * The shortfall leg (PostToolUse and PostToolUseFailure on
+ * `WebSearch|WebFetch`), run by `tenjin mcp`'s `hook` tool. THE FREE TOOL HAS
+ * ALREADY RUN, and a result that is fine ends here: no router call, no footer,
+ * no added latency. Only a clear shortfall ({@link shortfallOf}) asks for one
+ * routing decision, with what the harness reported riding in the packet as
+ * `nativeOutcome`, and only an offer (`execute` or `discovered`) says anything.
+ * A call the pre-call arm already redirected is not offered on again. Two lines
+ * ask the router nothing: a PDF WebFetch saved whole, where the agent is
+ * pointed at the file, and a noted search.
  *
  * A SEARCH THE PRE-CALL ARM NOTED A FREE LOOKUP ON gets that line now, read
  * from disk, framed as the option it is, under this event's own name, and the
@@ -1480,12 +1484,13 @@ export interface DelegationHookOutcome {
 }
 
 /**
- * `tenjin hook agent` (PreToolUse on `Agent|Task`). The one moment a subagent's
- * whole assignment is visible: its task prompt IS the current message, and the
- * parent's own turn is the history, so the router decides on exactly what the
- * subagent will do. On a clear offer, it is appended to that task as
- * one optional line, which reaches the subagent as part of its instructions
- * from its parent, before it starts. Anything else is no output at all.
+ * The agent leg (PreToolUse on `Agent|Task`), run by `tenjin mcp`'s `hook`
+ * tool. The one moment a subagent's whole assignment is visible: its task
+ * prompt IS the current message, and the parent's own turn is the history, so
+ * the router decides on exactly what the subagent will do. On a clear offer, it
+ * is appended to that task as one optional line, which reaches the subagent as
+ * part of its instructions from its parent, before it starts. Anything else is
+ * no output at all.
  *
  * The subagent will be the payer, so the same auto-execute rule applies here.
  */
@@ -1637,8 +1642,8 @@ async function openFooter(
 
 /** What the gate decided, in the footer's own words. A silent backend is not a
  *  blank line: the turn runs on native tools and the footer says which. A
- *  routing fee that was not paid (`fee_required`, `wallet_low` and the rest)
- *  is named as such, never passed off as the router choosing native tools. */
+ *  routing fee that was not paid (`wallet_low`, `no_payer` and the rest) is
+ *  named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
@@ -1651,9 +1656,10 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
 }
 
 /** The one routing call, its packet SEALED (masked and bounded): a path that
- *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
- *  path; a call that path cannot pay takes the free path, and the first such
- *  call in a session tells the user why and what fixes it.
+ *  skips the mask does not typecheck. It goes to the paid route, whose fee
+ *  the payer in `tenjin mcp` pays; a call it cannot pay is skipped at once,
+ *  the native tool runs, and the first such call in a session tells the user
+ *  why and what fixes it.
  *
  *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the
@@ -1676,7 +1682,7 @@ async function decide(
     warn(`tenjin hook: ${baseUrl} did not answer a moment ago, so the native tool runs (${left}s)`);
     return null;
   }
-  const route = (await deps.route?.(baseUrl)) ?? null;
+  const route = deps.route?.(baseUrl);
   const outcome = await requestDecision(
     'hook',
     { packet, sessionId },
@@ -1687,45 +1693,26 @@ async function decide(
       harness: hostOf(deps),
       timeoutMs: Math.max(0, deadline - now),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-      ...(route !== null ? { route } : {}),
+      ...(route !== undefined ? { route } : {}),
     },
   );
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
   if (deposited > 0n) deps.notice?.(depositSentence(deposited));
-  const why =
-    outcome.status === 'skipped'
-      ? outcome.why
-      : (outcome.freePath ??
-        (outcome.status === 'decided' && isFeeRequired(outcome.decision)
-          ? FEE_REQUIRED
-          : undefined));
-  if (why !== undefined) unpaid?.(why);
-  // A `fee_required` on a call the machine's "no paid path" memo sent to the
-  // free path is stale news, not a fault: the memo is cleared below and the
-  // next call pays. It does not use up the session's one notice.
-  const memoed = deps.route !== undefined && route === null;
-  if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
-    await tellOnce(deps, sessionId, why, now);
-  }
-  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
-  // over, and the session hears so once ("Tenjin wallet unlocked." or
-  // "... funded."). Only a decided call that did not fall back to the free path.
-  if (route !== null && outcome.status === 'decided' && outcome.freePath === undefined) {
-    const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
-    if (cleared !== null) deps.notice?.(cleared);
-  }
-  // The fee is on: a "no paid path" remembered from before stops holding the
-  // machine's calls on the free path.
-  if (outcome.status === 'decided' && isFeeRequired(outcome.decision)) {
-    await clearRouterMemo(deps.dataDir, 'paid-path-absent', baseUrl);
-  }
   if (outcome.status === 'skipped') {
+    // The router answered (its 402, say) before the skip: it is reachable.
+    if (outcome.answered === true) await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
+    unpaid?.(outcome.why);
+    await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
-  if (outcome.freePath !== undefined) {
-    warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
+  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
+  // over, and the session hears so once ("Tenjin wallet unlocked." or
+  // "... funded.").
+  if (route !== undefined && outcome.status === 'decided') {
+    const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
+    if (cleared !== null) deps.notice?.(cleared);
   }
   if (outcome.status === 'failed' && outcome.unreachable === true) {
     await writeRouterMemo(deps.dataDir, 'unreachable', baseUrl, {
@@ -1742,7 +1729,7 @@ async function decide(
     await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
   }
   if (outcome.status === 'failed') {
-    warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
+    warn(`tenjin hook: ${baseUrl}${ROUTE_PAID_PATH} ${outcome.reason}`);
     return null;
   }
   return outcome.decision.decision;
@@ -1755,8 +1742,14 @@ async function decide(
  * routing. A different reason later in the session is news again (a missing
  * passphrase repaired into a wrong one), the same one is not.
  */
-async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
-  const sentence = unpaidSentence(why);
+async function tellOnce(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  now: number,
+  quotedAtomic?: bigint,
+) {
+  const sentence = unpaidSentence(why, 'person', quotedAtomic);
   if (sentence === null || deps.notice === undefined) return;
   const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
   if (told === 'tell') deps.notice(sentence);

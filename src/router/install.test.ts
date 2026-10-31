@@ -59,7 +59,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.003 a call, paid from funds Tenjin sets aside: $0.25 at a time, or $0.03 while your balance is under $0.50. Unused funds remain yours; each deposit counts against these limits, and fees from it are not counted again.';
+  "Each routing call pays a quoted fee, at most $0.003, from funds set aside (the router's suggested amount, up to $0.25 at a time) and names your wallet address. Unused funds remain yours; each deposit counts against these limits once.";
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [
@@ -1034,7 +1034,7 @@ it('status separates routing deposits in the spend window from the remaining rou
   expect(result.humanLines?.slice(0, 4)).toEqual([
     'lookups 0.05 USD',
     'deposited for routing in the rolling 24h window: 0.25 USD',
-    'set aside for routing: approximately 0.24 USD (~80 calls; local estimate)',
+    'set aside for routing: approximately 0.24 USD (at least 80 calls; local estimate)',
     'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
   ]);
 });

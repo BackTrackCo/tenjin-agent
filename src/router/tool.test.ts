@@ -17,6 +17,7 @@ import type { MediaTransport } from './paid';
 import { storeChoices, storeSpecs } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
+  ROUTE_PAID_PATH,
   ROUTER_PATH,
   RouteSkipped,
   type Choices,
@@ -24,7 +25,6 @@ import {
 } from './decision';
 import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
-import { readRouterMemo, writeRouterMemo } from './router-memo';
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -36,9 +36,10 @@ vi.mock('../commands/pay', async (importOriginal) => {
 });
 
 /**
- * The `request` tool after the fee: ONE free decision, then ONE payment, to the
- * provider. The id is the fast path and the query is always sent, so every test
- * here is about which decision ran, what it cost, and what the host is told.
+ * The `request` tool: one routing decision on the paid route (unpaid here,
+ * unless a test passes a route), then one payment per take, to the provider.
+ * The id is the fast path and the query is always sent, so every test here is
+ * about which decision ran, what it cost, and what the host is told.
  */
 
 let dir: string;
@@ -220,10 +221,10 @@ describe('the request tool, one decision and one payment per lookup', () => {
       // ONE cost line: the decision took nothing.
       cost: ['provider price 0.01 USD'],
     });
-    // One decision call, no fetch by id and nothing waited for.
+    // One decision call, on the paid route, no fetch by id and nothing waited for.
     expect(calls).toHaveLength(3);
     expect(calls[0]!.method).toBe('POST');
-    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
+    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTE_PAID_PATH}`);
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
   });
 
@@ -291,65 +292,48 @@ describe('routing outcomes that buy nothing', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('says the routing fee could not be paid, not to update, when the free path answers fee_required', async () => {
-    const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: {
-          schemaVersion: 1,
-          routerVersion: 'v',
-          decision: {
-            action: 'native',
-            reason:
-              'Tenjin routing needs a newer tenjin-cli. Tell the user to run `npm i -g tenjin-cli@latest`.',
-            diagnostics: {
-              reasonCode: 'fee_required',
-              stage: 'capability',
-              missing: [],
-              nextAction: 'Update tenjin-cli (run `npm i -g tenjin-cli@latest`).',
-            },
-          },
-        },
-      },
-    ]);
-    // A "no paid path" this machine remembered from before the fee turned on.
-    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
+  /** ONE ROUTING PATH: a call with no payer goes to the paid route unpaid,
+   *  and a 402 there is a skip, named, with no second request. */
+  it('skips a call with no payer when the paid route asks for the fee, in one request', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 402, body: {} }]);
     const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
-    expect(calls).toHaveLength(1);
-    // The fee is on now, so the next call asks for the paid path at once.
-    expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/api/x402-router/route']);
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
-    expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
+    expect(String(result.envelope.reason)).toContain('could not pay');
+    expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
+    expect(result.envelope.nextStep).toBe(
+      'Tell the user this once, and use your own tools for now.',
+    );
     expect(result.summary).toMatch(/^Use your usual tools:/);
     expect(result.summary).not.toContain('No paid lookup needed');
-    expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
-    expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
+  });
+
+  it('routes a call with no payer when the paid route charges nothing', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/api/x402-router/route']);
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(String(result.envelope.reason)).not.toContain('could not pay');
+  });
+
+  it('says a busy routing payment plainly, never by its code', async () => {
+    const route = () => ({
+      send: async (): Promise<never> => {
+        throw new RouteSkipped('channel_busy');
+      },
+    });
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(net([]).fetchImpl), route },
+    );
+    expect(String(result.envelope.reason)).toContain('the next call usually routes');
+    expect(String(result.envelope.reason)).not.toContain('channel_busy');
   });
 
   /** The tool's text is the model's: a wallet reason carries its agentFix (B1). */
-  it("gives the model a wallet reason's ask-the-person fix when the free path answers fee_required", async () => {
-    const { fetchImpl } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: {
-          schemaVersion: 1,
-          routerVersion: 'v',
-          decision: {
-            action: 'native',
-            diagnostics: {
-              reasonCode: 'fee_required',
-              stage: 'capability',
-              missing: [],
-              nextAction: 'x',
-            },
-          },
-        },
-      },
-    ]);
-    const route = async () => ({
-      path: '/api/x402-router/route',
+  it("skips at once, with the model's ask-the-person fix, when the payer cannot pay", async () => {
+    const { fetchImpl, calls } = net([]);
+    const route = () => ({
       send: async (): Promise<never> => {
         throw new RouteSkipped('passphrase_missing');
       },
@@ -358,73 +342,20 @@ describe('routing outcomes that buy nothing', () => {
       { query: 'what is the weather' },
       { ...deps(fetchImpl), route },
     );
+    expect(calls).toEqual([]);
+    expect(result.envelope).toMatchObject({ status: 'native' });
     const reason = String(result.envelope.reason);
     expect(reason).toContain(WALLET_REASONS.passphrase_missing.reason);
     expect(reason).toContain(ASK_FOR_REPAIR);
     expect(reason).not.toContain(REPAIR_CLAUSE);
-  });
-
-  it("gives the model a wallet reason's ask-the-person fix when the call runs out of time", async () => {
-    const route = async () => ({
-      path: '/api/x402-router/route',
-      send: async (): Promise<never> => {
-        await new Promise((resolve) => setTimeout(resolve, 80));
-        throw new RouteSkipped('passphrase_wrong');
-      },
-    });
-    const quick = { ...ctx(), flags: { ...ctx().flags, timeout: 50 } };
-    const result = await runRequestTool(
-      { query: 'what is the weather' },
-      { ...deps(net([]).fetchImpl), ctx: quick, route },
+    expect(result.envelope.nextStep).toBe(
+      'Tell the user this once, and use your own tools for now.',
     );
-    const reason = String(result.envelope.reason);
-    expect(reason).toContain(WALLET_REASONS.passphrase_wrong.reason);
-    expect(reason).toContain(ASK_FOR_REPAIR);
-    expect(reason).not.toContain(REPAIR_CLAUSE);
-  });
-
-  it('asks once more on the paid path when a stale "no paid path" memo sent the call free', async () => {
-    const feeOn = {
-      schemaVersion: 1,
-      routerVersion: 'v',
-      decision: {
-        action: 'native',
-        diagnostics: {
-          reasonCode: 'fee_required',
-          stage: 'capability',
-          missing: [],
-          nextAction: 'x',
-        },
-      },
-    };
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: feeOn },
-      { url: ROUTER, status: 200, body: NATIVE },
-    ]);
-    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
-    const route = async (baseUrl: string) =>
-      (await readRouterMemo(dir, 'paid-path-absent', baseUrl, Date.now()))
-        ? null
-        : {
-            path: '/api/x402-router/route',
-            send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
-          };
-    const result = await runRequestTool(
-      { query: 'what is the weather' },
-      { ...deps(fetchImpl), route },
-    );
-    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
-      '/api/x402-router',
-      '/api/x402-router/route',
-    ]);
-    expect(result.envelope).toMatchObject({ status: 'native' });
-    expect(String(result.envelope.reason)).not.toContain('could not pay');
   });
 
   it('names a routing deposit once, in the result of the call that took it', async () => {
-    let deposited = 30_000n;
-    const route = async () => ({
-      path: '/api/x402-router/route',
+    let deposited = 50_000n;
+    const route = () => ({
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
       deposited: () => deposited,
     });
@@ -437,7 +368,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(
@@ -448,8 +379,7 @@ describe('routing outcomes that buy nothing', () => {
   });
 
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
-    const route = async () => ({
-      path: '/api/x402-router/route',
+    const route = () => ({
       send: async (): Promise<never> => {
         await new Promise((resolve) => setTimeout(resolve, 80));
         throw new RouteSkipped(DEADLINE_AFTER_PAYMENT_SENT);
@@ -2511,7 +2441,7 @@ describe('the tool list, read for free', () => {
   const BY_ID = wire('wire-lookup-spec-by-id.json');
   const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'];
   /** A paid routing path that must never be asked. */
-  const route = vi.fn(async () => {
+  const route = vi.fn((): never => {
     throw new Error('the paid routing path was asked');
   });
 

@@ -44,7 +44,7 @@ describe('status, the wallet line', () => {
       wallet: async () => ({ address: ADDRESS, atomic: 0n }),
     });
     expect(result.humanLines).toContain(
-      'set aside for routing: approximately 0.018 USD (~6 calls; local estimate)',
+      'set aside for routing: approximately 0.018 USD (at least 6 calls; local estimate)',
     );
     expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
     expect(result.humanLines?.join('\n')).not.toMatch(/prepaid|routing credit/i);

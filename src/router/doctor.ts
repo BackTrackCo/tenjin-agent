@@ -34,7 +34,7 @@ import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
 import {
   MAX_CHANNEL_DEPOSIT_ATOMIC,
-  ROUTING_FEE_ATOMIC,
+  ROUTING_FEE_CEILING_ATOMIC,
   SUGGESTED_FUND_USD,
   unpaid,
   usd,
@@ -324,8 +324,10 @@ export async function runRouterDoctor(
     env,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  // A probe the router answered ends the routing legs' backoff at once.
-  if (probe.status === 'ok') {
+  // A probe the router answered ends the routing legs' backoff at once: ok,
+  // or a warning about its 402 (a quote above the ceiling, or one this CLI
+  // cannot read).
+  if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
   } else {
@@ -645,7 +647,7 @@ async function sameDirAsAny(paths: string[], dir: string): Promise<boolean> {
 
 /**
  * The plugin: listed and enabled at this CLI's version and stamped by a
- * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still has a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -660,7 +662,7 @@ async function pluginCheck(
           name,
           status: 'warn',
           required: false,
-          detail: `${detail}; the settings install of an earlier release still routes here`,
+          detail: `${detail}; the settings install of an earlier release is still here`,
           fix: claude.meetsFloor
             ? `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`
             : `Run \`claude update\`, then \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
@@ -1293,7 +1295,7 @@ async function migrationCheck(
         detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
         fix: claude.meetsFloor
           ? `To load the plugin, ${NEW_SESSION_STEP}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
-          : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
+          : 'Run `claude update`, then `tenjin install`: until then the old entries stay.',
       };
 }
 
@@ -1342,9 +1344,11 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
 /**
  * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: `canPayRouting`, the
  * verdict the payer and the hooks reach on the same facts, in TODAY'S words
- * (S5). Never a failure: a call the fee cannot pay takes the free path.
+ * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
+ * tools run.
  *
- * - ready: today's ok row, byte for byte;
+ * - ready: ok, with the fee's terms; whether the router's live quote is
+ *   within the ceiling is the router check's to say;
  * - blocked by money or policy: today's `unpaid` detail, and today's fix
  *   (`fixes[why]`, else fee.ts's own);
  * - blocked because the wallet cannot sign: the WALLET_REASONS fragment and
@@ -1369,7 +1373,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
+      detail: `the router's quote, paid only when it is at most $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call, from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;
@@ -1484,8 +1488,8 @@ const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
  *
  * Exit codes keep their meaning (S11): no wallet, a wallet.json `describe`
  * cannot read, and an invalid TENJIN_WALLET_KEY fail as required, exactly as
- * before. A wallet that is there but cannot be unlocked only warns: lookups
- * still run on the free path, and the fix is a person's, never `agentFix`
+ * before. A wallet that is there but cannot be unlocked only warns: the
+ * native tools still run, and the fix is a person's, never `agentFix`
  * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
  * file (B1, S3). A check that could not answer is said as not checked.
  */
