@@ -72,7 +72,8 @@ export class FakeRouter {
       paid?: boolean;
       amount?: string;
       charge?: string;
-      minDeposit?: string;
+      /** The 402's `extra.minDeposit`; `null` leaves the field out. */
+      minDeposit?: string | null;
     } = {},
   ) {
     this.charge = BigInt(opts.charge ?? opts.amount ?? FEE);
@@ -85,7 +86,9 @@ export class FakeRouter {
       maxTimeoutSeconds: 15,
       extra: {
         // The hint the production server announces explicitly, whatever it quotes.
-        minDeposit: opts.minDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString(),
+        ...(opts.minDeposit === null
+          ? {}
+          : { minDeposit: opts.minDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString() }),
         receiverAuthorizer: privateKeyToAccount(generatePrivateKey()).address,
         withdrawDelay: 108_000,
         name: 'USDC',

@@ -4,6 +4,7 @@ import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/clien
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import {
   BatchSettlementEvmScheme,
+  parseAnnouncedMinDeposit,
   type BatchSettlementDepositStrategyContext,
 } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
@@ -25,8 +26,10 @@ import {
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
+  CHANNEL_DEPOSIT_ATOMIC,
   FEE_ABOVE_CEILING,
   feeRefusal,
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
   payerDir,
   refusedWhy,
   ROUTING_DEPOSIT_KEY,
@@ -70,7 +73,9 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
- *   and reserves it through the local spend authorizer, so it counts against
+ *   ({@link routingDepositAtomic}: the smallest of the 402's `extra.minDeposit`,
+ *   the wallet and the per-call limit, never below ten quoted fees) and
+ *   reserves it through the local spend authorizer, so it counts against
  *   the per-call limit, the rolling daily budget and the creator allowlist
  *   like any other; it counts from the moment it is sent, and only an
  *   answered 4xx or 5xx gives it back. The deposit is the spend: each fee
@@ -733,27 +738,39 @@ export class RoutingPayer {
 
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size and the refusals. It signs {@link routingDepositAtomic}: the SDK's
-   * ceiling (cap × multiplier) from a wallet holding twice it, else the
-   * server's hint. A wallet below the hint, or a spend the authorizer denies
-   * (the per-call limit, the daily budget, the creator allowlist), refuses it
-   * and the call is not paid.
+   * size and the refusals.
+   *
+   * THE SIZE is {@link routingDepositAtomic}: the smallest of the 402's
+   * `extra.minDeposit` ({@link CHANNEL_DEPOSIT_ATOMIC} when it has none), the
+   * wallet and the per-call limit, never below ten quoted fees, and inside the
+   * SDK's ceiling (cap × multiplier). A wallet below it is `wallet_low`; a
+   * spend the authorizer denies (the per-call limit, the daily budget, the
+   * creator allowlist) refuses it too, and the call is not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
-    const hint = BigInt(ctx.depositAmount);
+    const quote = BigInt(ctx.requestAmount);
     const left = call.until - this.now();
     if (left <= 0) this.refuse('busy');
     const payer = this.channel!.payer;
     const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
-    if (wallet !== null && wallet < hint) this.refuse('wallet_low');
+    const sdkMax = ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit);
     const amount = routingDepositAtomic({
+      hintAtomic:
+        parseAnnouncedMinDeposit(ctx.paymentRequirements.extra?.['minDeposit'], quote) ??
+        CHANNEL_DEPOSIT_ATOMIC,
+      quoteAtomic: quote,
       walletAtomic: wallet,
-      hintAtomic: hint,
-      maxAtomic: ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit),
+      perCallAtomic: policy.maxAutoSpendAtomic,
+      maxAtomic:
+        sdkMax !== null && sdkMax < MAX_CHANNEL_DEPOSIT_ATOMIC
+          ? sdkMax
+          : MAX_CHANNEL_DEPOSIT_ATOMIC,
+      neededAtomic: BigInt(ctx.minimumDepositAmount),
     });
+    if (wallet !== null && wallet < amount) this.refuse('wallet_low');
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',

@@ -30,26 +30,43 @@ import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 export const ROUTING_FEE_CEILING_ATOMIC = 3_000n;
 /** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
 export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
-/** The production server's default deposit hint ($0.05): the smallest
- *  deposit Tenjin signs, so a wallet below it is `wallet_low`. */
+/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`: the
+ *  production server's own, and the one doctor sizes from with no 402. */
 export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
+/** The fewest quoted fees a deposit covers, so a deposit's on-chain settle is
+ *  not spent on one or two calls. */
+export const DEPOSIT_FLOOR_FEES = 10n;
 
 /**
- * THE DEPOSIT TENJIN SIGNS: the ceiling only when the wallet holds twice it, so
- * the ceiling still stays in the wallet for the paid tools routing suggests,
- * which pay from the wallet, never the channel. Any smaller or unread balance,
- * or no ceiling, signs the server's hint. The caller refuses a wallet below it.
+ * THE DEPOSIT TENJIN SIGNS: the smallest of the server's hint
+ * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
+ * wallet holding more than the hint keeps the rest for the paid tools routing
+ * suggests, which pay from the wallet, never the channel; one between the
+ * floor and the hint deposits all it holds. Never below {@link DEPOSIT_FLOOR_FEES}
+ * quoted fees or what the next voucher needs, and never above the SDK's
+ * ceiling. A balance that could not be read bounds nothing. The caller
+ * refuses a wallet below the result (`wallet_low`), and the spend authorizer
+ * a limit below it.
  */
 export function routingDepositAtomic(o: {
-  walletAtomic: bigint | null;
   hintAtomic: bigint;
-  maxAtomic: bigint | null;
+  quoteAtomic: bigint;
+  walletAtomic: bigint | null;
+  perCallAtomic: bigint;
+  maxAtomic: bigint;
+  neededAtomic?: bigint;
 }): bigint {
-  if (o.walletAtomic === null || o.maxAtomic === null) return o.hintAtomic;
-  return o.walletAtomic >= 2n * o.maxAtomic ? o.maxAtomic : o.hintAtomic;
+  const least = (a: bigint, b: bigint) => (b < a ? b : a);
+  let amount = least(o.hintAtomic, o.perCallAtomic);
+  if (o.walletAtomic !== null) amount = least(amount, o.walletAtomic);
+  const floor = DEPOSIT_FLOOR_FEES * o.quoteAtomic;
+  const needed = o.neededAtomic ?? 0n;
+  if (amount < floor) amount = floor;
+  if (amount < needed) amount = needed;
+  return least(amount, o.maxAtomic);
 }
 
 /**
@@ -118,7 +135,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} Tenjin needs to set aside for routing`,
+    reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
