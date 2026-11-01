@@ -910,6 +910,10 @@ describe('RoutingPayer', () => {
     expect(skippedWhy(await routeOnce(p, fresh), fresh)).toBe('limit_below_deposit');
     expect(fresh.paidRequests()).toBe(0);
     expect(fresh.deposits).toBe(0);
+    // Only the first deposit counted.
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic).toBe(
+      CHANNEL_DEPOSIT_ATOMIC.toString(),
+    );
   });
 
   it('refuses a deposit the daily budget cannot take, and reserves nothing', async () => {

@@ -45,6 +45,7 @@ describe('routingDepositAtomic', () => {
 
   it.each<[string, Parameters<typeof size>[0], bigint]>([
     ['the hint, from a big wallet', {}, CHANNEL_DEPOSIT_ATOMIC],
+    ['the hint, from a $0.50 wallet', { wallet: 500_000n }, CHANNEL_DEPOSIT_ATOMIC],
     ['the hint, with the balance unread', { wallet: null }, CHANNEL_DEPOSIT_ATOMIC],
     ['a wallet below the hint, all of it', { quote: 1_000n, wallet: 20_000n }, 20_000n],
     ['a per-call limit below the hint', { quote: 1_000n, perCall: 15_000n }, 15_000n],
