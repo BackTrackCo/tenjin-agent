@@ -86,7 +86,7 @@ const HOOK_EXECUTE = {
     endpoint: 'https://pro-api.example.test/quotes',
     providerPriceAtomic: '10000',
     usage: 'the coins and currency',
-    hint: 'CoinMarketCap fits this. Call request({query: <the coins and currency>, id}) alone.',
+    hint: 'CoinMarketCap fits this. Call request({query: <the coins and currency>, id: "k3f9-abcd"}) alone.',
   },
 };
 
@@ -149,6 +149,7 @@ describe('one free decision', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
     ]);
   });
 
@@ -173,6 +174,7 @@ describe('one free decision', () => {
         'jobs',
         'headers',
         'note',
+        'tolerant',
         'bazaar',
       ]);
     }
@@ -208,10 +210,11 @@ describe('one free decision', () => {
 
   /**
    * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an execute
-   * with no contract came back to the host as a routine needs_input, and a hook
-   * answer quoting a price parsed as though the hook knew the task.
+   * with no contract came back to the host as a routine needs_input. A hook
+   * answer that also carries a contract is read as the hook's offer, the
+   * contract dropped as unknown, so no caller reads a price out of it.
    */
-  it('refuses a hook answer carrying a contract it cannot have', async () => {
+  it('reads a hook answer carrying a contract as the offer alone', async () => {
     // The gate names the service it chose; the CONTRACT is the tool call's,
     // because at gate time the task the host will run does not exist yet.
     const { fetchImpl } = net({
@@ -223,7 +226,10 @@ describe('one free decision', () => {
       { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    expect(outcome).toMatchObject({ status: 'failed' });
+    expect(outcome).toMatchObject({ status: 'decided' });
+    expect((outcome as { decision: { decision: object } }).decision.decision).toEqual(
+      HOOK_EXECUTE.decision,
+    );
   });
 
   it('refuses a tool execute with no contract', async () => {
@@ -267,12 +273,14 @@ describe('one free decision', () => {
   });
 
   /**
-   * STRICT, so a field in the wrong place fails loudly rather than being
-   * dropped into a shape check that then blames the whole response. Diagnostics
-   * nested one level deeper than the client expected shipped three times.
+   * TOLERANT OF WHAT IT DOES NOT KNOW, NEVER OF A KNOWN FIELD MISSING. A field
+   * in the wrong place is dropped as unknown, and the answer then lacks the
+   * field it needs, so it fails. Diagnostics nested one level deeper
+   * than the client expected shipped three times.
    */
-  it('refuses a body with a field in the wrong place', async () => {
-    const { fetchImpl } = net({ ...NATIVE, action: 'native' });
+  it('refuses a body with a required field in the wrong place', async () => {
+    const { diagnostics, ...decision } = NATIVE.decision;
+    const { fetchImpl } = net({ ...NATIVE, decision: { ...decision, detail: { diagnostics } } });
     const outcome = await requestDecision(
       'hook',
       { packet: packetForText('q') },

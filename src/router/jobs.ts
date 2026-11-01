@@ -70,7 +70,7 @@ export function answerState(
   }
   if (status === 202 || (opts.submit && job.always === true)) return 'running';
   const rule = job.running;
-  if ('httpStatus' in rule) return rule.httpStatus.includes(status) ? 'running' : 'done';
+  if (rule.httpStatus !== undefined) return rule.httpStatus.includes(status) ? 'running' : 'done';
   return fieldIn(json, rule.field, rule.values) ? 'running' : 'done';
 }
 
@@ -94,7 +94,7 @@ export function pollTarget(
   input: Json,
 ): PollRequestSpec | { problem: string; named?: string } {
   let raw: string | undefined;
-  if ('fixed' in job.pollUrl) raw = job.pollUrl.fixed;
+  if (job.pollUrl.fixed !== undefined) raw = job.pollUrl.fixed;
   else {
     const { field, header } = job.pollUrl;
     const fromBody = field !== undefined ? record(submit.json)[field] : undefined;

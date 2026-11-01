@@ -1138,6 +1138,8 @@ export async function paySpec(
       ...(spec.job !== undefined
         ? { job: { spec: spec.job, offerId: id, take: take?.n ?? 1, input: merged } }
         : {}),
+      ...(spec.timeoutS !== undefined ? { timeoutMs: spec.timeoutS * 1000 } : {}),
+      ...(spec.maxBytes !== undefined ? { maxBytes: spec.maxBytes } : {}),
     },
     admission,
     deps,
@@ -1217,6 +1219,10 @@ export interface ProviderCall {
   /** The spec's job: how this call is finished when the seller answers
    *  before its result is ready, and which take of which offer it is. */
   job?: CallJob;
+  /** The spec's own deadline and file cap (its `timeoutS` and `maxBytes`),
+   *  in place of the CLI's. */
+  timeoutMs?: number;
+  maxBytes?: number;
 }
 
 interface CallJob {
@@ -1318,6 +1324,8 @@ async function payAndDeliver(
             : admitAlone(call, admission.alone, deps),
         requestKey: call.requestKey,
         ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
+        ...(call.timeoutMs !== undefined ? { timeoutMs: call.timeoutMs } : {}),
+        ...(call.maxBytes !== undefined ? { maxBytes: call.maxBytes } : {}),
         printBody: true,
         ...(call.job !== undefined
           ? {
@@ -1587,7 +1595,15 @@ interface DeliveredMoney {
 /** What delivering needs of a call: a provider call, or a job's record of one. */
 type DeliverCall = Pick<
   ProviderCall,
-  'capabilityId' | 'provider' | 'label' | 'media' | 'parameters' | 'sent' | 'note' | 'project'
+  | 'capabilityId'
+  | 'provider'
+  | 'label'
+  | 'media'
+  | 'parameters'
+  | 'sent'
+  | 'note'
+  | 'project'
+  | 'maxBytes'
 > & { request: { url: string } };
 
 /**
@@ -1655,6 +1671,7 @@ async function deliverResult(
         deps,
         call.capabilityId,
         mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
+        call.maxBytes,
       )
     : { saved: [], capped: false, failed: false };
   if (linked.capped) unsaved ??= CAP_REACHED;
@@ -1742,13 +1759,16 @@ async function deliverResult(
 }
 
 /** The files a paid result links to, saved within what this call may still
- *  write. Best effort, like every save after the money moved. */
+ *  write, each under the spec's file cap when it names one. Best effort, like
+ *  every save after the money moved. */
 async function saveLinked(
   deps: RequestToolDeps,
   stem: string,
   urls: string[],
+  maxBytes: number | undefined,
 ): Promise<{ saved: string[]; capped: boolean; failed: boolean }> {
   return saveMedia(deps.ctx.dataDir, stem, urls, {
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
