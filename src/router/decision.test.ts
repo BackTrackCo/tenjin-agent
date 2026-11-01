@@ -6,14 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { packetForText } from './context';
-import { parseForTests, requestDecision, ROUTER_PATH } from './decision';
+import { parseForTests, requestDecision, ROUTE_PAID_PATH } from './decision';
 
 /**
- * THE DECISION IS FREE. No 402 on this route, no challenge to decode, no
- * signature and no ledger: a failure here costs the turn a routing answer and
- * nothing else. What is left to pin is the body that goes out, the shapes that
- * come back, and that a typed refusal arrives as its own code rather than as
- * "answered 400".
+ * THE DECISION, WITH NO PAYER. These calls go to the paid route unpaid, as a
+ * router with the fee off answers them: no 402, no challenge to decode, no
+ * signature and no ledger (the payer's are `routing-payer.test.ts`). What is
+ * left to pin is the body that goes out, the shapes that come back, and that
+ * a typed refusal arrives as its own code rather than as "answered 400".
  */
 
 let dir: string;
@@ -106,7 +106,7 @@ const TOOL_EXECUTE = {
   },
 };
 
-describe('one free decision', () => {
+describe('one decision, on the paid route', () => {
   it('sends the query and the packet, and nothing about money', async () => {
     const { fetchImpl, calls } = net(TOOL_EXECUTE);
     const outcome = await requestDecision(
@@ -117,11 +117,11 @@ describe('one free decision', () => {
 
     expect(outcome.status).toBe('decided');
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe(`${BASE}${ROUTER_PATH}`);
+    expect(calls[0]!.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
     expect(calls[0]!.method).toBe('POST');
     const body = calls[0]!.body as Record<string, unknown>;
     expect(body).toMatchObject({ schemaVersion: 1, query: 'BTC and ETH price' });
-    // One call, and no 402 probe before it: this route is free.
+    // One call, and the body carries no payment: that is the payer's, if any.
     expect(JSON.stringify(body)).not.toContain('billing');
   });
 

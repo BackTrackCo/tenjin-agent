@@ -136,7 +136,7 @@ describe('walletClearedSentence', () => {
     ['keychain_locked', WALLET_UNLOCKED],
     ['env_passphrase_wrong', WALLET_UNLOCKED],
     ['budget_reached', null],
-    ['fee_required', null],
+    ['no_payer', null],
     ['payment_failed', null],
   ])('%s', (why, expected) => {
     expect(walletClearedSentence(why)).toBe(expected);
