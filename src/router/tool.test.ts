@@ -14,7 +14,7 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeChoices, storeSpecs } from './specs';
+import { readSpec, storeChoices, storeSpecs } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTER_PATH,
@@ -1043,9 +1043,28 @@ describe('a discovered service', () => {
       },
     ]);
 
-  it('hands the host the server line and the listing, and pays nothing', async () => {
+  it("shows an open-Bazaar answer's spec under its id, keeps it, and pays nothing", async () => {
     const auth = authorizer();
     const answer = await wire('wire-lookup-discovered.json');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'generate a short whoosh sound effect' },
+      deps(fetchImpl, auth),
+    );
+    const id = (answer.decision as { id: string }).id;
+    expect(result).toMatchObject({ isError: false, envelope: { status: 'spec', id } });
+    expect(await readSpec(dir, id)).toMatchObject({ id, provider: 'BlockRun' });
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  /** An answer with no specs, as a router before specs sent: the server's
+   *  line and the seller's listing, and nothing kept to run. */
+  it('hands the host the server line and the listing, and pays nothing', async () => {
+    const auth = authorizer();
+    const wired = await wire('wire-lookup-discovered.json');
+    const bare = { ...(wired.decision as Record<string, unknown>) };
+    delete bare.specs;
+    const answer = { ...wired, decision: bare };
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool(
       { query: 'generate a short whoosh sound effect' },
@@ -1063,7 +1082,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1210,6 +1229,29 @@ describe('a discovered service', () => {
     ).toBe(true);
     expect(savedTo).toMatch(/-[0-9a-f]{8}\.mp3$/);
     expect(new Uint8Array(await readFile(savedTo))).toEqual(audio);
+  });
+
+  /** A SPEC'S FILE CAP holds the body it brings back: one over it is not kept. */
+  it("keeps no binary body over the spec's own maxBytes", async () => {
+    await kept({ maxBytes: 4 });
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0xff, 0xfb, 0x90]);
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: null,
+        raw: audio,
+        headers: { 'content-type': 'audio/mpeg' },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).not.toBe('fulfilled');
+    expect(String(result.envelope.reason)).toContain('over the 4-byte cap');
+    expect(await readdir(join(dir, 'downloads')).catch(() => [])).toEqual([]);
   });
 
   /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
@@ -2055,7 +2097,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
       harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
@@ -2142,7 +2184,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
       harness: 'claude',
     });
   });
@@ -2509,7 +2551,7 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'];
+  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'];
   /** A paid routing path that must never be asked. */
   const route = vi.fn(async () => {
     throw new Error('the paid routing path was asked');
@@ -2613,7 +2655,9 @@ describe('the tool list, read for free', () => {
   });
 
   it('reads an answer it cannot parse as a failure, with nothing paid', async () => {
-    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: { ...BROWSE, surprise: 1 } }]);
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: { ...BROWSE, schemaVersion: 2 } },
+    ]);
     const result = await runRequestTool({ browse: 'prices' }, deps(fetchImpl));
     expect(result).toMatchObject({
       isError: true,
@@ -2662,6 +2706,26 @@ describe('the tool list, read for free', () => {
       capabilityId: 'cmc-quotes',
       label: 'CoinMarketCap quotes',
     });
+  });
+
+  it('skips a spec that needs a feature this build lacks, by name, and keeps nothing', async () => {
+    const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
+    const served = {
+      ...BY_ID,
+      decision: { ...decision, spec: { ...decision.spec, requires: ['streaming'] } },
+    };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: served }]);
+    const result = await runRequestTool({ tool: 'cmc-quotes' }, deps(fetchImpl));
+    expect(result).toMatchObject({
+      isError: false,
+      envelope: { status: 'native', reasonCode: 'requires_unmet', missing: ['streaming'] },
+    });
+    expect(result.summary).toContain('`streaming`');
+    const ran = await runRequestTool(
+      { id: decision.id, input: { symbol: 'BTC' } },
+      deps(net([]).fetchImpl),
+    );
+    expect(ran.envelope).toMatchObject({ status: 'needs_input' });
   });
 
   it("passes on the server's needs_input for a row with no spec, and keeps nothing", async () => {

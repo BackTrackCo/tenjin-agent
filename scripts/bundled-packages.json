@@ -21,6 +21,7 @@
   "fast-string-width",
   "fast-uri",
   "fast-wrap-ansi",
+  "hash-wasm",
   "json-schema-traverse",
   "lean-qr",
   "ox",
