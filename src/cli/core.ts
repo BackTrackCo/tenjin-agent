@@ -351,7 +351,7 @@ Examples:
   addGlobalFlags(wallet.command('fund [amountUsd]'))
     .summary('fund this wallet through a checkout link for your region')
     .description(
-      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. In the US: Apple Pay or Google Pay with no Coinbase account. Elsewhere: your Coinbase account. The link moves no money: a human completes the payment.',
+      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. The link moves no money: a human completes the payment.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
     .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')
