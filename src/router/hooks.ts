@@ -1025,8 +1025,8 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
  * arm would only withhold costs no decision and writes no offer row.
  * `passFree` is the pre-call arm's too: a free offer comes back marked `free`
  * before the spend policy, the wallet or `repeated` is asked, since it is
- * never a redirect, and the arm closes its footer: shown when it kept the
- * offer's line, withheld when it did not.
+ * never a redirect, and the arm closes its footer: noted when it kept the
+ * offer's line for the after-call arm, withheld when it did not.
  */
 async function routeNativeCall(
   event: Omit<NativeCall, 'tool' | 'pending'>,
@@ -1047,7 +1047,7 @@ async function routeNativeCall(
   } = {},
 ): Promise<
   | { offer: OfferDecision; free?: undefined }
-  | { offer: ExecuteDecision; free: true; close: (shown: boolean) => Promise<void> }
+  | { offer: ExecuteDecision; free: true; close: (noted: boolean) => Promise<void> }
   | { offer: null; outcome: NativeHookOutcome }
 > {
   const { nativeOutcome, repeated } = opts;
@@ -1127,8 +1127,8 @@ async function routeNativeCall(
     };
   }
   if (opts.passFree === true && isFree(outcome)) {
-    const close = (shown: boolean) =>
-      footer.close(outcome, shown ? undefined : { withheld: 'free lookup, call runs' });
+    const close = (noted: boolean) =>
+      footer.close(outcome, noted ? { noted: true } : { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, close };
   }
   const vetted = await vetOffer(
@@ -1184,8 +1184,9 @@ async function routeNativeCall(
  * `delivery: "note"` the server's line is kept, once per query per agent in
  * five minutes, and the after-call arm shows it once the search has run; its
  * footer closes as a shown offer, so the lookup the agent may call resolves to
- * this session. Any other free offer, and any WebFetch, just runs: the server
- * owns which offer is a note.
+ * this session, but its untaken record waits for the after-call arm to show
+ * it. Any other free offer, and any WebFetch, just runs: the server owns which
+ * offer is a note.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1224,7 +1225,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       routed.offer.delivery === 'note' &&
       toolUseId !== undefined &&
       (await claimNote(deps.dataDir, session, event.agentId, pending.query, now)) &&
-      (await markNoted(deps.dataDir, session, toolUseId, { offerId: id, line: hint }, now));
+      (await markNoted(
+        deps.dataDir,
+        session,
+        toolUseId,
+        { offerId: id, line: hint, ids: offeredIds(routed.offer) },
+        now,
+      ));
     await routed.close(noted);
     return {
       response: null,
@@ -1353,7 +1360,8 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
  * A SEARCH THE PRE-CALL ARM NOTED A FREE LOOKUP ON gets that line now, read
  * from disk, framed as the option it is, under this event's own name, and the
  * router is not asked: the note already names the service it picked for this
- * search, so a call shows one line at most. An interrupted call gets nothing,
+ * search, so a call shows one line at most, and its untaken record is kept
+ * here, where it is shown (`untaken.ts`). An interrupted call gets nothing,
  * since the agent never read a result for it to follow.
  *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
@@ -1376,6 +1384,16 @@ export async function runShortfallHook(
         );
   if (note !== null) {
     if (event.interrupted === true) return { response: null };
+    await noteShown(
+      deps.dataDir,
+      {
+        id: note.offerId,
+        ids: note.ids ?? [],
+        harness: hostOf(deps),
+        scope: offerScope(localSession(event.sessionId, deps), event.agentId),
+      },
+      deps.now?.(),
+    );
     return {
       response: {
         hookSpecificOutput: {
@@ -1553,7 +1571,9 @@ export async function runDelegationHook(
  * also leaves the id-to-session binding the tool resolves its progress through,
  * the request specs the line names, which the tool reads by id, and its
  * untaken record (`untaken.ts`), scoped to `shownTo`: the agent whose native
- * call would ignore it, or null for a delegated task's.
+ * call would ignore it, or null for a delegated task's. A noted line is not
+ * shown yet, so it gets no untaken record here: the after-call arm keeps one
+ * when it shows the line.
  */
 async function openFooter(
   deps: HookDeps,
@@ -1563,8 +1583,12 @@ async function openFooter(
 ): Promise<{
   /** Why this call's routing fee was not paid, when it was not. */
   unpaid: (why: string) => void;
-  /** `withheld` is why an `execute` was not shown, in the footer's words. */
-  close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
+  /** `withheld` is why an `execute` was not shown, in the footer's words;
+   *  `noted` is a free line the after-call arm shows once the search has run. */
+  close: (
+    decision: HookDecision | null,
+    opts?: { withheld?: string; noted?: true },
+  ) => Promise<void>;
 }> {
   sessionId = localSession(sessionId, deps);
   const now = (): number => deps.now?.() ?? Date.now();
@@ -1601,16 +1625,18 @@ async function openFooter(
       );
       if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
-        await noteShown(
-          deps.dataDir,
-          {
-            id: decision.id,
-            ids: offeredIds(decision),
-            harness: hostOf(deps),
-            ...(shownTo !== null ? { scope: offerScope(sessionId, shownTo.agentId) } : {}),
-          },
-          now(),
-        );
+        if (opts?.noted !== true) {
+          await noteShown(
+            deps.dataDir,
+            {
+              id: decision.id,
+              ids: offeredIds(decision),
+              harness: hostOf(deps),
+              ...(shownTo !== null ? { scope: offerScope(sessionId, shownTo.agentId) } : {}),
+            },
+            now(),
+          );
+        }
         // The line is shown, so the specs of the services it names are what
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.

@@ -22,7 +22,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
-import { readChoices, readSpec } from './specs';
+import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import {
   claimRedirect,
@@ -32,6 +32,7 @@ import {
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
+import { claimIgnored, offerScope } from './untaken';
 import type { SignVerdict } from './eligibility';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { writePassphraseRecord } from '../lib/passphrase-record';
@@ -2772,6 +2773,7 @@ describe('a free lookup noted after a search', () => {
       at: expect.any(Number) as number,
       offerId: ID,
       line: NOTE_HINT,
+      ids: [ID],
     });
     expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
       id: ID,
@@ -2824,6 +2826,26 @@ describe('a free lookup noted after a search', () => {
     });
     expect(cut.out).toEqual({ response: null });
     expect(cut.calls).toHaveLength(0);
+  });
+
+  it('keeps the line untaken from when the after-call arm shows it, never on an interrupt', async () => {
+    const main = offerScope('sess-1', undefined);
+    await before('next.js middleware matcher', 'toolu_1');
+    // Not shown yet: a native call the agent starts meanwhile ignored nothing.
+    expect(await claimIgnored(dir, { now: Date.now(), nativeScope: main })).toEqual([]);
+    await after('next.js middleware matcher', 'toolu_1');
+    expect(await claimIgnored(dir, { now: Date.now(), nativeScope: main })).toEqual([
+      { id: ID, harness: 'claude', reason: 'native_after_offer' },
+    ]);
+    // A search cut short shows nothing, so nothing is reported for it, ever.
+    await before('zod v4 coerce', 'toolu_2');
+    await after('zod v4 coerce', 'toolu_2', undefined, {
+      hook_event_name: 'PostToolUseFailure',
+      tool_response: undefined,
+      error: 'Interrupted',
+      is_interrupt: true,
+    });
+    expect(await claimIgnored(dir, { now: Date.now() + SPEC_TTL_MS + 1 })).toEqual([]);
   });
 
   it('gives a noted search that came back short the note, and asks the router nothing', async () => {
