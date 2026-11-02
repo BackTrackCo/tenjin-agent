@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "why does this fail? see https://github.com/acme/widgets/pull/12",
+      "quoted": ["Error: connect ECONNREFUSED 127.0.0.1:5432\n    at TCPConnectWrap.afterConnect"]
+    },
+    "history": [],
+    "literalUrls": ["https://github.com/acme/widgets/pull/12"],
+    "ownUrls": ["https://github.com/acme/widgets/pull/12"],
+    "historyStatus": "ok"
+  }
+}

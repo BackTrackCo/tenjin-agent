@@ -228,6 +228,20 @@ describe('the request tool, one decision and one payment per lookup', () => {
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
   });
 
+  /** "Help improve routing" rides the tool form as it rides the hook's. */
+  it('says improve on the query only while router.improve is on', async () => {
+    for (const improve of [true, false]) {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000', router: { improve } }),
+      );
+      const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+      await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+      const body = JSON.parse(calls[0]!.body ?? '{}') as Record<string, unknown>;
+      expect(body.improve).toBe(improve ? true : undefined);
+    }
+  });
+
   it('works the same with no id at all', async () => {
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: decision() },

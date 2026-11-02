@@ -29,7 +29,14 @@ export const RouterLayerSchema = z.object({
   context: z.enum(ROUTER_CONTEXTS).optional(),
 });
 export type RouterLayer = z.infer<typeof RouterLayerSchema>;
-const RouterConfigSchema = RouterLayerSchema.required();
+/**
+ * The global file's router block: the project keys, and `improve`, "Help
+ * improve routing", which only this file carries. It is the person's consent
+ * for the router to keep the masked text of the turns it sees, so a file a
+ * repository commits can never give it ({@link parseRouterLayer} drops it).
+ */
+const RouterGlobalSchema = RouterLayerSchema.extend({ improve: z.boolean().optional() });
+const RouterConfigSchema = RouterGlobalSchema.required();
 
 /**
  * The `router` block of one project file's parsed JSON, and nothing else: an
@@ -118,6 +125,12 @@ const InstallConfigSchema = z.object({
    * project's settings file no longer carries our entries.
    */
   routerProjects: z.array(z.string()),
+  /**
+   * Install has put the "Help improve routing" question to this machine's
+   * person once: asked at a terminal, or handed to the agent that ran it. A
+   * later install or update never asks again, whatever the answer was.
+   */
+  improveAsked: z.boolean(),
 });
 
 /**
@@ -167,7 +180,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     install: InstallConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
-    router: RouterLayerSchema.passthrough().optional(),
+    router: RouterGlobalSchema.passthrough().optional(),
     experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
@@ -228,9 +241,9 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: PRODUCTION_ORIGIN,
   rpcUrl: DEFAULT_RPC_URL,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
-  install: { routerProjects: [] },
+  install: { routerProjects: [], improveAsked: false },
   update: { mode: 'auto' },
-  router: { enabled: true, context: 'session' },
+  router: { enabled: true, context: 'session', improve: false },
   experimental: { bazaar: 'off' },
 };
 
@@ -263,7 +276,7 @@ export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
 export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the router block. */
-export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
+export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context', 'router.improve'] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
 
 export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
@@ -323,11 +336,13 @@ export async function loadConfig(dir: string): Promise<Config> {
     ...raw,
     install: {
       routerProjects: raw.install?.routerProjects ?? CONFIG_DEFAULTS.install.routerProjects,
+      improveAsked: raw.install?.improveAsked ?? CONFIG_DEFAULTS.install.improveAsked,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     router: {
       enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
       context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
+      improve: raw.router?.improve ?? CONFIG_DEFAULTS.router.improve,
     },
     experimental: {
       bazaar: raw.experimental?.bazaar ?? CONFIG_DEFAULTS.experimental.bazaar,

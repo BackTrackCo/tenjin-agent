@@ -65,8 +65,8 @@ describe('loadConfig', () => {
     expect(raw).toMatchObject(legacy);
     const cfg = await loadConfig(dir);
     expect(cfg.maxAutoSpend).toBe('500000');
-    expect(cfg.router).toEqual({ enabled: false, context: 'session' });
-    expect(cfg.install).toEqual({ routerProjects: [] });
+    expect(cfg.router).toEqual({ enabled: false, context: 'session', improve: false });
+    expect(cfg.install).toEqual({ routerProjects: [], improveAsked: false });
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
     expect(s.maxAutoSpend).toEqual({ value: '500000', source: 'file' });
@@ -181,8 +181,8 @@ describe('writeConfig', () => {
 
 describe('install block', () => {
   it('defaults to no wired project', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [] });
-    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [] });
+    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [], improveAsked: false });
+    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [], improveAsked: false });
   });
 
   it('reads back the wired projects', async () => {
@@ -215,15 +215,19 @@ describe('parseOnOffFlag', () => {
 });
 
 describe('router block: the switch and the context', () => {
-  it('registers two dotted keys and no scalar', () => {
-    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context']);
+  it('registers three dotted keys and no scalar', () => {
+    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context', 'router.improve']);
     expect(CONFIG_KEYS as string[]).not.toContain('router');
-    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session' });
+    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session', improve: false });
   });
 
   it('loads a partial block over the defaults and keeps an unknown subkey', async () => {
     await writeFile(configFile(), JSON.stringify({ router: { context: 'turn', later: 1 } }));
-    expect((await loadConfig(dir)).router).toEqual({ enabled: true, context: 'turn' });
+    expect((await loadConfig(dir)).router).toEqual({
+      enabled: true,
+      context: 'turn',
+      improve: false,
+    });
     expect((await loadRawConfig(dir)).router).toEqual({ context: 'turn', later: 1 });
   });
 

@@ -285,6 +285,23 @@ describe('the prompt hook', () => {
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
+  /** "HELP IMPROVE ROUTING", ON IN THE GLOBAL FILE, rides as one flag; off
+   *  (the default, above) the body is unchanged. */
+  it('says improve when the person turned on Help improve routing', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, router: { improve: true } }),
+    );
+    const { fetchImpl, calls } = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect((calls[0] as { body: Record<string, unknown> }).body.improve).toBe(true);
+  });
+
   /**
    * A HINT TOWARD A CALL THAT STOPS IS NOT SENT. Over the cap or past the
    * budget, `request` answers `needs_approval`, and a model sent there stops

@@ -918,14 +918,7 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1111,14 +1104,7 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1504,14 +1490,7 @@ export async function runDelegationHook(
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
   const footer = await openFooter(deps, event.sessionId, 'delegate');
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1648,11 +1627,12 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
-  config: PartialConfig,
+  router: RouterHere,
   sessionId: string,
   deadline: number,
   unpaid?: (why: string) => void,
 ): Promise<HookDecision | null> {
+  const { config } = router;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1671,6 +1651,7 @@ async function decide(
       baseUrl,
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
       harness: hostOf(deps),
+      improve: router.settings.improve.value,
       timeoutMs: Math.max(0, deadline - now),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== undefined ? { route } : {}),
@@ -1775,6 +1756,12 @@ function pendingCallOf(
   return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
 }
 
+/** `router.*` for one event's directory, and the global config it read. */
+interface RouterHere {
+  settings: RouterSettings;
+  config: PartialConfig;
+}
+
 /**
  * `router.*` for the event's directory with the global config it came from,
  * which is read ONCE per event and also names the base URL; null when the
@@ -1783,10 +1770,7 @@ function pendingCallOf(
  * machine. A config that cannot be read is off too, since a switch the user
  * set must not fail open.
  */
-async function routerFor(
-  cwd: string | undefined,
-  deps: HookDeps,
-): Promise<{ settings: RouterSettings; config: PartialConfig } | null> {
+async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<RouterHere | null> {
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   try {
     const config = await loadRawConfig(deps.dataDir);

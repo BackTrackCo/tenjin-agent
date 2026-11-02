@@ -23,13 +23,35 @@ any model call. The free route `POST /api/x402-router` answers the routing forms
 and `{query, id?}` with `native` and `fee_required` first, with or without `spec` (The paid path,
 below). The outcome report is the one form that carries no `accepts`.
 
-| call    | request                                                        | answer                                                                                                                      |
-| ------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts}`      | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
-| tool    | `{schemaVersion, query, id?, accepts}`                         | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
-| browse  | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
-| by id   | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
+| call    | request                                                             | answer                                                                                                                      |
+| ------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
+| tool    | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
+| browse  | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
+| by id   | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
+| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
+| forget  | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
+
+`improve: true` rides the hook and tool forms only while the person has turned
+on "Help improve routing" (`router.improve`, off by default, asked once at
+install): the server then keeps that call's sealed packet beside its decision
+row, with no expiry. The `forget` form, on the free route, is sent once when
+the person turns it off: the server deletes every packet it kept for the
+request's `tenjin-install-id` header, and with no install id deletes nothing.
+Neither carries `accepts`.
+
+An outcome's `status` is `ignored` for an offer the host was shown and never
+took, with `reason` `expired` (its 15 minutes ran out with no `request` call
+naming it) or `native_after_offer` (the same agent in the same session made a
+native WebSearch or WebFetch call while it was untaken). The client never
+sends `result`; the server keeps reading it from custom setups.
+
+`packet.current.quoted` holds blocks the harness marked as pasted, moved out of
+`current.text` so the text is the user's own words; a message that would be
+left empty is sent unchanged, with no `quoted`. `packet.ownUrls` holds the
+entries of `literalUrls` the host can open with its own tools: links on the
+host of the current repository's git remote, and the harness's own links
+(`claude.ai` for Claude Code).
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
 catalog task id, such as `web research`, at most 64 characters),
@@ -391,6 +413,10 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
 | `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
 | `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
+| `wire-hook-request-improve.json`           | the hook from an install that turned on "Help improve routing": `improve`                 |
+| `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`     |
+| `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                    |
+| `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                              |
 
 Two rules the fixtures exist to hold:
 
@@ -417,6 +443,9 @@ Take these from here; do not re-derive them.
 | `packet.history`                | 6 messages                                                                                                                                                                                                  |
 | message `text`                  | 16000 characters                                                                                                                                                                                            |
 | `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                             |
+| `packet.ownUrls`                | optional; 8 entries, each 2000 characters, each one of `literalUrls`                                                                                                                                        |
+| `packet.current.quoted`         | optional; 1 to 8 blocks, each 1 to 16000 characters, inside the packet's 16384 bytes                                                                                                                        |
+| `improve`                       | optional; `true` only, on the hook and tool forms                                                                                                                                                           |
 | `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                          |
 | `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                |
 | `accepts`                       | up to 16 strings, each 1-32 characters; `spec` is required; the server also reads `catalog`, `label`, `fields`, `jobs`, `discovered` (the list), `bazaar` (the open Bazaar) and `choices` (compare options) |
