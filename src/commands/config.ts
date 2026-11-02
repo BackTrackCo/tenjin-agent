@@ -460,6 +460,20 @@ export async function persistRouterProject(
   });
 }
 
+/**
+ * Record that install put the "Help improve routing" question to this
+ * machine's person, and the answer when they gave one at a terminal: a yes
+ * turns `router.improve` on; a no, or a question handed to an agent, leaves
+ * the key as it was (off unless set). One locked write.
+ */
+export async function persistImproveAnswer(dir: string, on: boolean | undefined): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    install: { ...existing.install, improveAsked: true },
+    ...(on === true ? { router: { ...existing.router, improve: true } } : {}),
+  }));
+}
+
 /** Absent-only automatic router defaults; defined beside the spend question that shows them. */
 export { ROUTER_DEFAULTS, type RouterLimits };
 

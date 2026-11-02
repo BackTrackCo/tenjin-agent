@@ -572,6 +572,8 @@ function host(config: unknown = {}, rt: Partial<RuntimeSetup> = {}) {
   const steps: string[] = [];
   const deps: CodexSetupDeps = {
     homeDir: join(dir, 'home'),
+    // No harness: the suite may itself run inside one.
+    env: {},
     runtime: async () => ({
       state: 'skipped',
       root: join(dir, 'runtime'),
@@ -657,6 +659,24 @@ describe('Codex install, uninstall and doctor', () => {
     const { deps } = host();
     const out = await runCodexInstall({}, ctx(), deps);
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+  });
+
+  /** The Claude install's Help improve routing question, once per machine. */
+  it('hands an agent in Codex the Help improve routing question once, after the spend answer', async () => {
+    await writeFile(join(dir, 'config.json'), '{}');
+    const { deps } = host();
+    const env = { CODEX_SESSION_ID: 'thread-1' };
+    const steps = async (args: Parameters<typeof runCodexInstall>[0]) =>
+      (
+        (await runCodexInstall(args, ctx(), { ...deps, env })).data as {
+          nextSteps: { id: string; options: { command: string | null }[] }[];
+        }
+      ).nextSteps;
+    expect((await steps({})).map((q) => q.id)).toEqual(['spend']);
+    const answered = await steps({ yes: true });
+    expect(answered.map((q) => q.id)).toEqual(['improve']);
+    expect(answered[0]!.options[0]!.command).toBe('tenjin config set router.improve true');
+    expect(await steps({ yes: true })).toEqual([]);
   });
 
   it('writes the limits the two flags name, and asks nothing', async () => {
