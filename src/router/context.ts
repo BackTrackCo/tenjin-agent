@@ -38,6 +38,8 @@ export const MAX_MESSAGE_CHARS = 16_000;
 const MAX_TRANSCRIPT_BYTES = 4_000_000;
 const MAX_LITERAL_URLS = 8;
 const MAX_LITERAL_URL_CHARS = 2_000;
+/** The server's caps on `current.quoted`: blocks, each one a message's size. */
+const MAX_QUOTED = 8;
 const MAX_PENDING_CHARS = 4_000;
 /** The server's cap on a native outcome's error text. */
 const MAX_OUTCOME_ERROR_CHARS = 1_000;
@@ -48,6 +50,11 @@ export type PacketRole = 'user' | 'assistant';
 export interface PacketMessage {
   role: PacketRole;
   text: string;
+  /**
+   * On `current` only: blocks the harness marked as pasted, moved out of
+   * `text` so the text is the user's own words ({@link splitPasted}).
+   */
+  quoted?: string[];
 }
 
 export type HistoryStatus = 'ok' | 'unavailable';
@@ -144,6 +151,13 @@ export function fit(packet: Packet): Packet {
   while (next.literalUrls.length > 0 && size(next) > MAX_PACKET_BYTES) {
     next.literalUrls = next.literalUrls.slice(0, -1);
   }
+  // Then what the user pasted, last block first: it is context for the task,
+  // and the task is the user's own words.
+  while ((next.current.quoted?.length ?? 0) > 0 && size(next) > MAX_PACKET_BYTES) {
+    const quoted = next.current.quoted!.slice(0, -1);
+    const { role, text } = next.current;
+    next.current = quoted.length > 0 ? { role, text, quoted } : { role, text };
+  }
   while (size(next) > MAX_PACKET_BYTES && next.current.text.length > 1) {
     const over = size(next) - MAX_PACKET_BYTES;
     const keep = Math.max(1, next.current.text.length - Math.max(over, 1));
@@ -166,7 +180,8 @@ export interface Sealed {
 
 /**
  * THE ONE OUTBOUND CHOKEPOINT. Every string that leaves in a hook packet is
- * masked here, `current`, `history`, `literalUrls` and the pending call alike,
+ * masked here, `current` and its `quoted` blocks, `history`, `literalUrls` and
+ * the pending call alike,
  * and only then bounded ({@link maskWithin}): a secret cut in half by a bound
  * before the mask no longer matches its row, and its first half would leave. The server stores
  * the packet against the id, so a secret here is a secret in its database.
@@ -182,9 +197,17 @@ export function seal(packet: Packet): Sealed {
   const bound = (text: string): string => maskWithin(text, MAX_MESSAGE_CHARS).text;
   const sealedCurrent = maskWithin(packet.current.text, MAX_MESSAGE_CHARS);
   const current = sealedCurrent.text;
+  const quoted = (packet.current.quoted ?? [])
+    .slice(0, MAX_QUOTED)
+    .map(bound)
+    .filter((block) => block.length > 0);
   const outcome = packet.nativeOutcome;
   const sealed = fit({
-    current: { role: packet.current.role, text: current.length > 0 ? current : '(no task text)' },
+    current: {
+      role: packet.current.role,
+      text: current.length > 0 ? current : '(no task text)',
+      ...(quoted.length > 0 ? { quoted } : {}),
+    },
     history: packet.history
       .slice(-MAX_HISTORY)
       .map((message) => ({ role: message.role, text: bound(message.text) }))
@@ -282,11 +305,73 @@ export async function buildPromptPacket(
   const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
   const read = await readHistory(transcriptPath, { sessionId, harness });
   return {
-    current: { role: 'user', text },
+    current: withPasted({ role: 'user', text }, harness),
     history: read ?? [],
     literalUrls: literalUrlsIn(text),
     historyStatus: read === null ? 'unavailable' : 'ok',
   };
+}
+
+/**
+ * WHAT THE USER PASTED IS NOT WHAT THEY ASKED. A block the harness itself
+ * marks as pasted goes to `quoted`, so the gate reads the user's own words as
+ * the instruction and the paste as context. Only a harness's own mark counts:
+ * nothing is guessed from what the text looks like, and a message the move
+ * would leave empty stays as it was.
+ *
+ * WHICH HARNESS MARKS A PASTE (read 2026-11-01). Claude Code, in the terminal
+ * (2.1.316) and the desktop app, expands a paste into the prompt and the
+ * transcript with no mark at all (its `[Pasted text #N]` placeholders live
+ * only in its own prompt-recall file, written after the hook can run), so its
+ * messages are unchanged. Codex's terminal expands its `[Pasted Content N
+ * chars]` placeholder the same way. The Codex desktop app (0.162 to 0.164)
+ * saves a long paste as a file and writes the message as its own sections:
+ * `# Files pasted by the user:`, one `## "<the paste's opening…>": <file>`
+ * line per paste, and the user's words after `## My request:`. Those opening
+ * lines are the blocks moved here, without the local path.
+ */
+export function splitPasted(
+  text: string,
+  harness: Harness,
+): { text: string; quoted: string[] } | null {
+  if (harness !== 'codex') return null;
+  const lines = text.split('\n');
+  const start = lines.indexOf(PASTED_HEADER);
+  const request = lines.indexOf(REQUEST_HEADER, start + 1);
+  if (start === -1 || request === -1) return null;
+  // The section runs to the next of the app's top-level headers, or the request.
+  const after = lines.slice(start + 1, request).findIndex((line) => line.startsWith('# '));
+  const end = after === -1 ? request : start + 1 + after;
+  const quoted: string[] = [];
+  for (const line of lines.slice(start + 1, end)) {
+    if (line.trim().length === 0) continue;
+    const entry = PASTED_ENTRY.exec(line);
+    // A line the app's own shape does not explain: nothing is moved.
+    if (entry === null) return null;
+    quoted.push(entry[1]!);
+  }
+  const words = lines
+    .slice(request + 1)
+    .join('\n')
+    .trim();
+  if (quoted.length === 0 || words.length === 0) return null;
+  // With no other section of the app's beside it, the text is the words alone.
+  const others = [...lines.slice(0, start), ...lines.slice(end, request)].join('\n').trim();
+  const rest = [lines.slice(0, start).join('\n').trim(), lines.slice(end).join('\n').trim()]
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+  return { text: others.length === 0 ? words : rest, quoted };
+}
+
+const PASTED_HEADER = '# Files pasted by the user:';
+const REQUEST_HEADER = '## My request:';
+/** `## "<the paste's opening>": <the file it was saved to>`. */
+const PASTED_ENTRY = /^## "(.+)": \S.*$/;
+
+/** The message, with any harness-marked paste moved to `quoted`. */
+function withPasted(message: PacketMessage, harness: Harness): PacketMessage {
+  const pasted = splitPasted(message.text, harness);
+  return pasted === null ? message : { role: message.role, ...pasted };
 }
 
 /**
@@ -338,7 +423,10 @@ export async function buildNativePacket(
     .filter((entry) => entry.message.role === 'user');
   const current = lastUser.at(-1);
   return {
-    current: current?.message ?? { role: 'user', text: subject },
+    current:
+      current === undefined
+        ? { role: 'user', text: subject }
+        : withPasted(current.message, harness),
     history: current === undefined ? messages : messages.slice(0, current.index),
     literalUrls: literalUrlsIn(`${current?.message.text ?? ''}\n${subject}`),
     historyStatus: read === null && own === null ? 'unavailable' : 'ok',

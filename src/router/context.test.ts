@@ -7,7 +7,9 @@ import {
   buildNativePacket,
   buildPromptPacket,
   literalUrlsIn,
+  MAX_MESSAGE_CHARS,
   seal,
+  splitPasted,
   type Packet,
 } from './context';
 
@@ -397,6 +399,92 @@ describe('what a packet gives up to fit', () => {
   });
 });
 
+/**
+ * A PASTE THE HARNESS MARKED GOES TO `quoted`, and the text keeps the user's
+ * own words. Only the Codex desktop app marks one: it saves a long paste as a
+ * file and writes its sections around the request. Nothing else is moved,
+ * and nothing is moved from what text merely looks like.
+ */
+describe('pasted text', () => {
+  const PATH = '/Users/dev/.codex/attachments/3b1c2d3e-0000-4000-8000-000000000000/Pasted text.txt';
+  const ERROR = 'Error: connect ECONNREFUSED 127.0.0.1:5432 at TCPConnectWrap.afterConnect…';
+  const pasted = (request: string, before = '') =>
+    `${before}\n# Files pasted by the user:\n\n## "${ERROR}": ${PATH}\n\n## My request:\n${request}\n\n`;
+
+  it("moves the Codex desktop app's pasted files out of the prompt, leaving the request", async () => {
+    const packet = await sent(undefined, 's', pasted('why does this fail?'), 'codex');
+    expect(packet.current).toEqual({ role: 'user', text: 'why does this fail?', quoted: [ERROR] });
+    expect(JSON.stringify(packet)).not.toContain(PATH);
+  });
+
+  it("keeps the app's other sections, and moves only the pasted one", () => {
+    const browser = '# In app browser:\n- Current page: https://example.test/a';
+    expect(splitPasted(pasted('fix it', browser).trim(), 'codex')).toEqual({
+      text: `${browser}\n\n## My request:\nfix it`,
+      quoted: [ERROR],
+    });
+  });
+
+  it.each([
+    ['a Claude Code prompt, which marks no paste', pasted('why does this fail?'), 'claude'],
+    ['a request with no words of its own', pasted(''), 'codex'],
+    ['no request section', `# Files pasted by the user:\n\n## "${ERROR}": ${PATH}`, 'codex'],
+    [
+      'a line the app does not write there',
+      pasted('why?').replace('## My request:', 'something else\n## My request:'),
+      'codex',
+    ],
+    ['text that only looks pasted', 'why?\n\n```\nError: connect ECONNREFUSED\n```', 'codex'],
+  ] as const)('leaves %s unchanged', (_label, text, harness) => {
+    expect(splitPasted(text, harness)).toBeNull();
+  });
+
+  it("reads a native call's turn from the Codex rollout the same way", async () => {
+    const session = 'aaaaaaaa-0000-7000-8000-000000000000';
+    const path = await transcript([
+      {
+        type: 'session_meta',
+        payload: { id: session, session_id: session, thread_source: 'user' },
+      },
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          thread_id: session,
+          item: {
+            type: 'UserMessage',
+            id: 'u1',
+            content: [{ type: 'text', text: pasted('why does this fail?'), text_elements: [] }],
+          },
+        },
+      },
+    ]);
+    const packet = await buildNativePacket(
+      path,
+      session,
+      { tool: 'WebSearch', query: 'x' },
+      {
+        harness: 'codex',
+      },
+    );
+    expect(packet.current).toEqual({ role: 'user', text: 'why does this fail?', quoted: [ERROR] });
+  });
+
+  it('masks and bounds each block, keeps eight, and gives blocks up before the task', () => {
+    const big = 'q'.repeat(MAX_MESSAGE_CHARS + 50);
+    const sealed = seal({
+      current: { role: 'user', text: 'why?', quoted: Array.from({ length: 10 }, () => big) },
+      history: [],
+      literalUrls: [],
+      historyStatus: 'ok',
+    }).packet;
+    expect(sealed.current.text).toBe('why?');
+    expect(sealed.current.quoted!.length).toBeLessThanOrEqual(8);
+    expect(sealed.current.quoted!.every((b) => b.length <= MAX_MESSAGE_CHARS)).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(sealed))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+});
+
 describe('seal, the one way a packet leaves', () => {
   const KEY = `0x${'5c'.repeat(32)}`;
   const PEM_BODY = 'MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun';
@@ -426,7 +514,7 @@ describe('seal, the one way a packet leaves', () => {
 
   function planted(text: string, pendingCall: Packet['pendingCall']): Packet {
     return {
-      current: { role: 'user', text },
+      current: { role: 'user', text, quoted: [text] },
       history: [
         { role: 'user', text },
         { role: 'assistant', text },
