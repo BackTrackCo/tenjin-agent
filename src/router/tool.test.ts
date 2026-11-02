@@ -14,7 +14,8 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { readSpec, storeChoices, storeSpecs } from './specs';
+import { readSpec, SPEC_TTL_MS, storeChoices, storeSpecs } from './specs';
+import { claimIgnored, noteShown } from './untaken';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTE_PAID_PATH,
@@ -1644,6 +1645,15 @@ describe('an offer with a request spec', () => {
     expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
     expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
     expect(calls).toEqual([]);
+  });
+
+  /** A call naming the offer's id took it: it is never reported as ignored. */
+  it('takes the offer it names, so it never expires as ignored', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const now = Date.now();
+    await noteShown(dir, { id: SPEC_ID, ids: [SPEC_ID], harness: 'claude' }, now);
+    await runRequestTool({ id: SPEC_ID }, deps(net([]).fetchImpl));
+    expect(await claimIgnored(dir, { now: now + SPEC_TTL_MS + 1 })).toEqual([]);
   });
 
   it('builds the request from the input, pays the provider, and reports how it ended', async () => {

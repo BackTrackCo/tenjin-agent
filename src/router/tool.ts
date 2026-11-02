@@ -87,6 +87,7 @@ import {
   type SignedAuthorization,
 } from './paid';
 import { routerSettings, type RouterSettings } from './settings';
+import { markTaken } from './untaken';
 import type { Harness } from './names';
 import {
   answerState,
@@ -469,6 +470,9 @@ async function requestTool(
     return resumeJob(args.job, deps);
   }
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  // A call naming an offer's id takes it, whatever it asks: that offer was not
+  // ignored, so nothing reports it so (`untaken.ts`).
+  if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
   let id = offered;
   const { input } = args;
   const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;

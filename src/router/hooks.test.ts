@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -23,7 +23,7 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
 import { readChoices, readSpec } from './specs';
-import { ROUTE_PAID_PATH } from './decision';
+import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import {
   claimRedirect,
   renderProgress,
@@ -99,11 +99,21 @@ const BASE = 'https://tenjin.sh';
  * A recorded decision answer; `calls` is what the hook sent the router. The
  * balance read goes to {@link RPC}, or a fallback, through the same fetch and
  * is answered from {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ * An outcome report (an ignored offer's) is answered 204 and kept in
+ * `reports`, apart from the decisions.
  */
-function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
+function router(
+  body: unknown,
+  status = 200,
+): { fetchImpl: typeof fetch; calls: unknown[]; reports: { url: string; body: unknown }[] } {
   const calls: unknown[] = [];
+  const reports: { url: string; body: unknown }[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
+    if (sent.url.endsWith(ROUTER_PATH) && (sent.body as { status?: unknown })?.status) {
+      reports.push(sent);
+      return new Response(null, { status: 204 });
+    }
     if (RPCS.includes(sent.url)) {
       rpcCalls.push(sent);
       if (typeof rpcAnswer === 'function') return rpcAnswer(init);
@@ -116,7 +126,7 @@ function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: 
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, reports };
 }
 
 const NATIVE = {
@@ -3618,5 +3628,80 @@ describe('a question to the user', () => {
       });
       expect(answer).toMatchObject({ hookSpecificOutput: expected });
     }
+  });
+});
+
+/**
+ * AN OFFER THE HOST WAS SHOWN AND NEVER TOOK IS SAID ONCE, by id and why, at
+ * the next routed leg: a native call by the same agent while it was untaken,
+ * or its 15 minutes running out. No text, and no wait on the report.
+ */
+describe('an offer the host ignored', () => {
+  const T = 1_800_000_000_000;
+  const ignored = (reason: string) => ({
+    url: `${BASE}${ROUTER_PATH}`,
+    body: { schemaVersion: 1, id: 'k3f9-abcd', harness: 'claude', status: 'ignored', reason },
+  });
+
+  it('reports a prompt offer the agent answered with a native search instead', async () => {
+    const offer = router(EXECUTE);
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: offer.fetchImpl,
+      now: () => T,
+    });
+    const native = router(NATIVE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: native.fetchImpl, homeDir: dir };
+    await runNativeHook(await callEvent('example spec', 'WebSearch', 'PreToolUse'), {
+      ...deps,
+      now: () => T + 5_000,
+    });
+    await vi.waitFor(() => expect(native.reports).toEqual([ignored('native_after_offer')]));
+    // Said once: the next native call finds nothing left to report.
+    await runNativeHook(await callEvent('example spec 2', 'WebSearch', 'PreToolUse'), {
+      ...deps,
+      now: () => T + 6_000,
+    });
+    expect(native.reports).toHaveLength(1);
+  });
+
+  it('reports an offer past its 15 minutes at the next prompt, as expired', async () => {
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      now: () => T,
+    });
+    const later = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: later.fetchImpl,
+      now: () => T + 16 * 60_000,
+    });
+    await vi.waitFor(() => expect(later.reports).toEqual([ignored('expired')]));
+  });
+
+  it('never reports an offer that was withheld, since the host never saw it', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '14999', confirm: 'above:14999' }),
+    );
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      now: () => T,
+    });
+    const later = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: later.fetchImpl,
+      now: () => T + 16 * 60_000,
+    });
+    expect(later.reports).toEqual([]);
   });
 });

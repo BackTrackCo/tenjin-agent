@@ -189,12 +189,16 @@ describe('Codex automatic hooks', () => {
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Every call went to the paid route: one deposit, then a voucher.
-      expect(fake.log).toEqual([
+      // Every routing call went to the paid route: one deposit, then a voucher.
+      expect(fake.log.filter((line) => line.includes('/route'))).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
+      ]);
+      // The web call ran with the prompt's offer untaken: one free outcome report.
+      expect(fake.log.filter((line) => !line.includes('/route'))).toEqual([
+        'POST /api/x402-router unpaid',
       ]);
       expect(fake.deposits).toBe(1);
       // The deposit counts against the daily budget, as an MCP lookup's does.
