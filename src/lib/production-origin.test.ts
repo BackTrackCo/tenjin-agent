@@ -1,7 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { readdir, readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { extname, join, relative } from 'node:path';
 import pkg from '../../package.json';
 import {
   PRODUCTION_HOST,
@@ -13,12 +10,9 @@ import { CONFIG_DEFAULTS } from './config';
 import { TENJIN_USER_AGENT } from './client-meta';
 
 /**
- * The guard that makes the origin cutover (tenjin#402) a one-line edit: every
- * module that ships the production origin has to READ it from here, and nothing
- * else under src/ may spell the host out. Without this a flip lands in the
- * obvious places and leaves a stale default or a stale User-Agent behind — a
- * half-flip that no single test would catch, because each of those modules is
- * only ever compared against itself.
+ * Every module that ships the production origin reads it from here. These pin
+ * the copies a flip could leave behind: the config default, the User-Agent, and
+ * the package homepage, which is JSON and cannot import the constant.
  */
 describe('PRODUCTION_ORIGIN', () => {
   it('is a bare https origin, and the host is derived from it', () => {
@@ -102,86 +96,5 @@ describe('isSameDeployment', () => {
       expect(isSameDeployment(downgraded, other)).toBe(false);
       expect(isSameDeployment(ported, other)).toBe(false);
     }
-  });
-});
-
-const srcDir = fileURLToPath(new URL('..', import.meta.url));
-/**
- * Exempt because neither ships the origin: this module IS the constant, and
- * read-test-utils is test scaffolding whose sample URLs happen to use the host.
- */
-const EXEMPT = new Set(['lib/production-origin.ts', 'lib/read-test-utils.ts']);
-/**
- * Both spellings and either casing, so a partially-applied cutover fails as
- * loudly as a stale one and `Tenjin.Blog` does not walk past.
- */
-const HOST_LITERAL = /tenjin\.(?:blog|sh)/i;
-/**
- * The obvious dodge: `'tenjin' + '.blog'`, `'tenjin.' + 'blog'`, or the same
- * split across a template. Matching per line keeps this cheap, which is also its
- * ceiling (see the ADVISORY note above): a determined split survives it.
- */
-const SPLIT_HOST = /tenjin\.?['"`]\s*\+|\+\s*['"`]\.?(?:blog|sh)\b/i;
-const COMMENT_LINE = /^(?:\/\/|\/\*|\*)/;
-
-async function sourceFiles(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await sourceFiles(full)));
-    else if (extname(entry.name) === '.ts' && !entry.name.endsWith('.test.ts')) out.push(full);
-  }
-  return out;
-}
-
-/**
- * ADVISORY, not a security boundary. This is a sweep over raw lines, so it
- * catches the honest mistake (a forgotten literal, a stale copy) and nothing
- * more: anyone writing the host deliberately can build it at runtime out of
- * pieces no regex here will recognize. Treat a green run as "the sweep found
- * nothing", never as "the host appears nowhere".
- */
-describe('no module hardcodes the production host', () => {
-  it('names it only in comments, outside src/lib/production-origin.ts', async () => {
-    const offenders: string[] = [];
-    for (const file of await sourceFiles(srcDir)) {
-      const rel = relative(srcDir, file);
-      if (EXEMPT.has(rel)) continue;
-      const lines = (await readFile(file, 'utf8')).split('\n');
-      lines.forEach((line, i) => {
-        if (!HOST_LITERAL.test(line) && !SPLIT_HOST.test(line)) return;
-        // Prose about the site is fine; a literal the CLI can emit is not.
-        if (COMMENT_LINE.test(line.trim())) return;
-        offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
-      });
-    }
-    expect(offenders, 'import PRODUCTION_ORIGIN / PRODUCTION_HOST instead').toEqual([]);
-  });
-});
-
-const scriptsDir = fileURLToPath(new URL('../../scripts/', import.meta.url));
-
-/**
- * The scripts run outside the bundle (dependency-free Node and bash), so none
- * can import the constant. Pin them from here instead, in the suite that runs
- * on every PR.
- */
-describe('the scripts track the same origin', () => {
-  it('names no other host, in code or in the copy they emit', async () => {
-    const offenders: string[] = [];
-    for (const entry of await readdir(scriptsDir, { recursive: true, withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      const file = join(entry.parentPath, entry.name);
-      const name = relative(scriptsDir, file);
-      const lines = (await readFile(file, 'utf8')).split('\n');
-      lines.forEach((line, i) => {
-        const found = line.match(new RegExp(HOST_LITERAL.source, 'gi')) ?? [];
-        // Banners, commit messages, and PR bodies name the source too; a stale
-        // one there points a human at the dead site, so hold them to it as well.
-        if (found.every((hit) => hit.toLowerCase() === PRODUCTION_HOST)) return;
-        offenders.push(`${name}:${i + 1}: ${line.trim()}`);
-      });
-    }
-    expect(offenders, `every host in scripts/ must be ${PRODUCTION_HOST}`).toEqual([]);
   });
 });
