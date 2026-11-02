@@ -335,12 +335,15 @@ export async function buildPromptPacket(
   sessionId: string,
   prompt: string,
   harness: Harness = 'claude',
+  opts: { delegated?: boolean } = {},
 ): Promise<Packet> {
   const trimmed = prompt.trim();
   const text = trimmed.length > 0 ? trimmed : '(empty prompt)';
   const read = await readHistory(transcriptPath, { sessionId, harness });
+  // A delegated task is the agent's words, so no harness mark is read in it.
+  const current: PacketMessage = { role: 'user', text };
   return {
-    current: withPasted({ role: 'user', text }, harness),
+    current: opts.delegated === true ? current : withPasted(current, harness),
     history: read ?? [],
     literalUrls: literalUrlsIn(text),
     historyStatus: read === null ? 'unavailable' : 'ok',
@@ -349,27 +352,29 @@ export async function buildPromptPacket(
 
 /**
  * WHAT THE USER PASTED IS NOT WHAT THEY ASKED. A block the harness itself
- * marks as pasted goes to `quoted`, so the gate reads the user's own words as
- * the instruction and the paste as context. Only a harness's own mark counts:
- * nothing is guessed from what the text looks like, and a message the move
- * would leave empty stays as it was.
+ * marks as pasted goes to `quoted`, apart from the user's own words. Only a
+ * harness's own mark counts: nothing is guessed from what the text looks
+ * like, and a message the move would leave empty, or that carries a mark this
+ * reader cannot account for, stays as it was.
  *
  * WHICH HARNESS MARKS A PASTE (read 2026-11-01). Claude Code, in the terminal
- * (2.1.316) and the desktop app, expands a paste into the prompt and the
- * transcript with no mark at all (its `[Pasted text #N]` placeholders live
- * only in its own prompt-recall file, written after the hook can run), so its
- * messages are unchanged. Codex's terminal expands its `[Pasted Content N
- * chars]` placeholder the same way. The Codex desktop app (0.162 to 0.164)
- * saves a long paste as a file and writes the message as its own sections:
- * `# Files pasted by the user:`, one `## "<the paste's opening…>": <file>`
- * line per paste, and the user's words after `## My request:`. Those opening
- * lines are the blocks moved here, without the local path.
+ * and the desktop app's Code tab, wraps each paste in the prompt in
+ * `<pasted_content id="<4 hex>">` and `</pasted_content id="<the same id>">`,
+ * each tag on its own line, with any tag text inside the paste escaped
+ * (`<\pasted_content`): {@link splitClaudePastes}. Not every paste is wrapped
+ * (Claude Code decides), and an unwrapped one stays in the text. Codex's
+ * terminal expands its `[Pasted Content N chars]` placeholder inline with no
+ * mark. The Codex desktop app (0.162 to 0.164) saves a long paste as a file
+ * and writes the message as its own sections: `# Files pasted by the user:`,
+ * one `## "<the paste's opening…>": <file>` line per paste, and the user's
+ * words after `## My request:`. Those opening lines are the blocks moved here,
+ * without the local path.
  */
 export function splitPasted(
   text: string,
   harness: Harness,
 ): { text: string; quoted: string[] } | null {
-  if (harness !== 'codex') return null;
+  if (harness === 'claude') return splitClaudePastes(text);
   const lines = text.split('\n');
   const start = lines.indexOf(PASTED_HEADER);
   const request = lines.indexOf(REQUEST_HEADER, start + 1);
@@ -398,15 +403,64 @@ export function splitPasted(
   return { text: others.length === 0 ? words : rest, quoted };
 }
 
+/** Claude Code's paste tags, as its own reader takes them: the id is 4 hex. */
+const CLAUDE_OPEN = /<pasted_content id="([0-9a-f]{4})">\n/g;
+const CLAUDE_TAG = /<\/?pasted_content\b/g;
+
+/**
+ * Claude Code's wrapped pastes, read the way Claude Code reads them back: each
+ * block runs from its opening line to the closing tag with the same id, and
+ * up to two newlines on either side belong to the block. Any tag the pairs do
+ * not account for (an unclosed block, a closing tag alone, an id that is not
+ * one, the tag text typed in the user's own words) leaves the message as it is.
+ */
+function splitClaudePastes(text: string): { text: string; quoted: string[] } | null {
+  const words: string[] = [];
+  const quoted: string[] = [];
+  const tags: number[] = [];
+  let from = 0;
+  for (const open of text.matchAll(CLAUDE_OPEN)) {
+    if (open.index < from) return null;
+    const close = `\n</pasted_content id="${open[1]!}">`;
+    const bodyAt = open.index + open[0].length;
+    const closeAt = text.indexOf(close, bodyAt - 1);
+    if (closeAt === -1) return null;
+    let start = open.index;
+    for (let n = 0; n < 2 && start > from && text[start - 1] === '\n'; n++) start--;
+    let end = closeAt + close.length;
+    tags.push(open.index, closeAt + 1);
+    for (let n = 0; n < 2 && text[end] === '\n'; n++) end++;
+    words.push(text.slice(from, start));
+    quoted.push(text.slice(bodyAt, Math.max(bodyAt, closeAt)));
+    from = end;
+  }
+  words.push(text.slice(from));
+  // Every tag in the text is one of the pairs just read, or nothing is moved.
+  const every = [...text.matchAll(CLAUDE_TAG)].map((tag) => tag.index);
+  if (quoted.length === 0 || every.length !== tags.length) return null;
+  if (!every.every((at, i) => at === tags[i])) return null;
+  const rest = words
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join('\n');
+  if (rest.length === 0 || quoted.every((block) => block.trim().length === 0)) return null;
+  return { text: rest, quoted };
+}
+
 const PASTED_HEADER = '# Files pasted by the user:';
 const REQUEST_HEADER = '## My request:';
 /** `## "<the paste's opening>": <the file it was saved to>`. */
 const PASTED_ENTRY = /^## "(.+)": \S.*$/;
 
-/** The message, with any harness-marked paste moved to `quoted`. */
+/**
+ * The message, with any harness-marked paste moved to `quoted`; unchanged
+ * when it holds more blocks than the server takes, so none is dropped. Only
+ * `current` has a `quoted`: a history message keeps its paste in its text.
+ */
 function withPasted(message: PacketMessage, harness: Harness): PacketMessage {
   const pasted = splitPasted(message.text, harness);
-  return pasted === null ? message : { role: message.role, ...pasted };
+  if (pasted === null || pasted.quoted.length > MAX_QUOTED) return message;
+  return { role: message.role, ...pasted };
 }
 
 /**

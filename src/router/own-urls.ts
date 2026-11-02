@@ -8,8 +8,8 @@ import type { Harness } from './names';
 /**
  * THE USER'S OWN LINKS, which the host opens with its own tools: a pull
  * request on the forge this repository pushes to, a claude.ai artifact. A
- * paid page reader is never the answer to one, so the packet names them
- * (`ownUrls`) and the server keeps page reading off them.
+ * paid page reader is not the answer to one, so the packet names them
+ * (`ownUrls`) for the server's gate to keep page reading off them.
  *
  * Two sources. The hosts of the git remotes of the repository the hook's
  * working directory is in, read from its git config file and nothing else (no

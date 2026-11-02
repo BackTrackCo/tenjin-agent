@@ -1489,7 +1489,9 @@ export async function runDelegationHook(
     return { response: null, noRequestTool: true };
   }
   const sealed = await sealHere(
-    await buildPromptPacket(event.transcriptPath, event.sessionId, task),
+    await buildPromptPacket(event.transcriptPath, event.sessionId, task, hostOf(deps), {
+      delegated: true,
+    }),
     router,
     event.cwd,
     deps,
