@@ -382,6 +382,10 @@ describe('what a packet gives up to fit', () => {
     expect(fitted.literalUrls.length).toBeLessThan(urls.length);
     expect(fitted.current.text).toBe('read that page for me');
     expect(fitted.pendingCall).toEqual(packet.pendingCall);
+    // `ownUrls` names only what is still in `literalUrls`.
+    const own = fit({ ...packet, ownUrls: urls });
+    expect(own.ownUrls).toEqual(own.literalUrls);
+    expect(Buffer.byteLength(JSON.stringify(own))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
   it('gives up history before URLs, and URLs before the task', async () => {

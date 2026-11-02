@@ -55,6 +55,7 @@ import {
 } from './progress';
 import { routerSettings, type RouterSettings } from './settings';
 import { claimIgnored, noteShown, offerScope, reportIgnored } from './untaken';
+import { ownHostsFor } from './own-urls';
 
 /**
  * The six hook handlers. Between them they do exactly three things: build and
@@ -913,11 +914,11 @@ async function offerOnUserText(
   if (router === null) return { response: null };
   await sweepUntaken(deps, router);
 
-  const sealed = seal(
-    scoped(
-      await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
-      router.settings,
-    ),
+  const sealed = await sealHere(
+    await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
+    router,
+    event.cwd,
+    deps,
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt', {});
   const deadline = gateDeadline(deps);
@@ -1083,15 +1084,15 @@ async function routeNativeCall(
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate. Inside a subagent, its own task
   // comes first: see `buildNativePacket`.
-  const sealed = seal(
-    scoped(
-      await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
-        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
-        ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-        harness: hostOf(deps),
-      }),
-      router.settings,
-    ),
+  const sealed = await sealHere(
+    await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
+      ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+      harness: hostOf(deps),
+    }),
+    router,
+    event.cwd,
+    deps,
   );
   const { packet } = sealed;
   // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
@@ -1487,8 +1488,11 @@ export async function runDelegationHook(
   if ((await requestToolAccess(event.subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
     return { response: null, noRequestTool: true };
   }
-  const sealed = seal(
-    scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, task), router.settings),
+  const sealed = await sealHere(
+    await buildPromptPacket(event.transcriptPath, event.sessionId, task),
+    router,
+    event.cwd,
+    deps,
   );
   // The native hook's two rules, with the task as the subject: a task the mask
   // would change is not sent, since the offer is written back into it, and a
@@ -1845,6 +1849,22 @@ async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<Route
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;
   }
+}
+
+/**
+ * The packet as it leaves: scoped to `router.context`, then sealed, with the
+ * links on the user's own hosts named (`own-urls.ts`), read only when it has
+ * a link at all.
+ */
+async function sealHere(
+  packet: Packet,
+  router: RouterHere,
+  cwd: string | undefined,
+  deps: HookDeps,
+): Promise<Sealed> {
+  const inScope = scoped(packet, router.settings);
+  const ownHosts = await ownHostsFor(inScope, cwd ?? process.cwd(), hostOf(deps), deps.homeDir);
+  return seal(inScope, ownHosts.length > 0 ? { ownHosts } : {});
 }
 
 /**

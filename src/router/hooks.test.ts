@@ -295,6 +295,27 @@ describe('the prompt hook', () => {
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
+  /** A link the host opens itself, on this repository's forge or claude.ai,
+   *  is named in `ownUrls`; any other link is not. */
+  it("names the user's own links: the repository's remote host and claude.ai", async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/widgets.git\n',
+    );
+    const { fetchImpl, calls } = router(NATIVE);
+    const pr = 'https://github.com/acme/widgets/pull/12';
+    const artifact = 'https://claude.ai/code/artifact/0195f3a1';
+    await runPromptHook(promptEvent(`compare ${pr} with ${artifact} and https://example.test/x`), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
+    expect(packet.ownUrls).toEqual([pr, artifact]);
+    expect(packet.literalUrls).toHaveLength(3);
+  });
+
   /** "HELP IMPROVE ROUTING", ON IN THE GLOBAL FILE, rides as one flag; off
    *  (the default, above) the body is unchanged. */
   it('says improve when the person turned on Help improve routing', async () => {

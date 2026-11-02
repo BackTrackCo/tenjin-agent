@@ -64,6 +64,12 @@ export interface Packet {
   history: PacketMessage[];
   /** Absolute http(s) URLs written literally in the current message. */
   literalUrls: string[];
+  /**
+   * The entries of `literalUrls` the host can open with its own tools: links
+   * on the host of the current repository's git remote, and the harness's own
+   * links ({@link SealOptions}). Absent when there are none.
+   */
+  ownUrls?: string[];
   historyStatus: HistoryStatus;
   pendingCall?: PendingCall;
   /** How the free tool already fared on `pendingCall`, sent only when it fell
@@ -150,6 +156,10 @@ export function fit(packet: Packet): Packet {
   }
   while (next.literalUrls.length > 0 && size(next) > MAX_PACKET_BYTES) {
     next.literalUrls = next.literalUrls.slice(0, -1);
+    // `ownUrls` names entries of `literalUrls`, so it loses what that loses.
+    const own = next.ownUrls?.filter((url) => next.literalUrls.includes(url)) ?? [];
+    if (own.length > 0) next.ownUrls = own;
+    else delete next.ownUrls;
   }
   // Then what the user pasted, last block first: it is context for the task,
   // and the task is the user's own words.
@@ -164,6 +174,16 @@ export function fit(packet: Packet): Packet {
     next.current = { ...next.current, text: next.current.text.slice(0, keep) };
   }
   return next;
+}
+
+/** What {@link seal} is told beside the packet. */
+export interface SealOptions {
+  /**
+   * The hosts whose links the host opens with its own tools: the current
+   * repository's git remotes, and the harness's own (`own-urls.ts`). Each
+   * sealed literal URL on one of them is also listed in `ownUrls`.
+   */
+  ownHosts?: readonly string[];
 }
 
 export interface Sealed {
@@ -190,7 +210,7 @@ export interface Sealed {
  * become the query the server writes into its hint, and a local or private
  * target can only ever be answered natively; both run unrouted.
  */
-export function seal(packet: Packet): Sealed {
+export function seal(packet: Packet, opts: SealOptions = {}): Sealed {
   const pending = packet.pendingCall;
   const subject = pending === undefined ? '' : subjectOf(pending);
   const sealedSubject = maskWithin(subject, MAX_PENDING_CHARS);
@@ -202,6 +222,14 @@ export function seal(packet: Packet): Sealed {
     .map(bound)
     .filter((block) => block.length > 0);
   const outcome = packet.nativeOutcome;
+  const literalUrls = packet.literalUrls
+    .filter((url) => !isLocalTarget(url))
+    .map(mask)
+    .filter((url) => url.length <= MAX_LITERAL_URL_CHARS);
+  const ownHosts = new Set((opts.ownHosts ?? []).map((host) => host.toLowerCase()));
+  const ownUrls = literalUrls
+    .filter((url) => ownHosts.has(hostnameOf(url)))
+    .slice(0, MAX_LITERAL_URLS);
   const sealed = fit({
     current: {
       role: packet.current.role,
@@ -212,10 +240,8 @@ export function seal(packet: Packet): Sealed {
       .slice(-MAX_HISTORY)
       .map((message) => ({ role: message.role, text: bound(message.text) }))
       .filter((message) => message.text.length > 0),
-    literalUrls: packet.literalUrls
-      .filter((url) => !isLocalTarget(url))
-      .map(mask)
-      .filter((url) => url.length <= MAX_LITERAL_URL_CHARS),
+    literalUrls,
+    ...(ownUrls.length > 0 ? { ownUrls } : {}),
     historyStatus: packet.historyStatus,
     ...(pending === undefined ? {} : { pendingCall: withSubject(pending, sealedSubject.text) }),
     ...(outcome === undefined
@@ -252,6 +278,15 @@ function maskWithin(text: string, max: number): { text: string; changed: boolean
   const masked = mask(window);
   const limit = window.length < text.length ? Math.min(max, masked.length - MASK_MARGIN) : max;
   return { text: masked.slice(0, Math.max(0, limit)), changed: masked !== window };
+}
+
+/** A URL's host as `URL` names it, lowercase; empty for one that does not parse. */
+function hostnameOf(raw: string): string {
+  try {
+    return new URL(raw).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
 }
 
 const LOCAL_NAME = /(?:^|\.)(?:localhost|local)$/i;

@@ -24,7 +24,7 @@ import {
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
-import { MAX_PACKET_BYTES, type Packet } from './context';
+import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
 import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
@@ -288,6 +288,25 @@ describe('the request bodies', () => {
       improve: true,
     });
     expect(buildToolBody({ query: 'btc price', improve: false })).not.toHaveProperty('improve');
+  });
+
+  /** The pasted block rides apart from the user's words, and their own link
+   *  is named, through the same seal every hook packet passes. */
+  it('seals a pasted block and the user own link into the quoted fixture', () => {
+    const canonical = fixture('wire-hook-request-quoted.json');
+    const packet = canonical.packet as Packet;
+    const raw: Packet = {
+      current: packet.current,
+      history: [],
+      literalUrls: packet.literalUrls,
+      historyStatus: 'ok',
+    };
+    const own = { ownHosts: ['github.com', 'claude.ai'] };
+    expect(buildHookBody(seal(raw, own).packet)).toEqual(canonical);
+    // Another host's link is not the user's own, and with no own hosts none is.
+    const more = { ...raw, literalUrls: [...raw.literalUrls, 'https://example.test/elsewhere'] };
+    expect(seal(more, own).packet.ownUrls).toEqual(packet.ownUrls);
+    expect(seal(raw).packet).not.toHaveProperty('ownUrls');
   });
 
   it('builds the forget form, byte for byte, naming nothing but the request', () => {
