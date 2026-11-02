@@ -15,8 +15,9 @@ import type { TenjinHeld, TenjinRow } from '../types';
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
  *
  * An over-limit answer draws nothing, and the `approve` call that runs its
- * quote draws as the lookup's own row. A free lookup the CLI named draws the
- * same row with `free` where the price goes. The router's own calls and
+ * quote draws as the lookup's own row. A free lookup called by its line's id
+ * draws the same row with `free` where the price goes, named by the label the
+ * CLI kept or, with none kept, by its result. The router's own calls and
  * `needs_input` answers draw nothing; a charged failure
  * draws the error dot, the amount and the state, never a success.
  *
@@ -69,6 +70,8 @@ const PLAIN = new Set(['fulfilled', 'running']);
 const ERRORS = new Set(['failed', 'interrupted', 'partial']);
 /** What the price slot says for a lookup that costs nothing. */
 const FREE = 'free';
+/** The envelope's first `cost` line: what the provider charged, in USD. */
+const PROVIDER_PRICE = /^provider price (\d+\.?\d*) USD$/;
 
 type Dollar = EngineInterface;
 type Json = Record<string, unknown>;
@@ -348,7 +351,7 @@ function endOf(envelope: Json | undefined): Partial<TenjinRow> {
 
 /** A request call's row, or null where it draws nothing: not started, one of
  *  the router's own, sent back for input, ended with nothing paid and not a
- *  free lookup the CLI named, or drawn on a held call's row. */
+ *  free lookup called by its line's id, or drawn on a held call's row. */
 async function rowOf(
   $: Dollar,
   id: string,
@@ -362,7 +365,13 @@ async function rowOf(
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
   const label = stored?.label ?? ended.label;
   if (label === undefined) return null;
-  const drawn: TenjinRow = { ...stored, ...ended, label };
+  // A FREE LOOKUP BY ITS LINE'S ID with no kept label read when it ran: its
+  // result names it and says it cost nothing.
+  const free =
+    stored?.price === undefined && hasOfferId(asRecord(call.input)) && costsNothing(envelope?.cost)
+      ? { price: FREE }
+      : {};
+  const drawn: TenjinRow = { ...stored, ...ended, ...free, label };
   if (drawn.status !== undefined && HIDDEN.has(drawn.status)) return null;
   if (
     drawn.status !== undefined &&
@@ -486,6 +495,11 @@ function isJobPoll(args: Json | undefined): boolean {
   return typeof args?.job === 'string' && args.job.length > 0;
 }
 
+/** A call carrying a line's offer id: `{id, query}`, `{id, input}`, a choice. */
+function hasOfferId(args: Json | undefined): boolean {
+  return typeof args?.id === 'string' && args.id.length > 0;
+}
+
 /** The native tool and what it was asked, as one key. */
 function nativeKey(tool: string, input: unknown): string | undefined {
   const args = asRecord(input);
@@ -555,11 +569,15 @@ async function unnamedCharge($: Dollar, id: string, output: unknown): Promise<bo
 
 /** What the envelope's `cost` (`provider price 0.04 USD`) says left the wallet. */
 function paidOf(cost: unknown): string | undefined {
-  const paid = Array.isArray(cost)
-    ? /^provider price (\d+\.?\d*) USD$/.exec(String(cost[0]))
-    : null;
+  const paid = Array.isArray(cost) ? PROVIDER_PRICE.exec(String(cost[0])) : null;
   const atomic = paid === null ? 0n : BigInt(Math.round(Number(paid[1]) * 1e6));
   return atomic === 0n ? undefined : `$${usd(atomic)}`;
+}
+
+/** An envelope `cost` that says, in so many words, the provider charged nothing. */
+function costsNothing(cost: unknown): boolean {
+  const price = Array.isArray(cost) ? PROVIDER_PRICE.exec(String(cost[0])) : null;
+  return price !== null && Number(price[1]) === 0;
 }
 
 /** The request tool's envelope: the JSON block whose `status` comes first. */

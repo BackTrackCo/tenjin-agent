@@ -411,6 +411,75 @@ test('a free lookup sent back for input draws nothing, and its retry draws', asy
   await retry.unmount();
 });
 
+/**
+ * A FREE LOOKUP BY ITS LINE'S ID WITH NO KEPT LABEL (Context7 at the start of
+ * a turn) draws once it ends, named by its result, `free` in the price slot.
+ * The router's own free calls and a `needs_input` answer still draw nothing.
+ */
+test("a free lookup by its line's id draws free with no kept label; the router's own calls stay hidden", async ($, on) => {
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return Text({ children: ['rows'] });
+  });
+  machine(on);
+  const docs = envelope('fulfilled', {
+    supplier: 'tenjin.sh',
+    label: 'Context7 docs',
+    parameters: { query: 'Stripe Payment Element Link opt-in' },
+    cost: ['provider price 0 USD'],
+    result: 'docs',
+    providerContentUntrusted: true,
+  });
+  const spec = envelope('spec', { id: OFFER, cost: ['provider price 0 USD'] });
+  const browse = envelope('browse', { rows: [], cost: ['provider price 0 USD'] });
+  const needsInput = envelope('needs_input', { reason: 'query is required' });
+  const uncosted = envelope('fulfilled', { label: 'Context7 docs' });
+  const answers: Record<string, string> = {
+    toolu_docs: docs,
+    toolu_spec: spec,
+    toolu_browse: browse,
+    toolu_tool: spec,
+    toolu_input: needsInput,
+    toolu_uncosted: uncosted,
+  };
+  on('tool.call', { tool: TOOL }, async (_$, e) => {
+    const text = answers[e.tool_use_id] as string;
+    return { result: text, text };
+  });
+  const calls: [string, Record<string, unknown>][] = [
+    ['toolu_docs', { query: 'Stripe Payment Element Link opt-in', id: OFFER }],
+    ['toolu_spec', { id: OFFER }],
+    ['toolu_browse', { browse: 'docs' }],
+    ['toolu_tool', { tool: 'context7-docs' }],
+    ['toolu_input', { id: OFFER, query: '' }],
+    ['toolu_uncosted', { id: OFFER, query: 'zod' }],
+  ];
+  // `{tool}` names the event's own field: its row is drawn from the render alone.
+  for (const [id, args] of calls) {
+    if (!('tool' in args)) await $.tool.call({ tool: TOOL, tool_use_id: id, ...args });
+  }
+  const [drawn, ...hidden] = calls.map(([id, args]) =>
+    toolRow(id, TOOL, args, answers[id] as string),
+  );
+  for (const surface of SURFACES) {
+    for (const props of [groupOf([drawn]), drawn]) {
+      const ui = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'calls' in props ? 'ToolGroup' : 'ToolUse',
+        props: props as never,
+      });
+      expect(await rowText(ui)).toBe('Called Context7 docs · free (ctrl+o to expand)');
+      await ui.unmount();
+    }
+    for (const props of hidden) {
+      const ui = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
+      expect(await shownLines(ui)).toEqual([]);
+      await ui.unmount();
+    }
+  }
+});
+
 test('a run mixing a lookup with other calls unfolds for the engine to draw', async ($, on) => {
   machine(on);
   on('ui.render', { component: 'ToolGroup' }, ($, e) => {
