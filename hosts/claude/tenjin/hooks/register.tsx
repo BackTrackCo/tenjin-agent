@@ -17,7 +17,7 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * An over-limit answer draws nothing, and the `approve` call that runs its
  * quote draws as the lookup's own row. A free lookup called by its line's id
  * draws the same row with `free` where the price goes, named by the label the
- * CLI kept or, with none kept, by its result. The router's own calls and
+ * CLI kept or, once that has expired, by its result. The router's own calls and
  * `needs_input` answers draw nothing; a charged failure
  * draws the error dot, the amount and the state, never a success.
  *
@@ -365,8 +365,9 @@ async function rowOf(
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
   const label = stored?.label ?? ended.label;
   if (label === undefined) return null;
-  // A FREE LOOKUP BY ITS LINE'S ID with no kept label read when it ran: its
-  // result names it and says it cost nothing.
+  // A FREE LOOKUP BY ITS LINE'S ID WHOSE KEPT LABEL EXPIRED: a later hook
+  // prunes it after `SPEC_TTL_MS`, and the call still runs from its query.
+  // Its result names it and says it cost nothing.
   const free =
     stored?.price === undefined && hasOfferId(asRecord(call.input)) && costsNothing(envelope?.cost)
       ? { price: FREE }

@@ -412,11 +412,11 @@ test('a free lookup sent back for input draws nothing, and its retry draws', asy
 });
 
 /**
- * A FREE LOOKUP BY ITS LINE'S ID WITH NO KEPT LABEL (Context7 at the start of
- * a turn) draws once it ends, named by its result, `free` in the price slot.
+ * A FREE LOOKUP BY ITS LINE'S ID CALLED AFTER ITS KEPT LABEL EXPIRED draws
+ * once it ends, named by its result, `free` in the price slot.
  * The router's own free calls and a `needs_input` answer still draw nothing.
  */
-test("a free lookup by its line's id draws free with no kept label; the router's own calls stay hidden", async ($, on) => {
+test("a free lookup by its line's id draws free after its kept label expired; the router's own calls stay hidden", async ($, on) => {
   on('ui.render', { component: 'ToolGroup' }, ($, e) => {
     const { Text } = $.ui.resolve(e);
     return Text({ children: ['rows'] });
