@@ -32,7 +32,7 @@ const FILE_RE = /^[a-f0-9]{64}\.json$/;
 const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 /** A line names its own id, its specs' and a choice set's: far fewer than this. */
 const MAX_IDS = 16;
-/** Above this many files the rest wait for the next leg. */
+/** Above this many files a claim leaves the rest for the next leg. */
 const MAX_ENTRIES = 256;
 const MAX_ENTRY_BYTES = 4_096;
 
@@ -83,9 +83,18 @@ export async function noteShown(
   ).catch(() => undefined);
 }
 
-/** A `request` call named this id: the offer it came from is taken, not ignored. */
+/**
+ * A `request` call named this id: the offer it came from is taken, not ignored.
+ * A line's own id names its file; any other id it offered is found by reading
+ * every file, with no cap, since one left behind would be reported ignored.
+ */
 export async function markTaken(dataDir: string, id: string): Promise<void> {
-  for (const { path, entry } of await entries(dataDir)) {
+  const own = join(dataDir, UNTAKEN_DIR, `${digest(id)}.json`);
+  if ((await readEntry(own))?.ids.includes(id) === true) {
+    await rm(own, { force: true }).catch(() => undefined);
+    return;
+  }
+  for (const { path, entry } of await entries(dataDir, Infinity)) {
     if (entry?.ids.includes(id) === true) await rm(path, { force: true }).catch(() => undefined);
   }
 }
@@ -150,8 +159,12 @@ export function reportIgnored(
   ).then(() => undefined);
 }
 
-/** Every file here, each with its entry, or null for one that is not a whole entry. */
-async function entries(dataDir: string): Promise<{ path: string; entry: Entry | null }[]> {
+/** The files here, up to `limit`, each with its entry, or null for one that
+ *  is not a whole entry. */
+async function entries(
+  dataDir: string,
+  limit = MAX_ENTRIES,
+): Promise<{ path: string; entry: Entry | null }[]> {
   const dir = join(dataDir, UNTAKEN_DIR);
   const found: { path: string; entry: Entry | null }[] = [];
   try {
@@ -160,7 +173,7 @@ async function entries(dataDir: string): Promise<{ path: string; entry: Entry | 
       if (!item.isFile() || !FILE_RE.test(item.name)) continue;
       const path = join(dir, item.name);
       found.push({ path, entry: await readEntry(path) });
-      if (found.length >= MAX_ENTRIES) break;
+      if (found.length >= limit) break;
     }
   } catch {
     // None kept yet, or not readable: nothing to report.

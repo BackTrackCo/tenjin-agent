@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, opendir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -40,6 +40,25 @@ describe('untaken offers', () => {
     await markTaken(dir, 'offer-aaaa');
     await markTaken(dir, 'spec-cccc');
     expect(await claimIgnored(dir, { now: T0 + SPEC_TTL_MS + 1, nativeScope: main })).toEqual([]);
+  });
+
+  it('takes an offer however many files a listing reaches before it', async () => {
+    for (let n = 0; n < 300; n += 1) {
+      const id = `offer-${String(n).padStart(4, '0')}`;
+      await shown(id, { ids: [id, `spec-${id}`] });
+    }
+    // The last file a listing reaches, past the 256 a claim reads, taken by a
+    // spec id, which names no file.
+    const untaken = join(dir, 'progress', 'untaken');
+    const names: string[] = [];
+    for await (const item of await opendir(untaken)) names.push(item.name);
+    const last = JSON.parse(await readFile(join(untaken, names.at(-1)!), 'utf8')) as {
+      ids: string[];
+    };
+    await markTaken(dir, last.ids[1]!);
+    const left = await readdir(untaken);
+    expect(left).toHaveLength(299);
+    expect(left).not.toContain(names.at(-1));
   });
 
   it('reports a native call by the same agent in the same session, and no one else', async () => {
