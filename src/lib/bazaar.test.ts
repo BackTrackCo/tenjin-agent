@@ -31,6 +31,7 @@ function stub(handler: (url: globalThis.URL) => Response | Promise<Response>) {
   return mock;
 }
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -203,12 +204,15 @@ describe('Ultravioleta discovery adapter', () => {
     });
   });
   it('bounds the whole lookup, including all registries, by one deadline', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const fetch = stub(() => new Promise(() => {}));
-    const start = Date.now();
-    expect(
-      await verifyAgainstRegistries([UV, 'https://another.test'], URL, LIVE, 30),
-    ).toMatchObject({ outcome: 'unavailable' });
-    expect(Date.now() - start).toBeLessThan(500);
+    let settled: unknown;
+    void verifyAgainstRegistries([UV, 'https://another.test'], URL, LIVE, 30).then(
+      (r) => (settled = r),
+    );
+    // The first registry stalls past the whole 30 ms, so the second is never asked.
+    await vi.advanceTimersByTimeAsync(30);
+    expect(settled).toMatchObject({ outcome: 'unavailable' });
     expect(fetch).toHaveBeenCalledOnce();
   });
   it('bounds response bytes before parsing', async () => {

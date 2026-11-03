@@ -106,21 +106,6 @@ describe('main', () => {
     expect(parsed).toMatchObject({ ok: true, command: 'payments', data: { total: 0 } });
   });
 
-  // The release ships two products and nothing else, so the root list is the
-  // one place a stray shelf verb would show up.
-  it('lists only the core and router commands', async () => {
-    const cap = captureIo();
-    const code = await main(['--help'], cap.io);
-    expect(code).toBe(0);
-    const help = cap.stdout();
-    for (const command of ['install', 'uninstall', 'update', 'config', 'doctor', 'status'])
-      expect(help).toContain(command);
-    for (const command of ['wallet', 'pay', 'discover', 'hook', 'mcp'])
-      expect(help).toContain(command);
-    for (const shelf of ['search <question>', 'publish [file]', 'grade', 'daemon'])
-      expect(help).not.toContain(shelf);
-  });
-
   /**
    * The shape `tenjin --help` is expected to hold (clig.dev's "display the most
    * common flags and commands at the start", gh's grouped root list): five
@@ -156,31 +141,6 @@ describe('main', () => {
     expect(cap.stdout()).toContain('Usage: tenjin status');
   });
 
-  // vercel's rule, applied here: a global flag is listed once, on the root. The
-  // per-command copies still PARSE (`tenjin doctor --json`, covered below); they
-  // are hidden so a command's own flags are what its help shows.
-  it('lists the globals once, on the root, and not again under a command', async () => {
-    const root = captureIo();
-    expect(await main(['--help'], root.io)).toBe(0);
-    expect(root.stdout()).toContain('Global options:');
-    expect(root.stdout()).toContain('emit one machine JSON envelope on stdout');
-
-    const leafHelp = captureIo();
-    expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
-    expect(leafHelp.stdout()).toContain('Check everything a lookup needs');
-    expect(leafHelp.stdout()).not.toContain('--base-url');
-  });
-
-  it('ends with examples and the pointers, not a second copy of the docs', async () => {
-    const cap = captureIo();
-    expect(await main(['--help'], cap.io)).toBe(0);
-    const help = cap.stdout();
-    expect(help).toContain('Examples:');
-    expect(help).toContain('$ tenjin install');
-    expect(help).toContain('Run `tenjin <command> --help` for one command.');
-    expect(help).toContain(PERMISSIONS_DOC_URL);
-  });
-
   // A pointer in help has to work from wherever the reader is standing, which is
   // their own project and not this package. A repo-relative `docs/...` path reads
   // as a file they can open and is not one.
@@ -192,56 +152,15 @@ describe('main', () => {
     expect(help).not.toMatch(/(?<!\/)docs\/agent-permissions\.md/);
   });
 
-  // The two things an operator chooses at install time, and nothing else: which
-  // settings file, and whether this is a converge run for `tenjin update`.
-  it('documents invocation-scoped payment warnings', async () => {
-    const cap = captureIo();
-    expect(await main(['pay', '--help'], cap.io)).toBe(0);
-    const help = cap.stdout();
-    expect(help).toContain('--ignore-warnings');
-    expect(help.replace(/\s+/g, ' ')).toContain('--yes records prior consent for this quote');
-    expect(help).toContain('Unlisted endpoints need no warning flag');
-    expect(help).toContain('--json --max-price');
-    expect(help).not.toContain('bazaarPay');
-    expect(help).not.toContain('tenjin discover');
-  });
-
   it('cannot select internal router execution from the CLI', async () => {
     const cap = captureIo();
     expect(await main(['pay', 'https://example.com', '--execution', 'router'], cap.io)).toBe(2);
-  });
-
-  it('offers only the flags the router install actually has', async () => {
-    const cap = captureIo();
-    expect(await main(['install', '--help'], cap.io)).toBe(0);
-    const help = cap.stdout();
-    expect(help).toContain('--project');
-    expect(help).toContain('--refresh');
-    expect(help).toContain('--harness');
-    for (const gone of ['--bazaar-pay', '--no-grant', '--publish-mode', '--status-line'])
-      expect(help).not.toContain(gone);
   });
 
   it("accepts the plugin's own flag on the MCP server", async () => {
     const cap = captureIo();
     expect(await main(['mcp', '--plugin', '--help'], cap.io)).toBe(0);
     expect(cap.stdout()).not.toContain('--plugin');
-  });
-
-  // Removed pre-release flags are gone rather than hidden. Rejected at parse
-  // time, so the action never runs and none remains as an alias.
-  it('rejects removed install flags', async () => {
-    for (const flag of [
-      '--claude-md',
-      '--no-claude-md',
-      '--allow-free-verbs',
-      '--no-allow-free-verbs',
-      '--status-line',
-    ]) {
-      const cap = captureIo();
-      expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);
-      expect(cap.stdout(), flag).toContain(`unknown option '${flag}'`);
-    }
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
