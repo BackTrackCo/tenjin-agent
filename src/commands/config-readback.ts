@@ -60,7 +60,10 @@ export interface ReplacementSupport {
 const WHERE_IT_WORKS = `It works in Claude Code ${CLAUDE_CODE_FLOOR} or later with the Tenjin plugin; other agents keep getting ordinary offers.`;
 
 export function replacementSupportOf(
-  observations: readonly RouterObservation[],
+  observations: readonly Pick<
+    RouterObservation,
+    'at' | 'harness' | 'servedSession' | 'launchedByPlugin' | 'client'
+  >[],
 ): ReplacementSupport {
   const newest = [...observations].sort((a, b) => b.at - a.at);
   const claude = newest.find((o) => o.harness === 'claude' && o.servedSession);

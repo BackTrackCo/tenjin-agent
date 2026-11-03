@@ -116,7 +116,7 @@ echo "pack-smoke: packed wallet-kdf-worker.mjs derives the expected key (ok)"
 # fallback, with every source-tree test green. The manifest carries this
 # version, so the plugin Claude Code lists is the build that runs.
 HOSTS="./node_modules/tenjin-cli/dist/hosts/claude"
-for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts; do
+for f in .claude-plugin/marketplace.json tenjin/.claude-plugin/plugin.json tenjin/.mcp.json tenjin/hooks/hooks.json tenjin/hooks/register.tsx tenjin/types/index.d.ts tenjin/skills/tools/SKILL.md; do
   [ -f "$HOSTS/$f" ] || {
     echo "pack-smoke: FAIL: dist/hosts/claude/$f missing from the installed package" >&2
     exit 1

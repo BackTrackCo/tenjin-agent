@@ -113,7 +113,7 @@ describe('main', () => {
     const code = await main(['--help'], cap.io);
     expect(code).toBe(0);
     const help = cap.stdout();
-    for (const command of ['install', 'uninstall', 'update', 'config', 'doctor', 'status'])
+    for (const command of ['install', 'uninstall', 'update', 'config', 'doctor', 'status', 'tools'])
       expect(help).toContain(command);
     for (const command of ['wallet', 'pay', 'hook', 'mcp']) expect(help).toContain(command);
     for (const shelf of ['search <question>', 'publish [file]', 'discover', 'grade', 'daemon'])

@@ -118,6 +118,8 @@ The limits cap spending from your Tenjin balance.
 
 ## Your settings
 
+Open **`/tenjin:tools` in Claude Code** to inspect enabled and disabled tools, the setting behind each state, preferences and automatic use. Search by name, task, source or state; refresh after a setting changes. The same read-only view is available with `tenjin tools [filter]` in any host. Offline results are marked unverified. Enabled means allowed by your settings; host support, account checks and spending limits still apply when a tool runs.
+
 Tell your agent what Tenjin may use. It runs `tenjin config`, and reports what was saved and how to undo it.
 
 | You say                                     | Your agent runs                                             |
@@ -139,6 +141,7 @@ Tell your agent what Tenjin may use. It runs `tenjin config`, and reports what w
 
 ```bash
 tenjin status                          # your balance, spent today, and your limits
+tenjin tools                           # enabled and disabled tools, and why
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine
 tenjin doctor                          # check that a lookup can run
