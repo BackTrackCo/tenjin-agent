@@ -4,6 +4,7 @@ import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
 import { SETUP, WALLET, collect, type Registration } from './registration';
+import { installOutput } from '../router/install-output';
 
 /**
  * The core product: setting this machine up, the wallet, and the one standard
@@ -21,8 +22,8 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the defaults ($5 a day, $0.25 a call) instead of asking')
-    .option('--session-budget <usd|none>', 'your own daily limit, or none, instead of asking')
+    .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $0.25 a call)')
+    .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
     .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
     .addHelpText(
       'after',
@@ -32,8 +33,9 @@ Examples:
   $ tenjin install --project
   $ tenjin install --max-auto-spend 0.50 --session-budget 10
 
-The daily limit is the control, the per-call limit the runaway guard, and the
-wallet balance the hard stop. To turn the router off instead:
+The daily budget is shared across chats. Its spending counter resets 24 hours after its window starts;
+opening a new chat does not reset it. The per-call limit bounds each call, and the wallet balance is
+the hard stop. To turn the router off instead:
   $ tenjin config set router.enabled false
 
 Learn more:
@@ -90,7 +92,7 @@ Learn more:
             return one;
           });
         if (o.refresh !== true || harness !== undefined) {
-          return withNote(await installAll(), await note);
+          return installOutput(withNote(await installAll(), await note), ctx, o.refresh === true);
         }
         // `tenjin update` runs this refresh in the new build: a Codex that
         // already has the plugin gets the new hooks too, whatever Claude Code's
@@ -103,7 +105,7 @@ Learn more:
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      "Remove Tenjin's install for where you are: the project install of the folder you are in (from any subfolder), or else your user install. The tenjin marketplace, Tenjin's runtime and its launcher go once no install is left anywhere. Either all of it goes or nothing does, and it says what it keeps: your wallet, spend ledger and config. Run it before `npm uninstall -g tenjin-cli`.",
+      "Remove Tenjin's install for where you are: the project install of the folder you are in (from any subfolder), or else your user install. The tenjin marketplace, Tenjin's runtime and its launcher go once no install is left anywhere. Either all of it goes or nothing does, and it says what it keeps: your wallet, spend ledger and config. If installed through npm, run this before `npm uninstall -g tenjin-cli`.",
     )
     .addOption(hostOverride())
     .option(
@@ -213,7 +215,7 @@ Examples:
 
   const config = leaf(SETUP, 'config', 'read and set config values').description(
     'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default). ' +
-      'maxAutoSpend caps automatic router spending per call; sessionBudget caps it within a 24-hour budget window, across agent sessions. ' +
+      'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
       'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends.',
   );
   config.addHelpText(
@@ -270,7 +272,7 @@ Examples:
     'wallet',
     'create, show, fund, repair and send from the local wallet',
   ).description(
-    'Manage the local x402 payment wallet used for paid reads and publishing. The private key is generated on this machine, stored encrypted, and never printed.',
+    'Manage the local x402 payment wallet the router and `tenjin pay` spend from. The private key is generated on this machine, stored encrypted, and never printed.',
   );
   addGlobalFlags(wallet.command('create'))
     .summary('create a new local wallet')
@@ -349,7 +351,7 @@ Examples:
   addGlobalFlags(wallet.command('fund [amountUsd]'))
     .summary('fund this wallet through a checkout link for your region')
     .description(
-      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. In the US: Apple Pay or Google Pay with no Coinbase account. Elsewhere: your Coinbase account. The link moves no money: a human completes the payment.',
+      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. The link moves no money: a human completes the payment.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
     .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')
@@ -371,9 +373,9 @@ Examples:
     });
 
   // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
-  // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
-  // surface gains a send trigger (both exclusions are pinned by tests). It lives
-  // under `wallet` with every other verb that operates on the wallet.
+  // router's MCP tools (src/router/mcp.ts) and the plugin's skill; no
+  // model-facing surface gains a send trigger. It lives under `wallet` with
+  // every other verb that operates on the wallet.
   addGlobalFlags(wallet.command('send <amount> <token> <to>'))
     .summary('move funds out of the wallet (escape hatch)')
     .description(

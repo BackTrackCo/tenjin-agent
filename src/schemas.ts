@@ -27,34 +27,18 @@ export const ErrorCodeSchema = z.enum([
   'REFUSED',
   'NETWORK_ERROR',
   'INTERNAL',
-  'NOT_IMPLEMENTED',
-  // B2 (search/inspect/buy/outcome): a policy refusal (exit 3) has its own code
-  // so an agent can distinguish a spend-cap block from a generic REFUSED; a
-  // payment that failed after approval (exit 4) is PAYMENT_FAILED; the read
-  // route's own coded failures (402 preview parse, 409 gate) surface as these.
+  // A policy refusal (exit 3) has its own code so an agent can distinguish a
+  // spend-cap block from a generic REFUSED; a payment that failed after
+  // approval (exit 4) is PAYMENT_FAILED.
   'POLICY_REFUSED',
   'PAYMENT_FAILED',
   'RESOURCE_NOT_FOUND',
-  'SEARCH_NOT_FOUND',
-  // A 429 from the anonymous search/outcome/read limits; error.details carries
-  // retryAfterSeconds so a looping agent can back off instead of hammering.
+  // A 429 from a rate-limited endpoint; error.details carries retryAfterSeconds
+  // so a looping agent can back off instead of hammering.
   'RATE_LIMITED',
-  // B3 (publish): a publish that needs the human's yes (exit 3) — soft scan
-  // findings, or `review` mode always. NEEDS_CONFIRMATION clears with --yes;
-  // PUBLISH_BLOCKED is a hard-block finding (a live secret) that no mode or --yes
-  // ever clears. PUBLISH_FAILED (exit 4) is a write that failed AFTER approval,
-  // mirroring PAYMENT_FAILED's post-decision failure class.
-  'NEEDS_CONFIRMATION',
-  'PUBLISH_BLOCKED',
-  'PUBLISH_FAILED',
   // A send that reverted or produced no receipt AFTER the human approved it and
   // it was broadcast (exit 4), same post-decision class as PAYMENT_FAILED.
   'SEND_FAILED',
-  // `tenjin delete`: the soft-delete failed AFTER the human confirmed it (exit
-  // 4). Its own code rather than PUBLISH_FAILED because the two say opposite
-  // things about what is now live, and an agent reporting the outcome to a user
-  // must not read "the piece is still up" as "the piece went up".
-  'DELETE_FAILED',
   // `tenjin update`: the npm install it spawned exited nonzero or never started.
   // Exit 1, not the post-decision class: nothing is half-written that the
   // operator must reconcile, and the old build keeps running.

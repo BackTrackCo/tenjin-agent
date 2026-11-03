@@ -66,18 +66,23 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
 // every session starts, writes two small files and prints one JSON line only
 // when the wallet file or its saved passphrase file is unusable, so it takes
 // the same shortcut. A flag falls through to the command tree. Once its answer
-// is out, it starts the daily background update, detached (lib/auto-update).
+// is out, it starts the daily background update, detached (lib/auto-update):
+// after the answer, so the session waits on nothing new, and in a `finally`,
+// so a leg that throws, or a module that will not load, still starts the
+// update that may replace the build at fault. Starting it never throws and
+// never waits.
 if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] === 'alive') {
-  const [{ aliveMain }, { dataDir }, { default: pkg }] = await Promise.all([
-    import('./router/alive'),
-    import('./lib/paths'),
-    import('../package.json'),
-  ]);
-  await aliveMain({ dataDir: dataDir(process.env), version: pkg.version });
-  (await import('./lib/auto-update')).maybeAutoUpdate({
-    dataDir: dataDir(process.env),
-    env: process.env,
-  });
+  const { dataDir } = await import('./lib/paths');
+  const dir = dataDir(process.env);
+  try {
+    const [{ aliveMain }, { default: pkg }] = await Promise.all([
+      import('./router/alive'),
+      import('../package.json'),
+    ]);
+    await aliveMain({ dataDir: dir, version: pkg.version });
+  } finally {
+    (await import('./lib/auto-update')).maybeAutoUpdate({ dataDir: dir, env: process.env });
+  }
   process.exit(0);
 }
 

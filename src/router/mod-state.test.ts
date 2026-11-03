@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { OfferSpec } from './decision';
 import { MOD_STATE_FILES } from './mod-state';
 import { markOffered, sessionDir } from './progress';
-import { storeChoices, storeSpecs } from './specs';
+import { storeChoices, storeLabel, storeSpecs } from './specs';
 
 /**
  * THE FILES THE MOD READS, written by the CLI's own writers, with the fields
@@ -100,7 +100,15 @@ describe('the state contract between the CLI and the mod', () => {
     });
   });
 
-  it('names exactly these three files', () => {
-    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'offer']);
+  it("keeps a free lookup's label beside its id, for a row with no spec", async () => {
+    await storeLabel(dir, ID, 'Context7 docs');
+    expect(await json(`progress/specs/${sha256(ID)}.label.json`)).toEqual({
+      id: ID,
+      label: 'Context7 docs',
+    });
+  });
+
+  it('names exactly these four files', () => {
+    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'label', 'offer']);
   });
 });

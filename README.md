@@ -44,7 +44,7 @@ Paste this into Claude Code:
 Install Tenjin from tenjin.sh
 ```
 
-Your install request gives the agent permission to handle setup. It briefly explains task-context sharing before activation and asks about spending limits and adding funds. Follow its final activation instruction, then continue your task.
+Your install request gives the agent permission to handle setup. It briefly explains task-context sharing, asks about spending limits and adding funds, then gives the activation step. Follow that step to continue your original task. Wallet addresses appear only when requested or needed for recovery; storage and PATH details appear only for recovery.
 
 Or from a terminal (Node and npm are not required):
 
@@ -64,7 +64,7 @@ irm https://tenjin.sh/install.ps1 | iex
 ```
 
 The installer downloads a pinned Node and Tenjin, verifies both, and sets up
-the plugin. Supports macOS, Windows and glibc Linux 2.28+ on x64/arm64.
+the plugin. Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64.
 Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
 Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
 later does not stop it. Add `--project` to `tenjin install` for one project.
@@ -74,6 +74,9 @@ Plugin installation uses the default data directory; run without
 Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`. It sets up
 the same private runtime. An installation failure keeps your existing plugin
 registration. Check the reported cause, then retry the install.
+
+Agent-run installs return a compact handoff. `tenjin install --json` installs
+with the full structured result for scripts or troubleshooting.
 
 **Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 
@@ -108,7 +111,7 @@ The router names the tool and its price, and your agent calls it.
 | Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
 | PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-Provider prices above exclude Tenjin's $0.003 fee per paid routing call. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
+Provider prices above exclude Tenjin's routing fee, quoted per call and never more than $0.003. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
 You can also ask: "Find x402 endpoints I can use for speech synthesis, video generation and web search." Only when explicitly asked to discover endpoints, the shared skill checks Tenjin's catalog, public Bazaar registries and Orthogonal, then compares advertised prices, inputs and coverage. Discovery runs no provider task and pays nothing. From a terminal, `tenjin discover "speech synthesis" --json` runs the manual public-source search directly. Ordinary tasks and requests to quote or pay a known URL do not start endpoint discovery.
 
@@ -124,13 +127,15 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 
 `tenjin install` creates a wallet on your machine that holds USDC on Base. Its key never leaves your machine, and Tenjin never holds your funds. Payments run over [x402](https://www.x402.org) ([whitepaper](https://www.x402.org/x402-whitepaper.pdf), [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome)).
 
-| Limit    | Default | Change it                             |
-| -------- | ------- | ------------------------------------- |
-| Per day  | $5      | `tenjin config set sessionBudget 2`   |
-| Per call | $0.25   | `tenjin config set maxAutoSpend 0.50` |
+| Limit        | Default | Change it                             |
+| ------------ | ------- | ------------------------------------- |
+| Daily budget | $5      | `tenjin config set sessionBudget 2`   |
+| Per call     | $0.25   | `tenjin config set maxAutoSpend 0.50` |
+
+The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Browsing tools and their specs is free.
+- Each routing call costs a fee the router quotes, never more than $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees, the router's suggested amount at a time ($0.03 today, $0.05 once the router's update ships): less when your balance or per-call limit is smaller, but never less than ten fees ($0.03) or more than $0.25, so the rest stays available for paid tools. It stops routing when those funds run out and your balance is under $0.03; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
@@ -138,13 +143,13 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 ## Commands
 
 ```bash
-tenjin status                          # your balance, spent today, and your limits
+tenjin status                          # your balance, spending and limits
 tenjin wallet balance                  # what's left
 tenjin payments                        # paid lookups from this machine
 tenjin doctor                          # check that a lookup can run
 tenjin update                          # newest version now (it also updates itself daily; `tenjin config set update.mode off` stops that)
 tenjin config set router.enabled false # pause the router
-tenjin uninstall                       # run before `npm uninstall -g`; your wallet stays
+tenjin uninstall                       # your wallet stays; npm installs: then `npm uninstall -g tenjin-cli`
 ```
 
 ## Request a tool

@@ -7,7 +7,8 @@
 export type TenjinRow = {
   /** The service's `label`, from its spec or the result envelope. */
   label: string;
-  /** `$0.007`, `$0.09` for three takes, or `up to $0.05` when it varies. */
+  /** `$0.007`, `$0.09` for three takes, `up to $0.05` when it varies, or
+   *  `free` for a free lookup the CLI named. */
   price?: string;
   /** The one input the CLI says identifies the lookup, bounded. */
   argument?: string;

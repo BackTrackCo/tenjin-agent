@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,9 +8,6 @@ import { StoreExecError, type ExecFn } from '../lib/wallet/passphrase';
 import { writeWalletRecord } from '../lib/wallet/store';
 import { encryptedRecord, KNOWN_PASSPHRASE } from '../lib/wallet/test-support';
 import { defaultWalletSigning } from './install-wallet';
-
-// Real ox scrypt, as in the wallet suites.
-vi.setConfig({ testTimeout: 120000 });
 
 /** A Secret Service with nothing stored, so no test reads the developer's own keyring. */
 const emptySecretService: ExecFn = async () => {

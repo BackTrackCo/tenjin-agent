@@ -95,7 +95,7 @@ export async function forgetInstalledHost(dataDir: string, host: Harness): Promi
 /**
  * The host whose agent runs this command, from the variables each exports, or
  * undefined in a person's own terminal. A Claude Code variable wins when both
- * are set, as `readActor` reads them.
+ * are set.
  */
 export function agentHost(env: NodeJS.ProcessEnv): Harness | undefined {
   const set = (v: string | undefined) => typeof v === 'string' && v.trim().length > 0;

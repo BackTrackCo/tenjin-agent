@@ -3,119 +3,22 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
-import { HARNESSES } from '../adapters/types';
-import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
 import { DEFAULT_RPC_URL } from './usdc-balance';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
 
-/** The publish consent mode (B3, D38). `full-auto` is loosening-gated, below. */
-export const PublishModeSchema = z.enum(['review', 'auto', 'full-auto']);
-export type PublishMode = z.infer<typeof PublishModeSchema>;
-
-/**
- * Validate a publish-mode value at a command edge (`--mode`, `--publish-mode`):
- * an unrecognized value is USAGE (exit 2), never silently dropped. `flagName` is
- * woven into the message so the failing flag is named.
- */
-export function parsePublishModeFlag(value: string, flagName: string): PublishMode {
-  const parsed = PublishModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "review", "auto", or "full-auto".',
-  });
-}
-
-/**
- * The standing answer to the MARKETPLACE gate's warn tier (lib/consent.ts,
- * `acksServerWarnings`), which is a different question from `publish.mode`: the
- * mode decides what a run asks about the findings it can see locally, and this
- * decides whether a yes already given also covers findings only the server
- * found.
- *
- * `mode` (the default) derives the answer: `full-auto` acks, and anything else
- * acks only when the server contributed nothing the local pass had not already
- * rendered. `off` never acks, whatever the mode says, which is the off switch a
- * `full-auto` machine has without changing its mode. `on` is the operator's
- * standing yes for server findings, and it still needs a yes for the run: it
- * restores the pre-gate reading of `--yes` rather than manufacturing one.
- */
-export const AckServerWarningsSchema = z.enum(['mode', 'on', 'off']);
-export type AckServerWarnings = z.infer<typeof AckServerWarningsSchema>;
-
-/**
- * Validate an ack-setting value at a command edge: an unrecognized value is
- * USAGE (exit 2), never silently dropped onto the looser reading.
- */
-export function parseAckServerWarnings(value: string, keyName: string): AckServerWarnings {
-  const parsed = AckServerWarningsSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${keyName} ${JSON.stringify(value)}`, {
-    fix: 'Use "mode", "on", or "off".',
-  });
-}
-
-/**
- * The publish block (B3): `mode` governs the confirm cascade a `publish` runs,
- * `defaultPrice` is the atomic USDC price a card is published at when no
- * per-publish price is given (stored atomic like the spend keys), and
- * `ackServerWarnings` is the standing answer to the server gate's warn tier.
- */
-const PublishConfigSchema = z.object({
-  mode: PublishModeSchema,
-  defaultPrice: atomicString,
-  ackServerWarnings: AckServerWarningsSchema,
-});
-
-/**
- * The seven hook arms, one boolean each. Named by what the arm does, with the
- * harness event it answers beside it: `prompt` (UserPromptSubmit), `web-search`
- * (WebSearch), `web-fetch` (WebFetch), `subagent` (the dispatch and the child's
- * own start), `failure` (a failing command), `publish` (the turn-end ask on
- * Stop and SubagentStop), `primer` (SessionStart). The context arm is
- * bookkeeping for `failure` and `publish` and runs when either is on.
- */
-export const HOOK_ARMS = [
-  'prompt',
-  'web-search',
-  'web-fetch',
-  'subagent',
-  'failure',
-  'publish',
-  'primer',
-] as const;
-export type HookArm = (typeof HOOK_ARMS)[number];
-
-/**
- * The harness-hook block. EVERY key is read by the daemon at run time, which is
- * what makes them runtime toggles rather than install-time choices:
- * `tenjin config set hooks.web-search false` silences that arm immediately,
- * with no re-install and nothing to unwire. The entries stay registered and the
- * arm no-ops, which is also what lets turning one back on be a single
- * `config set`.
- */
-const HooksConfigSchema = z.object({
-  prompt: z.boolean(),
-  'web-search': z.boolean(),
-  'web-fetch': z.boolean(),
-  subagent: z.boolean(),
-  failure: z.boolean(),
-  publish: z.boolean(),
-  primer: z.boolean(),
-});
-
 /** How much conversation a router hook packet carries. */
 export const ROUTER_CONTEXTS = ['session', 'turn'] as const;
 export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
 
 /**
- * The router's own block, separate from the shelf's `hooks.*`: `enabled` is the
- * off switch every router hook and the `request` tool honour, and `context` is how
- * much conversation a hook packet carries (`session`, up to six prior messages,
- * or `turn`, none). THE ONE SCHEMA for it: the global file validates it here,
- * and a project's `.tenjin/config.json` and `config.local.json` go through
+ * The router's own block: `enabled` is the off switch every router hook and the
+ * `request` tool honour, and `context` is how much conversation a hook packet
+ * carries (`session`, up to six prior messages, or `turn`, none). THE ONE SCHEMA
+ * for it: the global file validates it here, and a project's
+ * `.tenjin/config.json` and `config.local.json` go through
  * {@link parseRouterLayer}. Both keys only ever tighten, which is why a
  * project file may carry them; a key that loosens (spend, allowlist, enabling,
  * base URL) must never join this object. `routerSettings` in
@@ -159,8 +62,7 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
  * `auto` installs it in the background where Tenjin's runtime is set up for the
  * default data dir (see lib/auto-update), and elsewhere behaves as `nudge`: the
  * runtime is the deferred-activation window a self-update needs, since versions
- * sit side by side and a running session keeps the one it started on (Codex
- * starts the update as its session ends, so its hooks move with it). `nudge`
+ * sit side by side and a running session keeps the one it started on. `nudge`
  * only reports it — one dim line for a human at a terminal, and an
  * `updateAvailable` field on the JSON envelope for everyone else, which is how
  * an agent learns to run `tenjin update` itself. `off` neither reports nor asks
@@ -168,68 +70,26 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
  */
 export const UpdateModeSchema = z.enum(['auto', 'nudge', 'off']);
 
-/**
- * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). TWO
- * budget numbers and two daemon knobs; every other bound is a formula over
- * these or a constant with a stated reason in `src/hooks/constants.ts`.
- *
- * `human_wait_ms`: a fire the human is waiting on (prompt, Stop, SessionStart).
- * `tool_wait_ms`: a fire a tool call is waiting on. There is no third budget:
- * a client-side rate limit rationed the research panel the loop exists to
- * capture, so the runaway stop is the server's own 429. `idle_exit_min`: the
- * daemon exits after this long with no request. `port`: null derives one from
- * the data dir path; set it only when doctor reports a foreign listener.
- */
-const positiveInt = z.number().int().positive();
-export const LoopConfigSchema = z.object({
-  human_wait_ms: positiveInt,
-  tool_wait_ms: positiveInt,
-  idle_exit_min: positiveInt,
-  port: z.number().int().min(0).max(65535).nullable(),
-});
-export type LoopConfig = z.infer<typeof LoopConfigSchema>;
-
-/**
- * `team.publicFallback` (tenjin-agent#229): `off` drops every public-only stage
- * from every lookup plan, so a team-mode miss never reaches tenjin.blog. Plain
- * config read by the daemon per fire; install against a team shelf writes `off`.
- */
-export const PublicFallbackSchema = z.enum(['on', 'off']);
-export type PublicFallback = z.infer<typeof PublicFallbackSchema>;
-export const TeamConfigSchema = z.object({ publicFallback: PublicFallbackSchema });
-export type TeamConfig = z.infer<typeof TeamConfigSchema>;
+/** An on/off switch, as `experimental.*` keys take it. */
+export const OnOffSchema = z.enum(['on', 'off']);
+export type OnOff = z.infer<typeof OnOffSchema>;
 
 /**
  * `experimental.*`: features that ship off. `bazaar` widens the third-party
  * services the router may offer from Tenjin's reviewed list (always on) to the
  * open x402 Bazaar: unreviewed sellers. Off, the client never asks for them.
  */
-export const ExperimentalConfigSchema = z.object({ bazaar: PublicFallbackSchema });
+export const ExperimentalConfigSchema = z.object({ bazaar: OnOffSchema });
 export type ExperimentalConfig = z.infer<typeof ExperimentalConfigSchema>;
 
-export function parsePublicFallbackFlag(value: string, keyName: string): PublicFallback {
-  const parsed = PublicFallbackSchema.safeParse(value);
+export function parseOnOffFlag(value: string, keyName: string): OnOff {
+  const parsed = OnOffSchema.safeParse(value);
   if (parsed.success) return parsed.data;
   throw new CliError('USAGE', `Invalid ${keyName}: ${JSON.stringify(value)}`, {
     fix: 'Use "on" or "off".',
   });
 }
 
-/** A `loop.*` value from `config set`: a positive integer, or for `loop.port`
- *  also `0`..`65535` or `null` (derive). */
-export function parseLoopValue(key: LoopConfigKey, value: string): number | null {
-  const field = key.slice('loop.'.length) as keyof LoopConfig;
-  if (field === 'port' && (value === 'null' || value === 'auto')) return null;
-  const n = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
-  const parsed = LoopConfigSchema.shape[field].safeParse(n);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${key}: ${JSON.stringify(value)}`, {
-    fix:
-      field === 'port'
-        ? 'Use an integer from 0 to 65535, or "null" to derive one from the data dir.'
-        : 'Use a positive integer.',
-  });
-}
 export type UpdateMode = z.infer<typeof UpdateModeSchema>;
 
 const UpdateConfigSchema = z.object({
@@ -244,32 +104,8 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
   });
 }
 
-/**
- * What `install` recorded about its own targets. `harness` is the last settled
- * prompt or explicit `--harness` selection, so `doctor` keeps judging every
- * directory the operator chose even when later detection cannot see it. Written
- * by `install`, not a `config set` key.
- */
+/** What `install` records about itself. Written by `install`, not a `config set` key. */
 const InstallConfigSchema = z.object({
-  harness: z.array(z.enum(HARNESSES)),
-  /**
-   * The EXACT rule strings still pending the last time an install explicitly
-   * declined the free-verb allowlist (`--no-grant`), so `--refresh`
-   * can subtract them from what it would
-   * otherwise report as pending instead of recomputing from the settings file
-   * and nagging about a settled "no" on every refresh (tenjin-agent#234).
-   *
-   * A LIST, NOT A FLAG, on purpose: a boolean has no way to say "these were
-   * declined" without also silencing every rule a LATER version might add, so a
-   * genuinely new suggestion would never be reported again either. Per-rule
-   * suppression means only the rules that were actually offered and refused
-   * stay quiet; a new one still surfaces.
-   *
-   * Cleared back to `[]` the next time an install actually wires the allowlist,
-   * or finds it already fully satisfied, so a later legitimate grant (manual or
-   * otherwise) is never shadowed by a stale decline.
-   */
-  grantDeclined: z.array(z.string()),
   /**
    * Absolute directories a `tenjin install --project` wired, so `tenjin update`
    * can refresh them. It spawns `install --refresh` from the HOME directory,
@@ -283,27 +119,6 @@ const InstallConfigSchema = z.object({
    */
   routerProjects: z.array(z.string()),
 });
-
-/**
- * `shared` was a real `install --harness` value before the harness selector was
- * narrowed to actual harnesses. It targeted the same ~/.agents/skills directory
- * as Codex, so the lossless upgrade is `codex`. Normalize at the raw parse edge:
- * commands that intentionally consume loadRawConfig directly must never see the
- * superseded value, and a later merge-write naturally persists the current shape.
- */
-const STORED_INSTALL_HARNESSES = [...HARNESSES, 'shared'] as const;
-type StoredInstallHarness = (typeof STORED_INSTALL_HARNESSES)[number];
-
-export function resolveInstallHarness(
-  value: readonly StoredInstallHarness[] | undefined,
-): Harness[] {
-  const normalized = new Set(value?.map((harness) => (harness === 'shared' ? 'codex' : harness)));
-  return HARNESSES.filter((harness) => normalized.has(harness));
-}
-
-const RawInstallHarnessSchema = z
-  .array(z.enum(STORED_INSTALL_HARNESSES))
-  .transform(resolveInstallHarness);
 
 /**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
@@ -324,97 +139,39 @@ export const ConfigSchema = z.object({
    */
   sendMaxAmount: z.union([z.literal('none'), atomicString]),
   allowlistCreators: z.array(z.string()),
+  /** The router's base URL: the Tenjin deployment every router call goes to. */
   baseUrl: z.url(),
-  /**
-   * The PUBLIC marketplace, consume-only, and the second shelf a team-mode
-   * lookup falls through to. Distinct from `baseUrl` because in team mode
-   * `baseUrl` is the team's own deployment: `publish`, `read` and the first leg
-   * of every search go there, and this is the shelf that still gets asked when
-   * the team's own has nothing. In public mode the two are the same origin and
-   * nothing falls through.
-   */
-  publicShelfUrl: z.url(),
-  /**
-   * The team shelf's Vercel "Protection Bypass for Automation" secret, and the
-   * ONE key that decides which mode this CLI is in: empty (the default) is
-   * public mode, byte-for-byte what it always did; non-empty is team mode.
-   *
-   * It is a DOOR KEY, not a credential of the operator's: it gets a request past
-   * Deployment Protection on the team's preview deployment and authenticates
-   * nobody. Stored in plain config.json alongside everything else for exactly
-   * that reason — anything that can read this file can already read the wallet's
-   * keystore path and rewrite `baseUrl`. It is redacted from `config get` and
-   * `config list` all the same, because those outputs are pasted into issues.
-   *
-   * Sent ONLY to `baseUrl`'s origin; see lib/http.ts's `bypass` option, which
-   * derives that from the request URL rather than from the caller's intent.
-   */
-  shelfBypassSecret: z.string(),
   rpcUrl: z.url(),
-  /**
-   * Evaluation-cohort opt-in (spec 09 §3): when true, search sends
-   * X-Tenjin-Eval-Cohort: 1 and the server stores the generalized question for
-   * 90 days. Off by default; no query text is retained server-side without it.
-   */
-  evalCohort: z.boolean(),
-  /** x402 discovery registries (facilitator base URLs) `discover` queries and
-   *  the Bazaar pay lane verifies against. */
+  /** x402 discovery registries (facilitator base URLs) the direct pay lane
+   *  verifies a seller's listing against. */
   bazaarRegistries: z.array(z.url()),
-  publish: PublishConfigSchema,
   install: InstallConfigSchema,
-  hooks: HooksConfigSchema,
   update: UpdateConfigSchema,
-  loop: LoopConfigSchema,
-  team: TeamConfigSchema,
   router: RouterConfigSchema,
   experimental: ExperimentalConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
 /**
- * `install`'s raw shape. The decline is a list of exact rules rather than a
- * boolean so a later version can still report a rule the operator was never
- * offered. The key is intentionally not aliased from its pre-release name.
- */
-const RawInstallConfigSchema = InstallConfigSchema.partial()
-  .extend({
-    harness: RawInstallHarnessSchema.optional(),
-    grantDeclined: z.array(z.string()).optional(),
-  })
-  .passthrough();
-
-/**
  * Values as they may appear in config.json — every known key optional; absent =
- * default. `.passthrough()` PRESERVES unknown keys through load + persist: without
- * it an older binary's `config set` would strip (and re-serialize away) any newer
- * block a later CLI wrote, e.g. B3's `publish.*`. Known keys are still validated;
- * unknown keys ride along untouched.
+ * default. `.passthrough()` PRESERVES unknown keys through load + persist: a key
+ * a newer CLI wrote survives an older binary's `config set`, and so does a key
+ * an earlier release wrote and this one no longer reads (the shelf's `publish`,
+ * `hooks`, `loop`, `team`, `publicShelfUrl`, `shelfBypassSecret`, `evalCohort`,
+ * and `install.harness`/`install.grantDeclined`). Known keys are still
+ * validated; unknown keys ride along untouched and are never read.
  */
 export const RawConfigSchema = ConfigSchema.partial()
-  // The publish block is itself partial + passthrough: `config set publish.mode`
-  // writes only the one subkey, and a subkey a newer CLI adds (e.g. publish.*
-  // beyond mode/defaultPrice) survives an older binary's set, same reason the
-  // outer object passes unknown keys through.
+  // Each block is itself partial + passthrough, for the same reason: `config
+  // set` writes one subkey, and a sibling it does not know survives.
   .extend({
-    publish: PublishConfigSchema.partial().passthrough().optional(),
-    install: RawInstallConfigSchema.optional(),
-    hooks: HooksConfigSchema.partial().passthrough().optional(),
+    install: InstallConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
-    loop: LoopConfigSchema.partial().passthrough().optional(),
-    team: TeamConfigSchema.partial().passthrough().optional(),
     router: RouterLayerSchema.passthrough().optional(),
     experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
-
-/**
- * Normalize `install.grantDeclined` as read from config.json. An absent key is
- * an empty set; a present key is already validated as exact rule strings.
- */
-export function resolveGrantDeclined(value: string[] | undefined): string[] {
-  return value ?? [];
-}
 
 /**
  * The resolved-view sentinel for an absent sendMaxAmount. Never a persistable
@@ -451,12 +208,11 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 export const DEFAULT_MAX_AUTO_SPEND = '250000';
 export const DEFAULT_SESSION_BUDGET = '5000000';
 
-/** The lowest per-call ceiling anyone can set, atomic USDC ($0.25): the
- *  routing deposit (`CHANNEL_DEPOSIT_ATOMIC`), below which routing cannot pay. */
+/** The lowest configurable per-call ceiling, atomic USDC ($0.25). */
 export const MAX_AUTO_SPEND_FLOOR_ATOMIC = 250_000n;
 /** Why: said by install, `config set` and doctor wherever the floor refuses. */
 export const MAX_AUTO_SPEND_FLOOR_WHY =
-  'The $0.25 minimum is the routing deposit: below it, routing cannot pay at all. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
+  'The per-call limit must be at least $0.25. To stop automatic payments, turn the router off with `tenjin config set router.enabled false`.';
 
 export const CONFIG_DEFAULTS: Config = {
   maxAutoSpend: DEFAULT_MAX_AUTO_SPEND,
@@ -470,57 +226,27 @@ export const CONFIG_DEFAULTS: Config = {
   sendMaxAmount: '0',
   allowlistCreators: [],
   baseUrl: PRODUCTION_ORIGIN,
-  publicShelfUrl: PRODUCTION_ORIGIN,
-  // Empty = public mode. Setting it is the whole of "turn on team mode".
-  shelfBypassSecret: '',
   rpcUrl: DEFAULT_RPC_URL,
-  evalCohort: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
-  publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [], grantDeclined: [], routerProjects: [] },
-  // Every hook is on out of the box: a vanilla install turns the whole loop on,
-  // and the disclosure and the undo ride the install output. `false` leaves the
-  // registered entries inert without touching settings.json, so any of these is
-  // one `config set` away in either direction.
-  hooks: {
-    prompt: true,
-    'web-search': true,
-    'web-fetch': true,
-    subagent: true,
-    failure: true,
-    publish: true,
-    primer: true,
-  },
+  install: { routerProjects: [] },
   update: { mode: 'auto' },
-  loop: {
-    human_wait_ms: 2500,
-    tool_wait_ms: 4000,
-    idle_exit_min: 30,
-    port: null,
-  },
-  team: { publicFallback: 'on' },
   router: { enabled: true, context: 'session' },
   experimental: { bazaar: 'off' },
 };
 
 /**
  * Scalar keys `config get/set/list` render one line each. The nested blocks are
- * excluded: `publish` and `hooks` are addressed by their dotted keys (see
- * PUBLISH_CONFIG_KEYS / HOOKS_CONFIG_KEYS), and `install` is a record `install`
- * writes about itself rather than a setting to hand-edit, so none is ever a bare
- * scalar.
+ * excluded: `update`, `router` and `experimental` are addressed by their dotted
+ * keys, and `install` is a record `install` writes about itself rather than a
+ * setting to hand-edit, so none is ever a bare scalar.
  */
 export type ScalarConfigKey = Exclude<
   keyof Config,
-  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team' | 'router' | 'experimental'
+  'install' | 'update' | 'router' | 'experimental'
 >;
 const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
-  'publish',
   'install',
-  'hooks',
   'update',
-  'loop',
-  'team',
   'router',
   'experimental',
 ]);
@@ -528,36 +254,9 @@ export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>)
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
 
-/** The dotted keys `config get/set` accept for the nested publish block. */
-export const PUBLISH_CONFIG_KEYS = [
-  'publish.mode',
-  'publish.defaultPrice',
-  'publish.ackServerWarnings',
-] as const;
-export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
-
-/** The dotted keys `config get/set` accept for the nested hooks block. */
-export type HooksConfigKey = `hooks.${HookArm}`;
-export const HOOKS_CONFIG_KEYS: readonly HooksConfigKey[] = HOOK_ARMS.map(
-  (arm) => `hooks.${arm}` as const,
-);
-
 /** The dotted key `config get/set` accepts for the nested update block. */
 export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
 export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
-
-/** The dotted keys `config get/set` accept for the loop daemon's block. */
-export const LOOP_CONFIG_KEYS = [
-  'loop.human_wait_ms',
-  'loop.tool_wait_ms',
-  'loop.idle_exit_min',
-  'loop.port',
-] as const;
-export type LoopConfigKey = (typeof LOOP_CONFIG_KEYS)[number];
-
-/** The dotted key `config get/set` accepts for the team block. */
-export const TEAM_CONFIG_KEYS = ['team.publicFallback'] as const;
-export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
 
 /** The dotted key `config get/set` accepts for the experimental block. */
 export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
@@ -611,9 +310,9 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
   return parsed.data;
 }
 
-/** File values merged over defaults — the effective persisted config. The nested
- *  publish block is merged per-subkey so a file that sets only publish.mode keeps
- *  the default defaultPrice (a shallow spread would drop it). */
+/** File values merged over defaults — the effective persisted config. Each
+ *  nested block is merged per-subkey, so a file that sets one subkey keeps the
+ *  defaults of its siblings (a shallow spread would drop them). */
 export async function loadConfig(dir: string): Promise<Config> {
   const raw = { ...(await loadRawConfig(dir)) };
   for (const key of retiredPaymentKeys(raw)) delete raw[key];
@@ -622,21 +321,10 @@ export async function loadConfig(dir: string): Promise<Config> {
   return {
     ...CONFIG_DEFAULTS,
     ...raw,
-    publish: {
-      mode: raw.publish?.mode ?? CONFIG_DEFAULTS.publish.mode,
-      defaultPrice: raw.publish?.defaultPrice ?? CONFIG_DEFAULTS.publish.defaultPrice,
-      ackServerWarnings:
-        raw.publish?.ackServerWarnings ?? CONFIG_DEFAULTS.publish.ackServerWarnings,
-    },
     install: {
-      harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
       routerProjects: raw.install?.routerProjects ?? CONFIG_DEFAULTS.install.routerProjects,
-      grantDeclined: resolveGrantDeclined(raw.install?.grantDeclined),
     },
-    hooks: resolveHooksConfig(raw),
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
-    loop: resolveLoopConfig(raw),
-    team: { publicFallback: raw.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
     router: {
       enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
       context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
@@ -644,18 +332,6 @@ export async function loadConfig(dir: string): Promise<Config> {
     experimental: {
       bazaar: raw.experimental?.bazaar ?? CONFIG_DEFAULTS.experimental.bazaar,
     },
-  };
-}
-
-/** Per-subkey merge over the defaults; an unknown key a newer CLI wrote is
- *  dropped from the EFFECTIVE object (it still rides through persist). */
-export function resolveLoopConfig(raw: PartialConfig): LoopConfig {
-  const file = raw.loop ?? {};
-  return {
-    human_wait_ms: file.human_wait_ms ?? CONFIG_DEFAULTS.loop.human_wait_ms,
-    tool_wait_ms: file.tool_wait_ms ?? CONFIG_DEFAULTS.loop.tool_wait_ms,
-    idle_exit_min: file.idle_exit_min ?? CONFIG_DEFAULTS.loop.idle_exit_min,
-    port: file.port === undefined ? CONFIG_DEFAULTS.loop.port : file.port,
   };
 }
 
@@ -667,26 +343,6 @@ export interface ResolvedSetting<T> {
   source: Provenance;
 }
 
-/**
- * The per-project `.tenjin.json` layer (B3, D38): publish overrides discovered by
- * walking up from cwd, plus whether that file is gitignored. `gitignored` gates
- * `full-auto` — a committed file requesting it is downgraded (loosening gate).
- */
-export interface ProjectPublishLayer {
-  publish?: { mode?: PublishMode; defaultPrice?: string };
-  gitignored: boolean;
-  /** The file named `publish.ackServerWarnings`, which this layer never supplies. */
-  ignoredAckServerWarnings?: boolean;
-}
-
-/** publish.mode resolution: value, source, and the downgrade warning (if any). */
-export interface PublishModeResolution {
-  value: PublishMode;
-  source: Provenance;
-  /** Set when a committed `.tenjin.json`'s `full-auto` was downgraded to `auto`. */
-  downgradedWarning?: string;
-}
-
 /** Effective value + where it came from, per key. What `config` (bare) renders. */
 export interface EffectiveSettings {
   maxAutoSpend: ResolvedSetting<string>;
@@ -694,19 +350,10 @@ export interface EffectiveSettings {
   sendMaxAmount: ResolvedSetting<string>;
   allowlistCreators: ResolvedSetting<string[]>;
   baseUrl: ResolvedSetting<string>;
-  publicShelfUrl: ResolvedSetting<string>;
-  shelfBypassSecret: ResolvedSetting<string>;
   rpcUrl: ResolvedSetting<string>;
-  evalCohort: ResolvedSetting<boolean>;
   bazaarRegistries: ResolvedSetting<string[]>;
-  publishMode: PublishModeResolution;
-  publishDefaultPrice: ResolvedSetting<string>;
-  publishAckServerWarnings: ResolvedSetting<AckServerWarnings>;
-  hooks: { [K in HookArm]: ResolvedSetting<boolean> };
   updateMode: ResolvedSetting<UpdateMode>;
-  loop: { [K in keyof LoopConfig]: ResolvedSetting<LoopConfig[K]> };
-  teamPublicFallback: ResolvedSetting<PublicFallback>;
-  experimentalBazaar: ResolvedSetting<PublicFallback>;
+  experimentalBazaar: ResolvedSetting<OnOff>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -719,88 +366,33 @@ export interface ResolveSettingsInput {
   config: PartialConfig;
   flags: SettingsFlags;
   env: NodeJS.ProcessEnv;
-  /** The nearest `.tenjin.json` layer, when one was found (see publish-settings). */
-  project?: ProjectPublishLayer;
 }
 
 /**
  * Apply precedence flag > env > file > default per key, returning each effective
- * value with its source. In B1 only baseUrl has flag/env overrides
- * (`--base-url`, TENJIN_BASE_URL); the rest resolve file-or-default. B3 adds the
- * publish keys, which additionally fold in the per-project `.tenjin.json` layer.
+ * value with its source. Only baseUrl has flag/env overrides (`--base-url`,
+ * TENJIN_BASE_URL); the rest resolve file-or-default.
  */
 export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings {
-  const { config, flags, env, project } = input;
+  const { config, flags, env } = input;
   return {
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
     sendMaxAmount: resolveSendMaxAmount(config),
     allowlistCreators: fileOrDefault('allowlistCreators', config),
     baseUrl: resolveBaseUrl(config, flags, env),
-    publicShelfUrl: fileOrDefault('publicShelfUrl', config),
-    shelfBypassSecret: fileOrDefault('shelfBypassSecret', config),
     rpcUrl: fileOrDefault('rpcUrl', config),
-    evalCohort: fileOrDefault('evalCohort', config),
     bazaarRegistries: fileOrDefault('bazaarRegistries', config),
-    publishMode: resolvePublishMode({ config, project, env }),
-    publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
-    publishAckServerWarnings: resolveAckServerWarnings(config),
-    hooks: resolveHookSettings(config),
     updateMode: resolveUpdateMode(config),
-    loop: resolveLoopSettings(config),
-    teamPublicFallback: resolveTeamPublicFallback(config),
     experimentalBazaar: resolveExperimentalBazaar(config),
   };
 }
 
-function resolveLoopSettings(config: PartialConfig): EffectiveSettings['loop'] {
-  const file = config.loop ?? {};
-  const one = <K extends keyof LoopConfig>(key: K): ResolvedSetting<LoopConfig[K]> => {
-    const fromFile = file[key];
-    if (fromFile !== undefined) return { value: fromFile as LoopConfig[K], source: 'file' };
-    return { value: CONFIG_DEFAULTS.loop[key], source: 'default' };
-  };
-  return {
-    human_wait_ms: one('human_wait_ms'),
-    tool_wait_ms: one('tool_wait_ms'),
-    idle_exit_min: one('idle_exit_min'),
-    port: one('port'),
-  };
-}
-
 /** experimental.bazaar: file or default (off), no env or flag. */
-export function resolveExperimentalBazaar(config: PartialConfig): ResolvedSetting<PublicFallback> {
+export function resolveExperimentalBazaar(config: PartialConfig): ResolvedSetting<OnOff> {
   const fromFile = config.experimental?.bazaar;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.experimental.bazaar, source: 'default' };
-}
-
-/** team.publicFallback: file or default, no env or flag. */
-export function resolveTeamPublicFallback(config: PartialConfig): ResolvedSetting<PublicFallback> {
-  const fromFile = config.team?.publicFallback;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.team.publicFallback, source: 'default' };
-}
-
-/**
- * publish.ackServerWarnings: the GLOBAL config file or the default, deliberately
- * with no project `.tenjin.json` layer and no env override. The other two publish
- * keys take the project layer because a repo may reasonably state its own price
- * and its own mode; this one only ever LOOSENS what a yes covers, so a file
- * checked into a repo the operator cloned must not be able to set it. That is the
- * same reason `resolvePublishMode` gates `full-auto` out of the project layer,
- * applied one step earlier: here there is no benign reading of the key at all.
- *
- * Exported because `resolvePublishSettings` (lib/settings.ts) resolves the same
- * key for the two writing commands, and two global-only readings that disagreed
- * would disagree about consent.
- */
-export function resolveAckServerWarnings(
-  config: PartialConfig,
-): ResolvedSetting<AckServerWarnings> {
-  const fromFile = config.publish?.ackServerWarnings;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.publish.ackServerWarnings, source: 'default' };
 }
 
 /** update.mode: file or default, no env or flag. Every surface that reports a
@@ -811,109 +403,16 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
 }
 
-/** One hook arm: file or default. Read per fire by the daemon, so a `config
- *  set` takes effect on the next prompt with no re-install. */
-export function resolveHook(config: PartialConfig, arm: HookArm): ResolvedSetting<boolean> {
-  const fromFile = config.hooks?.[arm];
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks[arm], source: 'default' };
-}
-
-function resolveHookSettings(config: PartialConfig): EffectiveSettings['hooks'] {
-  return Object.fromEntries(
-    HOOK_ARMS.map((arm) => [arm, resolveHook(config, arm)]),
-  ) as EffectiveSettings['hooks'];
-}
-
-/** Per-arm merge over the defaults, for the effective Config object. */
-function resolveHooksConfig(raw: PartialConfig): Config['hooks'] {
-  return Object.fromEntries(
-    HOOK_ARMS.map((arm) => [arm, raw.hooks?.[arm] ?? CONFIG_DEFAULTS.hooks[arm]]),
-  ) as Config['hooks'];
-}
-
-/**
- * The loosening gate (D38): a committed (not-gitignored) `.tenjin.json` requesting
- * `full-auto` is downgraded to `auto`, never silently honored — cloning a repo
- * must not enable auto-publish. `full-auto` from global config / env / flag (all
- * inherently local, not cloned) is always honored.
- */
-const FULL_AUTO_DOWNGRADE_WARNING =
-  'Ignoring publish.mode "full-auto" from a committed .tenjin.json (cloning a repo must not enable auto-publish); using "auto". Add .tenjin.json to .gitignore to opt in.';
-
-function coercePublishMode(raw: string | undefined): PublishMode | undefined {
-  if (raw === undefined || raw.length === 0) return undefined;
-  const parsed = PublishModeSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
-}
-
-/**
- * Resolve publish.mode through global file < project `.tenjin.json` < env
- * (TENJIN_PUBLISH_MODE) < flag (`--mode`). Total: an invalid env/flag value is
- * ignored (validation lives at the command edge, like baseUrl). The project
- * layer's `full-auto` is gated on that file being gitignored.
- */
-export function resolvePublishMode(input: {
-  config: PartialConfig;
-  project?: ProjectPublishLayer;
-  env: NodeJS.ProcessEnv;
-  flag?: string;
-}): PublishModeResolution {
-  const { config, project, env, flag } = input;
-  let winner: PublishModeResolution = { value: CONFIG_DEFAULTS.publish.mode, source: 'default' };
-
-  const fromFile = config.publish?.mode;
-  if (fromFile !== undefined) winner = { value: fromFile, source: 'file' };
-
-  if (project !== undefined && project.publish?.mode !== undefined) {
-    const fromProject = project.publish.mode;
-    if (fromProject === 'full-auto' && !project.gitignored) {
-      winner = { value: 'auto', source: 'project', downgradedWarning: FULL_AUTO_DOWNGRADE_WARNING };
-    } else {
-      winner = { value: fromProject, source: 'project' };
-    }
-  }
-
-  const fromEnv = coercePublishMode(env.TENJIN_PUBLISH_MODE);
-  if (fromEnv !== undefined) winner = { value: fromEnv, source: 'env' };
-
-  const fromFlag = coercePublishMode(flag);
-  if (fromFlag !== undefined) winner = { value: fromFlag, source: 'flag' };
-
-  return winner;
-}
-
-/** Resolve publish.defaultPrice (atomic) through global file < project < default. */
-export function resolvePublishDefaultPrice(input: {
-  config: PartialConfig;
-  project?: ProjectPublishLayer;
-}): ResolvedSetting<string> {
-  const { config, project } = input;
-  let result: ResolvedSetting<string> = {
-    value: CONFIG_DEFAULTS.publish.defaultPrice,
-    source: 'default',
-  };
-  if (config.publish?.defaultPrice !== undefined) {
-    result = { value: config.publish.defaultPrice, source: 'file' };
-  }
-  if (project?.publish?.defaultPrice !== undefined) {
-    result = { value: project.publish.defaultPrice, source: 'project' };
-  }
-  return result;
-}
-
 /**
  * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
  *
- * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
- * team shelf's shared door key, and every other secret in this tree is 0600
- * (the wallet, the passphrase, the session key, the spend ledger, the daemon
- * token) — wallet/local.ts even warns when it finds one that is not.
- * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
- * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
- * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
- * the key world-readable. `config --json` already redacts it, which is the same
- * care applied one layer up. Keep this in step with `persist` in commands/config.ts,
+ * 0600 BECAUSE config.json CAN HOLD A CREDENTIAL: `rpcUrl` commonly embeds an
+ * RPC provider's API key, and every other secret in this tree is 0600 (the
+ * wallet, the passphrase, the spend ledger). `dirMode: 0o700` is not a
+ * substitute: node's recursive mkdir does not chmod a directory that already
+ * exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created at 0755 by a
+ * devcontainer volume, a restored backup or a shared CI image would leave the
+ * file world-readable. Keep this in step with `persist` in commands/config.ts,
  * the other writer of this file.
  */
 export async function writeConfig(dir: string, config: Config): Promise<void> {

@@ -1,5 +1,28 @@
 # tenjin-cli
 
+## 0.1.0-alpha.33
+
+### Minor Changes
+
+- 2dc4fdf: Routed calls now tell the router this build sends a spec's fixed request
+  headers, so the router can hand it a service's call that needs one. The first
+  is Exa search with Dynamic Highlights: the spec carries Exa's
+  `Exa-Beta: dynamic-highlights-2026-08-28` opt-in and asks for one shared
+  5,000-character highlight budget across the results instead of 500 characters
+  per page, at no extra charge. Until the router ships that call, every answer
+  stays as it is.
+- b5f02a6: Add verified shell and PowerShell installers that include Node and use the same private runtime as npm. Refuse unsupported plugin profiles and preserve existing registration when runtime setup fails.
+
+### Patch Changes
+
+- fe8cef2: Tenjin now updates itself in Codex too. Codex stopped Tenjin's server before the daily background update could start, so a machine that runs Tenjin only in Codex stayed on the version it was installed with; the update now starts as a Codex session starts. Such a machine needs one `tenjin update` by hand to get this release, and updates itself from then on. In Claude Code, the daily update now starts even when Tenjin's session-start step fails, so the next release can still replace a build that fails there.
+- fe8cef2: The shell installer now refuses a Mac older than macOS 13.5, the oldest its pinned Node 24 runs on, before downloading anything, and fails a download only when it stalls (under 1 KB/s for a minute) instead of after five minutes, so a slow link can finish Node's 50 MB archive. The installer templates now ship in the npm package, so tenjin.sh builds its installers from the same release npm serves, under the same provenance. On Windows, a proxy download during `tenjin install` starts `curl.exe` from Tenjin's own folder, never from the folder you ran it in.
+- 89fe9ed: Suggest the free docs lookup after a search instead of fetching it. When the router sends a free lookup before a WebSearch as a note, the search runs as written and one optional line after it names the lookup; your assistant calls it or not. Any other free offer before a search stays silent, so the server decides when the line shows. Nothing is fetched or added to the search results, and a called lookup draws like every other Tenjin lookup, with `free` where the price goes.
+- 59adf08: The `ws` WebSocket library no longer ships: Tenjin reaches RPC over HTTP only, and Node 22 has its own WebSocket.
+- fe8cef2: `tenjin update` and the background auto-update now install a release only when npm's build provenance shows Tenjin's own release workflow built it, with the same sha512 as the tarball, whether the update runs through Tenjin's runtime or through npm. A release without that provenance is refused before anything is downloaded or installed, and the version you have keeps running.
+
+  The background auto-update also takes a release only once npm published it at least a day ago, so a bad release can be pulled before any machine runs it on its own; until then it switches nothing and `tenjin doctor` says why it waited. A manual `tenjin update` still takes the newest release right away. The background update does not run at all while `NODE_TLS_REJECT_UNAUTHORIZED=0` turns off TLS certificate checks, since anyone on the network path could then answer for npm; `tenjin doctor` says so and suggests `NODE_EXTRA_CA_CERTS` for a corporate certificate instead.
+
 ## 0.1.0-alpha.32
 
 ### Minor Changes

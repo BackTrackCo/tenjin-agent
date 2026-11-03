@@ -14,7 +14,7 @@ const bytes = await readFile(tarball);
 const pkg = JSON.parse(
   execFileSync('tar', ['-xOf', resolve(tarball), 'package/package.json'], { encoding: 'utf8' }),
 );
-if (pkg.name !== 'tenjin-cli' || !/^\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?$/.test(pkg.version))
+if (pkg.name !== 'tenjin-cli' || !/^\d+\.\d+\.\d+(?:-alpha\.\d+)?$/.test(pkg.version))
   throw new Error('Not a versioned tenjin-cli tarball');
 const node = pkg.tenjinRuntime?.node;
 if (!node || !/^\d+\.\d+\.\d+$/.test(node.version)) throw new Error('No pinned Node');
@@ -36,18 +36,12 @@ const replacements = {
     .join('\n'),
 };
 await mkdir(output, { recursive: true });
-const pins = { cliVersion: pkg.version, shSha256: '', ps1Sha256: '' };
-for (const [file, pin] of [
-  ['install.sh', 'shSha256'],
-  ['install.ps1', 'ps1Sha256'],
-]) {
+for (const file of ['install.sh', 'install.ps1']) {
   let script = await readFile(join(root, 'scripts', 'installers', file), 'utf8');
   script = script.replace(/@([A-Z_0-9]+)@/g, (_, key) => {
     if (!(key in replacements)) throw new Error(`Unknown installer token ${key}`);
     return replacements[key];
   });
   await writeFile(join(output, file), script, { mode: 0o755 });
-  pins[pin] = createHash('sha256').update(script).digest('hex');
+  console.log(`${file} ${createHash('sha256').update(script).digest('hex')}`);
 }
-await writeFile(join(output, 'pins.json'), `${JSON.stringify(pins, null, 2)}\n`);
-console.log(JSON.stringify(pins));

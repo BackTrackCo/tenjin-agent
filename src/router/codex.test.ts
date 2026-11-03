@@ -22,7 +22,7 @@ import {
   type CodexRun,
   type CodexSetupDeps,
 } from './codex-install';
-import { runHookCommand } from './hook-command';
+import { runHookKind } from './hook-command';
 import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
@@ -117,7 +117,6 @@ const codexDeps = (fetchImpl: typeof fetch) => ({
   dataDir: dir,
   harness: 'codex' as const,
   fetchImpl,
-  prefetch: () => {},
 });
 
 describe('Codex transcript ownership and bounds', () => {
@@ -314,16 +313,12 @@ describe('Codex web events', () => {
     });
     expect(codexRouterEvent({ ...post, tool_response: { changed: 'schema' } })).toMatchObject({
       nativeOutcome: null,
-      search: null,
     });
   });
 
-  it('puts free docs beside the result, since Codex cannot replace it', () => {
-    expect(
-      codexResponse({ hookSpecificOutput: { updatedToolOutput: { results: ['free docs'] } } }),
-    ).toEqual({
-      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'free docs' },
-    });
+  it('passes a line after the call through as additionalContext, and nothing else', () => {
+    const line = { hookEventName: 'PostToolUse', additionalContext: 'a line' };
+    expect(codexResponse({ hookSpecificOutput: line })).toEqual({ hookSpecificOutput: line });
     expect(
       codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, other: 1 }),
     ).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse' } });
@@ -421,6 +416,39 @@ describe('Codex routing through the router', () => {
     );
   });
 
+  /** The free docs lookup before a search, from the shared fixture. */
+  const freeNote = JSON.parse(
+    readFileSync(join(fixtures, 'wire-hook-execute-note.json'), 'utf8'),
+  ) as { decision: { id: string } };
+
+  it('notes a free lookup on a web.run search, and shows it after the search ran', async () => {
+    const pre = router(freeNote);
+    const before = await runNativeHook(
+      { ...native, tool_use_id: 'call-n', cwd: dir, transcript_path: transcript },
+      codexDeps(pre.fetchImpl),
+    );
+    expect(before).toMatchObject({ response: null, free: true, noted: true });
+    const post = router(paidOffer);
+    const after = await runShortfallHook(
+      {
+        ...native,
+        hook_event_name: 'PostToolUse',
+        tool_use_id: 'call-n',
+        tool_response: 'some results',
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(post.fetchImpl),
+    );
+    expect(post.bodies).toHaveLength(0);
+    const response = codexResponse(after.response);
+    expect(at(response, 'hookSpecificOutput', 'hookEventName')).toBe('PostToolUse');
+    const line = String(at(response, 'hookSpecificOutput', 'additionalContext'));
+    expect(line).toContain('your WebSearch call ran. Optional: Context7 docs, free');
+    expect(line).toContain(`${CODEX_REQUEST_TOOL}({`);
+    expect(line).toContain(freeNote.decision.id);
+  });
+
   const batch = {
     search_query: [{ q: 'example search' }, { q: 'second search site:example.com' }],
     open: [{ ref_id: 'https://example.com/page', lineno: 12 }],
@@ -494,23 +522,13 @@ describe('Codex routing through the router', () => {
     }
   });
 
-  /** One hook command run, its stdout captured. */
-  async function hookRun(kind: 'prompt' | 'native', event: unknown, extra: object = {}) {
-    const writes: string[] = [];
-    const io = {
-      stdout: { write: (s: string) => (writes.push(s), true) } as unknown as NodeJS.WritableStream,
-      stderr: process.stderr,
-      isTTY: false,
-    };
+  /** One routing leg as the Codex plugin's `mcp_tool` hook runs it, in
+   *  Codex's answer shape. */
+  async function hookRun(kind: 'prompt' | 'native', event: unknown) {
     const { fetchImpl } = router(paidOffer);
-    await runHookCommand(kind, io, {
-      dataDir: dir,
-      harness: 'codex',
-      readEvent: async () => JSON.stringify(event),
-      fetchImpl,
-      ...extra,
-    });
-    return writes.length === 0 ? null : (JSON.parse(writes[0]!) as unknown);
+    return codexResponse(
+      await runHookKind(kind, event, { dataDir: dir, harness: 'codex', fetchImpl }),
+    );
   }
   // Built per test: `dir` and `transcript` are set in beforeEach.
   const promptEvent = () => ({
@@ -647,6 +665,12 @@ describe('Codex install, uninstall and doctor', () => {
     const out = await runCodexInstall({ maxAutoSpend: '0.5', sessionBudget: 'none' }, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
     expect(config).toMatchObject({ maxAutoSpend: '500000', sessionBudget: 'none' });
+    expect(out.humanLines).toContain(
+      'Automatic router: up to $0.5 per call; no daily budget limit',
+    );
+    expect(out.data).toMatchObject({
+      spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
+    });
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 

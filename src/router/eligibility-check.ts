@@ -13,7 +13,14 @@ import {
   type SignVerdict,
   type Verdict,
 } from './eligibility';
-import { CHANNEL_DEPOSIT_ATOMIC, feeRefusal, refusedWhy } from './fee';
+import {
+  CHANNEL_DEPOSIT_ATOMIC,
+  feeRefusal,
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
+  refusedWhy,
+  ROUTING_FEE_CEILING_ATOMIC,
+  routingDepositAtomic,
+} from './fee';
 import { UNKNOWN_DETAIL } from './wallet-reasons';
 
 /**
@@ -132,17 +139,24 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit is always the full $0.25 and meets the whole policy once, as
-  // the payer's `depositStrategy` meets it; an unreadable ledger counts as
-  // nothing spent, as an absent one does.
+  // The deposit the payer would sign for this balance, from the production
+  // server's hint and with no quote to go on but the ceiling, evaluated
+  // against the whole policy as the payer's is.
   const deposit = evaluateSpendPolicy(input.policy, {
     mode: 'automatic',
-    amountAtomic: CHANNEL_DEPOSIT_ATOMIC,
+    amountAtomic: routingDepositAtomic({
+      hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
+      quoteAtomic: ROUTING_FEE_CEILING_ATOMIC,
+      walletAtomic: balanceAtomic,
+      perCallAtomic: input.policy.maxAutoSpendAtomic,
+      maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
+    }),
     creator: input.host,
     sessionSpentAtomic: spent ?? 0n,
   });
   const routing = canPayRouting({
-    feeRefusal: feeRefusal(input.policy, input.host),
+    // No quote to go on here: the ceiling, the most a call would pay.
+    feeRefusal: feeRefusal(input.policy, input.host, ROUTING_FEE_CEILING_ATOMIC),
     sign,
     creditAtomic,
     depositRefusal: deposit.decision === 'allow' ? null : refusedWhy(deposit.reason),

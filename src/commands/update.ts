@@ -14,6 +14,7 @@ import {
   NUDGE_OPT_OUT,
   channelTag,
   fetchDistTags,
+  fetchPublishTime,
   isNewer,
   resolveTarget,
 } from '../lib/update-check';
@@ -32,8 +33,9 @@ import { RUNTIME_MISSING_FIX } from '../router/plugin-files';
  * the default data dir only) is here.
  *
  * THE RUNTIME BRANCH needs no npm. This OLD build downloads the release (the
- * registry tarball, checked against its sha512, or a copy of itself when it IS
- * that release), ensures the Node the release pins, and places it beside the
+ * registry tarball, once npm's provenance shows Tenjin's release workflow built
+ * it, checked against its sha512; or a copy of itself when it IS that
+ * release), ensures the Node the release pins, and places it beside the
  * current version. The NEW build, spawned on that Node as `install --refresh`,
  * checks itself (`verifyBuild`), and only then switches the runtime to itself
  * and registers it. The parent reads the switch back from `state.json`: a
@@ -47,6 +49,9 @@ import { RUNTIME_MISSING_FIX } from '../router/plugin-files';
  *   the check and the install cannot disagree about what ships, and the version
  *   string is certified parseable by the same `isNewer` gate the nudge trusts
  *   before it goes anywhere near an argv.
+ * - That version passes the runtime branch's provenance check (lib/runtime's
+ *   `checkReleaseProvenance`) before the manager is spawned: what npm installs
+ *   here can become the first runtime on its refresh.
  * - The owner performs the install. npm, pnpm and bun are each driven with their
  *   own global-add command, because the PATH race that makes a second install
  *   dangerous comes from CROSS-manager writes, not from asking the owner to do
@@ -71,12 +76,26 @@ const INSTALL_TIMEOUT_MS = 300_000;
 const STAGE_TIMEOUT_MS = 120_000;
 const NODE_TIMEOUT_MS = 300_000;
 
+/**
+ * HOW OLD A RELEASE MUST BE BEFORE THE BACKGROUND RUN TAKES IT: a day since
+ * the registry published it. The window lets maintainers move `latest` back
+ * (`npm dist-tag add tenjin-cli@<good> latest`) before any auto-updater runs
+ * a bad or malicious release, which the provenance check (lib/runtime's
+ * `RELEASE_WORKFLOW`) cannot catch when the release workflow itself was
+ * compromised. Publish times are set by the registry and cannot be backdated.
+ * A manual `tenjin update` is the person choosing the release now, and does
+ * not wait.
+ */
+export const BACKGROUND_COOLDOWN_MS = 24 * 60 * 60_000;
+
 export interface UpdateOptions {
   /** Report whether a newer version exists; never install. */
   check: boolean;
   /**
    * The detached run lib/auto-update starts: the runtime branch only, never
-   * npm, with how it ended recorded in `<runtime>/auto-update.json`.
+   * npm, only a release published at least a day ago
+   * ({@link BACKGROUND_COOLDOWN_MS}), with how it ended recorded in
+   * `<runtime>/auto-update.json`.
    */
   background?: boolean;
 }
@@ -154,6 +173,8 @@ export interface UpdateDeps {
   place?: typeof placeVersion;
   /** Test seam; production asks this Node whether it can use the shell's proxy. */
   proxySupported?: boolean;
+  /** The clock the background run's cooldown reads; tests pin it. */
+  now?: () => number;
 }
 
 interface UpdateData {
@@ -295,6 +316,19 @@ async function update(
     };
   }
 
+  // THE BACKGROUND RUN WAITS A DAY after a release is published (see
+  // BACKGROUND_COOLDOWN_MS) and switches nothing before then; the next daily
+  // run takes it. Only the background run: here it always has a runtime.
+  if (opts.background === true) {
+    const wait = await tooNewForBackground(latest, ctx, deps);
+    if (wait !== null) {
+      return {
+        data: { ...data(false), skipped: wait },
+        humanLines: [`${wait}; the background update takes a release a day after it is published.`],
+      };
+    }
+  }
+
   // No manager below this line is asked, so none of the stage-2 refusals about
   // how npm's copy was installed apply: an npx run updates the runtime too.
   if (runtime !== null) {
@@ -309,6 +343,20 @@ async function update(
   // Second stage: the entries whose fix strings name the version just resolved.
   // Reached only on the install path, since --check has already returned.
   refuse(moduleDir, { check: false, spec });
+
+  // THE SAME PROVENANCE GATE THE RUNTIME BRANCH'S DOWNLOAD PASSES, before any
+  // manager is asked: the build installed here runs its own `install --refresh`
+  // next, which on the default data dir copies it into a first runtime, wallet
+  // and auto-update included. The manager then installs this exact version
+  // and checks its tarball against the same `dist.integrity` the provenance
+  // was matched to, which a published version can never change, so it
+  // installs the attested bytes. A manager configured to fetch from another
+  // registry (a mirror) gets them from there, which this check does not see.
+  const { checkReleaseProvenance } = await import('../lib/runtime');
+  await checkReleaseProvenance(latest, {
+    timeoutMs: ctx.flags.timeout,
+    fetchImpl: deps.fetchImpl,
+  });
 
   // Live chatter is a human courtesy only; the tail rides in the error envelope
   // so a piped failure is still diagnosable. Sanitized per line, because npm
@@ -434,6 +482,35 @@ async function runtimeHere(
   const inRuntime = runtimeBuild(moduleDir) !== null;
   if (state === null && !inRuntime) return null;
   return { root, current: state?.current.cli ?? null, inRuntime };
+}
+
+/**
+ * Why the background run does not take `latest` yet, or null once the registry
+ * published it at least {@link BACKGROUND_COOLDOWN_MS} ago. A publish time that
+ * is missing, does not parse, or lies in the future counts as too new: waiting
+ * is the safe side. A registry that cannot be asked fails the run, as the
+ * dist-tags read does, and the next daily run asks again.
+ */
+async function tooNewForBackground(
+  latest: string,
+  ctx: CommandContext,
+  deps: UpdateDeps,
+): Promise<string | null> {
+  const answer = await fetchPublishTime(latest, {
+    fetchImpl: deps.fetchImpl,
+    timeoutMs: ctx.flags.timeout,
+  });
+  if (answer === null) {
+    throw new CliError('NETWORK_ERROR', `Could not read when tenjin-cli ${latest} was published`, {
+      fix: 'Check access to registry.npmjs.org and retry',
+    });
+  }
+  if (answer.publishedAt === null) return `npm names no publish time for tenjin-cli ${latest}`;
+  const age = (deps.now ?? Date.now)() - answer.publishedAt;
+  // A time in the future gives a negative age, so it waits too.
+  return age >= BACKGROUND_COOLDOWN_MS
+    ? null
+    : `tenjin-cli ${latest} was published under 24 hours ago`;
 }
 
 /**
@@ -654,7 +731,7 @@ export interface RefreshOutcome {
  * has hooks belonging to THAT profile while a bare `tenjin update` resolves the
  * default one. Refreshing only the invoking profile there would leave the
  * registered scripts — the ones the harness actually fires — stale forever,
- * which is exactly the shelf runbook's manual re-install step. So the detector
+ * short of a manual re-install for each profile. So the detector
  * reads the harness settings and each profile it names is refreshed with
  * `TENJIN_DATA_DIR` set to it. A machine with no registered hooks has no other
  * profile to find, and gets one refresh for the invoking one.
@@ -929,12 +1006,12 @@ function isExistingDir(path: string): boolean {
  * The manual command that converges THIS profile.
  *
  * A bare `tenjin install` resolves one data dir, so handing it to an operator
- * whose failed profile is a shelf — the case the per-profile loop exists for —
- * is advice that cannot repair the thing it names. The bare form is emitted only
+ * whose failed profile is another one — the case the per-profile loop exists
+ * for — is advice that cannot repair the thing it names. The bare form is emitted only
  * for a dir that is the default under this home AND the one this invocation
  * itself resolved, so it is right under either reading of "what a bare install
- * would do next"; every other profile gets the explicit env prefix, which is the
- * same form the shelf runbook uses and is right unconditionally.
+ * would do next"; every other profile gets the explicit env prefix, which is
+ * right unconditionally.
  */
 function manualFix(dataDir: string, home: string, invoking: string): string {
   const bare =

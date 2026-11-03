@@ -33,8 +33,8 @@ import type { CommandContext } from '../context';
 
 /**
  * The wallet step `tenjin install` runs: keep the wallet this machine has, or
- * create one. Shared by the router install and the shelf install so the two
- * can never disagree about when a wallet is made or what a skip tells you.
+ * create one. Shared by the Claude Code and Codex installs so the two can never
+ * disagree about when a wallet is made or what a skip tells you.
  */
 
 /** The wallet question's literal copy. */

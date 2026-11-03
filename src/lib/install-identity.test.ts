@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   enableCliIdentity,
-  enableDaemonIdentity,
   identityFor,
   readOrCreateInstallId,
   tenjinOrigins,
@@ -64,18 +63,9 @@ describe('readOrCreateInstallId', () => {
 
 describe('tenjinOrigins', () => {
   it("is Tenjin's deployments and the base URL this run points at", () => {
-    expect(tenjinOrigins({ baseUrl: 'http://localhost:3000/', teamMode: false }).sort()).toEqual(
+    expect(tenjinOrigins({ baseUrl: 'http://localhost:3000/' }).sort()).toEqual(
       [...knownDeploymentOrigins(), 'http://localhost:3000'].sort(),
     );
-  });
-
-  it("leaves a team shelf out: that deployment is the team's, not Tenjin's", () => {
-    const origins = tenjinOrigins({
-      baseUrl: 'https://team.example',
-      teamMode: true,
-    });
-    expect(origins).not.toContain('https://team.example');
-    expect(origins).toContain(PRODUCTION_ORIGIN);
   });
 });
 
@@ -116,18 +106,6 @@ describe('enableCliIdentity', () => {
     expect(seen[1]).not.toHaveProperty(INSTALL_ID_HEADER);
   });
 
-  it('does not send the id to a custom public shelf', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ publicShelfUrl: 'https://shelf.example' }),
-    );
-    enableCliIdentity(dir, {});
-    expect(await tenjinIdentityHeaders('https://shelf.example/api/search')).toEqual({});
-    expect(await tenjinIdentityHeaders(`${PRODUCTION_ORIGIN}/api/search`)).toHaveProperty(
-      INSTALL_ID_HEADER,
-    );
-  });
-
   it('honours TENJIN_BASE_URL, and sends nothing when config.json is corrupt', async () => {
     enableCliIdentity(dir, { TENJIN_BASE_URL: 'http://127.0.0.1:9999' });
     expect(await tenjinIdentityHeaders('http://127.0.0.1:9999/api/search')).toHaveProperty(
@@ -137,25 +115,5 @@ describe('enableCliIdentity', () => {
     await writeFile(join(dir, 'config.json'), '{corrupt');
     enableCliIdentity(dir, {});
     expect(await tenjinIdentityHeaders(`${PRODUCTION_ORIGIN}/api/search`)).toEqual({});
-  });
-});
-
-describe('enableDaemonIdentity', () => {
-  it("follows the daemon's live config, and leaves out a team shelf", async () => {
-    let config = {
-      baseUrl: 'https://team.example',
-      publicShelfUrl: PRODUCTION_ORIGIN,
-      shelfBypassSecret: 'door-key',
-    };
-    enableDaemonIdentity(dir, () => config);
-    expect(await tenjinIdentityHeaders('https://team.example/api/search')).toEqual({});
-    expect(await tenjinIdentityHeaders(`${PRODUCTION_ORIGIN}/api/search`)).toHaveProperty(
-      INSTALL_ID_HEADER,
-    );
-
-    config = { ...config, shelfBypassSecret: '' };
-    expect(await tenjinIdentityHeaders('https://team.example/api/search')).toHaveProperty(
-      INSTALL_ID_HEADER,
-    );
   });
 });

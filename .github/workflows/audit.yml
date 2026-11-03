@@ -26,7 +26,7 @@ jobs:
     name: audit (auto-open fix PR)
     # workflow_dispatch lets the operator pick any ref; bind to main so a
     # dispatch off a stale branch can't spend the write token (same guard as
-    # release.yml and skill-drift.yml).
+    # release.yml).
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -41,7 +41,7 @@ jobs:
 
       # PRs opened with the default GITHUB_TOKEN don't trigger downstream
       # workflows (Actions anti-recursion), which would leave the fix PR with no
-      # CI. Same app-token mechanism release.yml and skill-drift.yml use.
+      # CI. Same app-token mechanism release.yml uses.
       - name: Mint release-bot installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0

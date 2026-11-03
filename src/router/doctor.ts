@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join, posix, resolve, sep, win32 } from 'node:path';
 import pkg from '../../package.json';
 import { autoUpdateLine } from '../lib/auto-update';
+import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { hasCode } from '../lib/errno';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
@@ -31,7 +32,13 @@ import {
 } from './claude-cli';
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, SUGGESTED_FUND_USD, unpaid, usd } from './fee';
+import {
+  MAX_CHANNEL_DEPOSIT_ATOMIC,
+  ROUTING_FEE_CEILING_ATOMIC,
+  SUGGESTED_FUND_USD,
+  unpaid,
+  usd,
+} from './fee';
 import { NEW_SESSION_STEP, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
@@ -80,10 +87,6 @@ import {
  *
  * EVERY FIX IS A STEP THE AGENT TAKES IN THE SESSION: a command it runs, or a
  * slash command the person types there. None sends anyone out of Claude Code.
- *
- * THE SHELF'S DOCTOR IS NOT THIS ONE. It stays with the product it belongs to
- * (`src/commands/doctor.ts`, unregistered), and this one reports the router's
- * own wiring.
  */
 
 export type { RouterCheck };
@@ -321,8 +324,10 @@ export async function runRouterDoctor(
     env,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
-  // A probe the router answered ends the routing legs' backoff at once.
-  if (probe.status === 'ok') {
+  // A probe the router answered ends the routing legs' backoff at once: ok,
+  // or a warning about its 402 (a quote above the ceiling, or one this CLI
+  // cannot read).
+  if (probe.status !== 'fail') {
     await clearRouterMemo(ctx.dataDir, 'unreachable', settings.baseUrl);
     checks.push(probe);
   } else {
@@ -642,7 +647,7 @@ async function sameDirAsAny(paths: string[], dir: string): Promise<boolean> {
 
 /**
  * The plugin: listed and enabled at this CLI's version and stamped by a
- * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still routes through a
+ * session at it, or, with no binary to ask, its folder and the `alive` stamp. A machine that still has a
  * settings install of an earlier release warns rather than fails.
  */
 async function pluginCheck(
@@ -657,7 +662,7 @@ async function pluginCheck(
           name,
           status: 'warn',
           required: false,
-          detail: `${detail}; the settings install of an earlier release still routes here`,
+          detail: `${detail}; the settings install of an earlier release is still here`,
           fix: claude.meetsFloor
             ? `Run \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`
             : `Run \`claude update\`, then \`tenjin install${c.scope === 'local' ? ' --project' : ''}\` to move this machine to the plugin.`,
@@ -1290,7 +1295,7 @@ async function migrationCheck(
         detail: `${found}, kept until the plugin loads: ${proof.reason}${lookalikes}`,
         fix: claude.meetsFloor
           ? `To load the plugin, ${NEW_SESSION_STEP}; the next \`tenjin install\` or \`tenjin update\` then removes the old entries.`
-          : 'Run `claude update`, then `tenjin install`: until then the old entries keep routing.',
+          : 'Run `claude update`, then `tenjin install`: until then the old entries stay.',
       };
 }
 
@@ -1339,9 +1344,11 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
 /**
  * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: `canPayRouting`, the
  * verdict the payer and the hooks reach on the same facts, in TODAY'S words
- * (S5). Never a failure: a call the fee cannot pay takes the free path.
+ * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
+ * tools run.
  *
- * - ready: today's ok row, byte for byte;
+ * - ready: ok, with the fee's terms; whether the router's live quote is
+ *   within the ceiling is the router check's to say;
  * - blocked by money or policy: today's `unpaid` detail, and today's fix
  *   (`fixes[why]`, else fee.ts's own);
  * - blocked because the wallet cannot sign: the WALLET_REASONS fragment and
@@ -1366,7 +1373,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
       name,
       status: 'ok',
       required: false,
-      detail: `$${usd(ROUTING_FEE_ATOMIC)} a call, paid from channel deposits of up to $${usd(CHANNEL_DEPOSIT_ATOMIC)} that count against the spend limits`,
+      detail: `the router's quote, paid only when it is at most $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call, from funds set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time; deposits count against the spend limits`,
     };
   }
   const why = v.reason;
@@ -1382,9 +1389,9 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
   const u = unpaid(why);
   const fixes: Record<string, string> = {
     no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
-    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+    limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
     budget_reached:
-      'Room comes back as the rolling day passes, or raise it with `tenjin config set sessionBudget <usd>`.',
+      'Room comes back when the daily budget resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     not_allowlisted: `Add ${host} to allowlistCreators, or clear the allowlist.`,
   };
   return {
@@ -1410,7 +1417,7 @@ function experimentalCheck(bazaar: boolean): RouterCheck {
 
 /**
  * The two limits: the daily budget is the control, the per-call ceiling the
- * runaway guard. A per-call limit an earlier release left below $0.25 shows
+ * runaway guard. A per-call limit an earlier release left below the deposit shows
  * on the routing-fee row, which names the deposit it refuses.
  */
 function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | null): RouterCheck {
@@ -1419,8 +1426,8 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       name: 'spend',
       status: 'fail',
       required: true,
-      detail: 'The daily limit is 0, so positive payments are refused even with --yes.',
-      fix: 'Choose a daily limit with `tenjin config set sessionBudget <usd|none>`.',
+      detail: 'The daily budget is 0, so positive payments are refused even with --yes.',
+      fix: 'Choose a daily budget with `tenjin config set sessionBudget <usd|none>`.',
     };
   }
   if (maxAutoSpendAtomic === 0n) {
@@ -1429,13 +1436,13 @@ function spendCheck(maxAutoSpendAtomic: bigint, sessionBudgetAtomic: bigint | nu
       status: 'fail',
       required: true,
       detail: 'maxAutoSpend is 0, so every lookup needs approval and none can pay',
-      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(CHANNEL_DEPOSIT_ATOMIC)}\`.`,
+      fix: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
     };
   }
   const budget =
     sessionBudgetAtomic === null
-      ? 'no daily ceiling'
-      : `${toMoney(sessionBudgetAtomic.toString()).usd} USD a day`;
+      ? 'no daily budget limit'
+      : `${toMoney(sessionBudgetAtomic.toString()).usd} USD daily budget, shared across chats`;
   return {
     name: 'spend',
     status: sessionBudgetAtomic === null ? 'warn' : 'ok',
@@ -1481,8 +1488,8 @@ const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
  *
  * Exit codes keep their meaning (S11): no wallet, a wallet.json `describe`
  * cannot read, and an invalid TENJIN_WALLET_KEY fail as required, exactly as
- * before. A wallet that is there but cannot be unlocked only warns: lookups
- * still run on the free path, and the fix is a person's, never `agentFix`
+ * before. A wallet that is there but cannot be unlocked only warns: the
+ * native tools still run, and the fix is a person's, never `agentFix`
  * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
  * file (B1, S3). A check that could not answer is said as not checked.
  */

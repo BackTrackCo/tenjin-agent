@@ -8,8 +8,7 @@ import type { HookDeps } from './hooks';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
-import { requestDecision, ROUTER_PATH, RouteSkipped } from './decision';
-import { ROUTE_PAID_PATH } from './fee';
+import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
 
 /**
  * THE ROUTING LEGS' BACKOFF. A call that could not reach the router (a
@@ -176,7 +175,8 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(await memo()).toMatchObject({ until: clock + UNREACHABLE_BACKOFF_MS });
   });
 
-  it('keeps "no answer" on a failed free-path fallback, so it ends no backoff', async () => {
+  it('skips a call the payer could not pay, with no second request', async () => {
+    let calls = 0;
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
@@ -184,17 +184,18 @@ describe('the routing legs back off a router they cannot reach', () => {
         ctx: { flags: { json: true, timeout: 3_500 }, dataDir: dir } as never,
         baseUrl: BASE,
         fetchImpl: (async () => {
+          calls += 1;
           throw socketError('ECONNRESET');
         }) as typeof fetch,
         route: {
-          path: ROUTE_PAID_PATH,
           send: async () => {
             throw new RouteSkipped('payment_failed');
           },
         },
       },
     );
-    expect(outcome).toMatchObject({ status: 'failed', noAnswer: true, freePath: 'payment_failed' });
+    expect(outcome).toEqual({ status: 'skipped', why: 'payment_failed' });
+    expect(calls).toBe(0);
   });
 
   it('does not start it on an answer whose body failed to read', async () => {
@@ -222,7 +223,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     },
   );
 
-  it('retries a reset socket on the free path, on a fresh connection, and starts nothing', async () => {
+  it('skips a paid call whose socket reset, with no second request, and starts nothing', async () => {
     const fake = new FakeRouter();
     const seen: string[] = [];
     const resetOnPaid = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -233,20 +234,23 @@ describe('the routing legs back off a router they cannot reach', () => {
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
     await runHookKind('prompt', prompt(), deps(resetOnPaid, p));
-    expect(seen).toEqual([ROUTE_PAID_PATH, ROUTER_PATH]);
+    expect(seen).toEqual([ROUTE_PAID_PATH]);
     expect(await memo()).toBeNull();
   });
 
-  it('does not start it from the free path a paid attempt fell back to', async () => {
+  it('ends it, and starts none, on a paid call the router answered with a 5xx', async () => {
     const fake = new FakeRouter();
-    const paidErrsFreeRefuses = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const path = new URL(new Request(input, init).url).pathname;
-      if (path === ROUTE_PAID_PATH) return new Response('{}', { status: 503 });
-      throw socketError('ECONNREFUSED');
+    const seen: string[] = [];
+    const paidErrs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seen.push(new URL(new Request(input, init).url).pathname);
+      return new Response('{}', { status: 503 });
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
-    await runHookKind('prompt', prompt(), deps(paidErrsFreeRefuses, p));
-    expect(await memo()).toBeNull();
+    await writeRouterMemo(dir, 'unreachable', BASE, { now: clock - 120_000, ttlMs: 60_000 });
+    await runHookKind('prompt', prompt(), deps(paidErrs, p));
+    expect(seen).toEqual([ROUTE_PAID_PATH]);
+    // The skip came after an answer, so the router is reachable: the memo goes.
+    expect(await readdir(join(dir, 'router-memo'))).toEqual([]);
   });
 
   it('does not start it from a paid call queued behind another until its budget ran out', async () => {
@@ -261,7 +265,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(await readRouterMemo(dir, 'unreachable', BASE, Date.now())).toBeNull();
   });
 
-  it('starts it from the paid path too, without trying the free path on the same host', async () => {
+  it('starts it from a paid call too', async () => {
     const fake = new FakeRouter();
     const r = router();
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));

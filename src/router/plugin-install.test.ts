@@ -583,14 +583,14 @@ describe('the settings install of an earlier release', () => {
     expect(await readFile(join(cfg, 'settings.json'), 'utf8')).toBe(before);
     expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
     expect((install.data as { next: string }).next).toBe(
-      'run `claude update`, then run `tenjin install` again; until then the earlier Tenjin setup keeps routing as before',
+      'run `claude update`, then run `tenjin install` again; until then the earlier Tenjin setup stays as it is',
     );
     expect(install.humanLines![0]).toBe(
       '! Tenjin keeps its earlier Claude Code setup until Claude Code is updated',
     );
     // `tenjin update` prints the refresh's notices, since it shows nothing else of a success.
     expect((refresh.data as { notices: string[] }).notices).toEqual([
-      'Claude Code 2.1.200 is older than 2.1.287, so the Tenjin plugin was not registered and the earlier settings setup keeps routing. Run `claude update`, then `tenjin install`.',
+      'Claude Code 2.1.200 is older than 2.1.287, so the Tenjin plugin was not registered and the earlier settings setup stays as it is. Run `claude update`, then `tenjin install`.',
     ]);
   });
 
@@ -978,7 +978,7 @@ describe('tenjin doctor', () => {
     expect(c['router server']?.detail).toContain('Failed to connect');
   });
 
-  it('reports a pending settings install, and warns rather than fails while it still routes', async () => {
+  it('reports a pending settings install, and warns rather than fails while it is still here', async () => {
     await writeLegacy();
     const c = await checks();
     expect(c['plugin']?.status).toBe('warn');

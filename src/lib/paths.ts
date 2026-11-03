@@ -8,9 +8,8 @@ import { join, resolve } from 'node:path';
  */
 export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.TENJIN_DATA_DIR;
-  // Absolute, always: the daemon compares this string against its own
-  // `data_dir` and is spawned with it as `cwd`, so a relative override must
-  // mean the same directory from every process.
+  // Absolute, always: a relative override must mean the same directory from
+  // every process, whatever its working directory.
   if (override !== undefined && override.length > 0) return resolve(override);
   return defaultDataDir();
 }
@@ -60,21 +59,12 @@ export function installIdPath(dir: string = dataDir()): string {
 }
 
 /**
- * Where the delegated P-256 session key + its wallet-signed SIWX delegation are
- * cached (B3, D35). A short-lived (≤24h) hot key: lower stakes than wallet.json,
- * but still written 0600 and address-bound so a wallet change invalidates it.
- */
-export function sessionPath(dir: string = dataDir()): string {
-  return join(dir, 'session.json');
-}
-
-/**
  * Where the client-side rolling spend ledger lives (lib/wallet/spend.ts).
  *
- * Its own file, NOT session.json: the two schemas are incompatible and both
- * readers treat a parse failure as "absent", so a shared path meant each writer
- * silently destroyed the other's file — a session key wiped the spend window, and
- * the next spend wiped the session key.
+ * Its own file, NOT `session.json`, which an earlier release cached a session
+ * key in: the two schemas were incompatible and both readers treated a parse
+ * failure as "absent", so a shared path meant each writer silently destroyed
+ * the other's file.
  */
 export function spendLedgerPath(dir: string = dataDir()): string {
   return join(dir, 'spend.json');
@@ -95,26 +85,6 @@ export function balanceCachePath(dir: string = dataDir()): string {
  */
 export function updateCheckPath(dir: string = dataDir()): string {
   return join(dir, 'update-check.json');
-}
-
-/**
- * Where `install` writes the standalone harness hook scripts. Under the data dir
- * rather than the harness's own config directory: the scripts are ours, a harness
- * only ever holds the path to them, and one location serves every harness.
- */
-export function hooksDir(dir: string = dataDir()): string {
-  return join(dir, 'hooks');
-}
-
-/**
- * How the marketplace has been answering the dispatch hook lately, so a run of
- * failures stops the arm instead of paying the fetch budget per subagent through
- * an outage. Hook-written, unlocked, and cheap to lose, since a missing file
- * reads as "healthy". Its own file because two hooks writing one unlocked file
- * would erase each other.
- */
-export function hookHealthPath(dir: string = dataDir()): string {
-  return join(dir, 'hook-health.json');
 }
 
 /**
@@ -168,58 +138,6 @@ export function passphraseFilePathFor(account: string, dir: string = dataDir()):
  */
 export function archivedWalletPath(account: string, dir: string = dataDir()): string {
   return join(dir, `wallet.${account}.json.bak`);
-}
-
-/**
- * The loop daemon's own state, all under the data dir (tenjin-notes
- * loop-redesign/02-redesign.md §4, §10).
- */
-export function loopDbPath(dir: string = dataDir()): string {
-  return join(dir, 'loop.db');
-}
-
-/** 32 random bytes, hex, 0600. Minted by `tenjin daemon start`, rotated only by
- *  reinstall, NEVER deleted by the daemon: every transport reads it, and an idle
- *  exit that removed it would strand them all. */
-export function daemonTokenPath(dir: string = dataDir()): string {
-  return join(dir, 'daemon.token');
-}
-
-/** `{ pid, port, started_at, data_dir }`, advisory: written after the bind,
- *  removed at exit only by the process whose pid it names. Liveness is
- *  `GET /health`, never this file alone. */
-export function daemonPidPath(dir: string = dataDir()): string {
-  return join(dir, 'daemon.pid');
-}
-
-/** Where a detached daemon's stdout and stderr go, and where the shim writes its
- *  one `daemon-down` line when it cannot reach one. */
-export function daemonLogPath(dir: string = dataDir()): string {
-  return join(dir, 'daemon.log');
-}
-
-/** An empty file whose mtime is the last spawn attempt; the shim's backoff. */
-export function daemonSpawnPath(dir: string = dataDir()): string {
-  return join(dir, 'daemon.spawn');
-}
-
-/** The single-file daemon bundle `tenjin daemon start` copies from `dist`. */
-export function daemonBundlePath(dir: string = dataDir()): string {
-  return join(hooksDir(dir), 'tenjin-daemon.mjs');
-}
-
-/** The ensure-and-forward shim the two `command` hook entries run. */
-export function shimBundlePath(dir: string = dataDir()): string {
-  return join(hooksDir(dir), 'tenjin-shim.mjs');
-}
-
-/** Tenjin's own vitest reporter, copied beside the bundles. NOT A HOOK ENTRY
- *  and never spawned: a repo's own `vitest.config.ts` imports it by this
- *  absolute path, which is why `doctor` can hint at it verbatim. */
-export const VITEST_REPORTER_FILE = 'tenjin-vitest-reporter.mjs';
-
-export function vitestReporterPath(dir: string = dataDir()): string {
-  return join(hooksDir(dir), VITEST_REPORTER_FILE);
 }
 
 /**
