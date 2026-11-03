@@ -58,8 +58,14 @@ async function offerRecord(sessionId: string, toolUseId: string): Promise<unknow
   return JSON.parse(await readFile(join(sessionDir(dir, sessionId), `offer-${key}.json`), 'utf8'));
 }
 
-/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
-const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
+/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto, and
+ *  that it asked Help improve routing, so a prompt carries only its offer. */
+const ROUTER_POLICY = {
+  maxAutoSpend: '250000',
+  sessionBudget: '5000000',
+  confirm: 'above:250000',
+  install: { improveAsked: true },
+};
 /** The wallet file's cleartext address, which is all a hook reads of it. */
 const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 /** The configured default `rpcUrl`, where the balance read goes. */
@@ -332,6 +338,37 @@ describe('the prompt hook', () => {
       fetchImpl,
     });
     expect((calls[0] as { body: Record<string, unknown> }).body.improve).toBe(true);
+  });
+
+  /**
+   * A MACHINE INSTALLED BEFORE HELP IMPROVE ROUTING EXISTED never runs the
+   * install that asks it, so its first routed prompt hands the agent the
+   * question, with no shell command for the person: recorded as asked, still
+   * off, and never asked again.
+   */
+  it('hands the agent Help improve routing once on a machine nobody asked, then never again', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    const { fetchImpl } = router(NATIVE);
+    const prompt = () =>
+      runPromptHook(promptEvent('what is the weather'), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    const first = await prompt();
+    const line = (first.response as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(line).toContain('"Help improve routing? ');
+    expect(line).toContain('You can ask your agent to turn it off any time.');
+    expect(line).toContain('On yes, run `tenjin config set router.improve true` yourself');
+    expect(line).not.toContain('Turn it off any time with');
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+      install?: unknown;
+      router?: unknown;
+    };
+    expect(config.install).toEqual({ improveAsked: true });
+    expect(config.router).toBeUndefined();
+    expect((await prompt()).response).toBeNull();
   });
 
   /**
@@ -3277,7 +3314,11 @@ describe('a discovered service', () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+      JSON.stringify({
+        maxAutoSpend: '50000',
+        experimental: { bazaar: 'on' },
+        install: { improveAsked: true },
+      }),
     );
     const { fetchImpl } = router(DISCOVERED);
     const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {

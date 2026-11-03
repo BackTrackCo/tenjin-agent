@@ -5,16 +5,20 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { QuestionStep } from './install';
 
 /**
- * "HELP IMPROVE ROUTING", ASKED ONCE PER MACHINE AT INSTALL. Off until the
- * person says yes: the router then keeps the secret-masked text of the turns
- * it sees, so its offers can be graded on real work (`router.improve`).
+ * "HELP IMPROVE ROUTING", ASKED ONCE PER MACHINE. Off until the person says
+ * yes: the router then keeps the secret-masked text of the turns it sees, so
+ * its offers can be graded on real work (`router.improve`).
  *
  * At a terminal it is one plain yes/no question, default No. When an agent
  * runs the install there is no terminal to ask at, so the question goes to
  * the agent, with the one command a yes runs; with no answer it stays off.
- * Either way the config records that it was asked, so a reinstall or an
- * update never asks again. A machine whose file already names
- * `router.improve` has answered it, and is not asked at all.
+ * A machine installed before the question existed never reaches it there:
+ * auto-update and `tenjin update` bring it the new build through `install
+ * --refresh`, which asks nothing, and a package manager through no install at
+ * all. So its first routed prompt hands the question to the agent in that
+ * session instead ({@link improveSessionAsk}). Every way, the config records
+ * that it was asked, so nothing asks again. A machine whose file already
+ * names `router.improve` has answered it, and is not asked.
  */
 
 /** What is kept, why and for how long; the same in both versions. */
@@ -97,6 +101,33 @@ export async function improveStep(
     ],
     next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once, as written; ${relayRules("that option's command", `${o.command} config set router.improve false`)}`,
   };
+}
+
+/**
+ * The question for the agent in a session on a machine nobody has asked, for
+ * the prompt leg to add beside its answer; undefined when it was asked or
+ * answered before. Recorded as asked FIRST, and handed over only once that
+ * write has landed: a config that cannot be written would otherwise put the
+ * question on every prompt.
+ */
+export async function improveSessionAsk(
+  dataDir: string,
+  config: PartialConfig,
+): Promise<string | undefined> {
+  if (!improveUnasked(config)) return undefined;
+  try {
+    await persistImproveAnswer(dataDir, undefined);
+  } catch {
+    return undefined;
+  }
+  return (
+    'ask the person one question, once, as written, at the end of your reply to this turn; ' +
+    relayRules(
+      '`tenjin config set router.improve true`',
+      'tenjin config set router.improve false',
+    ) +
+    ` The question: "${IMPROVE_AGENT_QUESTION}"`
+  );
 }
 
 /** The question as the install summary prints it. */

@@ -35,9 +35,14 @@ let transcript: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-codex-paid-'));
   await mkdir(join(dir, '.git'));
+  // Installed, and asked Help improve routing, so a prompt carries only its offer.
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+      install: { improveAsked: true },
+    }),
   );
   homeDir = join(dir, 'home');
   const day = join(homeDir, '.codex', 'sessions', '2026', '10', '22');
