@@ -371,6 +371,29 @@ describe('the prompt hook', () => {
     expect((await prompt()).response).toBeNull();
   });
 
+  it('never holds a prompt on a held config lock: the question waits, the answer does not', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    // A leftover lock from a crashed writer; the file lock never steals one.
+    await fs.mkdir(join(dir, 'config.json.lock'));
+    const { fetchImpl } = router(NATIVE);
+    const started = Date.now();
+    const out = await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(out.response).toBeNull();
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+      install?: unknown;
+    };
+    expect(config.install).toBeUndefined();
+  });
+
   /**
    * A HINT TOWARD A CALL THAT STOPS IS NOT SENT. Over the cap or past the
    * budget, `request` answers `needs_approval`, and a model sent there stops

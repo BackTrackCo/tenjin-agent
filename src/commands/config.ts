@@ -31,7 +31,7 @@ import type {
 } from '../lib/config';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { withFileLock, LockTimeoutError } from '../lib/lock';
+import { withFileLock, LockTimeoutError, type FileLockOptions } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
@@ -466,12 +466,20 @@ export async function persistRouterProject(
  * turns `router.improve` on; a no, or a question handed to an agent, leaves
  * the key as it was (off unless set). One locked write.
  */
-export async function persistImproveAnswer(dir: string, on: boolean | undefined): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    install: { ...existing.install, improveAsked: true },
-    ...(on === true ? { router: { ...existing.router, improve: true } } : {}),
-  }));
+export async function persistImproveAnswer(
+  dir: string,
+  on: boolean | undefined,
+  lock?: FileLockOptions,
+): Promise<void> {
+  await persist(
+    dir,
+    (existing) => ({
+      ...existing,
+      install: { ...existing.install, improveAsked: true },
+      ...(on === true ? { router: { ...existing.router, improve: true } } : {}),
+    }),
+    lock,
+  );
 }
 
 /** Absent-only automatic router defaults; defined beside the spend question that shows them. */
@@ -655,22 +663,27 @@ function parseHttpUrl(value: string): string {
 async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
+  lock?: FileLockOptions,
 ): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const lockPath = `${configPath(dir)}.lock`;
   try {
-    await withFileLock(lockPath, async () => {
-      const existing = await loadRawConfig(dir);
-      const merged = merge(existing);
-      const validated = RawConfigSchema.parse(merged);
-      // 0600, matching lib/config.ts's `writeConfig`: `rpcUrl` can carry an RPC
-      // provider's key, and this is the writer `config set` uses to put it
-      // there. See that function for why dirMode alone is not enough.
-      await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o600,
-        dirMode: 0o700,
-      });
-    });
+    await withFileLock(
+      lockPath,
+      async () => {
+        const existing = await loadRawConfig(dir);
+        const merged = merge(existing);
+        const validated = RawConfigSchema.parse(merged);
+        // 0600, matching lib/config.ts's `writeConfig`: `rpcUrl` can carry an RPC
+        // provider's key, and this is the writer `config set` uses to put it
+        // there. See that function for why dirMode alone is not enough.
+        await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
+          mode: 0o600,
+          dirMode: 0o700,
+        });
+      },
+      lock,
+    );
   } catch (err) {
     // A lock timeout is not the user's malformed input; surface it as INTERNAL with
     // the one manual step (there is no auto-steal), keeping the JSON error contract.

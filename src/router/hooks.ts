@@ -915,7 +915,8 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
-  const improve = hookEventName === 'UserPromptSubmit' ? await improveAsk(router, deps) : undefined;
+  // Beside the routing decision, never ahead of it.
+  const asking = hookEventName === 'UserPromptSubmit' ? improveAsk(router, deps) : undefined;
   await sweepUntaken(deps, router);
 
   const sealed = await sealHere(
@@ -927,6 +928,7 @@ async function offerOnUserText(
   const footer = await openFooter(deps, event.sessionId, 'prompt', {});
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  const improve = await asking;
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {

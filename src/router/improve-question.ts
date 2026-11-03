@@ -116,7 +116,9 @@ export async function improveSessionAsk(
 ): Promise<string | undefined> {
   if (!improveUnasked(config)) return undefined;
   try {
-    await persistImproveAnswer(dataDir, undefined);
+    // One try, no wait: a busy or leftover lock skips the question this prompt
+    // rather than hold up the routing answer it rides with.
+    await persistImproveAnswer(dataDir, undefined, { timeoutMs: 0 });
   } catch {
     return undefined;
   }
