@@ -47,8 +47,12 @@ export interface RouterObserver {
   queueNews: (line: string) => void;
   /** HookDeps.walletNews. */
   takeNews: (sessionId: string) => Promise<WalletNews>;
-  /** Remove the exit handler and the observation (tests; the process exit does it otherwise). */
-  dispose: () => void;
+  /**
+   * Remove the exit handler and the observation (tests; the process exit does
+   * it otherwise). Resolves once a write already under way has landed and been
+   * removed, so a test can delete the data directory after it.
+   */
+  dispose: () => Promise<void>;
 }
 
 export function createRouterObserver(o: {
@@ -229,7 +233,7 @@ export function createRouterObserver(o: {
       process.removeListener('exit', onExit);
       removeObservationSync(o.dataDir, o.pid);
       // A write already under way when this ran lands after it: remove again.
-      void writes.then(() => removeObservationSync(o.dataDir, o.pid));
+      return writes.then(() => removeObservationSync(o.dataDir, o.pid));
     },
   };
 }
