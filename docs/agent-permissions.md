@@ -55,7 +55,7 @@ A compromised backend can therefore name any origin it likes, and spend at most 
 
 ## Your settings: what Tenjin may use
 
-Open `/tenjin-tools` in Claude Code for a searchable view of enabled and disabled tools and the setting behind each state. Preferences and automatic use appear separately. Refresh rereads settings and the free catalog. `tenjin tools [filter]` and `request({inspect: ""})` expose the same read-only inspection in other hosts; inspection works while paused. It sends only a catalog revision to the server, never the filter, task or settings, and makes no provider call or payment. A cached catalog is marked unverified, and enabled means allowed by settings rather than guaranteed host support, account access or spending approval.
+Open `/tenjin:tools` in Claude Code for a searchable view of enabled and disabled tools and the setting behind each state. Preferences and automatic use appear separately. Refresh rereads settings and the free catalog. `tenjin tools [filter]` and `request({inspect: ""})` expose the same read-only inspection in other hosts; inspection works while paused. It sends only a catalog revision to the server, never the filter, task or settings, and makes no provider call or payment. A cached catalog is marked unverified, and enabled means allowed by settings rather than guaranteed host support, account access or spending approval.
 
 You can tell your assistant what Tenjin may use, and it changes your settings with `tenjin config` operations, each of which answers with what it saved and how to undo it. `tenjin config --help` lists them with an example each:
 
