@@ -1,0 +1,11 @@
+---
+'tenjin-cli': patch
+---
+
+A wallet Claude Code cannot unlock is now fixed, and said plainly. The wallet's passphrase is saved where Claude Code can read it without a prompt: the platform's credential store where one answers (Keychain, Secret Service, DPAPI), and otherwise a file only you can read, `~/.tenjin/passphrase.<address>.plain` (mode 0600), recorded in `~/.tenjin/passphrase-store.json`. `wallet.json` is never rewritten, and a machine with no such record behaves as before. `tenjin wallet create --insecure-storage` picks the file even where a keychain exists; it is a choice, never the fix for a locked keychain. A locked keychain is fixed by unlocking it (or logging in to the desktop session) and retrying.
+
+`tenjin wallet create` no longer prompts for the new wallet's passphrase: it generates one, or uses `TENJIN_WALLET_PASSPHRASE` when set, so set that first to choose your own. A `TENJIN_WALLET_PASSPHRASE` given when a wallet is created is now saved too (the keychain, else a file only you can read), and create says where in one line.
+
+New `tenjin wallet repair`, for a wallet whose passphrase was never saved (before this release, a passphrase given in the variable when the wallet was created was never saved, and one typed at the create prompt was not saved either, since create prompted only when no keychain answered). Run it yourself in a terminal: it asks for the passphrase (or uses `TENJIN_WALLET_PASSPHRASE` when that opens the wallet); never paste the passphrase into chat. It checks the passphrase opens the wallet, saves it, and says to start a new Claude Code session; the next session says "Tenjin wallet unlocked." It is never pre-approved for an agent.
+
+A `TENJIN_WALLET_PASSPHRASE` that does not open the wallet no longer blocks it: the saved passphrase is tried next, and Claude Code says once that the variable is wrong. A correct variable still wins. Wallet notices name the reason and are said once per reason; wallet fixes name `tenjin wallet repair` instead of the variable. Paid lookups are not offered while the wallet definitely cannot pay, and are offered as before when Tenjin cannot tell. A keychain that does not answer never stalls a lookup. `tenjin doctor` says what the router in your running Claude Code session saw, and `tenjin install` never marks with a ✓ a wallet Claude Code could not unlock.

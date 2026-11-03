@@ -1,0 +1,98 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "router",
+            "tool": "hook",
+            "input": {
+              "kind": "prompt",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "prompt": "${prompt}"
+            },
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "webrun",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "router",
+            "tool": "hook",
+            "input": {
+              "kind": "native",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}"
+            },
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__router__hook",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Only the Tenjin hooks call this tool. To make a lookup, call mcp__router__request.\"}}'",
+            "commandWindows": "echo {\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Only the Tenjin hooks call this tool. To make a lookup, call mcp__router__request.\"}}",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "webrun",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "router",
+            "tool": "hook",
+            "input": {
+              "kind": "shortfall",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "tool_response": "${tool_response}"
+            },
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "mcp__router__request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}'",
+            "commandWindows": "echo {\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

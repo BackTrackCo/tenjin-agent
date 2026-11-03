@@ -120,10 +120,9 @@ export function refuse(moduleDir: string, opts: { check: boolean; spec: string |
 }
 
 /**
- * The published package ships `dist/`, `docs/`, and `skills/` with no `src/`
- * beside them (the `files` array), so a `src/` next to the nearest package.json
- * means a checkout, whose version number says nothing about what HEAD holds.
- * Same test skill-heal uses to keep its hands off working-tree skills.
+ * The published package ships `dist/` and `docs/` with no `src/` beside them
+ * (the `files` array), so a `src/` next to the nearest package.json means a
+ * checkout, whose version number says nothing about what HEAD holds.
  */
 export function isSourceCheckout(moduleDir: string): boolean {
   let dir = moduleDir;
@@ -267,8 +266,8 @@ function scriptNear(dir: string, bin: string): string | null {
 
 /**
  * Walk PATH for the manager's shim and turn it into its script. Probes the
- * PATHEXT extensions on win32 for the same reason `onPath` in skill-wiring.ts
- * does: the real file there is `npm.cmd`, never a bare `npm`.
+ * PATHEXT extensions on win32: the real file there is `npm.cmd`, never a bare
+ * `npm`.
  */
 function scriptOnPath(
   bin: string,

@@ -1,0 +1,17 @@
+{
+  "files": [
+    {
+      "path": "docs/safety-model.md",
+      "description": "What the agent may do with user data and money, and what it must ask for."
+    },
+    {
+      "path": "docs/agent-permissions.md",
+      "description": "Permission and consent model the hooks and commands enforce."
+    },
+    {
+      "path": "src/schemas.ts",
+      "description": "Wire schemas shared with the Tenjin API.",
+      "scope": ["src/**"]
+    }
+  ]
+}

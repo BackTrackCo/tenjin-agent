@@ -1,0 +1,498 @@
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  bindDecision,
+  claimNote,
+  claimRedirect,
+  EXPIRY_MS,
+  markNoted,
+  newCallId,
+  NOTE_REPEAT_MS,
+  noteOf,
+  noteSession,
+  openLookupFooter,
+  pruneProgress,
+  pruneSessions,
+  RECENT_MS,
+  renderProgress,
+  resolveProgressSession,
+  SESSION_ACTIVE_MS,
+  sessionDir,
+  STALE_AFTER_MS,
+  writeProgress,
+} from './progress';
+
+/**
+ * The footer's evidence. Two questions decide every test here: does the line a
+ * person reads say what actually happened, and can one session's lookup ever
+ * appear in another session's terminal.
+ */
+
+let dir: string;
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'router-progress-'));
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+const NOW = 1_800_000_000_000;
+const PROVIDER = 'https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest';
+
+describe('what the status line renders', () => {
+  it('is ready when the session has never looked anything up', async () => {
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('x402 · ready');
+  });
+
+  it('names the executed provider and its parameters while the call runs', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      { phase: 'calling', provider: PROVIDER, parameters: { query: { symbol: 'BTC,ETH' } } },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: calling pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest · {"query":{"symbol":"BTC,ETH"}}',
+    );
+  });
+
+  it('shows the decision in flight before any provider is known', async () => {
+    await writeProgress(sessionDir(dir, 'session-a'), 'call-1', { phase: 'routing' }, NOW);
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: selecting service',
+    );
+  });
+
+  it('keeps a finished call on the line with its outcome and price', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      {
+        phase: 'done',
+        outcome: 'fulfilled',
+        provider: 'https://hunter.x402.paywithlocus.com/hunter/company-enrichment',
+        parameters: { body: { domain: 'stripe.com' } },
+        price: '$0.01',
+      },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 2_000 })).toBe(
+      'x402 · request: fulfilled hunter.x402.paywithlocus.com/hunter/company-enrichment · {"body":{"domain":"stripe.com"}} · $0.01',
+    );
+    // ...and drops off once it is no longer news.
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 60_000 })).toBe('x402 · ready');
+  });
+
+  it('names the newest of two overlapping calls and counts the rest', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(session, 'call-1', { phase: 'calling', provider: PROVIDER }, NOW);
+    await writeProgress(
+      session,
+      'call-2',
+      { phase: 'calling', provider: 'https://api.exa.ai/search' },
+      NOW + 10,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 20 })).toBe(
+      'x402 · request: calling api.exa.ai/search · +1 more',
+    );
+  });
+
+  it('calls an abandoned call stale rather than claiming it is still running', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      { phase: 'calling', provider: PROVIDER },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + STALE_AFTER_MS + 1 })).toBe(
+      'x402 · request: stale, no outcome recorded',
+    );
+  });
+
+  it('never emits a terminal control sequence a provider put in its URL', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      {
+        phase: 'calling',
+        // Built rather than typed: a literal directional override in a source
+        // file is the very thing this test says must never reach a terminal.
+        provider: `https://evil.test/a\u001b[2Kb${String.fromCharCode(0x202e)}c`,
+        parameters: { note: 'one\nline\u0007' },
+      },
+      NOW,
+    );
+
+    const rendered = await renderProgress(dir, 'session-a', { now: NOW });
+    expect(rendered).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    expect(rendered).toContain('evil.test');
+  });
+
+  it('redacts a secret a decision put in its parameters', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      {
+        phase: 'calling',
+        provider: PROVIDER,
+        parameters: { token: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' },
+      },
+      NOW,
+    );
+
+    const rendered = await renderProgress(dir, 'session-a', { now: NOW });
+    expect(rendered).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(rendered).toContain('redacted');
+  });
+
+  it('bounds the line to the terminal width', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      { phase: 'calling', provider: `https://long.test/${'p'.repeat(200)}` },
+      NOW,
+    );
+
+    expect((await renderProgress(dir, 'session-a', { now: NOW, columns: 60 })).length).toBe(60);
+  });
+
+  it('shows nothing from another session', async () => {
+    await writeProgress(
+      sessionDir(dir, 'session-a'),
+      'call-1',
+      { phase: 'calling', provider: PROVIDER },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-b', { now: NOW })).toBe('x402 · ready');
+  });
+
+  it('ignores a file that is not one of its own records', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(session, 'call-1', { phase: 'routing' }, NOW);
+    await writeFile(join(session, 'notes.json'), JSON.stringify({ version: 1, at: NOW }));
+    await writeFile(join(session, `${'f'.repeat(64)}.json`), 'not json');
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: selecting service',
+    );
+  });
+});
+
+describe('which session a tool call belongs to', () => {
+  it('follows the binding the hook left for that decision id', async () => {
+    await noteSession(dir, 'session-a', NOW);
+    await noteSession(dir, 'session-b', NOW);
+    await bindDecision(dir, 'session-b', 'turn-42', NOW);
+
+    expect(await resolveProgressSession(dir, { id: 'turn-42', now: NOW })).toBe(
+      sessionDir(dir, 'session-b'),
+    );
+  });
+
+  it('uses the only active session when the call carries no id', async () => {
+    await noteSession(dir, 'session-a', NOW);
+
+    expect(await resolveProgressSession(dir, { now: NOW })).toBe(sessionDir(dir, 'session-a'));
+  });
+
+  it('refuses to guess between two active sessions', async () => {
+    await noteSession(dir, 'session-a', NOW);
+    await noteSession(dir, 'session-b', NOW);
+
+    expect(await resolveProgressSession(dir, { now: NOW })).toBeNull();
+    expect(await resolveProgressSession(dir, { id: 'unknown-turn', now: NOW })).toBeNull();
+  });
+
+  it('writes nothing at all when it cannot tell', async () => {
+    await noteSession(dir, 'session-a', NOW);
+    await noteSession(dir, 'session-b', NOW);
+    const footer = await openLookupFooter(dir, { now: () => NOW });
+    await footer.routing();
+    await footer.done('fulfilled', { provider: PROVIDER });
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('x402 · ready');
+    expect(await renderProgress(dir, 'session-b', { now: NOW })).toBe('x402 · ready');
+  });
+
+  it('carries one lookup from routing to its outcome in the bound session', async () => {
+    await noteSession(dir, 'session-a', NOW);
+    await bindDecision(dir, 'session-a', 'turn-42', NOW);
+    const footer = await openLookupFooter(dir, { id: 'turn-42', now: () => NOW });
+
+    await footer.routing();
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe(
+      'x402 · request: selecting service',
+    );
+
+    await footer.calling({ provider: PROVIDER, parameters: { symbol: 'BTC' } });
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toContain(
+      'calling pro-api.coinmarketcap.com',
+    );
+
+    await footer.done('fulfilled', { provider: PROVIDER, price: '$0.01' });
+    expect(await renderProgress(dir, 'session-a', { now: NOW })).toContain('fulfilled');
+  });
+});
+
+describe('housekeeping', () => {
+  it('drops records past the expiry and leaves the live one', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(
+      session,
+      'old',
+      { phase: 'done', outcome: 'fulfilled' },
+      NOW - EXPIRY_MS - 1,
+    );
+    await writeProgress(session, 'new', { phase: 'routing' }, NOW);
+
+    await pruneProgress(session, NOW);
+
+    expect((await readdir(session)).length).toBe(1);
+  });
+
+  it('gives every call its own record', () => {
+    expect(newCallId()).not.toBe(newCallId());
+  });
+
+  /**
+   * A TEMP FILE IS NOT A RECORD between its write and its rename: read as one
+   * it is damaged, and the prune a parallel hook runs deleted it from under the
+   * writer. It ages by its mtime. A docs body an older build left is damaged,
+   * and goes on the next prune.
+   */
+  it('keeps a temp file mid-rename, ages it out by mtime, and drops an old docs body', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await noteSession(dir, 'session-a', NOW);
+    const temp = join(session, '.note-abc.json.123.tmp');
+    await writeFile(temp, '{"stat');
+    const body = join(session, `augment-${'a'.repeat(64)}.docs`);
+    await writeFile(body, JSON.stringify({ status: 200, text: 'x'.repeat(20_000) }));
+    const seconds = NOW / 1000;
+    for (const path of [temp, body]) await utimes(path, seconds, seconds);
+
+    await pruneProgress(session, NOW + 1_000);
+    expect(existsSync(temp)).toBe(true);
+    expect(existsSync(body)).toBe(false);
+
+    await pruneProgress(session, NOW + EXPIRY_MS + 1_000);
+    expect(existsSync(temp)).toBe(false);
+  });
+});
+
+describe('the free-docs records', () => {
+  const ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23';
+  const LINE = `Context7 docs, free: docs. If WebSearch couldn't get this, call request({query: "zod", id: "${ID}"}) and wait for its result.`;
+
+  it('finds the note by the call id, with its offer and line', async () => {
+    expect(await markNoted(dir, 'session-a', 'toolu_1', { offerId: ID, line: LINE }, NOW)).toBe(
+      true,
+    );
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW + 1_000)).toEqual({
+      offerId: ID,
+      line: LINE,
+    });
+    expect(await noteOf(dir, 'session-a', 'toolu_2', NOW)).toBeNull();
+    expect(await noteOf(dir, 'session-b', 'toolu_1', NOW)).toBeNull();
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW + EXPIRY_MS + 1)).toBeNull();
+  });
+
+  it('writes nothing for a record past the bound, or a line without its own id', async () => {
+    const long = `${LINE} ${'x'.repeat(4_096)}`;
+    expect(await markNoted(dir, 'session-a', 'toolu_1', { offerId: ID, line: long }, NOW)).toBe(
+      false,
+    );
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW)).toBeNull();
+    const other = LINE.replace(ID, 'another-id');
+    expect(await markNoted(dir, 'session-a', 'toolu_2', { offerId: ID, line: other }, NOW)).toBe(
+      false,
+    );
+    expect(await markNoted(dir, 'session-a', 'toolu_3', { offerId: 'a b', line: LINE }, NOW)).toBe(
+      false,
+    );
+  });
+
+  it('reads a record whose line no longer carries its offer id as absent', async () => {
+    const key = createHash('sha256').update('toolu_1').digest('hex');
+    const path = join(sessionDir(dir, 'session-a'), `note-${key}.json`);
+    await markNoted(dir, 'session-a', 'toolu_1', { offerId: ID, line: LINE }, NOW);
+    await writeFile(
+      path,
+      JSON.stringify({ version: 1, at: NOW, offerId: ID, line: 'Call request({query}).' }),
+    );
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW)).toBeNull();
+  });
+
+  /** The start of a NOTE_REPEAT_MS window, so a test can stand either side of one. */
+  const WINDOW = Math.ceil(NOW / NOTE_REPEAT_MS) * NOTE_REPEAT_MS;
+
+  it('claims one agent query once in its span, and again after it', async () => {
+    const at = WINDOW + 1_000;
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', at)).toBe(true);
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', at + 1_000)).toBe(false);
+    // Another agent, another query, another session: each its own claim.
+    expect(await claimNote(dir, 'session-a', 'a1', 'zod v4 coerce', at)).toBe(true);
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 transform', at)).toBe(true);
+    expect(await claimNote(dir, 'session-b', undefined, 'zod v4 coerce', at)).toBe(true);
+    // Across the window boundary the claim still holds its full span.
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', at + NOTE_REPEAT_MS)).toBe(
+      false,
+    );
+    const later = at + NOTE_REPEAT_MS + 1;
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', later)).toBe(true);
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', later + 1)).toBe(false);
+  });
+
+  it('gives six parallel copies of one query a single claim, after the window too', async () => {
+    const copies = (now: number) =>
+      Promise.all(
+        Array.from({ length: 6 }, () => claimNote(dir, 'session-a', undefined, 'same', now)),
+      );
+    expect((await copies(WINDOW + 1_000)).filter(Boolean)).toHaveLength(1);
+    expect((await copies(WINDOW + 1_000 + NOTE_REPEAT_MS + 1)).filter(Boolean)).toHaveLength(1);
+  });
+});
+
+/**
+ * ONE REDIRECT PER TARGET, DECIDED BY ONE EXCLUSIVE CREATE. A claim is never
+ * replaced: replacing an expired one let two parallel copies of a call both
+ * read the old stamp, both write, and both be denied.
+ */
+describe('the redirect claims', () => {
+  /** The start of an EXPIRY_MS window, so a test can stand either side of one. */
+  const WINDOW = Math.ceil(NOW / EXPIRY_MS) * EXPIRY_MS;
+  const TARGET = 'WebFetch https://example.test/spec';
+  const claim = (now: number, agentId?: string, target = TARGET) =>
+    claimRedirect(dir, 'session-a', agentId, target, now);
+
+  it('is one per agent and target, and holds for its span', async () => {
+    expect(await claim(WINDOW + 1_000)).toBe(true);
+    expect(await claim(WINDOW + 2_000)).toBe(false);
+    expect(await claim(WINDOW + 1_000, 'a1')).toBe(true);
+    expect(await claim(WINDOW + 1_000, undefined, 'WebSearch spec')).toBe(true);
+  });
+
+  it('holds its full span across a window boundary, then lapses', async () => {
+    const at = WINDOW + EXPIRY_MS - 1_000;
+    expect(await claim(at)).toBe(true);
+    expect(await claim(WINDOW + EXPIRY_MS + 1_000)).toBe(false);
+    expect(await claim(at + EXPIRY_MS)).toBe(false);
+    expect(await claim(at + EXPIRY_MS + 1)).toBe(true);
+    expect(await claim(at + EXPIRY_MS + 2)).toBe(false);
+  });
+
+  it('gives parallel copies exactly one claim, including after one expired', async () => {
+    const copies = (now: number) => Promise.all(Array.from({ length: 6 }, () => claim(now)));
+    expect((await copies(WINDOW + 1_000)).filter(Boolean)).toHaveLength(1);
+    const after = await copies(WINDOW + 1_000 + EXPIRY_MS + 1);
+    expect(after.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('prunes a claim once it has expired, and keeps a live one', async () => {
+    expect(await claim(WINDOW + 1_000)).toBe(true);
+    const directory = sessionDir(dir, 'session-a');
+    await pruneProgress(directory, WINDOW + 1_000 + EXPIRY_MS);
+    expect((await readdir(directory)).filter((name) => name.startsWith('redirect-'))).toHaveLength(
+      1,
+    );
+    await pruneProgress(directory, WINDOW + 1_000 + EXPIRY_MS + 1);
+    expect((await readdir(directory)).filter((name) => name.startsWith('redirect-'))).toHaveLength(
+      0,
+    );
+  });
+});
+
+describe('sessions that are over', () => {
+  it('drops their directories, and keeps a live one', async () => {
+    await noteSession(dir, 'live', NOW);
+    await noteSession(dir, 'gone', NOW - SESSION_ACTIVE_MS - 1);
+    await writeProgress(sessionDir(dir, 'gone'), 'old', { phase: 'routing' }, NOW - EXPIRY_MS - 1);
+
+    await pruneSessions(dir, NOW);
+
+    expect(existsSync(sessionDir(dir, 'live'))).toBe(true);
+    expect(existsSync(sessionDir(dir, 'gone'))).toBe(false);
+    // ...so the one that is left can still claim an id-less call.
+    expect(await resolveProgressSession(dir, { now: NOW })).toBe(sessionDir(dir, 'live'));
+  });
+
+  it('keeps a quiet session that still has a call inside the display window', async () => {
+    await noteSession(dir, 'quiet', NOW - SESSION_ACTIVE_MS - 1);
+    await writeProgress(sessionDir(dir, 'quiet'), 'call-1', { phase: 'calling' }, NOW);
+
+    await pruneSessions(dir, NOW);
+
+    expect(await renderProgress(dir, 'quiet', { now: NOW })).toBe('x402 · request: calling');
+  });
+});
+
+describe('when the display itself fails', () => {
+  it('prints nothing, rather than a state it could not read', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(session, 'call-1', { phase: 'routing' }, NOW);
+    await chmod(session, 0o000);
+
+    try {
+      expect(await renderProgress(dir, 'session-a', { now: NOW })).toBe('');
+    } finally {
+      await chmod(session, 0o700);
+    }
+  });
+
+  it('still says ready for a session that has looked nothing up', async () => {
+    expect(await renderProgress(dir, 'never-used', { now: NOW })).toBe('x402 · ready');
+  });
+});
+
+describe('how long a state holds the line', () => {
+  it('keeps a hook outcome until the next state, then goes back to ready', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(
+      session,
+      'hook-1',
+      { phase: 'done', operation: 'search', outcome: 'native tools (no x402 payment)' },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 9_000 })).toBe(
+      'x402 · search: native tools (no x402 payment)',
+    );
+    expect(await renderProgress(dir, 'session-a', { now: NOW + RECENT_MS + 1 })).toBe(
+      'x402 · ready',
+    );
+  });
+
+  it('keeps a lookup in flight on the line well past a hook state', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(session, 'call-1', { phase: 'calling', provider: PROVIDER }, NOW);
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + RECENT_MS + 1 })).toContain(
+      'calling pro-api.coinmarketcap.com',
+    );
+  });
+
+  it('says ready for a hook decision that never came back', async () => {
+    const session = sessionDir(dir, 'session-a');
+    await writeProgress(
+      session,
+      'hook-1',
+      { phase: 'routing', operation: 'prompt', outcome: 'selecting service' },
+      NOW,
+    );
+
+    expect(await renderProgress(dir, 'session-a', { now: NOW + 1_000 })).toBe(
+      'x402 · prompt: selecting service',
+    );
+    expect(await renderProgress(dir, 'session-a', { now: NOW + RECENT_MS + 1 })).toBe(
+      'x402 · ready',
+    );
+  });
+});

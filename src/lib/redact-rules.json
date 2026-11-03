@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries by `mask()`; regex rows only). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "note": "The rule table for mask() in src/lib/redact.ts, the redaction applied to hook queries and router packets before they leave this machine. Every row is one detector: `id` names it, `tier` says how sure a match is (`block`: a vendor prefix or an unambiguous shape; `warn`: a heuristic shape), `match` is a JS regex or the name of an algorithmic detector (`hex64`, `pemBlock`, `bip39`), `excerpt` is what replaces a match (never the secret), and `skip` names a predicate that leaves a match as written. Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
   "publicHexConstants": [
     {
       "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -53,16 +53,13 @@
   ],
   "excerptPolicies": {
     "mask": "Keep the first `keep` characters (a public type marker) and replace the rest with a redaction count.",
-    "verbatim": "Echo the match, truncated to `max` characters when set. Only for non-secret matches.",
-    "abbreviate": "Keep `head` leading and `tail` trailing characters joined by an ellipsis.",
     "custom": "Consumer-implemented builder named by `handler`."
   },
   "rules": [
     {
       "id": "secret-assignment",
       "tier": "warn",
-      "scopes": ["query", "publish", "team"],
-      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value. NOT the JSON-quoted form (\"password\": \"...\"): reading a quote after the name turned ordinary config keys into findings ({\"credentials\": \"include\"}, {\"max_tokens\": 128000}, {\"tokenizer\": \"cl100k_base\"}), and a JSON key is an identifier the shelf ranks on (owner decision, review round 6). The separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
+      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value. The JSON-quoted form (\"password\": \"...\") is the third row, not a quote read here: reading a quote after this name turned ordinary config keys into findings ({\"credentials\": \"include\"}, {\"max_tokens\": 128000}, {\"tokenizer\": \"cl100k_base\"}, review round 6). The separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
       "source": "tenjin",
       "match": {
         "kind": "regex",
@@ -80,7 +77,6 @@
     {
       "id": "secret-assignment",
       "tier": "warn",
-      "scopes": ["query", "publish", "team"],
       "description": "Secret-named command-line flag with a SPACE-separated literal value (--api-key <v>, --token <v>): the one credential position the assignment form above cannot see, since it needs `=` or `:` after the name. `X-Api-Key: <v>` and `--api-key=<v>` already match above (Api-Key, api-key) and are deliberately not repeated here, so one value yields one finding. For the shapes a recorded command line takes (tenjin-agent#281): a hex-only key has no vendor prefix, and bare hex is deliberately never reported so a commit SHA still syncs, so the credential POSITION is the signal.",
       "source": "tenjin (closes tenjin-agent#281)",
       "match": {
@@ -97,9 +93,26 @@
       }
     },
     {
+      "id": "secret-assignment",
+      "tier": "warn",
+      "description": "Quoted secret name before `:` or `=` with a quoted value (\"password\": \"...\", 'api_key' = '...'), the JSON and YAML form of the first row (tenjin-agent#296). Narrower than the first row on purpose, so the review-round-6 config keys stay clean: the name must END in the secret word (no `max_tokens`, `tokenizer`, `passwordHash`), and the value must be quoted and carry a letter and a digit (no `128000`, no `\"include\"`). A letters-only quoted password is an accepted miss.",
+      "source": "tenjin (tenjin-agent#296)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<=[\"'])([A-Za-z0-9_-]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|SUBSCRIPTION[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN))[\"'][ \\t]*[:=][ \\t]*(\"(?=[^\"]*\\d)(?=[^\"]*[A-Za-z])[^\"]{6,}\"|'(?=[^']*\\d)(?=[^']*[A-Za-z])[^']{6,}')",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
+    {
       "id": "aws-access-key",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "AWS access key id (AKIA/ASIA/ABIA/ACCA/A3T prefixes).",
       "source": "gitleaks:aws-access-token",
       "match": {
@@ -115,7 +128,6 @@
     {
       "id": "jwt",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "JSON Web Token: three base64url segments whose header starts eyJ.",
       "source": "gitleaks:jwt",
       "match": {
@@ -131,7 +143,6 @@
     {
       "id": "github-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "GitHub classic PAT/OAuth/app/refresh token or fine-grained PAT (github_pat_).",
       "source": "gitleaks:github-pat + github-fine-grained-pat",
       "match": {
@@ -147,7 +158,6 @@
     {
       "id": "slack-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Slack bot/user/app/refresh/legacy token.",
       "source": "gitleaks:slack-*-token",
       "match": {
@@ -163,7 +173,6 @@
     {
       "id": "stripe-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Stripe live or test secret/restricted key.",
       "source": "gitleaks:stripe-access-token",
       "match": {
@@ -179,7 +188,6 @@
     {
       "id": "anthropic-key",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Anthropic API key (sk-ant-).",
       "source": "gitleaks:anthropic-api-key",
       "match": {
@@ -195,7 +203,6 @@
     {
       "id": "openai-key",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block. Project, service-account and admin keys carry `_` and `-` throughout the body, so the prefixed branch takes the wider class and its own trailing guard; the bare branch keeps the digit requirement and its own guard. The guards live INSIDE each branch: a shared guard outside the alternation made a classic key followed by `-old` fail outright (review round 6).",
       "source": "gitleaks:openai-api-key",
       "match": {
@@ -211,7 +218,6 @@
     {
       "id": "google-key",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Google API key (AIza) or OAuth client secret (GOCSPX-).",
       "source": "gitleaks:gcp-api-key + gcp-oauth-client-secret",
       "match": {
@@ -227,7 +233,6 @@
     {
       "id": "npm-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "npm access token.",
       "source": "gitleaks:npm-access-token",
       "match": {
@@ -243,7 +248,6 @@
     {
       "id": "supabase-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Supabase personal access token (sbp_) or secret/publishable API key (sb_*_).",
       "source": "gitleaks:supabase-access-token",
       "match": {
@@ -259,7 +263,6 @@
     {
       "id": "twilio-key",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Twilio API key SID (SK + 32 lowercase hex).",
       "source": "gitleaks:twilio-api-key",
       "match": {
@@ -275,7 +278,6 @@
     {
       "id": "sendgrid-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "SendGrid API key (SG.<id>.<secret>).",
       "source": "gitleaks:sendgrid-api-token",
       "match": {
@@ -291,7 +293,6 @@
     {
       "id": "huggingface-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Hugging Face user access token (hf_).",
       "source": "gitleaks:huggingface-access-token",
       "match": {
@@ -307,7 +308,6 @@
     {
       "id": "vercel-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Vercel Blob read/write store token.",
       "source": "tenjin (shape from the Vercel Blob docs)",
       "match": {
@@ -323,7 +323,6 @@
     {
       "id": "vercel-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Vercel platform token (vcp_/vci_/vca_/vcr_/vck_ prefixes).",
       "source": "secretlint:@secretlint/secretlint-rule-vercel",
       "match": {
@@ -339,7 +338,6 @@
     {
       "id": "notion-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Notion integration token (ntn_).",
       "source": "secretlint:@secretlint/secretlint-rule-notion",
       "match": {
@@ -355,7 +353,6 @@
     {
       "id": "linear-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Linear API key (lin_api_).",
       "source": "secretlint:@secretlint/secretlint-rule-linear",
       "match": {
@@ -371,7 +368,6 @@
     {
       "id": "figma-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Figma personal access token (figd_).",
       "source": "secretlint:@secretlint/secretlint-rule-figma",
       "match": {
@@ -387,7 +383,6 @@
     {
       "id": "gitlab-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "GitLab personal access token (glpat-).",
       "source": "secretlint:@secretlint/secretlint-rule-gitlab",
       "match": {
@@ -403,7 +398,6 @@
     {
       "id": "docker-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Docker Hub personal access token (dckr_pat_).",
       "source": "secretlint:@secretlint/secretlint-rule-docker",
       "match": {
@@ -419,7 +413,6 @@
     {
       "id": "cloudflare-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Cloudflare API key or account/user token (cfk_/cfut_/cfat_).",
       "source": "secretlint:@secretlint/secretlint-rule-cloudflare",
       "match": {
@@ -435,7 +428,6 @@
     {
       "id": "databricks-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Databricks personal access token (dapi).",
       "source": "secretlint:@secretlint/secretlint-rule-databricks",
       "match": {
@@ -451,7 +443,6 @@
     {
       "id": "openssh-private-key",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "OpenSSH private key body pasted without its PEM framing (base64 of the openssh-key-v1 magic).",
       "source": "gitleaks:private-key (framing-free variant)",
       "match": {
@@ -467,7 +458,6 @@
     {
       "id": "totp-uri",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "otpauth:// TOTP/HOTP provisioning URI; its secret= parameter is a live second factor.",
       "source": "tenjin (RFC-style otpauth key URI)",
       "match": {
@@ -483,7 +473,6 @@
     {
       "id": "db-connection-uri",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Basic-auth style URI with an embedded password (scheme://user:pass@host), including database connection strings. The scheme run is length-bounded: unbounded, it backtracks quadratically across a transcript-length dotted-token line that never reaches ://. The user may be empty: `redis://:password@host` is the standard Redis form.",
       "source": "tenjin",
       "match": {
@@ -502,7 +491,6 @@
     {
       "id": "bearer-token",
       "tier": "block",
-      "scopes": ["query", "publish", "team"],
       "description": "Authorization: Bearer header carrying a live token.",
       "source": "tenjin",
       "match": {
@@ -519,192 +507,29 @@
       }
     },
     {
-      "id": "wallet-address",
+      "id": "basic-auth-header",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "EVM account/contract address (0x + 40 hex).",
-      "source": "blockrun-mcp (wallet-key leak scanner)",
+      "description": "Authorization: Basic header: the base64 of user:password, under the entropy floor and on no vendor prefix (tenjin-agent#296). The header name is a bounded lookbehind behind a shape lookahead, so the mask keeps it, replaces the credential alone, and a whitespace run stays linear.",
+      "source": "tenjin (tenjin-agent#296)",
       "match": {
         "kind": "regex",
-        "pattern": "(?<![0-9a-fx])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])",
+        "pattern": "(?=[A-Za-z0-9+/]{8})(?<=\\bAuthorization:[ \\t]{0,16}Basic[ \\t]{1,16})[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/=])",
         "flags": "gi"
       },
       "excerpt": {
-        "kind": "abbreviate",
-        "head": 6,
-        "tail": 4
+        "kind": "mask",
+        "keep": 0
       }
     },
     {
-      "id": "confidential-marker",
+      "id": "curl-user-credential",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Document classification legend (CONFIDENTIAL stamp, INTERNAL USE ONLY, DO NOT DISTRIBUTE). Case-sensitive: marker-shaped, not word-in-phrase.",
-      "source": "tenjin",
+      "description": "curl -u / --user user:password on one command (tenjin-agent#296): the password is masked and the command and user kept. Anchored on `curl` within 200 characters of the flag on the same pipeline segment, so `docker run -u 1000:1000` never matches. A `$VAR`, a placeholder or a bare lowercase word is skipped as the assignment row skips it.",
+      "source": "tenjin (tenjin-agent#296)",
       "match": {
         "kind": "regex",
-        "pattern": "\\b(?:STRICTLY|COMPANY|HIGHLY)\\s+CONFIDENTIAL\\b|(?<![A-Z]{2,}[ \\t]+)\\bCONFIDENTIAL\\b|\\bCONFIDENTIAL\\b(?![ \\t]+[A-Z]{2,})|\\bConfidential(?=\\s*(?:[-:.,;–—]|$))|\\b(?:INTERNAL|Internal)(?:\\s+(?:USE|Use))?\\s+(?:ONLY|Only)\\b|\\b(?:DO\\s+NOT\\s+DISTRIBUTE|Do\\s+Not\\s+Distribute)\\b",
+        "pattern": "(\\bcurl\\b[^\\n|;&]{0,200}?[ \\t](?:-u|--user)(?:[ \\t]+|=)[\"']?[^\\s:\"']{1,64}):([^\\s\"']+)",
         "flags": "g"
-      },
-      "excerpt": {
-        "kind": "verbatim"
-      }
-    },
-    {
-      "id": "internal-hostname",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Hostname on a private-use suffix (.internal, .corp, .local, .lan, .intranet). Label count and label length are bounded: an unbounded (label\\.)+ run is quadratic on a transcript-length line of dotted digits.",
-      "source": "tenjin",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\b(?:[a-z0-9-]{1,63}\\.){1,6}(?:internal|corp|local|lan|intranet)\\b",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "verbatim"
-      }
-    },
-    {
-      "id": "private-network-endpoint",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "RFC1918 / link-local IPv4 endpoint (10/8, 172.16/12, 192.168/16, 169.254/16).",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "(?<![\\d.])(?:10\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|172\\.(?:1[6-9]|2\\d|3[01])\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|192\\.168\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|169\\.254\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d))(?::\\d{2,5})?(?!\\.?\\d)",
-        "flags": "g"
-      },
-      "excerpt": {
-        "kind": "verbatim"
-      }
-    },
-    {
-      "id": "private-network-endpoint",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Loopback / wildcard-bind development endpoint. Scheme or port required so prose about localhost does not warn.",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "https?:\\/\\/(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])(?::\\d{2,5})?(?:\\/[^\\s\"'`<>?&)\\]]*)?|\\b(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0):\\d{2,5}\\b",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "verbatim",
-        "max": 80
-      }
-    },
-    {
-      "id": "collaboration-url",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Link into a collaboration workspace (Google Docs/Drive, Notion, Figma, Slack archives, Linear, Jira/Confluence): the target is usually access-controlled.",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "https?:\\/\\/(?:docs\\.google\\.com|drive\\.google\\.com|(?:[a-z0-9-]+\\.)?notion\\.(?:so|site)|(?:www\\.)?figma\\.com|(?:[a-z0-9-]+\\.)?slack\\.com\\/archives|linear\\.app|[a-z0-9-]+\\.atlassian\\.net)(?:\\/[^\\s\"'`<>?&)\\]]*)?",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "verbatim",
-        "max": 80
-      }
-    },
-    {
-      "id": "cloud-resource-id",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "AWS ARN: names an account, region, and resource.",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\barn:aws[0-9a-z-]*:[0-9a-z-]+:[0-9a-z-]*:\\d{0,12}:[^\\s\"'`<>,)\\]]+",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "verbatim",
-        "max": 80
-      }
-    },
-    {
-      "id": "cloud-resource-id",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "GCP fully-qualified resource name (projects/<id>/<collection>/<name>).",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\bprojects\\/[a-z][a-z0-9-]{4,28}[a-z0-9]\\/(?:locations|topics|subscriptions|secrets|instances|serviceAccounts|datasets|buckets|zones|keyRings|clusters|jobs|models)\\/[^\\s\"'`<>,)\\]]+",
-        "flags": "g"
-      },
-      "excerpt": {
-        "kind": "verbatim",
-        "max": 80
-      }
-    },
-    {
-      "id": "cloud-resource-id",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Azure resource id: /subscriptions/<guid>/resourceGroups/<name>/...",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\/subscriptions\\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\/resourceGroups\\/[^\\s\"'`<>,)\\]/]+(?:\\/[^\\s\"'`<>,)\\]]*)?",
-        "flags": "g"
-      },
-      "excerpt": {
-        "kind": "verbatim",
-        "max": 80
-      }
-    },
-    {
-      "id": "cloud-resource-id",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Cloud object-storage location (s3://, gs://, or an S3/Azure Blob/GCS bucket hostname).",
-      "source": "tenjin (closes tenjin-agent#45)",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\b(?:s3|gs):\\/\\/[a-z0-9][a-z0-9._-]{2,62}(?:\\/[^\\s\"'`<>,?&)\\]]*)?|\\b[a-z0-9][a-z0-9.-]{1,62}\\.(?:s3(?:[.-][a-z0-9-]+)?\\.amazonaws\\.com|blob\\.core\\.windows\\.net|storage\\.googleapis\\.com)\\b",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "verbatim",
-        "max": 80
-      }
-    },
-    {
-      "id": "local-path",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Home-anchored local filesystem path: leaks the machine username and private project layout.",
-      "source": "tenjin",
-      "match": {
-        "kind": "regex",
-        "pattern": "(?:(?<![\\w.-])\\/(?:Users|home)\\/([A-Za-z0-9._-]+)(?:\\/[^\\s\"'`)\\]}>:,;?&/]+)+|\\b[A-Za-z]:\\\\[Uu]sers\\\\([^\\\\\\s\"']+)(?:\\\\[^\\\\\\s\"']+)+)",
-        "flags": "dg"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "localPath"
-      },
-      "skip": {
-        "handler": "placeholderUsername"
-      }
-    },
-    {
-      "id": "customer-identifier",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Labeled customer/account/tenant identifier with a literal value.",
-      "source": "tenjin",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\b((?:customer|client|account|tenant|subscriber)[ _-]?(?:id|number|no))\\b\\s*[:=#]\\s*(\"[^\"]{2,}\"|'[^']{2,}'|[A-Za-z0-9][A-Za-z0-9._-]{2,})",
-        "flags": "gi"
       },
       "excerpt": {
         "kind": "custom",
@@ -715,88 +540,123 @@
       }
     },
     {
-      "id": "paid-content-marker",
+      "id": "rpc-url-key",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Third-party rights legend suggesting copied licensed material. Legend shapes only: bare paywall vocabulary is this marketplace’s own subject matter.",
-      "source": "tenjin",
+      "description": "An RPC provider key in a URL path, keyed on the provider's documented host: QuickNode (<name>.<network>.quiknode.pro/<key>/), Alchemy (<chain>.g.alchemy.com/v2/<key> and /nft/v3/<key>), Infura (<network>.infura.io/v3/<key> and /ws/v3/<key>), Ankr (rpc.ankr.com/<chain>/<token>), Chainstack (nd-NNN-NNN-NNN.p2pify.com/<key>, <network>.core.chainstack.com/<key> and /ws/<key>), GetBlock (go.getblock.io/<token>/, shared.<region>.getblock.io/<token>/), dRPC (lb.drpc.live/<network>/<key>) and Tenderly (<network>.gateway.tenderly.co/<key>). It keeps the node key of tenjin-agent#388 out of a router packet now that url-path-credential no longer masks in queries (tenjin-agent#489). The key must be 16 or more [A-Za-z0-9_-] characters with a letter and a digit, so a keyless path (Alchemy `demo`, a chain name) stays. Blast API is left out: it shut down.",
+      "source": "tenjin (tenjin-agent#489)",
       "match": {
         "kind": "regex",
-        "pattern": "\\ball rights reserved\\b|\\b(?:reprinted|reproduced|used) with permission\\b|\\bnot for (?:redistribution|republication)\\b|\\bdo not (?:redistribute|republish)\\b|(?:©|\\(c\\)|copyright)\\s*(?:19|20)\\d{2}\\b",
+        "pattern": "\\/(?=[\\w-]{16})(?<=\\b(?:https?|wss?):\\/\\/(?:[\\w-]+(?:\\.[\\w-]+)*\\.quiknode\\.pro|[\\w-]+\\.g\\.alchemy\\.com\\/(?:v2|nft\\/v3)|[\\w-]+\\.infura\\.io\\/(?:ws\\/)?v3|rpc\\.ankr\\.com\\/[\\w-]+|(?:ws-)?nd-[\\d-]+\\.p2pify\\.com|[\\w-]+\\.core\\.chainstack\\.com(?:\\/ws)?|(?:go|(?:shared|dedicated|limitless)\\.[\\w-]+)\\.getblock\\.io|lb\\.drpc\\.(?:live|org)\\/[\\w-]+|[\\w-]+\\.gateway\\.tenderly\\.co)\\/)(?=[\\w-]*[A-Za-z])(?=[\\w-]*\\d)[\\w-]{16,}(?=[.;:!]*(?:[\\/?#\\s\\\"'<>(),\\[\\]{}`]|$))",
         "flags": "gi"
       },
       "excerpt": {
-        "kind": "verbatim"
+        "kind": "mask",
+        "keep": 1
       }
     },
     {
-      "id": "embedded-instruction",
+      "id": "webhook-url-token",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Injection-shaped imperative captured from a prompt or tool output.",
-      "source": "tenjin",
+      "description": "A webhook token in a URL path, keyed on the service's documented host: Slack (hooks.slack.com/services/T.../B.../<token> and /triggers/...), Discord (discord.com/api/webhooks/<id>/<token>, with or without /v10, and the discordapp.com, ptb and canary hosts) and Make (hook.make.com/<token>, and the regional hook.<region>.make.com). Anyone holding the URL can post as the hook, and url-path-credential no longer masks in queries (tenjin-agent#489). Any path segment of 16 or more [A-Za-z0-9_-] characters after the host is the token; ids before it are shorter. The Slack lookbehind spans at most four segments, so a line of long segments stays linear. Google Chat carries its token in the query string, which url-query-credential masks. Teams connector URLs are retired (2026-05), and a Zapier catch-hook id is 5 characters, so neither is listed.",
+      "source": "tenjin (tenjin-agent#489)",
       "match": {
         "kind": "regex",
-        "pattern": "\\b(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+)?(?:previous|prior|above|earlier|preceding)\\s+(?:instructions?|prompts?|context|messages?)\\b|\\bdo not (?:reveal|disclose|mention) (?:this|these|the above)\\b",
+        "pattern": "\\/(?=[\\w-]{16})(?<=\\bhttps?:\\/\\/(?:hooks\\.slack\\.com(?:\\/[\\w-]+){1,4}|(?:(?:ptb|canary)\\.)?discord(?:app)?\\.com\\/api(?:\\/v\\d+)?\\/webhooks\\/\\d+|hook(?:\\.[a-z]{2}\\d)?\\.make\\.com)\\/)[\\w-]{16,}(?=[.;:!]*(?:[\\/?#\\s\\\"'<>(),\\[\\]{}`]|$))",
         "flags": "gi"
       },
       "excerpt": {
-        "kind": "verbatim"
+        "kind": "mask",
+        "keep": 1
       }
     },
     {
-      "id": "embedded-instruction",
+      "id": "url-query-credential",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Hidden-prompt document header. Case-sensitive: the all-caps header form is the injection-typed one.",
-      "source": "tenjin",
+      "description": "Credential-named query parameter on a URL (?key=, &api_key=, ?token=, ?sig=, ?password=): the value is masked and the name kept. The value class stops at `&`, `#`, whitespace, quotes and brackets, so a value another row already replaced with `[redacted …]` is not masked twice.",
+      "source": "tenjin (tenjin-agent#388)",
       "match": {
         "kind": "regex",
-        "pattern": "\\bBEGIN (?:SYSTEM|HIDDEN) (?:PROMPT|INSTRUCTIONS)\\b",
-        "flags": "g"
+        "pattern": "([?&](?:key|apikey|api_key|api-key|token|access_token|auth|secret|client_secret|sig|signature|password|pwd))=([^&#\\s\"'<>\\[\\]]+)",
+        "flags": "gi"
       },
       "excerpt": {
-        "kind": "verbatim"
+        "kind": "custom",
+        "handler": "labeledValue"
       }
     },
     {
-      "id": "email",
+      "id": "bare-hex-key",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Email address (PII), subsuming corporate-domain addresses. Lengths follow the RFC limits so the local part and the domain cannot backtrack against each other: unbounded, the pair is quadratic on a transcript-length line.",
-      "source": "tenjin",
+      "description": "64 hex with no 0x, the shape a private key takes when a tool exports it bare (tenjin-agent#388). A hash label within two tokens before it (tx, txn, txid, hash, sha, sha256, hmac, digest, commit, id, checksum, sig, signature, across markdown emphasis) or an http(s) URL around it makes it a hash and it is kept, the same downgrade the 0x form has. A 128-hex run (sha512) is not a 64-hex run and never matches.",
+      "source": "tenjin (tenjin-agent#388)",
       "match": {
         "kind": "regex",
-        "pattern": "\\b[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.){1,8}[A-Za-z]{2,24}\\b",
+        "pattern": "(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])",
         "flags": "g"
       },
       "excerpt": {
-        "kind": "verbatim"
+        "kind": "mask",
+        "keep": 0
       },
       "skip": {
-        "handler": "reservedExampleEmail"
+        "handler": "hashLabelled"
       }
     },
     {
-      "id": "phone",
+      "id": "bare-hex-key",
       "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Telephone number (PII).",
-      "source": "tenjin",
+      "description": "A 64-hex key split into two 32-hex halves by one space or one newline, with an optional 0x on the first half. Bounded to exactly two adjacent halves: a third 32-hex run before or after (a list of MD5 sums) keeps the whole list as written, and a hash label keeps it as for the row above.",
+      "source": "tenjin (tenjin-agent#388)",
       "match": {
         "kind": "regex",
-        "pattern": "(?<!\\d)(?:\\+?\\d{1,2}[\\s.-]?)?(?:\\(\\d{3}\\)|\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\d)",
+        "pattern": "(?<![0-9A-Za-z])(?<![0-9a-fA-F]{32}[ \\n])(?:0x)?[0-9a-fA-F]{32}[ \\n][0-9a-fA-F]{32}(?![0-9A-Za-z])(?![ \\n][0-9a-fA-F]{32})",
         "flags": "g"
       },
       "excerpt": {
-        "kind": "verbatim"
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "solana-secret-key",
+      "tier": "warn",
+      "description": "An 87 or 88 character base58 run: a Solana keypair's 64-byte secret key as a wallet exports it (tenjin-agent#388). A transaction signature has the same shape, so a tx or sig label before it or an http(s) URL around it keeps it, as for bare-hex-key. A 32-byte public key is 43 or 44 characters and never matches.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{87,88}(?![1-9A-HJ-NP-Za-km-z])",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 0
+      },
+      "skip": {
+        "handler": "hashLabelled"
+      }
+    },
+    {
+      "id": "solana-secret-key",
+      "tier": "warn",
+      "description": "A JSON array of exactly 64 integers from 0 to 255: the solana-keygen keypair file.",
+      "source": "tenjin (tenjin-agent#388)",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\[\\s*(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\s*,\\s*){63}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\s*\\]",
+        "flags": "g"
+      },
+      "excerpt": {
+        "kind": "mask",
+        "keep": 1
       }
     },
     {
       "id": "raw-private-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
-      "description": "0x + 64 hex with no hash context. Demoted to the warn detector hex32-value when a hash/identifier label precedes it (within two intervening tokens, across markdown and quote punctuation), when it sits inside an http(s) URL, or when it is one of the publicHexConstants below. An unlabeled bare 64-hex stays block: that is the floor.",
+      "description": "0x + 64 hex with no hash context. Left as written, as a hash, when a hash/identifier label precedes it (within two intervening tokens, across markdown and quote punctuation), when it sits inside an http(s) URL, or when it is one of the publicHexConstants below. An unlabeled bare 64-hex is masked: that is the floor.",
       "source": "blockrun-mcp (wallet-key leak scanner)",
       "match": {
         "kind": "algorithm",
@@ -810,7 +670,6 @@
     {
       "id": "pem-private-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
       "description": "PEM private-key armor (-----BEGIN ... PRIVATE KEY-----), RSA/EC/OPENSSH/PGP variants.",
       "source": "gitleaks:private-key",
       "match": {
@@ -825,8 +684,7 @@
     {
       "id": "bip39-seed-phrase",
       "tier": "block",
-      "scopes": ["publish", "team"],
-      "description": "Twelve or more consecutive BIP-39 English wordlist words separated only by spaces or tabs: a wallet recovery phrase.",
+      "description": "Twelve or more consecutive BIP-39 English wordlist words separated only by whitespace or quote characters, so a quoted `.env` value (MNEMONIC=\"abandon ... about\") counts (tenjin-agent#296): a wallet recovery phrase.",
       "source": "tenjin; wordlist from BIP-0039 (see NOTICE.md)",
       "match": {
         "kind": "algorithm",
@@ -835,51 +693,6 @@
       "excerpt": {
         "kind": "custom",
         "handler": "bip39"
-      }
-    },
-    {
-      "id": "env-dump-block",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Three or more consecutive SHOUTY_KEY=value lines carrying at least one substantial literal: a pasted .env file.",
-      "source": "tenjin",
-      "match": {
-        "kind": "algorithm",
-        "algorithm": "envDump"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "envDump"
-      }
-    },
-    {
-      "id": "high-entropy-string",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Catch-all for unknown credential formats: a long mixed-case alphanumeric token whose Shannon entropy and case-run profile match random key material rather than an identifier.",
-      "source": "tenjin (entropy heuristic in the spirit of gitleaks entropy gating)",
-      "match": {
-        "kind": "algorithm",
-        "algorithm": "entropy"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "entropy"
-      }
-    },
-    {
-      "id": "long-verbatim-quote",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Fenced block or blockquote run long enough to read as copied third-party material.",
-      "source": "tenjin",
-      "match": {
-        "kind": "algorithm",
-        "algorithm": "longVerbatim"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "longVerbatim"
       }
     }
   ]

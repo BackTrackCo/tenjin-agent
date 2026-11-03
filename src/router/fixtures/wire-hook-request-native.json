@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "research BTC and ETH for someone new to crypto"
+    },
+    "history": [
+      {
+        "role": "user",
+        "text": "we are writing a primer"
+      },
+      {
+        "role": "assistant",
+        "text": "I will gather sources first."
+      }
+    ],
+    "literalUrls": ["https://example.test/primer"],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebSearch",
+      "query": "btc eth price today"
+    }
+  }
+}

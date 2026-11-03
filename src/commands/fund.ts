@@ -2,34 +2,36 @@ import { getAddress, isAddress } from 'viem';
 import { CliError } from '../lib/errors';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { httpRequest, fetchFailureToCliError, type HttpRequestOptions } from '../lib/http';
-import { buildSiwxHeader, SIWX_HEADER } from '../lib/siwx';
-import { SESSION_CHAIN_ID } from '../lib/session-key';
+import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import {
   describeWallet,
   resolveWalletProvider,
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import { getUsdcBalance } from '../lib/usdc';
+import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { toMoney } from '../lib/money';
 import { emitNotice, emitWriteNotice } from '../lib/output';
+import { addressQrLines } from '../lib/qr';
 import { openInBrowser } from '../lib/open-url';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { underAgentHarness } from '../lib/session';
 import type { CommandContext, CommandResult } from '../context';
 
 /*
- * `tenjin wallet fund`: card-fund THIS wallet via Coinbase Onramp. The CLI signs a
- * SIWX proof with the wallet's own key and asks the Tenjin backend to mint a
- * Coinbase-hosted checkout URL for that same address (the server refuses any
- * other address, per Coinbase's onboarding-verified auth model). The money
- * moves entirely on Coinbase's side; the minted session grants no spending
- * power over the wallet. Two Coinbase properties shape the UX here: the URL is
- * single-use and expires in ~5 minutes (mint fresh per run, open immediately,
- * never persist), and it is bound to this machine's public IP at mint time, so
- * it must be opened in a browser on this machine/network.
+ * `tenjin wallet fund`: fund THIS wallet through Coinbase Onramp. The CLI signs a
+ * SIWX proof with the wallet's own key and asks the Tenjin backend for a checkout
+ * link for that same address (the server refuses any other address). The link is
+ * either the Tenjin /fund page (US callers once headless onramp is live, with a
+ * short-lived token in the URL fragment) or a Coinbase-hosted checkout. The money
+ * moves entirely on Coinbase's side and the link grants no spending power over
+ * the wallet. A hosted link is single-use, expires in ~5 minutes and is bound to
+ * this machine's public IP at mint time, so it must be opened in a browser on this
+ * machine/network.
  */
 
-/** The only host a minted checkout URL may point at; anything else is refused unopened. */
-const CHECKOUT_HOST = 'pay.coinbase.com';
+/** The hosted Coinbase checkout host, one of the two hosts a returned link may use. */
+const COINBASE_CHECKOUT_HOST = 'pay.coinbase.com';
 /**
  * fund talks to production, full stop (owner decision, 2026-08-12): the mint
  * signs with the wallet key, so this path takes no override -- not `--base-url`,
@@ -37,7 +39,16 @@ const CHECKOUT_HOST = 'pay.coinbase.com';
  * sit in the free allowlist tier with nothing to caveat.
  */
 const FUND_ORIGIN = PRODUCTION_ORIGIN;
-/** Matches the server's presetAmount bound (app/api/cdp/session bodySchema). */
+/**
+ * The only hosts a returned link may point at; anything else is refused unopened.
+ * The first is the host of the pinned origin (the Tenjin /fund page), so it
+ * follows the origin if that is ever re-pointed.
+ */
+const ALLOWED_CHECKOUT_HOSTS: readonly string[] = [
+  new URL(FUND_ORIGIN).host,
+  COINBASE_CHECKOUT_HOST,
+];
+/** Matches the server's presetAmount bound (the fund link route's body schema). */
 const MAX_PRESET_USD = 100_000;
 const POLL_INTERVAL_MS = 5_000;
 const POLL_TIMEOUT_MS = 600_000;
@@ -46,7 +57,7 @@ const POLL_TIMEOUT_MS = 600_000;
  * Why the run is not reporting an arrival, kept distinct in the envelope because
  * three different outcomes otherwise collapse into `funded: false`: the run never
  * waited, it wanted to but could not read a baseline balance, or it waited and
- * the deadline won. Only `timed-out` says anything about the purchase.
+ * the deadline won. None establishes the checkout's payment status.
  */
 export type FundPollStatus = 'skipped' | 'unavailable' | 'timed-out' | 'arrived';
 
@@ -55,6 +66,10 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   amountUsd?: string;
   /** Skip the browser open (still prints the URL). */
   open?: boolean;
+  /** The environment the agent-harness check reads; defaults to the process's. */
+  env?: NodeJS.ProcessEnv;
+  /** `--no-qr`: skip the QR block a TTY otherwise gets for sending USDC from a phone. */
+  qr?: boolean;
   /** Poll the balance after issuing the link. Defaults to ON at a TTY, OFF otherwise. */
   wait?: boolean;
   fetchImpl?: typeof fetch;
@@ -88,19 +103,18 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // here only disables the wait, it never blocks funding.
   const startBalance = shouldWait ? await balanceOrUndefined(desc, rpcUrl) : undefined;
 
-  const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: SESSION_CHAIN_ID });
+  const siwxHeader = await buildSiwxHeader(signer, { baseUrl, chainId: SIWX_CHAIN_ID });
   const request: HttpRequestOptions = {
     method: 'POST',
     timeoutMs: ctx.flags.timeout,
     headers: { [SIWX_HEADER]: siwxHeader },
     jsonBody: {
-      mode: 'onramp',
       address,
       ...(preset !== undefined ? { presetAmount: preset } : {}),
     },
     ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
   };
-  const res = await httpRequest(`${baseUrl}/api/cdp/session`, request);
+  const res = await httpRequest(`${baseUrl}/api/fund/link`, request);
   if (!res.ok) {
     throw fetchFailureToCliError(res, {
       fix: 'Check your network, then retry.',
@@ -114,15 +128,30 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // exactly the case that must not get the link after it has died, so these
   // three lines are write-notices (stderr, no TTY gate, no --json gate) rather
   // than human-mode notices. stdout stays exactly one JSON object.
-  emitWriteNotice(ctx.io, `Coinbase Onramp checkout for ${address}:`);
+  //
+  // A Tenjin /fund link carries a token in its fragment, and it prints whole on
+  // every path: a user who copies it into another browser needs the token. It is
+  // not worth hiding, since it can only fund this wallet and expires in ~10 minutes.
+  // An agent's shell has no terminal, but an agent runs this only on the
+  // person's yes to "open the funding page" (`tenjin install` hands it that
+  // question), so under a harness the page opens too.
+  const willOpen =
+    opts.open !== false && (ctx.io.isTTY || underAgentHarness(opts.env ?? process.env));
+  const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
+  emitWriteNotice(ctx.io, `Checkout for ${address}:`);
   emitWriteNotice(ctx.io, `  ${url}`);
   emitWriteNotice(
     ctx.io,
-    'The link is single-use, expires in ~5 minutes, and only works in a browser on this machine (it is bound to this network). A Coinbase account is required.',
+    hosted
+      ? 'The link is single-use, expires in ~5 minutes, and only works in a browser on this machine (it is bound to this network).'
+      : 'The link expires in ~10 minutes.',
   );
 
   let opened = false;
-  if (opts.open !== false && ctx.io.isTTY) {
+  // The opener is resolved by absolute path and ignores BROWSER (lib/open-url.ts), so an
+  // agent host cannot route the link into its embedded view. If the user's default browser
+  // is itself an embedded view there is nothing more to do here: the link and QR are printed.
+  if (willOpen) {
     opened = await (opts.openUrl ?? openInBrowser)(url);
     emitNotice(
       ctx.io,
@@ -131,11 +160,24 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     );
   }
 
+  // Human mode only, and before the wait: the poll below also sees USDC sent
+  // straight to the address, so a phone wallet is a second way to finish.
+  const qrLines =
+    opts.qr !== false && ctx.io.isTTY && !ctx.flags.json
+      ? addressQrLines(address, ctx.io.stderr)
+      : [];
+  if (qrLines.length > 0) {
+    ctx.io.stderr.write(
+      [`Or send USDC from a phone wallet to ${address}:`, ...qrLines].join('\n') + '\n',
+    );
+  }
+
   const funded =
     shouldWait && startBalance !== undefined
       ? await pollForFunds(ctx, desc, rpcUrl, startBalance, opts)
       : undefined;
   if (funded !== undefined) {
+    await forgetRememberedBalance(ctx.dataDir);
     emitWriteNotice(ctx.io, 'USDC arrived - you can close the checkout tab.');
   }
   const pollStatus: FundPollStatus = !shouldWait
@@ -155,6 +197,10 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       ...(preset !== undefined ? { presetAmount: preset } : {}),
       funded: funded !== undefined,
       pollStatus,
+      nextStep:
+        funded !== undefined
+          ? 'Funds confirmed. Continue the original task; funding does not require another restart.'
+          : 'Ask the person to finish checkout and return to this conversation. When they return, run `wallet balance` with the same Tenjin executable and shell used for this funding command to check funds, then continue their task if sufficient. Until the balance confirms funds, say "Funds not confirmed"; if the balance cannot be read, say you could not check it. Do not open another checkout unless they ask for a new link or the current link has expired. Run the check yourself, never ask the person to type a command.',
       ...(balanceAtomic !== undefined ? { balance: toMoney(balanceAtomic.toString()) } : {}),
     },
     humanLines:
@@ -165,7 +211,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
             ...(pollStatus === 'unavailable'
               ? ['Could not read the balance to wait on it; the link is unaffected.']
               : []),
-            'Confirm arrival later with `tenjin wallet balance`.',
+            'Finish checkout, then return to your agent to confirm funds and continue your task.',
+            'Funds not confirmed. Check with `tenjin wallet balance` before adding funds again.',
           ],
   };
 }
@@ -202,9 +249,10 @@ function parsePreset(raw: string | undefined): number | undefined {
 
 /**
  * Map the mint response to either the checkout URL or the coded refusal. The
- * URL is opened by this process, so it is validated as https on Coinbase's
- * checkout host before anything else sees it: a compromised or misconfigured
- * server must not be able to steer the user's browser anywhere else.
+ * URL is opened by this process, so it is validated as https on one of the two
+ * allowed hosts (the Tenjin origin or Coinbase's checkout) before anything else
+ * sees it: a compromised or misconfigured server must not be able to steer the
+ * user's browser anywhere else.
  */
 function checkoutUrlFrom(status: number, json: unknown): string {
   if (status === 200) {
@@ -217,13 +265,17 @@ function checkoutUrlFrom(status: number, json: unknown): string {
       } catch {
         parsed = undefined;
       }
-      if (parsed !== undefined && parsed.protocol === 'https:' && parsed.host === CHECKOUT_HOST) {
+      if (
+        parsed !== undefined &&
+        parsed.protocol === 'https:' &&
+        ALLOWED_CHECKOUT_HOSTS.includes(parsed.host)
+      ) {
         return url;
       }
     }
     throw new CliError(
       'CONTRACT_MISMATCH',
-      `The server's checkout URL was missing or not https://${CHECKOUT_HOST}; refusing to open it.`,
+      `The server's checkout URL was missing or not https on ${ALLOWED_CHECKOUT_HOSTS.join(' or ')}; refusing to open it.`,
     );
   }
   const code = errorCode(json);

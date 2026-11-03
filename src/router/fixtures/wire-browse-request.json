@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "browse": "live crypto prices",
+  "accepts": ["discovered", "spec", "label", "fields"]
+}

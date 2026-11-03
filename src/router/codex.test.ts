@@ -1,0 +1,1193 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CommandContext } from '../context';
+import { CliError } from '../lib/errors';
+import type { RuntimeSetup } from '../lib/runtime';
+import { parseCodexHistory } from './codex-history';
+import { codexRouterEvent, codexResponse } from './codex-event';
+import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
+import {
+  alongsideCodexRefresh,
+  CODEX_REFRESH_LINES,
+  codexAtLeast,
+  ownCodexRow,
+  refreshCodexPlugin,
+  runCodexDoctor,
+  runCodexInstall,
+  runCodexUninstall,
+  type CodexRun,
+  type CodexSetupDeps,
+} from './codex-install';
+import { runHookKind } from './hook-command';
+import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
+import { trustCodexHooks } from '../lib/codex-trust';
+import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
+import { CODEX_REQUEST_TOOL, requestToolName } from './names';
+import { resolveProgressSession, sessionDir } from './progress';
+
+const session = 'session-one';
+const meta = {
+  type: 'session_meta',
+  payload: { id: session, session_id: session, thread_source: 'user' },
+};
+const item = (id: string, text: string, type = 'UserMessage') => ({
+  type: 'event_msg',
+  payload: {
+    type: 'item_completed',
+    thread_id: session,
+    item: {
+      id,
+      type,
+      phase: 'final_answer',
+      content: [{ type: type === 'UserMessage' ? 'text' : 'Text', text }],
+    },
+  },
+});
+const history = (...rows: unknown[]) => rows.map((r) => JSON.stringify(r)).join('\n');
+const native = {
+  hook_event_name: 'PreToolUse',
+  session_id: session,
+  tool_name: 'webrun',
+  tool_use_id: 'call-1',
+  tool_input: { search_query: [{ q: 'example search' }] },
+};
+const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
+const paidOffer = JSON.parse(
+  readFileSync(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'),
+) as { decision: { id: string } };
+const nativeAnswer = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    reason: 'Use native tools',
+    diagnostics: {
+      reasonCode: 'native_sufficient',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Use native tools',
+    },
+  },
+};
+
+let dir: string;
+let transcript: string;
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'tenjin-codex-'));
+  await mkdir(join(dir, '.git'));
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+  );
+  // A wallet for the offer to pay from: with none, a paid offer is withheld.
+  await writeFile(
+    join(dir, 'wallet.json'),
+    JSON.stringify({ schemaVersion: 2, address: '0x1234567890AbcdEF1234567890aBcdef12345678' }),
+  );
+  transcript = join(dir, 'rollout.jsonl');
+  await writeFile(transcript, history(meta, item('u', 'Find recent reports on example search.')));
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+/**
+ * A router stub that records each router body and answers `answer`. The
+ * wallet's balance reads (JSON-RPC) share the fetch seam; they are not router
+ * calls, so they are answered with a balance and left out of `bodies`.
+ */
+function router(answer: unknown) {
+  const bodies: Record<string, unknown>[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (body.jsonrpc !== undefined) {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0xf4240' }));
+    }
+    bodies.push(body);
+    return new Response(JSON.stringify(answer));
+  }) as typeof fetch;
+  return { bodies, fetchImpl };
+}
+
+const codexDeps = (fetchImpl: typeof fetch) => ({
+  dataDir: dir,
+  harness: 'codex' as const,
+  fetchImpl,
+});
+
+describe('Codex transcript ownership and bounds', () => {
+  it('admits completed conversation once, excluding synthetic and tool rows', () => {
+    const user = item('u', 'No paid tools.');
+    expect(
+      parseCodexHistory(
+        history(
+          meta,
+          {
+            type: 'response_item',
+            payload: { role: 'user', content: [{ type: 'input_text', text: 'injected' }] },
+          },
+          user,
+          user,
+          item('a', 'Understood.', 'AgentMessage'),
+          item('t', 'untrusted', 'McpToolCall'),
+        ),
+        session,
+      ),
+    ).toEqual([
+      { role: 'user', text: 'No paid tools.' },
+      { role: 'assistant', text: 'Understood.' },
+    ]);
+  });
+
+  it('rejects a child with copied parent metadata, mismatched items, empty history and compaction', () => {
+    const child = {
+      ...meta,
+      payload: {
+        ...meta.payload,
+        id: 'child',
+        thread_source: 'subagent',
+        parent_thread_id: session,
+      },
+    };
+    expect(parseCodexHistory(history(child, meta, item('u', 'secret')), session)).toBeNull();
+    const other = item('u', 'secret');
+    expect(
+      parseCodexHistory(
+        history(meta, { ...other, payload: { ...other.payload, thread_id: 'other' } }),
+        session,
+      ),
+    ).toBeNull();
+    expect(parseCodexHistory(history(meta), session)).toBeNull();
+    expect(
+      parseCodexHistory(
+        history(meta, item('u', 'No paid tools'), { type: 'compacted', payload: {} }),
+        session,
+      ),
+    ).toBeNull();
+    expect(parseCodexHistory(history(meta, item('u', 'x')) + '\n{', session)).toBeNull();
+  });
+
+  it('never offers on a web call whose rollout is past the read bound', async () => {
+    const big = item('u', 'x'.repeat(1_000_000));
+    await writeFile(transcript, history(meta, big, big, big, big, item('u', 'Find it.')));
+    const { bodies, fetchImpl } = router(paidOffer);
+    const out = await runNativeHook(
+      { ...native, cwd: dir, transcript_path: transcript },
+      codexDeps(fetchImpl),
+    );
+    expect(out.response).toBeNull();
+    expect(bodies).toHaveLength(0);
+  });
+});
+
+describe('Codex web events', () => {
+  /** Real `webrun` inputs from Codex 0.163 rollouts, the routed entry, and the exact rest. */
+  const shapes: [string, Record<string, unknown>, unknown, Record<string, unknown> | undefined][] =
+    [
+      [
+        'a lone search',
+        { search_query: [{ q: 'example search' }] },
+        { tool: 'WebSearch', query: 'example search' },
+        undefined,
+      ],
+      [
+        'a three-query batch, filter inside q',
+        {
+          search_query: [
+            { q: 'best local LLM 16GB Mac' },
+            { q: 'ollama qwen3 site:reddit.com' },
+            { q: 'llama.cpp metal benchmarks' },
+          ],
+          response_length: 'medium',
+        },
+        { tool: 'WebSearch', query: 'best local LLM 16GB Mac' },
+        {
+          search_query: [
+            { q: 'ollama qwen3 site:reddit.com' },
+            { q: 'llama.cpp metal benchmarks' },
+          ],
+          response_length: 'medium',
+        },
+      ],
+      [
+        'a search plus an open',
+        { search_query: [{ q: 'a' }], open: [{ ref_id: 'https://example.com/p' }] },
+        { tool: 'WebSearch', query: 'a' },
+        { open: [{ ref_id: 'https://example.com/p' }] },
+      ],
+      [
+        'a domain-filtered search beside a plain one',
+        {
+          search_query: [{ q: 'a', domains: ['example.com'] }, { q: 'b', recency: 7 }, { q: 'c' }],
+        },
+        { tool: 'WebSearch', query: 'c' },
+        {
+          search_query: [
+            { q: 'a', domains: ['example.com'] },
+            { q: 'b', recency: 7 },
+          ],
+        },
+      ],
+      [
+        'one URL open',
+        { open: [{ ref_id: 'https://www.reddit.com/r/rust/comments/1dh773j/report/' }] },
+        { tool: 'WebFetch', url: 'https://www.reddit.com/r/rust/comments/1dh773j/report/' },
+        undefined,
+      ],
+      [
+        'an open at a line, then a URL open',
+        {
+          open: [{ ref_id: 'https://a.example/x', lineno: 40 }, { ref_id: 'https://b.example/y' }],
+        },
+        { tool: 'WebFetch', url: 'https://b.example/y' },
+        { open: [{ ref_id: 'https://a.example/x', lineno: 40 }] },
+      ],
+      [
+        'an open at a line alone',
+        { open: [{ ref_id: 'https://a.example/x', lineno: 40 }] },
+        null,
+        undefined,
+      ],
+      ['a turn-reference open', { open: [{ ref_id: 'turn0search0' }] }, null, undefined],
+      ['a find only', { find: [{ ref_id: 'turn0view0', pattern: 'price' }] }, null, undefined],
+      ['a click only', { click: [{ ref_id: 'turn0view0', id: 3 }] }, null, undefined],
+      ['weather', { weather: [{ location: 'Toronto' }] }, null, undefined],
+      [
+        'a filtered search alone',
+        { search_query: [{ q: 'a', domains: ['example.com'] }] },
+        null,
+        undefined,
+      ],
+    ];
+
+  it.each(shapes)('reads %s as its entry and the exact rest', (_, tool_input, entry, rest) => {
+    const event = codexRouterEvent({ ...native, tool_input });
+    if (entry === null) {
+      expect(event).toBeNull();
+      return;
+    }
+    expect(event).toMatchObject({ kind: 'native', pending: entry });
+    expect((event as { rest?: unknown }).rest).toEqual(rest);
+  });
+
+  it('keeps the daemon view: only a lone plain search is a web tool', () => {
+    expect(codexRouterEvent(native)).toMatchObject({
+      kind: 'native',
+      pending: { tool: 'WebSearch', query: 'example search' },
+    });
+    expect(codexRouterEvent(native)).not.toHaveProperty('rest');
+  });
+
+  it('gives a child agent no routing: it has no request tool to call', () => {
+    expect(codexRouterEvent({ ...native, agent_id: 'child' })).toBeNull();
+    expect(
+      codexRouterEvent({
+        hook_event_name: 'UserPromptSubmit',
+        session_id: session,
+        agent_id: 'child',
+        prompt: 'x',
+      }),
+    ).toBeNull();
+  });
+
+  it('reads a failed search from PostToolUse, and an unknown result as no shortfall', () => {
+    const post = { ...native, hook_event_name: 'PostToolUse' };
+    expect(
+      codexRouterEvent({ ...post, tool_response: [{ type: 'input_text', text: 'native answer' }] }),
+    ).toMatchObject({ kind: 'shortfall', nativeOutcome: null });
+    expect(codexRouterEvent({ ...post, tool_response: '' })).toMatchObject({
+      nativeOutcome: { error: 'Web search returned no results' },
+    });
+    // A batch returns one text for the whole call: only an empty one is short.
+    const batchPost = { ...post, tool_input: { search_query: [{ q: 'a' }, { q: 'b' }] } };
+    expect(codexRouterEvent({ ...batchPost, tool_response: '' })).toMatchObject({
+      pending: { tool: 'WebSearch', query: 'a' },
+      nativeOutcome: { error: 'Web search returned no results' },
+    });
+    expect(codexRouterEvent({ ...batchPost, tool_response: 'some results' })).toMatchObject({
+      nativeOutcome: null,
+    });
+    expect(codexRouterEvent({ ...post, tool_response: { changed: 'schema' } })).toMatchObject({
+      nativeOutcome: null,
+    });
+  });
+
+  it('passes a line after the call through as additionalContext, and nothing else', () => {
+    const line = { hookEventName: 'PostToolUse', additionalContext: 'a line' };
+    expect(codexResponse({ hookSpecificOutput: line })).toEqual({ hookSpecificOutput: line });
+    expect(
+      codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, other: 1 }),
+    ).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse' } });
+  });
+
+  it("keeps the user's line, alone or beside the hook's answer, in the field Codex shows", () => {
+    expect(codexResponse({ systemMessage: 'routing fee not paid' })).toEqual({
+      systemMessage: 'routing fee not paid',
+    });
+    expect(
+      codexResponse({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, systemMessage: 'x' }),
+    ).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse' }, systemMessage: 'x' });
+    expect(codexResponse({ systemMessage: 3 })).toBeNull();
+  });
+});
+
+describe('Codex routing through the router', () => {
+  it('denies a routed search with the Codex tool name and sends harness codex', async () => {
+    const { bodies, fetchImpl } = router(paidOffer);
+    const out = await runNativeHook(
+      { ...native, cwd: dir, transcript_path: transcript },
+      codexDeps(fetchImpl),
+    );
+    expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    const reason = String(at(out.response, 'hookSpecificOutput', 'permissionDecisionReason'));
+    expect(reason).toContain(`${CODEX_REQUEST_TOOL}({`);
+    expect(reason).not.toContain('mcp__x402');
+    expect(bodies[0]).toMatchObject({ harness: 'codex' });
+    expect(at(bodies[0], 'packet', 'current', 'text')).toBe(
+      'Find recent reports on example search.',
+    );
+    expect(at(bodies[0], 'packet', 'pendingCall')).toEqual({
+      tool: 'WebSearch',
+      query: 'example search',
+    });
+  });
+
+  it('redirects one of two parallel copies of a search, and keeps Codex state apart from Claude', async () => {
+    const { fetchImpl } = router(paidOffer);
+    const event = { ...native, cwd: dir, transcript_path: transcript };
+    const outs = await Promise.all([
+      runNativeHook(event, codexDeps(fetchImpl)),
+      runNativeHook({ ...event, tool_use_id: 'call-2' }, codexDeps(fetchImpl)),
+    ]);
+    expect(outs.filter((o) => o.response !== null)).toHaveLength(1);
+    expect(await resolveProgressSession(dir, { id: paidOffer.decision.id })).toBe(
+      sessionDir(dir, `codex:${session}`),
+    );
+  });
+
+  it('delivers a prompt offer through the Codex envelope', async () => {
+    const { bodies, fetchImpl } = router(paidOffer);
+    const out = await runPromptHook(
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: session,
+        prompt: 'Research a topic',
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(fetchImpl),
+    );
+    expect(at(out.response, 'hookSpecificOutput', 'hookEventName')).toBe('UserPromptSubmit');
+    expect(String(at(out.response, 'hookSpecificOutput', 'additionalContext'))).toContain(
+      `${CODEX_REQUEST_TOOL}({`,
+    );
+    expect(bodies[0]).toMatchObject({ harness: 'codex' });
+  });
+
+  it('says nothing when the router answers native', async () => {
+    const { fetchImpl } = router(nativeAnswer);
+    const out = await runNativeHook(
+      { ...native, cwd: dir, transcript_path: transcript },
+      codexDeps(fetchImpl),
+    );
+    expect(out.response).toBeNull();
+  });
+
+  it('offers on an empty search after it ran', async () => {
+    const { fetchImpl } = router(paidOffer);
+    const out = await runShortfallHook(
+      {
+        ...native,
+        hook_event_name: 'PostToolUse',
+        tool_use_id: 'call-9',
+        tool_response: '',
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(fetchImpl),
+    );
+    expect(at(out.response, 'hookSpecificOutput', 'hookEventName')).toBe('PostToolUse');
+    expect(String(at(out.response, 'hookSpecificOutput', 'additionalContext'))).toContain(
+      CODEX_REQUEST_TOOL,
+    );
+  });
+
+  /** The free docs lookup before a search, from the shared fixture. */
+  const freeNote = JSON.parse(
+    readFileSync(join(fixtures, 'wire-hook-execute-note.json'), 'utf8'),
+  ) as { decision: { id: string } };
+
+  it('notes a free lookup on a web.run search, and shows it after the search ran', async () => {
+    const pre = router(freeNote);
+    const before = await runNativeHook(
+      { ...native, tool_use_id: 'call-n', cwd: dir, transcript_path: transcript },
+      codexDeps(pre.fetchImpl),
+    );
+    expect(before).toMatchObject({ response: null, free: true, noted: true });
+    const post = router(paidOffer);
+    const after = await runShortfallHook(
+      {
+        ...native,
+        hook_event_name: 'PostToolUse',
+        tool_use_id: 'call-n',
+        tool_response: 'some results',
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(post.fetchImpl),
+    );
+    expect(post.bodies).toHaveLength(0);
+    const response = codexResponse(after.response);
+    expect(at(response, 'hookSpecificOutput', 'hookEventName')).toBe('PostToolUse');
+    const line = String(at(response, 'hookSpecificOutput', 'additionalContext'));
+    expect(line).toContain('your WebSearch call ran. Optional: Context7 docs, free');
+    expect(line).toContain(`${CODEX_REQUEST_TOOL}({`);
+    expect(line).toContain(freeNote.decision.id);
+  });
+
+  const batch = {
+    search_query: [{ q: 'example search' }, { q: 'second search site:example.com' }],
+    open: [{ ref_id: 'https://example.com/page', lineno: 12 }],
+    response_length: 'short',
+  };
+  const rest = {
+    search_query: [{ q: 'second search site:example.com' }],
+    open: [{ ref_id: 'https://example.com/page', lineno: 12 }],
+    response_length: 'short',
+  };
+
+  it('denies a batch once, naming the rest as exact JSON, and lets the re-run through', async () => {
+    const { bodies, fetchImpl } = router(paidOffer);
+    const event = { ...native, tool_input: batch, cwd: dir, transcript_path: transcript };
+    const out = await runNativeHook(event, codexDeps(fetchImpl));
+    expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    const reason = String(at(out.response, 'hookSpecificOutput', 'permissionDecisionReason'));
+    expect(reason).toContain(`${CODEX_REQUEST_TOOL}({`);
+    expect(reason.endsWith(`call web.run again with exactly ${JSON.stringify(rest)}`)).toBe(true);
+    expect(bodies).toHaveLength(1);
+    expect(at(bodies[0], 'packet', 'pendingCall')).toEqual({
+      tool: 'WebSearch',
+      query: 'example search',
+    });
+    // The rest, and the whole call again, run with no second router call.
+    const routerCalls = bodies.length;
+    for (const [id, tool_input] of [
+      ['call-rest', rest],
+      ['call-again', batch],
+    ] as const) {
+      const again = await runNativeHook(
+        { ...event, tool_use_id: id, tool_input },
+        codexDeps(fetchImpl),
+      );
+      expect(again.response).toBeNull();
+    }
+    expect(bodies.length).toBe(routerCalls);
+  });
+
+  it('routes a lone URL open as WebFetch, and runs a batch untouched on a free or no offer', async () => {
+    const page = 'https://www.reddit.com/r/rust/comments/1dh773j/report/';
+    const paid = router(paidOffer);
+    const out = await runNativeHook(
+      {
+        ...native,
+        tool_input: { open: [{ ref_id: page }] },
+        cwd: dir,
+        transcript_path: transcript,
+      },
+      codexDeps(paid.fetchImpl),
+    );
+    expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    expect(at(paid.bodies[0], 'packet', 'pendingCall')).toEqual({ tool: 'WebFetch', url: page });
+    const freeOffer = {
+      ...paidOffer,
+      decision: { ...paidOffer.decision, providerPriceAtomic: '0' },
+    };
+    for (const answer of [freeOffer, nativeAnswer]) {
+      const { fetchImpl } = router(answer);
+      const ran = await runNativeHook(
+        {
+          ...native,
+          tool_use_id: `call-${String(answer === nativeAnswer)}`,
+          tool_input: { ...batch, search_query: [{ q: 'fresh search' }, ...rest.search_query] },
+          cwd: dir,
+          transcript_path: transcript,
+        },
+        codexDeps(fetchImpl),
+      );
+      expect(ran.response).toBeNull();
+    }
+  });
+
+  /** One routing leg as the Codex plugin's `mcp_tool` hook runs it, in
+   *  Codex's answer shape. */
+  async function hookRun(kind: 'prompt' | 'native', event: unknown) {
+    const { fetchImpl } = router(paidOffer);
+    return codexResponse(
+      await runHookKind(kind, event, { dataDir: dir, harness: 'codex', fetchImpl }),
+    );
+  }
+  // Built per test: `dir` and `transcript` are set in beforeEach.
+  const promptEvent = () => ({
+    hook_event_name: 'UserPromptSubmit',
+    session_id: session,
+    prompt: 'Research a topic',
+    cwd: dir,
+  });
+  const webEvent = () => ({ ...native, cwd: dir, transcript_path: transcript });
+
+  it('always denies a routed search, with no prompt leg first and no record kept', async () => {
+    const out = await hookRun('native', webEvent());
+    expect(at(out, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    expect(String(at(out, 'hookSpecificOutput', 'permissionDecisionReason'))).toContain(
+      `${CODEX_REQUEST_TOOL}({`,
+    );
+    expect(await hookRun('prompt', promptEvent())).not.toBeNull();
+    expect(existsSync(join(sessionDir(dir, `codex:${session}`), 'request-tool.json'))).toBe(false);
+  });
+
+  it('denies a search once, so a retry of it runs even where Codex refuses the tool', async () => {
+    const first = await hookRun('native', webEvent());
+    expect(at(first, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
+    const retry = await hookRun('native', { ...webEvent(), tool_use_id: 'call-retry' });
+    expect(at(retry, 'hookSpecificOutput', 'permissionDecision')).toBeUndefined();
+  });
+
+  it('names the request tool by host', () => {
+    expect(requestToolName('codex')).toBe('mcp__router__request');
+  });
+});
+
+const ctx = (): CommandContext => ({
+  dataDir: dir,
+  flags: { json: true, timeout: 1000 },
+  io: { stdout: process.stdout, stderr: process.stderr, isTTY: false },
+});
+
+/** A Codex stand-in: records every command in order. The runtime is `skipped` unless a test sets it up. */
+function host(config: unknown = {}, rt: Partial<RuntimeSetup> = {}) {
+  const steps: string[] = [];
+  const deps: CodexSetupDeps = {
+    homeDir: join(dir, 'home'),
+    runtime: async () => ({
+      state: 'skipped',
+      root: join(dir, 'runtime'),
+      firstTime: false,
+      launcher: null,
+      ...rt,
+    }),
+    run: async (args: string[]): Promise<CodexRun> => {
+      steps.push(`codex ${args.filter((a) => a !== '--json').join(' ')}`);
+      return { code: 0, stdout: '{}', stderr: '' };
+    },
+    config: async () => config,
+    hooks: async () => ({ data: [] }),
+    version: async () => '0.157.1',
+    hostsDir: '/package/dist/hosts/codex',
+    walletExists: async () => false,
+    createWallet: async () => {
+      steps.push('wallet');
+      return '0x1111111111111111111111111111111111111111';
+    },
+  };
+  return { steps, deps };
+}
+
+/** One `hooks/list` row of the Tenjin plugin, as Codex's HookMetadata carries it. */
+const row = (key: string, over: Record<string, unknown> = {}) => ({
+  key,
+  pluginId: CODEX_PLUGIN,
+  enabled: true,
+  trustStatus: 'trusted',
+  ...over,
+});
+const allowRow = (over: Record<string, unknown> = {}) =>
+  row('/c/tenjin/hooks/hooks.json:permission_request:0:0', {
+    command: CODEX_ALLOW_HOOK_COMMAND,
+    ...over,
+  });
+const listed = (...rows: unknown[]) => ({
+  data: [{ hooks: [{ key: 'theirs', pluginId: 'other@x', trustStatus: 'untrusted' }, ...rows] }],
+});
+/** A routing leg as Codex 0.157 lists it: an `mcp_tool` hook into the plugin's server. */
+const legRow = (key: string, over: Record<string, unknown> = {}) =>
+  row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
+const allRows = () => [legRow('a'), legRow('b'), legRow('c'), row('deny'), allowRow()];
+
+describe('Codex install, uninstall and doctor', () => {
+  it('writes the wallet, the spend limits and the plugin, and no Codex config', async () => {
+    const { steps, deps } = host();
+    const out = await runCodexInstall({ yes: true }, ctx(), deps);
+    const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
+    expect(config).toMatchObject({ maxAutoSpend: '250000' });
+    expect(steps).toEqual([
+      'wallet',
+      'codex plugin marketplace add /package/dist/hosts/codex',
+      'codex plugin add tenjin@tenjin',
+    ]);
+    expect(out.data).not.toHaveProperty('grant');
+    expect(out.data).not.toHaveProperty('approval');
+    expect(out.humanLines?.join('\n')).toContain('five Tenjin hooks');
+  });
+
+  it('keeps the defaults with no answer and hands the spend question back', async () => {
+    await writeFile(join(dir, 'config.json'), '{}');
+    const { deps } = host();
+    const out = await runCodexInstall({}, ctx(), deps);
+    const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
+    expect(config).not.toHaveProperty('maxAutoSpend');
+    expect(config).not.toHaveProperty('sessionBudget');
+    const data = out.data as {
+      spend: { effective: { maxAutoSpend: string; sessionBudget: string } };
+      nextSteps: { id: string; options: { command: string | null }[] }[];
+    };
+    expect(data.spend.effective).toEqual({ maxAutoSpend: '0.25', sessionBudget: '5' });
+    expect(data.nextSteps.map((s) => s.id)).toEqual(['spend']);
+    expect(data.nextSteps[0]?.options.map((o) => o.command)).toEqual([
+      'tenjin install --yes',
+      'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
+    ]);
+    expect(out.data).not.toHaveProperty('approval');
+  });
+
+  it('asks nothing again once the file names a limit', async () => {
+    const { deps } = host();
+    const out = await runCodexInstall({}, ctx(), deps);
+    expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+  });
+
+  it('writes the limits the two flags name, and asks nothing', async () => {
+    await writeFile(join(dir, 'config.json'), '{}');
+    const { deps } = host();
+    const out = await runCodexInstall({ maxAutoSpend: '0.5', sessionBudget: 'none' }, ctx(), deps);
+    const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
+    expect(config).toMatchObject({ maxAutoSpend: '500000', sessionBudget: 'none' });
+    expect(out.humanLines).toContain(
+      'Automatic router: up to $0.5 per call; no daily budget limit',
+    );
+    expect(out.data).toMatchObject({
+      spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
+    });
+    expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+  });
+
+  it('refuses a per-call limit under the 0.25 floor before any write', async () => {
+    await writeFile(join(dir, 'config.json'), '{}');
+    const { steps, deps } = host();
+    await expect(runCodexInstall({ maxAutoSpend: '0.1' }, ctx(), deps)).rejects.toThrow(
+      '--max-auto-spend 0.1',
+    );
+    expect(steps).toEqual([]);
+    expect(readFileSync(join(dir, 'config.json'), 'utf8')).toBe('{}');
+  });
+
+  it('refuses project scope before any write', async () => {
+    const { steps, deps } = host();
+    await expect(runCodexInstall({ project: true }, ctx(), deps)).rejects.toThrow('user only');
+    expect(steps).toEqual([]);
+  });
+
+  it('removes the plugin and its marketplace, reading no config first', async () => {
+    const { steps, deps } = host(null);
+    const out = await runCodexUninstall({}, ctx(), deps);
+    expect(steps).toEqual([
+      'codex plugin remove tenjin@tenjin',
+      'codex plugin marketplace remove tenjin',
+    ]);
+    expect(out.data).toEqual({ removed: CODEX_PLUGIN, marketplace: 'tenjin' });
+  });
+
+  describe("from Tenjin's runtime", () => {
+    const runtimeHosts = () => join(dir, 'runtime', 'codex');
+    const withCatalog = async () => {
+      await mkdir(join(runtimeHosts(), '.agents', 'plugins'), { recursive: true });
+      await writeFile(join(runtimeHosts(), '.agents', 'plugins', 'marketplace.json'), '{}');
+    };
+
+    it('adds the runtime folder once the runtime is set up, and carries it in --json', async () => {
+      await withCatalog();
+      const { steps, deps } = host({}, { state: 'active', cli: '1.2.3', nodeVersion: '24.0.0' });
+      const out = await runCodexInstall({ yes: true }, ctx(), deps);
+      expect(steps).toEqual([
+        'wallet',
+        `codex plugin marketplace add ${runtimeHosts()}`,
+        'codex plugin add tenjin@tenjin',
+      ]);
+      expect((out.data as { runtime: unknown }).runtime).toEqual({
+        state: 'active',
+        root: join(dir, 'runtime'),
+        cli: '1.2.3',
+        nodeVersion: '24.0.0',
+      });
+    });
+
+    it('refuses runtime failure before creating a wallet or changing registration', async () => {
+      const { steps, deps } = host({}, { state: 'failed', reason: 'no Node' });
+      await expect(runCodexInstall({ yes: true }, ctx(), deps)).rejects.toThrow('no Node');
+      expect(steps).toEqual([]);
+    });
+
+    it('uses a checkout folder only for source development', async () => {
+      const { steps, deps } = host();
+      await runCodexInstall({ yes: true }, ctx(), deps);
+      expect(steps).toContain('codex plugin marketplace add /package/dist/hosts/codex');
+    });
+
+    it('restores only the prior Tenjin marketplace and runtime after plugin add fails', async () => {
+      await withCatalog();
+      let restored = false;
+      let source = '/previous/tenjin';
+      let enabled = true;
+      const unrelated = { source: '/other/plugin', enabled: true };
+      const { deps } = host(
+        {
+          marketplaces: { tenjin: { source } },
+          plugins: { 'tenjin@tenjin': { enabled } },
+          unrelated,
+        },
+        {
+          state: 'active',
+          restore: async () => {
+            restored = true;
+          },
+        },
+      );
+      let failNext = true;
+      deps.run = async (args) => {
+        if (args[1] === 'marketplace' && args[2] === 'remove') source = '';
+        if (args[1] === 'marketplace' && args[2] === 'add') source = args[3]!;
+        if (args[1] === 'add' && failNext) {
+          failNext = false;
+          enabled = false;
+          return { code: 1, stdout: '', stderr: 'simulated registration failure' };
+        }
+        if (args[1] === 'add') enabled = true;
+        return { code: 0, stdout: '{}', stderr: '' };
+      };
+      await expect(runCodexInstall({ yes: true }, ctx(), deps)).rejects.toThrow(
+        'simulated registration failure',
+      );
+      expect(restored).toBe(true);
+      expect(source).toBe('/previous/tenjin');
+      expect(enabled).toBe(true);
+      expect(unrelated).toEqual({ source: '/other/plugin', enabled: true });
+    });
+
+    it('removes a marketplace added from another folder first, and leaves one already there', async () => {
+      await withCatalog();
+      const moved = host(
+        { marketplaces: { tenjin: { source: '/package/dist/hosts/codex' } } },
+        { state: 'current' },
+      );
+      await runCodexInstall({ yes: true }, ctx(), moved.deps);
+      expect(moved.steps).toEqual([
+        'wallet',
+        'codex plugin marketplace remove tenjin',
+        `codex plugin marketplace add ${runtimeHosts()}`,
+        'codex plugin add tenjin@tenjin',
+      ]);
+      const same = host(
+        { marketplaces: { tenjin: { source: `${runtimeHosts()}/` } } },
+        { state: 'current' },
+      );
+      await runCodexInstall({ yes: true }, ctx(), same.deps);
+      expect(same.steps).not.toContain('codex plugin marketplace remove tenjin');
+    });
+
+    it('says in doctor what the plugin runs, information only', async () => {
+      const runs = async (source: string) => {
+        const out = await runCodexDoctor({}, ctx(), {
+          ...host({ marketplaces: { tenjin: { source } } }).deps,
+          hooks: async () => listed(...allRows()),
+        });
+        return out.humanLines?.find((l) => l.startsWith('Codex plugin runs:'));
+      };
+      expect(await runs(runtimeHosts())).toBe(
+        `Codex plugin runs: Tenjin's runtime (${runtimeHosts()})`,
+      );
+      // No runtime to move to: nothing to say.
+      expect(await runs('/package/dist/hosts/codex')).toBeUndefined();
+      expect(await runs(42 as unknown as string)).toBeUndefined();
+    });
+
+    it('names the install that moves the plugin when a runtime is there to move to', async () => {
+      const dataDir = join(dir, 'home', '.tenjin');
+      await mkdir(join(dataDir, 'runtime'), { recursive: true });
+      await writeFile(join(dataDir, 'runtime', 'state.json'), '{}');
+      const run = (source: string) =>
+        runCodexDoctor(
+          {},
+          { ...ctx(), dataDir },
+          {
+            ...host({ marketplaces: { tenjin: { source } } }).deps,
+            hooks: async () => listed(...allRows()),
+          },
+        );
+      const moved = await run(join(dataDir, 'runtime', 'codex'));
+      expect(moved.humanLines).toContain(
+        "Codex plugin runs: Tenjin's runtime (~/.tenjin/runtime/codex)",
+      );
+      const onPath = await run('/package/dist/hosts/codex');
+      expect(onPath.humanLines).toContain(
+        "Codex plugin runs: `tenjin` from your PATH; run `tenjin install --harness codex` to move it to Tenjin's runtime",
+      );
+      expect(onPath.data).toMatchObject({ ok: true });
+    });
+
+    it('says how the last background update ended, information only', async () => {
+      const dataDir = join(dir, 'home', '.tenjin');
+      const root = join(dataDir, 'runtime');
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, 'state.json'), '{}');
+      const run = () =>
+        runCodexDoctor(
+          {},
+          { ...ctx(), dataDir },
+          {
+            ...host({ marketplaces: { tenjin: { source: join(root, 'codex') } } }).deps,
+            hooks: async () => listed(...allRows()),
+          },
+        );
+      expect((await run()).humanLines?.some((l) => l.startsWith('Auto-update:'))).toBe(false);
+      await writeFile(
+        join(root, 'auto-update.json'),
+        JSON.stringify({
+          finishedAt: '2026-10-21T08:00:00.000Z',
+          outcome: 'failed',
+          reason: 'offline',
+        }),
+      );
+      const out = await run();
+      expect(out.humanLines).toContain('Auto-update: 2026-10-21 failed: offline');
+      expect(out.data).toMatchObject({ ok: true });
+    });
+  });
+
+  it('reads the plugin from hooks/list rows: installed and trusted, absent, untrusted', () => {
+    expect(codexHookRows(listed(...allRows()))).toEqual({
+      state: 'trusted',
+      allowOff: false,
+      routing: 'paid',
+    });
+    expect(codexHookRows(listed())).toEqual({
+      state: 'absent',
+      allowOff: false,
+      routing: 'unknown',
+    });
+    expect(codexHookRows(listed(row('a'), row('b', { trustStatus: 'untrusted' })))).toMatchObject({
+      state: 'review',
+    });
+    expect(
+      codexHookRows(
+        listed(legRow('a'), legRow('b'), legRow('c', { enabled: false }), row('d'), allowRow()),
+      ),
+    ).toMatchObject({ state: 'review' });
+    expect(codexHookRows(listed(row('a'), row('b'), row('c')))).toMatchObject({ state: 'review' });
+    expect(codexHookRows(null)).toEqual({ state: 'unknown', allowOff: false, routing: 'unknown' });
+    // The allow hook off is the documented opt-out, so the plugin still counts as ready.
+    expect(
+      codexHookRows(
+        listed(
+          legRow('a'),
+          legRow('b'),
+          legRow('c'),
+          row('d'),
+          allowRow({ enabled: false, trustStatus: 'untrusted' }),
+        ),
+      ),
+    ).toEqual({ state: 'trusted', allowOff: true, routing: 'paid' });
+  });
+
+  it('tells command legs from an older build apart from the legs that pay the fee', () => {
+    const command = (kind: string) =>
+      row(kind, { handlerType: 'command', command: `tenjin hook ${kind} --harness codex` });
+    expect(
+      codexHookRows(listed(command('prompt'), command('native'), command('shortfall'), allowRow())),
+    ).toMatchObject({ routing: 'free' });
+    const launcher = row('p', {
+      handlerType: 'command',
+      command: `'/h/.tenjin/runtime/codex/tenjin/bin/tenjin' hook prompt --harness codex`,
+    });
+    expect(codexHookRows(listed(launcher, allowRow()))).toMatchObject({ routing: 'free' });
+    expect(codexHookRows(listed(legRow('a'), allowRow()))).toMatchObject({ routing: 'unknown' });
+  });
+
+  it('warns on command legs, fails on a Codex too old for mcp_tool hooks, and never pays', async () => {
+    const command = (kind: string) =>
+      row(kind, { handlerType: 'command', command: `tenjin hook ${kind} --harness codex` });
+    const stale = [command('prompt'), command('native'), command('shortfall'), allowRow()];
+    const { steps, deps } = host();
+    const warned = await runCodexDoctor({}, ctx(), {
+      ...deps,
+      hooks: async () => listed(...stale),
+    });
+    expect(warned.data).toMatchObject({ routing: 'free', ok: true });
+    expect(warned.humanLines?.join('\n')).toContain('! Routing: its routing hooks are commands');
+    await expect(
+      runCodexDoctor({}, ctx(), {
+        ...deps,
+        hooks: async () => listed(...allRows()),
+        version: async () => '0.148.0',
+      }),
+    ).rejects.toMatchObject({
+      details: { routing: 'paid', version: '0.148.0', ok: false },
+      fix: expect.stringContaining('Update Codex to 0.149.0 or later'),
+    });
+    // Nothing ran: no codex command, and the only reads are the stand-ins above.
+    expect(steps).toEqual([]);
+  });
+
+  it('compares Codex builds by number, a suffix ignored', () => {
+    expect(codexAtLeast('0.157.1', '0.148.0')).toBe(true);
+    expect(codexAtLeast('0.149.0', '0.149.0')).toBe(true);
+    expect(codexAtLeast('0.149.0-alpha.2', '0.149.0')).toBe(true);
+    expect(codexAtLeast('0.148.9', '0.149.0')).toBe(false);
+    expect(codexAtLeast('1.0.0', '0.148.0')).toBe(true);
+  });
+
+  it('reads one hooks/list, runs no codex command, and never calls the build a gate', async () => {
+    const { steps, deps } = host({ approval_policy: 'never' });
+    const ready = await runCodexDoctor({}, ctx(), {
+      ...deps,
+      hooks: async () => listed(...allRows()),
+    });
+    expect(steps).toEqual([]);
+    expect(ready.data).toMatchObject({
+      hooks: 'trusted',
+      ok: true,
+      version: '0.157.1',
+    });
+    expect(ready.data).not.toHaveProperty('elicitation');
+    expect(ready.humanLines?.join('\n')).toContain('information only');
+    expect(ready.humanLines?.join('\n')).not.toContain('Pay once');
+  });
+
+  it('fails with the install step when absent and the /hooks step when untrusted', async () => {
+    const { deps } = host();
+    await expect(runCodexDoctor({}, ctx(), deps)).rejects.toMatchObject({
+      code: 'REFUSED',
+      details: { hooks: 'absent', ok: false },
+      fix: expect.stringContaining('tenjin install --harness codex'),
+    });
+    await expect(
+      runCodexDoctor({}, ctx(), {
+        ...deps,
+        hooks: async () => listed(...allRows().map((r) => ({ ...r, trustStatus: 'untrusted' }))),
+      }),
+    ).rejects.toMatchObject({
+      details: { hooks: 'review' },
+      fix: expect.stringContaining('/hooks'),
+    });
+  });
+
+  it('fails when the allow hook is off under approval_policy never, which refuses the tool', async () => {
+    const off = () =>
+      listed(legRow('a'), legRow('b'), legRow('c'), row('d'), allowRow({ enabled: false }));
+    const prompt = await runCodexDoctor({}, ctx(), { ...host().deps, hooks: async () => off() });
+    expect(prompt.humanLines?.join('\n')).toContain('asks before each call');
+    await expect(
+      runCodexDoctor({}, ctx(), {
+        ...host({ approval_policy: 'never' }).deps,
+        hooks: async () => off(),
+      }),
+    ).rejects.toMatchObject({ details: { allowOff: true, ok: false } });
+  });
+});
+
+describe('turning the Codex plugin hooks on, and the update refresh', () => {
+  const source = '/c/plugins/cache/tenjin/tenjin/local/hooks/hooks.json';
+  const SNAKE: Record<string, string> = {
+    UserPromptSubmit: 'user_prompt_submit',
+    PreToolUse: 'pre_tool_use',
+    PostToolUse: 'post_tool_use',
+    PermissionRequest: 'permission_request',
+  };
+  /** Every handler the plugin renders, as Codex 0.157 lists it. */
+  const ownRows = (over: Record<string, unknown> = {}) =>
+    Object.entries(renderCodexHooks().hooks).flatMap(([event, groups]) =>
+      (groups as { matcher?: string; hooks: Record<string, unknown>[] }[]).flatMap((g, gi) =>
+        g.hooks.map((h, hi) => ({
+          key: `${source}:${SNAKE[event]}:${gi}:${hi}`,
+          sourcePath: source,
+          pluginId: CODEX_PLUGIN,
+          matcher: g.matcher ?? null,
+          enabled: true,
+          trustStatus: 'untrusted',
+          currentHash: `sha256:${event}${gi}${hi}`,
+          ...(h.type === 'mcp_tool'
+            ? { handlerType: 'mcpTool', server: h.server, tool: h.tool }
+            : { handlerType: 'command', command: h.command }),
+          ...over,
+        })),
+      ),
+    );
+  const foreign = {
+    ...ownRows()[0]!,
+    key: `${source}:user_prompt_submit:0:1`,
+    handlerType: 'command',
+    command: 'curl evil',
+  };
+
+  /** An app server that records the batch write and answers the rows it holds. */
+  function appServer(rows: Record<string, unknown>[], applies = true) {
+    const writes: unknown[] = [];
+    let current = rows;
+    const connect = async (method: string, params: unknown) => {
+      if (method === 'hooks/list') return { data: [{ hooks: current }] };
+      writes.push(params);
+      const value = (params as { edits: { value: Record<string, unknown> }[] }).edits[0]!.value;
+      if (applies) {
+        current = current.map((r) =>
+          typeof r.key === 'string' && r.key in value ? { ...r, trustStatus: 'trusted' } : r,
+        );
+      }
+      return {};
+    };
+    return { connect, writes };
+  }
+
+  it("trusts exactly the plugin's own legs, deny and allow, and no foreign row", async () => {
+    const rows = [...ownRows(), foreign];
+    expect(rows.filter(ownCodexRow)).toHaveLength(5);
+    expect(ownCodexRow(foreign)).toBe(false);
+    expect(ownCodexRow({ ...ownRows()[0]!, pluginId: 'other@x' })).toBe(false);
+    expect(ownCodexRow({ ...ownRows()[0]!, server: 'elsewhere' })).toBe(false);
+    const server = appServer(rows);
+    const keys = rows.filter(ownCodexRow).map((r) => r.key);
+    const result = await trustCodexHooks('/h', keys, ownCodexRow, { connect: server.connect });
+    expect(result.ok).toBe(true);
+    const written = Object.keys(
+      (server.writes[0] as { edits: { value: Record<string, unknown> }[] }).edits[0]!.value,
+    );
+    expect(written.sort()).toEqual([...keys].sort());
+    expect(written).not.toContain(foreign.key);
+  });
+
+  it('refuses a result where Codex trusted only some of the rows', async () => {
+    const server = appServer(ownRows(), false);
+    const keys = ownRows().map((r) => r.key);
+    const result = await trustCodexHooks('/h', keys, ownCodexRow, { connect: server.connect });
+    expect(result).toMatchObject({ ok: false, failedAt: 'verify' });
+  });
+
+  it('turns the hooks on at install, and names /hooks only when that fails', async () => {
+    const { deps } = host();
+    const trusted = await runCodexInstall({ yes: true }, ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: ownRows() }] }),
+      trust: async (_home, keys) => ({ ok: true, trusted: [...keys] }),
+    });
+    expect(trusted.data).toMatchObject({ next: expect.stringContaining('new Codex session') });
+    const refused = await runCodexInstall({ yes: true }, ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: ownRows() }] }),
+      trust: async () => ({ ok: false, trusted: [], failedAt: 'write' }),
+    });
+    expect(refused.data).toMatchObject({ next: expect.stringContaining('/hooks') });
+  });
+
+  const stale = () =>
+    ownRows({ trustStatus: 'trusted' }).map((r, i) =>
+      i < 3 ? { ...r, handlerType: 'command', command: `tenjin hook prompt --harness codex` } : r,
+    );
+
+  it('installs the plugin from 0.149.0 or an unknown build, and leaves an older copy', async () => {
+    for (const [version, adds] of [
+      ['0.148.0', false],
+      ['0.149.0', true],
+      [null, true],
+    ] as const) {
+      const { steps, deps } = host();
+      const out = await runCodexInstall({ yes: true }, ctx(), {
+        ...deps,
+        version: async () => version,
+      });
+      expect(
+        steps.some((s) => s.startsWith('codex plugin add')),
+        String(version),
+      ).toBe(adds);
+      if (!adds) {
+        expect(out.data).toMatchObject({ next: CODEX_REFRESH_LINES.old });
+        expect(CODEX_REFRESH_LINES.old).toContain('0.149.0');
+        expect(CODEX_REFRESH_LINES.old).not.toMatch(/tenjin |`/);
+      }
+    }
+  });
+
+  it('does nothing where Codex is absent or does not have the plugin', async () => {
+    const { steps, deps } = host();
+    expect(await refreshCodexPlugin(ctx(), { ...deps, version: async () => null })).toBeUndefined();
+    expect(await refreshCodexPlugin(ctx(), deps)).toBeUndefined();
+    expect(steps).toEqual([]);
+  });
+
+  it('re-adds an older copy, turns its new hooks on, and says so in one line', async () => {
+    const { steps, deps } = host();
+    let lists = 0;
+    let trustedKeys: readonly string[] = [];
+    const line = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: lists++ === 0 ? stale() : ownRows() }] }),
+      trust: async (_home, keys) => ((trustedKeys = keys), { ok: true, trusted: [...keys] }),
+    });
+    expect(steps).toEqual([
+      'codex plugin marketplace add /package/dist/hosts/codex',
+      'codex plugin add tenjin@tenjin',
+    ]);
+    expect(trustedKeys).toHaveLength(5);
+    expect(line).toBe(CODEX_REFRESH_LINES.done);
+  });
+
+  it('falls back to the /hooks line, or one failure line, and never throws', async () => {
+    const { deps } = host();
+    const review = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: stale() }] }),
+      trust: async () => ({ ok: false, trusted: [], failedAt: 'verify' }),
+    });
+    expect(review).toBe(CODEX_REFRESH_LINES.review);
+    expect(review).not.toMatch(/tenjin |`/);
+    const failed = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      hooks: async () => ({ data: [{ hooks: stale() }] }),
+      run: async () => ({ code: 1, stdout: '', stderr: 'boom' }),
+    });
+    expect(failed).toBe(CODEX_REFRESH_LINES.failed);
+    const old = await refreshCodexPlugin(ctx(), {
+      ...deps,
+      version: async () => '0.148.0',
+      hooks: async () => ({ data: [{ hooks: stale() }] }),
+    });
+    expect(old).toBe(CODEX_REFRESH_LINES.old);
+  });
+
+  it("runs the Codex refresh whatever Claude Code's refresh did, and keeps its real failures", async () => {
+    const refused = async () => {
+      throw new CliError('REFUSED', 'Nothing to refresh: no Claude Code install here.');
+    };
+    const broken = async () => {
+      throw new CliError('REFUSED', 'Claude Code could not register the plugin.');
+    };
+    const line = CODEX_REFRESH_LINES.done;
+    expect(await alongsideCodexRefresh(refused, async () => line)).toEqual({
+      data: { notices: [line] },
+      humanLines: [line],
+    });
+    await expect(alongsideCodexRefresh(refused, async () => undefined)).rejects.toThrow(
+      'Nothing to refresh',
+    );
+    let codexRan = false;
+    await expect(
+      alongsideCodexRefresh(broken, async () => ((codexRan = true), line)),
+    ).rejects.toThrow('could not register');
+    expect(codexRan).toBe(true);
+    const ok = await alongsideCodexRefresh(
+      async () => ({ data: {}, humanLines: ['refreshed'] }),
+      async () => line,
+    );
+    expect(ok.humanLines).toEqual(['refreshed', line]);
+  });
+});

@@ -1,366 +1,165 @@
-# tenjin-agent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo-dark.svg">
+    <img src="./assets/logo-light.svg" alt="Tenjin" width="220">
+  </picture>
+</p>
 
-Agent tooling for [Tenjin](https://tenjin.blog), an x402-native marketplace where agents can search, buy, read, and publish reusable knowledge with USDC on Base.
+<h3 align="center">The tool router for coding agents.</h3>
 
-Tenjin is meant for questions that are public, durable, and annoying to reproduce: integration gotchas, version-specific behavior, tested migration notes, dated operational probes, benchmarks, and other work where paying a few cents is cheaper than making every agent rediscover the answer.
+<p align="center">
+  <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
+  <img src="https://img.shields.io/badge/works%20with-Claude%20Code-1C1A17" alt="Works with Claude Code">
+  <img src="https://img.shields.io/badge/payments-x402-8C9A7E" alt="Payments via x402">
+</p>
 
-This repository ships:
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#try-it">Try it</a> ·
+  <a href="#what-your-agent-can-do">Tools</a> ·
+  <a href="#wallet-and-limits">Wallet and limits</a> ·
+  <a href="#request-a-tool">Request a tool</a>
+</p>
 
-- `tenjin`, the CLI published as [`tenjin-cli`](https://www.npmjs.com/package/tenjin-cli)
-- Agent Skills for Claude Code, Codex, and other Agent-Skills-compatible harnesses
-- A local stdio MCP server backed by the same command core
+<p align="center">
+  <img src="./assets/demo.gif" alt="Tenjin in Claude Code: research, live crypto prices, company lookup, email verification, and computation" width="720">
+</p>
 
-No API key or Tenjin account is required. Your wallet is the credential, and the private key stays on your machine.
+## Why
 
-## Start with a prompt
+Giving your coding agent good tools is a chore:
 
-Tenjin is built for agent harnesses, so the easiest setup path is to ask your agent to install it.
+- **A key for every tool.** Sign up, pick a plan, paste an API key. Five tools, five accounts.
+- **MCP servers crowd the context.** Each one loads its tool list into every session, needed or not.
+- **Your agent forgets anyway.** It reaches for plain web search, so you write rules, and it still slips.
+- **Some tools you need once.** A one-off lookup isn't worth the setup.
 
-Open Claude Code, Codex, Cursor, or another shell-capable agent and paste:
+With Tenjin, you install once and keep working. The router suggests the right tool when it helps, and your wallet pays per call. No keys, no extra servers, no rules.
 
-```text
-Install Tenjin for this harness.
+## Install
 
-Run `npm i -g tenjin-cli`, then run `tenjin install` and use the recommended
-defaults unless I say otherwise. When setup finishes, tell me whether I should
-restart this harness so the new skills and hooks load. Then show me my Tenjin
-wallet address and the command to fund it.
-```
-
-After setup, restart or open a fresh harness session. Most agents load skills and hooks at session start.
-
-Then fund the wallet when you are ready to try paid reads:
-
-```bash
-tenjin wallet fund 5
-```
-
-That opens a Coinbase Onramp checkout for this wallet. You can also send USDC on Base to the address printed by:
-
-```bash
-tenjin wallet show
-```
-
-Once funded, ask your agent to use Tenjin when a public, reusable answer might already exist:
+Paste this into Claude Code:
 
 ```text
-When we hit a public, durable question that would take real work to verify,
-search Tenjin first. Spend no more than $0.25 unless I approve more. If Tenjin
-misses and you verify the answer yourself, ask whether we should publish the
-finding back for the next agent.
+Install Tenjin from tenjin.sh
 ```
 
-## Manual setup
+Your install request gives the agent permission to handle setup. It briefly explains task-context sharing, asks about spending limits and adding funds, then gives the activation step. Follow that step to continue your original task. Wallet addresses appear only when requested or needed for recovery; storage and PATH details appear only for recovery.
 
-Requirements: Node.js 24 or newer.
+Or from a terminal (Node and npm are not required):
 
-```bash
-npm i -g tenjin-cli
-tenjin install
-tenjin doctor
+```sh
+(
+  tenjin_install_dir="$(mktemp -d ./.tenjin-install.XXXXXXXX)" || exit
+  trap 'rm -f "$tenjin_install_dir/install.sh"; rmdir "$tenjin_install_dir"' EXIT
+  curl -fsSL https://tenjin.sh/install.sh -o "$tenjin_install_dir/install.sh" &&
+    sh "$tenjin_install_dir/install.sh"
+)
 ```
 
-`tenjin install` wires the skills for the harnesses it detects, writes the recommended command permissions where supported, registers the hook entries and starts the local loop daemon they point at, and creates a local Base wallet. It is safe to run again: the entries are written as one whole set, so a second run leaves the same file and no uninstall is needed first.
+On Windows, in PowerShell:
 
-It asks two things:
-
-- `When your agent has something worth publishing:` — `Auto (recommended)`: your agent publishes and updates pieces on its own, under your identity; it also allows `tenjin publish` and `tenjin edit` in the harness. The other answers are `Ask me in chat first` and `Fully unattended`, where only a hard block stops it.
-- `Create a wallet now?`
-
-Everything else is a flag: `--bazaar-pay`, `--no-grant`, `--no-hooks`, `--no-wallet`, `--publish-mode <mode>`. `tenjin install --help` lists them.
-
-Then it prints what it wired:
-
-```
-tenjin is wired for Claude Code.
-
-  skills       3 in ~/.claude/skills
-  permissions  11 tenjin commands in ~/.claude/settings.json
-  hooks        7 enabled; change: tenjin hooks disable <arm>
-  publishing   auto - your agent publishes under your identity
-  wallet       0x1234…abcd, $0 - fund with: tenjin wallet fund
-
-Restart Claude Code to load the hooks. Undo everything: tenjin uninstall
-tenjin doctor: 11 checks, all pass.
+```powershell
+irm https://tenjin.sh/install.ps1 | iex
 ```
 
-Show the wallet address:
+The installer downloads a pinned Node and Tenjin, verifies both, and sets up
+the plugin. Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64.
+Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
+Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
+later does not stop it. Add `--project` to `tenjin install` for one project.
+Plugin installation uses the default data directory; run without
+`TENJIN_DATA_DIR`. Other CLI commands can still use a custom data directory.
 
-```bash
-tenjin wallet show
-```
+Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`. It sets up
+the same private runtime. An installation failure keeps your existing plugin
+registration. Check the reported cause, then retry the install.
 
-Add a small amount of USDC when you want paid reads:
+Agent-run installs return a compact handoff. `tenjin install --json` installs
+with the full structured result for scripts or troubleshooting.
 
-```bash
-tenjin wallet fund 5
-```
+**Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
 
-Then ask Tenjin for work that might already exist:
+## Try it
 
-```bash
-tenjin search "Does Vercel use .nvmrc for serverless function builds?" --max-price 0.25
-```
-
-If a candidate looks relevant, inspect it before buying:
-
-```bash
-tenjin inspect <url-or-resource-id>
-tenjin buy <url-or-resource-id> --max-price 0.25
-```
-
-Free reads use `tenjin read`. Paid reads use `tenjin buy`; the split is deliberate so a command named "read" never spends money.
-
-## When to use Tenjin
-
-Use Tenjin when all of these are true:
-
-- The question can be generalized without leaking private context.
-- The answer will still matter later.
-- Reproducing it costs real time, browsing, testing, paid data, or specialist judgment.
-- A prior agent or human could plausibly have verified the same thing.
-
-Skip Tenjin for private-codebase questions, live prices or status checks, generic advice, one-line docs lookups, or work you are already implementing or debugging locally.
-
-Good searches:
-
-```bash
-tenjin search "Which x402 TypeScript SDK version fixed route matching for Next.js app router?"
-tenjin search "Does Stripe's Vercel marketplace template work with Next 15 server actions?"
-tenjin search "What changed in pgvector 0.7 ivfflat index rebuild behavior?"
-```
-
-Poor searches:
-
-```bash
-tenjin search "Why is my private service failing?"
-tenjin search "What is ETH doing right now?"
-tenjin search "Explain OAuth"
-```
-
-## Core commands
-
-`tenjin --help` lists every command under five headings: Setup, Search and read, Publish, Wallet, Integration. `tenjin <command> --help` carries that command's flags and an example.
-
-Most agent workflows only need `search`, `inspect`, `read`, `buy`, `outcome`, and sometimes `publish`.
-
-For scripts and agents, pass `--json`. The CLI then emits one machine-readable envelope and uses stable exit codes:
-
-- `0`: success, including an honest search miss
-- `1`: runtime or network failure
-- `2`: usage error
-- `3`: policy refusal, missing approval, or a publish that needs confirmation
-- `4`: payment or publish failure after approval
-
-## Publishing back
-
-Tenjin works best when agents publish results that would otherwise be rediscovered.
-
-A finding is a publish document: YAML frontmatter carrying the title and the
-answer card, then the body. That is the only shape `tenjin publish` takes, and it
-is checked before anything is written, so a missing title or an incomplete card
-costs a message rather than a signature.
-
-```bash
-tenjin publish - --price 0.10 <<'TENJIN_MD'
----
-title: Verified finding
-questionsAnswered:
-  - why does the build fail on Node 24?
-  - which release fixed it?
-  - what is the workaround until then?
-scope: this package on Node 22 and 24
-exclusions: Bun and Deno, which were not tested
-provenanceSummary: ran the build on both versions and diffed the output
----
-The reusable result and the evidence behind it.
-TENJIN_MD
-```
-
-Bare `tenjin publish` also reads piped input when stdin is non-interactive. If
-the Markdown is already in a regular file, run `tenjin publish ./finding.md ...` as its
-own command rather than chaining it behind the write. `--draft` parks a piece
-that is not finished yet, and is the one publish that does not need a card.
-
-A useful Tenjin post should lead with the finding, not the genre. Prefer "Next 15 server actions require..." over "A migration guide for...".
-
-For paid posts, put the free preview before a paywall marker:
-
-```md
-# Vercel ignores .nvmrc for serverless functions unless...
-
-Short answer first. The verified behavior is...
-
-<!--paywall-->
-
-Reproduction steps, logs, versions tested, and edge cases...
-```
-
-Publishing is gated by local consent settings and a local scan for obvious secrets or sensitive material. Hard blocks cannot be bypassed by `--yes`.
-See [docs/safety-model.md](./docs/safety-model.md) for the security invariants agents are expected to follow.
-
-## Wallet and spending
-
-Tenjin uses USDC on Base. Search, inspect, free reads, outcomes, and publishing do not cost USDC. Paid reads do, and so does `tenjin pay`, the lane for any other x402 endpoint.
-
-The default automatic spend is zero. To make unattended buying possible, configure explicit limits first:
-
-```bash
-tenjin config set maxAutoSpend 0.25
-tenjin config set sessionBudget 2.00
-```
-
-Keep this as a small wallet. It is designed for pocket-money agent reads, not treasury custody.
-
-Wallet behavior:
-
-- The private key is generated locally and stored encrypted in `~/.tenjin/wallet.json`.
-- The plaintext key is never written to disk.
-- Signing happens locally.
-- `tenjin wallet show` prints the address, never the private key.
-- `tenjin wallet send` exists as an escape hatch for moving USDC out, but it is intentionally not part of the recommended agent flow.
-
-## Permissions
-
-Harnesses that run unattended often deny unknown shell commands. `tenjin install` pre-clears the free Tenjin verbs so an agent can search, inspect, read free or already-owned pieces, report outcomes, and check wallet state without permission popups. `--no-grant` is the opt-out.
-
-The free tier cannot spend wallet USDC or export keys. `tenjin wallet fund` only opens a Coinbase checkout for this wallet:
+Work as usual. Ask for something your agent can't do on its own:
 
 ```text
-Bash(tenjin search:*)
-Bash(tenjin wallet fund:*)
-Bash(tenjin inspect:*)
-Bash(tenjin read:*)
-Bash(tenjin outcome:*)
-Bash(tenjin doctor:*)
-Bash(tenjin wallet show:*)
-Bash(tenjin wallet balance:*)
-Bash(tenjin config get:*)
+> Generate a 10-second voiceover that says "Welcome to Tenjin"
+> Make a whoosh sound effect for a page transition
+> Make a hero image of plum blossoms in ukiyo-e style
+> Make a 5-second video of a paper crane unfolding
+> Summarize the risk factors in Nvidia's latest 10-K
+> What are people on Reddit saying about Bun vs Node lately?
 ```
 
-The nine free verbs above cannot spend USDC; `doctor` decrypts locally to check your wallet still opens, and `read` opens the keystore once to mint the read-scoped session key that recovers a piece you already own.
+The router names the tool and its price, and your agent calls it.
 
-Purchases are separate: `Bash(tenjin buy:*)`. Do not add that line until you have set spend limits you are comfortable with. See [docs/agent-permissions.md](./docs/agent-permissions.md) for the full rationale and caveats.
+## What your agent can do
 
-Codex users also need network access enabled for the workspace-write sandbox before paid x402 calls can work:
+| Your agent needs                       | With                            | Provider price |
+| -------------------------------------- | ------------------------------- | -------------- |
+| Library docs                           | Context7                        | free           |
+| Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢   |
+| Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢       |
+| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢    |
+| X and Reddit                           | glim                            | 0.1¢ to 1¢     |
+| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14.4¢  |
+| Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 1¢ to 12¢      |
+| Video clips                            | MiniMax Hailuo, Google Veo      | 15.5¢ to 45¢   |
+| Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢     |
+| Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
+| PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-```toml
-[sandbox_workspace_write]
-network_access = true
-```
+Provider prices above exclude Tenjin's routing fee, quoted per call and never more than $0.003. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
-## Local stdio MCP server
+## How it works
 
-The CLI can run a local stdio MCP server:
+1. The router watches the moments a tool could help: your prompt, each web search or page fetch, each task handed to a subagent, and each question your agent asks you.
+2. Jev, a decision model from [TypeSafe](https://typesafe.ai), picks one tool from the catalog, or none. Your agent sees one line naming the tool and its price.
+3. Your agent calls it through the plugin's `request` tool, and your wallet pays the provider. When nothing fits, your agent carries on with its own tools.
+
+The router sees your prompt and up to six earlier messages, with secrets masked, and never sees tool results. [What the hooks send →](./docs/agent-permissions.md#what-the-hooks-send)
+
+## Wallet and limits
+
+`tenjin install` creates a wallet on your machine that holds USDC on Base. Its key never leaves your machine, and Tenjin never holds your funds. Payments run over [x402](https://www.x402.org) ([whitepaper](https://www.x402.org/x402-whitepaper.pdf), [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome)).
+
+| Limit        | Default | Change it                             |
+| ------------ | ------- | ------------------------------------- |
+| Daily budget | $5      | `tenjin config set sessionBudget 2`   |
+| Per call     | $0.25   | `tenjin config set maxAutoSpend 0.50` |
+
+The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
+
+- A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
+- Each routing call costs a fee the router quotes, never more than $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees, the router's suggested amount at a time ($0.03 today, $0.05 once the router's update ships): less when your balance or per-call limit is smaller, but never less than ten fees ($0.03) or more than $0.25, so the rest stays available for paid tools. It stops routing when those funds run out and your balance is under $0.03; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
+- Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
+
+[How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
+
+## Commands
 
 ```bash
-tenjin mcp
+tenjin status                          # your balance, spending and limits
+tenjin wallet balance                  # what's left
+tenjin payments                        # paid lookups from this machine
+tenjin doctor                          # check that a lookup can run
+tenjin update                          # newest version now (it also updates itself daily; `tenjin config set update.mode off` stops that)
+tenjin config set router.enabled false # pause the router
+tenjin uninstall                       # your wallet stays; npm installs: then `npm uninstall -g tenjin-cli`
 ```
 
-Claude Code:
+## Request a tool
 
-```bash
-claude mcp add tenjin -s user -- tenjin mcp
-```
+Tenjin is in alpha, and the catalog grows with what people ask for.
 
-Cursor:
+- **[Request a tool →](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement)**
+- **[Report a bug →](https://github.com/BackTrackCo/tenjin-agent/issues/new?labels=bug)**
 
-```json
-{
-  "mcpServers": {
-    "tenjin": {
-      "command": "tenjin",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+## Learn more
 
-There is also a keyless remote MCP server:
-
-```text
-https://tenjin.blog/api/mcp
-```
-
-Useful hosted references:
-
-- Agent guide: [tenjin.blog/llms.txt](https://tenjin.blog/llms.txt)
-- Full API reference: [tenjin.blog/llms-full.txt](https://tenjin.blog/llms-full.txt)
-- OpenAPI: [tenjin.blog/openapi.json](https://tenjin.blog/openapi.json)
-- Agent Skill: [tenjin.blog/skills.md](https://tenjin.blog/skills.md)
-- x402 discovery: [tenjin.blog/.well-known/x402](https://tenjin.blog/.well-known/x402)
-
-## Configuration
-
-Show config:
-
-```bash
-tenjin config
-```
-
-Common settings:
-
-```bash
-tenjin config set maxAutoSpend 0.25
-tenjin config set sessionBudget 2.00
-tenjin config set publish.mode review
-tenjin config set publish.defaultPrice 0.10
-tenjin config set hooks.web-search false
-```
-
-Important defaults:
-
-- `maxAutoSpend` is `0`, so nothing is auto-approved.
-- `sessionBudget` is `0`, which means no session ceiling once auto-spend is otherwise enabled.
-- `publish.mode` starts as `review`; `tenjin install` may settle it based on your choice.
-- `baseUrl` defaults to `https://tenjin.blog`.
-
-## Client identity
-
-Every request the CLI makes carries the standard `User-Agent` field and nothing
-else that identifies the client:
-
-```http
-User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
-```
-
-The loop's hook arms travel in that same field. What keeps a query an agent rode
-along with apart from a question somebody chose to look up is the `trigger` on the
-request itself — `prompt`, `research`, `dispatch` or `failure` for an arm, `cli`
-for a command you ran — which is what Tenjin's demand data is grouped by.
-
-If you are an agent that runs the CLI, you can travel in that field too. Export
-`TENJIN_CALLER_USER_AGENT` when you launch it, and your products follow the
-CLI's, in your order:
-
-```bash
-TENJIN_CALLER_USER_AGENT="codex/1.2.0 node/24.4.0" tenjin search "..."
-```
-
-```http
-User-Agent: tenjin-cli/<version> codex/1.2.0 node/24.4.0 (+https://tenjin.blog)
-```
-
-The handoff takes a **product sequence only**: `name` or `name/version`,
-space-separated. Never put a user, wallet, session, hostname, or machine
-identifier in it. Anything that is not a bare product sequence, and anything that
-pushes the composed field past the 512 characters Tenjin accepts, is dropped
-whole: the CLI's own identity is then sent alone, never a truncated version of
-yours. Composition is idempotent, so a value that already contains
-`tenjin-cli/...` (a retry, or a handoff you received and re-exported) never
-duplicates it.
-
-This is self-reported telemetry, used for attribution and measurement. It is
-never authentication, and it decides no entitlement, payment, or spend.
-
-## Developing
-
-```bash
-pnpm install
-pnpm run build
-pnpm run test
-pnpm run typecheck
-pnpm run lint
-```
-
-Release notes live in [RELEASING.md](./RELEASING.md).
+- [Permissions, hooks, and what install writes](./docs/agent-permissions.md)
+- [Safety model](./docs/safety-model.md)
+- [Troubleshooting](./docs/troubleshooting.md)
+- [Contributing](./CONTRIBUTING.md)

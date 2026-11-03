@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d12",
+  "status": "unpaid",
+  "reason": "provider",
+  "httpStatus": 503,
+  "ms": 1200
+}

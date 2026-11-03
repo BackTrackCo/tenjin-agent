@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "router": {
+      "command": "tenjin",
+      "args": ["mcp", "--harness", "codex"],
+      "env_vars": ["CODEX_HOME"]
+    }
+  }
+}

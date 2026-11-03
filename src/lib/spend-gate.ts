@@ -1,3 +1,4 @@
+import type { PaymentMode } from './policy';
 import { CliError } from './errors';
 import { toMoney } from './money';
 import { promptYesNo } from './prompt';
@@ -17,11 +18,14 @@ import type { CommandContext } from '../context';
 
 export interface SpendGateInput {
   ctx: CommandContext;
+  mode: PaymentMode;
   authorizer: SpendAuthorizer;
   amountAtomic: bigint;
   /** The policy's creator identity (a handle for buy, the target host for pay). */
   creator: string;
   maxPriceAtomic?: bigint;
+  /** The same-turn duplicate guard's identity for this request; see SpendRequest. */
+  requestKey?: string;
   /** --yes: bypasses the interactive confirm only, never a cap or a deny. */
   yes: boolean;
   /** Interactive-confirm seam; defaults to a TTY y/n prompt. */
@@ -44,9 +48,11 @@ export interface SpendGateInput {
 export async function gateSpend(input: SpendGateInput): Promise<string | undefined> {
   const { authorizer, amountAtomic } = input;
   const authorization = await authorizer.authorize({
+    mode: input.mode,
     amountAtomic,
     creator: input.creator,
     ...(input.maxPriceAtomic !== undefined ? { maxPriceAtomic: input.maxPriceAtomic } : {}),
+    ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
   });
   if (authorization.decision === 'deny') {
     throw new CliError('POLICY_REFUSED', authorization.message, {
@@ -56,11 +62,17 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   }
   const reservationId = authorization.reservationId;
   if (authorization.decision === 'confirm') {
-    const approved = await confirmSpend(input);
+    let approved: boolean;
+    try {
+      approved = await confirmSpend(input);
+    } catch (err) {
+      await authorizer.release(reservationId);
+      throw err;
+    }
     if (!approved) {
       await authorizer.release(reservationId);
       throw new CliError('POLICY_REFUSED', input.notConfirmedMessage, {
-        fix: 'Re-run with --yes, or set a policy that auto-approves this spend.',
+        fix: 'Obtain explicit user consent for this quoted payment, then re-run with --yes or confirm interactively. Manual pay is never an autonomous workaround for a router refusal.',
         details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
       });
     }
@@ -68,16 +80,19 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   return reservationId;
 }
 
-function policyFix(reason: string, allowlistSubject: string): string {
+/** What follows a refusal, by its policy reason. */
+export function policyFix(reason: string, allowlistSubject: string): string {
   switch (reason) {
     case 'price_cap_exceeded':
       return 'Raise --max-price if this price is acceptable.';
     case 'not_allowlisted':
       return `Add ${allowlistSubject} to allowlistCreators, or clear the allowlist.`;
     case 'session_budget_exceeded':
-      return 'Raise sessionBudget with `tenjin config set sessionBudget <usd>`, or wait for the window to roll over.';
+      return "Today's automatic budget is spent; it comes back as the rolling 24 hours pass. Nothing more is paid without the user's yes.";
+    case 'duplicate_in_flight':
+      return 'Let the in-flight request finish and read its result; retrying the same request does not renew authorization.';
     default:
-      return 'Adjust your spend policy with `tenjin config set`.';
+      return "This is over what this machine pays without asking, so it is not paid without the user's yes.";
   }
 }
 

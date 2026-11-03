@@ -1,514 +1,218 @@
 # Agent permissions
 
-Coding harnesses running unattended ("auto mode", "full auto", YOLO) classify each
-shell command before running it, and an unknown binary is denied by default. That
-denies the free verbs too, which breaks the whole marketplace loop: the skills
-forbid working around a denial, so a denied `tenjin search` just stops.
+`tenjin install` registers one Claude Code plugin, `tenjin`, and writes no permission rule. This page is the whole reasoning behind what the plugin allows: what it clears, what it cannot clear, and what stays a decision you make by hand.
 
-Pre-clearing the free verbs once fixes that. This page is the full reasoning
-behind which verbs are on that list, which two are separate opt-ins, and which are
-never recommended at all, and it is where `tenjin install` sends you. The [README](../README.md#permissions) carries the paste block and the
-three-tier summary.
+Harnesses that run unattended deny tools they have not been told about. Without the answer below, every lookup stops on a permission prompt, and a session left alone stops with it.
 
-## The free tier
+## The plugin's two permission answers
 
-The free tier is nine rules for the `permissions.allow` array of Claude Code's
-`~/.claude/settings.json`. `tenjin install` can write them for you; see
-[Getting the rules onto your machine](#getting-the-rules-onto-your-machine).
+A plugin cannot carry permission rules, so the plugin answers two permission questions itself, with two `PreToolUse` hooks:
 
 ```
-Bash(tenjin search:*)
-Bash(tenjin wallet fund:*)
-Bash(tenjin inspect:*)
-Bash(tenjin read:*)
-Bash(tenjin outcome:*)
-Bash(tenjin doctor:*)
-Bash(tenjin wallet show:*)
-Bash(tenjin wallet balance:*)
-Bash(tenjin config get:*)
+mcp__plugin_tenjin_router__request   allow
+mcp__plugin_tenjin_router__hook      deny
 ```
 
-None of those can spend; `tenjin doctor` decrypts locally to check your wallet
-still opens. That is the definition of this tier, and it is deliberately narrower
-than "signs nothing" and narrower than "never opens the keystore": `tenjin read`
-signs with a P-256 session delegation, and mints one with a wallet signature when
-an owned piece is not on this machine and no delegation is live. The delegated key
-is the wrong curve to authorize a USDC transfer, so no amount of it moves money.
+The first clears the `request` tool on the plugin's `router` MCP server, and nothing else: no shell verb, no other tool, no price. A hook's allow never overrides a `deny` or `ask` rule you wrote for that tool, so a rule of yours still wins. The second blocks your assistant from calling `hook`, the tool the plugin's own hook legs call, in every permission mode, bypass included; Claude Code's own hook calls to it still run. The tool stays in your assistant's tool list, and a call to it returns the reason instead of running. Each answer is a fixed line of JSON that `node -e` prints, started with no shell.
 
-### What each verb actually does
+The allow is a tool grant, not a spending grant. Every payment the tool makes still passes the local spend policy, and the policy is the only thing that decides an amount.
 
-| Rule                            | Why it is safe to pre-clear                                                                                                        |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.                  |
-| `Bash(tenjin wallet fund:*)`    | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, origin-pinned (no `--base-url`). |
-| `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                          |
-| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend, but opens the keystore to mint a read-scoped session key, and transmits it (see below).          |
-| `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.      |
-| `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                           |
-| `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                    |
-| `Bash(tenjin wallet balance:*)` | Read-only USDC balance query on Base.                                                                                              |
-| `Bash(tenjin config get:*)`     | Reads one effective config value. Note `config get rpcUrl` returns a URL that commonly embeds a provider API key.                  |
+## What bounds a payment
 
-`tenjin doctor --json` emits the same per-verb notes under `permissions`, so an
-agent can read them without this page.
+Router on/off controls automatic routing. The spending controls and ledger are local; the router cannot read or raise them:
 
-### Three free verbs are not read-only
+- **`sessionBudget`**, the daily budget, is the control. It caps automatic spending across chats, $5 by default. Its counter resets 24 hours after the window starts; a new chat does not reset it. Zero blocks automatic spending; `none` removes the daily ceiling.
+- **`maxAutoSpend`**, the per-call ceiling, is the runaway guard. It caps what one router call pays on its own: all its payments together, so several takes of one call or every option of a compare count as one total. It is $0.25 by default and cannot be set below $0.25, the largest routing deposit, because a deposit the router asks for can reach it. `tenjin install` and `tenjin config set` refuse a lower amount. A service priced above it (today two video models at $0.42 and $0.45, hosting at $0.50 and research at $0.60) is approved once, for that call (below).
+- **The wallet balance** is the hard stop. Nothing pays past it.
+- **`spend.json`** records all payments, with separate automatic exposure and reservation modes. Only automatic exposure and pending automatic reservations consume the daily budget. Manual payments remain in total reporting. Older records without a mode/counter conservatively count as automatic until their window expires. Both modes retain the keyed duplicate guard, including under `none`.
 
-Worth knowing before you pre-clear them: `tenjin search` POSTs your generalized
-question off-machine, and `tenjin outcome` POSTs a report that moves the
-marketplace's reuse signal — both unauthenticated and free, neither carrying a
-credential — while `tenjin read` writes locally, saving a delivered piece to your
-library.
+Both defaults hold from the moment Tenjin is installed, whether or not anyone answers. `tenjin install` asks once: "Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits." In a terminal it asks you directly. When it cannot ask (`--json`, or a shell with no terminal, which is how an agent runs it), it writes neither limit, the defaults hold, and its output hands the same question to whoever ran it (the first entry of `nextSteps` in `--json`), with the one command for each answer: **Use the defaults** runs the same install again with `--yes` (for example `tenjin install --no-wallet --yes`), which writes them; **Set my own limits** asks you for the daily budget shared across chats and the most per call, then runs `tenjin install --max-auto-spend <usd> --session-budget <usd|none>` with your amounts, which replace any limit the config file holds. Everything else the follow-up install writes is what the first run wrote. The question is asked only while the config file names neither limit. No answer turns spending off: `tenjin config set router.enabled false` turns the router off.
 
-### `read` mints and transmits a credential
+Manual pay ignores both configured limits and always requires user consent. The retired `bazaarPay` and `confirm` keys have no effect after upgrade, regardless of their old values. Doctor/status warn while they remain. Install/refresh removes and reports exactly those keys, preserving current router/limit settings and unrelated fields. `config set` rejects the retired keys.
 
-Worth knowing before you paste the `read` line. A paid piece this wallet already
-owns but has never been read on this machine takes one wallet signature: `read`
-mints the same ≤24h read-scoped P-256 delegation `publish` and `edit` mint, stores
-it 0600 in `~/.tenjin/session.json`, and transmits that
-**wallet-derived credential** to the origin of the piece. Every later owned read
-reuses it and asks for nothing.
-
-It mints and presents only for the origin of the URL being read, and never for a
-second origin while a delegation for another is cached, which is what keeps a
-stray `--base-url` from turning an allowlisted read into a wallet signature
-against a host an agent picked.
-
-`read` still **cannot pay**: the payment module is absent from its import graph,
-test-pinned, and the delegated key is the wrong curve for an EIP-3009
-authorization. It never consults the spend policy.
-
-### The `read` scope is not a containment boundary
-
-Do not read the `read` scope as more than a scope. It is enforced only on the
-request shape that carries a session signature alongside the delegation header; a
-copy of the same delegation presented differently is not scope-checked, so treat
-the file as a credential carrying your wallet's authority. Its real bounds are the
-24h expiry, the 0600 mode, and the origin binding.
-
-## Getting the rules onto your machine
-
-`tenjin install` writes the nine rules into `~/.claude/settings.json` for you,
-plus the two rules your publish mode carries (below). It does not ask a question
-of its own about them. Installing tenjin is the consent for the free nine, and
-the publish-mode select is the consent for the pair, because that is the answer
-that adds them:
-
-> Auto (recommended) — your agent publishes and updates pieces on its own, under
-> your identity; it also allows `tenjin publish` and `tenjin edit` in the
-> harness.
-
-One prompt, one consent: a second yes/no naming the same grant would ask twice
-for one thing, and put a rule string in front of an operator with no way to act on
-it mid-install. This page is where the detail lives.
-
-It merges the rules in. The write appends the rules that are missing and
-never reorders or rewrites an existing entry or any other key in the file. It
-removes exactly two things: a rule an older version of this CLI wrote and this one
-no longer does, and, when your `publish.mode` is back to `review`, the two rules
-that mode carries. A settings file it cannot parse is reported and left exactly as
-it is, never repaired. The rules it may write are fixed constants selected by your
-publish mode, so no flag or config value can widen it to `buy`, `wallet send`,
-`config set`, or a blanket `Bash(tenjin:*)`.
-
-A non-interactive install (piped, or under `--json`) does the same write, for the
-same reason: the machine most likely to be denied mid-task is the headless one.
-`--no-grant` is the only opt-out. Every run reports how many rules
-landed and in which file, on its `permissions` row.
-
-`tenjin doctor --json` carries this whole recommendation as data under
-`permissions` (every rule, every per-verb note, both caveats, on the failure
-envelope as well as the success one) so an agent that just got denied can point
-you at the exact line. Its human render is the check list and nothing else,
-except on a machine whose own publish mode is missing a rule: that one line names
-the rule, because it is a finding about the machine rather than a standing
-recommendation.
-
-## A prefix rule pins the verb, not the flags
-
-Every line above also clears `--base-url <url>` on that verb, because the CLI
-accepts the global flags on every subcommand. `--base-url` is validated as a URL
-and nothing more, and it wins settings precedence, so it moves where the question
-goes, where `doctor` probes, and (with the `buy` line below) where a SIWX signature
-and an EIP-3009 payment authorization are sent. The origin pin only checks that a
-resource URL shares an origin with the _configured_ base, so an attacker-controlled
-pair satisfies it.
-
-There is no prefix syntax for "this verb but not that flag", so treat this as a
-disclosed limit: set your base URL in config, and allowlist these verbs only if you
-are content for an agent to be able to choose the destination host. The skills tell
-agents never to pass `--base-url` on an allowlisted verb, but that is a convention
-rather than an enforced boundary.
-
-## Opt-in: purchases
-
-Purchases are a **separate, explicit opt-in**:
-
-```
-Bash(tenjin buy:*)
-```
-
-Read this before pasting it: **on the default config that line authorizes
-unattended spending up to your wallet balance.** `--yes` is an ordinary flag on the
-same allowlisted verb and it clears the confirm gate outright, so `confirm: always`
-does not put a human on every purchase once the agent can pass `--yes`.
-
-Walking the defaults:
-
-- `allowlistCreators` is empty, so the creator gate is off.
-- `maxAutoSpend` is `0` and `confirm` is `always`, which together only ask for a
-  confirmation that `--yes` satisfies.
-- `sessionBudget` is `0`, which the policy reads as **no ceiling at all**, not a
-  zero one.
-
-Set real values first:
+A router call whose total is over `maxAutoSpend` or what is left of the day's `sessionBudget` pays nothing, and returns `needs_approval` with one sentence your assistant repeats ("5 takes of AiSpace (Hailuo 3 Max) cost $0.775 in total ($0.155 each)."). In Claude Code 2.1.214 or later, the `router` server also offers the `approve` tool, and the result carries a quote and the call your assistant makes next, `approve({quote, total, what})`. Claude Code shows its own permission prompt for that tool, with the total and what it buys, on every call and in every permission mode; no allow rule or hook skips it, and where nobody can answer (`dontAsk`, or `-p` with a permission-prompt tool) the call is denied. Your yes to that prompt is the only approval: nothing on disk, and no command, approves a quote. It then runs the quoted call exactly, once. A quote lasts ten minutes. An approved call may pass both limits, and counts as your own payment, outside the automatic budget, as manual pay does; it never runs past the wallet's balance. Any other host, and an older Claude Code, gets no `approve` tool: the call is refused with what it would cost and nothing paid. Nothing raises a limit on your behalf: `tenjin config set` below changes them, and only you run it.
 
 ```bash
+tenjin status                          # spent, reserved, and the caps in force
 tenjin config set maxAutoSpend 0.25
 tenjin config set sessionBudget 2.00
 ```
 
-The allowlist line itself never raises a spend cap. That is true, and it is not the
-same as saying the caps stop an allowlisted `buy`.
+## What bounds a ROUTER payment, on top of that
 
-## Opt-in: `tenjin pay`
+The routing decision comes from a server, and each call costs a fee the server quotes, never more than $0.003, from the wallet's channel, paid from funds set aside in deposits of up to $0.25 that count against the limits (the deposit is counted when it leaves the wallet, the fees from it are not counted again): it proposes, it never authorizes. These checks are what keep a wrong or hostile one from being worth anything:
 
-The generic x402 payment verb is its own opt-in, with everything above applying
-unchanged:
+- The routing fee is paid only by `tenjin mcp`, with the stock x402 client, only to the configured router's paid route, and only in USDC on Base over `batch-settlement`. It pays what that route's 402 quotes when the quote is at or below the ceiling this CLI ships, $0.003, the fee every install so far agreed to; a quote above it is not paid, and the call tells you so once, with the price quoted. Nothing else about the router is pinned, not its payee and not an exact price: the bounds are its origin, that ceiling and the limits below. A provider's 402 never meets this ceiling: a tool's payment is held to its own spec's price. The wallet has one routing channel. When it cannot cover the next fee, the call carries a deposit. The deposit is the smallest of the server's hint (its 402's `extra.minDeposit`: $0.03 today, $0.05 once the router's update ships), the wallet balance and `maxAutoSpend`, never less than ten quoted fees ($0.03 at the $0.003 ceiling) and never more than the stock SDK's $0.25 ceiling. A wallet holding more than the hint keeps the rest, which pays for the tools routing suggests; the routing channel cannot. A wallet between ten fees and the hint deposits what it holds. A wallet below ten fees is refused as too low; when the balance cannot be read, the deposit is the hint. Unused funds remain yours. A deposit is an automatic payment: it is reserved in `spend.json` before it is signed, so it must fit `maxAutoSpend`, the day's `sessionBudget` and `allowlistCreators` (the router's host is the creator), and it is counted from the moment it is sent, so a lost answer or a killed process leaves it counted; only an answered 4xx or 5xx, on which the server settles nothing, gives it back. The deposit counts against the spending limits: the fees come out of it and are not counted again, so the day's running total never refuses one. Each fee still gets the per-payment checks, at the amount quoted: it has to fit `maxAutoSpend` (a 0 an earlier release let you set refuses it) and pass `allowlistCreators`, and a `sessionBudget` of 0 refuses it. A fee that fails one is not paid, even from a channel that is already funded, and the call is skipped. The server may charge less than it quoted, and the channel records the lower charge. Approving the limits at install, where the question names the fee, is what approves it.
+- Every routing call goes to the router's paid route. One that cannot be paid is skipped at once: nothing is routed, no second request is made, and the native tools run. That happens when the wallet holds less than the deposit, `tenjin mcp` cannot unlock the wallet (no saved passphrase it can reach, a wrong one, or a locked keychain), a limit refuses the deposit, the payment fails, or the channel is carrying another session's call at that moment. Such a call tells you, in Claude Code's own message line, the reason, once for each reason. Missing funds leave your usual tools available without reopening checkout; explicit balance, payment and doctor results retain funding guidance. Other failures name `tenjin wallet repair` or `tenjin doctor` as needed; the line changes when the reason does, and a funded or unlocked wallet is said once; a busy channel says nothing, and while the router charges no fee the wallet is not touched and nothing is said. The native tools are never blocked for it, and `tenjin doctor` names the same reasons, as the router Claude Code is running saw them when one is live. While the wallet definitely cannot sign (no wallet, or a wallet it cannot unlock), paid lookups are not offered, not even ones you could approve. While its balance is below the price, a curated lookup is not offered, and a discovered one is shown with a note to fund the wallet, so you are asked first; a subagent, which cannot ask you, is not offered either. When Tenjin cannot tell (a balance or keychain read fails), they are offered as before, and the spend checks still decide what is paid.
+- A routing call that cannot reach the router (DNS, TLS, a refused connection, a proxy refusing the tunnel) makes every hook leg skip the router for the next 60 seconds, so the native tools run at once instead of each waiting out the gate. A call that runs out of its few seconds, a dropped socket or an answer of any status does not start the pause. The pause is a timestamp under `~/.tenjin/router-memo/` that every session on the machine reads. The pause ends after its 60 seconds, or at once when `tenjin doctor` reaches the router; while doctor cannot reach it either, it names the pause with the seconds left.
+
+- The call's payments, together, have to fit `maxAutoSpend` and the day's `sessionBudget` unless you approved that call's quote, and each one is signed only against that plan, never above its planned amount. A live price above the one the decision quoted is refused before anything is signed, so a provider or a stale catalog cannot charge more than it advertised; a hostile server sets that quote itself, so against one the bound stays `maxAutoSpend`.
+- An offer carries the service's spec: its input schema, the fields Tenjin pins, and the HTTP request those fields become. Your assistant fills the fields; this CLI puts the pins over them, validates the result against the schema, builds the request and pays the spec's own payee, never above the spec's price ceiling. The one lookup without a spec, the free docs lookup, is bound by the backend from your assistant's query, and no provider is paid for it; the routing call that binds it pays the routing fee like any other.
+- The destination has to be a public HTTPS endpoint whose name resolves to a public address. This is a check, not a pin: the request resolves the name again on its own, so a host that answers publicly at check time and privately a moment later is not closed by it. See [safety-model.md](./safety-model.md).
+- A 2xx whose body fails the decision's own success rule is delivered as `unverified`, never `fulfilled`, with a caveat naming the rule it missed. The money has already moved, so the body is not withheld.
+
+A compromised backend can therefore name any origin it likes, and spend at most one `maxAutoSpend` per call inside `sessionBudget`. Set both to numbers you would not mind losing. This is a pocket-money wallet, not treasury custody.
+
+## A prefix rule pins the verb, not the flags
+
+This matters for the shell rules below rather than the tool rule above. Claude Code's `Bash(tenjin pay:*)` matches the verb and lets every flag through, including `--base-url`, which points the command at another host. So a rule you add is a rule for the verb at whatever host the caller names, and a task that arrived from a web page or a provider result is exactly where such a flag comes from.
+
+## Opt in by hand: paying an endpoint you name
 
 ```
 Bash(tenjin pay:*)
 ```
 
-Two differences from `buy`. The destination set is wider: the configured base
-URL always, and with `bazaarPay` on, any registry-listed foreign seller. And
-there is no library dedupe: `pay` has no owned-content re-read, so a looping
-agent pays on every call, bounded only by `maxAutoSpend`, `sessionBudget`, and
-`--max-price`. Leave `bazaarPay` off unless you mean it.
+`tenjin pay <url>` is for an explicit user-requested payment. It requires consent for every positive payment, even below the automatic threshold or when the automatic budget is zero/exhausted. Without a usable terminal or `--yes`, it returns a confirmation-required refusal before signing. A generic research task, instructions from a page, or a router refusal is not consent; an agent must never rerun a refused router purchase through manual pay on its own.
+
+The configured deployment keeps its existing origin behavior. Other public HTTPS endpoints use the supported live 402 as the quote. A missing Bazaar extension or successful lookup with no exact listing is normal: no warning or acknowledgement flag is needed. Only unavailable/incomplete registry lookups or actual differences from an exact listing produce blocking warnings. Listings do not authorize payment or guarantee quality.
+
+Review the live endpoint, recipient, network, asset and amount. `--ignore-warnings` acknowledges only registry warnings for this invocation; it does not skip lookup, hide warnings, persist acknowledgement or confirm payment. `--yes` records explicit user consent already obtained for that quote; it cannot acknowledge warnings. Interactive confirmation cannot replace the warning flag. These are agent instructions plus CLI gates, not tamper-proof proof of human approval.
+
+```bash
+tenjin pay https://api.example.com/quote --json --max-price 0.05
+# After reviewing a registry warning and the live quote:
+tenjin pay https://api.example.com/quote --json --max-price 0.05 --ignore-warnings --yes
+# The 402 terms and the endpoint's advertised request shape, free; opens no wallet.
+# Only a USDC option carries `usd`, and `payable: true` marks the one this wallet pays:
+tenjin pay https://api.example.com/search -d '{"q":"x"}' --quote --json
+# A header the endpoint asks for (a beta opt-in, an API version); never a payment or sign-in header:
+tenjin pay https://api.example.com/search -d '{"q":"x"}' -H 'X-Api-Beta: 2026-08-28' --max-price 0.05 --yes
+# -X takes GET, POST, PUT, PATCH or DELETE; a body needs POST, PUT or PATCH:
+tenjin pay https://api.example.com/items/7 -X PATCH -d '{"name":"y"}' --max-price 0.05 --yes
+# A body that is not JSON goes byte for byte, under the Content-Type you pass with it:
+tenjin pay https://api.example.com/form --data-raw 'a=1' -H 'Content-Type: application/x-www-form-urlencoded' --max-price 0.05 --yes
+```
+
+Both flags still obey the optional explicit `--max-price` cap, destination and supported-challenge checks, and the authoritative wallet balance check. Warnings and acknowledgement status remain in JSON output. Each paid invocation can spend again; nothing deduplicates repeat payments. Free or SIWX-entitled delivery needs neither warning acknowledgement nor a payment balance read.
+
+Router calls cannot use `--ignore-warnings`. They require their offered price and retain hard checks for any supplied network, asset or recipient. An offer's spec supplies all four, so the live 402 has to match its recipient, network and asset and stay within its price; a lookup without a spec gets its price alone from the server, and for it this release does not claim complete endpoint/payee quote binding.
+
+Immediately before signing a positive payment, the CLI reads the actual signer's Base USDC balance through the configured RPC; on the shipped default, `https://base-rpc.publicnode.com` and then `https://base.drpc.org` are asked if it fails. An unreadable balance gets one retry within the original deadline. Confirmed insufficient funds or two unreadable results refuse, releases the reservation and counts no spend. Hook balance reads are advisory and bounded: prompt, pre-call, after-call and subagent offers are suppressed for known insufficient funds or policy refusal. A hook reuses a read from the last minute (`balance.json`, the address and amount only); the payment's read never does. A successful balance read cannot reserve funds or guarantee settlement after concurrent transfers.
 
 ## Never recommended
 
-Deliberately **never** recommended, because each is a human decision:
+Each of these is a decision a person makes, so none is in the rule set and none should be added without meaning it:
 
-| Verb                   | Why it stays a human decision                                                        |
-| ---------------------- | ------------------------------------------------------------------------------------ |
-| `tenjin wallet send`   | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
-| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
-| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.              |
-| `tenjin delete`        | Destroys a published piece. No mode clears it; see below.                            |
-| `tenjin wallet create` | Creates the payment credential.                                                      |
-| `tenjin config set`    | It can widen the agent's own spend policy.                                           |
-| `tenjin install`       | Writes into harness config and skills directories.                                   |
-| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                  |
-| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                        |
+| Verb                   | Why it stays a human decision                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `tenjin wallet send`   | Moves USDC out of the wallet and is not bounded by the spend policy.                                                 |
+| `tenjin wallet create` | Creates the payment credential.                                                                                      |
+| `tenjin wallet repair` | Saves the passphrase that unlocks the payment credential; a person types it, and it can replace what the store held. |
+| `tenjin config set`    | It can widen the agent's own spend policy.                                                                           |
+| `tenjin install`       | Writes into harness config.                                                                                          |
+| `tenjin uninstall`     | Removes the wiring the harness is running on.                                                                        |
+| `tenjin update`        | Replaces the binary the agent then runs.                                                                             |
 
-For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
-`Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
+Prefer the narrow rules on this page to a broad `Bash(tenjin:*)`, `Bash(tenjin wallet:*)` or `Bash(tenjin config:*)`, each of which swallows the table above.
 
-## The two rules your publish mode carries
+## When your agent runs the install
 
-`publish.mode` is where you say whether publishing asks you first. On `auto` or
-`full-auto` it does not, and a harness prompt in front of every publish asks that
-same question again somewhere the mode cannot answer it, so the agent stops and
-the mode you chose does nothing. That is why two rules track the mode:
+Under an agent harness (Claude Code, Claude Desktop, Codex), `tenjin install` opens nothing and pays nothing. Its default non-terminal output is one compact JSON envelope: read the complete `next` activation instruction and unanswered `nextSteps`, including each option's command. `tenjin install --json` retains the full diagnostic result; `doctor`, failures and refresh output are unchanged. Registration alone does not establish that this session has loaded the plugin. Each question comes at the point where its answer is needed:
 
-- `Bash(tenjin publish:*)` puts new content on the marketplace under your identity.
-  It publishes Markdown supplied on stdin or the contents of any regular local file the
-  agent can read, gated only by the deterministic scan below. The prefix rule
-  matches a stdin heredoc because its shell/tool command uses `tenjin publish` as
-  the command prefix. A file publish must likewise run as its own bare command:
-  chaining it after `cat`, `cd`, or the command that writes the file can put a
-  different prefix in front and therefore fall outside this rule. Publishing also
-  opens your wallet keystore unattended and mints a `read+write` session credential
-  to disk when no usable one exists, which is a strictly broader credential than
-  the read-only one `tenjin read` mints.
-- `Bash(tenjin edit:*)` updates posts your wallet already owns: reprices, refreshes
-  an as-of date, repairs an answer card, and flips status both ways, so it can
-  promote a draft to published under the same mode gate (a promotion re-runs the
-  block-tier secret scan over the stored body). Owner-scoped on both legs, spends
-  nothing, and mints no new posts, but it opens the keystore on the same terms,
-  and it runs the same `publish.mode` gate in the CLI. A mode that can publish a
-  post unattended but cannot fix that post's price is the asymmetry the mode exists
-  to remove.
+1. The spend question comes first, while the config file names neither limit, because the answer picks the install command: Use the defaults (`tenjin install --yes`) or Set my own limits (`--max-auto-spend <usd> --session-budget <usd|none>`), as above. The defaults already hold while the question waits.
+2. The funding question comes from the output of that install command, when the wallet is new or its balance confirms it is empty: "Add $5 to Tenjin now?" "Add $5" runs `tenjin wallet fund 5`, which opens checkout in your default browser with $5 filled in. "Not now" runs nothing: the agent continues the original task with available tools. Paid tools need funds; explain a requested paid call's refusal when needed, and offer checkout again only on request. When an existing balance cannot be checked, install reports that without suggesting another payment; ask the agent to check funds later. The address remains available if you choose a direct transfer. Install mints no link and does not unlock the wallet; a later yes runs `tenjin wallet fund 5`.
 
-Neither is in any block above: there is nothing to paste here, because the mode is
-the decision and the rules only follow it. Neither can spend: `publish` and `edit`
-carry no payment path, so what they reach is your identity and your keystore, not
-your balance.
+So the agent asks the spend question, runs the one install command your answer names, asks the funding question from that command's output, and runs `tenjin wallet fund 5` alone only after your yes. It never runs it without that yes. It shows an address only on request or when needed for recovery, and storage or PATH details only for recovery. It runs the selected command itself. A person running `tenjin install` in a terminal answers the spend question there and gets no question handed over.
 
-**The mode carries two rules and stops there.** `tenjin delete` is the write verb
-it deliberately does not reach: consent to publish is not consent to destroy, and
-letting one decision authorize the other is how an operator ends up with a piece
-gone that they only ever agreed to have published. So `delete` sits on the never
-list above under any mode, and the CLI does not rely on the harness for that: the
-command reads no mode at all and confirms on every run, interactively at a
-terminal and by refusing with exit 3 until `--yes` anywhere else. When a piece
-should come down but not be lost, `tenjin edit <post-id> --status draft` is the
-reversible move, and it rides the ordinary `Bash(tenjin edit:*)` rule.
+## What `tenjin install` writes, in full
 
-**Installing Tenjin is the consent for these.** `tenjin install` settles
-`publish.mode` at `auto` unless you say otherwise, and writes both rules alongside
-the free tier on the FIRST install, headless runs included. Pass
-`--publish-mode review` if you want the mode without the rules; at a terminal the
-install asks the question outright, with auto as the default answer.
+Claude Code 2.1.287 or later is required. `tenjin install` and `tenjin doctor` read `claude --version`, and on an older one say to run `claude update` in the session.
 
-Each surface discloses the grant at the depth its reader can use. At a terminal
-the install says which mode it settled, what your agent will now do in plain
-words, and the one command that turns it off (`tenjin config set publish.mode
-review`); it deliberately prints no rule strings, because a `Bash(...)` line an
-operator is meeting for the first time mid-install is not something they can act
-on. `tenjin install --json` and `tenjin doctor --json` carry the whole thing as
-data: both rule strings, what they clear including the keystore and the
-`read+write` session mint, and all three undos. This page is the long form.
+1. A wallet, when this machine has none (`--no-wallet` skips it). Install says in one line where it saved the passphrase. It never marks with a ✓ a wallet Claude Code could not unlock (it names `tenjin wallet repair` instead), or one that signs only through `TENJIN_WALLET_KEY` or `TENJIN_WALLET_PASSPHRASE` in the shell you ran install from (it says Claude Code needs the same variable).
+2. The two automatic spend limits above, only where your config file is silent, and only after you answer the question in a terminal. When your agent runs the install, it writes neither and the defaults hold: your agent asks you the same question and runs the one install command your answer names (see [When your agent runs the install](#when-your-agent-runs-the-install)). Explicit zero, unlimited, custom registry lists and router opt-outs are preserved. Ignored `bazaarPay` and `confirm` keys are removed and reported; refresh removes retired keys without filling absent settings.
+3. Tenjin's own runtime, in `~/.tenjin/runtime`, so that switching or removing Node, or `npm rm -g tenjin-cli`, does not stop it: a copy of this build in `versions/<version>`, and a pinned Node 24 in `node/<version>`, downloaded from nodejs.org and checked against the SHA-256 this build carries. Install runs the copy on that Node to check it before anything points at it. It also puts a `tenjin` command in `~/.local/bin` (and `tenjin.cmd` on Windows): a short launcher that runs the copy on that Node, and says how to reinstall when the runtime is gone. A file there that is not Tenjin's launcher, or npm's own link, is left as it is. Install edits no shell file; when `~/.local/bin` is not on your PATH it prints the line to add. Plugin installation requires the default data directory and a supported platform: macOS 13.5+, Windows or glibc Linux 2.28+ on x64/arm64. A custom `TENJIN_DATA_DIR` or unsupported platform is refused before registration changes. A runtime setup failure stops the install and keeps any working runtime and plugin registration; fix the reported cause, then retry.
+4. The Claude Code plugin `tenjin`, registered with Claude Code's own commands, which leave no step to you: `claude plugin marketplace add ~/.tenjin/runtime/claude` and then `claude plugin install tenjin@tenjin` (with `--scope local` under `--project`, so only this project loads it), and `claude plugin update tenjin@tenjin` when Claude Code holds an older version. The marketplace is the runtime's `claude` folder, read in place, so the plugin is the build you installed, and an update only rewrites that folder. Claude Code keeps one `tenjin` marketplace for the whole machine, so this one `add` also moves a project install made by an earlier release. Claude Code writes `extraKnownMarketplaces` and `enabledPlugins` into its settings; this CLI writes nothing into `settings.json` or `~/.claude.json` itself. The binary is `claude` on PATH, else the one Claude Code names in `CLAUDE_CODE_EXECPATH`; with neither, or when a `claude plugin` command fails, the same plugin is written as a folder, `skills/tenjin-router/` under Claude Code's config directory (`$CLAUDE_CONFIG_DIR` when set, else `~/.claude`), which Claude Code loads as `tenjin@skills-dir` with no command at all. `skills/tenjin`, where tenjin.sh suggests dropping its hosted skill, is never touched, and in the folder only the plugin's own five files are ever written or removed. The plugin carries:
+   - Seven hook legs, each a Claude Code `mcp_tool` hook that calls the `hook` tool of the plugin's `router` server with the event's fields: `UserPromptSubmit`, `PreToolUse` on `WebSearch|WebFetch`, `PreToolUse` on `Agent|Task`, `PostToolUse` and `PostToolUseFailure` on `WebSearch|WebFetch`, and `PreToolUse` and `PostToolUse` on `AskUserQuestion`. So each routing step runs inside the session's own `tenjin mcp`, the one process that holds the wallet. That tool reads history only from a file whose real path, symlinks resolved, lies under Claude Code's projects directory (`$CLAUDE_CONFIG_DIR/projects` when that variable is set, else `~/.claude/projects/`) and that is named for the calling session or one of its subagents; a session's first prompt, which fires before that transcript is written, routes on the prompt alone, and any other call reads, sends and pays nothing. Each has a 5 second timeout, so a stuck server never holds a prompt longer, and the two after-call entries on `WebSearch|WebFetch` 15 seconds so a search can wait for the free docs described below. A call that carries a routing channel's deposit waits 4.5 of those seconds instead of 3.5, and a routing payment still out when its time ends says nothing: that prompt runs on the native tools while `tenjin mcp` lets the request finish, for 15 seconds at most, so the channel records it; a deposit in it was counted in the spend ledger when it was sent. A session where the `router` server is not running routes nothing, and its native tools run. No daemon, no generated script; the one background process is that docs fetch, a single `node` process per such search that exits within 12 seconds. `tenjin hook <prompt|native|shortfall|agent|ask|answer>` still exists for hook entries an older setup wrote: it cannot pay the routing fee, so it routes nothing. In a session the plugin serves it says nothing; elsewhere it tells you once per session to ask your agent to set Tenjin up again, after a Claude Code update where the plugin needs one.
+   - The two permission answers above. No hook approves any other call, so WebSearch and WebFetch stay under your own permission rules. Before each one, when a paid lookup fits it, the hook redirects your assistant to `mcp__plugin_tenjin_router__request` in its place; a subagent is redirected only when it is known to have that tool and your spend policy would pay without asking, and otherwise its call simply runs. For library documentation, which is a free lookup, it never redirects, in the main agent or a subagent: the search runs as your assistant wrote it, and when Tenjin's server sends the lookup as a note, after it the hook adds one optional line naming the free Context7 docs lookup for the same query, which your assistant calls or ignores, once in five minutes for one agent's identical search. A WebFetch with a free lookup simply runs. It never redirects the same call twice: once a search or URL has been redirected, your assistant's own retry of that same search or URL runs as it is, whether the redirected lookup succeeded, failed or was never called, and however many other calls ran in between, for ten minutes and separately for each agent, while every other search or URL is routed as usual. After a call that came back short (a failed call, a page that answers 401, 402, 403, 429 or 5xx, an empty page, a search with no results; never a 404 or 410, since a missing page is missing for a paid reader too), the router may offer a paid lookup.
+   - One `SessionStart` command, `tenjin hook alive`, run by the runtime's Node with the runtime's `dist/index.js`, which writes two small files under `~/.tenjin/alive/`: a marker for the session (a hash of its id) and a stamp saying the plugin has loaded on this machine. When `wallet.json` cannot be read, or the passphrase file Tenjin saved is gone, it prints one message for you with the reason and the fix, and one line for your assistant. Otherwise, while the wallet holds less than the per-call limit, it shows you one line, `Tenjin balance: $0.00. Ask your agent to add funds to Tenjin.`, with no wallet address; to know, it reads the balance once from your configured Base RPC (the public ones when you set none), at most two seconds, and adds nothing to your assistant's context. Anything else about the wallet, and the "Tenjin wallet unlocked" confirmation after a repair, comes from the router on the session's first prompt.
+   - A mod (`hooks/register.tsx`, with its state contract in `types/index.d.ts`), which Claude Code runs in the terminal, the desktop app and VS Code. It reads three kinds of file the CLI already keeps under `~/.tenjin`: a kept spec's label, price and the one input a row may show; a choice set's option names; and the offer record of a redirected call, plus the request tool's own result, and writes nothing there. It draws each lookup the way Claude Code draws an MCP call: `⏺ Calling Exa search… · $0.007` with the query under it while it runs, then the dim `Called Exa search · $0.007 (ctrl+o to expand)`. In the ctrl+o transcript, under `--verbose`, or in a run Claude Code expands, every call to the router, the ones the normal view hides included, is Claude Code's own row with its input and result. A lookup over a spend limit draws no row of its own; the `approve` call that runs it once you say yes draws as that lookup (`Calling Exa search… · $0.775`, then `Called Exa search · $0.775`). A call that failed after paying shows the error dot, the amount and the state. A call the router sends back for a missing field, and the router's own free calls, draw nothing. It shows an input only when it names what was looked up (a query, a URL, a name, at most 80 characters), never a media prompt, so an image call reads `Called Ideogram V4 · $0.03`. A run that mixes a lookup with other calls is drawn unfolded, each call its own row. A WebSearch or WebFetch held for a Tenjin offer shows as its native row struck through, `⏺ ~~Web Search~~("query") · Tenjin offered Exa search`, then becomes, in place, the lookup drawn as a built-in row would be, `⏺ Exa search("query") · $0.007`, or disappears if your assistant runs the same search itself. It answers no permission question, rewrites no prompt, denies nothing, writes no config and answers no tool call. The request tool stays in the prompt's tool list through the server's own `anthropic/alwaysLoad`, and the permission answer above allows it.
+   - The `router` MCP server, `tenjin mcp --plugin`, run the same way, never by the `node` on your PATH.
+   - `bin/tenjin`, the same launcher as `~/.local/bin/tenjin`. Claude Code puts the plugin's `bin/` at the end of the Bash tool's PATH, so your assistant's `tenjin` is this one when nothing earlier on PATH is named `tenjin`.
 
-The bare CLI, on a machine where `install` never ran, still defaults to `review`
-and grants nothing. Install is the consent anchor: nothing here is granted to
-someone who never ran it.
+   Every command the plugin carries is a Claude Code exec-form command: the absolute path of the runtime's Node and the absolute path of its `dist/index.js`, started with no shell and never through the `tenjin` npm shim or a launcher, so Windows runs the same files macOS and Linux run. The `skills/tenjin-router/` folder uses the same verified runtime; a failed runtime setup never registers npm-folder commands.
 
-Going back to `review` takes them away, on the next `install` or immediately
-with `tenjin config set publish.mode review`. `tenjin uninstall` reclaims them
-like every other rule this CLI wrote. There is no flag that adds them and no line
-to paste: change the mode.
+5. Nothing else. The status line is no longer set up: `tenjin status-line` still exists, and you can set it as your status line command yourself.
 
-Your `publish.mode` lives in `~/.tenjin/config.json` and survives `tenjin
-uninstall` along with the rest of your config, so a later `tenjin install` resumes
-it and writes both rules again: installing is the consent, each time. Set the mode
-to `review` before uninstalling, or pass `--publish-mode review` when you come
-back, if you want the rules to stay gone.
+**An install from an earlier release** wrote seven hook entries, the `mcp__x402__request` allow rule, the `mcp__x402__hook` deny rule and possibly a `statusLine` into your settings, and registered an `x402` MCP server. On a Claude Code older than 2.1.287, install and `tenjin update` do not register the plugin at all while that install is there, and say so: the old install stays until `claude update` and the next `tenjin install`, though its `tenjin hook` command entries, where it wrote those, no longer route. Otherwise it keeps working until the plugin has proven to load on this machine: Claude Code at 2.1.287 or later lists the plugin enabled, and its `SessionStart` leg has run in a real session. Until then both stay, and in any session the plugin serves, the old entries say nothing, so nothing is offered twice. The next `tenjin install` or `tenjin update` after that removes the old install, and only in the exact shapes it wrote: a hook handler that calls the `x402` server's `hook` tool or is exactly `tenjin hook <leg>`, the two rules (only when the `x402` server is Tenjin's or gone), a status line that runs `tenjin status-line` (a composition is put back to your own command; install and `tenjin update` both name the status line they removed, and you can set `tenjin status-line` again yourself), and the `x402` server, through `claude mcp remove x402`, only after this CLI read that entry and found it launching `tenjin mcp`. A command that only mentions `tenjin hook`, a handler of yours in the same group, your own rules and your own `x402` server stay, and doctor names what it left alone. This migration is removed on or after 2026-12-01; doctor keeps naming an unmigrated machine after that.
 
-`tenjin config set publish.mode` keeps the two in step without waiting for the
-next `install`. Moving to `auto` or `full-auto` asks you once, naming both rules,
-and writes them on yes; a run with no terminal, a `--json` run, or a no leaves
-the file alone and prints where the rules go. Moving back to `review` retracts
-them without asking, because that direction can only take back what this CLI
-wrote. It runs through a pass that removes and never appends, so it retracts on
-any machine carrying the rules, including one whose free tier no longer matches
-what this release ships. The one case it cannot handle is a settings file it
-cannot parse, which it reports by name along with `tenjin uninstall`.
+Install then sends the router one empty, unsigned request to check that this machine can reach it. When it cannot, install still succeeds, and it names the layer that refused (a proxy, DNS, TLS, or the connection) with the fix. `tenjin doctor` runs the same check. Both also look for running `tenjin mcp` processes that started before this install: Claude Code keeps an MCP server for the whole session, so one of those still runs the old build, and the new hooks can fail there with "Tool hook not found". They name the count and the fix (start a new Claude Code session) and stop nothing.
 
-What still stops a bad publish is the CLI, not the harness prompt: the
-deterministic secret scan blocks in every mode and is never clearable by `--yes`,
-`auto` stops on any finding, and `full-auto` stops only on a hard block. These
-rules clear the harness prompt and nothing else.
+The plugin carries one skill, `tenjin-pay`. It teaches an agent to quote an endpoint for free first, cap the price at the option this wallet would pay, and pay only with your consent to that quote, using this machine's wallet rather than another tool's, with any of the five methods and a JSON or raw body. Install and refresh still remove only an owned obsolete `tenjin-pay` skill file an earlier release wrote under your Claude config folder, preserving adjacent user files and foreign skills.
 
-Read "`auto` stops on any finding" as a stop rather than as a human, though.
-These are prefix rules: they pin the verb, not the flags. `--yes` is an ordinary
-flag on the same allowlisted verb, and it clears exactly the WARN findings `auto`
-stopped on, so a re-run with it collapses `auto` into `full-auto` with nobody
-asked, the same hazard the `tenjin buy` line carries. What holds that line is the
-skills, which render the findings as the question rather than asking a generic
-one first.
+If the host automatically denies the requested funding command, the agent explains that it opens checkout, where you confirm payment, and asks once to retry that same command. Your yes permits one retry if the host allows it; refusal, a managed deny rule or another block stops the action without changing permission settings. When the command opens checkout, it returns promptly with a `nextStep`: finish checkout and return to the same conversation. The agent runs `tenjin wallet balance` to confirm funds and continues the task when sufficient. An unconfirmed balance or failed balance read does not establish a failed payment or trigger another checkout. A confirmed balance check clears the hook balance cache, so eligible offers can resume without restarting.
 
-### `tenjin update`, a human decision
+Follow the activation instruction from install. A fresh terminal installation offers `/reload-plugins` in the same conversation, then you continue your task. In Claude Desktop's Code tab, choose **New session** in the same folder: Desktop connects the plugin's MCP server in a new session. Before switching, your agent gives you a short, ready-to-paste prompt containing your task, progress and next action, with a Tenjin doctor check before continuing. The next prompt hook records that the plugin serves this session; doctor uses that live observation, so a standalone MCP probe cannot contradict it. Reload does not run `SessionStart`; future sessions still do. Upgrades from the earlier settings-based installation need a new session to leave the old server behind. Codex also needs a new session; ask your agent for a short task handoff before switching.
 
-`tenjin update` replaces the globally installed `tenjin` with whatever npm serves
-next, which is the binary the agent goes on to run for the rest of the session and
-every session after it. A successful swap then re-copies the loop daemon's
-bundles and rewrites this CLI's own hook entries in `settings.json`, for the
-profile the update ran under, so the harness fires the new build rather than the
-one just replaced; it writes no permission rule and registers no hook on a machine
-that had none. Which build an agent executes is an operator decision, so
-no recommended rule pre-clears it. `tenjin update --check` only reports, but a
-prefix rule pins the **verb**, not the flags, so clearing the check would clear
-the install with it. Nothing stops you adding the rule yourself; it stays off the
-recommended set.
+`tenjin update` needs no npm. It downloads the newest `tenjin-cli` from the npm registry, installs it only when npm's provenance shows Tenjin's own release workflow (`release.yml` on `main` of BackTrackCo/tenjin-agent) built it, checks it against the registry's SHA-512, fetches the Node that version pins, and has the new build check itself on that Node before it switches anything; a version that fails the check is not used, and the current one keeps running. The version it replaces stays in the runtime, and an older version is removed only once nothing runs from it. An older build never replaces a newer one; to go back, run `tenjin uninstall`, then install the older version.
 
-### `tenjin wallet fund`, free on both surfaces
+`tenjin uninstall` removes the install for where you are, from any folder: the project install made in the folder you are in or the nearest folder above it, or else the user install. `tenjin uninstall --project <path>` removes another project's install, and `tenjin uninstall --all` removes every one. For each, it runs `claude plugin uninstall tenjin@tenjin` in that install's scope, unlinks the plugin folder's own files, and removes an earlier release's settings install under the rules above. The `tenjin` marketplace, the runtime and the launchers go only when no install is left anywhere, and a run is all or nothing: when one removal fails, those stay, and uninstall names what it removed and what is left. It ends by saying what it kept: your wallet, with its address, the spend ledger, the config, and where the passphrase is saved. If installed through npm, run it before `npm uninstall -g tenjin-cli`; if npm went first, `~/.local/bin/tenjin uninstall --all` still works.
 
-Free by owner decision (2026-08-12), because on either surface the command just
-opens the fund modal. Minting a checkout link moves no money: the destination is
-pinned server-side to the wallet that signed the request, so a link an agent
-mints can only ever fund your own wallet, the CLI refuses any checkout host but
-`pay.coinbase.com`, and the payment itself happens behind Coinbase's own human
-gate. The `--base-url` caveat that qualifies every other prefix rule does not
-apply here: `fund` is pinned to the production origin and takes no override from
-the flag, the environment, or config, so an allowlisted invocation cannot steer
-where the wallet's SIWX proof goes. `read` is pinned the same way, one step
-wider: it presents and mints only against `baseUrl` or `publicShelfUrl` as the
-config file names them, so `read --base-url <host>` still fetches a free piece
-from that host but signs nothing for it.
+To stop the router without removing anything, `tenjin config set router.enabled false` stops it on this machine, and `tenjin config set --project router.enabled false` stops it in this repository. Off means no router hook reads or sends anything and the `request` tool refuses without paying. The project value lives in `<project>/.tenjin/config.json`, which you commit; `--project --local` writes `.tenjin/config.local.json` beside it instead, which is yours alone and belongs in `.gitignore`. Every such file from where the session runs up to the git root applies, and in a git worktree so do the main checkout's; a key a file leaves out is inherited from the files around it. A project file can only turn the router off or narrow what it sends; it cannot enable anything or change a spend setting. From a git worktree, `config set --project` writes at the worktree's own root, never the main checkout's file, though the router reads both.
 
-### `tenjin wallet send`, the escape hatch
+## How one lookup runs
 
-`send` is human-invoked only: it is deliberately absent from the MCP toolset and
-the harness skills, and nothing is signed until the previewed (checksummed)
-recipient, amount, and network fee are confirmed, interactively at a TTY or
-explicitly with `--yes` when headless. It refuses when the active wallet's
-passphrase entry is missing. The `sendMaxAmount` hard per-send cap has no
-default: `tenjin wallet send` refuses until you run `tenjin config set sendMaxAmount
-<usd|0|none>` (`0` disables the verb, `none` opts in to uncapped), and `--yes`
-can never bypass the cap or the unset refusal. For routing FUTURE revenue away
-from the agent wallet entirely, connect the agent to your own Tenjin account
-instead (delegation); `send` exists for funds already sitting on the agent key.
+1. You type a turn. The hook sends the bounded packet to Tenjin, which answers whether a paid capability fits and, if it does, keeps that packet under a short-lived id.
+2. When one fits, your assistant sees one line, opening with `Tenjin router (installed by the user):`, that starts at the service's name and its price (`Exa search, $0.007: …`) and ends with the call to make: `mcp__plugin_tenjin_router__request({id, input})` with the required fields as placeholders, or already filled in when the hook holds them (the search a native call was about to run, or the page it was about to fetch). The hook keeps the service's spec on this machine under the id.
+3. Your assistant fills the fields and calls `request({id, input})` once. This CLI validates the input against the spec, builds the request, pays that provider once under your limits, hands back the result, and tells Tenjin only how the call ended. Every routing call costs a routing fee separately, quoted and never more than $0.003, including when no tool is suggested. Where the spec names the fields its result promises, the result holds only those, and the provider's whole response is saved under `~/.tenjin/results/` (readable by you alone, kept a day) at the path the result names in `fullResultPath`.
+4. An input that does not fit the spec is refused before anything is sent to the provider: your assistant gets every problem and the whole spec (each input with its description and allowed values, the required fields inside a nested object, an example and what comes back), locally and with nothing paid, and calls again. `request({id})` alone shows the same spec. A spec whose input schema this CLI cannot compile is refused outright, with nothing sent to the provider or paid.
+5. Your assistant can also see what is available without a lookup: `request({browse: "<a need>"})`, or `browse: ""` for every tool, returns the tool list (each tool's id, name, what it does and its price), and `request({tool: "<id>"})` returns one tool's spec under a fresh id, which `request({id, input})` then runs as in step 3. Both are free: no routing decision, no routing fee and no payment. A browse sends only the words of the need; a `tool` call sends only the id. The hooks still route each lookup as above.
+6. Some lines offer a choice of services for the same step, such as several image models. Your assistant uses the one you named or asked to compare, asks you when you have not said and you are there to answer, and otherwise uses the line's default, then calls `request({id, choice, input})`. One choice runs exactly as that service's own offer. `all` runs every choice side by side, each paid once to its own provider, but only after each is quoted at its live price and the whole set's total fits your limits: within `maxAutoSpend`, which is per call, and inside the day's `sessionBudget`. A set that does not fit returns `needs_approval` with nothing paid, and in Claude Code runs once you approve it. The result lists each choice with its cost and the file it saved under `~/.tenjin/downloads/`.
+
+## What a paid lookup leaves on your machine
+
+- Every paid lookup is recorded in `~/.tenjin/paid/ledger.jsonl`: what was sent (masked), who was paid, the tool's display name when it has one, how much, the settlement transaction, and any files saved.
+- A hook that redirects a call leaves a short record under `~/.tenjin/progress/`, keyed by that call's id: when, the offer's id, the offered tool's display name, and its price. It expires with the other progress records, after ten minutes.
+- Files a paid lookup returns, and media files a paid third-party service links to or returns inline as base64 in its JSON, are saved under `~/.tenjin/downloads/`. An inline file is replaced in the result by a note naming where it was saved.
+- When a tool names the fields it returns, your agent gets those fields and the provider's whole response is saved under `~/.tenjin/results/` for a day, at the path the result names.
+- When a seller never confirmed settlement, `tenjin payments reconcile` asks USDC on Base whether the payment was used once it has expired, and one that was never charged goes back to today's limit; the `request` tool does the same for up to three beside each lookup, without waiting for it.
+
+## What the hooks send
+
+- On every prompt and every native `WebSearch` or `WebFetch`: the text of the current turn and at most six prior messages, masked by the CLI's key, PEM, seed-phrase, and URL credential rules (`src/lib/redact-rules.json`), then bounded to 16 KiB, with harness meta rows and tool results excluded. Tool results never travel: a tool result is other people's content, and a packet carrying it would be a channel from a fetched page into a routing decision.
+- A native call sends that same bounded turn WITH the call attached, read from this session's own transcript. That is how a restriction you stated in your own words, such as asking for native tools only, reaches the decision about a bare URL your assistant is fetching. When that call then comes back short and nothing was offered before it, it is sent once more with what the harness reported: the status code and byte count, the error, or that a fetch came back with only the page's shell (`reason: no_main_content`). Never the page or the results. A call that came back fine sends nothing more.
+- When your assistant hands a task to a subagent: that task, as the current message, with the same bounded turn before it.
+- When your assistant asks you a question (`AskUserQuestion`): the questions and their options, attached to the same bounded turn, before you see them; and after you answer, your answers as the current message. Before the question, a fitting lookup redirects it once, under the same rules as a native call, and only when your spend limits and wallet would pay it without asking you; after it, a fitting lookup is offered beside your answers.
+- Every hook request carries this session's id, so one session is not offered the same pay-per-call service twice.
+- Every request also lists what this CLI can parse and run (`accepts`): `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note` and `tolerant`, plus `bazaar` while the open Bazaar is on. The server sends a field only to a CLI that lists it: `label` brings each tool's display name and the line that starts at it, and `fields` brings which input takes a pending search or URL, what kind of result a tool returns (files are saved only when it says `media`), and how the free docs lookup is delivered, and `note` brings the free docs line after a search in place of docs added to it. A field this CLI does not know is ignored rather than failing the answer, while every field it knows keeps its checks. An offer that needs a feature names it in `requires`, from the same list, and the server sends it only to a CLI that listed it; one that reaches a CLI without the feature anyway is skipped by name with no provider paid, and when the offer's line names it, the whole answer is. A server change to a tool then reaches an installed CLI without a new release.
+- With `router.context turn`, no prior messages are sent: the prompt on a prompt, your latest message on a native call, and the task on a delegation. `tenjin config set router.context turn` sets it for this machine, and `--project` for this repository.
+- Slash commands and one-word acknowledgements are never sent at all.
+- With `tenjin config set experimental.bazaar on` (off by default), short snippets of your prompts also go to Coinbase's public x402 Bazaar search, so the router can suggest unreviewed sellers listed there.
+- The packet is stored on the backend against the decision id, so the lookup your assistant sends next is decided with the context you gave. Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first.
+- On a paid lookup: the capability chosen, a hash of the contract, a hash of the arguments, your wallet address, the amount and the transaction hash are kept.
+- On every call run from an offer's spec: the offer's id, how the call ended, the provider's HTTP status and how long it took. A call stopped before anything was paid says which side stopped it: the input, the offer's terms, the provider's answer, the network, or the wallet. Never the input or the result.
+
+The answer can put one line into your session, or into a task your assistant delegates: the service that fits, what it does, its listed price, and the `mcp__plugin_tenjin_router__request` call carrying the id that brings your context to it. The line says it comes from the Tenjin router you installed, and it is an option: your assistant's own tools keep working. Which service actually runs, and what it costs, is decided when your assistant makes that call, under your spend policy.
 
 ## Wallet passphrase storage
 
-The signing passphrase resolves in order: `TENJIN_WALLET_PASSPHRASE`, then the
-OS credential store, then an interactive prompt. On `wallet create` with no env
-passphrase, a strong random one is generated and saved to the OS store so later
-signing is transparent. Every stored entry is **per wallet**, keyed by the
-wallet's own address, so replacing a wallet never touches the outgoing wallet's
-passphrase. Installs from before per-wallet entries used one shared slot; the
-first signing that proves ownership re-keys that slot under the owning wallet's
-address, and the copy is verified before the old slot is removed.
+The private key is generated on your machine and stored encrypted in `~/.tenjin/wallet.json`. Its passphrase is the first of these that opens it: `TENJIN_WALLET_PASSPHRASE` when you set one, else the passphrase Tenjin saved. Tenjin saves it the way the GitHub CLI saves its token: in the platform's own credential store where there is one (Keychain on macOS, Secret Service on Linux, DPAPI on Windows), and otherwise in a file only you can read (`~/.tenjin/passphrase.<address>.plain`, mode 0600). `tenjin wallet create --insecure-storage` picks the file even where a keychain exists; it is a choice you make, never the fix for a locked keychain. A passphrase you give in `TENJIN_WALLET_PASSPHRASE` when the wallet is created is saved the same way, so Claude Code does not need the variable afterwards. `tenjin wallet create` and `tenjin install` say in one line where it went. That choice is recorded in `~/.tenjin/passphrase-store.json`, beside the wallet. `wallet.json` itself is never rewritten, so an older CLI still reads it, and with no such record Tenjin behaves as it did before. The file is the trade-off: anyone who can read your home folder as you can open this wallet, which is one more reason to keep it a pocket-money wallet. A keychain that does not answer never stalls Claude Code: a lookup stops waiting within its time budget and is skipped, so the native tools run, while the keychain request stays open so you can answer an unlock prompt. Saving a passphrase waits up to 10 seconds, or up to a minute at a terminal, where it says it is waiting. A locked keychain is fixed by unlocking it (or logging in to the desktop session) and retrying; Tenjin never quietly switches to the file or to another passphrase. A `TENJIN_WALLET_PASSPHRASE` that does not open the wallet no longer blocks it: the saved passphrase is tried next, and Claude Code tells you once that the variable is set but wrong and to remove it. A correct variable still wins.
 
-Where entries land per platform:
+A wallet whose passphrase was never saved is fixed with `tenjin wallet repair`, which is never pre-approved for an agent: you run it. (Before 0.1.0-alpha.31, a passphrase given in the variable when the wallet was created was never saved, and one typed at the create prompt was not saved either, since create prompted only when no keychain answered.) Run it yourself in a terminal: it asks for the passphrase there (or uses `TENJIN_WALLET_PASSPHRASE` when that opens the wallet). Never paste the passphrase into chat, and never put it on a command line. It checks that the passphrase opens the wallet (the address does not change), saves it as above, and names a `TENJIN_WALLET_PASSPHRASE` in that shell that conflicts with it. Then it tells you to start a new Claude Code session. Saving is not the proof: the next session says "Tenjin wallet unlocked", or why not, and `tenjin doctor` shows what that session's router saw. See [Troubleshooting](./troubleshooting.md).
 
-- **macOS**: the login keychain, via the OS `security` tool (the same mechanism
-  the GitHub CLI uses): service `tenjin-cli`, account = the wallet address.
-- **Windows**: a DPAPI-encrypted file per wallet (`passphrase.<address>.dpapi`),
-  decryptable only by the same user on the same machine, via built-in
-  PowerShell. The file holds ciphertext, not the passphrase.
-- **Desktop Linux**: the Secret Service keyring, via `secret-tool` when
-  libsecret-tools is installed: service `tenjin-cli`, account = the wallet
-  address.
-- **Headless or CI (any OS)**: no durable OS store, so set
-  `TENJIN_WALLET_PASSPHRASE`.
-
-The passphrase reaches these tools over stdin, never on a command line, and the
-key never leaves the machine.
-
-## Two gaps, both fail-closed
-
-Both are denied, never wrongly allowed:
-
-- Bare `tenjin config` is as read-only as `config get`, but no prefix rule reaches
-  it without also covering `config set`, so use `tenjin config get <key>`.
-- Group-level flag forms like `tenjin wallet --json show` are not covered, so put
-  global flags after the leaf verb (`tenjin wallet show --json`).
+Decryption happens in this CLI, in a disposable worker thread, and the key never leaves the process. The worker uses hash-wasm for the usual scrypt wallet parameters and Ox for other formats; Ox still verifies the MAC and decrypts the key, whose address is checked before use. The wallet format, work factors and passphrase storage are unchanged. `tenjin mcp` starts unlocking at startup, reuses the signer once ready, and exits with the session; an immediate first lookup can still wait for unlocking to finish.
 
 ## Delegating to a subagent
 
-The free tier is the answer to "what may a read-only subagent run", with nothing
-subtracted. All nine are safe to hand over: `search`, `wallet fund`, `inspect`, `read`,
-`outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`.
-None can spend; `wallet fund` mints a checkout link only a human can pay, and
-`read` mints and presents a read-scoped session key (above).
+When your assistant delegates, the task it hands over is routed before the subagent starts, and a paid lookup that fits is appended to that task as one optional line. A native search or fetch the subagent makes later is routed on its own task, read from its own transcript, with your turn still in front of it.
 
-Everything that mutates stays in a mutation-capable, human-gated context:
-`publish`, `edit`, `delete`, `buy`, `wallet send`,
-`wallet create`, `config set`, `install`. Never delegate
-`delete` at all: it is irreversible, and a subagent has no one to ask.
+A subagent cannot reach you to approve a spend, so it is only offered lookups your spend policy would pay without asking: within `maxAutoSpend`, inside the day's `sessionBudget`, and to a host `allowlistCreators` permits. Its payments run through the same ledger and the same caps as the lead's, because the lock is on the file rather than on the process. A subagent is not a second budget.
 
-Publishing what a subagent derived is the one exception, and it is a narrow one.
-Do not hand a subagent a publish as a task. What the SubagentStop capture arm does
-is different: at that subagent's own end, with `hooks.publish` on, the arm asks it
-once to publish the finding it just settled, and that publish runs the same local
-scan and the same `publish.mode` consent as any other, in the same directory. So
-under `review` it refuses and the subagent states the finding instead, for you to
-publish; under `auto` with a clean scan, or `full-auto`, it publishes. Your own
-turn end then reports what your subagents published.
-
-`hooks.publish` is on by default and asks you and each subagent at its own end,
-as context beside the stop rather than as a blocking decision; off it asks
-nobody.
-
-Two caveats travel with the safe set. "Read-only" describes your wallet and your
-repo, not the network: `search` and `outcome` POST off-machine (a question, a
-report) and `read` saves to the local library. And a delegated context is where a stray `--base-url` does the most
-damage, so never pass one.
-
-## Running the local MCP server instead?
-
-That is a different permission surface: the harness gates tools there, and these
-Bash rules do not apply. If you follow the
-[MCP section](../README.md#local-stdio-mcp-server) as well, leave
-`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`,
-`mcp__tenjin__tenjin_delete`, and `mcp__tenjin__tenjin_wallet` gated, and treat
-`mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.
-`mcp__tenjin__tenjin_delete` is the one whose core still confirms even if you
-clear it: it never reads `publish.mode`, so an ungated call comes back as
-`NEEDS_CONFIRMATION` rather than deleting.
+A subagent is only redirected or offered a lookup when it is known to have `mcp__plugin_tenjin_router__request`: a custom agent whose definition (`.claude/agents/<name>.md` in the project, `~/.claude/agents/<name>.md`, or an installed plugin's) lists it in `tools:` or has no `tools:` line at all, or one of the built-in `general-purpose`, `Explore` and `Plan` agents, which inherit MCP tools. Any other subagent, such as the built-in `claude-code-guide` (which has WebFetch and WebSearch but no MCP tools) or a type with no definition to read, is left alone: its native calls and delegated tasks are not sent to the router at all, and its calls run free. `tenjin doctor` names your own agents that leave the tool out, including one that still lists only the earlier `mcp__x402__request`; add `mcp__plugin_tenjin_router__request` to their `tools:` to allow paid lookups there. Nothing here edits your agent files.
 
 ## Not the same as `allowlistCreators`
 
-This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
-that one gates **who you may pay**, this one gates **which commands may run**.
+`allowlistCreators` is a spend-policy key that restricts which hosts may be paid at all. The plugin's permission answers on this page are a harness setting about which tool may run. They are separate gates and neither substitutes for the other.
 
-## What install writes
+## Codex
 
-`tenjin install` prints five rows and this page carries the rest. What is behind
-each row:
+Codex support is experimental.
 
-**Skills.** The packaged skills, copied into every harness directory it detected
-(`~/.claude/skills`, `~/.agents/skills`). A skill already there is replaced by
-this package's copy; your own files beside it are left alone.
+`tenjin install` sets up Codex when Codex's agent runs it, or in a terminal when this machine has Codex (`codex --version` must answer; a name on PATH is not enough). With both Claude Code and Codex there, a terminal install asks which, both selected; `--yes`, `--json` or no terminal takes both. `--harness claude|codex` picks one instead. An agent's install that also finds the other agent ends with one line, in `notices`, telling the agent to ask whether to set up Tenjin there too and, on yes, to run `tenjin install --harness <other>`. Install records the agents it set up in `installed-hosts.json` in your Tenjin data dir, and `tenjin doctor` and `tenjin uninstall` check or remove each one recorded (Claude Code on a machine set up before the record). For Codex, install writes the wallet, the spend limits and the Codex plugin through `codex plugin add`, and no Codex config. The plugin is added from `~/.tenjin/runtime/codex`, and its server runs the `tenjin` launcher in that folder by absolute path, so a Node upgrade or `npm rm -g tenjin-cli` does not stop it and an update changes nothing Codex has trusted; its hooks name no path at all. If the runtime cannot be set up, installation stops and preserves the previous registration. Moving an existing Codex plugin to the runtime moves its hooks file, and install turns those hooks on again as below. Its spend limits follow the same defaults as Claude Code: `--yes` takes them, `--max-auto-spend <usd>` (at least 0.25) and `--session-budget <usd|none>` set your own, and a terminal asks once while the config file names neither limit. With no answer it writes neither, the defaults ($0.25 a call, $5 a day) hold, and the spend question comes back in `nextSteps` with `tenjin install` as its command. The plugin carries five hooks. Three are routing legs: the prompt, and one web call (a search, a page open, or a batch of them) before it runs and after, where a batch is blocked at most once and the block names the rest of the call to run as written. Each leg is an `mcp_tool` hook that Codex sends to the plugin's `router` server, the same `tenjin mcp` that carries the request tool, so the leg pays the routing fee from your wallet under your spend limits, as a request does; these need Codex 0.149.0 or later, and on an older Codex install and update leave its plugin copy as it is. The fourth is a `PreToolUse` hook that denies `mcp__router__hook` to your assistant, since only the hooks call that tool. The fifth is a `PermissionRequest` hook on `mcp__router__request` that answers allow. That last hook is how the request tool runs without a prompt, `approval_policy = "never"` included: Codex runs hooks before its approval policy. It covers the request tool alone, and your spend limits still bound every payment. Install turns the five hooks on, as installing a Claude Code plugin does: it reads Tenjin's own rows and the hash Codex computed for each from Codex's app server, writes them as trusted through the same `config/batchWrite` call `/hooks` makes, and reads them back to confirm. It never computes a hash, never touches another tool's hook, and leaves a hook you turned off in `/hooks` off. If that step fails, install says to approve Tenjin's hooks in `/hooks`.
 
-**Permissions.** The rules above, in `~/.claude/settings.json`. Nine on `review`,
-eleven on `auto` and `full-auto`. Deleting those lines undoes it, and so does
-`tenjin uninstall`.
+The trade-off: the allow hook also overrides your own `approval_mode = "prompt"` for the request tool. To be asked before each call, turn that one hook off in `/hooks`; `tenjin doctor` then reports that the tool asks first, and under `approval_policy = "never"` that Codex refuses it. With that hook off, the router still blocks a web search once to point at the request tool. Where Codex then asks or refuses, a retry of that search runs: each search is blocked once at most, so the cost is one extra step. `tenjin doctor` also checks, with nothing paid or sent, that the routing legs reach the `router` server and that your Codex can run them. A plugin copy from an earlier release runs its legs as commands, which cannot pay the routing fee and so route nothing, and the first prompt of each session says so. `tenjin update` replaces such a copy, only where Codex already has the plugin, and turns its new hooks on the same way; when it cannot, it prints one line saying to approve Tenjin's hooks in `/hooks`, and the update itself still succeeds. `tenjin uninstall` removes the plugin and its marketplace.
 
-**Hooks.** Eleven Claude Code entries in the same file, written as one set. Nine
-POST the harness's own hook payload to a Tenjin daemon on `127.0.0.1` — your
-machine only, authorized by a token in that file, which is why it is written mode
-0600 — and two run `~/.tenjin/hooks/tenjin-shim.mjs` so that daemon is up before
-the turn's first tool call. With Codex installed, seven entries in
-`~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) all run that shim and carry
-no token; Codex runs them only after you enable them in `/hooks`, and `tenjin
-doctor` reports configured and observed entries as separate facts.
-A Codex shell result carries no exit status, so the failure arm learns of a
-failure only from an error marker; a Codex spawn's task is opaque on the wire,
-so no work order is looked up for a child. No arm can block or change a tool call; every one of
-them only adds context beside it. The arms ask your configured shelf a question
-and mention a tested answer if one exists. Six things leave the machine, each
-with its secrets stubbed and then cut at 8,000 characters: a prompt you typed, a
-WebSearch query, a WebFetch address and the prompt beside it, the description
-and work order a subagent is dispatched with, and — to the team shelf only —
-the fingerprint of a failed command and, when that
-fingerprint round comes back with no answer, the failed command's error line as
-the runner printed it. Nothing else does. A failure too generic to fingerprint
-at all has no first round to lose, so for that one the error line is the only
-thing sent. That sixth one is the only one of the six you did not type: an error
-line can carry a path, a host, or an internal package name, and `tenjin hooks
-disable failure` is how you keep it here. The files you read and edit are
-recorded locally and asked about nowhere; the publish arm reads that record to
-know your turn did work. What the failure arm leaves on `~/.tenjin/loop.db` is
-the row it already wrote to ask: the masked error line and its fingerprint,
-which is what lets your turn's last message name the failure back to you, plus
-the time of your last command, so it can tell that command's output from the one
-before it.
+## Other settings
 
-The seven arms, in the order `tenjin hooks` prints them:
-
-- **prompt** — you press enter. Your prompt goes to the team shelf and the
-  public one, and a piece that answers it is named beside what you typed.
-- **web-search** — before a WebSearch runs. The query goes to both shelves as
-  typed, and an answer already paid for is named beside the search.
-- **web-fetch** — before a WebFetch runs. The address goes to both shelves, cut
-  at the first `?` or `#` so a token in the query string or the fragment stays
-  here, along with the prompt attached to the fetch.
-- **subagent** — you dispatch a subagent, and that subagent starts. The work
-  order goes to both shelves at dispatch; you are told nothing, and whatever it
-  found opens the subagent's first turn instead. The start itself sends nothing.
-- **failure** — a shell command fails. Its fingerprint, a hash rather than your
-  error text, goes to the team shelf first; if that round answers nothing —
-  because no piece is filed under the hash, or because the request never landed
-  — the error line itself follows as a question, in the runner's words rather
-  than yours, so a teammate's write-up that carries no fingerprint is still
-  reachable. A failure with no fingerprint to send skips straight to the words.
-  Both rounds are the team shelf, never the public one, and with no team shelf
-  configured nothing leaves at all. This machine keeps no record of the errors
-  it has fixed, and nothing here pairs a failure with a later pass.
-- **publish** — your turn ends, and each subagent's turn ends. If there is
-  something worth writing up, you are asked once whether to publish it, and the
-  answer is kept here. It sends nothing: publishing is `tenjin publish`, which
-  you run.
-- **primer** — a session starts, including a clear and a compact. Two paragraphs
-  about the shelf go in front of the model. It sends nothing.
-
-There is one key per arm, all on out of the box: `tenjin hooks` lists the seven
-with what each has fired and hit this week, and `tenjin hooks disable web-fetch`
-silences that one without unwiring anything. Hooks are read once at session
-start, so Claude Code has to be restarted.
-
-**Publishing.** `publish.mode` in `~/.tenjin/config.json`, from the select above.
-`tenjin config set publish.mode review` puts it back to asking first.
-
-**Wallet.** A local Base wallet at `~/.tenjin/wallet.json`, unless `--no-wallet`.
-The key is encrypted at rest (keystore v3, scrypt, mode 0600) and never leaves
-this machine; the passphrase goes to your OS credential store, or to
-`TENJIN_WALLET_PASSPHRASE` if you set one. With neither, nothing is created and
-the run says so. It holds $0: funding is a human step, `tenjin wallet fund`.
-
-`tenjin uninstall` removes all of it except the wallet, the config, the library
-and the loop database, which are yours rather than something install created.
+- `tenjin wallet send <amount> USDC <address>` moves funds out. It needs a per-send cap (`tenjin config set sendMaxAmount <usd>`) and a little ETH on Base for gas.
+- Where Tenjin's runtime is set up, Tenjin updates itself at most once a day, the way `tenjin update` does, but only to a release published at least 24 hours earlier: at the start of a Claude Code or Codex session, it starts that update in the background on the runtime's own Node, which checks the new version before switching to it, keeps the previous one, never moves to an older one and never runs npm. Both Claude Code and Codex run the new version from their next session. `tenjin doctor` shows the last result. `tenjin config set update.mode nudge` only reports a newer version, and `off` stops the check. Without a runtime, the CLI checks npm at most once a day and reports a newer version.

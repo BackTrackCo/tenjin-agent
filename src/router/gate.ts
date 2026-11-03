@@ -1,0 +1,38 @@
+/**
+ * THE HOOK'S TIME BUDGET, which is the only thing this module still owns.
+ *
+ * There is no separate gate call any more: the hook asks the paid route,
+ * `POST /api/x402-router/route`, for the one decision, and the backend answers
+ * as soon as the native-versus-paid question is settled, binding whatever it
+ * chose in the background. What used to live here, the `/prepare` client and the
+ * category-shaped hint validator, went with that second round trip.
+ */
+
+/**
+ * The hook's whole budget is 5 s (`ROUTE_HOOK_TIMEOUT_SECONDS`, the timeout
+ * `install` writes for each routing leg), and the decision gets 3.5 s of it.
+ * Inside `tenjin mcp` those 3.5 s hold the paid route too: the 402, the SDK's
+ * chain read, the wallet read before a deposit and the paid request. 1.5 s
+ * are left for startup, the transcript read and the reply, and 500 ms on a
+ * call that carries a deposit ({@link DEPOSIT_GATE_TIMEOUT_MS}); `wire.test.ts`
+ * pins the sums.
+ * The expected wait is about 1 s: the backend answers on the gate question and
+ * binds afterwards.
+ *
+ * AN ABORT HERE IS A LOST HINT, not a lost turn. The hook falls back to one
+ * line telling the model to call `request` with its own query, and the tool
+ * makes the decision instead. One of four live prompts was swallowed at a 1.5 s
+ * abort against a backend measured at 0.4 to 0.5 s, so this holds the slack the
+ * harness budget was already leaving unused.
+ */
+export const GATE_TIMEOUT_MS = 3_500;
+
+/**
+ * A CALL THAT CARRIES A DEPOSIT gets the rest of the hook leg instead: the
+ * first paid call on a channel waits on verify, the gate and the on-chain
+ * deposit in a row (5.0 s measured on Base), so 3.5 s cut it short. It is the
+ * leg's 5 s less the 500 ms for startup, the transcript read and the reply,
+ * so the leg still never runs past the timeout `install` writes; `wire.test.ts`
+ * pins that.
+ */
+export const DEPOSIT_GATE_TIMEOUT_MS = 4_500;
