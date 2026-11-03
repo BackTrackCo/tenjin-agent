@@ -1529,25 +1529,21 @@ describe('setupRuntime', () => {
 
   it('returns within the 35 s refresh budget when the Node download never ends', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-    let asked = false;
+    // Staging copies the package on real disk I/O before the download starts,
+    // and no fake timer drives that, so the clock moves only once the fetch is
+    // asked: by then every timer the budget arms is armed.
+    let asked!: () => void;
+    const downloading = new Promise<void>((resolve) => (asked = resolve));
     const fetchImpl = (async () => {
-      asked = true;
+      asked();
       return new Promise<Response>(() => undefined);
     }) as typeof fetch;
     let settled: Awaited<ReturnType<typeof setupRuntime>> | undefined;
     const started = Date.now();
     void setup('0.1.0-alpha.32', { refresh: true, fetchImpl }).then((r) => (settled = r));
-    // Staging copies the package on real disk I/O before the download starts,
-    // which a slow runner stretches past any fixed tick count. Wait for the
-    // fetch on the wall clock: these fake timers leave `performance` alone.
-    const waitUntil = performance.now() + 20_000;
-    while (!asked && performance.now() < waitUntil) await new Promise((r) => setImmediate(r));
-    expect(asked).toBe(true);
-    for (let i = 0; i < 40 && settled === undefined; i += 1) {
-      await vi.advanceTimersByTimeAsync(1_000);
-      await new Promise((r) => setImmediate(r));
-    }
+    await downloading;
+    await vi.advanceTimersByTimeAsync(35_000);
     expect(settled).toMatchObject({ state: 'failed', reason: 'the 35 s refresh budget ran out' });
     expect(Date.now() - started).toBeLessThanOrEqual(35_000);
-  }, 30_000);
+  });
 });

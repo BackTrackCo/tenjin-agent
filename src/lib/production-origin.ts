@@ -1,7 +1,8 @@
 /**
  * The one place the production Tenjin origin is written down. Every shipped
  * default, fallback, identity string, and piece of operator copy that names the
- * live site derives from here; `production-origin.test.ts` keeps it that way.
+ * live site derives from here; `production-origin.test.ts` checks the config
+ * default, the User-Agent and the package homepage against it.
  *
  * This is NOT the base URL a command talks to. Ordinary requests resolve
  * `baseUrl` through config/flag/env precedence (`CONFIG_DEFAULTS.baseUrl` merely

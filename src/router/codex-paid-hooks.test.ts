@@ -11,6 +11,7 @@ import { FakeRouter, testSigner } from './fee-test-utils';
 import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
 import { createRouterMcpServer } from './mcp';
 import { renderProgress } from './progress';
+import { createRouterObserver } from './router-observer';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -123,14 +124,30 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
       };
 }
 
-/** The production server with only the network and the signer faked. */
+/**
+ * The production server with only the network and the signer faked. The
+ * observer is the one the factory would build, made here so `close` can wait
+ * for the observation writes it queues in the background: the data directory
+ * is deleted next, and a write landing mid-delete fails it (ENOTEMPTY).
+ */
 async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
   const fetchImpl = fake.fetch;
+  const observer = createRouterObserver({
+    dataDir: dir,
+    pid: process.pid,
+    startedAt: Date.now(),
+    cliVersion: 'test',
+    harness: 'codex',
+    launchedByPlugin: false,
+    cwd: dir,
+    env: {},
+  });
   const server = await createRouterMcpServer({
     dataDir: dir,
     harness: 'codex',
     homeDir,
     flags: { baseUrl: BASE },
+    observer,
     payerDeps: {
       getSigner: async () => testSigner(wallet),
       fetchImpl,
@@ -163,6 +180,7 @@ async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) 
     close: async () => {
       await client.close();
       await server.close();
+      await observer.dispose();
     },
   };
 }

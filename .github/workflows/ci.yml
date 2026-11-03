@@ -17,6 +17,9 @@ permissions: {}
 jobs:
   ci:
     # The Node 22 leg keeps the bare name, which is the required check on main.
+    # It runs everything. The Node 24 leg runs only build + test: format, lint,
+    # typecheck, the bundled-packages check and the audit give the same answer
+    # on either Node.
     name: CI (lint, typecheck, build, test, audit)${{ matrix.suffix }}
     strategy:
       fail-fast: false
@@ -44,8 +47,11 @@ jobs:
         run: node scripts/check-workspace-adapters.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
+        if: matrix.node == '22'
       - run: pnpm lint
+        if: matrix.node == '22'
       - run: pnpm typecheck
+        if: matrix.node == '22'
       # check = build + test.
       - run: pnpm run check
       # The dist bundles every dependency, so an install's `npm audit` sees none
@@ -53,6 +59,7 @@ jobs:
       # scripts/bundled-packages.json, so one entering or leaving the bundle
       # shows up in review.
       - run: node scripts/check-bundled-packages.mjs
+        if: matrix.node == '22'
       # Supply-chain advisory scan. WARN-ONLY on ordinary PRs: advisories
       # publish against a frozen lockfile, so a blocking gate reds every open PR
       # for drift unrelated to its diff. BLOCKING on the release version PR
@@ -61,6 +68,7 @@ jobs:
       # caught here, before the publish dispatch, not during it. The daily
       # audit.yml opens the fix PR (range-scoped overrides in pnpm-workspace.yaml).
       - name: Audit (blocking on the version PR, warn-only elsewhere)
+        if: matrix.node == '22'
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
@@ -87,7 +95,8 @@ jobs:
 
   # Claude Code runs a plugin's exec-form hooks and its stdio server with no
   # shell, and on Windows only a real executable starts that way. This builds
-  # the plugin and spawns each of its commands as Claude Code would.
+  # the plugin and spawns each of its commands as Claude Code would. Linux
+  # already typechecks, so this job does not.
   windows:
     name: Windows (plugin commands, no shell)
     runs-on: windows-latest
@@ -102,7 +111,6 @@ jobs:
           node-version: '22'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
       - run: pnpm exec vitest run src/router/hook-form.test.ts src/router/plugin-files.test.ts
       # `pnpm build` starts with `rm -rf`, which cmd.exe lacks. A fresh checkout has no dist to clear.
       - run: pnpm exec tsup
