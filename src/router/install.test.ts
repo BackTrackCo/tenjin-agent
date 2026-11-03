@@ -1323,8 +1323,11 @@ describe('install run by an agent asks each question where its answer is needed'
  * is recorded as asked, so no later install or update asks again.
  */
 describe('install asks Help improve routing once', () => {
-  const IMPROVE =
-    'Help improve routing? Tenjin keeps the secret-masked text of turns the router sees so we can grade its offers. You can turn this off any time with `tenjin config set router.improve false`.';
+  const KEPT =
+    "Help improve routing? Tenjin keeps the secret-masked text of turns the router sees, including anything pasted into them, to check and improve its offers. It's kept until you turn this off, which deletes it.";
+  /** At a terminal the person runs the command; through an agent they ask for it. */
+  const IMPROVE = `${KEPT} Turn it off any time with \`tenjin config set router.improve false\`. Details: https://tenjin.sh/privacy`;
+  const IMPROVE_AGENT = `${KEPT} You can ask your agent to turn it off any time. Details: https://tenjin.sh/privacy`;
   type Step = { id: string; question: string; options: { command: string | null }[] };
   const improveOf = (result: { data: unknown }) =>
     (result.data as { nextSteps: Step[] }).nextSteps.find((q) => q.id === 'improve');
@@ -1362,12 +1365,12 @@ describe('install asks Help improve routing once', () => {
     expect(improveOf(first)).toBeUndefined();
     const answered = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
     expect(improveOf(answered)).toMatchObject({
-      question: IMPROVE,
+      question: IMPROVE_AGENT,
       options: [{ command: 'tenjin config set router.improve true' }, { command: null }],
     });
     expect(answered.humanLines).toEqual(
       expect.arrayContaining([
-        `  Ask the person: ${IMPROVE}`,
+        `  Ask the person: ${IMPROVE_AGENT}`,
         '  Yes: tenjin config set router.improve true',
         '  No: run nothing; it stays off',
       ]),

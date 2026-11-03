@@ -132,7 +132,7 @@ function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): Re
  * what is kept, and how to stop it.
  */
 export const IMPROVE_ON_NOTE =
-  'Help improve routing is on: Tenjin keeps the secret-masked text of turns the router sees so we can grade its offers. ' +
+  'Help improve routing is on: Tenjin keeps the secret-masked text of turns the router sees, including anything pasted into them, to check and improve its offers. ' +
   'Turn it off any time with `tenjin config set router.improve false`, which also deletes what was kept.';
 
 /** Router keys resolve against the directory the command runs in, as a hook would. */

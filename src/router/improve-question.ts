@@ -1,6 +1,7 @@
 import { persistImproveAnswer } from '../commands/config';
 import { confirmChoice } from '../lib/clack';
 import type { PartialConfig } from '../lib/config';
+import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { QuestionStep } from './install';
 
 /**
@@ -16,9 +17,20 @@ import type { QuestionStep } from './install';
  * `router.improve` has answered it, and is not asked at all.
  */
 
-export const IMPROVE_QUESTION =
-  'Help improve routing? Tenjin keeps the secret-masked text of turns the router sees so we can grade its offers. ' +
-  'You can turn this off any time with `tenjin config set router.improve false`.';
+/** What is kept, why and for how long; the same in both versions. */
+const IMPROVE_KEPT =
+  'Help improve routing? Tenjin keeps the secret-masked text of turns the router sees, including anything pasted into them, to check and improve its offers. ' +
+  "It's kept until you turn this off, which deletes it.";
+const IMPROVE_POLICY = `Details: ${PRODUCTION_ORIGIN}/privacy`;
+
+/** At a terminal, where the person runs commands themselves. */
+export const IMPROVE_QUESTION = `${IMPROVE_KEPT} Turn it off any time with \`tenjin config set router.improve false\`. ${IMPROVE_POLICY}`;
+
+/**
+ * Through an agent, which puts it to the person as written: no shell command
+ * in front of them, as the fund question keeps its commands in the options.
+ */
+export const IMPROVE_AGENT_QUESTION = `${IMPROVE_KEPT} You can ask your agent to turn it off any time. ${IMPROVE_POLICY}`;
 
 export interface ImproveDeps {
   /** The yes/no question at a terminal; defaults to the clack confirm, default No. */
@@ -45,6 +57,18 @@ export async function askImprove(
 }
 
 /**
+ * What the agent does with the answer. The agent version of the question
+ * tells the person they can ask to turn it off, so the agent is given that
+ * command too.
+ */
+function relayRules(yes: string, off: string): string {
+  return (
+    `it is off until they say yes. On yes, run ${yes} yourself, alone; never ask the person to run it. ` +
+    `On no, or with no answer, run nothing. Do not ask it again. If they later ask you to turn it off, run \`${off}\`.`
+  );
+}
+
+/**
  * The question for the agent that ran the install, recorded as asked once it
  * is handed over: a yes runs `command config set router.improve true`, and
  * anything else runs nothing. Undefined when there is nobody to ask it (no
@@ -61,7 +85,7 @@ export async function improveStep(
   await persistImproveAnswer(dataDir, undefined).catch(() => undefined);
   return {
     id: 'improve',
-    question: IMPROVE_QUESTION,
+    question: IMPROVE_AGENT_QUESTION,
     options: [
       {
         id: 'yes',
@@ -71,7 +95,7 @@ export async function improveStep(
       },
       { id: 'no', label: 'No', recommended: false, command: null },
     ],
-    next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once, as written; it is off until they say yes. On yes, run that option's command yourself, alone; never ask the person to run it. On no, or with no answer, run nothing. Do not ask it again.`,
+    next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once, as written; ${relayRules("that option's command", `${o.command} config set router.improve false`)}`,
   };
 }
 
