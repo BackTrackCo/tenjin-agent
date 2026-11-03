@@ -34,8 +34,8 @@ export const ASK_FOR_REPAIR =
  *   helpful agent never solicits a secret into the transcript.
  *
  * `reason` is a fragment that slots into a sentence ("... (reason), so ...").
- * `no_wallet` keeps fee.ts's `UNPAID.no_wallet` wording byte for byte, and
- * `wallet_low` is not here at all: funding copy is out of scope (S5, S6).
+ * fee.ts's `UNPAID` takes its wallet rows from this table, and `wallet_low`
+ * is not here at all: funding copy is out of scope (S5, S6).
  */
 export const WALLET_REASONS: Record<
   Exclude<UnlockReason, 'unlock_timeout'> | 'wallet_locked',

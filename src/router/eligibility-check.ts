@@ -14,11 +14,11 @@ import {
   type Verdict,
 } from './eligibility';
 import {
-  canRetryDepositAtHint,
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
   refusedWhy,
+  ROUTING_FEE_CEILING_ATOMIC,
   routingDepositAtomic,
 } from './fee';
 import { UNKNOWN_DETAIL } from './wallet-reasons';
@@ -139,30 +139,28 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  const amount = routingDepositAtomic({
-    short: balanceAtomic !== null && balanceAtomic < MAX_CHANNEL_DEPOSIT_ATOMIC,
-    maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
+  // The deposit the payer would sign, from the production server's hint and
+  // with no quote to go on but the ceiling, evaluated against the whole
+  // policy as the payer's is. Neither reads the balance to size it.
+  const depositAtomic = routingDepositAtomic({
     hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
+    quoteAtomic: ROUTING_FEE_CEILING_ATOMIC,
+    perCallAtomic: input.policy.maxAutoSpendAtomic,
+    maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
   });
-  const evaluateDeposit = (amountAtomic: bigint) =>
-    evaluateSpendPolicy(input.policy, {
-      mode: 'automatic',
-      amountAtomic,
-      creator: input.host,
-      sessionSpentAtomic: spent ?? 0n,
-    });
-  let deposit = evaluateDeposit(amount);
-  if (
-    deposit.decision !== 'allow' &&
-    canRetryDepositAtHint(amount, CHANNEL_DEPOSIT_ATOMIC, deposit.reason)
-  ) {
-    deposit = evaluateDeposit(CHANNEL_DEPOSIT_ATOMIC);
-  }
+  const deposit = evaluateSpendPolicy(input.policy, {
+    mode: 'automatic',
+    amountAtomic: depositAtomic,
+    creator: input.host,
+    sessionSpentAtomic: spent ?? 0n,
+  });
   const routing = canPayRouting({
-    feeRefusal: feeRefusal(input.policy, input.host),
+    // No quote to go on here: the ceiling, the most a call would pay.
+    feeRefusal: feeRefusal(input.policy, input.host, ROUTING_FEE_CEILING_ATOMIC),
     sign,
     creditAtomic,
     depositRefusal: deposit.decision === 'allow' ? null : refusedWhy(deposit.reason),
+    depositAtomic,
     balanceAtomic,
   });
 

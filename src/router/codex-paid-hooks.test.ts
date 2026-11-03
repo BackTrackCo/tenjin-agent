@@ -8,9 +8,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { FakeRouter, testSigner } from './fee-test-utils';
-import { runHookCommand } from './hook-command';
+import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
 import { createRouterMcpServer } from './mcp';
 import { renderProgress } from './progress';
+import { createRouterObserver } from './router-observer';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -28,15 +29,6 @@ const SESSION = '01a1658a-1223-73f1-91f9-62ecb164c700';
 const HOOKS = fileURLToPath(new URL('../../hosts/codex/tenjin/hooks/hooks.json', import.meta.url));
 const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const wallet = privateKeyToAccount(generatePrivateKey());
-/** What the free path answers every form since the fee became required. */
-const FEE_REQUIRED = {
-  schemaVersion: 1,
-  routerVersion: 'test',
-  decision: {
-    action: 'native',
-    diagnostics: { reasonCode: 'fee_required', stage: 'capability', missing: [], nextAction: '' },
-  },
-};
 
 let dir: string;
 let homeDir: string;
@@ -132,17 +124,30 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
       };
 }
 
-/** The production server with only the network and the signer faked. */
-async function connect(
-  fake: FakeRouter,
-  payer: Partial<RoutingPayerDeps> = {},
-  fetchImpl: typeof fetch = fake.fetch,
-) {
+/**
+ * The production server with only the network and the signer faked. The
+ * observer is the one the factory would build, made here so `close` can wait
+ * for the observation writes it queues in the background: the data directory
+ * is deleted next, and a write landing mid-delete fails it (ENOTEMPTY).
+ */
+async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
+  const fetchImpl = fake.fetch;
+  const observer = createRouterObserver({
+    dataDir: dir,
+    pid: process.pid,
+    startedAt: Date.now(),
+    cliVersion: 'test',
+    harness: 'codex',
+    launchedByPlugin: false,
+    cwd: dir,
+    env: {},
+  });
   const server = await createRouterMcpServer({
     dataDir: dir,
     harness: 'codex',
     homeDir,
     flags: { baseUrl: BASE },
+    observer,
     payerDeps: {
       getSigner: async () => testSigner(wallet),
       fetchImpl,
@@ -174,6 +179,7 @@ async function connect(
     close: async () => {
       await client.close();
       await server.close();
+      await observer.dispose();
     },
   };
 }
@@ -194,13 +200,13 @@ describe('Codex automatic hooks', () => {
           hookEventName: 'UserPromptSubmit',
           additionalContext: expect.stringContaining('mcp__router__request'),
         },
-        systemMessage: expect.stringContaining('set aside $0.25 for routing'),
+        systemMessage: expect.stringContaining('set aside $0.05 for routing'),
       });
       const native = await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Nothing went to the free path: one deposit, then a voucher.
+      // Every call went to the paid route: one deposit, then a voucher.
       expect(fake.log).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
@@ -209,7 +215,7 @@ describe('Codex automatic hooks', () => {
       ]);
       expect(fake.deposits).toBe(1);
       // The deposit counts against the daily budget, as an MCP lookup's does.
-      expect((await readSpendSummary(dir))?.committedAtomic).toBe('250000');
+      expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
     } finally {
       await server.close();
     }
@@ -218,32 +224,21 @@ describe('Codex automatic hooks', () => {
   it('show the real reason when the fee cannot be paid, and record it as unpaid', async () => {
     const fake = new FakeRouter();
     fake.body = await offer();
-    // The live free path since the fee is required: native, `fee_required`.
-    const free = fake.fetch;
-    const routed = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
-      new URL(input instanceof Request ? input.url : String(input)).pathname === '/api/x402-router'
-        ? Response.json(FEE_REQUIRED)
-        : free(input, init)) as typeof fetch;
-    const server = await connect(
-      fake,
-      {
-        policy: async () => ({
-          maxAutoSpendAtomic: 0n,
-          sessionBudgetAtomic: null,
-          allowlistCreators: [],
-        }),
-      },
-      routed,
-    );
+    // No balance is read first: the facilitator refuses the deposit.
+    fake.walletAtomic = 20_000n;
+    const server = await connect(fake);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({
-        systemMessage: expect.stringContaining('could not pay its $0.003 fee'),
-      });
+      expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route paid',
+      ]);
+      expect(fake.deposits).toBe(0);
+      expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin wallet fund');
-      expect(fake.paidRequests()).toBe(0);
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
-        'prompt: fee unpaid: limit_below_deposit',
+        'prompt: fee unpaid: wallet_low',
       );
     } finally {
       await server.close();
@@ -297,27 +292,17 @@ describe('Codex automatic hooks', () => {
 });
 
 describe('a Codex plugin copy from an older build', () => {
-  it('tells the user once why its command legs offer nothing, in the field Codex shows', async () => {
-    const feeRequired = (async () => Response.json(FEE_REQUIRED)) as typeof fetch;
+  it('tells the user once to set Tenjin up again, in the field Codex shows, and routes nothing', async () => {
     const run = async () => {
       let out = '';
-      await runHookCommand(
-        'prompt',
-        { stdout: { write: (s: string) => ((out += s), true) } } as never,
-        {
-          dataDir: dir,
-          harness: 'codex',
-          baseUrl: BASE,
-          fetchImpl: feeRequired,
-          warn: () => undefined,
-          readEvent: async () => JSON.stringify(codexEvent('prompt')),
-        },
-      );
+      await runHookCommand({ stdout: { write: (s: string) => ((out += s), true) } } as never, {
+        dataDir: dir,
+        harness: 'codex',
+        readEvent: async () => JSON.stringify(codexEvent('prompt')),
+      });
       return out;
     };
-    expect(JSON.parse(await run())).toEqual({
-      systemMessage: expect.stringContaining('`tenjin doctor`'),
-    });
+    expect(JSON.parse(await run())).toEqual({ systemMessage: STALE_HOOK_LINE });
     expect(await run()).toBe('');
   });
 });

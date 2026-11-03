@@ -2,14 +2,13 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runHookKind } from './hook-command';
 import type { HookDeps } from './hooks';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
-import { requestDecision, ROUTER_PATH, RouteSkipped } from './decision';
-import { ROUTE_PAID_PATH } from './fee';
+import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
 
 /**
  * THE ROUTING LEGS' BACKOFF. A call that could not reach the router (a
@@ -41,6 +40,7 @@ beforeEach(async () => {
   clock = 1_800_000_000_000;
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -85,13 +85,24 @@ function socketError(code: string): TypeError {
   });
 }
 
-/** A fetch that answers only when its signal aborts, as a slow router does. */
+/**
+ * A fetch that answers only when its signal aborts, as a slow router does. It
+ * listens on the caller's own signal: the signal of a `new Request(input,
+ * init)` dropped here follows the caller's only while that Request lives, so a
+ * garbage collection mid-call left the fetch hanging past the test's timeout.
+ */
 const hangs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
   new Promise<Response>((_resolve, reject) => {
-    new Request(input, init).signal.addEventListener('abort', () =>
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    signal?.addEventListener('abort', () =>
       reject(new DOMException('The operation was aborted.', 'AbortError')),
     );
   })) as typeof fetch;
+
+/** Holds the timers still, so a call's budget ends only when the test advances it. */
+function holdTimers(): void {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+}
 
 const prompt = () => ({
   hook_event_name: 'UserPromptSubmit',
@@ -142,41 +153,57 @@ describe('the routing legs back off a router they cannot reach', () => {
   });
 
   it('does not start it on the call running out of its own time', async () => {
+    holdTimers();
     let calls = 0;
+    let asked!: () => void;
     const slow = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       calls += 1;
+      asked();
       return hangs(input, init);
     }) as typeof fetch;
-    await runHookKind('prompt', prompt(), deps(slow, undefined, { timeoutMs: 30 }));
+    const timesOut = async () => {
+      const sent = new Promise<void>((resolve) => (asked = resolve));
+      const leg = runHookKind('prompt', prompt(), deps(slow, undefined, { timeoutMs: 30 }));
+      await sent;
+      await vi.advanceTimersByTimeAsync(30);
+      await leg;
+    };
+    await timesOut();
     expect(await memo()).toBeNull();
-    await runHookKind('prompt', prompt(), deps(slow, undefined, { timeoutMs: 30 }));
+    await timesOut();
     expect(calls).toBe(2);
   });
 
   it('keeps the backoff one call started when a concurrent call times out', async () => {
+    holdTimers();
     let calls = 0;
-    let secondStarted!: () => void;
-    const bothInFlight = new Promise<void>((resolve) => (secondStarted = resolve));
-    const outage = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    let hangStarted!: () => void;
+    const bothInFlight = new Promise<void>((resolve) => (hangStarted = resolve));
+    // One call is refused once the other is in flight, so neither reads a
+    // memo the other wrote; the other hangs past its budget.
+    const refusing = (async () => {
       calls += 1;
-      // The first call is refused once the second is in flight, so neither
-      // reads a memo the other wrote; the second hangs past its budget.
-      if (calls === 1) {
-        await bothInFlight;
-        throw socketError('ECONNREFUSED');
-      }
-      secondStarted();
+      await bothInFlight;
+      throw socketError('ECONNREFUSED');
+    }) as typeof fetch;
+    const hanging = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      calls += 1;
+      hangStarted();
       return hangs(input, init);
     }) as typeof fetch;
-    await Promise.all([
-      runHookKind('prompt', prompt(), deps(outage, undefined, { timeoutMs: 200 })),
-      runHookKind('prompt', prompt(), deps(outage, undefined, { timeoutMs: 200 })),
-    ]);
+    const refused = runHookKind('prompt', prompt(), deps(refusing, undefined, { timeoutMs: 200 }));
+    const timedOut = runHookKind('prompt', prompt(), deps(hanging, undefined, { timeoutMs: 200 }));
+    // The refused call writes the memo first; only then does the other time out.
+    await refused;
+    expect(await memo()).toMatchObject({ until: clock + UNREACHABLE_BACKOFF_MS });
+    await vi.advanceTimersByTimeAsync(200);
+    await timedOut;
     expect(calls).toBe(2);
     expect(await memo()).toMatchObject({ until: clock + UNREACHABLE_BACKOFF_MS });
   });
 
-  it('keeps "no answer" on a failed free-path fallback, so it ends no backoff', async () => {
+  it('skips a call the payer could not pay, with no second request', async () => {
+    let calls = 0;
     const outcome = await requestDecision(
       'tool',
       { query: 'q' },
@@ -184,17 +211,18 @@ describe('the routing legs back off a router they cannot reach', () => {
         ctx: { flags: { json: true, timeout: 3_500 }, dataDir: dir } as never,
         baseUrl: BASE,
         fetchImpl: (async () => {
+          calls += 1;
           throw socketError('ECONNRESET');
         }) as typeof fetch,
         route: {
-          path: ROUTE_PAID_PATH,
           send: async () => {
             throw new RouteSkipped('payment_failed');
           },
         },
       },
     );
-    expect(outcome).toMatchObject({ status: 'failed', noAnswer: true, freePath: 'payment_failed' });
+    expect(outcome).toEqual({ status: 'skipped', why: 'payment_failed' });
+    expect(calls).toBe(0);
   });
 
   it('does not start it on an answer whose body failed to read', async () => {
@@ -222,7 +250,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     },
   );
 
-  it('retries a reset socket on the free path, on a fresh connection, and starts nothing', async () => {
+  it('skips a paid call whose socket reset, with no second request, and starts nothing', async () => {
     const fake = new FakeRouter();
     const seen: string[] = [];
     const resetOnPaid = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -233,20 +261,23 @@ describe('the routing legs back off a router they cannot reach', () => {
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
     await runHookKind('prompt', prompt(), deps(resetOnPaid, p));
-    expect(seen).toEqual([ROUTE_PAID_PATH, ROUTER_PATH]);
+    expect(seen).toEqual([ROUTE_PAID_PATH]);
     expect(await memo()).toBeNull();
   });
 
-  it('does not start it from the free path a paid attempt fell back to', async () => {
+  it('ends it, and starts none, on a paid call the router answered with a 5xx', async () => {
     const fake = new FakeRouter();
-    const paidErrsFreeRefuses = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const path = new URL(new Request(input, init).url).pathname;
-      if (path === ROUTE_PAID_PATH) return new Response('{}', { status: 503 });
-      throw socketError('ECONNREFUSED');
+    const seen: string[] = [];
+    const paidErrs = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seen.push(new URL(new Request(input, init).url).pathname);
+      return new Response('{}', { status: 503 });
     }) as typeof fetch;
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));
-    await runHookKind('prompt', prompt(), deps(paidErrsFreeRefuses, p));
-    expect(await memo()).toBeNull();
+    await writeRouterMemo(dir, 'unreachable', BASE, { now: clock - 120_000, ttlMs: 60_000 });
+    await runHookKind('prompt', prompt(), deps(paidErrs, p));
+    expect(seen).toEqual([ROUTE_PAID_PATH]);
+    // The skip came after an answer, so the router is reachable: the memo goes.
+    expect(await readdir(join(dir, 'router-memo'))).toEqual([]);
   });
 
   it('does not start it from a paid call queued behind another until its budget ran out', async () => {
@@ -261,7 +292,7 @@ describe('the routing legs back off a router they cannot reach', () => {
     expect(await readRouterMemo(dir, 'unreachable', BASE, Date.now())).toBeNull();
   });
 
-  it('starts it from the paid path too, without trying the free path on the same host', async () => {
+  it('starts it from a paid call too', async () => {
     const fake = new FakeRouter();
     const r = router();
     const p = new RoutingPayer(payerDeps(fake, dir, wallet, { now: () => clock }));

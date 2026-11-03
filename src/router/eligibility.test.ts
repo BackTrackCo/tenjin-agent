@@ -12,7 +12,7 @@ import {
   type SignFacts,
   type SignVerdict,
 } from './eligibility';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_ATOMIC, unpaid } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC, unpaid } from './fee';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 const READY: SignVerdict = { status: 'ready', source: 'keychain' };
@@ -131,6 +131,7 @@ const ROUTING: RoutingFacts = {
   sign: READY,
   creditAtomic: null,
   depositRefusal: null,
+  depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
   balanceAtomic: CHANNEL_DEPOSIT_ATOMIC,
 };
 
@@ -150,17 +151,17 @@ describe('canPayRouting (section 2.4)', () => {
     ['2. a sign block is that block', { sign: BLOCKED }, BLOCKED],
     [
       '3. credit with sign ready is ready',
-      { creditAtomic: ROUTING_FEE_ATOMIC, balanceAtomic: 0n },
+      { creditAtomic: ROUTING_FEE_CEILING_ATOMIC, balanceAtomic: 0n },
       READY,
     ],
     [
       '3. credit with sign unknown is unknown',
-      { creditAtomic: ROUTING_FEE_ATOMIC, sign: UNKNOWN, balanceAtomic: 0n },
+      { creditAtomic: ROUTING_FEE_CEILING_ATOMIC, sign: UNKNOWN, balanceAtomic: 0n },
       UNKNOWN,
     ],
     [
       '3. credit skips a deposit refusal',
-      { creditAtomic: ROUTING_FEE_ATOMIC, depositRefusal: 'budget_reached' },
+      { creditAtomic: ROUTING_FEE_CEILING_ATOMIC, depositRefusal: 'budget_reached' },
       READY,
     ],
     [
@@ -168,11 +169,14 @@ describe('canPayRouting (section 2.4)', () => {
       { depositRefusal: 'budget_reached' },
       money('budget_reached'),
     ],
+    // The facilitator refuses a deposit the wallet cannot cover, so the
+    // balance read here predicts it: below the deposit is wallet_low.
     [
       '5. a balance below the deposit is wallet_low',
       { balanceAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n },
       money('wallet_low'),
     ],
+    ['5. a balance at the deposit is ready', { balanceAtomic: CHANNEL_DEPOSIT_ATOMIC }, READY],
     ['6. sign unknown is unknown', { sign: UNKNOWN }, UNKNOWN],
     [
       '7. an unreadable balance is unknown',
@@ -190,7 +194,11 @@ describe('canPayRouting (section 2.4)', () => {
 
   it('credit covering the fee at a $0 balance with sign ready is ready (checklist item 8)', () => {
     expect(
-      canPayRouting({ ...ROUTING, creditAtomic: ROUTING_FEE_ATOMIC * 10n, balanceAtomic: 0n }),
+      canPayRouting({
+        ...ROUTING,
+        creditAtomic: ROUTING_FEE_CEILING_ATOMIC * 10n,
+        balanceAtomic: 0n,
+      }),
     ).toMatchObject({ status: 'ready' });
   });
 
@@ -347,7 +355,7 @@ describe('the invariants, over a seeded random sweep', () => {
     null,
     0n,
     1n,
-    ROUTING_FEE_ATOMIC,
+    ROUTING_FEE_CEILING_ATOMIC,
     CHANNEL_DEPOSIT_ATOMIC - 1n,
     CHANNEL_DEPOSIT_ATOMIC,
     10n ** 9n,
@@ -382,6 +390,7 @@ describe('the invariants, over a seeded random sweep', () => {
         sign,
         creditAtomic: pick(amounts),
         depositRefusal: pick([null, null, null, 'budget_reached']),
+        depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
         balanceAtomic: pick(amounts),
       });
       const provider = canPayProvider(
@@ -407,6 +416,7 @@ describe('the invariants, over a seeded random sweep', () => {
           sign: unknownSign,
           creditAtomic: pick([null, 0n]),
           depositRefusal: null,
+          depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
           balanceAtomic: null,
         }).status,
       ).toBe('unknown');

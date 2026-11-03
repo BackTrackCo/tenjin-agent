@@ -7,7 +7,7 @@ import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
 import { channelCredit } from './channel-credit';
-import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_ATOMIC } from './fee';
+import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 
 /**
  * `tenjin status`: what this machine has spent and what it is still holding.
@@ -120,7 +120,9 @@ export async function runRouterStatus(
     },
     routingCredit: {
       remaining: toMoney(creditAtomic.toString()),
-      calls: Number(creditAtomic / ROUTING_FEE_ATOMIC),
+      // At least this many: counted at the fee ceiling, since the fee each
+      // call pays is the router's quote, at or below it.
+      calls: Number(creditAtomic / ROUTING_FEE_CEILING_ATOMIC),
     },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
@@ -144,7 +146,7 @@ export async function runRouterStatus(
       : []),
     ...(depositedAtomic > 0n || creditAtomic > 0n
       ? [
-          `set aside for routing: approximately ${data.routingCredit.remaining.usd} USD (~${data.routingCredit.calls} calls; local estimate)`,
+          `set aside for routing: approximately ${data.routingCredit.remaining.usd} USD (at least ${data.routingCredit.calls} calls; local estimate)`,
         ]
       : []),
   ];
@@ -155,7 +157,7 @@ export async function runRouterStatus(
         ? ['wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries']
         : [
             `wallet ${toMoney(wallet.atomic.toString()).usd} USD`,
-            ...(wallet.atomic === 0n && creditAtomic < ROUTING_FEE_ATOMIC
+            ...(wallet.atomic === 0n && creditAtomic < ROUTING_FEE_CEILING_ATOMIC
               ? [FUND_COMMAND_LINE]
               : []),
           ];

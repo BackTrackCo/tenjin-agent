@@ -65,10 +65,10 @@ describe('noticeCleared', () => {
 
   it('gives null for a non-wallet reason and for a session told nothing', async () => {
     expect(await noticeCleared(dir, 'never', NOW)).toBeNull();
-    await noticeFor(dir, 's', 'fee_required', NOW);
+    await noticeFor(dir, 's', 'no_payer', NOW);
     expect(await noticeCleared(dir, 's', NOW + 1)).toBeNull();
     // The non-wallet marker stays: it is still quiet.
-    expect(await noticeFor(dir, 's', 'fee_required', NOW + 2)).toBe('quiet');
+    expect(await noticeFor(dir, 's', 'no_payer', NOW + 2)).toBe('quiet');
   });
 });
 
