@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
+import { LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL, requestToolName } from './names';
 
 /**
  * CAN THIS SUBAGENT CALL `request` AT ALL? An offer to an agent whose definition
@@ -30,7 +30,7 @@ export type RequestToolAccess = 'allowed' | 'excluded' | 'unknown';
 
 /**
  * The built-in agent types that have no definition file and still inherit MCP
- * tools, so can call `mcp__x402__request`. From Claude Code's own Agent tool
+ * tools, so can call the request tool. From Claude Code's own Agent tool
  * listing (2.1.28x): `general-purpose` has every tool, and `Explore` and `Plan`
  * exclude only editing and agent tools, never MCP. Built-ins with a fixed tool
  * list, such as `claude-code-guide` (Bash, Read, WebFetch, WebSearch) and
@@ -53,36 +53,57 @@ const TYPE_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
 export async function requestToolAccess(
   agentType: string | undefined,
   lookup: AgentLookup,
+  tool: string = requestToolName(),
 ): Promise<RequestToolAccess> {
   if (agentType === undefined || !TYPE_RE.test(agentType)) return 'unknown';
   try {
     const text = await findDefinition(agentType, lookup);
-    if (text !== null) return accessOf(text);
+    if (text !== null) return accessOf(text, tool);
     return MCP_INHERITING_BUILTINS.has(agentType) ? 'allowed' : 'unknown';
   } catch {
     return 'unknown';
   }
 }
 
-/** What one definition's frontmatter says about the request tool. */
-export function accessOf(definition: string): RequestToolAccess {
+/**
+ * What one definition's frontmatter says about the request tool, named as the
+ * leg's harness exposes it (`tool`).
+ *
+ * THE OLD NAME, AFTER THE RENAME. An agent whose `tools:` names only
+ * `mcp__x402__request` cannot call the plugin's tool, so it counts as excluded
+ * and doctor names the new name to add. One whose `disallowedTools:` names the
+ * old tool or server meant to keep paid lookups out, so it stays excluded.
+ * SHIM: the old-name branch goes on or after 2026-12-01.
+ */
+export function accessOf(definition: string, tool: string = requestToolName()): RequestToolAccess {
   const frontmatter = frontmatterOf(definition);
   if (frontmatter === null) return 'unknown';
   const disallowed = listField(frontmatter, 'disallowedTools');
-  if (disallowed !== undefined && disallowed.some(namesRequestTool)) return 'excluded';
+  if (
+    disallowed !== undefined &&
+    disallowed.some((entry) => namesRequestTool(entry, tool) || namesLegacyTool(entry))
+  ) {
+    return 'excluded';
+  }
   const tools = listField(frontmatter, 'tools');
   if (tools === undefined) return 'allowed';
-  return tools.some(namesRequestTool) ? 'allowed' : 'excluded';
+  return tools.some((entry) => namesRequestTool(entry, tool)) ? 'allowed' : 'excluded';
 }
 
 /**
  * Does one `tools:` or `disallowedTools:` entry cover the request tool? The
- * tool itself, the bare server, or any `*`-suffixed pattern the tool's name
- * starts with: `*`, `mcp__*`, `mcp__x402__*` and every prefix between.
+ * tool itself, its bare server (`mcp__plugin_tenjin_router`), or any
+ * `*`-suffixed pattern the tool's name starts with: `*`, `mcp__*`,
+ * `mcp__plugin_tenjin_router__*` and every prefix between.
  */
-function namesRequestTool(tool: string): boolean {
-  if (tool === REQUEST_TOOL || tool === `mcp__${MCP_SERVER_NAME}`) return true;
-  return tool.endsWith('*') && REQUEST_TOOL.startsWith(tool.slice(0, -1));
+function namesRequestTool(entry: string, tool: string): boolean {
+  if (entry === tool || entry === tool.replace(/__request$/, '')) return true;
+  return entry.endsWith('*') && tool.startsWith(entry.slice(0, -1));
+}
+
+/** The settings install's tool or server, by literal or wildcard. */
+function namesLegacyTool(entry: string): boolean {
+  return namesRequestTool(entry, LEGACY_REQUEST_TOOL) || entry === `mcp__${LEGACY_MCP_SERVER_NAME}`;
 }
 
 /**
@@ -90,7 +111,10 @@ function namesRequestTool(tool: string): boolean {
  * request tool out, for `doctor` to name. Plugin agents are not listed: their
  * files are not the user's to edit.
  */
-export async function agentsWithoutRequestTool(lookup: AgentLookup): Promise<string[]> {
+export async function agentsWithoutRequestTool(
+  lookup: AgentLookup,
+  tool: string = requestToolName(),
+): Promise<string[]> {
   const found: string[] = [];
   const seen = new Set<string>();
   for (const directory of agentDirs(lookup)) {
@@ -98,7 +122,7 @@ export async function agentsWithoutRequestTool(lookup: AgentLookup): Promise<str
       const type = nameOf(text) ?? name;
       if (seen.has(type)) continue;
       seen.add(type);
-      if (accessOf(text) === 'excluded') found.push(type);
+      if (accessOf(text, tool) === 'excluded') found.push(type);
     }
   }
   return found.sort();

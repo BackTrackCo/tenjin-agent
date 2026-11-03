@@ -1,0 +1,15 @@
+{
+  "name": "tenjin",
+  "owner": {
+    "name": "Tenjin",
+    "url": "https://tenjin.sh"
+  },
+  "description": "Tenjin's tool router for Claude Code, installed by `tenjin install`.",
+  "plugins": [
+    {
+      "name": "tenjin",
+      "source": "./tenjin",
+      "description": "Tenjin picks the right tool when your agent needs one, and one wallet on this machine pays for every call."
+    }
+  ]
+}

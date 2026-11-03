@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
  * cost is the product's floor. tsup splits each dynamic-import boundary into its
  * own chunk for exactly this reason, and this asserts the result: nothing in the
  * chunk graph a hook loads comes from the wallet, `ox`, `viem`, the x402 SDK or
- * the MCP SDK.
+ * the MCP SDK. The same holds for the plugin's `alive` leg (SessionStart).
  *
  * It reads `dist`, so it needs a build. Without one it SKIPS rather than
  * passing: a green assertion over a directory that is not there would be the
@@ -66,6 +66,58 @@ describe.skipIf(!existsSync(dist))('the hook chunk graph', () => {
       expect(
         sources.filter((s) => re.test(s)),
         `${label} reached the hook graph`,
+      ).toEqual([]);
+    }
+  });
+
+  /** The modules the hooks gate and word notices with: pure strings, file
+   *  facts and markers, all of them in the graph the check above walks. */
+  it('carries the wallet facts and reasons the hooks gate on, outside src/lib/wallet', () => {
+    const sources = closure(chunkContaining('router/hook-command')!).flatMap(sourcesOf);
+    for (const module of [
+      'router/eligibility.ts',
+      'lib/wallet-unlock.ts',
+      'lib/wallet-facts.ts',
+      'lib/passphrase-record.ts',
+      'router/wallet-reasons.ts',
+      'router/notice-markers.ts',
+    ]) {
+      expect(
+        sources.some((s) => s.includes(module)),
+        `${module} should be in the hook graph`,
+      ).toBe(true);
+    }
+  });
+
+  /** The plugin's SessionStart leg runs before every session, and now reads
+   *  the wallet's files: still never the wallet layer itself. */
+  it('keeps the alive leg free of the wallet, ox, viem, x402 and MCP', () => {
+    const entry = chunkContaining('router/alive');
+    expect(entry, 'the alive leg should have its own chunk').toBeDefined();
+    const sources = closure(entry!).flatMap(sourcesOf);
+    for (const { label, re } of FORBIDDEN) {
+      expect(
+        sources.filter((s) => re.test(s)),
+        `${label} reached the alive leg`,
+      ).toEqual([]);
+    }
+  });
+
+  /** Started from the alive leg and Codex's server: the layout and `node:*`
+   *  only, never the runtime's writer, the update command or the config schema. */
+  it('keeps the background auto-update light', () => {
+    const entry = chunkContaining('lib/auto-update');
+    expect(entry, 'the auto-update should have its own chunk').toBeDefined();
+    const sources = closure(entry!).flatMap(sourcesOf);
+    for (const { label, re } of [
+      ...FORBIDDEN,
+      { label: "the runtime's writer", re: /src[/\\]lib[/\\]runtime\.ts/ },
+      { label: 'the update command', re: /src[/\\]commands[/\\]update/ },
+      { label: 'zod', re: /[/\\]zod[@/\\]/ },
+    ]) {
+      expect(
+        sources.filter((s) => re.test(s)),
+        `${label} reached the auto-update`,
       ).toEqual([]);
     }
   });

@@ -3,18 +3,20 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
-import { readUsdcBalance } from '../lib/usdc-balance';
+import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
-import { fetchFailureToCliError, httpRequest } from '../lib/http';
-import type { HttpResponse } from '../lib/http';
+import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
+import type { FetchJsonFailure, HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
+import { mask } from '../lib/redact';
 import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
+import { spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -26,6 +28,7 @@ import {
 import {
   buildExactPayment,
   createPayerClient,
+  isCanonicalUsdc,
   noPayableRequirement,
   selectPayableRequirement,
 } from '../lib/x402-pay';
@@ -46,12 +49,15 @@ import type { CommandContext, CommandResult } from '../context';
  * any seller that supports it while nothing origin-bound can leak elsewhere.
  *
  * Direct third-party payments require acknowledgement of registry warnings.
- * Router calls retain their advertised-price and supplied-term hard checks.
+ * Router calls retain their advertised-price and supplied-term hard checks,
+ * and each is signed only against its call's spend plan (`admit`).
  * Every positive payment checks the actual signer's balance before signing.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
 const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
+/** x402 v1's name for the same header. */
+const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
@@ -81,10 +87,16 @@ export interface AdvertisedTerms {
 
 export interface PayArgs {
   url: string;
-  /** GET (default) or POST; POST is implied when --data is given. */
+  /** GET, POST, PUT, PATCH or DELETE. GET by default, POST when a body is given. */
   method?: string;
   /** A JSON request body; content-type is always application/json. */
   data?: string;
+  /**
+   * `--data-raw`: a body sent byte for byte, for an endpoint that does not
+   * take JSON. Its content type is the operator's own `-H 'Content-Type: …'`,
+   * which is required with it and refused everywhere else.
+   */
+  dataRaw?: string;
   /** Decimal USD; the hard price cap, never bypassed by --yes. */
   maxPrice?: string;
   /** Bypass the interactive confirm only (never the price cap or a hard deny). */
@@ -104,8 +116,32 @@ export interface PayArgs {
    * payment header in beside the one this command signs.
    */
   headers?: Record<string, string>;
-  /** A body the caller already encoded; sent byte for byte. Needs `-X POST`. */
+  /**
+   * A catalog spec's fixed request headers, on the router's provider leg: the
+   * same bar as `-H`, checked again here, and set under `headers`, so a spec
+   * never replaces the leg's own `accept` or `content-type`.
+   */
+  specHeaders?: Record<string, string>;
+  /**
+   * `-H 'Name: value'` lines from the operator, for a header the endpoint
+   * itself asks for (a beta opt-in, an API version). Manual lane only. Any
+   * name this command signs or sets is refused before the probe.
+   */
+  header?: string[];
+  /**
+   * `--quote`: decode and report the 402 (every payment option, the resource
+   * line, the seller's extensions and the body) and stop there. No wallet is
+   * opened and nothing is signed. A 2xx on the probe still delivers free.
+   */
+  quote?: boolean;
+  /** The router's body, already encoded; sent byte for byte. Needs POST, PUT or PATCH. */
   rawBody?: string;
+  /** The provider's own deadline for each leg, from its spec, in place of
+   *  `--timeout`: the probe's, and the least the paid leg waits. */
+  timeoutMs?: number;
+  /** The largest binary body kept, from the provider's spec; absent, the
+   *  transport's own cap. */
+  maxBytes?: number;
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
@@ -117,6 +153,27 @@ export interface PayArgs {
    * `resultCaveat` saying which.
    */
   resultSchema?: unknown;
+  /**
+   * The router's job seam: called once with the answer that delivered (free,
+   * entitled or paid), or with a paid leg that timed out after its headers
+   * came. A long job's status URL can be a header. Never part of `data`,
+   * which `tenjin pay --json` prints.
+   */
+  onPaidLeg?: (leg: PaidLeg) => void;
+  /**
+   * THE CALL'S SPEND PLAN, which every router payment is signed against.
+   * Handed the live price before the wallet is opened, it returns the slot an
+   * admitted plan holds for this payment (`lib/spend-plan.ts`), or throws the
+   * refusal: over the limits, the router's quote. Required in router mode: a
+   * router payment no plan admitted is refused with nothing sent.
+   */
+  admit?: (amountAtomic: bigint) => Promise<PlanSlot>;
+}
+
+/** What {@link PayArgs.onPaidLeg} is handed. */
+export interface PaidLeg {
+  status?: number;
+  header?: (name: string) => string | undefined;
 }
 
 export interface PayDeps {
@@ -184,6 +241,13 @@ async function executePay(
         { details: { reason: 'invalid_router_terms' } },
       );
     }
+    if (args.admit === undefined) {
+      throw new CliError(
+        'REFUSED',
+        "A router payment is signed only against its call's spend plan, and this one has none; nothing was sent.",
+        { details: { reason: 'unplanned' } },
+      );
+    }
   }
   const settings = await resolveContextSettings(ctx);
   const maxPriceAtomic =
@@ -199,19 +263,28 @@ async function executePay(
   // that is the one that has to prove it is not on this network.
   if (lane === 'bazaar') await assertPublicDestination(url, deps.destination ?? {});
   const method = resolveMethod(args);
-  const jsonBody = parseBody(args.data);
-  const headers = callerHeaders(args.headers);
+  const operator = operatorHeaders(args.header, args.dataRaw !== undefined);
+  const body = resolveBody(args, operator);
+  const headers = {
+    ...operator,
+    ...specHeaders(args.specHeaders),
+    ...callerHeaders(args.headers),
+  };
 
+  const legTimeoutMs = args.timeoutMs ?? ctx.flags.timeout;
   const fetchOpts = {
-    timeoutMs: ctx.flags.timeout,
+    timeoutMs: legTimeoutMs,
     // Both legs: the probe's 402 is money-path input, and the paid retry
     // carries a signed header (which pins redirects on its own; this pins the
     // probe too, so the challenge always comes from the URL that was gated).
     blockRedirects: true as const,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    ...(jsonBody !== undefined ? { jsonBody } : {}),
-    ...(jsonBody === undefined && args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    ...body,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    // A router lookup can buy a file (a sound, an image): its bytes are kept
+    // whole for the tool to save, never decoded as text.
+    ...(router ? { binaryBody: true as const } : {}),
+    ...(args.maxBytes !== undefined ? { maxBinaryBytes: args.maxBytes } : {}),
     method,
   };
 
@@ -225,6 +298,7 @@ async function executePay(
   }
   if (probe.status >= 200 && probe.status < 300) {
     const caveat = assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
+    args.onPaidLeg?.({ status: probe.status, header: probe.header });
     return deliver(url, lane, probe, {
       paid: false,
       ...(caveat !== undefined ? { caveat } : {}),
@@ -245,7 +319,7 @@ async function executePay(
           probe.status === 404
             ? 'Nothing was paid. The same request will answer 404 again.'
             : 'Check the URL and the endpoint status, then retry.',
-        details: { status: probe.status, body: probe.json },
+        details: { status: probe.status, body: probe.json, ...providerError(probe.text) },
       },
     );
   }
@@ -256,6 +330,12 @@ async function executePay(
   // unpayable or unverifiable deal is refused before a signer exists.
   const payer = createPayerClient(() => signerOrThrow(openedSigner));
   const requirement = selectRequirement(payer.core, paymentRequired, args.terms);
+  // `--quote` is a READ: the 402 is reported as it came, with the entry the
+  // paid path would sign marked by the same selection. Nothing below this line
+  // runs, so no wallet is opened and nothing is signed.
+  if (args.quote === true) {
+    return deliverQuote(url, lane, probe, paymentRequired, requirement, args.printBody === true);
+  }
   if (requirement === undefined) {
     throw noMatchingEntry(paymentRequired, args.terms);
   }
@@ -280,13 +360,19 @@ async function executePay(
       warnings,
     );
   }
+  // THE CALL'S PLAN ADMITS ONLY A PAYMENT STILL NEEDED. With no entitlement
+  // to check, it is admitted here, at the price first seen, before the wallet
+  // is opened; over the limits, the refusal is the router's quote. A seller
+  // that takes sign-in-with-x is asked first, below: a wallet that already
+  // owns the result re-reads it free, and is never quoted a payment for it.
+  const entitlement = paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined;
+  let slot = router && !entitlement ? await args.admit!(firstSeenAmount) : undefined;
 
   const provider = resolveWalletProvider(
     ctx,
     deps.provider !== undefined ? { provider: deps.provider } : {},
   );
-  await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
-  const signer = await provider.getSigner();
+  const signer = await openWallet(provider);
   openedSigner.current = signer;
 
   // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
@@ -296,7 +382,7 @@ async function executePay(
   // so a foreign seller gets a credential worth nothing anywhere else.
   let effectiveChallenge = paymentRequired;
   let effectiveRequirement = requirement;
-  if (paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined) {
+  if (entitlement) {
     const siwxHeader = await buildSiwxHeader(signer, {
       baseUrl: new URL(url).origin,
       chainId: requirement.network,
@@ -313,6 +399,7 @@ async function executePay(
         recheck.status,
         'entitled',
       );
+      args.onPaidLeg?.({ status: recheck.status, header: recheck.header });
       return deliver(url, lane, recheck, {
         paid: false,
         entitled: true,
@@ -326,7 +413,7 @@ async function executePay(
         `${url} answered ${recheck.status} on the entitlement re-check.`,
         {
           fix: 'Retry; if it persists the endpoint looks misconfigured.',
-          details: { status: recheck.status, body: recheck.json },
+          details: { status: recheck.status, body: recheck.json, ...providerError(recheck.text) },
         },
       );
     }
@@ -374,6 +461,34 @@ async function executePay(
     }
   }
   const amountAtomic = BigInt(effectiveRequirement.amount);
+  if (router && entitlement) slot = await args.admit!(amountAtomic);
+  if (router) {
+    const refusal = spendSlot(slot, amountAtomic);
+    if (refusal === 'above_plan') {
+      throw new CliError(
+        'PAYMENT_FAILED',
+        `The live price ($${toMoney(amountAtomic.toString()).usd}) is above the $${toMoney(slot!.amountAtomic.toString()).usd} this call planned for it, so nothing was signed.`,
+        {
+          fix: 'Call again for a fresh plan at the new price.',
+          details: {
+            reason: 'above_plan',
+            plannedAtomic: slot!.amountAtomic.toString(),
+            live: { amount: amountAtomic.toString() },
+          },
+        },
+      );
+    }
+    if (refusal !== null) {
+      throw new CliError(
+        'REFUSED',
+        "A router payment is signed only against an unspent slot of its call's spend plan; nothing was signed.",
+        { details: { reason: refusal } },
+      );
+    }
+  }
+  // A PLAN A PERSON APPROVED is theirs, as a manual payment is: it may pass
+  // the automatic limits, and it does not use up the automatic budget.
+  const approved = slot?.approved === true;
 
   const authorizer = resolveSpendAuthorizer(
     ctx,
@@ -384,7 +499,7 @@ async function executePay(
   // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
-  const mode = router ? 'automatic' : 'manual';
+  const mode = router && !approved ? 'automatic' : 'manual';
   const reservationId = await gateSpend({
     mode,
     ctx,
@@ -393,7 +508,7 @@ async function executePay(
     creator: host,
     ...(maxPriceAtomic !== undefined ? { maxPriceAtomic } : {}),
     ...(args.requestKey !== undefined ? { requestKey: args.requestKey } : {}),
-    yes: args.yes === true,
+    yes: args.yes === true || approved,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
     payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
     allowlistSubject: 'this host',
@@ -408,41 +523,7 @@ async function executePay(
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
-    if (amountAtomic > 0n) {
-      // One retry across a rate-limit interval, within the original read deadline.
-      const deadline = Date.now() + ctx.flags.timeout;
-      const readBalance = deps.readBalance ?? readUsdcBalance;
-      let balance = await readBalance(signer.address, settings.rpcUrl, {
-        timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
-      });
-      if (balance === null && Date.now() < deadline) {
-        await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
-        const remaining = deadline - Date.now();
-        if (remaining > 0)
-          balance = await readBalance(signer.address, settings.rpcUrl, { timeoutMs: remaining });
-      }
-      if (balance === null) {
-        throw new CliError(
-          'REFUSED',
-          'The wallet balance could not be read; no payment was signed.',
-          {
-            fix: 'Check the configured Base rpcUrl and retry when it is available.',
-            details: { reason: 'balance_unavailable', address: signer.address },
-          },
-        );
-      }
-      if (balance < amountAtomic) {
-        throw new CliError('REFUSED', 'The wallet has insufficient USDC; no payment was signed.', {
-          fix: 'Fund this wallet on Base with `tenjin wallet fund` before paying.',
-          details: {
-            reason: 'insufficient_funds',
-            address: signer.address,
-            balanceAtomic: balance.toString(),
-            requiredAtomic: amountAtomic.toString(),
-          },
-        });
-      }
-    }
+    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
@@ -456,23 +537,65 @@ async function executePay(
   // hostile registry-listed seller answer 402 after each signature while
   // sessionBudget counted zero of the authorizations it was stacking up.
   // (httpRequest never throws on transport failure; it returns ok:false.)
+  // A spec's deadline may lengthen this leg, never shorten it: the
+  // authorization has left, and a cut here loses a result already paid for.
+  const paidTimeoutMs = paidLegTimeoutMs(
+    effectiveRequirement,
+    Math.max(legTimeoutMs, ctx.flags.timeout),
+  );
   const paid = await httpRequest(url, {
     ...fetchOpts,
-    timeoutMs: paidLegTimeoutMs(effectiveRequirement, ctx.flags.timeout),
+    timeoutMs: paidTimeoutMs,
     headers: { ...headers, ...payment.headers },
   });
-  await authorizer.commit(reservationId, payment.amountAtomic, { mode });
+  await authorizer.commit(reservationId, payment.amountAtomic, {
+    mode,
+    ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
+  });
+  if (paid.ok || paid.header !== undefined) {
+    args.onPaidLeg?.({
+      ...(paid.status !== undefined ? { status: paid.status } : {}),
+      ...(paid.header !== undefined ? { header: paid.header } : {}),
+    });
+  }
   // A TRANSPORT failure on this leg is a post-transmission outcome like any
   // other: the authorization has left, the reservation is committed above, and
   // a receipt that said nothing was paid would report a provider cost of zero
   // for money the ledger has already counted. The transport's own reason and
   // code survive; only the fix and the amounts are this leg's to state.
   if (!paid.ok) {
+    // A LONG JOB THAT NAMED WHERE ITS RESULT WILL BE: the seller is still
+    // working, so the agent is pointed there rather than told it failed.
+    // Settlement is just as unknown as on any other timeout.
+    const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
+    if (statusUrl !== null) {
+      throw new CliError(
+        'NETWORK_ERROR',
+        `The seller is still working on this: no result within ${Math.round(paidTimeoutMs / 1000)} s, and it named a status URL to check: ${statusUrl}`,
+        {
+          fix:
+            'The authorization was transmitted and settlement is unknown until the job ends; it is recorded as transmitted exposure. ' +
+            'Do not pay again: check the status URL for the result.',
+          details: {
+            statusUrl,
+            amountAtomic: payment.amountAtomic.toString(),
+            settlement: 'unknown',
+            ...(payment.authorization !== undefined
+              ? { authorization: payment.authorization }
+              : {}),
+          },
+        },
+      );
+    }
     throw fetchFailureToCliError(paid, {
       fix:
         'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ' +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
-      details: { amountAtomic: payment.amountAtomic.toString(), settlement: 'unknown' },
+      details: {
+        amountAtomic: payment.amountAtomic.toString(),
+        settlement: 'unknown',
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+      },
     });
   }
   if (paid.status >= 200 && paid.status < 300) {
@@ -493,6 +616,7 @@ async function executePay(
       warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
+      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       ...(registry !== undefined ? { registry } : {}),
       ...(caveat !== undefined ? { caveat } : {}),
       printBody: args.printBody === true,
@@ -501,20 +625,32 @@ async function executePay(
   // Still 402 (payment rejected) or anything else: nothing was delivered, but
   // the seller holds a live authorization, so the amount stays counted and the
   // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
+  // A SELLER THAT SAYS IT DID NOT SETTLE is named as saying so, with its reason
+  // from the payment-response header: its body can be an empty `{}`. The
+  // authorization stays valid until it expires, so settlement is still unknown.
+  const refusal = settlementRefusal(paid);
   throw new CliError(
     'PAYMENT_FAILED',
-    paid.status === 402
-      ? 'Payment was not accepted by the endpoint.'
-      : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
+    refusal !== undefined
+      ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
+      : paid.status === 402
+        ? 'Payment was not accepted by the endpoint.'
+        : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix: 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
+      fix:
+        refusal !== undefined
+          ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
+          : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk
       // rather than a zero. Settlement is unknown by construction here.
       details: {
         status: paid.status,
         body: paid.json,
+        ...providerError(paid.text),
+        ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
         amountAtomic: payment.amountAtomic.toString(),
         settlement: 'unknown',
+        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
     },
   );
@@ -527,8 +663,9 @@ async function executePay(
  * off a provider advertising 360 s of work and threw its answer away. The
  * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
  * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
- * and it never shortens what the user asked for with `--timeout`. The probe
- * leg keeps the CLI timeout: nothing is at stake there.
+ * and it never shortens what the user asked for with `--timeout`, nor does a
+ * spec's `timeoutS`. The probe leg takes the spec's deadline, else the CLI
+ * timeout: nothing is at stake there.
  */
 export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
 
@@ -538,6 +675,148 @@ export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs:
     return cliTimeoutMs;
   }
   return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
+}
+
+/**
+ * THE WALLET HOLDS THE AMOUNT, read live, or a refusal before anything is
+ * signed. Live, never the hooks' remembered balance: a minute-old read can
+ * count funds the wallet has since spent. The default RPC's public fallbacks
+ * are live reads too.
+ */
+async function assertBalanceCovers(
+  address: string,
+  amountAtomic: bigint,
+  rpcUrl: string,
+  ctx: CommandContext,
+  deps: PayDeps,
+): Promise<void> {
+  if (amountAtomic <= 0n) return;
+  // One retry across a rate-limit interval, within the original read deadline.
+  const deadline = Date.now() + ctx.flags.timeout;
+  const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
+  let balance = await readBalance(address, rpcUrl, {
+    timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
+  });
+  if (balance === null && Date.now() < deadline) {
+    await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
+    const remaining = deadline - Date.now();
+    if (remaining > 0) balance = await readBalance(address, rpcUrl, { timeoutMs: remaining });
+  }
+  if (balance === null) {
+    throw new CliError('REFUSED', 'The wallet balance could not be read; no payment was signed.', {
+      fix: 'Check the configured Base rpcUrl and retry when it is available.',
+      details: { reason: 'balance_unavailable', address },
+    });
+  }
+  if (balance < amountAtomic) {
+    const short = toMoney((amountAtomic - balance).toString()).usd;
+    throw new CliError(
+      'REFUSED',
+      `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
+      {
+        fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
+        details: {
+          reason: 'insufficient_funds',
+          address,
+          balanceAtomic: balance.toString(),
+          requiredAtomic: amountAtomic.toString(),
+        },
+      },
+    );
+  }
+}
+
+/**
+ * WHAT A ROUTER CALL WILL COST, from one unpaid probe: the live 402's amount
+ * on the entry this call would sign, held to the advertised terms, with
+ * nothing signed and nothing reserved. It is the number a single call gates
+ * on, so several takes of one call are checked at it rather than at the
+ * spec's ceiling: a price that varies by input is quoted for this input.
+ * A probe that answers 2xx is free: 0. A seller that takes sign-in-with-x is
+ * asked as the paid leg asks it, so a wallet that already owns the result
+ * quotes 0 and is never planned a payment for it. Every refusal is the paid
+ * leg's own, with nothing sent but the probe and that re-read.
+ */
+export async function quoteRouterCall(
+  args: Pick<PayArgs, 'url' | 'method' | 'headers' | 'specHeaders' | 'rawBody' | 'timeoutMs'> & {
+    terms: AdvertisedTerms;
+  },
+  ctx: CommandContext,
+  deps: PayDeps = {},
+): Promise<bigint> {
+  const settings = await resolveContextSettings(ctx);
+  const url = args.url.trim();
+  if (resolveLane(url, settings) === 'bazaar') {
+    await assertPublicDestination(url, deps.destination ?? {});
+  }
+  const headers = { ...specHeaders(args.specHeaders), ...callerHeaders(args.headers) };
+  const probe = await httpRequest(url, {
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
+    blockRedirects: true,
+    binaryBody: true,
+    method: resolveMethod(args),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+  });
+  if (!probe.ok) {
+    throw fetchFailureToCliError(probe, {
+      fix: `Nothing was sent and nothing was paid. ${legFix(probe)}`,
+    });
+  }
+  if (probe.status >= 200 && probe.status < 300) return 0n;
+  if (probe.status !== 402) {
+    const said = providerMessage(probe.json);
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${probe.status}${said === null ? '.' : `: ${said}`}`,
+      {
+        fix: 'Nothing was paid.',
+        details: { status: probe.status, body: probe.json, ...providerError(probe.text) },
+      },
+    );
+  }
+  const challenge = decodeChallenge(probe, url);
+  const payer = createPayerClient(() => signerOrThrow({}));
+  const requirement = selectRequirement(payer.core, challenge, args.terms);
+  if (requirement === undefined) throw noMatchingEntry(challenge, args.terms);
+  assertWithinTerms(args.terms, requirement);
+  if (challenge.extensions?.[SIGN_IN_WITH_X] === undefined) return BigInt(requirement.amount);
+  const signer = await openWallet(
+    resolveWalletProvider(ctx, deps.provider !== undefined ? { provider: deps.provider } : {}),
+  );
+  const recheck = await httpRequest(url, {
+    timeoutMs: args.timeoutMs ?? ctx.flags.timeout,
+    blockRedirects: true,
+    binaryBody: true,
+    method: resolveMethod(args),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(args.rawBody !== undefined ? { rawBody: args.rawBody } : {}),
+    headers: {
+      ...headers,
+      [SIWX_HEADER]: await buildSiwxHeader(signer, {
+        baseUrl: new URL(url).origin,
+        chainId: requirement.network,
+      }),
+    },
+  });
+  if (!recheck.ok) throw fetchFailureToCliError(recheck);
+  if (recheck.status >= 200 && recheck.status < 300) return 0n;
+  if (recheck.status !== 402) {
+    throw new CliError(
+      'API_UNREACHABLE',
+      `${url} answered ${recheck.status} on the entitlement re-check.`,
+      {
+        fix: 'Nothing was paid.',
+        details: { status: recheck.status, body: recheck.json, ...providerError(recheck.text) },
+      },
+    );
+  }
+  const fresh = decodeChallenge(recheck, url);
+  const owed = selectRequirement(payer.core, fresh, args.terms);
+  if (owed === undefined) throw noMatchingEntry(fresh, args.terms);
+  assertWithinTerms(args.terms, owed);
+  return BigInt(owed.amount);
 }
 
 /** Which lane may pay this URL, or the exact refusal. */
@@ -568,25 +847,109 @@ function resolveLane(url: string, settings: ResolvedSettings): Lane {
   return 'bazaar';
 }
 
-function resolveMethod(args: PayArgs): 'GET' | 'POST' {
-  const method = args.method?.toUpperCase() ?? (args.data !== undefined ? 'POST' : 'GET');
-  if (method !== 'GET' && method !== 'POST') {
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+const METHODS: ReadonlySet<string> = new Set<Method>(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+/** The methods that carry a body. GET and DELETE never do here. */
+const BODY_METHODS: ReadonlySet<string> = new Set<Method>(['POST', 'PUT', 'PATCH']);
+
+function hasBody(args: PayArgs): boolean {
+  return args.data !== undefined || args.dataRaw !== undefined || args.rawBody !== undefined;
+}
+
+function resolveMethod(args: PayArgs): Method {
+  const method = args.method?.toUpperCase() ?? (hasBody(args) ? 'POST' : 'GET');
+  if (!METHODS.has(method)) {
     throw new CliError('USAGE', `Unsupported method ${JSON.stringify(args.method)}`, {
-      fix: 'Use -X GET or -X POST.',
+      fix: 'Use -X GET, POST, PUT, PATCH or DELETE.',
     });
   }
-  if (method === 'GET' && (args.data !== undefined || args.rawBody !== undefined)) {
-    throw new CliError('USAGE', 'A request body needs -X POST.', {
-      fix: 'Drop --data, or pass -X POST.',
+  if (hasBody(args) && !BODY_METHODS.has(method)) {
+    throw new CliError('USAGE', 'A request body needs -X POST, PUT or PATCH.', {
+      fix: 'Drop the body, or pass -X POST, PUT or PATCH.',
     });
   }
-  return method;
+  return method as Method;
 }
 
 /**
- * The caller's headers, or a refusal. Two names only: everything else on this
- * request is either this command's to set (the payment signature, the user
- * agent, the shelf bypass) or nobody's.
+ * The one body this request carries, or none. `--data` is JSON and sets its
+ * own content type; `--data-raw` goes byte for byte under the operator's
+ * Content-Type; `rawBody` is the router's, already encoded. Two at once is a
+ * usage error, never a silent pick.
+ */
+function resolveBody(
+  args: PayArgs,
+  operator: Record<string, string>,
+): { jsonBody?: unknown; rawBody?: string } {
+  const given = [args.data, args.dataRaw, args.rawBody].filter((b) => b !== undefined);
+  if (given.length > 1) {
+    throw new CliError('USAGE', 'Pass one request body: --data or --data-raw, not both.', {
+      fix: 'Use --data for a JSON body, or --data-raw with its own Content-Type.',
+    });
+  }
+  if (args.data !== undefined) return { jsonBody: parseBody(args.data) };
+  if (args.dataRaw !== undefined) {
+    if (operator['content-type'] === undefined) {
+      throw new CliError('USAGE', 'A --data-raw body needs its content type.', {
+        fix: "Pass -H 'Content-Type: <type>' with --data-raw.",
+      });
+    }
+    return { rawBody: args.dataRaw };
+  }
+  return args.rawBody !== undefined ? { rawBody: args.rawBody } : {};
+}
+
+/**
+ * The operator's `-H` lines, or a refusal. The opposite rule from
+ * {@link callerHeaders}: a person typing the command may name any header the
+ * endpoint asks for, except what this command signs or sets itself. Values
+ * are bounded and single-line, the same bar the router's two names meet.
+ * `content-type` is the operator's only with `--data-raw`, whose bytes this
+ * command does not encode; `--data` is always JSON.
+ */
+function operatorHeaders(lines: string[] | undefined, rawBody: boolean): Record<string, string> {
+  if (lines === undefined) return {};
+  const out: Record<string, string> = {};
+  for (const line of lines) {
+    const at = line.indexOf(':');
+    const name = at > 0 ? line.slice(0, at).trim() : '';
+    const value = at > 0 ? line.slice(at + 1).trim() : '';
+    const problem = requestHeaderProblem(name, value, rawBody);
+    if (problem === 'name') {
+      throw new CliError('USAGE', `Not a request header: ${JSON.stringify(line)}`, {
+        fix: "Pass -H 'Name: value'.",
+      });
+    }
+    if (problem === 'reserved') {
+      throw new CliError('USAGE', `This command sets the header ${JSON.stringify(name)} itself.`, {
+        fix: 'Payment, sign-in, bypass and transport headers are never taken from -H. --data is always application/json; only --data-raw takes a Content-Type from -H.',
+      });
+    }
+    if (problem === 'value') {
+      throw new CliError(
+        'USAGE',
+        `The value of ${JSON.stringify(name)} is too long or spans lines.`,
+        {
+          fix: 'Keep each -H value on one line, under 1,024 characters.',
+        },
+      );
+    }
+    const lowered = name.toLowerCase();
+    if (lowered in out) {
+      throw new CliError('USAGE', `The header ${JSON.stringify(name)} was given twice.`, {
+        fix: 'Pass each header name once.',
+      });
+    }
+    out[lowered] = value;
+  }
+  return out;
+}
+
+/**
+ * The router's headers, or a refusal. Two names only: a decision composes
+ * `accept` and `content-type`, and everything else on this request is either
+ * this command's to set (the payment signature, the user agent) or the
+ * operator's through `-H`.
  */
 function callerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
   if (headers === undefined) return {};
@@ -604,6 +967,29 @@ function callerHeaders(headers: Record<string, string> | undefined): Record<stri
       );
     }
     out[lowered] = value;
+  }
+  return out;
+}
+
+/**
+ * A catalog spec's fixed headers, or a refusal. The spec was checked when its
+ * request was built; this is the last stop before the wire, so the same
+ * check runs again.
+ */
+function specHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  if (headers === undefined) return {};
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (requestHeaderProblem(name, value) !== null) {
+      throw new CliError(
+        'USAGE',
+        `This command will not send the header ${JSON.stringify(name)}.`,
+        {
+          fix: 'A spec header is a bounded, single-line value, and never a payment, sign-in, bypass or transport header.',
+        },
+      );
+    }
+    out[name.toLowerCase()] = value;
   }
   return out;
 }
@@ -686,6 +1072,31 @@ function failedRuleCaveat(check: ResultCheck): string {
   return `${check.reason ?? 'The result does not satisfy its success schema.'} The payment settled, so the body is delivered as received, unverified: treat it as possibly not the answer that was paid for.`;
 }
 
+/**
+ * Headers a seller sends with the first byte of a long job to say where its
+ * result can be checked. Treza sends `X-Status-Url`; another seller's name for
+ * the same thing goes here.
+ */
+const STATUS_URL_HEADERS = ['x-status-url'];
+
+/** The https status URL a timed-out paid response named, resolved against the
+ *  paid URL, or null. Its bytes are the seller's: bounded, https only, same host. */
+function statusUrlOf(failure: FetchJsonFailure, requestUrl: string): string | null {
+  for (const name of STATUS_URL_HEADERS) {
+    const value = failure.header?.(name)?.trim();
+    if (value === undefined || value.length === 0 || value.length > 2_048) continue;
+    try {
+      const status = new URL(value, requestUrl);
+      if (status.protocol === 'https:' && status.host === new URL(requestUrl).host) {
+        return status.toString();
+      }
+    } catch {
+      // Not a URL: the next name, or the plain timeout.
+    }
+  }
+  return null;
+}
+
 /** The transport's own remedy, when it has one, appended after the leg's
  *  payment sentence so the two never contradict each other. */
 function legFix(failure: { kind: string }): string {
@@ -706,6 +1117,35 @@ function providerMessage(body: unknown): string | null {
     .trim()
     .slice(0, 300);
   return line.length > 0 ? line : null;
+}
+
+/** Cap on {@link providerError}: enough for a provider's reason, never its page. */
+const PROVIDER_ERROR_CHARS = 500;
+
+/**
+ * WHY THE PROVIDER REFUSED, in its own words: the first
+ * {@link PROVIDER_ERROR_CHARS} characters of a non-2xx body, redacted and on
+ * one plain line, whatever its type. `body` above is the parse, which an HTML
+ * error page has none of, and without this a 403 reached the agent as a bare
+ * status. Other people's content, never instructions.
+ */
+function providerError(text: string): { providerError?: string } {
+  const line = sellerLine(text);
+  return line.length > 0 ? { providerError: line } : {};
+}
+
+/** Seller text as one plain, redacted line of at most
+ *  {@link PROVIDER_ERROR_CHARS} characters; empty when nothing is left. */
+export function sellerLine(text: string): string {
+  // Masked in a window well past the cap, so a large page costs nothing and a
+  // secret that starts inside the snippet is seen whole.
+  const flat = sanitizeForTerminal(
+    mask(text.slice(0, PROVIDER_ERROR_CHARS * 8)).replace(/\s+/g, ' '),
+  ).trim();
+  const chars = Array.from(flat);
+  return chars.length <= PROVIDER_ERROR_CHARS
+    ? flat
+    : `${chars.slice(0, PROVIDER_ERROR_CHARS).join('')}…`;
 }
 
 /** Nothing this caller may pay: no entry at all, or none on the advertised
@@ -845,10 +1285,83 @@ type DeliverOpts = {
       paid: true;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
+      authorization?: { from: string; nonce: string; validBefore: string };
       registry?: string;
       printBody: boolean;
     }
 );
+
+/**
+ * The 402 as a quote: every accepted payment option in the seller's order, the
+ * resource line, the extensions the seller attached (a listing's advertised
+ * request shape rides there), and the 402 body as data. Nothing was paid, and
+ * the terminal line says so.
+ *
+ * `usd` rides only on a canonical USDC entry, the one kind whose amount is
+ * 6-decimal by construction: a seller listing an 18-decimal entry first had it
+ * labelled as dollars. `payable` marks the entry the paid path would sign, and
+ * the headline prices that entry or says there is none.
+ */
+function deliverQuote(
+  url: string,
+  lane: Lane,
+  res: HttpResponse,
+  challenge: PaymentRequired,
+  chosen: PaymentRequirements | undefined,
+  printBody: boolean,
+): CommandResult {
+  const chosenAt =
+    chosen === undefined ? -1 : challenge.accepts.findIndex((a) => sameDeal(a, chosen));
+  const accepts = challenge.accepts.map((a, i) => ({
+    scheme: a.scheme,
+    network: a.network,
+    asset: a.asset,
+    amount: a.amount,
+    ...(isCanonicalUsdc(a) ? { usd: toMoney(a.amount).usd } : {}),
+    ...(i === chosenAt ? { payable: true as const } : {}),
+    payTo: a.payTo,
+    maxTimeoutSeconds: a.maxTimeoutSeconds,
+    ...(a.extra !== undefined ? { extra: a.extra } : {}),
+  }));
+  const data = {
+    url,
+    lane,
+    status: res.status,
+    paid: false,
+    quote: true,
+    resource: challenge.resource,
+    accepts,
+    ...(challenge.extensions !== undefined ? { extensions: challenge.extensions } : {}),
+    ...(res.json !== undefined ? { body: res.json } : {}),
+    bodyText: res.text,
+  };
+  const host = sanitizeForTerminal(new URL(url).host);
+  const payable = accepts[chosenAt];
+  const headline =
+    payable?.usd !== undefined
+      ? `quote: ${payable.usd} USD to ${host} on ${sanitizeForTerminal(payable.network)} (nothing paid)`
+      : accepts.length === 0
+        ? `quote: ${host} answered 402 with no payment option (nothing paid)`
+        : `quote: ${host} lists no option this wallet can pay, only USDC on Base is supported (nothing paid)`;
+  const body = sanitizeForTerminal(res.text);
+  const preview =
+    printBody || body.length <= BODY_PREVIEW_CHARS
+      ? body
+      : `${body.slice(0, BODY_PREVIEW_CHARS)}\n… truncated; run with --print-body or --json for the full body`;
+  return { data, humanLines: [headline, ...(preview.length > 0 ? [preview] : [])] };
+}
+
+/** The same advertised deal, whether or not the SDK handed back the same object. */
+function sameDeal(a: PaymentRequirements, b: PaymentRequirements): boolean {
+  return (
+    a === b ||
+    (a.scheme === b.scheme &&
+      a.network === b.network &&
+      a.asset.toLowerCase() === b.asset.toLowerCase() &&
+      a.amount === b.amount &&
+      a.payTo.toLowerCase() === b.payTo.toLowerCase())
+  );
+}
 
 function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts): CommandResult {
   const settlementTxHash = opts.paid ? settlementTx(res) : undefined;
@@ -864,6 +1377,7 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
           payTo: opts.requirement.payTo,
           network: opts.requirement.network,
           asset: opts.requirement.asset,
+          ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
         }
       : opts.entitled === true
@@ -875,9 +1389,13 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
     // a caller branching on a delivery must not have to match on prose, which
     // is how an unchecked body passed for a checked one one layer up.
     ...(opts.caveat !== undefined ? { resultUnverified: true, resultCaveat: opts.caveat } : {}),
-    // The body is the product: JSON when the endpoint spoke it, raw text always.
+    // The body is the product: JSON when the endpoint spoke it, raw text always,
+    // and the bytes themselves when it was a file.
     ...(res.json !== undefined ? { body: res.json } : {}),
     bodyText: res.text,
+    ...(res.bytes !== undefined
+      ? { bodyBytes: res.bytes, contentType: res.header('content-type') ?? '' }
+      : {}),
   };
   const headline = opts.paid
     ? `paid ${toMoney(opts.amountAtomic.toString()).usd} USD to ${sanitizeForTerminal(new URL(url).host)}` +
@@ -903,15 +1421,70 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
   };
 }
 
-function settlementTx(res: HttpResponse): string | undefined {
-  const header = res.header(PAYMENT_RESPONSE_HEADER);
+/**
+ * The settlement transaction the payment-response header names (v2's
+ * `PAYMENT-RESPONSE`, or v1's `X-PAYMENT-RESPONSE`): base64 JSON carrying
+ * `transaction`. Read from the protocol header only, never the seller's body.
+ */
+export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
+  const tx = paymentResponse(res)?.transaction;
+  return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
+}
+
+/**
+ * The seller's own word that it did NOT settle: its payment-response header
+ * with `success: false`, and the `errorReason` (or `errorMessage`) it gave, as
+ * one bounded redacted line. Seller text, never instructions. `undefined` when
+ * the header is absent, unreadable or says it settled.
+ */
+function settlementRefusal(res: Pick<HttpResponse, 'header'>): { reason?: string } | undefined {
+  const settle = paymentResponse(res);
+  if (settle?.success !== false) return undefined;
+  const said = [settle.errorReason, settle.errorMessage].find(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0,
+  );
+  const reason = said !== undefined ? sellerLine(said) : '';
+  return reason.length > 0 ? { reason } : {};
+}
+
+/** The decoded payment-response header (v2's `PAYMENT-RESPONSE`, or v1's
+ *  `X-PAYMENT-RESPONSE`) when it is a JSON object, else `undefined`. */
+function paymentResponse(res: Pick<HttpResponse, 'header'>): Record<string, unknown> | undefined {
+  const header = res.header(PAYMENT_RESPONSE_HEADER) ?? res.header(PAYMENT_RESPONSE_HEADER_V1);
   if (header === undefined) return undefined;
   try {
-    const settle = decodePaymentResponseHeader(header);
-    const tx = (settle as { transaction?: unknown }).transaction;
-    return typeof tx === 'string' ? tx : undefined;
+    const settle: unknown = decodePaymentResponseHeader(header);
+    return typeof settle === 'object' && settle !== null
+      ? (settle as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * THE WALLET, OPENED, and a refusal from it marked as the wallet's
+ * (`walletUnavailable`): a missing wallet, one with no passphrase in a process
+ * that cannot prompt, or a key that will not decrypt. The locked wallet's
+ * `USAGE` reads the same as a refused destination's otherwise, and a caller
+ * reporting why nothing was paid has to tell the two apart. The code, message
+ * and fix stay the wallet's own.
+ */
+async function openWallet(provider: WalletProvider): Promise<TenjinSigner> {
+  try {
+    await describeWallet(provider); // WALLET_MISSING with its own fix if none exists
+    return await provider.getSigner();
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    throw new CliError(err.code, err.message, {
+      exitCode: err.exitCode,
+      ...(err.fix !== undefined ? { fix: err.fix } : {}),
+      details: {
+        ...(typeof err.details === 'object' && err.details !== null ? err.details : {}),
+        walletUnavailable: true,
+      },
+      cause: err,
+    });
   }
 }
 

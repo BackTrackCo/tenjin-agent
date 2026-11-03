@@ -16,7 +16,16 @@ permissions: {}
 
 jobs:
   ci:
-    name: CI (lint, typecheck, build, test, audit)
+    # The Node 22 leg keeps the bare name, which is the required check on main.
+    name: CI (lint, typecheck, build, test, audit)${{ matrix.suffix }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: '22'
+            suffix: ''
+          - node: '24'
+            suffix: ' (Node 24)'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -29,7 +38,7 @@ jobs:
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
           cache: pnpm
       - name: Validate generated workspace guidance
         run: node scripts/check-workspace-adapters.mjs
@@ -37,27 +46,82 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      # check = build + test. Offline contract pins (src/contract.test.ts against
-      # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
-      # (scheduled + dispatch) so a server blip can never red an unrelated PR.
+      # check = build + test.
       - run: pnpm run check
-      # Supply-chain advisory scan, WARN-ONLY: advisories publish against a
-      # frozen lockfile, so a blocking gate reds every open PR for drift
-      # unrelated to its diff. A hit annotates the run; clearing it is a
-      # range-scoped override in pnpm-workspace.yaml (see the entries there).
-      - name: Audit (warn-only)
+      # The dist bundles every dependency, so an install's `npm audit` sees none
+      # of them. This fails when the packages in dist differ from the committed
+      # scripts/bundled-packages.json, so one entering or leaving the bundle
+      # shows up in review.
+      - run: node scripts/check-bundled-packages.mjs
+      # Supply-chain advisory scan. WARN-ONLY on ordinary PRs: advisories
+      # publish against a frozen lockfile, so a blocking gate reds every open PR
+      # for drift unrelated to its diff. BLOCKING on the release version PR
+      # (changeset-release/main): merging it is the step right before publish,
+      # and release.yml's pre-publish gate runs this same audit, so a hit is
+      # caught here, before the publish dispatch, not during it. The daily
+      # audit.yml opens the fix PR (range-scoped overrides in pnpm-workspace.yaml).
+      - name: Audit (blocking on the version PR, warn-only elsewhere)
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          pnpm audit --audit-level=high || echo "::warning title=pnpm audit::high/critical advisories in the lockfile; add a range-scoped override in pnpm-workspace.yaml"
-      # Packed-artifact smoke on the engines floor (Node 24). npm-packs the
-      # CLI, installs the tarball into a throwaway consumer, and exercises the
-      # PUBLISHED shape (--version, config, a bogus command) — catching
+          if pnpm audit --audit-level=high; then exit 0; fi
+          if [ "$HEAD_REF" = "changeset-release/main" ]; then
+            echo "::error title=pnpm audit::high/critical advisories would fail the publish gate; merge the audit fix PR (or run the audit workflow), then update this PR"
+            exit 1
+          fi
+          echo "::warning title=pnpm audit::high/critical advisories in the lockfile; the daily audit workflow opens a fix PR"
+      # Packed-artifact smoke on the exact engines floor (Node 22.0.0). npm-packs
+      # the CLI, installs the tarball into a throwaway consumer, and exercises
+      # the PUBLISHED shape (--version, config, a bogus command), catching
       # externalized chunks and missing `files` entries the source-tree tests
-      # can't. The floor IS Node 24 now (tenjin-agent#209: the hook state store
-      # is `node:sqlite`), so this pins the same major the rest of the job uses
-      # and stays a separate step because it exercises the packed tarball.
-      - name: Set up Node 24 (engines floor)
+      # can't. The floor is Claude Code's own, and the shipped router CLI loads
+      # no `node:sqlite`, so nothing above 22.0 is needed. Once, on the 22 leg.
+      - name: Set up Node 22.0.0 (engines floor)
+        if: matrix.node == '22'
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '24'
+          node-version: '22.0.0'
       - name: Packed-artifact smoke
+        if: matrix.node == '22'
         run: bash scripts/pack-smoke.sh
+
+  # Claude Code runs a plugin's exec-form hooks and its stdio server with no
+  # shell, and on Windows only a real executable starts that way. This builds
+  # the plugin and spawns each of its commands as Claude Code would.
+  windows:
+    name: Windows (plugin commands, no shell)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm exec vitest run src/router/hook-form.test.ts src/router/plugin-files.test.ts
+      # `pnpm build` starts with `rm -rf`, which cmd.exe lacks. A fresh checkout has no dist to clear.
+      - run: pnpm exec tsup
+      - run: node scripts/plugin-spawn-smoke.mjs dist/hosts/claude
+      - run: node scripts/installer-smoke.mjs
+
+  installer:
+    name: Installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+      - run: node scripts/installer-smoke.mjs

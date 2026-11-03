@@ -24,6 +24,22 @@ export interface BuiltPayment {
   headers: Record<string, string>;
   /** The exact amount authorized, atomic USDC (from accepts[0]). */
   amountAtomic: bigint;
+  /** The signed EIP-3009 authorization's identity, when the scheme used one:
+   *  enough to ask the token later whether it was spent. */
+  authorization?: { from: string; nonce: string; validBefore: string };
+}
+
+/** `payload.authorization`'s `from`, `nonce` and `validBefore`, or nothing. */
+function authorizationOf(payload: unknown): BuiltPayment['authorization'] {
+  const inner = (payload as { payload?: { authorization?: unknown } } | null)?.payload;
+  const auth = inner?.authorization;
+  if (auth === null || typeof auth !== 'object') return undefined;
+  const { from, nonce, validBefore } = auth as Record<string, unknown>;
+  if (typeof from !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(from)) return undefined;
+  if (typeof nonce !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) return undefined;
+  const before = typeof validBefore === 'number' ? String(validBefore) : validBefore;
+  if (typeof before !== 'string' || !/^\d+$/.test(before)) return undefined;
+  return { from, nonce, validBefore: before };
 }
 
 /**
@@ -124,9 +140,9 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
     core.register(network as `${string}:${string}`, new ExactEvmScheme(lazy));
   }
   core.registerPolicy(canonicalUsdcOnly);
-  // The SDK fires this hook only for sellers whose 402 advertises
-  // `builder-code`, so a seller that never declared it still gets an
-  // extension-free payload. That gating is why attribution stays spec-clean.
+  // The SDK (2.21+) runs this hook on every payment, so every seller gets
+  // Tenjin's service code; a seller that declared `builder-code` also gets its
+  // own fields echoed. Both are the SDK's own payload.
   const builderCode = new BuilderCodeClientExtension(TENJIN_CLI_BUILDER_CODE);
   core.registerExtension(builderCode);
   return { core, http: new x402HTTPClient(core), builderCodeKey: builderCode.key };
@@ -139,16 +155,22 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
  * in a token of its choosing, and the signed EIP-3009 authorization is valid
  * against that token's contract directly, no facilitator required.
  */
-const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
-  requirements.filter((requirement) => {
-    const allowed = ALLOWED_USDC_BY_NETWORK[requirement.network];
-    if (allowed === undefined) return false;
-    try {
-      return getAddress(requirement.asset) === getAddress(allowed);
-    } catch {
-      return false;
-    }
-  });
+export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
+  requirements.filter(isCanonicalUsdc);
+
+/**
+ * Whether an entry names canonical USDC on a chain this CLI pays on. Only such
+ * an amount is 6-decimal by construction, so only it may be shown in USD.
+ */
+export function isCanonicalUsdc(entry: Pick<PaymentRequirements, 'network' | 'asset'>): boolean {
+  const allowed = ALLOWED_USDC_BY_NETWORK[entry.network];
+  if (allowed === undefined) return false;
+  try {
+    return getAddress(entry.asset) === getAddress(allowed);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The entry the SDK would pay, or undefined when it would pay none. The SDK
@@ -251,10 +273,23 @@ export async function buildExactPayment(
   const { core, http, builderCodeKey } = createPayerClient(() => signer);
   const requirement = only ?? selectPayableRequirement(core, paymentRequired);
   if (requirement === undefined) throw noPayableRequirement(paymentRequired.accepts);
+  // THE SDK'S PER-PAYMENT CAP IS THE AUTHORIZED AMOUNT. Since 2.23 the client
+  // refuses anything over $1 unless told otherwise; the spend policy has already
+  // authorized this exact requirement (with consent when it is manual), so the
+  // cap is set to it: the SDK then signs that amount and nothing larger.
+  core.setSpendControls({
+    allowedAssets: [
+      {
+        network: requirement.network,
+        asset: requirement.asset,
+        maxAmountPerPayment: requirement.amount,
+      },
+    ],
+  });
 
   // A single-accept challenge, so nothing can re-select a different or costlier
-  // entry between the check and the signature. Narrow `accepts` only, or the
-  // builder-code hook never fires.
+  // entry between the check and the signature. Narrow `accepts` only, so the
+  // extensions the seller declared still ride along.
   const bound: PaymentRequired = {
     ...paymentRequired,
     accepts: [requirement],
@@ -262,9 +297,11 @@ export async function buildExactPayment(
   };
 
   let headers: Record<string, string>;
+  let authorization: BuiltPayment['authorization'];
   try {
     const payload = await http.createPaymentPayload(bound);
     headers = http.encodePaymentSignatureHeader(payload);
+    authorization = authorizationOf(payload);
   } catch (err) {
     throw new CliError('PAYMENT_FAILED', 'Could not build the x402 payment authorization.', {
       fix: 'Confirm the wallet is a supported EVM account on the advertised network.',
@@ -272,5 +309,9 @@ export async function buildExactPayment(
     });
   }
 
-  return { headers, amountAtomic: BigInt(requirement.amount) };
+  return {
+    headers,
+    amountAtomic: BigInt(requirement.amount),
+    ...(authorization !== undefined ? { authorization } : {}),
+  };
 }

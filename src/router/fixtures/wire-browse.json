@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-06.1",
+  "rows": [
+    {
+      "id": "cmc-quotes",
+      "label": "CoinMarketCap quotes",
+      "does": "Live crypto prices",
+      "price": "1¢",
+      "free": false,
+      "kind": "Live crypto prices"
+    },
+    {
+      "id": "stableenrich-exa-answer",
+      "label": "Exa Answer",
+      "does": "A short answer to a question grounded in live web search, with citations.",
+      "price": "1¢",
+      "free": false,
+      "kind": "Web research"
+    }
+  ]
+}

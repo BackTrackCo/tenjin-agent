@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-06.1",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22",
+    "capabilityId": "context7-docs",
+    "category": "library or API documentation",
+    "provider": "Context7",
+    "label": "Context7 docs",
+    "capabilityDescription": "current, version-specific documentation and code examples for a named library, framework, SDK or CLI",
+    "providerPriceAtomic": "0",
+    "endpoint": "https://tenjin.sh/api/docs-lookup",
+    "usage": "the library and what to look up in it",
+    "hint": "Context7 docs, free: current, version-specific documentation and code examples for a named library, framework, SDK or CLI. Call request({query: \"next.js 16 middleware matcher\", id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22\"}) instead; native tools stay allowed for anything else.",
+    "delivery": "augment",
+    "augmentUrl": "https://tenjin.sh/api/docs-lookup?query=next.js+16+middleware+matcher"
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 210
+  }
+}

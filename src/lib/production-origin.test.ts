@@ -25,7 +25,7 @@ describe('PRODUCTION_ORIGIN', () => {
     const url = new URL(PRODUCTION_ORIGIN);
     expect(url.protocol).toBe('https:');
     // A path, trailing slash, query, or port would survive every consumer here
-    // and then break the ones that concatenate (`${origin}/api/cdp/session`).
+    // and then break the ones that concatenate (`${origin}/api/fund/link`).
     expect(PRODUCTION_ORIGIN).toBe(url.origin);
     expect(PRODUCTION_HOST).toBe(url.host);
   });
@@ -65,7 +65,7 @@ describe('isSameDeployment', () => {
    * the same reason. Removal runbook: docs/safety-model.md.
    */
   it('is exactly the two deployment origins, and nothing has crept in', () => {
-    expect(knownDeploymentOrigins()).toEqual([PRODUCTION_ORIGIN, 'https://tenjin.sh']);
+    expect(knownDeploymentOrigins()).toEqual([PRODUCTION_ORIGIN, 'https://tenjin.blog']);
   });
 
   it('lists the production origin and at least one alias for the cutover', () => {
@@ -162,29 +162,18 @@ describe('no module hardcodes the production host', () => {
 const scriptsDir = fileURLToPath(new URL('../../scripts/', import.meta.url));
 
 /**
- * The skill-mirror automation runs outside the bundle: `sync-skill.mjs` is
- * dependency-free Node (drift CI runs it with no install) and
- * `open-skill-resync-pr.sh` is bash, so neither can import the constant. Pin
- * them from here instead, in the suite that runs on every PR.
- *
- * A grep step in `skill-drift.yml` would not do this job: that workflow is
- * path-filtered to `skills/` and these two scripts, so the cutover commit (which
- * touches neither) never runs it, and the daily resync would go on fetching the
- * dead origin with every check green while `skill-writer.ts` tells users to
- * re-fetch from the new one. This test reds on the commit that causes the drift.
+ * The scripts run outside the bundle (dependency-free Node and bash), so none
+ * can import the constant. Pin them from here instead, in the suite that runs
+ * on every PR.
  */
-describe('the skill-mirror scripts track the same origin', () => {
-  it('fetches the canonical skill from PRODUCTION_ORIGIN', async () => {
-    const mjs = await readFile(join(scriptsDir, 'sync-skill.mjs'), 'utf8');
-    const sh = await readFile(join(scriptsDir, 'open-skill-resync-pr.sh'), 'utf8');
-    expect(mjs).toContain(`const SOURCE_URL = '${PRODUCTION_ORIGIN}/skills.md';`);
-    expect(sh).toContain(`SOURCE_URL=${PRODUCTION_ORIGIN}/skills.md`);
-  });
-
+describe('the scripts track the same origin', () => {
   it('names no other host, in code or in the copy they emit', async () => {
     const offenders: string[] = [];
-    for (const name of await readdir(scriptsDir)) {
-      const lines = (await readFile(join(scriptsDir, name), 'utf8')).split('\n');
+    for (const entry of await readdir(scriptsDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const file = join(entry.parentPath, entry.name);
+      const name = relative(scriptsDir, file);
+      const lines = (await readFile(file, 'utf8')).split('\n');
       lines.forEach((line, i) => {
         const found = line.match(new RegExp(HOST_LITERAL.source, 'gi')) ?? [];
         // Banners, commit messages, and PR bodies name the source too; a stale

@@ -9,9 +9,9 @@ export interface KeystoreDerivationOptions {
 }
 
 /**
- * Ox's asynchronous KDF yields microtasks, which can starve Node timers for the
- * entire derivation. Keep its exact parameters/encoding in a disposable worker:
- * native OpenSSL scrypt rejects the existing N=262144,r=1,p=8 wallet format.
+ * Scrypt's CPU work stays in a disposable worker so timers remain responsive.
+ * The worker accelerates the existing wallet parameters with hash-wasm and
+ * retains Ox for other shapes; native OpenSSL scrypt rejects N=262144,r=1,p=8.
  * No credential-store operation or payment signature runs in this worker.
  */
 export async function deriveKeystoreKey(
@@ -24,7 +24,7 @@ export async function deriveKeystoreKey(
     throw new Error('Keystore derivation timeout must be between 1 and 120000 milliseconds.');
   if (options.signal?.aborted) throw derivationError('AbortError');
 
-  // Source tests run on the same Node 24 floor as the CLI (native type stripping).
+  // Source tests run the .ts worker through native type stripping (unflagged from Node 22.18).
   // Every bundled entry and code-split chunk is adjacent to the worker in dist.
   const url = new URL(
     import.meta.url.endsWith('.ts') ? './keystore-kdf-worker.ts' : './wallet-kdf-worker.mjs',

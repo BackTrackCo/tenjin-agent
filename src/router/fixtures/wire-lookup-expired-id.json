@@ -3,37 +3,27 @@
   "routerVersion": "2026-09-23.1",
   "decision": {
     "action": "execute",
-    "capabilityId": "cmc-quotes",
-    "category": "crypto price quote",
-    "provider": "CoinMarketCap",
-    "capabilityDescription": "latest market quotes (price, market cap, 24h volume, percent changes) for one or more cryptocurrencies",
-    "providerPriceAtomic": "10000",
+    "capabilityId": "context7-docs",
+    "category": "library or API documentation",
+    "provider": "Context7",
+    "capabilityDescription": "current, version-specific documentation and code examples for a named library, framework, SDK or CLI",
+    "providerPriceAtomic": "0",
     "contract": {
-      "arguments": {
-        "symbol": "BTC,ETH",
-        "convert": "USD"
-      },
-      "resultSchema": {
-        "type": "object",
-        "properties": {
-          "data": {
-            "type": "object"
-          }
-        },
-        "required": ["data"]
-      },
       "request": {
-        "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/quotes/latest?symbol=BTC%2CETH&convert=USD",
+        "url": "https://tenjin.sh/api/docs-lookup?query=next.js+16+middleware+matcher+syntax",
         "method": "GET",
         "headers": {
-          "accept": "application/json"
+          "accept": "text/plain"
         }
+      },
+      "arguments": {
+        "query": "next.js 16 middleware matcher syntax"
       }
     }
   },
-  "note": "That decision id was unknown or expired, so this decision was made from the query alone.",
+  "note": "That decision id was unknown or expired, so this pick was made from the query alone.",
   "jev": {
-    "calls": 3,
-    "latencyMs": 1400
+    "calls": 1,
+    "latencyMs": 160
   }
 }

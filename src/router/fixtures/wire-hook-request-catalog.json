@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a2c",
+  "accepts": ["catalog", "spec", "bazaar"],
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Add a soft whoosh when the hero breaks into petals."
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  }
+}

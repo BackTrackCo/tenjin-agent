@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "list the top five tokens on Uniswap's explore page with their prices"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebFetch",
+      "url": "https://app.uniswap.org/explore/tokens"
+    },
+    "nativeOutcome": {
+      "code": 200,
+      "bytes": 85717,
+      "reason": "no_main_content"
+    }
+  }
+}

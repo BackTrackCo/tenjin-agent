@@ -1,31 +1,61 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   HINT_SOURCE,
+  hookOutcome,
   NEAR_EMPTY_BYTES,
   promptSkipReason,
+  runAnswerHook,
+  runAskHook,
   runDelegationHook,
   runNativeHook,
   runPromptHook,
   runShortfallHook,
   shortfallOf,
+  spendShortfall,
   toolNamed,
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
-import { runHookCommand } from './hook-command';
-import { ROUTER_PATH } from './decision';
+import { runHookKind } from './hook-command';
+import { readChoices, readSpec } from './specs';
+import { ROUTE_PAID_PATH } from './decision';
 import {
-  markDelivered,
+  claimRedirect,
   renderProgress,
   resolveProgressSession,
   sessionDir,
-  takeUndelivered,
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
-import type { PrefetchJob } from './augment';
+import type { SignVerdict } from './eligibility';
+import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
+import { writePassphraseRecord } from '../lib/passphrase-record';
+import { FALLBACK_RPC_URLS } from '../lib/usdc-balance';
+
+interface WebFetchSample {
+  url: string;
+  tool_response: { bytes: number; code: number; result: string; url: string };
+}
+
+/** Real WebFetch results (`tool_response`): shells, pages that read fine, and
+ *  a PDF it saved whole. */
+const webFetchSamples = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
+    'utf8',
+  ),
+) as Record<'shell' | 'page', WebFetchSample[]> & { pdf: WebFetchSample };
+
+/** The offer record a redirect leaves for the mod, as it lies on disk. */
+async function offerRecord(sessionId: string, toolUseId: string): Promise<unknown> {
+  const key = createHash('sha256').update(toolUseId).digest('hex');
+  return JSON.parse(await readFile(join(sessionDir(dir, sessionId), `offer-${key}.json`), 'utf8'));
+}
 
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
 const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
@@ -34,8 +64,11 @@ const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 /** The configured default `rpcUrl`, where the balance read goes. */
 const RPC = 'https://mainnet.base.org';
 
+/** The public RPCs a failed read falls back to, in order (`FALLBACK_RPC_URLS`). */
+const RPCS = [RPC, ...FALLBACK_RPC_URLS];
+
 /**
- * What the RPC answers `balanceOf` with: an atomic USDC amount, or a function
+ * What every RPC answers `balanceOf` with: an atomic USDC amount, or a function
  * standing in for a failure. Funded by default (1 USDC), so a test about
  * routing is not a test about the wallet; reset before each test.
  */
@@ -64,14 +97,14 @@ const BASE = 'https://tenjin.sh';
 
 /**
  * A recorded decision answer; `calls` is what the hook sent the router. The
- * balance read goes to {@link RPC} through the same fetch and is answered from
- * {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ * balance read goes to {@link RPC}, or a fallback, through the same fetch and
+ * is answered from {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
  */
 function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
   const calls: unknown[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
-    if (sent.url === RPC) {
+    if (RPCS.includes(sent.url)) {
       rpcCalls.push(sent);
       if (typeof rpcAnswer === 'function') return rpcAnswer(init);
       const word = `0x${rpcAnswer.toString(16).padStart(64, '0')}`;
@@ -102,7 +135,7 @@ const NATIVE = {
 };
 const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape . ' +
+  '$0.015 via https://api.munition.io/v1/firecrawl/scrape . ' +
   'Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) alone and wait for its result.';
 /**
  * The two native-call lines tenjin's `hintFor` writes (tenjin#886): before the
@@ -111,7 +144,7 @@ const HINT =
  */
 const OFFER =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
-  '$0.01 via https://vaaya.ai/api/run/firecrawl/scrape .';
+  '$0.015 via https://api.munition.io/v1/firecrawl/scrape .';
 const PRECALL_HINT = `${OFFER} Call request({query: "https://example.test/spec", id: "k3f9-abcd"}) instead; native tools stay allowed for anything else.`;
 const SHORTFALL_HINT = `${OFFER} If WebFetch couldn't get this, call request({query: "https://example.test/spec", id: "k3f9-abcd"}) and wait for its result.`;
 const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decision, hint } });
@@ -120,7 +153,10 @@ const withHint = (hint: string) => ({ ...EXECUTE, decision: { ...EXECUTE.decisio
 const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request({');
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
-  'If this does not cover it, make your own call again: you will not be redirected twice in a row.';
+  'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
+/** The ask arm's form of it, about the question. */
+const ONE_BLOCK_QUESTION =
+  'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
@@ -130,13 +166,13 @@ const EXECUTE = {
   decision: {
     action: 'execute',
     id: 'k3f9-abcd',
-    capabilityId: 'vaaya-scrape',
+    capabilityId: 'munition-scrape',
     category: 'read an exact page',
     provider: 'Firecrawl',
     capabilityDescription:
       'scrapes one public URL and returns its content as clean markdown or HTML',
-    endpoint: 'https://vaaya.ai/api/run/firecrawl/scrape',
-    providerPriceAtomic: '10000',
+    endpoint: 'https://api.munition.io/v1/firecrawl/scrape',
+    providerPriceAtomic: '15000',
     usage: 'the page URL',
     hint: HINT,
   },
@@ -199,6 +235,9 @@ const SHORT: Record<'WebSearch' | 'WebFetch', unknown> = {
   WebSearch: { query: 'q', results: [], durationSeconds: 1.2, searchCount: 1 },
 };
 
+/** The session whose tool-results hold the recorded PDF sample. */
+const PDF_SESSION = '3080b0f2-f873-488a-bca3-9c6f7789134f';
+
 function nativeEvent(query: string, tool: 'WebSearch' | 'WebFetch' = 'WebSearch'): unknown {
   return {
     hook_event_name: 'PostToolUse',
@@ -230,13 +269,19 @@ describe('the prompt hook', () => {
     // harness actually exposes; every other word, id included, is the server's.
     expect(line).toBe(SEEN);
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
-    // One free call, carrying the packet and nothing else.
+    // One call, on the paid route, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
-    expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
+    expect(sent.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
     // The route reads a STRICT object: an extra field is a 400, which is a
     // turn with no hint.
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    expect(Object.keys(sent.body).sort()).toEqual([
+      'accepts',
+      'harness',
+      'packet',
+      'schemaVersion',
+      'sessionId',
+    ]);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
@@ -246,7 +291,7 @@ describe('the prompt hook', () => {
    * to ask the user instead of using its free tools.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('says nothing when the lookup is %s', async (_label, over) => {
     const fs = await import('node:fs/promises');
@@ -326,6 +371,29 @@ describe('the prompt hook', () => {
     expect(promptSkipReason('yes')).toBe('acknowledgement');
     expect(promptSkipReason('2^1000')).toBeNull();
   });
+
+  /** A TURN THAT HANDS WORK BACK asks for none: a task finishing, a subagent,
+   *  a teammate or another session writing in. No backend call at all. */
+  it.each([
+    ['a task notification', '<task-notification>\n<task-id>b1</task-id> done</task-notification>'],
+    ['an agent message', '<agent-message from="worker">the scrape finished</agent-message>'],
+    ['a teammate message', '  <teammate-message teammate_id="lead">build X</teammate-message>'],
+    ['a cross-session message', '<cross-session-message from="other">hi</cross-session-message>'],
+    ['another session', 'Another Claude session sent a message: look up the BTC price'],
+  ])('never asks about %s', async (_label, prompt) => {
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, skipped: 'handback' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('still asks about a prompt that only mentions those tags later on', async () => {
+    expect(promptSkipReason('what does <task-notification> mean in Claude Code?')).toBeNull();
+  });
 });
 
 describe('the shortfall hook', () => {
@@ -378,7 +446,13 @@ describe('the shortfall hook', () => {
     // The call and how it fared ride INSIDE the packet, in the shape
     // `wire-hook-request-native-shortfall.json` pins.
     const sent = calls[0] as { body: Record<string, unknown> };
-    expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+    expect(Object.keys(sent.body).sort()).toEqual([
+      'accepts',
+      'harness',
+      'packet',
+      'schemaVersion',
+      'sessionId',
+    ]);
     const packet = sent.body.packet as { pendingCall?: unknown; nativeOutcome?: unknown };
     expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
     expect(packet.nativeOutcome).toEqual({ code: 402, bytes: 0 });
@@ -400,6 +474,97 @@ describe('the shortfall hook', () => {
         `couldn't get this, call mcp__x402__request({query: "https://example.test/spec", ` +
         `id: "k3f9-abcd"}) and wait for its result.`,
     );
+  });
+
+  it('offers a page reader after a WebFetch that read only the page shell', async () => {
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
+    const shell = webFetchSamples.shell.find(
+      (s) => s.url === 'https://app.uniswap.org/explore/tokens',
+    )!;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(shell.url, 'WebFetch')) as object),
+        tool_response: shell.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out.action).toBe('execute');
+    const sent = calls[0] as { body: { packet: { nativeOutcome?: unknown } } };
+    expect(sent.body.packet.nativeOutcome).toEqual({
+      code: 200,
+      bytes: 85_717,
+      reason: 'no_main_content',
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { hookEventName: 'PostToolUse' } });
+  });
+
+  /**
+   * A PDF IS READ FOR FREE. WebFetch's summary of arxiv.org/pdf/1706.03762
+   * said it could not parse the binary, but the harness saved the file whole
+   * and `Read` returns every page. The line says so, and nothing is asked.
+   */
+  it('points at the PDF WebFetch saved, free, and asks the router nothing', async () => {
+    const { fetchImpl, calls } = router(withHint(SHORTFALL_HINT));
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        session_id: PDF_SESSION,
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(calls).toHaveLength(0);
+    expect(out).toEqual({
+      response: {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext:
+            `${HINT_SOURCE}: WebFetch's summary cannot read a PDF, but it saved this one whole to ` +
+            '/Users/dev/.claude/projects/-Users-dev-proj/3080b0f2-f873-488a-bca3-9c6f7789134f/' +
+            'tool-results/webfetch-1790892522380-pxva9y.pdf. Read that file for its text, free ' +
+            '(pass pages, such as "1-10", for a long one).',
+        },
+      },
+      savedPdf: true,
+    });
+    expect(
+      shortfallOf({
+        hook_event_name: 'PostToolUse',
+        session_id: PDF_SESSION,
+        tool_name: 'WebFetch',
+        ...pdf,
+      }),
+    ).toBeNull();
+  });
+
+  /** The note names a file in another session's tool-results: not this one's to read. */
+  it('never points at a PDF another session saved', async () => {
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(withHint(SHORTFALL_HINT)).fetchImpl },
+    );
+    expect(out).not.toHaveProperty('savedPdf');
+    expect(JSON.stringify(out)).not.toContain('tool-results');
+  });
+
+  it('says nothing about a saved PDF where the router is off', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ router: { enabled: false } }));
+    const pdf = webFetchSamples.pdf;
+    const out = await runShortfallHook(
+      {
+        ...((await readableEvent(pdf.url, 'WebFetch')) as object),
+        session_id: PDF_SESSION,
+        tool_response: pdf.tool_response,
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl },
+    );
+    expect(out).toEqual({ response: null });
   });
 
   it('offers the lookup after a failed call, carrying its error', async () => {
@@ -509,13 +674,19 @@ describe('the shortfall hook', () => {
 });
 
 /**
- * THE TOOL NAME IS THE ONE THE HARNESS EXPOSES, derived from the name
- * `install` registers the server under, and only the call is rewritten.
+ * THE TOOL NAME IS THE ONE THE HARNESS EXPOSES: the plugin's tool in a process
+ * the plugin launched, the settings install's tool otherwise, and only the
+ * call is rewritten.
  */
 describe('the tool name in a hint', () => {
-  it('comes from the registered server name', () => {
-    expect(REQUEST_TOOL).toBe(`mcp__${MCP_SERVER_NAME}__request`);
-    expect(REQUEST_TOOL).toBe('mcp__x402__request');
+  it('comes from the plugin and server names, in a process the plugin launched', () => {
+    expect(REQUEST_TOOL).toBe(`mcp__plugin_tenjin_${MCP_SERVER_NAME}__request`);
+    expect(
+      toolNamed('Call request({query: "q"})', 'claude', { CLAUDE_PLUGIN_ROOT: '/plugin' }),
+    ).toBe('Call mcp__plugin_tenjin_router__request({query: "q"})');
+    expect(toolNamed('Call request({query: "q"})', 'claude', {})).toBe(
+      'Call mcp__x402__request({query: "q"})',
+    );
   });
 
   it('rewrites every bare call and nothing else', () => {
@@ -537,7 +708,12 @@ describe('the tool name in a hint', () => {
 /** The mechanical shortfall rule, case by case. */
 describe('shortfallOf', () => {
   const fetchWith = (tool_response: unknown) =>
-    shortfallOf({ hook_event_name: 'PostToolUse', tool_name: 'WebFetch', tool_response });
+    shortfallOf({
+      hook_event_name: 'PostToolUse',
+      session_id: 'sess-1',
+      tool_name: 'WebFetch',
+      tool_response,
+    });
 
   // What the harness reported IS the outcome sent: nothing is added or dropped.
   it.each([
@@ -567,10 +743,41 @@ describe('shortfallOf', () => {
     expect(fetchWith(response)).toBeNull();
   });
 
+  /**
+   * A 200 WITH TENS OF KILOBYTES CAN STILL BE NOTHING. app.uniswap.org came
+   * back as its title and YouTube as its footer; the size rule passed both,
+   * and the agent was left with no offer and no page. The summary says so, and
+   * the outcome names why, since its code and size cannot.
+   */
+  it.each([
+    'https://app.uniswap.org/explore/tokens',
+    'https://www.youtube.com/watch?v=zjkBMFhNj_g',
+  ])('counts a WebFetch of %s that read only a shell as short, and says why', (url) => {
+    const sample = webFetchSamples.shell.find((s) => s.url === url)!.tool_response;
+    expect(fetchWith(sample)).toEqual({
+      code: 200,
+      bytes: sample.bytes,
+      reason: 'no_main_content',
+    });
+  });
+
+  it('does not count a WebFetch whose summary is the page answering', () => {
+    for (const { tool_response } of webFetchSamples.page) {
+      expect(fetchWith(tool_response), tool_response.url).toBeNull();
+    }
+  });
+
+  it('counts the status first: a refused shell is a refusal, with no reason', () => {
+    const shell = webFetchSamples.shell[0]!.tool_response;
+    expect(fetchWith({ ...shell, code: 403 })).toEqual({ code: 403, bytes: shell.bytes });
+    expect(fetchWith({ ...shell, code: 404 })).toBeNull();
+  });
+
   it('counts only a search with no result links', () => {
     const search = (results: unknown) =>
       shortfallOf({
         hook_event_name: 'PostToolUse',
+        session_id: 'sess-1',
         tool_name: 'WebSearch',
         tool_response: { query: 'q', results },
       });
@@ -586,18 +793,18 @@ describe('shortfallOf', () => {
   // failure error before it leaves".
   it('reports a failure error whole, and ignores an empty one', () => {
     const fail = (error: unknown) =>
-      shortfallOf({ hook_event_name: 'PostToolUseFailure', tool_name: 'WebFetch', error });
+      shortfallOf({
+        hook_event_name: 'PostToolUseFailure',
+        session_id: 'sess-1',
+        tool_name: 'WebFetch',
+        error,
+      });
     expect(fail('x'.repeat(5_000))?.error).toHaveLength(5_000);
     expect(fail('  ')).toBeNull();
     expect(fail(undefined)).toBeNull();
   });
 });
 
-/**
- * OLD INSTALLS KEEP WORKING. Every alpha install carries PreToolUse on
- * `WebSearch|WebFetch` running `tenjin hook native`; after a CLI update and
- * before a refresh, that command must be a hook with no opinion.
- */
 /** The same call as the harness reports it BEFORE it runs: no response yet. */
 async function preCall(
   subject: string,
@@ -620,7 +827,7 @@ describe('the pre-call hook', () => {
     await fs.writeFile(join(dir, 'config.json'), JSON.stringify(values));
   }
 
-  // What `tenjin install` writes: the fixture's 10000-atomic lookup auto-executes.
+  // What `tenjin install` writes: the fixture's 15000-atomic lookup auto-executes.
   beforeEach(async () => {
     await setConfig(ROUTER_POLICY);
   });
@@ -656,7 +863,7 @@ describe('the pre-call hook', () => {
    * still offer, since `request` can ask the user there.
    */
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     ['past the session budget', { sessionBudget: '20000' }],
   ])('lets the main agent call run when the lookup is %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
@@ -748,23 +955,10 @@ describe('the pre-call hook', () => {
     expect(after.response).not.toBeNull();
   });
 
-  it('is what `tenjin hook native` prints', async () => {
+  it('is what the hook tool answers for a `native` leg', async () => {
     const { fetchImpl } = router(EXECUTE);
-    const written: string[] = [];
-    const io = {
-      stdout: { write: (chunk: string) => written.push(chunk) },
-      stderr: { write: () => true },
-      isTTY: false,
-    } as never;
     const event = await preCall('https://example.test/spec');
-    await runHookCommand('native', io, {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      readEvent: async () => JSON.stringify(event),
-    });
-    expect(written).toHaveLength(1);
-    expect(JSON.parse(written[0]!)).toEqual({
+    expect(await runHookKind('native', event, { dataDir: dir, baseUrl: BASE, fetchImpl })).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
@@ -775,33 +969,39 @@ describe('the pre-call hook', () => {
 });
 
 /**
- * NEVER BLOCKED TWICE IN A ROW FOR ONE KIND OF LOOKUP. A redirect whose lookup
- * does not deliver sends the agent back to its own tools, and a second deny
- * there is a loop: so every call is still routed, the agent's next offer in the
- * same category is withheld once, and anything else is redirected as usual.
+ * NEVER REDIRECTED TWICE FOR ONE TARGET. The deny promises the agent that its
+ * own retry will run, so a retry of the same search or URL always runs, however
+ * the redirected lookup went and whatever ran in between. A shared per-agent
+ * record broke that under parallel calls: A denied, B's offer spent A's record,
+ * and A's retry was denied again (the same LinkedIn URL three times in a row).
  */
-describe('never blocked twice in a row', () => {
+describe('never redirected twice for one target', () => {
   const DENY = { hookSpecificOutput: { permissionDecision: 'deny' } };
-  const WITHHELD = { response: null, action: 'execute', redirectUndelivered: true };
+  /** A retry found redirected before the router is asked: no decision, no action. */
+  const WITHHELD = { response: null, alreadyRedirected: true };
+  const A = 'https://example.test/spec';
+  const B = 'https://example.test/other';
 
-  /** One pre-call WebFetch in `sess-1` (or as `over` says), which the router
-   *  answers with an offer in `category`. Every one of them asks the router. */
+  /** One pre-call call for `subject` in `sess-1` (or as `over` says), which
+   *  the router answers with an offer. Every one of them asks the router,
+   *  except the retry of a target already redirected, which asks nothing. */
   async function nativeCall(
-    category = EXECUTE.decision.category,
+    subject = A,
     over: Record<string, unknown> = {},
+    tool: 'WebSearch' | 'WebFetch' = 'WebFetch',
   ): Promise<Awaited<ReturnType<typeof runNativeHook>>> {
     const { fetchImpl, calls } = router({
       ...EXECUTE,
-      decision: { ...EXECUTE.decision, hint: PRECALL_HINT, category },
+      decision: { ...EXECUTE.decision, hint: PRECALL_HINT },
     });
-    const event = await preCall('https://example.test/spec', 'WebFetch', over);
+    const event = await preCall(subject, tool, over);
     const out = await runNativeHook(event, {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
       homeDir: dir,
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(out.alreadyRedirected === true && out.action === undefined ? 0 : 1);
     return out;
   }
 
@@ -810,7 +1010,7 @@ describe('never blocked twice in a row', () => {
   function lookup(fetchImpl: typeof fetch): ReturnType<typeof runRequestTool> {
     const sink = { write: () => true } as unknown as NodeJS.WritableStream;
     return runRequestTool(
-      { query: 'https://example.test/spec', id: 'k3f9-abcd' },
+      { query: A, id: 'k3f9-abcd' },
       {
         ctx: {
           flags: { json: true, timeout: 5000, baseUrl: BASE },
@@ -824,41 +1024,87 @@ describe('never blocked twice in a row', () => {
     );
   }
 
-  it('withholds the same kind of offer once when nothing was called in between', async () => {
+  it('lets the retry of a redirected call run, and every retry after it', async () => {
     expect((await nativeCall()).response).toMatchObject(DENY);
+    expect(await nativeCall()).toEqual(WITHHELD);
     expect(await nativeCall()).toEqual(WITHHELD);
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (already redirected once)',
     );
   });
 
-  it('withholds it after a lookup that failed, then redirects the call after', async () => {
+  /** The retry would only be withheld, so asking the router for it wrote an
+   *  offer row nobody saw and spent a gate decision: ~45% of a session's rows. */
+  it('asks the router nothing for the retry of a redirected call', async () => {
+    expect((await nativeCall()).response).toMatchObject(DENY);
+    const { fetchImpl, calls } = router(withHint(PRECALL_HINT));
+    const retry = await runNativeHook(await preCall(A, 'WebFetch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      homeDir: dir,
+    });
+    expect(retry).toEqual(WITHHELD);
+    expect(calls).toHaveLength(0);
+    expect(rpcCalls).toHaveLength(1);
+  });
+
+  it('keeps the promise under parallel calls: A, then B, then A again', async () => {
+    expect((await nativeCall(A)).response).toMatchObject(DENY);
+    expect((await nativeCall(B)).response).toMatchObject(DENY);
+    expect(await nativeCall(A)).toEqual(WITHHELD);
+    expect(await nativeCall(B)).toEqual(WITHHELD);
+  });
+
+  it('denies two parallel copies of one call once', async () => {
+    const outs = await Promise.all([nativeCall(), nativeCall()]);
+    expect(outs.filter((out) => out.response !== null)).toHaveLength(1);
+    expect(outs.filter((out) => out.alreadyRedirected === true)).toHaveLength(1);
+  });
+
+  it('lets the retry run after its lookup failed', async () => {
     expect((await nativeCall()).response).toMatchObject(DENY);
     const failed = await lookup(router({ error: { code: 'nope', message: 'no' } }, 503).fetchImpl);
     expect(failed.envelope.status).toBe('failed');
     expect(await nativeCall()).toEqual(WITHHELD);
-    expect((await nativeCall()).response).toMatchObject(DENY);
   });
 
-  it('redirects an offer of another kind as usual, which becomes the last one', async () => {
-    expect((await nativeCall('read an exact page')).response).toMatchObject(DENY);
-    expect((await nativeCall('web research')).response).toMatchObject(DENY);
-    expect(await nativeCall('web research')).toEqual(WITHHELD);
+  it('keys a URL as it parses, and a search by its own words', async () => {
+    expect((await nativeCall('https://EXAMPLE.test/spec')).response).toMatchObject(DENY);
+    expect(await nativeCall(A)).toEqual(WITHHELD);
+    expect((await nativeCall(A, {}, 'WebSearch')).response).toMatchObject(DENY);
+    expect(await nativeCall(A, {}, 'WebSearch')).toEqual(WITHHELD);
+    expect((await nativeCall('site:example.test spec', {}, 'WebSearch')).response).toMatchObject(
+      DENY,
+    );
   });
 
-  it('redirects the same kind again once the lookup was fulfilled', async () => {
-    expect((await nativeCall()).response).toMatchObject(DENY);
-    // What `request` does on `fulfilled`; tool.test.ts pins that it does.
-    await markDelivered(dir, 'k3f9-abcd');
-    expect((await nativeCall()).response).toMatchObject(DENY);
+  it('redirects the same target again once its claim has expired', async () => {
+    const start = Date.now();
+    const at = async (now: number) => {
+      const { fetchImpl } = router({
+        ...EXECUTE,
+        decision: { ...EXECUTE.decision, hint: PRECALL_HINT },
+      });
+      return runNativeHook(await preCall(A), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+        homeDir: dir,
+        now: () => now,
+      });
+    };
+    expect((await at(start)).response).toMatchObject(DENY);
+    expect(await at(start + 60_000)).toEqual(WITHHELD);
+    expect((await at(start + 11 * 60_000)).response).toMatchObject(DENY);
   });
 
-  it('keeps the main agent and a subagent to a record each', async () => {
+  it('keeps the main agent and a subagent to a claim each', async () => {
     const subagent = { agent_id: 'a1', agent_type: 'general-purpose' };
     expect((await nativeCall()).response).toMatchObject(DENY);
-    expect((await nativeCall(undefined, subagent)).response).toMatchObject(DENY);
+    expect((await nativeCall(A, subagent)).response).toMatchObject(DENY);
     expect(await nativeCall()).toEqual(WITHHELD);
-    expect(await nativeCall(undefined, subagent)).toEqual(WITHHELD);
+    expect(await nativeCall(A, subagent)).toEqual(WITHHELD);
   });
 
   it('leaves another session to be routed as usual', async () => {
@@ -866,7 +1112,7 @@ describe('never blocked twice in a row', () => {
     const other = await transcriptFor([
       { type: 'user', sessionId: 'sess-2', message: { content: 'please read the spec' } },
     ]);
-    const elsewhere = await nativeCall(undefined, { session_id: 'sess-2', transcript_path: other });
+    const elsewhere = await nativeCall(A, { session_id: 'sess-2', transcript_path: other });
     expect(elsewhere.response).toMatchObject(DENY);
   });
 });
@@ -881,7 +1127,7 @@ describe('never blocked twice in a row', () => {
  */
 describe('a wallet that cannot cover the lookup', () => {
   it('reads one balanceOf for the wallet, and denies when it covers the price', async () => {
-    rpcAnswer = 10_000n; // the fixture's price, exactly
+    rpcAnswer = 15_000n; // the fixture's price, exactly
     const { fetchImpl } = router(EXECUTE);
     const out = await runNativeHook(await preCall('https://example.test/spec'), {
       dataDir: dir,
@@ -910,7 +1156,7 @@ describe('a wallet that cannot cover the lookup', () => {
 
   it.each([
     ['holds no USDC', 0n],
-    ['holds less than the price', 9_999n],
+    ['holds less than the price', 14_999n],
   ])('lets the free call run, and shows no hint, when it %s', async (_label, balance) => {
     rpcAnswer = balance;
     const { fetchImpl } = router(EXECUTE);
@@ -935,6 +1181,15 @@ describe('a wallet that cannot cover the lookup', () => {
       deps,
     );
     expect(after.response).toBeNull();
+  });
+
+  /** Base's public RPC refuses the sixth `eth_call` in a second, which a
+   *  burst of parallel lookups reaches: a minute-old read stands. */
+  it('reads the balance once for a burst of lookups', async () => {
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
+    expect((await runNativeHook(await preCall('https://x.test/a'), deps)).response).not.toBeNull();
+    expect((await runNativeHook(await preCall('https://x.test/b'), deps)).response).not.toBeNull();
+    expect(rpcCalls).toHaveLength(1);
   });
 
   it.each([
@@ -963,6 +1218,8 @@ describe('a wallet that cannot cover the lookup', () => {
       warn: (line) => lines.push(line),
     });
     expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    // Every fallback was asked, in order, before the policy decided alone.
+    expect(rpcCalls.map((call) => call.url)).toEqual(RPCS);
     expect(lines).toEqual([
       "tenjin hook: the wallet's USDC balance could not be read from mainnet.base.org, so the spend policy alone decides",
     ]);
@@ -989,7 +1246,9 @@ describe('a wallet that cannot cover the lookup', () => {
     expect(rpcCalls).toHaveLength(0);
   });
 
-  it('reads nothing, and leaves the policy to decide, with no wallet file', async () => {
+  /** No wallet file and no key is a wallet that definitely cannot sign: the
+   *  free call runs rather than a redirect to a call that cannot pay. */
+  it('withholds, and reads nothing, with no wallet file and no key', async () => {
     const fs = await import('node:fs/promises');
     await fs.rm(join(dir, 'wallet.json'));
     const { fetchImpl } = router(EXECUTE);
@@ -997,8 +1256,10 @@ describe('a wallet that cannot cover the lookup', () => {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
+      env: {},
     });
-    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toContain('native tools (wallet cannot sign)');
     expect(rpcCalls).toHaveLength(0);
   });
 
@@ -1015,6 +1276,226 @@ describe('a wallet that cannot cover the lookup', () => {
     });
     expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
     expect(rpcCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * A WALLET THAT DEFINITELY CANNOT SIGN withholds every offer, a discovered one
+ * where the user could be asked included (Q3): approval cannot unlock a wallet
+ * mid-session. An unknown signer still offers: only `blocked` gates.
+ */
+describe('a wallet that cannot sign', () => {
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string } };
+  const blocked: SignVerdict = {
+    status: 'blocked',
+    reason: 'passphrase_missing',
+    detail: WALLET_REASONS.passphrase_missing.reason,
+    fix: WALLET_REASONS.passphrase_missing.fix,
+  };
+  const unknown: SignVerdict = {
+    status: 'unknown',
+    reason: 'keychain_locked',
+    detail: 'the keychain holding the passphrase did not answer',
+  };
+
+  it("withholds a curated offer on the payer's blocked verdict, and the footer says why", async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
+    expect(await renderProgress(dir, 'sess-1')).toContain('native tools (wallet cannot sign)');
+    // A blocked signer is never asked for its balance.
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  it('withholds a discovered offer too, though the user could be asked', async () => {
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
+  });
+
+  /** Approving an over-cap call cannot unlock the wallet either: the blocked
+   *  signer wins over the policy's `needs_approval`. */
+  it('withholds a discovered offer priced over the cap too, and shows it on an unknown verdict', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '50000', confirm: 'above:50000' }),
+    );
+    const terms = { providerPriceAtomic: '53501', endpoint: 'https://example.test/spec' };
+    expect(
+      await spendShortfall(
+        terms,
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+        Date.now() + 3_000,
+      ),
+    ).toMatchObject({ withheld: 'wallet cannot sign', signBlocked: true });
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => blocked,
+    });
+    expect(out).toMatchObject({ response: null, action: 'discovered', withheld: true });
+
+    expect(
+      await spendShortfall(
+        terms,
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => unknown },
+        Date.now() + 3_000,
+      ),
+    ).toMatchObject({ withheld: 'offer needs approval' });
+    const shown = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(shown).toMatchObject({ action: 'discovered', id: DISCOVERED.decision.id });
+    expect(JSON.stringify(shown.response)).toContain('needs_approval');
+  });
+
+  it('offers on an unknown verdict', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    const discovered = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+      env: {},
+      signer: () => unknown,
+    });
+    expect(discovered).toMatchObject({ action: 'discovered', id: DISCOVERED.decision.id });
+    expect(discovered.response).not.toBeNull();
+  });
+
+  /** S13: the sidecar names the file store and its file is gone. Without the
+   *  variable nothing can open the wallet; with it, the variable is a source. */
+  it('withholds when the saved passphrase file is gone and the variable is unset, and offers when it is set', async () => {
+    await writePassphraseRecord(dir, WALLET, { store: 'file', by: 'create' });
+    const without = await runNativeHook(await preCall('https://example.test/spec'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      env: {},
+    });
+    expect(without).toMatchObject({ response: null, withheld: true });
+    const withVar = await runNativeHook(await preCall('https://example.test/spec2'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      env: { TENJIN_WALLET_PASSPHRASE: 'set-but-unchecked' },
+    });
+    expect(withVar.response).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
+  });
+
+  /** A free call pays nothing: no wallet at all (`--no-wallet`), or one that
+   *  cannot sign, never withholds it, on any leg. */
+  it('offers a free curated call with no wallet, on the prompt and delegation legs', async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(join(dir, 'wallet.json'));
+    const FREE = { ...EXECUTE, decision: { ...EXECUTE.decision, providerPriceAtomic: '0' } };
+    expect(
+      await spendShortfall(
+        { providerPriceAtomic: '0', endpoint: 'https://example.test/spec' },
+        { dataDir: dir, baseUrl: BASE, env: {} },
+        Date.now() + 3_000,
+      ),
+    ).toBeNull();
+    expect(
+      await spendShortfall(
+        { providerPriceAtomic: '0', endpoint: 'https://example.test/spec' },
+        { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+        Date.now() + 3_000,
+      ),
+    ).toBeNull();
+    const prompt = await runPromptHook(promptEvent('what does the next.js matcher do'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(FREE).fetchImpl,
+      env: {},
+    });
+    expect(prompt).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
+    expect(prompt.response).not.toBeNull();
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'Read the spec.' } },
+    ]);
+    const task = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: {
+          description: 'read the spec',
+          prompt: 'Read https://example.test/spec and summarize the auth section.',
+          subagent_type: 'general-purpose',
+        },
+      },
+      {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(FREE).fetchImpl,
+        env: {},
+        signer: () => blocked,
+      },
+    );
+    expect(task).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
+    expect(task.response).not.toBeNull();
+  });
+
+  /** The note rides in a hook's `additionalContext`, so its reader is the
+   *  model: it asks the person to repair, and never names the variable (B1). */
+  it("words a blocked signer's note for the model", async () => {
+    const shortfall = await spendShortfall(
+      { providerPriceAtomic: '15000', endpoint: 'https://example.test/spec' },
+      { dataDir: dir, baseUrl: BASE, env: {}, signer: () => blocked },
+      Date.now() + 3_000,
+    );
+    expect(shortfall).toEqual({
+      withheld: 'wallet cannot sign',
+      note: `Note: Tenjin's wallet cannot pay for this (${WALLET_REASONS.passphrase_missing.reason}); ${ASK_FOR_REPAIR}`,
+      signBlocked: true,
+    });
+    expect(shortfall!.note).not.toContain('TENJIN_WALLET_PASSPHRASE=');
+    expect(shortfall!.note).not.toContain(REPAIR_CLAUSE);
+  });
+
+  it('words a malformed key from the files alone, for the model', async () => {
+    const shortfall = await spendShortfall(
+      { providerPriceAtomic: '15000', endpoint: 'https://example.test/spec' },
+      { dataDir: dir, baseUrl: BASE, env: { TENJIN_WALLET_KEY: '0xnotakey' } },
+      Date.now() + 3_000,
+    );
+    expect(shortfall).toMatchObject({ withheld: 'wallet cannot sign', signBlocked: true });
+    expect(shortfall!.note).toContain(WALLET_REASONS.env_key_invalid.agentFix);
   });
 });
 
@@ -1273,10 +1754,35 @@ describe('what the hook leaves for the status line', () => {
 
     expect(out).toMatchObject({ response: null, action: 'native' });
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · prompt: native tools (no x402 payment)',
+      'x402 · prompt: native tools (router chose native)',
     );
     // The session is still known, so a lookup it makes later can be attributed.
     expect(await resolveProgressSession(dir, {})).toBe(sessionDir(dir, 'sess-1'));
+  });
+
+  it('names an unpaid routing fee as unpaid, never as the router choosing native tools', async () => {
+    const fetchImpl = (async () => Response.json({}, { status: 402 })) as typeof fetch;
+
+    await runPromptHook(promptEvent('what is the current price of ETH in USD'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: no_payer');
+  });
+
+  it('names an offer this build skipped as such, never as the router choosing native tools', () => {
+    const skipped = {
+      action: 'native' as const,
+      diagnostics: {
+        reasonCode: 'requires_unmet',
+        stage: 'client',
+        missing: ['x'],
+        nextAction: '',
+      },
+    };
+    expect(hookOutcome(skipped)).toBe('native tools (offer needs newer tenjin)');
   });
 
   it('names the native search stage the way the demo does', async () => {
@@ -1290,7 +1796,7 @@ describe('what the hook leaves for the status line', () => {
 
     expect(out).toMatchObject({ response: null });
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · search: native tools (no x402 payment)',
+      'x402 · search: native tools (router chose native)',
     );
   });
 
@@ -1654,7 +2160,7 @@ describe('a subagent', () => {
    * A SUBAGENT CANNOT REACH THE USER, so an offer it would need approval for
    * is not shown at all. The same evaluation `request` runs decides it: price
    * cap, allowlist, session budget and confirm. The fixture's provider price is
-   * 10000 atomic, paid to vaaya.ai.
+   * 15000 atomic, paid to api.munition.io.
    */
   async function subagentOffer(): Promise<{ response: unknown; withheld?: true }> {
     const path = await parentTranscript();
@@ -1664,7 +2170,7 @@ describe('a subagent', () => {
   }
 
   it.each([
-    ['above maxAutoSpend', { maxAutoSpend: '9999', confirm: 'above:9999' }],
+    ['above maxAutoSpend', { maxAutoSpend: '14999', confirm: 'above:14999' }],
     [
       'to a host outside allowlistCreators',
       { allowlistCreators: ['wolframalpha.x402.paysponge.com'] },
@@ -1692,8 +2198,8 @@ describe('a subagent', () => {
 
   it.each([
     ['retired settings do not suppress offers', { confirm: 'always', bazaarPay: false }],
-    ['at maxAutoSpend', { maxAutoSpend: '10000', confirm: 'above:10000' }],
-    ['to an allowlisted host', { allowlistCreators: ['vaaya.ai'] }],
+    ['at maxAutoSpend', { maxAutoSpend: '15000', confirm: 'above:15000' }],
+    ['to an allowlisted host', { allowlistCreators: ['api.munition.io'] }],
   ])('is offered a lookup that would auto-execute, %s', async (_label, over) => {
     await setConfig({ ...ROUTER_POLICY, ...over });
     const out = await subagentOffer();
@@ -1920,7 +2426,13 @@ describe('the delegation hook', () => {
       // The task is the current message, the parent's turn is history, and
       // it is the ordinary hook body: no pending call, nothing new on the wire.
       const sent = calls[0] as { body: Record<string, unknown> };
-      expect(Object.keys(sent.body).sort()).toEqual(['packet', 'schemaVersion']);
+      expect(Object.keys(sent.body).sort()).toEqual([
+        'accepts',
+        'harness',
+        'packet',
+        'schemaVersion',
+        'sessionId',
+      ]);
       const packet = sent.body.packet as {
         current: { text: string };
         history: unknown;
@@ -1987,7 +2499,7 @@ describe('the delegation hook', () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '9999' }),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '14999' }),
     );
     const { fetchImpl } = router(EXECUTE);
     const out = await runDelegationHook(await delegation(), {
@@ -2061,30 +2573,54 @@ describe('no hook but the pre-call one', () => {
 });
 
 /**
- * FREE DOCS ON TOP OF A SEARCH, NEVER IN PLACE OF ONE. A free offer on a
- * WebSearch is not a deny: the search runs, the docs are fetched beside it, and
- * the after-call arm puts them first in the search's own results. The detached
- * fetch is replaced here by a recorder, and each test writes what the fetch
- * would have written, in the shape `PREFETCH_SCRIPT` writes it
- * (`augment.test.ts` runs that script for real).
+ * A FREE LOOKUP NOTED AFTER A SEARCH, NEVER IN PLACE OF ONE AND NEVER FETCHED
+ * FOR IT. A free offer on a WebSearch is not a deny: the search runs with no
+ * output, the server's line is kept, and the after-call arm shows it once the
+ * search has run, only when the server sent it as `delivery: "note"`. Any
+ * other free offer before a search runs silent. Generic: keyed on the price
+ * and the delivery, never on the service.
  */
-describe('free docs on top of a search', () => {
-  const DOCS = 'library or API documentation';
+describe('a free lookup noted after a search', () => {
+  const ID = 'k3f9-abcd';
+  const NOTE_HINT = `Context7 docs, free: current, version-specific documentation. If WebSearch couldn't get this, call request({query: "next.js middleware matcher", id: "${ID}"}) and wait for its result.`;
   const FREE = {
     ...EXECUTE,
     decision: {
       ...EXECUTE.decision,
       capabilityId: 'context7-docs',
-      category: DOCS,
+      category: 'library or API documentation',
       provider: 'Context7',
+      label: 'Context7 docs',
       capabilityDescription: 'current, version-specific documentation for a named library',
       endpoint: `${BASE}/api/docs-lookup`,
       providerPriceAtomic: '0',
       usage: 'the library and what to look up in it',
-      hint:
-        'Context7 fits this: current, version-specific documentation. Free via ' +
-        `${BASE}/api/docs-lookup . Call request({query: "next.js middleware", id: "k3f9-abcd"}) instead.`,
+      hint: NOTE_HINT,
+      delivery: 'note',
     },
+  };
+  /** The same offer as today's production server sends it: `augment`, with
+   *  the pre-call wording and the URL an older build fetched. */
+  const PRECALL_FREE_HINT = `Context7 docs, free: current, version-specific documentation. Call request({query: "next.js middleware matcher", id: "${ID}"}) instead; native tools stay allowed for anything else.`;
+  const AUGMENT = {
+    ...FREE,
+    decision: {
+      ...FREE.decision,
+      hint: PRECALL_FREE_HINT,
+      delivery: 'augment',
+      augmentUrl: `${BASE}/api/docs-lookup?query=next.js+middleware+matcher`,
+    },
+  };
+  /** As a server sends any other line. */
+  const OFFER = { ...FREE, decision: { ...FREE.decision, delivery: 'offer' } };
+  /** And as a server from before `delivery` sends it. */
+  const BARE = {
+    ...FREE,
+    decision: Object.fromEntries(
+      Object.entries({ ...FREE.decision, hint: PRECALL_FREE_HINT }).filter(
+        ([field]) => field !== 'delivery',
+      ),
+    ),
   };
   /** A WebSearch response as Claude Code reports it after the call. */
   const SEARCH = {
@@ -2092,27 +2628,35 @@ describe('free docs on top of a search', () => {
     results: [
       {
         tool_use_id: 'srvtoolu_01',
-        content: [
-          { title: 'Routing: Middleware', url: 'https://nextjs.org/docs/app/middleware' },
-          { title: 'matcher config', url: 'https://example.test/matcher' },
-        ],
+        content: [{ title: 'Routing: Middleware', url: 'https://nextjs.org/docs/app/middleware' }],
       },
-      'Middleware runs before a request completes; `matcher` filters the paths.',
     ],
     durationSeconds: 4.8,
     searchCount: 1,
   };
-  const TEXT = 'Context7 matched: /vercel/next.js.\n\n### Matcher\nexport const config = {...}';
-  const LINE =
-    "Tenjin router added Context7 docs for this search (free). If they don't cover it, use the web results below.\n\n" +
-    TEXT;
-
-  let jobs: PrefetchJob[];
-  beforeEach(() => {
-    jobs = [];
+  const SHORT = { ...SEARCH, results: [] };
+  const lineFor = (hint: string) =>
+    `${HINT_SOURCE}: your WebSearch call ran. Optional: ${toolNamed(hint)}`;
+  const noted = (hint: string, eventName = 'PostToolUse') => ({
+    response: {
+      hookSpecificOutput: { hookEventName: eventName, additionalContext: lineFor(hint) },
+    },
+    action: 'execute',
+    id: ID,
+    noted: true,
   });
 
-  function deps(body: unknown = FREE, over: Record<string, unknown> = {}) {
+  const key = (text: string) => createHash('sha256').update(text).digest('hex');
+  const notePath = (toolUseId: string, session = 'sess-1') =>
+    join(sessionDir(dir, session), `note-${key(toolUseId)}.json`);
+  const labelPath = (id = ID) => join(dir, 'progress', 'specs', `${key(id)}.label.json`);
+  const exists = async (path: string) =>
+    readFile(path, 'utf8').then(
+      () => true,
+      () => false,
+    );
+
+  function deps(body: unknown, over: Record<string, unknown> = {}) {
     const { fetchImpl, calls } = router(body);
     return {
       calls,
@@ -2121,36 +2665,33 @@ describe('free docs on top of a search', () => {
         baseUrl: BASE,
         fetchImpl,
         homeDir: dir,
-        prefetch: (job: PrefetchJob) => jobs.push(job),
-        augmentWaitMs: 300,
+        warn: () => undefined,
         ...over,
       },
     };
   }
 
-  function before(
+  async function before(
     query: string,
     toolUseId: string,
     over: Record<string, unknown> = {},
     body: unknown = FREE,
+    depsOver: Record<string, unknown> = {},
   ) {
-    const { deps: d, calls } = deps(body);
-    return preCall(query, 'WebSearch', { tool_use_id: toolUseId, ...over }).then(async (event) => ({
-      out: await runNativeHook(event, d),
-      calls,
-    }));
+    const { deps: d, calls } = deps(body, depsOver);
+    const event = await preCall(query, 'WebSearch', { tool_use_id: toolUseId, ...over });
+    return { out: await runNativeHook(event, d), calls };
   }
 
   /** The after-call event, against a router that WOULD offer, so a shortfall
-   *  offer on an augmented call cannot hide. */
+   *  offer on a noted call cannot hide. */
   async function after(
     query: string,
     toolUseId: string,
     response: unknown = SEARCH,
     over: Record<string, unknown> = {},
-    body: unknown = EXECUTE,
   ) {
-    const { deps: d, calls } = deps(body);
+    const { deps: d, calls } = deps(withHint(PRECALL_HINT));
     const event = {
       ...((await readableEvent(query, 'WebSearch')) as object),
       tool_use_id: toolUseId,
@@ -2160,309 +2701,905 @@ describe('free docs on top of a search', () => {
     return { out: await runShortfallHook(event, d), calls };
   }
 
-  /** What the prefetch writes when it is done. */
-  async function answer(job: PrefetchJob, status: number, text = ''): Promise<void> {
-    const fs = await import('node:fs/promises');
-    await fs.writeFile(job.out, JSON.stringify({ status, text }));
-  }
-
-  it('never denies the search, and adds the docs as one string above its results', async () => {
+  it('lets the search run with no output and shows the line after it, delivery note', async () => {
     const pre = await before('next.js middleware matcher', 'toolu_1');
     expect(pre.out).toEqual({
       response: null,
       action: 'execute',
-      id: 'k3f9-abcd',
+      id: ID,
       free: true,
-      augmenting: true,
+      noted: true,
     });
-    // One gate call, and no balance read: nothing here is paid.
+    // One gate call and nothing else: no balance read, no docs fetched.
     expect(pre.calls).toHaveLength(1);
     expect(rpcCalls).toHaveLength(0);
-    // The agent's own query, on the endpoint the offer named, with the CLI's identity.
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.url).toBe(`${BASE}/api/docs-lookup?query=next.js+middleware+matcher`);
-    expect(jobs[0]!.userAgent).toMatch(/^tenjin-cli\//);
-    expect(jobs[0]!.out.startsWith(sessionDir(dir, 'sess-1'))).toBe(true);
-    // Not a redirect: nothing recorded for the one-block rule or the offer mark.
+    // Not a redirect: nothing for the one-block rule or the offer mark.
     expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
-    expect(await takeUndelivered(dir, 'sess-1', undefined, DOCS)).toBe(false);
+    expect(
+      await claimRedirect(dir, 'sess-1', undefined, 'WebSearch next.js middleware matcher'),
+    ).toBe(true);
+    // Both records, and the id bound to this session as a shown line's is.
+    expect(JSON.parse(await readFile(notePath('toolu_1'), 'utf8'))).toEqual({
+      version: 1,
+      at: expect.any(Number) as number,
+      offerId: ID,
+      line: NOTE_HINT,
+    });
+    expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
+      id: ID,
+      label: 'Context7 docs',
+    });
+    expect(await resolveProgressSession(dir, { id: ID })).toBe(sessionDir(dir, 'sess-1'));
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: paid lookup offered (Context7)',
+    );
+
+    const post = await after('next.js middleware matcher', 'toolu_1');
+    expect(post.out).toEqual(noted(NOTE_HINT));
+    expect(post.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['augment, from the server in production today', AUGMENT],
+    ['offer', OFFER],
+    ['absent, from a server older than both', BARE],
+  ])('lets the search run with no output and no line after it, delivery %s', async (_l, body) => {
+    const pre = await before('next.js middleware matcher', 'toolu_1', {}, body);
+    expect(pre.out).toEqual({ response: null, action: 'execute', id: ID, free: true });
+    expect(pre.calls).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(0);
+    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+    expect(await exists(notePath('toolu_1'))).toBe(false);
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · search: native tools (free lookup, call runs)',
     );
+    // A silent offer spends no note window: a note for the same query still shows.
+    expect((await after('next.js middleware matcher', 'toolu_1')).out).toEqual({ response: null });
+    expect((await before('next.js middleware matcher', 'toolu_2')).out.noted).toBe(true);
+  });
 
-    await answer(jobs[0]!, 200, TEXT);
-    const post = await after('next.js middleware matcher', 'toolu_1');
-    expect(post.out).toMatchObject({ augmented: 'added' });
-    const updated = (
-      post.out.response as {
-        hookSpecificOutput: { hookEventName: string; updatedToolOutput: typeof SEARCH };
-      }
-    ).hookSpecificOutput;
-    expect(updated.hookEventName).toBe('PostToolUse');
-    // EXACTLY one string prepended; every other field and item as the harness sent it.
-    expect(updated.updatedToolOutput).toEqual({ ...SEARCH, results: [LINE, ...SEARCH.results] });
-    expect(updated.updatedToolOutput.results).toHaveLength(SEARCH.results.length + 1);
-    // The router is not asked after the call.
+  it('shows the line after a failed search under its own event name, and nothing on an interrupt', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    const failed = await after('next.js middleware matcher', 'toolu_1', undefined, {
+      hook_event_name: 'PostToolUseFailure',
+      tool_response: undefined,
+      error: 'Web search failed',
+    });
+    expect(failed.out).toEqual(noted(NOTE_HINT, 'PostToolUseFailure'));
+    expect(failed.calls).toHaveLength(0);
+    await before('zod v4 coerce', 'toolu_2');
+    const cut = await after('zod v4 coerce', 'toolu_2', undefined, {
+      hook_event_name: 'PostToolUseFailure',
+      tool_response: undefined,
+      error: 'Interrupted',
+      is_interrupt: true,
+    });
+    expect(cut.out).toEqual({ response: null });
+    expect(cut.calls).toHaveLength(0);
+  });
+
+  it('gives a noted search that came back short the note, and asks the router nothing', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
+    const post = await after('next.js middleware matcher', 'toolu_1', SHORT);
+    expect(post.out).toEqual(noted(NOTE_HINT));
     expect(post.calls).toHaveLength(0);
   });
 
-  it('is what `tenjin hook shortfall` prints', async () => {
-    await before('zod v4 coerce', 'toolu_1');
-    await answer(jobs[0]!, 200, TEXT);
-    const written: string[] = [];
-    const io = {
-      stdout: { write: (chunk: string) => written.push(chunk) },
-      stderr: { write: () => true },
-      isTTY: false,
-    } as never;
+  it('is what the hook tool answers for a `shortfall` leg', async () => {
+    await before('next.js middleware matcher', 'toolu_1');
     const event = {
-      ...((await readableEvent('zod v4 coerce', 'WebSearch')) as object),
+      ...((await readableEvent('next.js middleware matcher', 'WebSearch')) as object),
       tool_use_id: 'toolu_1',
       tool_response: SEARCH,
     };
-    await runHookCommand('shortfall', io, {
-      ...deps(EXECUTE).deps,
-      readEvent: async () => JSON.stringify(event),
+    expect(await runHookKind('shortfall', event, deps(EXECUTE).deps)).toEqual(
+      noted(NOTE_HINT).response,
+    );
+  });
+
+  it("notes one agent's identical search once in five minutes, and each agent's own", async () => {
+    let clock = Date.now();
+    const at = { now: () => clock };
+    const run = async (toolUseId: string, over: Record<string, unknown> = {}) =>
+      (await before('next.js middleware matcher', toolUseId, over, FREE, at)).out;
+    expect(await run('toolu_1')).toMatchObject({ free: true, noted: true });
+    // The same search again: it runs, undenied, with no line after it.
+    clock += 1;
+    const again = await run('toolu_2');
+    expect(again).toMatchObject({ response: null, free: true });
+    expect(again.noted).toBeUndefined();
+    expect(await exists(notePath('toolu_2'))).toBe(false);
+    expect(await renderProgress(dir, 'sess-1', { now: clock })).toBe(
+      'x402 · search: native tools (free lookup, call runs)',
+    );
+    // An ordinary call after it runs: a fine search says nothing.
+    expect((await after('next.js middleware matcher', 'toolu_2')).out).toEqual({ response: null });
+    // A subagent's identical search is its own.
+    await defineAgent('general-purpose', 'WebSearch, mcp__x402__request');
+    expect(await run('toolu_3', { agent_id: 'a1', agent_type: 'general-purpose' })).toMatchObject({
+      noted: true,
     });
-    expect(written).toHaveLength(1);
-    expect(JSON.parse(written[0]!)).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PostToolUse',
-        updatedToolOutput: { ...SEARCH, results: [LINE, ...SEARCH.results] },
-      },
+    // And past the window, the same agent's is noted again.
+    clock += 5 * 60_000 + 1;
+    expect(await run('toolu_4')).toMatchObject({ noted: true });
+  });
+
+  it('gives six parallel copies of one search one note, before and after the window', async () => {
+    let clock = Date.now();
+    const at = { now: () => clock };
+    const copies = async (prefix: string) =>
+      Promise.all(
+        Array.from({ length: 6 }, (_, at_) =>
+          before('next.js middleware matcher', `${prefix}${at_}`, {}, FREE, at),
+        ),
+      );
+    expect((await copies('toolu_a')).filter(({ out }) => out.noted === true)).toHaveLength(1);
+    clock += 5 * 60_000 + 1;
+    expect((await copies('toolu_b')).filter(({ out }) => out.noted === true)).toHaveLength(1);
+  });
+
+  it('notes two parallel distinct searches each with its own line', async () => {
+    const zod = {
+      ...FREE,
+      decision: { ...FREE.decision, hint: NOTE_HINT.replace('next.js middleware matcher', 'zod') },
+    };
+    const [a, b] = await Promise.all([
+      before('next.js middleware matcher', 'toolu_a'),
+      before('zod', 'toolu_b', {}, zod),
+    ]);
+    expect(a.out.noted).toBe(true);
+    expect(b.out.noted).toBe(true);
+    expect((await after('next.js middleware matcher', 'toolu_a')).out).toEqual(noted(NOTE_HINT));
+    expect((await after('zod', 'toolu_b')).out).toEqual(noted(zod.decision.hint));
+  });
+
+  it('writes no record past the bound: the search runs, and no line follows', async () => {
+    // Under the hint's 2,000 characters, over the record's 4,096 bytes.
+    const hint = `${'\u20ac'.repeat(1_750)} ${NOTE_HINT}`;
+    expect(hint.length).toBeLessThanOrEqual(2_000);
+    const huge = { ...FREE, decision: { ...FREE.decision, hint } };
+    const pre = await before('next.js middleware matcher', 'toolu_1', {}, huge);
+    expect(pre.out).toEqual({ response: null, action: 'execute', id: ID, free: true });
+    expect(await exists(notePath('toolu_1'))).toBe(false);
+    expect((await after('next.js middleware matcher', 'toolu_1')).out).toEqual({
+      response: null,
     });
   });
 
-  /** The server's line after a search that came back short, and as the host sees it. */
-  const SEARCH_SHORTFALL_HINT = `${OFFER} If WebSearch couldn't get this, call request({query: "next.js middleware matcher", id: "k3f9-abcd"}) and wait for its result.`;
-  const SHORT_OFFER = `${HINT_SOURCE}: your WebSearch call came back short. Optional: ${toolNamed(SEARCH_SHORTFALL_HINT)}`;
-  const SHORT = { ...SEARCH, results: [] };
-
-  /** The shortfall route's answer, as for any other call: the router asked
-   *  once with the shortfall in its packet, and an offer, never docs. */
-  function expectShortfallOffer(
-    post: Awaited<ReturnType<typeof after>>,
-    eventName: 'PostToolUse' | 'PostToolUseFailure' = 'PostToolUse',
-    nativeOutcome: unknown = { error: 'Web search returned no results' },
-  ): void {
-    expect(post.calls).toHaveLength(1);
-    const packet = (post.calls[0] as { body: { packet: { nativeOutcome?: unknown } } }).body.packet;
-    expect(packet.nativeOutcome).toEqual(nativeOutcome);
-    expect(post.out).toMatchObject({ action: 'execute', id: 'k3f9-abcd', augmented: 'nothing' });
-    expect(post.out.response).toEqual({
-      hookSpecificOutput: { hookEventName: eventName, additionalContext: SHORT_OFFER },
-    });
-    expect(JSON.stringify(post.out.response)).not.toContain('updatedToolOutput');
-  }
-
-  /**
-   * NO DOCS, SO AN ORDINARY CALL. When the lookup added nothing, a search that
-   * came back short takes the shortfall route like any other call, so a failed
-   * docs lookup never costs it the paid offer. Each of these is a search with
-   * no links, which the router is asked about once.
-   */
-  it.each([
-    ['no library matched (404)', 404, ''],
-    ['the lookup is unavailable (503)', 503, ''],
-    ['the caller is over its limit (429)', 429, ''],
-    ['the fetch failed', 0, ''],
-    ['an empty 200', 200, '   '],
-  ])('takes the shortfall route after a short search when %s', async (_label, status, text) => {
-    await before('next.js middleware matcher', 'toolu_1');
-    await answer(jobs[0]!, status, text);
-    const post = await after(
-      'next.js middleware matcher',
-      'toolu_1',
-      SHORT,
-      {},
-      withHint(SEARCH_SHORTFALL_HINT),
-    );
-    expectShortfallOffer(post);
-  });
-
-  it('never re-offers the free docs lookup that just missed on this search', async () => {
-    await before('next.js middleware matcher', 'toolu_1');
-    await answer(jobs[0]!, 404, '');
-    const free = withHint(SEARCH_SHORTFALL_HINT);
-    const post = await after(
-      'next.js middleware matcher',
-      'toolu_1',
-      SHORT,
-      {},
-      {
-        ...free,
-        decision: { ...free.decision, providerPriceAtomic: '0' },
-      },
-    );
-    expect(post.out.response).toBeNull();
-    expect(post.out.augmented).toBe('nothing');
-  });
-
-  it('takes the shortfall route when the lookup has not answered in time', async () => {
-    await before('next.js middleware matcher', 'toolu_1');
-    const started = Date.now();
-    const post = await after(
-      'next.js middleware matcher',
-      'toolu_1',
-      SHORT,
-      {},
-      withHint(SEARCH_SHORTFALL_HINT),
-    );
-    expectShortfallOffer(post);
-    // Bounded by the wait, not by the hook's timeout.
-    expect(Date.now() - started).toBeLessThan(3_000);
-  });
-
-  it('takes the shortfall route when the augmented search itself failed', async () => {
-    await before('next.js middleware matcher', 'toolu_1');
-    // Docs that came back have no response to ride on when the call failed.
-    await answer(jobs[0]!, 200, TEXT);
-    const post = await after(
-      'next.js middleware matcher',
-      'toolu_1',
-      undefined,
-      {
-        hook_event_name: 'PostToolUseFailure',
-        tool_response: undefined,
-        error: 'Web search failed',
-      },
-      withHint(SEARCH_SHORTFALL_HINT),
-    );
-    expectShortfallOffer(post, 'PostToolUseFailure', { error: 'Web search failed' });
-  });
-
-  it('says nothing, and asks nothing, when no docs came back and the search was fine', async () => {
-    await before('next.js middleware matcher', 'toolu_1');
-    await answer(jobs[0]!, 404);
-    const post = await after(
-      'next.js middleware matcher',
-      'toolu_1',
-      SEARCH,
-      {},
-      withHint(SEARCH_SHORTFALL_HINT),
-    );
-    expect(post.out).toEqual({ response: null, augmented: 'nothing' });
-    expect(post.calls).toHaveLength(0);
-  });
-
-  /** DOCS ADDED IS THE ANSWER: a short search they were added to is not offered on as well. */
-  it('adds the docs to a search with no links, and makes no offer as well', async () => {
-    await before('next.js middleware matcher', 'toolu_1');
-    await answer(jobs[0]!, 200, TEXT);
-    const post = await after(
-      'next.js middleware matcher',
-      'toolu_1',
-      SHORT,
-      {},
-      withHint(SEARCH_SHORTFALL_HINT),
-    );
-    expect(post.out).toEqual({
-      response: {
-        hookSpecificOutput: {
-          hookEventName: 'PostToolUse',
-          updatedToolOutput: { ...SHORT, results: [LINE] },
-        },
-      },
-      augmented: 'added',
-    });
-    expect(post.calls).toHaveLength(0);
-  });
-
-  it('still denies a paid offer on a search, and fetches nothing', async () => {
+  it('still denies a paid offer on a search, and notes nothing', async () => {
     const pre = await before('btc price today', 'toolu_1', {}, withHint(PRECALL_HINT));
     expect(pre.out.response).toMatchObject({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
     });
     expect(pre.out.free).toBeUndefined();
-    expect(jobs).toHaveLength(0);
+    expect(await exists(notePath('toolu_1'))).toBe(false);
     expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(true);
   });
 
-  it('lets a WebFetch run on a free offer, with no output and nothing fetched', async () => {
-    const { deps: d, calls } = deps();
+  async function defineAgent(name: string, tools: string): Promise<void> {
+    const fs = await import('node:fs/promises');
+    const folder = join(dir, '.claude', 'agents');
+    await fs.mkdir(folder, { recursive: true });
+    await fs.writeFile(
+      join(folder, `${name}.md`),
+      `---\nname: ${name}\ndescription: searches\ntools: ${tools}\n---\nSearch.\n`,
+    );
+  }
+
+  it.each([
+    ['a subagent without the request tool', { agent_id: 'a1', agent_type: 'restricted-reader' }],
+    ['an unreadable transcript', { transcript_path: undefined }],
+  ])('leaves no record and no line for %s', async (_label, over) => {
+    await defineAgent('restricted-reader', 'WebSearch');
+    const pre = await before('next.js middleware matcher', 'toolu_1', over);
+    expect(pre.out.response).toBeNull();
+    expect(pre.out.noted).toBeUndefined();
+    expect(await exists(notePath('toolu_1'))).toBe(false);
+    expect(await exists(labelPath())).toBe(false);
+    expect((await after('next.js middleware matcher', 'toolu_1', SEARCH, over)).out.response).toBe(
+      null,
+    );
+  });
+
+  it('leaves no record and no line for a credential-shaped query', async () => {
+    const query = `next.js docs ghp_${'B'.repeat(36)}`;
+    const pre = await before(query, 'toolu_1');
+    expect(pre.out).toEqual({ response: null });
+    expect(pre.calls).toHaveLength(0);
+    expect(await exists(notePath('toolu_1'))).toBe(false);
+  });
+
+  it('lets a WebFetch run on a free offer, with no output and no note', async () => {
+    const { deps: d, calls } = deps(FREE);
     const out = await runNativeHook(
       await preCall('https://nextjs.org/docs/app/middleware', 'WebFetch', {
         tool_use_id: 'toolu_1',
       }),
       d,
     );
-    expect(out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', free: true });
+    expect(out).toEqual({ response: null, action: 'execute', id: ID, free: true });
     expect(calls).toHaveLength(1);
-    expect(jobs).toHaveLength(0);
-    expect(await wasOffered(dir, 'sess-1', 'toolu_1')).toBe(false);
+    expect(await exists(notePath('toolu_1'))).toBe(false);
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · search: native tools (free lookup, call runs)',
+    );
   });
 
-  it('augments two parallel searches each with its own docs', async () => {
-    await Promise.all([
-      before('next.js middleware matcher', 'toolu_a'),
-      before('zod v4 coerce', 'toolu_b'),
-    ]);
-    expect(jobs).toHaveLength(2);
-    const job = (query: string) => jobs.find((j) => j.url.includes(query))!;
-    expect(job('next.js').out).not.toBe(job('zod').out);
-    await answer(job('zod'), 200, 'zod docs');
-    await answer(job('next.js'), 200, 'next docs');
-    const [a, b] = await Promise.all([
-      after('next.js middleware matcher', 'toolu_a'),
-      after('zod v4 coerce', 'toolu_b', { ...SEARCH, query: 'zod v4 coerce' }),
-    ]);
-    const first = (out: typeof a) =>
-      (out.out.response as { hookSpecificOutput: { updatedToolOutput: typeof SEARCH } })
-        .hookSpecificOutput.updatedToolOutput.results[0];
-    expect(first(a)).toContain('next docs');
-    expect(first(a)).not.toContain('zod docs');
-    expect(first(b)).toContain('zod docs');
-    expect(first(b)).not.toContain('next docs');
+  it('keeps the label of a free offer shown at the start of a turn, for its row', async () => {
+    const { fetchImpl } = router(FREE);
+    const out = await runPromptHook(promptEvent('how does next.js middleware matcher work'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.id).toBe(ID);
+    expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
+      id: ID,
+      label: 'Context7 docs',
+    });
+  });
+});
+
+/**
+ * A PAY-PER-CALL SERVICE NOBODY CURATED, shown exactly where a curated offer
+ * is: the server's own line, attributed and tool-named, under the same spend,
+ * wallet and one-block rules. The shape is the shared fixture's.
+ */
+describe('a discovered service', () => {
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string; candidate: { url: string } } };
+  const { id: ID, hint: LINE } = DISCOVERED.decision;
+  const SEEN_LINE = `${HINT_SOURCE}: ${LINE.replace('request({', 'mcp__x402__request({')}`;
+
+  beforeEach(async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
   });
 
-  it("fetches one agent's identical search once in a few minutes", async () => {
-    let clock = Date.now();
-    const at = { now: () => clock };
-    const run = async (toolUseId: string, over: Record<string, unknown> = {}) =>
-      runNativeHook(
-        await preCall('next.js middleware matcher', 'WebSearch', {
-          tool_use_id: toolUseId,
-          ...over,
-        }),
-        deps(FREE, at).deps,
-      );
-    expect(await run('toolu_1')).toMatchObject({ free: true, augmenting: true });
-    // The same search again: it runs, undenied, and nothing is fetched.
-    const again = await run('toolu_2');
-    expect(again).toMatchObject({ response: null, free: true });
-    expect(again.augmenting).toBeUndefined();
-    expect(jobs).toHaveLength(1);
-    // A different agent's identical search is its own.
-    await run('toolu_3', { agent_id: 'a1', agent_type: 'general-purpose' });
-    expect(jobs).toHaveLength(2);
-    // And past the window, the same agent's is fetched again.
-    clock += 5 * 60_000 + 1;
-    expect(await run('toolu_4')).toMatchObject({ augmenting: true });
-    expect(jobs).toHaveLength(3);
-    // The call that was not augmented is an ordinary one after it runs.
-    const post = await after('next.js middleware matcher', 'toolu_2');
-    expect(post.out.augmented).toBeUndefined();
+  it('is injected on a prompt, with the session id and what this build accepts', async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(out.response).toEqual({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: SEEN_LINE },
+    });
+    expect((calls[0] as { body: unknown }).body).toMatchObject({
+      sessionId: 'sess-1',
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+    });
+    // The footer names the seller, and the id binds this session for `request`.
+    expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
+    expect(await resolveProgressSession(dir, { id: ID })).not.toBeNull();
   });
 
-  it('adds the docs inside a subagent, as for the main agent', async () => {
-    const subagent = { agent_id: 'a1', agent_type: 'general-purpose' };
-    const pre = await before('next.js middleware matcher', 'toolu_1', subagent);
-    expect(pre.out).toMatchObject({ response: null, free: true, augmenting: true });
-    await answer(jobs[0]!, 200, TEXT);
-    const post = await after('next.js middleware matcher', 'toolu_1', SEARCH, subagent);
-    expect(
-      (post.out.response as { hookSpecificOutput: { updatedToolOutput: typeof SEARCH } })
-        .hookSpecificOutput.updatedToolOutput.results[0],
-    ).toBe(LINE);
+  it('keeps the spec of a shown offer, for request to read by its id', async () => {
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-spec.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; specs: unknown[] } };
+    const { fetchImpl } = router(OFFERED);
+    await runPromptHook(promptEvent('make a hero image for the blog post'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await readSpec(dir, OFFERED.decision.id)).toEqual(OFFERED.decision.specs[0]);
+    expect(await readChoices(dir, OFFERED.decision.id)).toBeNull();
   });
 
-  it('fetches nothing from an endpoint on another origin, and still does not deny', async () => {
-    const elsewhere = {
-      ...FREE,
-      decision: { ...FREE.decision, endpoint: 'https://docs.example.test/api/docs-lookup' },
+  /** A CHOICE SET is kept by the line's id, beside every option's spec, so
+   *  `request({id, choice})` finds the option the user picked. */
+  it('keeps the choice set of a shown offer, and every option spec', async () => {
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown } };
+    const { fetchImpl } = router(OFFERED);
+    await runPromptHook(promptEvent('generate an image of a lighthouse at dusk'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(await readChoices(dir, OFFERED.decision.id)).toEqual({
+      choices: OFFERED.decision.choices,
+      hint: OFFERED.decision.hint,
+    });
+    for (const spec of OFFERED.decision.specs) expect(await readSpec(dir, spec.id)).toEqual(spec);
+  });
+
+  /** A LIST CAN NAME A SERVICE OVER THE CAP beside one that fits: People Data
+   *  Labs at $0.28 beside a $0.005 email finder, under the $0.25 cap, was
+   *  picked and stopped on needs_approval with no warning. */
+  describe('a list with a service over the auto-spend cap', () => {
+    const entry = (n: number, provider: string, usd: string, id: string) =>
+      `${n}) ${provider} (finds a work email), POST https://${provider.toLowerCase()}.test/x , ` +
+      `about $${usd} per call. Input: {name: string}. To use it, call request({id: "${id}", input: {...}}).`;
+    const list = (second: string) => ({
+      ...DISCOVERED,
+      decision: {
+        ...DISCOVERED.decision,
+        candidate: { ...DISCOVERED.decision.candidate, providerPriceAtomic: '5000' },
+        hint:
+          'Tenjin router found pay-per-call services for this step, no API key needed: ' +
+          `${entry(1, 'OneShot', '0.005', ID)} ${entry(2, 'PDL', second, '04d63d65-cdbb-4a30')} ` +
+          'Tenjin reviewed these listings. Use your judgement: pick one.',
+      },
+    });
+    const shown = async (body: unknown): Promise<string> => {
+      const out = await runPromptHook(promptEvent('find the email of a person'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(body).fetchImpl,
+      });
+      return (out.response as { hookSpecificOutput: { additionalContext: string } })
+        .hookSpecificOutput.additionalContext;
     };
-    const pre = await before('next.js middleware matcher', 'toolu_1', {}, elsewhere);
-    expect(pre.out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', free: true });
-    expect(jobs).toHaveLength(0);
+
+    /** PRICES ARE FIELDS, NEVER PROSE: an offer that carries no specs gets no
+     *  note, whatever dollar amounts its line quotes. */
+    it('reads no price out of the line itself', async () => {
+      expect(await shown(list('0.28'))).not.toContain('Note:');
+    });
+
+    /** WITH SPECS THE FIELDS SAY IT: each other service's `priceAtomic`,
+     *  never the line's prose, so a line that starts at a label and quotes
+     *  its prices any way it likes still warns, and only when a field is over. */
+    it("reads each listed service's price from its spec when the offer carries specs", async () => {
+      const labelled = JSON.parse(
+        readFileSync(
+          fileURLToPath(new URL('./fixtures/wire-hook-execute-labelled.json', import.meta.url)),
+          'utf8',
+        ),
+      ) as { decision: { specs: Record<string, unknown>[] } };
+      const base = labelled.decision.specs[0]!;
+      const priced = (id: string, atomic: string) => ({
+        ...base,
+        id,
+        priceAtomic: atomic,
+        maxAmountAtomic: atomic,
+      });
+      const offered = (second: string, prose: string) => ({
+        ...DISCOVERED,
+        decision: {
+          ...DISCOVERED.decision,
+          candidate: { ...DISCOVERED.decision.candidate, providerPriceAtomic: '5000' },
+          hint:
+            `OneShot, $0.005: request({id: "${ID}", input: {...}}). ` +
+            `PDL, ${prose}: request({id: "04d63d65-cdbb-4a30", input: {...}}).`,
+          specs: [priced(ID, '5000'), priced('04d63d65-cdbb-4a30', second)],
+        },
+      });
+      expect(await shown(offered('280000', '$0.03'))).toMatch(
+        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
+      );
+      expect(await shown(offered('30000', 'about $0.28 per call'))).not.toContain('Note:');
+    });
+  });
+
+  /** THE TENJIN LIST IS ON BY DEFAULT; the open Bazaar is asked for only
+   *  with the experiment on. */
+  it('asks for the open Bazaar only with the experiment on', async () => {
+    const first = router(NATIVE);
+    await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: first.fetchImpl,
+    });
+    expect((first.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'headers',
+      'note',
+      'tolerant',
+    ]);
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, experimental: { bazaar: 'on' } }),
+    );
+    const second = router(NATIVE);
+    await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: second.fetchImpl,
+    });
+    expect((second.calls[0] as { body: Record<string, unknown> }).body.accepts).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'headers',
+      'note',
+      'tolerant',
+      'bazaar',
+    ]);
+  });
+
+  it('denies a native call once, with the one-block sentence', async () => {
+    const { fetchImpl } = router(DISCOVERED);
+    const event = await preCall('sound effect generator api', 'WebSearch', {
+      tool_use_id: 'toolu_held',
+    });
+    const out = await runNativeHook(event, { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK}`,
+      },
+    });
+    // An offer the model acts on, never a block it narrates.
+    expect(`${SEEN_LINE} ${ONE_BLOCK}`).not.toMatch(/\b(block|blocked|denied|refused)\b/i);
+    // The offer record names the offer, which the mod matches its request call to.
+    expect(await offerRecord('sess-1', 'toolu_held')).toMatchObject({
+      version: 1,
+      offerId: ID,
+    });
+    // The same search again is let run: the one-block rule.
+    const again = await runNativeHook(
+      await preCall('sound effect generator api', 'WebSearch', { tool_use_id: 'toolu_retry' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
+    expect(again).toEqual({ response: null, alreadyRedirected: true });
+  });
+
+  it('is offered after a native call that came back short', async () => {
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runShortfallHook(await readableEvent('sound effect generator api'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(
+      (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
+        .additionalContext,
+    ).toBe(
+      `${HINT_SOURCE}: your WebSearch call came back short. Optional: ${SEEN_LINE.slice(HINT_SOURCE.length + 2)}`,
+    );
+  });
+
+  it('is appended to a delegated task', async () => {
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'make the promo sound better' } },
+    ]);
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Add sound effects to the promo', subagent_type: 'general-purpose' },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    const prompt = (out.response as { hookSpecificOutput: { updatedInput: { prompt: string } } })
+      .hookSpecificOutput.updatedInput.prompt;
+    expect(prompt).toContain(SEEN_LINE.slice(HINT_SOURCE.length + 2));
+  });
+
+  /**
+   * NEVER WITHHELD WHERE THE USER CAN BE ASKED. Over the automatic cap, the
+   * line still names the service, with one sentence saying the call needs
+   * approval; a curated offer over the cap is still withheld (above).
+   */
+  it('is shown over the automatic cap, with a note that request returns needs_approval', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toMatchObject({ action: 'discovered', id: ID });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext:
+          `${SEEN_LINE} Note: $0.053501 is above this machine's automatic per-call limit ($0.05); ` +
+          'request will pay nothing and return needs_approval with what it costs.',
+      },
+    });
+  });
+
+  /** The owner's video run: a $0.68 service against the $0.25 default cap. The
+   *  whole server line survives, the other options it lists included. */
+  it('injects a $0.68 offer over a $0.25 cap with the note, menu line intact', async () => {
+    const id = DISCOVERED.decision.id;
+    const hint =
+      'Tenjin router found a pay-per-call service for this step: VideoGen (text-to-video), ' +
+      'POST https://video.example.test/v1/generate , about $0.68 per call. ' +
+      'Other options: ClipForge ($0.90), Reelsmith ($1.10). ' +
+      `To use it, call request({id: "${id}", input: {...}}) alone and wait for its result.`;
+    const { fetchImpl } = router({
+      ...DISCOVERED,
+      decision: {
+        ...DISCOVERED.decision,
+        hint,
+        candidate: {
+          ...(DISCOVERED.decision as unknown as { candidate: Record<string, unknown> }).candidate,
+          provider: 'VideoGen',
+          url: 'https://video.example.test/v1/generate',
+          providerPriceAtomic: '680000',
+        },
+      },
+    });
+    const out = await runPromptHook(promptEvent('make a 5 second promo video clip'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(line).toBe(
+      `${HINT_SOURCE}: ${hint.replace('request({', 'mcp__x402__request({')} ` +
+        "Note: $0.68 is above this machine's automatic per-call limit ($0.25); " +
+        'request will pay nothing and return needs_approval with what it costs.',
+    );
+    expect(line).toContain('Other options: ClipForge ($0.90), Reelsmith ($1.10).');
+  });
+
+  it('is shown when the wallet cannot cover it, with a note to fund it', async () => {
+    rpcAnswer = 10_000n;
+    const { fetchImpl } = router(DISCOVERED);
+    const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(
+      (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
+        .additionalContext,
+    ).toBe(
+      `${SEEN_LINE} Note: the wallet holds $0.01, $0.043501 short of its $0.053501; fund it with \`tenjin wallet fund\`.`,
+    );
+  });
+
+  it('denies the main agent a native call over the cap, with the note in the reason', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const out = await runNativeHook(await preCall('sound effect generator api', 'WebSearch'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(
+      (out.response as { hookSpecificOutput: { permissionDecisionReason: string } })
+        .hookSpecificOutput.permissionDecisionReason,
+    ).toContain('return needs_approval with what it costs.');
+  });
+
+  /** Where nobody can ask the user, it is withheld like any other offer. */
+  it('is withheld from a delegated task over the cap', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const path = await transcriptFor([
+      { type: 'user', sessionId: 'sess-1', message: { content: 'make the promo sound better' } },
+    ]);
+    const out = await runDelegationHook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        cwd: dir,
+        transcript_path: path,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'Add sound effects to the promo', subagent_type: 'general-purpose' },
+      },
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
+    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
+  });
+
+  it("is withheld from a subagent's native call over the cap", async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+    );
+    const out = await runNativeHook(
+      await preCall('sound effect generator api', 'WebSearch', {
+        agent_id: 'a1b2c3',
+        agent_type: 'general-purpose',
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl, homeDir: dir },
+    );
+    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
+  });
+});
+
+/**
+ * THE HOST'S QUESTION TO THE USER. Before it is asked, the questions and their
+ * options ride as the pending call; after it, the user's answers are routed as
+ * their own words.
+ */
+describe('a question to the user', () => {
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string } };
+  const SEEN_LINE = `${HINT_SOURCE}: ${DISCOVERED.decision.hint.replace('request({', 'mcp__x402__request({')}`;
+  /** Claude Code's AskUserQuestion input, as the transcript records it. */
+  const QUESTIONS = {
+    questions: [
+      {
+        question: 'For the audio, which can you get?',
+        header: 'Audio',
+        multiSelect: false,
+        options: [
+          {
+            label: 'ElevenLabs API key (Recommended)',
+            description: 'I generate the sound effects and a music bed through their API.',
+          },
+          { label: 'You pick a track', description: 'send me a licensed track.' },
+        ],
+      },
+    ],
+  };
+
+  beforeEach(async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(ROUTER_POLICY));
+  });
+
+  async function askEvent(over: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const path = await transcriptFor([
+      {
+        type: 'user',
+        sessionId: 'sess-1',
+        message: { content: 'make the promo sound better, I can get API keys if you need them' },
+      },
+    ]);
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: 'sess-1',
+      cwd: dir,
+      transcript_path: path,
+      tool_name: 'AskUserQuestion',
+      tool_input: QUESTIONS,
+      tool_use_id: 'toolu_ask',
+      ...over,
+    };
+  }
+
+  async function answerEvent(answers: Record<string, string>): Promise<Record<string, unknown>> {
+    return {
+      ...(await askEvent()),
+      hook_event_name: 'PostToolUse',
+      tool_response: { questions: QUESTIONS.questions, answers, annotations: {} },
+    };
+  }
+
+  it('sends the questions and their options as the pending call', async () => {
+    const { fetchImpl, calls } = router(NATIVE);
+    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toEqual({ response: null, action: 'native' });
+    const body = (calls[0] as { body: { packet: Record<string, unknown> } }).body;
+    expect(body.packet.pendingCall).toEqual({
+      tool: 'AskUserQuestion',
+      question:
+        'For the audio, which can you get? ' +
+        'ElevenLabs API key (Recommended): I generate the sound effects and a music bed through their API. ' +
+        'You pick a track: send me a licensed track.',
+    });
+    expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
+    expect(body).toMatchObject({
+      sessionId: 'sess-1',
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+    });
+  });
+
+  it('leaves the offer record for the question it denied', async () => {
+    await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(await wasOffered(dir, 'sess-1', 'toolu_ask')).toBe(true);
+    expect(await offerRecord('sess-1', 'toolu_ask')).toMatchObject({
+      version: 1,
+      priceAtomic: (
+        DISCOVERED.decision as unknown as { candidate: { providerPriceAtomic: string } }
+      ).candidate.providerPriceAtomic,
+    });
+  });
+
+  it('denies the question once on an offer, then lets it be asked', async () => {
+    const first = await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(first.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK_QUESTION}`,
+      },
+    });
+    const second = await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(second).toEqual({ response: null, alreadyRedirected: true });
+    // The claim is the question's own: a different question is its own target.
+    const other = await runAskHook(
+      await askEvent({
+        tool_input: { questions: [{ question: 'Which voice should narrate it?', options: [] }] },
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
+    expect(other.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
+
+  it('denies it on a curated offer too, with the same wording', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${SEEN} ${ONE_BLOCK_QUESTION}`,
+      },
+    });
+  });
+
+  /**
+   * AN OFFER IT COULD NOT PAY FOR NEVER TAKES THE QUESTION'S PLACE. A fresh
+   * install's empty wallet, or a price over the cap, would turn the deny into
+   * "ask the user", which the denied question already was: the question runs.
+   */
+  it.each([
+    ['an empty wallet', { balance: 0n }],
+    ['a price over the cap', { config: { ...ROUTER_POLICY, maxAutoSpend: '50000' } }],
+  ])('lets the question run with %s', async (_label, setup) => {
+    if ('balance' in setup) rpcAnswer = setup.balance;
+    if ('config' in setup) {
+      const fs = await import('node:fs/promises');
+      await fs.writeFile(join(dir, 'config.json'), JSON.stringify(setup.config));
+    }
+    const out = await runAskHook(await askEvent(), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(DISCOVERED).fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
+  });
+
+  it('never denies it for a free offer', async () => {
+    const { fetchImpl } = router({
+      ...EXECUTE,
+      decision: { ...EXECUTE.decision, providerPriceAtomic: '0' },
+    });
+    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toMatchObject({ response: null, free: true });
+  });
+
+  it('asks nothing about a question with no text', async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAskHook(await askEvent({ tool_input: { questions: [] } }), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out.response).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("routes the user's answers as their own words, and offers beside them", async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAnswerHook(
+      await answerEvent({
+        'For the audio, which can you get?':
+          'is there an elevenlabs x402, you already have a wallet, just use it',
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out.response).toEqual({
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: SEEN_LINE },
+    });
+    const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
+    expect(packet.current).toEqual({
+      role: 'user',
+      text: 'is there an elevenlabs x402, you already have a wallet, just use it',
+    });
+    expect(packet.pendingCall).toBeUndefined();
+  });
+
+  /**
+   * THE REAL SHAPE, from the owner's art session (Claude Code 2.1.x): the
+   * answers ride in `tool_response.answers`, keyed by question, one per line
+   * in the packet, a multi-select answer as its label. The backend logged
+   * this exact turn as the search text "OG / social card Can try all".
+   */
+  it('routes the answers from a real AskUserQuestion PostToolUse event', async () => {
+    const real = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL('./fixtures/harness/claude-PostToolUse-AskUserQuestion.json', import.meta.url),
+        ),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const path = await transcriptFor([
+      {
+        type: 'user',
+        sessionId: real.session_id,
+        message: { content: 'make some art for the landing page' },
+      },
+    ]);
+    const { fetchImpl, calls } = router(NATIVE);
+    const out = await runAnswerHook(
+      { ...real, cwd: dir, transcript_path: path },
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toEqual({ response: null, action: 'native' });
+    const body = (calls[0] as { body: { sessionId: string; packet: Record<string, unknown> } })
+      .body;
+    expect(body.sessionId).toBe('3080b0f2-f873-488a-bca3-9c6f7789134f');
+    expect(body.packet.current).toEqual({ role: 'user', text: 'OG / social card\nCan try all' });
+    expect(body.packet.pendingCall).toBeUndefined();
+    expect(JSON.stringify(body.packet.history)).toContain('make some art for the landing page');
+  });
+
+  it('says nothing on a plain acknowledgement, and asks nothing', async () => {
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAnswerHook(
+      await answerEvent({ 'For the audio, which can you get?': 'Yes' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toEqual({ response: null, skipped: 'acknowledgement' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is what the hook tool answers for `ask` and `answer` legs', async () => {
+    for (const [kind, event, expected] of [
+      ['ask', await askEvent(), { hookEventName: 'PreToolUse', permissionDecision: 'deny' }],
+      [
+        'answer',
+        await answerEvent({ 'For the audio, which can you get?': 'use a paid service' }),
+        { hookEventName: 'PostToolUse', additionalContext: SEEN_LINE },
+      ],
+    ] as const) {
+      await rm(join(dir, 'progress'), { recursive: true, force: true });
+      const answer = await runHookKind(kind, event, {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(DISCOVERED).fetchImpl,
+      });
+      expect(answer).toMatchObject({ hookSpecificOutput: expected });
+    }
   });
 });

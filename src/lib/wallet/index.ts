@@ -1,7 +1,7 @@
 import { CliError } from '../errors';
 import { emitNotice } from '../output';
 import { spendLedgerPath } from '../paths';
-import { createLocalProvider, type PassphraseOverrides } from './local';
+import { createLocalProvider, type PassphraseOverrides, type WalletWarning } from './local';
 import { createLocalSpendAuthorizer, type SpendAuthorizer } from './spend';
 import type { SpendPolicy } from '../policy';
 import type { CommandContext } from '../../context';
@@ -11,8 +11,10 @@ export * from './provider';
 export {
   commitLocalWallet,
   createLocalWallet,
+  openKeystore,
   parkOutgoingWallet,
   prepareLocalWallet,
+  repairLocalWalletPassphrase,
   restoreParkedWallet,
   verifyAndPreserveOutgoingWallet,
   verifyLocalWallet,
@@ -23,8 +25,11 @@ export {
   type PreparedLocalWallet,
   type PassphraseOverrides,
   type PreservedWalletInfo,
+  type RepairOutcome,
   type UnarchivedReason,
+  type WalletWarning,
 } from './local';
+export { classifyUnlockError, ENV_PASSPHRASE_WRONG, type UnlockReason } from '../wallet-unlock';
 export {
   createLocalSpendAuthorizer,
   type SpendAuthorizer,
@@ -41,6 +46,13 @@ export interface ResolveWalletProviderOptions {
    * credential store; `isTTY` is still decided here, never by a caller.
    */
   passphrase?: Omit<PassphraseOverrides, 'isTTY'>;
+  /**
+   * Where a wallet warning goes (today: TENJIN_WALLET_PASSPHRASE is set but
+   * wrong, and a saved passphrase signed instead). Default for CLI commands: a
+   * dim stderr notice, `emitNotice(ctx.io, w.message, { json: ctx.flags.json })`.
+   * `tenjin mcp` routes it to the router observer instead.
+   */
+  onWarning?: (w: WalletWarning) => void;
 }
 
 /**
@@ -66,6 +78,7 @@ export function resolveWalletProvider(
     dir: ctx.dataDir,
     env: process.env,
     passphrase: { ...opts.passphrase, isTTY: ctx.io.isTTY ? undefined : false },
+    onWarning: opts.onWarning ?? ((w) => emitNotice(ctx.io, w.message, { json: ctx.flags.json })),
   });
 }
 

@@ -113,6 +113,19 @@ describe('buildExactPayment', () => {
     expect(built.headers['PAYMENT-SIGNATURE']).toBeTypeOf('string');
   });
 
+  // The SDK's own per-payment cap (2.23+, $1 by default) would refuse a manual
+  // payment the user consented to above it; the cap is set to the amount the
+  // spend policy already authorized, so the SDK enforces exactly that amount.
+  it('signs an authorized amount above the SDK default $1 cap, and only that amount', async () => {
+    const { paymentRequired } = buildPaymentRequired({ amount: '2500000' });
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    expect(built.amountAtomic).toBe(2_500_000n);
+    const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
+    expect((payload.payload as { authorization: { value: string } }).authorization.value).toBe(
+      '2500000',
+    );
+  });
+
   it('accepts USDC given in a different hex case (checksum compare, not string compare)', async () => {
     const { paymentRequired } = buildPaymentRequired({
       asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
@@ -164,11 +177,14 @@ describe('buildExactPayment, builder-code attribution', () => {
     expect(info?.a).toBe('bc_seller01');
   });
 
-  it('sends no builder-code extension to a seller that never advertised one', async () => {
+  // The SDK's default since @x402/core 2.21: every registered client extension
+  // enriches every payment, so a seller that never advertised builder-code
+  // still gets Tenjin's service code, and no seller field.
+  it("sends the SDK's builder-code entry to a seller that never advertised one", async () => {
     const { paymentRequired } = buildPaymentRequired();
     const built = await buildExactPayment(paymentRequired, testSigner());
     const payload = decodePaymentSignatureHeader(built.headers['PAYMENT-SIGNATURE'] as string);
-    expect(builderCodeInfo(payload.extensions)).toBeUndefined();
+    expect(builderCodeInfo(payload.extensions)).toEqual({ s: [TENJIN_CLI_BUILDER_CODE] });
   });
 
   // Attribution is metadata, not terms: what the wallet authorizes must be

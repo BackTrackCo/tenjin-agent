@@ -2,15 +2,27 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_PAID_LEG_TIMEOUT_MS, paidLegTimeoutMs, runPay } from './pay';
+import {
+  MAX_PAID_LEG_TIMEOUT_MS,
+  paidLegTimeoutMs,
+  quoteRouterCall,
+  runPay,
+  type PaidLeg,
+} from './pay';
+import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { createQuote } from '../lib/spend-quotes';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
+import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
+import { buildSpecRequest } from '../router/spec-call';
+import type { ToolSpec } from '../router/decision';
+import { DEFAULT_RPC_URL, FALLBACK_RPC_URLS, rememberingBalanceReader } from '../lib/usdc-balance';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -37,6 +49,18 @@ const FOREIGN_URL = 'https://seller.example/api/enrich';
 const REGISTRY = 'https://registry.test';
 
 const RESERVATION = 'rsv-test';
+
+/** A router payment's place in its call's plan: a plan of one, admitted under
+ *  a policy with room for anything. */
+async function planned(amountAtomic: bigint): Promise<PlanSlot> {
+  const plan = await admitPlan([{ amountAtomic, creator: 'seller.example' }], {
+    dataDir: dir,
+    policy: { maxAutoSpendAtomic: 10n ** 12n, sessionBudgetAtomic: null, allowlistCreators: [] },
+    balance: async () => null,
+  });
+  if (!('admitted' in plan)) throw new Error('a roomy plan was not admitted');
+  return plan.admitted[0]!;
+}
 
 /**
  * The Bazaar lane resolves its destination before it probes, and `.example`
@@ -206,7 +230,10 @@ describe('runPay, tenjin lane', () => {
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
     // The identical business request is retried: same body, same method.
     expect(calls[1]!.body).toBe(calls[0]!.body);
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
   });
 
   // A routing decision can name a contract on the configured origin, so the
@@ -217,7 +244,7 @@ describe('runPay, tenjin lane', () => {
     const authorizer = fakeAuthorizer('allow');
     await expect(
       runPay(
-        { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '99999' } },
+        { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '99999' }, admit: planned },
         makeCtx(),
         { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
       ),
@@ -264,7 +291,10 @@ describe('runPay, tenjin lane', () => {
         authorizer,
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
   });
 
@@ -379,12 +409,99 @@ describe('runPay, paid-leg timeout', () => {
     expect((result.data as { paid: boolean }).paid).toBe(true);
   });
 
+  /** A paid leg whose headers name `statusUrl` and whose body never arrives
+   *  before the deadline: the refusal, and which legs were sent. */
+  async function longJob(statusUrl: string): Promise<{ err: CliError; calls: string[] }> {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = (async (
+      _input: Parameters<typeof fetch>[0],
+      init?: RequestInit,
+    ) => {
+      calls.push(new Headers(init?.headers).has('PAYMENT-SIGNATURE') ? 'paid' : 'probe');
+      if (calls.length === 1) return json(402, {}, { 'PAYMENT-REQUIRED': fixture.header });
+      // The render's headers come at once; its body never does before the deadline.
+      const body = new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'X-Status-Url': statusUrl } });
+    }) as typeof fetch;
+    const err = (await runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), {
+      ...PUBLIC_DNS,
+      fetchImpl,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    )) as CliError;
+    return { err, calls };
+  }
+
+  it('names the status URL a long job sent with its headers, and pays nothing more', async () => {
+    const { err, calls } = await longJob('/jobs/42');
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).toBe(
+      'The seller is still working on this: no result within 1 s, and it named a status URL to check: https://tenjin.blog/jobs/42',
+    );
+    expect(err.fix).toContain('Do not pay again: check the status URL for the result.');
+    expect(err.details).toMatchObject({
+      statusUrl: 'https://tenjin.blog/jobs/42',
+      settlement: 'unknown',
+    });
+    expect(calls).toEqual(['probe', 'paid']);
+  });
+
+  it('never points the agent at a status URL on another host', async () => {
+    const { err } = await longJob('https://localhost/jobs/42');
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.message).not.toContain('status URL');
+    expect(err.details).not.toHaveProperty('statusUrl');
+    expect(err.details).toMatchObject({ settlement: 'unknown' });
+  });
+
   it('keeps the unpaid probe on the CLI timeout', async () => {
     const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
     const fetch = slowFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })], [150]);
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx({ timeout: 50 }), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toBeInstanceOf(CliError);
+  });
+
+  it("takes a spec's own deadline for the probe in place of the CLI timeout", async () => {
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 1 });
+    const fetch = slowFetch(
+      [json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }), json(200, { answer: 'paid' })],
+      [150, 0],
+    );
+    const result = await runPay({ url: TENJIN_URL, timeoutMs: 1_000 }, makeCtx({ timeout: 50 }), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+  });
+
+  it("never lets a spec's shorter deadline cut the paid leg after payment", async () => {
+    // No advertised bound, so the paid leg's floor alone decides its wait.
+    const fixture = buildPaymentRequired({ maxTimeoutSeconds: 0 });
+    const fetch = slowFetch(
+      [json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }), json(200, { answer: 'paid' })],
+      [0, 150],
+    );
+    // The spec asks for 50 ms; the CLI timeout of 1 s still holds the paid leg.
+    const result = await runPay({ url: TENJIN_URL, timeoutMs: 50 }, makeCtx({ timeout: 1_000 }), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect((result.data as { paid: boolean }).paid).toBe(true);
   });
 
   it('clamps the advertised bound and never goes below the CLI timeout', () => {
@@ -421,9 +538,10 @@ describe('runPay, builder-code attribution', () => {
     ]);
   });
 
-  // A seller who never declared the extension must not receive it: the SDK's
-  // gating is what keeps this attribution spec-clean rather than a custom header.
-  it('sends no builder-code extension to a seller that did not advertise it', async () => {
+  // The SDK's own default since @x402/core 2.21: every registered client
+  // extension enriches every payment, so a seller that never declared
+  // builder-code still gets Tenjin's service code, with no seller field.
+  it("sends the SDK's builder-code entry to a seller that did not advertise it", async () => {
     const fixture = buildPaymentRequired();
     const { fetch, calls } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
@@ -435,7 +553,9 @@ describe('runPay, builder-code attribution', () => {
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
     });
-    expect(attributionOf(calls[1]!.headers['payment-signature'])).toBeUndefined();
+    expect(attributionOf(calls[1]!.headers['payment-signature'])).toEqual({
+      s: [TENJIN_CLI_BUILDER_CODE],
+    });
   });
 
   // The lane the Tenjin server actually takes: it always declares
@@ -552,6 +672,76 @@ describe('runPay, the sign-in-with-x extension', () => {
     expect(calls[2]!.headers['sign-in-with-x']).toBeUndefined(); // payment IS the credential
   });
 
+  /** A WALLET THAT ALREADY OWNS THE RESULT is never quoted a payment for it:
+   *  the router's plan admits only a payment the re-read says is still owed,
+   *  at the price it says. */
+  it('re-reads free for an entitled wallet before its call plans any payment', async () => {
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(200, { answer: 'yours already' }),
+    ]);
+    const admit = vi.fn(async (): Promise<PlanSlot> => {
+      throw new CliError('POLICY_REFUSED', 'over the limit: a quote');
+    });
+    const result = await runPay(
+      { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '100000' }, admit },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
+    );
+    expect(result.data).toMatchObject({ paid: false, entitled: true });
+    expect(calls[1]!.headers['sign-in-with-x']).toBeDefined();
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it('plans an unentitled wallet at the price the re-read still asks', async () => {
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '90000').header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const admit = vi.fn(planned);
+    const result = await runPay(
+      { url: TENJIN_URL, terms: { source: 'router', maxAmountAtomic: '100000' }, admit },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect(result.data).toMatchObject({ paid: true });
+    expect(admit.mock.calls).toEqual([[90_000n]]);
+  });
+
+  it("quotes an entitled wallet's router call at nothing, and an unentitled one fresh", async () => {
+    const terms = { source: 'router', maxAmountAtomic: '100000' };
+    const owned = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(200, { answer: 'yours already' }),
+    ]);
+    expect(
+      await quoteRouterCall({ url: TENJIN_URL, terms }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: owned.fetch,
+        provider: testWalletProvider(),
+      }),
+    ).toBe(0n);
+    expect(owned.calls[1]!.headers['sign-in-with-x']).toBeDefined();
+    expect(owned.calls[1]!.headers['payment-signature']).toBeUndefined();
+    const owed = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': siwxFixture(TENJIN_URL, '90000').header }),
+    ]);
+    expect(
+      await quoteRouterCall({ url: TENJIN_URL, terms }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: owed.fetch,
+        provider: testWalletProvider(),
+      }),
+    ).toBe(90_000n);
+  });
+
   it('a price bump between the first look and signing is refused', async () => {
     const fixture = siwxFixture(TENJIN_URL, '100000');
     const { fetch } = scriptedFetch([
@@ -603,17 +793,368 @@ describe('runPay, usage errors', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('rejects GET with a body, and unsupported methods', async () => {
-    const { fetch } = scriptedFetch([]);
-    await expect(
-      runPay({ url: TENJIN_URL, method: 'GET', data: '{}' }, makeCtx(), {
+  it('rejects GET or DELETE with a body, and unsupported methods', async () => {
+    const { fetch, calls } = scriptedFetch([]);
+    for (const args of [
+      { method: 'GET', data: '{}' },
+      { method: 'DELETE', data: '{}' },
+      { method: 'delete', dataRaw: 'a=1', header: ['Content-Type: text/plain'] },
+      { method: 'OPTIONS' },
+    ]) {
+      await expect(
+        runPay({ url: TENJIN_URL, ...args }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('runPay, methods and bodies', () => {
+  it('PUT and PATCH carry the JSON body with that method on the probe and the paid leg', async () => {
+    for (const method of ['PUT', 'patch']) {
+      const fixture = buildPaymentRequired();
+      const { fetch, calls } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+        json(200, { ok: true }),
+      ]);
+      const result = await runPay({ url: TENJIN_URL, method, data: '{"name":"y"}' }, makeCtx(), {
         ...PUBLIC_DNS,
         fetchImpl: fetch,
-      }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
-    await expect(
-      runPay({ url: TENJIN_URL, method: 'DELETE' }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      });
+      expect((result.data as { paid: boolean }).paid).toBe(true);
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        expect(call.method).toBe(method.toUpperCase());
+        expect(call.body).toBe('{"name":"y"}');
+        expect(call.headers['content-type']).toBe('application/json');
+      }
+    }
+  });
+
+  it('DELETE without a body reaches the endpoint as DELETE', async () => {
+    const { fetch, calls } = scriptedFetch([json(200, { deleted: true })]);
+    await runPay({ url: TENJIN_URL, method: 'DELETE' }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    expect(calls[0]!.method).toBe('DELETE');
+    expect(calls[0]!.body).toBeUndefined();
+  });
+
+  it('--data-raw sends its exact bytes under the operator content type on both legs', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    const result = await runPay(
+      {
+        url: TENJIN_URL,
+        dataRaw: 'a=1',
+        header: ['Content-Type: application/x-www-form-urlencoded'],
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.method).toBe('POST');
+      expect(call.body).toBe('a=1');
+      expect(call.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    }
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+  });
+
+  it('refuses --data-raw without a content type, and --data with --data-raw', async () => {
+    for (const args of [
+      { dataRaw: 'a=1' },
+      { dataRaw: 'a=1', header: ['X-Trace: t-1'] },
+      { data: '{}', dataRaw: 'a=1', header: ['Content-Type: text/plain'] },
+      { data: '{}', header: ['Content-Type: text/plain'] },
+    ]) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, ...args }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+});
+
+describe('runPay, --quote', () => {
+  it('reports the 402 terms and the advertised request shape, opening no wallet', async () => {
+    const shape = { type: 'http', method: 'POST', bodyType: 'json', body: { q: 'x' } };
+    const fixture = buildPaymentRequired(
+      {},
+      { extensions: { bazaar: { info: { input: shape } } } },
+    );
+    const { fetch, calls } = scriptedFetch([
+      json(402, { error: 'payment required' }, { 'PAYMENT-REQUIRED': fixture.header }),
+    ]);
+    // No provider and no authorizer: reaching either would throw, so a quote
+    // that returns proves nothing past the probe ran.
+    const result = await runPay(
+      { url: TENJIN_URL, data: '{"q":"x"}', quote: true, header: ['X-Api-Beta: 1'] },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch },
+    );
+    const data = result.data as {
+      paid: boolean;
+      quote: boolean;
+      status: number;
+      accepts: Array<{ amount: string; usd: string; payTo: string; network: string }>;
+      extensions: { bazaar: { info: { input: unknown } } };
+      body: { error: string };
+    };
+    expect(data.paid).toBe(false);
+    expect(data.quote).toBe(true);
+    expect(data.status).toBe(402);
+    expect(data.accepts).toHaveLength(1);
+    expect(data.accepts[0]).toMatchObject({
+      amount: '100000',
+      payTo: '0x1111111111111111111111111111111111111111',
+      network: 'eip155:8453',
+    });
+    expect(data.accepts[0]!.usd).toBeDefined();
+    expect(data.extensions.bazaar.info.input).toEqual(shape);
+    expect(data.body.error).toBe('payment required');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers['x-api-beta']).toBe('1');
+    expect(calls[0]!.headers['payment-signature']).toBeUndefined();
+    expect(result.humanLines?.[0]).toMatch(
+      /^quote: .* USD to tenjin\.blog on eip155:8453 \(nothing paid\)$/,
+    );
+  });
+
+  it('prices only the USDC entry and marks it payable when an 18-decimal entry is listed first', async () => {
+    const paymentRequired: PaymentRequired = {
+      x402Version: 2,
+      resource: { url: TENJIN_URL, description: 'A paid search', mimeType: 'application/json' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'eip155:56',
+          asset: '0x0000000000000000000000000000000000000000',
+          amount: '1000000000000000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 300,
+          extra: {},
+        },
+        {
+          scheme: 'exact',
+          network: 'eip155:8453',
+          asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+          amount: '10000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 300,
+          extra: { name: 'USD Coin', version: '2' },
+        },
+      ],
+    };
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': encodePaymentRequiredHeader(paymentRequired) }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const accepts = (result.data as { accepts: Array<Record<string, unknown>> }).accepts;
+    expect(accepts).toHaveLength(2);
+    expect(accepts[0]).not.toHaveProperty('usd');
+    expect(accepts[0]).not.toHaveProperty('payable');
+    expect(accepts[1]).toMatchObject({ usd: '0.01', payable: true, network: 'eip155:8453' });
+    expect(result.humanLines?.[0]).toBe(
+      'quote: 0.01 USD to tenjin.blog on eip155:8453 (nothing paid)',
+    );
+  });
+
+  it('says so when no entry is payable, and prices none of them', async () => {
+    const paymentRequired: PaymentRequired = {
+      x402Version: 2,
+      resource: { url: TENJIN_URL, description: 'A paid search', mimeType: 'application/json' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'eip155:56',
+          asset: '0x0000000000000000000000000000000000000000',
+          amount: '1000000000000000',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 300,
+          extra: {},
+        },
+      ],
+    };
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': encodePaymentRequiredHeader(paymentRequired) }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const accepts = (result.data as { accepts: Array<Record<string, unknown>> }).accepts;
+    expect(accepts[0]).not.toHaveProperty('usd');
+    expect(accepts[0]).not.toHaveProperty('payable');
+    expect(result.humanLines?.[0]).toMatch(/lists no option this wallet can pay/);
+    expect(result.humanLines?.[0]).not.toMatch(/USD to/);
+  });
+
+  it('a 2xx on the probe is delivered free, quote or not', async () => {
+    const { fetch, calls } = scriptedFetch([json(200, { ok: 1 })]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+    });
+    const data = result.data as { paid: boolean; quote?: boolean; status: number };
+    expect(data.paid).toBe(false);
+    expect(data.quote).toBeUndefined();
+    expect(data.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('runPay, operator headers (-H)', () => {
+  const BETA = 'dynamic-highlights-2026-08-28';
+
+  it('rides on the probe and the paid leg, beneath the signature', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, { error: 'payment required' }, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const result = await runPay(
+      { url: TENJIN_URL, data: '{"q":"x"}', header: [`Exa-Beta: ${BETA}`, 'X-Trace: t-1'] },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.headers['exa-beta']).toBe(BETA);
+      expect(call.headers['x-trace']).toBe('t-1');
+      expect(call.headers['content-type']).toBe('application/json');
+    }
+    expect(calls[0]!.headers['payment-signature']).toBeUndefined();
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+  });
+
+  it('refuses a header this command signs or sets itself, before any network', async () => {
+    for (const line of [
+      'Payment-Signature: forged',
+      'X-PAYMENT: forged',
+      'Sign-In-With-X: forged',
+      'Tenjin-Session-Delegation: forged',
+      'X-Vercel-Protection-Bypass: secret',
+      'Tenjin-Install-Id: other',
+      'Content-Type: text/plain',
+      'Host: elsewhere.example',
+    ]) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, header: [line] }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('refuses a malformed, multi-line, over-long or repeated header', async () => {
+    for (const lines of [
+      ['no-colon'],
+      [': value'],
+      ['Bad Name: v'],
+      ['X-Empty:   '],
+      ['X-Split: a\r\nb'],
+      [`X-Long: ${'a'.repeat(1_025)}`],
+      ['X-Twice: a', 'x-twice: b'],
+    ]) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, header: lines }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+});
+
+describe("runPay, a catalog spec's fixed headers", () => {
+  const BETA = 'dynamic-highlights-2026-08-28';
+  const exa = (headers: Record<string, string>): ToolSpec => ({
+    capabilityId: 'catalog:exa-search',
+    provider: 'Exa',
+    description: 'Web search.',
+    priceAtomic: '10000',
+    priceVaries: false,
+    maxAmountAtomic: '10000',
+    payTo: '0x1111111111111111111111111111111111111111',
+    network: 'eip155:8453',
+    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    request: { method: 'POST', url: TENJIN_URL, fields: {}, location: 'body', headers },
+    input: { type: 'object', properties: { query: { type: 'string' } } },
+    pinned: {},
+  });
+
+  it("ride the probe and the paid leg, under the leg's own accept and content-type", async () => {
+    const built = buildSpecRequest(
+      exa({ 'Exa-Beta': BETA, Accept: 'text/plain', 'X-Trace': 't-1' }),
+      { query: 'x' },
+    );
+    if ('problem' in built) throw new Error(built.problem);
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, { error: 'payment required' }, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { answer: 'paid' }),
+    ]);
+    const result = await runPay(
+      {
+        url: built.url,
+        method: built.method,
+        headers: built.headers,
+        ...(built.specHeaders !== undefined ? { specHeaders: built.specHeaders } : {}),
+        ...(built.body !== undefined ? { rawBody: built.body } : {}),
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.headers['exa-beta']).toBe(BETA);
+      expect(call.headers['x-trace']).toBe('t-1');
+      expect(call.headers['accept']).toBe('application/json');
+      expect(call.headers['content-type']).toBe('application/json');
+    }
+    expect(calls[0]!.headers['payment-signature']).toBeUndefined();
+    expect(calls[1]!.headers['payment-signature']).toBeDefined();
+  });
+
+  it('refuses a reserved name handed to the paid leg directly, before any network', async () => {
+    for (const name of ['Payment-Signature', 'Sign-In-With-X', 'Content-Type', 'Host']) {
+      const { fetch, calls } = scriptedFetch([]);
+      await expect(
+        runPay({ url: TENJIN_URL, specHeaders: { [name]: 'forged' } }, makeCtx(), {
+          ...PUBLIC_DNS,
+          fetchImpl: fetch,
+        }),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toHaveLength(0);
+    }
   });
 });
 
@@ -679,8 +1220,102 @@ describe('runPay, bazaar lane', () => {
       expect((err as CliError).fix).not.toMatch(/then retry/i);
     }
     expect(calls[1]!.headers['payment-signature']).toBeDefined();
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
+  });
+
+  /** A paid leg rejected with this payment-response header, v2 or v1: an
+   *  object is encoded as the protocol does, a string is sent as it is. */
+  async function rejectedWith(
+    settle: Record<string, unknown> | string | undefined,
+    header = 'PAYMENT-RESPONSE',
+  ): Promise<CliError> {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(
+        402,
+        {},
+        typeof settle === 'string'
+          ? { [header]: settle }
+          : settle !== undefined
+            ? { [header]: Buffer.from(JSON.stringify(settle)).toString('base64') }
+            : {},
+      ),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const err = await runPay({ url: FOREIGN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    }).then(
+      () => expect.unreachable(),
+      (thrown: unknown) => thrown,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    // Whatever the seller says, the signed authorization left: counted.
+    expect(authorizer.commit).toHaveBeenCalledOnce();
+    expect(authorizer.release).not.toHaveBeenCalled();
+    return err as CliError;
+  }
+
+  // A seller whose facilitator refused the settle: a 402 with an empty `{}`
+  // body, and the reason only in the payment-response header.
+  it.each(['PAYMENT-RESPONSE', 'X-PAYMENT-RESPONSE'])(
+    'names a seller whose %s header says it did not settle, with its reason',
+    async (header) => {
+      const reason =
+        'Facilitator settle failed (402): A valid payment method is required for this account.';
+      const err = await rejectedWith(
+        { success: false, errorReason: reason, transaction: '', network: 'eip155:8453' },
+        header,
+      );
+      expect(err.code).toBe('PAYMENT_FAILED');
+      expect(err.message).toBe(`The endpoint did not settle the payment: ${reason}`);
+      expect(err.details).toMatchObject({
+        status: 402,
+        settlementError: reason,
+        amountAtomic: '100000',
+        settlement: 'unknown',
+      });
+      expect(err.fix).toContain('reported that nothing settled');
+      expect(err.fix).toContain('Do not simply retry');
+      expect(err.fix).toContain('Use a different service');
+      expect(err.fix).not.toMatch(/refund/i);
+    },
+  );
+
+  it("bounds the seller's settle reason to one redacted plain line", async () => {
+    const key = `sk-ant-api03-${'a'.repeat(90)}`;
+    const err = await rejectedWith({
+      success: false,
+      errorReason: `denied\n\u001b[2J\u202e ${key} ${'x'.repeat(2_000)}`,
+      transaction: '',
+    });
+    const said = (err.details as { settlementError: string }).settlementError;
+    expect(said.startsWith('denied ')).toBe(true);
+    expect(said).not.toMatch(/[\p{Cc}\u202e]/u);
+    expect(said).not.toContain(key);
+    expect(Array.from(said)).toHaveLength(501);
+    expect(err.message).not.toMatch(/[\p{Cc}\u202e]/u);
+  });
+
+  it.each([
+    ['no payment-response header', undefined],
+    ['one that says it settled', { success: true, transaction: `0x${'ab'.repeat(32)}` }],
+    ['one that cannot be read', 'not base64 json'],
+    ['one that is not an object', Buffer.from('false').toString('base64')],
+  ])('keeps the unknown-settlement failure for %s', async (_label, settle) => {
+    const err = await rejectedWith(settle);
+    expect(err.message).toBe('Payment was not accepted by the endpoint.');
+    expect(err.details).not.toHaveProperty('settlementError');
+    expect(err.fix).toContain('the endpoint may still settle it');
   });
 
   // The fresh post-SIWX challenge is what gets SIGNED, so it is re-verified
@@ -1011,7 +1646,7 @@ describe('runPay, the shared request gate', () => {
     ]);
     let prompt = '';
     const result = await runPay(
-      { url: FOREIGN_URL, terms: { ...TERMS, source: 'a decision' } },
+      { url: FOREIGN_URL, terms: { ...TERMS, source: 'a decision' }, admit: planned },
       makeCtx(),
       {
         ...PUBLIC_DNS,
@@ -1040,7 +1675,7 @@ describe('runPay, the shared request gate', () => {
     const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
     const authorizer = fakeAuthorizer('allow');
     await expect(
-      runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+      runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
         ...PUBLIC_DNS,
         fetchImpl: fetch,
         provider: testWalletProvider(),
@@ -1049,6 +1684,93 @@ describe('runPay, the shared request gate', () => {
     ).rejects.toMatchObject({ code: 'REGISTRY_MISMATCH' });
     expect(calls).toHaveLength(1);
     expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  /** A ROUTER PAYMENT IS SIGNED ONLY AGAINST ITS CALL'S PLAN: no plan, a
+   *  slot nobody admitted, a slot already spent, or a live price above the
+   *  plan signs nothing. */
+  it('refuses a router payment its call never planned, before anything is sent', async () => {
+    await writeConfig();
+    const { fetch, calls } = scriptedFetch([]);
+    await expect(
+      runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'unplanned' } });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a slot no plan admitted, one already spent, and a price above the plan', async () => {
+    await writeConfig();
+    const attempt = async (admit: () => Promise<PlanSlot>) => {
+      const fixture = buildPaymentRequired();
+      const { fetch } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': fixture.header })]);
+      const authorizer = fakeAuthorizer('allow');
+      const err = await runPay({ url: FOREIGN_URL, terms: TERMS, admit }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }).catch((caught: unknown) => caught);
+      expect(authorizer.authorize).not.toHaveBeenCalled();
+      return err;
+    };
+    expect(await attempt(async () => ({ amountAtomic: 10n ** 9n, approved: true }))).toMatchObject({
+      code: 'REFUSED',
+      details: { reason: 'unplanned' },
+    });
+    const once = await planned(100_000n);
+    const paid = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': paid.header }),
+      json(200, { ok: true }),
+    ]);
+    await runPay({ url: FOREIGN_URL, terms: TERMS, admit: async () => once }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(await attempt(async () => once)).toMatchObject({
+      code: 'REFUSED',
+      details: { reason: 'spent' },
+    });
+    expect(await attempt(() => planned(99_999n))).toMatchObject({
+      code: 'PAYMENT_FAILED',
+      details: { reason: 'above_plan' },
+    });
+  });
+
+  /** A QUOTE A PERSON APPROVED is theirs, as a manual payment is: past the
+   *  automatic limits, and outside the automatic budget. */
+  it("signs a slot of an approved quote as the user's own payment", async () => {
+    await writeConfig({ maxAutoSpend: '0', sessionBudget: '0' });
+    const quote = await createQuote(dir, {
+      what: 'one call to a seller',
+      sentence: 'One call to a seller costs $0.1.',
+      payments: [{ amountAtomic: 100_000n, creator: 'seller.example' }],
+      call: {},
+    });
+    const admitted = await admitQuote(dir, quote.id, {
+      balance: async () => null,
+    });
+    if (!('admitted' in admitted)) throw new Error('the quote was not admitted');
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(200, { ok: true }),
+    ]);
+    const authorizer = fakeAuthorizer('confirm');
+    const result = await runPay(
+      { url: FOREIGN_URL, terms: TERMS, admit: async () => admitted.admitted[0]! },
+      makeCtx(),
+      { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider(), authorizer },
+    );
+    expect((result.data as { paid: boolean }).paid).toBe(true);
+    expect(authorizer.authorize).toHaveBeenCalledWith(expect.objectContaining({ mode: 'manual' }));
+    expect(authorizer.commit).toHaveBeenCalledWith(
+      RESERVATION,
+      100_000n,
+      expect.objectContaining({ mode: 'manual' }),
+    );
   });
 
   it('carries the duplicate-guard key into the authorizer', async () => {
@@ -1190,12 +1912,12 @@ describe('runPay, the success rule on every delivery', () => {
   });
 
   /**
-   * A body past the client's 128 KiB validation limit is not evidence the
+   * A body past the client's 4 MiB validation limit is not evidence the
    * endpoint broke its contract: the limit is ours, the rule never ran, and on
    * the paid leg the authorization has already settled. Refusing it charged the
    * caller and threw the product away.
    */
-  const OVERSIZED = { success: true, blob: 'x'.repeat(200 * 1024) };
+  const OVERSIZED = { success: true, blob: 'x'.repeat(MAX_BODY_BYTES) };
 
   it('delivers a PAID 2xx too large to validate, with the caveat, and keeps the charge', async () => {
     const fixture = buildPaymentRequired();
@@ -1227,7 +1949,10 @@ describe('runPay, the success rule on every delivery', () => {
     expect(data.resultCaveat).toContain('unverified');
     expect(result.humanLines?.some((line) => line.includes('unverified'))).toBe(true);
     // The ledger is unchanged by this: the money moved either way.
-    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, { mode: 'manual' });
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/) as string,
+    });
   });
 
   it('delivers a free 2xx too large to validate with the same caveat', async () => {
@@ -1268,6 +1993,43 @@ describe('runPay, the success rule on every delivery', () => {
 // The paid leg's transport failures are post-transmission outcomes: the
 // authorization has left and the reservation is committed, so the receipt owes
 // the amount whatever the transport said.
+/**
+ * THE ROUTER'S JOB SEAM. A long job's status URL can be a header, so the
+ * router is handed the paid answer's status and headers. The payment header
+ * it carried is never handed on: a poll is never signed.
+ */
+describe('runPay, the paid leg a job is started from', () => {
+  it('hands the paid answer to the caller, and never its payment header', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(202, { id: 'job-1' }, { 'X-Status-Url': '/jobs/1' }),
+    ]);
+    let seen: PaidLeg | undefined;
+    const result = await runPay(
+      {
+        url: TENJIN_URL,
+        onPaidLeg: (leg) => {
+          seen = leg;
+        },
+      },
+      makeCtx(),
+      {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      },
+    );
+    const sent = calls[1]!.headers['payment-signature']!;
+    expect(sent).toBeDefined();
+    expect(seen?.status).toBe(202);
+    expect(seen?.header?.('x-status-url')).toBe('/jobs/1');
+    expect(Object.keys(seen ?? {}).sort()).toEqual(['header', 'status']);
+    expect(JSON.stringify(result.data)).not.toContain(sent);
+  });
+});
+
 describe('runPay, a transport failure after the payment was transmitted', () => {
   it('carries the amount and settlement unknown when the paid leg cannot be read', async () => {
     const fixture = buildPaymentRequired();
@@ -1370,7 +2132,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       json(402, {}, { 'PAYMENT-REQUIRED': multiChain() }),
       json(200, { data: { BTC: 1 } }),
     ]);
-    const result = await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+    const result = await runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
@@ -1390,7 +2152,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       json(402, {}, { 'PAYMENT-REQUIRED': multiChain() }),
       json(200, { ok: true }),
     ]);
-    await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+    await runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
@@ -1418,7 +2180,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       ),
     ]);
     const authorizer = fakeAuthorizer('allow');
-    const err = await runPay({ url: FOREIGN_URL, terms: TERMS }, makeCtx(), {
+    const err = await runPay({ url: FOREIGN_URL, terms: TERMS, admit: planned }, makeCtx(), {
       ...PUBLIC_DNS,
       fetchImpl: fetch,
       provider: testWalletProvider(),
@@ -1444,7 +2206,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       ),
     ]);
     const err = await runPay(
-      { url: FOREIGN_URL, terms: { ...TERMS, maxAmountAtomic: '9999' } },
+      { url: FOREIGN_URL, terms: { ...TERMS, maxAmountAtomic: '9999' }, admit: planned },
       makeCtx(),
       { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
     ).catch((e: unknown) => e);
@@ -1459,6 +2221,7 @@ describe('runPay, a 402 that advertises several chains', () => {
       {
         url: FOREIGN_URL,
         terms: { ...TERMS, payTo: '0x9999999999999999999999999999999999999999' },
+        admit: planned,
       },
       makeCtx(),
       { ...PUBLIC_DNS, fetchImpl: fetch, provider: testWalletProvider() },
@@ -1640,6 +2403,13 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
       ).rejects.toMatchObject({
         code: 'REFUSED',
         details: { reason: balance === null ? 'balance_unavailable' : 'insufficient_funds' },
+        ...(balance === 99_999n
+          ? {
+              message: expect.stringContaining(
+                'It holds 0.099999 USD and this costs 0.1 USD: 0.000001 USD short.',
+              ),
+            }
+          : {}),
       });
       expect(readBalance).toHaveBeenCalledWith(signer.address, expect.any(String), {
         timeoutMs: expect.any(Number),
@@ -1703,6 +2473,42 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
     expect(result.data).toMatchObject({ paid: true });
     expect(readBalance).toHaveBeenCalledTimes(2);
     expect(readBalance.mock.calls[1]![2].timeoutMs).toBeLessThan(5000);
+  });
+  /** THE SIGNER'S BALANCE IS READ LIVE before signing (docs/agent-permissions.md).
+   *  The balance the hooks remembered a minute ago can be one the wallet has
+   *  since spent, so it never stands in for a read that failed. */
+  it('refuses an unreadable balance even with one the hooks remembered', async () => {
+    const provider = testWalletProvider();
+    const signer = await provider.getSigner();
+    const remember = rememberingBalanceReader(dir, { read: async () => 100_000_000n });
+    expect(await remember(signer.address, 'https://rpc.test', { timeoutMs: 1_000 })).toBe(
+      100_000_000n,
+    );
+    const asked: string[] = [];
+    vi.stubGlobal('fetch', async (input: unknown) => {
+      asked.push(String(input));
+      return new Response('over rate limit', { status: 429 });
+    });
+    const sign = vi.spyOn(signer, 'signTypedData');
+    const { fetch, calls } = paymentResponses();
+    await expect(
+      runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
+        destination: PUBLIC_DNS.destination,
+        fetchImpl: fetch,
+        provider,
+      }),
+    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason: 'balance_unavailable' } });
+    // Both reads asked the default and each public fallback, live.
+    expect(asked).toEqual([
+      DEFAULT_RPC_URL,
+      ...FALLBACK_RPC_URLS,
+      DEFAULT_RPC_URL,
+      ...FALLBACK_RPC_URLS,
+    ]);
+    expect(sign).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    const { readSpendSummary } = await import('../lib/wallet/spend');
+    expect(await readSpendSummary(dir)).toMatchObject({ committedAtomic: '0', reservations: [] });
   });
   it('both flags cannot bypass an explicit price cap', async () => {
     await writeConfig({ sessionBudget: 'none' });

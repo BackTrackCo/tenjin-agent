@@ -14,8 +14,15 @@ it gives BackTrack PBC permission to license your contribution.
 Maintainers must verify that each contributor has posted their own acceptance comment
 before merging. Acceptance is checked manually; there is no CLA bot.
 
-See the [development instructions](./README.md#developing) to get started.
-
 The agreement follows the short form used by
 [n8n](https://github.com/n8n-io/n8n/blob/master/CONTRIBUTOR_LICENSE_AGREEMENT.md),
 based on [Indie Open Source's Tiny CLA](https://indieopensource.com/forms/cla).
+
+## Development
+
+```bash
+pnpm install
+pnpm run githooks   # once, to use the repo's git hooks
+pnpm run build
+pnpm run test
+```

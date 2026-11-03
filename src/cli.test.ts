@@ -96,6 +96,16 @@ describe('main', () => {
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
   });
 
+  // The already-paid message in the `request` tool sends the agent to a bare
+  // `tenjin payments`; it once exited 2 because only `reconcile` existed. The
+  // list reads the local ledger and nothing else, so it runs here offline.
+  it('a bare `tenjin payments` lists the ledger rather than failing on usage', async () => {
+    const cap = captureIo();
+    expect(await main(['payments'], cap.io)).toBe(0);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed).toMatchObject({ ok: true, command: 'payments', data: { total: 0 } });
+  });
+
   // The release ships two products and nothing else, so the root list is the
   // one place a stray shelf verb would show up.
   it('lists only the core and router commands', async () => {
@@ -206,8 +216,15 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain('--project');
     expect(help).toContain('--refresh');
-    for (const gone of ['--harness', '--bazaar-pay', '--no-grant', '--publish-mode'])
+    expect(help).toContain('--harness');
+    for (const gone of ['--bazaar-pay', '--no-grant', '--publish-mode', '--status-line'])
       expect(help).not.toContain(gone);
+  });
+
+  it("accepts the plugin's own flag on the MCP server", async () => {
+    const cap = captureIo();
+    expect(await main(['mcp', '--plugin', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).not.toContain('--plugin');
   });
 
   // Removed pre-release flags are gone rather than hidden. Rejected at parse
@@ -218,6 +235,7 @@ describe('main', () => {
       '--no-claude-md',
       '--allow-free-verbs',
       '--no-allow-free-verbs',
+      '--status-line',
     ]) {
       const cap = captureIo();
       expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);
@@ -338,6 +356,33 @@ describe('global flags are position-independent', () => {
     expect(parsed.command).toBe('wallet.show');
   });
 
+  it('`wallet address` is `wallet show`, and both QR commands accept --no-qr', async () => {
+    for (const argv of [
+      ['wallet', 'address', '--no-qr', '--timeout', 'abc'],
+      ['wallet', 'fund', '--no-qr', '--timeout', 'abc'],
+    ]) {
+      const cap = captureIo();
+      expect(await main(argv, cap.io)).toBe(2);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.command).toBe(argv[1] === 'address' ? 'wallet.show' : 'wallet.fund');
+    }
+  });
+
+  it('`wallet repair` resolves to wallet.repair, and --insecure-storage parses on repair and create', async () => {
+    for (const verb of ['repair', 'create']) {
+      const cap = captureIo();
+      expect(await main(['wallet', verb, '--insecure-storage', '--timeout', 'abc'], cap.io)).toBe(
+        2,
+      );
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.error.code).toBe('USAGE');
+      // A rejected flag would be a 'tenjin' parse error; the leaf's own name
+      // proves `--insecure-storage` was accepted there.
+      expect(parsed.command).toBe(`wallet.${verb}`);
+    }
+  });
+
   it('trailing --json suppresses stderr on a TTY, exactly like leading --json', async () => {
     const lead = captureIo(true);
     await main(['--json', 'doctor', '--timeout', 'abc'], lead.io);
@@ -391,6 +436,15 @@ describe('the update nudge and `install --refresh`', () => {
     await main(['install', '--refresh', '--json'], cap.io);
     expect(existsSync(cachePath())).toBe(false);
     expect(fetched).toBe(0);
+  });
+
+  it('refuses a Codex refresh as usage, with nothing to bring up to date', async () => {
+    const cap = captureIo();
+    expect(await main(['install', '--harness', 'codex', '--refresh', '--json'], cap.io)).not.toBe(
+      0,
+    );
+    expect(cap.stdout()).toContain('no refresh');
+    expect(existsSync(cachePath())).toBe(false);
   });
 
   // The other half: without it the case above would pass on a nudge that was

@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-06.1",
+  "decision": {
+    "action": "execute",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21",
+    "capabilityId": "exa-search",
+    "category": "web research",
+    "provider": "Exa",
+    "label": "Exa search",
+    "capabilityDescription": "web search that returns ranked source pages, optionally with their text, highlights or summaries",
+    "providerPriceAtomic": "7000",
+    "endpoint": "https://api.exa.ai/search",
+    "usage": "the research question",
+    "hint": "Exa search, $0.007: web search that returns ranked source pages, optionally with their text, highlights or summaries. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21\", input: {\"query\":\"x402 agent payments\"}}) instead; native tools stay allowed for anything else.",
+    "specs": [
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d21",
+        "capabilityId": "exa-search",
+        "provider": "Exa",
+        "label": "Exa search",
+        "holds": {
+          "WebSearch": "query"
+        },
+        "output": "json",
+        "description": "web search that returns ranked source pages, optionally with their text, highlights or summaries",
+        "priceAtomic": "7000",
+        "priceVaries": false,
+        "maxAmountAtomic": "7000",
+        "payTo": "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "POST",
+          "url": "https://api.exa.ai/search",
+          "fields": {
+            "query": "body",
+            "type": "body",
+            "category": "body",
+            "includeDomains": "body",
+            "numResults": "body",
+            "contents": "body"
+          },
+          "location": "body",
+          "headers": {
+            "Exa-Beta": "dynamic-highlights-2026-08-28"
+          }
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Search query"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["lite", "auto"],
+              "default": "lite",
+              "description": "Search tier, the agent's choice per task: lite ($0.004) is Exa 3.0's cost tier on the same index as auto and found the same answers on single-shot factual questions in 586 ms median, so it is the default; auto ($0.007) spends more compute per query for hard or ambiguous research; fast and instant are retired, and the deep tiers price above this listing"
+            },
+            "category": {
+              "type": "string",
+              "enum": [
+                "company",
+                "people",
+                "publication",
+                "news",
+                "personal site",
+                "financial report"
+              ],
+              "description": "A data category to focus on"
+            },
+            "includeDomains": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "description": "Return results only from these domains or domain paths"
+            },
+            "numResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 10
+            },
+            "contents": {
+              "type": "object",
+              "const": {
+                "highlights": {
+                  "dynamic": true,
+                  "maxTotalCharacters": 5000
+                }
+              }
+            }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        },
+        "pinned": {
+          "contents": {
+            "highlights": {
+              "dynamic": true,
+              "maxTotalCharacters": 5000
+            }
+          }
+        },
+        "example": {
+          "numResults": 10,
+          "query": "example search query",
+          "type": "lite"
+        },
+        "returns": "JSON {results:[{title, url, publishedDate, highlights[]}]}: up to numResults pages sharing about 5,000 characters of highlights, more from the strongest pages, not the full text",
+        "returnsExample": {
+          "results": [
+            {
+              "score": 0.99,
+              "title": "Example",
+              "url": "https://example.com"
+            }
+          ]
+        }
+      }
+    ],
+    "delivery": "offer"
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 210
+  }
+}

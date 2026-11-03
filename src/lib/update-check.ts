@@ -8,16 +8,18 @@ import { emitNotice } from './output';
 import type { Io } from './output';
 import type { UpdateAvailable } from '../schemas';
 import { updateCheckPath } from './paths';
+import { isNewer, parseVersion } from './version-order';
 
 /**
  * "A newer tenjin-cli exists", asked of npm at most once a day and reported
  * three ways: one dim stderr line for a human at a terminal, `updateAvailable`
  * on the JSON envelope, and a line on the generated hook scripts' output.
  *
- * It REPORTS and never installs. A CLI that starts a fresh process per
- * invocation has no deferred-activation window to hide a binary swap in — "next
- * start" is "mid-session" for whatever is driving it — so the decision to run
- * `tenjin update` belongs to the agent or the human, not to this check.
+ * It REPORTS and never installs. Installing needs a deferred-activation window,
+ * and Tenjin's runtime is that window (versions side by side, a running session
+ * keeps its own), so `update.mode auto` installs from lib/auto-update, which
+ * the session hooks start; `auto` reports here exactly as `nudge` does. After a
+ * switch the running version equals `latest`, so this line goes quiet by itself.
  *
  * Everything here is subordinate to the command that ran: the fetch happens
  * AFTER the envelope is written, it never touches stdout, it never changes an
@@ -33,15 +35,13 @@ import { updateCheckPath } from './paths';
  * data dirs come out of a settings file this CLI does not own, and this check is
  * the one thing in a refresh that would CREATE such a directory — `writeCache`
  * mkdirs the tree — where the refresh itself only converges what exists.
- *
- * A separate switch rather than `CI`, which would also stand the skills heal
- * down (lib/skill-heal) and so gut the refresh it was set for.
  */
 export const NUDGE_OPT_OUT = 'TENJIN_NO_UPDATE_CHECK';
 
 const CHECK_INTERVAL_MS = 86_400_000; // 24h
 const FETCH_TIMEOUT_MS = 1500;
 const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags';
+const PACKUMENT_URL = 'https://registry.npmjs.org/tenjin-cli';
 
 /** What is known about ONE dist-tag: when it was asked, and what it said. */
 const TagEntrySchema = z.object({
@@ -207,9 +207,8 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
  * when `update.mode` is `off` — off silences BOTH surfaces, not just the line a
  * human sees.
  *
- * Reporting rather than installing is the whole design. A CLI that starts a
- * fresh process per invocation has no deferred-activation moment to hide a
- * binary swap in, so the agent is told and decides for itself.
+ * Reporting only: where Tenjin's runtime is set up, lib/auto-update installs in
+ * the background; everywhere else the agent is told and decides for itself.
  */
 export async function readUpdateSignal(
   dir: string,
@@ -291,6 +290,34 @@ export async function fetchDistTags(opts: {
 }
 
 /**
+ * When the registry says `version` was published, in ms since the epoch, from
+ * the packument's `time` map (the per-version document carries no time). Null
+ * when the registry could not be asked; `{ publishedAt: null }` when it
+ * answered with no time for that version, or one that does not parse. The
+ * registry sets these times itself at publish, and a publisher cannot backdate
+ * them, which is what lets `tenjin update --background` wait on one.
+ */
+export async function fetchPublishTime(
+  version: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs: number },
+): Promise<{ publishedAt: number | null } | null> {
+  let json: { time?: Record<string, unknown> } | null;
+  try {
+    const res = await (opts.fetchImpl ?? fetch)(PACKUMENT_URL, {
+      signal: AbortSignal.timeout(opts.timeoutMs),
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    json = (await res.json()) as typeof json;
+  } catch {
+    return null;
+  }
+  const raw = json?.time?.[version];
+  const at = typeof raw === 'string' ? Date.parse(raw) : NaN;
+  return { publishedAt: Number.isNaN(at) ? null : at };
+}
+
+/**
  * The nudge's one-shot: fetch, then resolve. Null when the registry could not be
  * asked; `{ latest: null }` when it answered with nothing usable.
  */
@@ -318,52 +345,6 @@ async function readCache(path: string): Promise<Cache | null> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Version comparison: this package's shape only, no semver dependency.
-// ---------------------------------------------------------------------------
-
-/** `major.minor.patch` with an optional `-alpha.N` — every version tenjin-cli
- *  has ever published. Anything else is unparseable ON PURPOSE (see isNewer). */
-const VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-alpha\.(\d+))?$/;
-
-interface Version {
-  major: number;
-  minor: number;
-  patch: number;
-  /** null = a release; a number = that prerelease counter. */
-  alpha: number | null;
-}
-
-function parseVersion(raw: string): Version | null {
-  const m = VERSION_RE.exec(raw);
-  if (m === null) return null;
-  const [, major, minor, patch, alpha] = m;
-  if (major === undefined || minor === undefined || patch === undefined) return null;
-  return {
-    major: Number(major),
-    minor: Number(minor),
-    patch: Number(patch),
-    alpha: alpha !== undefined ? Number(alpha) : null,
-  };
-}
-
-/**
- * Is `candidate` newer than `current`? An unparseable version on EITHER side is
- * "not newer": the registry is untrusted input, and the failure mode of guessing
- * is nagging every single command with a line the user cannot act on. A true
- * return therefore also certifies that BOTH sides parse, which is what lets
- * `tenjin update` splice the candidate into an npm argv without re-validating.
- */
-export function isNewer(candidate: string, current: string): boolean {
-  const a = parseVersion(candidate);
-  const b = parseVersion(current);
-  if (a === null || b === null) return false;
-  if (a.major !== b.major) return a.major > b.major;
-  if (a.minor !== b.minor) return a.minor > b.minor;
-  if (a.patch !== b.patch) return a.patch > b.patch;
-  // Same release triple: semver says a prerelease precedes its own release, so
-  // 0.1.0 beats 0.1.0-alpha.9 and never the other way around.
-  if (a.alpha === null) return b.alpha !== null;
-  if (b.alpha === null) return false;
-  return a.alpha > b.alpha;
-}
+// Version comparison lives in ./version-order, which the runtime's layout code
+// shares; re-exported so existing importers keep their path.
+export { isNewer };

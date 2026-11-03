@@ -59,6 +59,43 @@ describe('what a definition says about the request tool', () => {
   });
 });
 
+/**
+ * AFTER THE RENAME, for a leg the plugin runs: its tool is
+ * `mcp__plugin_tenjin_router__request`. An agent that allows only the old
+ * name cannot call it, so it is excluded and doctor names the new name; one
+ * that disallows the old name meant to keep paid lookups out, so it stays out.
+ */
+describe('the plugin tool, with the old name still in a definition', () => {
+  const PLUGIN_TOOL = 'mcp__plugin_tenjin_router__request';
+  it.each([
+    ['the plugin tool', 'tools: Read, mcp__plugin_tenjin_router__request\n', 'allowed'],
+    ['the plugin server', 'tools: mcp__plugin_tenjin_router\n', 'allowed'],
+    ['the plugin server wildcard', 'tools: mcp__plugin_tenjin_router__*\n', 'allowed'],
+    ['every plugin tool', 'tools: mcp__plugin_*\n', 'allowed'],
+    ['only the old tool', 'tools: Read, mcp__x402__request\n', 'excluded'],
+    ['only the old server wildcard', 'tools: mcp__x402__*\n', 'excluded'],
+    ['the old tool disallowed', 'disallowedTools: mcp__x402__request\n', 'excluded'],
+    ['the old server disallowed', 'disallowedTools: mcp__x402\n', 'excluded'],
+    ['the old server wildcard disallowed', 'disallowedTools: mcp__x402__*\n', 'excluded'],
+    [
+      'the plugin tool disallowed',
+      'disallowedTools: mcp__plugin_tenjin_router__request\n',
+      'excluded',
+    ],
+  ] as const)('%s', (_label, frontmatter, expected) => {
+    expect(accessOf(agent('a', frontmatter), PLUGIN_TOOL)).toBe(expected);
+  });
+
+  it('doctor names an agent that allows only the old name', async () => {
+    await define(
+      join(home, '.claude', 'agents'),
+      'old.md',
+      agent('old', 'tools: mcp__x402__request\n'),
+    );
+    expect(await agentsWithoutRequestTool({ homeDir: home }, PLUGIN_TOOL)).toEqual(['old']);
+  });
+});
+
 describe('finding the definition an agent type names', () => {
   it('prefers the project over the user, from any depth in the project', async () => {
     await define(join(project, '.claude', 'agents'), 'reader.md', agent('reader', 'tools: Read\n'));

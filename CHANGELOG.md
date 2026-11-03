@@ -1,5 +1,562 @@
 # tenjin-cli
 
+## 0.1.0-alpha.33
+
+### Minor Changes
+
+- 2dc4fdf: Routed calls now tell the router this build sends a spec's fixed request
+  headers, so the router can hand it a service's call that needs one. The first
+  is Exa search with Dynamic Highlights: the spec carries Exa's
+  `Exa-Beta: dynamic-highlights-2026-08-28` opt-in and asks for one shared
+  5,000-character highlight budget across the results instead of 500 characters
+  per page, at no extra charge. Until the router ships that call, every answer
+  stays as it is.
+- b5f02a6: Add verified shell and PowerShell installers that include Node and use the same private runtime as npm. Refuse unsupported plugin profiles and preserve existing registration when runtime setup fails.
+
+### Patch Changes
+
+- fe8cef2: Tenjin now updates itself in Codex too. Codex stopped Tenjin's server before the daily background update could start, so a machine that runs Tenjin only in Codex stayed on the version it was installed with; the update now starts as a Codex session starts. Such a machine needs one `tenjin update` by hand to get this release, and updates itself from then on. In Claude Code, the daily update now starts even when Tenjin's session-start step fails, so the next release can still replace a build that fails there.
+- fe8cef2: The shell installer now refuses a Mac older than macOS 13.5, the oldest its pinned Node 24 runs on, before downloading anything, and fails a download only when it stalls (under 1 KB/s for a minute) instead of after five minutes, so a slow link can finish Node's 50 MB archive. The installer templates now ship in the npm package, so tenjin.sh builds its installers from the same release npm serves, under the same provenance. On Windows, a proxy download during `tenjin install` starts `curl.exe` from Tenjin's own folder, never from the folder you ran it in.
+- 89fe9ed: Suggest the free docs lookup after a search instead of fetching it. When the router sends a free lookup before a WebSearch as a note, the search runs as written and one optional line after it names the lookup; your assistant calls it or not. Any other free offer before a search stays silent, so the server decides when the line shows. Nothing is fetched or added to the search results, and a called lookup draws like every other Tenjin lookup, with `free` where the price goes.
+- 59adf08: The `ws` WebSocket library no longer ships: Tenjin reaches RPC over HTTP only, and Node 22 has its own WebSocket.
+- fe8cef2: `tenjin update` and the background auto-update now install a release only when npm's build provenance shows Tenjin's own release workflow built it, with the same sha512 as the tarball, whether the update runs through Tenjin's runtime or through npm. A release without that provenance is refused before anything is downloaded or installed, and the version you have keeps running.
+
+  The background auto-update also takes a release only once npm published it at least a day ago, so a bad release can be pulled before any machine runs it on its own; until then it switches nothing and `tenjin doctor` says why it waited. A manual `tenjin update` still takes the newest release right away. The background update does not run at all while `NODE_TLS_REJECT_UNAUTHORIZED=0` turns off TLS certificate checks, since anyone on the network path could then answer for npm; `tenjin doctor` says so and suggests `NODE_EXTRA_CA_CERTS` for a corporate certificate instead.
+
+## 0.1.0-alpha.32
+
+### Minor Changes
+
+- 058df3f: Paying an endpoint can now start with a free quote, and the plugin teaches an
+  agent to quote first and then pay with this machine's wallet.
+
+  A quote decodes the endpoint's 402 and reports every payment option, the
+  resource line, the seller's extensions (a listing's advertised request shape
+  rides there) and the body. No wallet is opened and nothing is signed. Only a
+  USDC option carries a dollar amount, and the option the paid path would sign is
+  marked payable, chosen by the same selection. The headline prices that option,
+  or says the endpoint lists none this wallet can pay, so an 18-decimal option a
+  seller lists first is never shown as dollars.
+
+  A paid call can send a request header the endpoint asks for, such as a
+  provider's beta opt-in or an API version, on the probe and the paid leg alike,
+  and it can send several. Every header the CLI signs or sets itself is refused
+  before any request leaves: the payment signature, sign-in-with-x, the session
+  delegation, the shelf bypass, the install id, the payment header namespace and
+  the transport headers (host, content length, content type, user agent). A
+  routing decision still passes only the accept and content type headers. A
+  catalog spec can now carry fixed request headers the catalog decides, such as a
+  provider's beta opt-in. They ride the routed call's probe and paid leg under
+  its own accept and content type, and a spec naming any header refused above is
+  refused before anything is sent. The server does not send them yet.
+
+  A paid call now takes GET, POST, PUT, PATCH or DELETE, and a body needs POST,
+  PUT or PATCH. A body that is not JSON goes byte for byte under the content type
+  sent with it, the one case where that header may be set.
+
+  The Claude Code plugin gains a `tenjin-pay` skill: quote first, cap the price
+  at the payable option, pay with the user's consent to that quote, send the
+  headers the endpoint asks for, and never use another tool's wallet for a call
+  this one can make. Install and update write it with the plugin's other files,
+  and uninstall removes it with them.
+
+### Patch Changes
+
+- 622e5b4: Codex's automatic hooks route again now that the router charges its routing fee. The Codex plugin's three routing legs (the prompt, and a web call before and after it runs) are `mcp_tool` hooks into the plugin's `router` server, as Claude Code's are, so each leg pays the $0.003 fee from the wallet under the local spend limits, the same way a `request` does. They need Codex 0.149.0 or later: install and update leave an older Codex's plugin copy as it is and say so in one line. Routing keeps working after a prompt edit and under a custom `CODEX_HOME`, which the server now receives through `env_vars`. A fifth hook denies the server's `hook` tool to the assistant. `tenjin install --harness codex` now turns the five hooks on through Codex's app server, the same call `/hooks` makes, for Tenjin's own rows only, and names `/hooks` only when that fails. When the fee cannot be paid, Codex shows why (a low wallet, a locked wallet, the daily limit) once per session, and the status line records `fee unpaid: <reason>` instead of a native choice. `tenjin doctor --harness codex` checks that the routing legs reach the server and that Codex is new enough to run them, with nothing paid or sent. `tenjin update` replaces a Codex plugin copy from an earlier release (only where Codex already has it) and turns its new hooks on; when it cannot, it prints one line and the update still succeeds. `tenjin doctor --harness codex` warns, without failing, while a copy still has the old command legs.
+- 88360c1: Tenjin keeps working after a Node upgrade. Install copies Tenjin into `~/.tenjin/runtime` with its own pinned Node 24, downloaded from nodejs.org and checked against the SHA-256 the build carries, and Claude Code runs the plugin's hooks and server from there by absolute path. Removing the Node that installed it, switching versions with mise, nvm, fnm, asdf or Volta, or running `npm rm -g tenjin-cli` no longer stops the router. On a platform with no pinned Node (musl, or glibc older than 2.28), under a non-default `TENJIN_DATA_DIR`, or when setting up the runtime fails, Tenjin runs from the npm package as before and says why.
+
+  The `tenjin` command is now a launcher in `~/.local/bin` (`tenjin.cmd` too on Windows), and the plugin carries the same launcher in its `bin/`, which Claude Code puts at the end of the Bash tool's PATH. When the runtime is gone, the launcher says so and names the fix: `npx -y tenjin-cli@latest install`, then start a new Claude Code session. Install says when `~/.local/bin` is not on your PATH and gives the line to add, and leaves a `tenjin` there that is not its own.
+
+  `tenjin update` no longer needs npm. It downloads the new version from the npm registry, checks it against the registry's SHA-512, and has the new build check itself on its own Node before it switches anything; a failed check keeps the version you had. The previous version stays in the runtime, and older ones are removed only once nothing runs from them. An older build never replaces a newer one; to go back, run `tenjin uninstall`, then install the older version.
+
+  Codex runs Tenjin from the same runtime: install adds the Codex plugin from `~/.tenjin/runtime/codex`, whose hooks and server run the runtime's launcher, so a Node upgrade no longer breaks Tenjin in Codex. Run `tenjin install` once in Codex to move an existing install; Codex asks you to review the changed hooks.
+
+  Tenjin now updates itself in the background, at most once a day, at the start of a Claude Code session or as a Codex session ends, where its runtime is set up. It uses `tenjin update`'s checks, never npm. Claude Code and Codex both run the new version from their next session. `tenjin config set update.mode nudge` only reports a newer version; `off` turns the check off.
+
+  `tenjin doctor` checks the runtime Claude Code starts, and names an older `tenjin` first on your PATH, or a plugin an older build moved back to its npm folder.
+
+  Existing installs move to the runtime on their next `tenjin install` or `tenjin update`, project installs included. The wallet, the passphrase, the spend ledger and the config stay where they are.
+
+  `tenjin uninstall` removes the install for where you are, from any folder: the project install for this folder or the nearest one above it, or else the user install. `--project <path>` removes another project's install, and `--all` removes every one. A run is all or nothing: when a removal fails, the marketplace, the runtime and the launcher stay, and it names what was removed and what is left. It ends by saying what it kept (your wallet and its address, the spend ledger, the config, where the passphrase is saved) and to run `npm uninstall -g tenjin-cli` after it, never before.
+
+  A wallet that will not open no longer uses up an approved quote: the `approve` call opens the wallet first, so the quote waits for a second yes after `tenjin wallet repair`. `tenjin status` shows the wallet's USDC balance, and `tenjin status` and `tenjin wallet balance` say how to fund a wallet at $0.
+
+  Every fix now says the same thing: start a new Claude Code session. Fixes to an environment variable say to quit Claude Code fully and start a new session, since a running Claude Code keeps the environment it started with.
+
+  New troubleshooting entry: "Tenjin stopped after a Node upgrade (`Executable not found`, `cache-miss`)".
+
+- 9f9cc3e: A paid read of a public link no longer stops at "the query carries a credential-shaped value". Queries stopped masking any long letters-and-digits path segment, which also caught Reddit slugs, Google Docs and Drive ids, gists, Loom shares and Notion pages and sent nothing. A query still masks an RPC provider key in a URL path (QuickNode, Alchemy, Infura, Ankr, Chainstack, GetBlock, dRPC, Tenderly) and a webhook token in one (Slack, Discord, Make), along with vendor tokens, credential query parameters, bearer tokens and connection strings.
+- f37f0ed: When the routing fee cannot be paid, the notice and `tenjin doctor` now say Tenjin is not routing calls until it is fixed, instead of saying calls take the free path: the router charges the fee on every call, so an unpaid call gets no routing.
+- 313ccae: A wallet Claude Code cannot unlock is now fixed, and said plainly. The wallet's passphrase is saved where Claude Code can read it without a prompt: the platform's credential store where one answers (Keychain, Secret Service, DPAPI), and otherwise a file only you can read, `~/.tenjin/passphrase.<address>.plain` (mode 0600), recorded in `~/.tenjin/passphrase-store.json`. `wallet.json` is never rewritten, and a machine with no such record behaves as before. `tenjin wallet create --insecure-storage` picks the file even where a keychain exists; it is a choice, never the fix for a locked keychain. A locked keychain is fixed by unlocking it (or logging in to the desktop session) and retrying.
+
+  `tenjin wallet create` no longer prompts for the new wallet's passphrase: it generates one, or uses `TENJIN_WALLET_PASSPHRASE` when set, so set that first to choose your own. A `TENJIN_WALLET_PASSPHRASE` given when a wallet is created is now saved too (the keychain, else a file only you can read), and create says where in one line.
+
+  New `tenjin wallet repair`, for a wallet whose passphrase was never saved (before this release, a passphrase given in the variable when the wallet was created was never saved, and one typed at the create prompt was not saved either, since create prompted only when no keychain answered). Run it yourself in a terminal: it asks for the passphrase (or uses `TENJIN_WALLET_PASSPHRASE` when that opens the wallet); never paste the passphrase into chat. It checks the passphrase opens the wallet, saves it, and says to start a new Claude Code session; the next session says "Tenjin wallet unlocked." It is never pre-approved for an agent.
+
+  A `TENJIN_WALLET_PASSPHRASE` that does not open the wallet no longer blocks it: the saved passphrase is tried next, and Claude Code says once that the variable is wrong. A correct variable still wins. Wallet notices name the reason and are said once per reason; wallet fixes name `tenjin wallet repair` instead of the variable. Paid lookups are not offered while the wallet definitely cannot pay, and are offered as before when Tenjin cannot tell. A keychain that does not answer never stalls a lookup. `tenjin doctor` says what the router in your running Claude Code session saw, and `tenjin install` never marks with a ✓ a wallet Claude Code could not unlock.
+
+## 0.1.0-alpha.31
+
+### Patch Changes
+
+- 10e3627: The `tenjin` Claude Code plugin now carries a mod (Claude Code 2.1.287 or later). Each paid lookup is one transcript line drawn as Claude Code draws an MCP call: while it runs, `⏺ Calling Exa search… · $0.007` with the query under it, and once it ends the dim `Called Exa search · $0.007 (ctrl+o to expand)`. In the ctrl+o transcript every call to the router, hidden ones included, is Claude Code's own row with its input and result. A lookup over a spend limit draws no row of its own; the `approve` call that runs it draws as that lookup. Several takes show what they all paid. A call that failed after paying shows the error dot, the amount and the state. A call the router sends back for a missing field, and the router's own free calls, draw nothing. A WebSearch or WebFetch held for a Tenjin offer shows as its native row struck through, `~~Web Search~~("best local LLM") · Tenjin offered Exa search`, and becomes, once the `request` call takes it up, `⏺ Exa search("best local LLM") · $0.007` in place. The mod reads only the kept spec and the offer record, and writes nothing under `~/.tenjin`.
+
+  Without the mod too: `tenjin hook alive` says at session start when the wallet holds less than the per-call limit, and the request tool stays out of tool search through `anthropic/alwaysLoad`.
+
+- f20c9a7: `tenjin install` sets up Tenjin in Codex too, with no flag. Run by an agent, it sets up the agent it runs in; in a terminal, it sets up Claude Code or Codex, whichever answers `--version`, and asks which when both do, both selected. It records the agents it set up in `installed-hosts.json` in the Tenjin data dir, and `tenjin doctor` and `tenjin uninstall` check or remove each one recorded. `--harness claude|codex` only overrides. An agent's install that also finds the other agent names it in one line, with how to add Tenjin there. For Codex it writes the wallet, the spend limits and the Codex plugin `tenjin` through `codex plugin marketplace add` and `codex plugin add` from the package's `dist/hosts/codex`. Its spend limits follow the same defaults as Claude Code: with no answer the defaults ($0.25 a call, $5 a day) hold and the spend question comes back in `nextSteps`, and `--max-auto-spend` (at least 0.25) and `--session-budget` set your own. The plugin's hooks route your prompt and one web call before it runs and after (a search, a page open, or a batch of them: a batch is blocked at most once, and the block names the rest of the call to run as written), its `router` server carries the request tool, named `mcp__router__request`, and a `PermissionRequest` hook allows that tool without a prompt (turn it off in `/hooks` to be asked first). Codex asks you to trust the four hooks in `/hooks`. On native Windows, the CLI starts npm's `codex.cmd` through the script behind it, and the allow hook carries a `commandWindows` form that `cmd.exe` prints as plain JSON. The plugin carries no version, so its hooks keep their trust across `tenjin update`. For Codex, `tenjin doctor` reads Codex's one hook list for the plugin and its trust, and writes nothing, and `tenjin uninstall` removes the plugin and its marketplace.
+
+  Every router request now names its host in `harness` (`claude` or `codex`), on the hook, tool and outcome bodies, so the router can leave out a lookup the host's own tools already do.
+
+- 10e3627: router: advertises the `label` and `fields` contract tokens. Offer lines start
+  at the tool's display name, the free docs lookup fetches the URL the server
+  builds when it says to, and the over-cap note reads each listed service's
+  price from its spec. The `request` tool gains a free browse of the tool list
+  (`{browse}`) and a spec by row id (`{tool}`). The footer, the paid ledger and
+  the redirect record carry the tool's label.
+
+## 0.1.0-alpha.30
+
+### Patch Changes
+
+- 2daa787: Spending has two limits with defaults that hold whether or not anyone
+  answers: a daily budget of $5, the control, and a per-call ceiling of $0.25,
+  the runaway guard. The wallet balance is the hard stop. The per-call ceiling
+  can no longer be set below $0.25, the routing deposit: `tenjin install` and
+  `tenjin config set` refuse a lower amount and say why. The routing deposit
+  is always $0.25: a lower limit an earlier release left refuses it, and
+  `tenjin doctor` names the fix. The "spend limits not answered" notices are
+  gone.
+
+  `tenjin install` asks once: "Use the defaults ($5 a day, $0.25 a call) or set
+  your own limits." Run by an agent, it hands that question over with two
+  answers, each one install command the agent runs: `tenjin install --yes` or
+  `tenjin install --max-auto-spend <usd> --session-budget <usd|none>`. There is
+  no "no automatic spending" answer; `tenjin config set router.enabled false`
+  turns the router off. The install an answer picks then asks whether to add
+  $5 now, with the wallet's address for later; it mints no link. On
+  a yes the agent runs `tenjin wallet fund 5`, which now opens the fund page
+  under an agent harness too. Each question is in `nextSteps` in `--json`, and
+  only there.
+
+## 0.1.0-alpha.29
+
+### Patch Changes
+
+- dbec7e8: Paid jobs that finish later, and several takes of one call:
+
+  - A paid lookup whose seller answers before the result is ready (a queued video, a busy image render, a 202) is polled until it is done, for up to 5 minutes inside the call (in Claude Code, which moves a long call into the background, for as long as the seller says the job can take, with each poll reported as progress), and the file is saved as before. If it is still running then, the result says `running` with a `job` id, and `request({job})` checks it again later, from any session, paying nothing more. A 202 is never reported as a finished result.
+  - Polls go only to the seller's own host over HTTPS, and never carry a payment: a take costs its one payment, and a seller that asks for another to hand back the result gets nothing and the take fails.
+  - `request({id, input, count})` runs 2 to 5 takes of an image, video or audio call, each its own payment.
+  - One spend rule for every call: a call plans all its payments first, and their total is checked once against the per-call limit (`maxAutoSpend`, now the whole call's), the daily budget and the balance. A compare (`choice: "all"`) is planned at each option's live price.
+  - Over a limit, nothing is paid and the result says what it would cost ("5 takes of AiSpace (Hailuo 3 Max) cost $0.775 in total ($0.155 each)."). In Claude Code 2.1.214 or later, a new `approve` tool runs exactly that call once, and only through Claude Code's own permission prompt, which no mode or allow rule skips. Nobody is told to raise a limit.
+
+- 1247724: The Claude Code plugin now runs on Windows: every command it carries is exec form, `node` and its arguments started with no shell, so Git Bash and PowerShell no longer parse it. The `SessionStart` leg and the `router` MCP server run `node` with the package's own `dist/index.js` (found from `${CLAUDE_PLUGIN_ROOT}` in the shipped plugin, and written as an absolute path into the `skills/tenjin-router/` folder fallback), never the `tenjin` npm shim, which Windows cannot spawn without a shell. The two permission answers are fixed JSON that `node -e` prints. With a `claude` binary present, the `plugin` row now also reads the stamp a session's `SessionStart` leg writes, and warns when no session has started the plugin at this version, since `claude mcp get` runs with doctor's PATH, not Claude Code's. A Claude Code opened before Node was on its PATH writes no stamp, so that row names the cause: its fix is to start a new session and run doctor again, then to run `node --version` in the session and restart Claude Code. A `router server` failure says to restart Claude Code (quit it from the tray) or sign out and in.
+- dbec7e8: Small fixes across the CLI:
+
+  - The wallet address QR code scans on light editor themes: it is drawn from fixed 256-color black and white with the spec's four-module margin, and is skipped (the address still prints) on a terminal without 256 colors.
+  - `tenjin payments` lists the paid lookups this machine made: time, provider, service, amount, settlement and transaction. `payments reconcile` is unchanged.
+  - The routing deposit reads as prepaid credit, not spend. `tenjin status` shows lookups and routing credit apart (prepaid, what is left, about how many calls) and what counts toward the daily limit; `tenjin wallet balance` adds the credit left. The call that takes a deposit says so once. It still counts toward the daily limit.
+  - A paid job still running when its time runs out, whose seller sent a status URL (`X-Status-Url`), is reported as still running with that URL to check, settlement unknown, instead of as a failure.
+  - Every funding hint names the same amount, `tenjin wallet fund 5`, the checkout's Apple Pay and Google Pay minimum.
+  - The request tool's description opens with what to do (call the service a hook line names) instead of a list of lookups, which read as all the router sells, so an agent asked for an image or a sound no longer takes it as out of scope.
+  - A wallet too low to pay says how much USDC it is short.
+  - A `tenjin install --project` install is refreshed by `tenjin update`, from its own directory; `install --project` records it.
+  - A bare `tenjin doctor` in a project installed with `--project` checks that install, and the install names `tenjin doctor --project`.
+  - A bare `tenjin uninstall` in such a project says it left the project's install in place and names `tenjin uninstall --project`.
+
+## 0.1.0-alpha.28
+
+### Patch Changes
+
+- 6d28fd1: `tenjin install` now sets up Tenjin as a Claude Code plugin, `tenjin`, with no step left to the person: after the wallet and the spend question, it runs `claude plugin marketplace add` on the package's own `dist/hosts/claude` folder and `claude plugin install tenjin@tenjin`, finding `claude` on PATH or through `CLAUDE_CODE_EXECPATH`, and writes the plugin as a folder under the config dir's `skills/tenjin-router/` when neither works. The plugin carries the seven routing legs as `mcp_tool` hooks on its `router` MCP server, a `SessionStart` leg (`tenjin hook alive`), and two hooks that allow `mcp__plugin_tenjin_router__request` and deny the legs' own tool to the model, so install writes no hook entries, permission rules, status line or MCP registration of its own. Claude Code 2.1.287 or later is required; install and doctor say to run `claude update` on an older one. `CLAUDE_CONFIG_DIR` is honored by every read and write.
+
+  A settings-based install from an earlier release keeps working until the plugin has loaded in a session on the machine, and is then removed by the next `tenjin install` or `tenjin update`, only in the exact shapes it wrote. `tenjin doctor` checks the plugin through `claude plugin list --json` and `claude mcp get plugin:tenjin:router`, and reports a pending migration. On a Claude Code older than 2.1.287, the plugin is not registered while a settings install is there, so that install keeps routing until `claude update`. While a settings install stays, install, update and doctor ask for a new session rather than `/reload-plugins`, and the status line the migration removes is named in install and update output. `tenjin uninstall` removes the plugin and its marketplace through Claude Code's commands. The `--status-line` flag is gone; `tenjin status-line` stays an opt-in command.
+
+  Migration shims, removed on or after 2026-12-01: the `x402` request tool name for a process a settings install launched, the per-session silence of settings-install legs in a session the plugin serves, the old tool name in a custom agent's `disallowedTools:`, and the settings-install remover.
+
+- 6d89e2d: router: sends `catalog` in place of `discovered` and `choices`. A Tenjin list
+  service arrives under its catalog id, with its spec's holds and output, and a
+  paid result's files are saved by the spec's output. Hook, tool and footer text
+  are unchanged.
+- b1bba9d: `tenjin wallet fund` asks the server for the checkout link for your region. In the US the link opens a Tenjin page that takes Apple Pay or Google Pay with no Coinbase account. Elsewhere it is still the hosted Coinbase checkout. The CLI opens only `tenjin.sh` and `pay.coinbase.com` links.
+
+## 0.1.0-alpha.27
+
+### Minor Changes
+
+- 8d11ddb: A line can now offer a choice of services for one step, such as several
+  image models. The CLI sends `choices` in `accepts`, and the hook keeps the
+  offer's choice set beside every option's spec. `request({id, choice, input})`
+  runs the option the user picked as its own offer, under its own id, exactly
+  as `request({id: option.id, input})` would. `choice: "all"` runs every option
+  side by side, each paid once straight to its own provider, after one check
+  that the whole set fits the spend policy (each payment within `maxAutoSpend`,
+  the total inside `sessionBudget`); a set that does not fit returns
+  `needs_approval` with nothing signed. The result lists each option with its
+  status, cost and saved file under `~/.tenjin/downloads/`, so the agent can
+  open the images and help the user pick. An option already paid is not paid
+  again. Which options a set holds is the server's data, so a new set needs no
+  CLI release.
+
+### Patch Changes
+
+- a800185: A paid third-party service that returns its file inline, as base64 inside its
+  JSON (`b64_json`, a `data:` URI, an `audio_base64` field), now has that file
+  saved under `~/.tenjin/downloads/`, the way a linked file already was. The
+  `request` tool's result replaces the base64 with a note naming the saved path,
+  its type and its size, and lists the file in `savedFiles` and the paid ledger.
+  Before, a four-second video reached the agent as 4.2 MB of base64 with nothing
+  saved. A short string that only looks like base64, such as an id or a hash, is
+  left alone.
+- 8b102a1: The CLI now runs on Node 22, the same floor Claude Code needs (was Node 24). Human output stays plain when piped on every Node 22 release. Routing through HTTPS_PROXY still needs Node 24.14 or newer, and `tenjin doctor` says so.
+- a800185: When a seller rejects a signed payment and its payment-response header says it
+  did not settle (`success: false`), `tenjin pay` and the `request` tool now say
+  so, with the seller's reason: "The endpoint did not settle the payment: …". The
+  `request` tool's result carries that reason as `settlementError`, beside
+  `providerError`. Before, the reason was dropped, and a seller that answered with
+  an empty `{}` body reached the agent as `providerError: "{}"` and "settlement
+  unknown". The amount stays counted and the settlement stays `unknown`, because
+  the signed authorization is valid until it expires.
+- a800185: A call run from an offer's spec now tells Tenjin how it ended when it stopped
+  before anything was paid, too: the input did not fit the spec, the live 402 was
+  not the spec's deal, the provider answered something other than a 402, the
+  provider could not be reached, or the wallet could not pay (no wallet, a locked
+  one, or too little USDC). It is reported as `unpaid` with that reason, which
+  never counts as the offer taken, and a spend-limit refusal as `needs_approval`.
+  Before, only a call that ran or paid was reported, so a call stopped before
+  payment looked the same as an offer nobody used. The report still carries no
+  input and no result.
+- 3f79366: `tenjin update` no longer prints the routing-fee notice. The install question names the fee.
+
+## 0.1.0-alpha.26
+
+### Patch Changes
+
+- f441ec3: `tenjin doctor` names the layer that refused the router probe: a proxy, DNS,
+  TLS, the connection, or a 401/403 that a proxy sent instead of the origin. On
+  the production base URL it no longer tells you to set the base URL you already
+  have. `tenjin install` runs the same probe at the end and prints a warning when
+  the router does not answer. The install still succeeds.
+
+  On Node 24.14 or newer, the CLI, its hooks (the free docs prefetch included)
+  and `tenjin mcp` send their requests through the proxy that `HTTPS_PROXY` or
+  `HTTP_PROXY` names, and honour
+  `NO_PROXY`. Before, Node's `fetch` ignored them unless `NODE_USE_ENV_PROXY=1`
+  was set. A proxy that asks for credentials (407) gets a fix that says where to
+  put them.
+
+  When `tenjin install` cannot ask (`--json`, or a shell with no terminal, which
+  is how an agent runs it), it writes no spend limit, the same as cancelling at
+  the question in a terminal, and sets up everything else. Its output holds the
+  question the terminal selector would have asked, with the same limits and
+  routing-fee terms, and the command for each answer (`spend.approval` in
+  `--json`). For a yes the agent runs the same install again with the new `--yes`
+  (for example `tenjin install --no-wallet --yes`), which writes the limits shown,
+  as the selector's "Use these limits" does.
+  Until someone answers, the router pays for nothing on its own. `tenjin doctor`
+  shows the open question as a warning instead of failing on it, so its network
+  checks still print, and the first unpaid routing call in a session shows the
+  same question.
+
+  When a routing call cannot reach the router (DNS, TLS, a refused connection,
+  a proxy refusing the tunnel), every hook leg skips the router for the next 60
+  seconds and the native tool runs at once, instead of each prompt, search and
+  hand-off waiting out the gate. A slow answer, a dropped socket or an answer of
+  any status does not start the pause. It ends after 60 seconds, or at once
+  when `tenjin doctor` reaches the router; while doctor cannot, it names the
+  pause with the seconds left.
+
+  The install report no longer names a `hooksDir` for the router's hook entries,
+  which use no directory. The README keeps one sentence on
+  what the router sends and links to `docs/agent-permissions.md`, which lists all
+  of it, including the questions your agent asks you and your answers. The paid
+  lookup files and the `alpha.18` `~/.mcp.json` fix move to the docs too.
+
+  `tenjin doctor` and `tenjin install` warn when a running `tenjin mcp` started
+  before this install, so it still runs the older build and the new hooks can fail
+  with "Tool hook not found", and name the fix: reconnect `x402` with `/mcp`, or
+  start a new Claude Code session.
+
+- f441ec3: A routing deposit counts once, against `maxAutoSpend` and the daily `sessionBudget`,
+  when it leaves the wallet, and the fees paid from it are not counted again. Each fee
+  still gets the per-payment checks before the wallet unlocks, including a fee from a
+  channel that is already funded: it must fit `maxAutoSpend` and `allowlistCreators`,
+  and a `sessionBudget` of 0 refuses every fee and so every deposit.
+
+  A routing call that carries the channel's deposit now gets 4.5 s instead of 3.5 s.
+  The first paid call on a new channel measured 5.0 s on Base, so it can still run
+  past that. A routing payment still out when the call's time ends no longer shows
+  "the routing payment failed": that prompt runs on the native tools while
+  `tenjin mcp` lets the request finish, so the channel records it. A deposit in it
+  was already counted in the spend ledger when it was sent.
+
+- b15fa9d: `tenjin wallet show` and `tenjin wallet fund` draw the wallet address as a QR code at
+  a terminal, with `USDC on Base (eip155:8453)` under it, so a phone wallet can scan it
+  and send USDC. `tenjin wallet address` is a new name for `wallet show`. The code
+  encodes the plain EIP-55 address and is drawn black on white in 33 columns. It is
+  skipped with `--no-qr`, with `--json`, when stdout is not a terminal, when the
+  terminal is narrower than the code or cannot show color (`NO_COLOR`, `TERM=dumb`). The
+  JSON output is unchanged.
+
+## 0.1.0-alpha.25
+
+### Patch Changes
+
+- 6368b51: `PRODUCTION_ORIGIN` is now `https://tenjin.sh`; `KNOWN_DEPLOYMENT_ORIGINS` keeps
+  both hosts, so a CLI on either default reaches the same deployment.
+- 4af63f1: The client side of the routing fee. Once Tenjin's server answers its paid routing
+  path, each routing call costs a flat $0.003 over x402 `batch-settlement`, paid by
+  `tenjin mcp` through `@x402/fetch`'s `wrapFetchWithPayment` with the stock
+  `BatchSettlementEvmScheme`. The wallet has one routing channel, kept in the SDK's own
+  file storage. When the channel cannot cover the next fee, the call carries a deposit of
+  up to $0.25, sized down to `maxAutoSpend` while that still covers ten fees. A deposit
+  is an automatic payment: it is reserved in the spend ledger before it is signed, so
+  `maxAutoSpend`, `sessionBudget` and `allowlistCreators` apply to it, and `tenjin status`
+  shows it. The fees come out of the deposit and are not counted again. `tenjin install`
+  names the fee and its deposits in its spend-limit question, and approving the limits
+  approves the fee. An install whose limits were approved before this release pays the
+  fee inside those same limits ($0.25 a call and $5 a day by default), and `tenjin update`
+  names the fee when it runs.
+
+  A routing call that cannot be paid takes the free path: a wallet below the deposit, a
+  wallet `tenjin mcp` cannot unlock without a prompt, a limit that refuses the deposit, a
+  failed payment, or another session's call on the channel at that moment. The first such
+  call in a session shows you one line with the reason and the fix (`tenjin wallet fund
+0.25`, `TENJIN_WALLET_PASSPHRASE`, or `tenjin doctor`), and `tenjin doctor` names the
+  same reasons. The native tools are never blocked for it. While the router charges no
+  fee, the wallet is not touched and nothing is said.
+
+  The router's hook entries are now Claude Code `mcp_tool` hooks that call the new
+  `hook` tool of the session's `x402` server, so every routing step runs in the one
+  process that holds the wallet; `tenjin install --refresh` (which `tenjin update` runs)
+  rewrites the older `tenjin hook` command entries into them. Install and refresh also
+  write `mcp__x402__hook` into `permissions.deny`, which hides that tool from the model
+  while the hook calls still run, and the tool reads only a transcript under Claude
+  Code's projects directory (`$CLAUDE_CONFIG_DIR/projects` when set) named for its
+  session. `tenjin hook <kind>` stays for hosts with no MCP server, on the free path.
+
+  The `@x402/*` SDK moves to 2.28.0, and `@x402/fetch` 2.28.0 is added. With it, every
+  provider payment carries Tenjin's builder code in the SDK's own `builder-code`
+  extension, also to sellers that never asked for one, and the SDK's per-payment cap is
+  set to the amount your spend policy authorized, so a payment you approved above the
+  SDK's $1 default still signs.
+
+## 0.1.0-alpha.24
+
+### Patch Changes
+
+- 15e1109: `tenjin install` in an interactive terminal now asks once, before it writes
+  anything, whether to use the automatic spend limits ($0.25 a call, $5 a day) or
+  set your own. Your own limits must be above zero, and the daily limit may be
+  `none`. Cancelling writes nothing. A limit already in the config file is kept
+  and not asked for. Non-interactive runs, `--json`, and `--refresh` (which
+  `tenjin update` runs) ask nothing and write the defaults only where the file
+  names no limit, as before.
+- 27e09ef: The `request` tool builds every paid call from a spec it keeps on this machine,
+  and nothing else. An offer's id with an input whose spec has expired or been
+  pruned now answers `needs_input` at once, pointing the agent at a fresh
+  `request({query})`, with no server call and nothing paid; before, it fell
+  through to a server path that no longer exists. Pairs with the Tenjin router
+  dropping its server-side binder: tenjin-cli 0.1.0-alpha.21 and older receive no
+  paid offers and are told to run `tenjin update`.
+  A `request({query})` with no id now only picks: it answers with the service's
+  spec and the call to fill under a fresh id, and never runs or pays in that call.
+- 27e09ef: A subagent's native-call packet keeps the subagent's own task once its transcript passes 4 MB, read from the head of the file, instead of carrying the parent's latest message.
+
+## 0.1.0-alpha.23
+
+### Minor Changes
+
+- 7ab9157: A request spec can now name the fields its result promises (`outputSchema`).
+  The `request` tool checks the success rule on the provider's whole body as
+  before, then hands the agent only the fields the spec declares, through
+  nested objects and array items, and saves the whole body under
+  `~/.tenjin/results/` (mode 0600, kept a day) at the path the result names in
+  `fullResultPath`. An Apollo person lookup, whose body carries the employer's
+  whole organization record, comes back as the person's name, title, email,
+  LinkedIn URL, employer and work history. A body that cannot be cut (not JSON,
+  over the 4 MB result cap) or a file that cannot be written hands back the
+  whole body, as before; the projection never fails a call. A spec with no
+  `outputSchema` returns the body unchanged.
+
+### Patch Changes
+
+- 7ab9157: A paid result is now checked against its success rule up to 4 MB, not 128 KB.
+  An Apollo person hit runs 60-180 KB because it embeds the employer's whole
+  organization record, so a good match came back `unverified` with a "possibly
+  not the answer that was paid for" caveat: a body past 64 KB failed the check on
+  a size limit meant for inputs, and one past 128 KB was never checked. A body
+  over 4 MB is still delivered whole and flagged unverified, as before.
+
+## 0.1.0-alpha.22
+
+### Minor Changes
+
+- e1e6f7d: The router's `request` tool now runs an offer from its request spec, in one
+  call. The client asks for specs (`accepts: ["spec"]`), and the hook that shows
+  an offer keeps each offered service's spec by its id. The offer line is the
+  call to make: `request({id, input})` with the required fields as placeholders,
+  or already filled in when the hook holds them (the search a native call was
+  about to run, or the page it was about to fetch). `request({id, input})` puts
+  the pins over the input, checks it against the spec's schema, builds the
+  request and pays the provider directly through the same `runPay` checks: the
+  live price against the spec's ceiling, its payee against the spec's, and the
+  spend policy. An input that misses the spec, or names a field the spec does
+  not, comes back with every problem and the whole spec (each input with its
+  description and allowed values, the required fields inside a nested object,
+  the fields Tenjin pins, one example and what comes back), locally, with
+  nothing sent or paid; `request({id})` alone shows the same spec, free and
+  offline. A schema keyword that checks nothing (OpenAPI's `example`, a
+  vendor's `x-in`) is passed over rather than stopping the check, and a spec
+  whose input schema cannot be compiled at all is refused with nothing sent or
+  paid, never paid unchecked. When the call ran or money left, the tool then
+  tells the server only how the call ended; a refusal before payment (the
+  spend policy, the spec's terms, the provider's own 4xx) reports nothing. Each
+  spec id pays once: a retry of a paid id, or a second call racing it, pays
+  nothing and points at the earlier result or a new offer, while a call that
+  signed nothing (a refused input) leaves the spec runnable. A call that signed
+  a payment and then failed without learning the amount (a spend ledger that
+  could not be written) keeps the id claimed as possibly paid, so a retry signs
+  nothing and says to check `tenjin payments`. A spec is kept as
+  long as the server keeps its offer, 15 minutes. A path input of `.` or `..` is
+  refused before anything is sent, and an input whose varying price lands over
+  the spec's ceiling is refused before signing, asking for a smaller input. A
+  query with an id goes to the server as before. A query with no id comes back
+  as the spec of the service the server picks for it, kept like a hook's: when
+  the server bound the query to the spec's input, the tool runs and pays it in
+  the same call; otherwise it shows the spec and the call's skeleton, so the
+  next call is `request({id, input})`. An id alone with no spec kept says so and
+  asks for the query its line named. A failure now says what was sent.
+- e1e6f7d: A WebFetch that came back as an empty shell now counts as falling short. A
+  JavaScript app (app.uniswap.org came back as its title, "Uniswap Interface")
+  and a YouTube page (its footer links only) both answer 200 with tens of
+  kilobytes, so the size rule never fired and the agent was left with neither the
+  page nor an offer. The after-call hook now reads the opening of WebFetch's own
+  summary for a page that was empty, only a title, navigation or a footer, or
+  needed JavaScript, and sends `nativeOutcome.reason: "no_main_content"` beside
+  the code and size so the router can pick a page reader that renders it. Over
+  682 recorded 2xx WebFetch results the rule matched the eight shells and nothing
+  else. A router that predates `reason` refuses the packet, which the hook reads
+  as silence, as before.
+
+### Patch Changes
+
+- e1e6f7d: A PDF that WebFetch fetched is now pointed at for free. WebFetch's summary is
+  handed the PDF's compressed bytes and says it cannot parse them (arxiv.org's
+  "Attention Is All You Need" came back as "a corrupted or binary PDF file"), but
+  Claude Code saves the file whole and names it on the result's last line. The
+  after-call hook now adds one line naming that file and saying `Read` returns its
+  text, and asks the router nothing: a paid page reader would only fetch the same
+  file again. Only a file named the way WebFetch names one, on that last line, in
+  the session's own tool-results directory, is ever pointed at.
+- e1e6f7d: When Base's default RPC fails a balance read for the router hooks or for a
+  payment (`tenjin pay` and the router's `request` tool), two public RPCs are now
+  asked, `https://base-rpc.publicnode.com` and then `https://base.drpc.org`,
+  before the read gives up. The default, mainnet.base.org, rate-limits a busy IP
+  (`-32016 over rate limit`), and four paid lookups across two research runs were
+  refused with "the wallet balance could not be read" while those two answered
+  every read. The fallbacks run only after the default fails, inside the same
+  timeout: every RPC but the last gets half of what is left, so one that hangs
+  still leaves the others time. An `rpcUrl` you configured yourself is the only
+  RPC asked, since choosing one can be about privacy and the public RPCs would
+  see the wallet's address. Only the hooks also reuse the minute-long last-known
+  balance. `wallet balance`, `doctor`, `fund` and `send` still ask the configured
+  RPC alone.
+
+## 0.1.0-alpha.21
+
+### Patch Changes
+
+- a46ec7c: When nothing in the curated catalog fits but a reviewed third-party
+  pay-per-call x402 service on the Tenjin list could do the step, the router can
+  now name that one service (who sells it, its URL, its price and the input it takes), and your
+  agent decides whether to use it. It calls `mcp__x402__request` with the id and
+  an `input` object, and pays the seller through the same path and under the
+  same automatic limits as a curated lookup. A paid response that is a file (an
+  audio clip, an image) is saved under `~/.tenjin/downloads` and the result names
+  the file. Two new hooks watch `AskUserQuestion`: before the question, a fitting
+  lookup redirects it once; after it, one is offered beside your answers. Hook
+  requests now carry the session id, used only so one session is not offered the
+  same service twice. `tenjin install --refresh` (which `tenjin update` runs)
+  adds the two hook entries. The open x402 Bazaar (unreviewed sellers) is
+  experimental and off by default: `tenjin config set experimental.bazaar on`.
+- 55ce073: A router offer that lists another service priced above this machine's automatic
+  per-call limit now says so, whether it is a list entry ("about $0.28") or a
+  curated alternative ("$0.30"). A Tenjin list menu (or an alternative beside the
+  offer) could name People Data Labs at $0.28 beside a $0.005 email finder under a
+  $0.25 limit with no warning, and the agent picked the one that stopped on
+  `needs_approval`. The line now ends with one sentence naming the price over the
+  limit and asking for a service within it, or the user's approval first. Only
+  the places the router writes a price are read: a dollar amount in a service's
+  description ("seats from $500/month") never raises the note. The single-service
+  case was already covered.
+- a46ec7c: Every paid router lookup now reports its settlement transaction (from the
+  x402 payment-response header) and is recorded in `~/.tenjin/paid/ledger.jsonl`
+  with what was sent (masked), the seller, the amount, the signed
+  authorization's nonce, and any files saved. Media a paid third-party service links to is
+  downloaded into `~/.tenjin/downloads/`. `tenjin payments reconcile` resolves a
+  payment whose settlement was unknown from USDC's `authorizationState` once its
+  authorization has expired, and gives a payment that was never charged back to
+  the daily limit; the `request` tool runs the same check for up to three before
+  each lookup.
+- 55ce073: A router lookup the spend policy refused (`needs_approval`) is no longer written
+  to `~/.tenjin/paid/ledger.jsonl` as a paid call, and its result no longer reports
+  the refused price as a cost. Nothing was signed, so there is nothing to record or
+  reconcile.
+- 55ce073: The retry of a WebSearch, WebFetch or question the pre-call router hook already
+  redirected no longer asks the router. The hook asked first and only then saw the
+  target was claimed, so every redirect-then-retry pair spent a second routing
+  decision and left an offer row nobody saw, about 45% of the rows in an active
+  session. The claim is now checked before the router is asked; two parallel
+  copies of one call are still denied once.
+- 55ce073: A subagent's hand-back, a teammate's message and a message from another session
+  are no longer read as the user's words in a router packet. They reach the
+  parent's transcript as `type: "user"` rows (`origin.kind: "peer"`), so a native
+  call or delegation right after one was routed with the subagent's report as the
+  current turn, in place of what the user asked. The transcript reader now skips
+  them by the same frames the prompt hook already skips.
+- 55ce073: A session whose transcript is over 4 MB is routed again. The router read nothing
+  from a transcript that size, so every long working session lost the pre-call
+  redirect and the delegation offer for the rest of its life ("this session's
+  transcript could not be read"). It now reads the last 4 MB, from the first whole
+  line, and uses it only when that window still holds a user message, so this
+  turn's own instructions are always what the decision reads.
+- 55ce073: The router hooks remember a wallet balance read for a minute in
+  `~/.tenjin/balance.json` (the address and amount only, never the RPC URL) and
+  reuse it instead of asking the RPC again, so a burst of parallel lookups no
+  longer runs Base's public RPC into its rate limit or waits on its timeout. A
+  payment still reads the signer's balance live immediately before signing and
+  never uses the remembered one.
+
+## 0.1.0-alpha.20
+
+### Patch Changes
+
+- 4b61f7a: Requests to Tenjin now carry a `tenjin-install-id` header: a random, anonymous
+  id minted once and stored at `~/.tenjin/install-id`. It is sent only to Tenjin,
+  never to a provider or a team shelf, and Tenjin uses it to count installs and
+  router usage. A file that cannot be read or written only drops the header.
+- ce30bbd: A router `request` the provider refused now says why. When the provider answers
+  a non-2xx status, before or after payment, the tool's failure envelope carries
+  `providerStatus` and `providerError`: the first 500 characters of the provider's
+  body, redacted and on one plain line, whether or not it is JSON, and marked as
+  untrusted provider content like the rest of the envelope. Before this, a paid
+  call Firecrawl answered 403 on reached the agent with neither the status as a
+  field nor the provider's reason, so a refused target read like an outage.
+  `tenjin pay` carries the same `providerError` in its error details. Settlement
+  on a paid failure is still reported as unknown.
+- ce30bbd: The pre-call router hook now keeps its promise that a redirected WebSearch or
+  WebFetch is not redirected again. It kept one "last redirect" per agent and let
+  any next offer in the same category spend it, so with parallel calls one call's
+  redirect was used up by another and the agent's own retry was denied again: the
+  same URL could be denied three times in a row. Each redirect now claims its exact
+  search, or its URL as parsed, for that agent, one file per claim so parallel hook
+  processes never share a record. A retry of the same search or URL runs as it is
+  for ten minutes, whether the redirected lookup succeeded, failed or was never
+  called, and two parallel copies of one call are denied once. Every other search
+  or URL still gets its own first redirect, and the main agent and each subagent
+  keep their own claims.
+
 ## 0.1.0-alpha.19
 
 ### Minor Changes

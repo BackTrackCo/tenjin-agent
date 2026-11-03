@@ -59,10 +59,10 @@ function addGlobalFlags(cmd: Command): Command {
  * One top-level command: filed under its heading, summarized in the one line
  * `tenjin --help` shows for it, and carrying the global flags. The heading goes
  * on the command itself rather than through commander's `commandsGroup()`
- * default so commands can be declared in the order that reads best (`read`
- * before `buy`) instead of in heading order. `helpCommand(false)` drops the
- * implicit `help [command]` INSIDE a group (`tenjin hooks help enable` is a
- * third spelling of one thing); the root keeps it, see {@link rootHelpCommand}.
+ * default so commands can be declared in the order that reads best instead of
+ * in heading order. `helpCommand(false)` drops the implicit `help [command]`
+ * INSIDE a group (`tenjin wallet help show` is a third spelling of one thing);
+ * the root keeps it, see {@link rootHelpCommand}.
  */
 function leaf(program: Command, group: string, nameAndArgs: string, summary: string): Command {
   return addGlobalFlags(
@@ -119,8 +119,7 @@ function buildContext(cmd: Command, io: Io): CommandContext {
  */
 export type ProductRegistration = (registration: Registration) => void;
 
-/** This release's products, in `--help` order. The shelf is deliberately absent:
- *  `./cli/shelf` is not imported, so it is neither bundled nor listed. */
+/** This release's products, in `--help` order. */
 export const PRODUCTS: readonly ProductRegistration[] = [registerCore, registerRouter];
 
 export function buildProgram(
@@ -139,12 +138,14 @@ export function buildProgram(
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
-    // `install --refresh` promises to converge what exists and create nothing.
-    // Under `tenjin update` the child is held to that by TENJIN_NO_UPDATE_CHECK,
-    // but a hand-run refresh arrives here with nothing set, and the nudge below
-    // would materialize `update-check.json` under a data dir this mode was not
-    // allowed to add a single file to. Read here rather than in the command
-    // body: the nudge fires after the body has already thrown its refusal.
+    // `install --refresh` promises to converge what exists and add nothing but
+    // Tenjin's runtime, its launcher and the record of Claude Code's project
+    // installs. Under `tenjin update` the child is held to that by
+    // TENJIN_NO_UPDATE_CHECK, but a hand-run refresh arrives here with nothing
+    // set, and the nudge below would materialize `update-check.json` under a
+    // data dir this mode was not allowed to add it to. Read here rather than in
+    // the command body: the nudge fires after the body has already thrown its
+    // refusal.
     const refreshRun = command === 'install' && cmd.optsWithGlobals().refresh === true;
     // Read BEFORE the envelope, from the last check's cache only: this is the
     // agent's copy of the nudge, and it must not cost a network call or a delay.
@@ -157,6 +158,7 @@ export function buildProgram(
       const result = await run(ctx);
       emitSuccess(ctx.io, command, result.data, result.humanLines, {
         json: ctx.flags.json,
+        compactJson: result.compactJson,
         updateAvailable,
       });
     } catch (err) {

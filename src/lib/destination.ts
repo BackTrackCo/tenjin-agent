@@ -19,7 +19,9 @@ import { CliError } from './errors';
  * following its own redirects on its own server. Closing the first needs a
  * transport that connects to the address it validated (`node:https` with a
  * `lookup` override, as the draft experiment's `safeHttpsTransport` did), which
- * the plan for this release deliberately left unported. What this does remove
+ * the plan for this release left unported for the paid leg. The router's media
+ * download does connect that way: it pins its socket to the address
+ * {@link resolvePublicDestination} validated (`router/paid.ts`). What this does remove
  * is the easy local target: `http://`, credentials, a custom port, a literal
  * private address, a `.localhost`/`.internal` name, and a public name whose
  * only answers are private. Documented in docs/safety-model.md as a bound.
@@ -118,9 +120,22 @@ export async function assertPublicDestination(
   raw: string,
   options: DestinationOptions = {},
 ): Promise<URL> {
+  return (await resolvePublicDestination(raw, options)).url;
+}
+
+/**
+ * The same preflight, returning the ONE address it validated, for a transport
+ * that connects to exactly that address instead of resolving the name again
+ * (see the module comment). Every answer must be public, as above; the first
+ * is the one to pin.
+ */
+export async function resolvePublicDestination(
+  raw: string,
+  options: DestinationOptions = {},
+): Promise<{ url: URL; address: string; family: 4 | 6 }> {
   const url = assertPublicHttpsUrl(raw);
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  if (isIP(host) !== 0) return url;
+  if (isIP(host) !== 0) return { url, address: host, family: isIP(host) === 6 ? 6 : 4 };
   const resolve = options.resolveHostname ?? ((name: string) => lookup(name, { all: true }));
   const signal = AbortSignal.timeout(options.timeoutMs ?? 5_000);
   let addresses: { address: string; family: number }[];
@@ -141,5 +156,6 @@ export async function assertPublicDestination(
   if (addresses.length === 0 || addresses.some((entry) => !isPublicAddress(entry.address))) {
     refuse(`The endpoint host ${host} resolves to a private or unsupported network address.`);
   }
-  return url;
+  const first = addresses[0]!;
+  return { url, address: first.address, family: isIP(first.address) === 6 ? 6 : 4 };
 }
