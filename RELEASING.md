@@ -4,7 +4,6 @@
 
 ```bash
 pnpm install
-pnpm run githooks # once, to use the repo's git hooks
 pnpm check        # build + test
 pnpm lint && pnpm typecheck && pnpm format:check
 pnpm pack-smoke   # exercises the packed npm artifact
