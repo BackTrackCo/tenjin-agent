@@ -18,6 +18,7 @@ import { buildFailureEnvelope, buildSuccessEnvelope } from '../lib/output';
 import { PLUGIN_ID } from '../router/names';
 import { runRouterInstall } from '../router/install';
 import { RECONNECT_FIX } from '../router/mcp-processes';
+import { ROUTING_FEE_TERMS } from '../router/spend-question';
 import { attestationsFor } from '../lib/fixtures/npm-attestations';
 import { nodeBinPath, versionEntry } from '../lib/runtime-layout';
 import type { NodePin } from '../lib/runtime';
@@ -188,7 +189,7 @@ describe('runUpdate', () => {
     });
     expect(result.humanLines?.join(' ')).toContain('0.1.0-alpha.6 -> 0.1.0-alpha.7');
     // The install question names the routing fee; update stays silent about it.
-    expect(result.humanLines?.join(' ')).not.toContain('Routing costs');
+    expect(result.humanLines?.join(' ')).not.toContain(ROUTING_FEE_TERMS);
   });
 
   it('spawns no package manager for a release without Tenjin’s provenance', async () => {

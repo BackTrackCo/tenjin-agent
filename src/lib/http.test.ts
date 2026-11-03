@@ -1,14 +1,11 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
-  fetchJson,
   fetchFailureToCliError,
   httpRequest,
   isBinaryContentType,
-  shelfBypassHeaders,
   setTenjinIdentity,
   transportFailure,
   INSTALL_ID_HEADER,
-  SHELF_BYPASS_HEADER,
 } from './http';
 import { SIWX_HEADER } from './siwx';
 import { CliError, exitCodeFor } from './errors';
@@ -19,165 +16,7 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { status: 200, ...init });
 }
 
-describe('fetchJson', () => {
-  it('returns ok with parsed json on a 2xx', async () => {
-    const fetchImpl: typeof fetch = async () => jsonResponse({ items: [1, 2] });
-    const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
-    expect(res).toMatchObject({ ok: true, status: 200, json: { items: [1, 2] } });
-  });
-
-  it('captures the x-request-id header when present', async () => {
-    const fetchImpl: typeof fetch = async () =>
-      jsonResponse({ ok: 1 }, { headers: { 'x-request-id': 'req-123' } });
-    const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
-    expect(res).toMatchObject({ ok: true, requestId: 'req-123' });
-  });
-
-  it('flags a 2xx body that is not JSON as invalid-json', async () => {
-    const fetchImpl: typeof fetch = async () => new Response('not json{', { status: 200 });
-    const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
-    expect(res).toMatchObject({ ok: false, kind: 'invalid-json', status: 200 });
-  });
-
-  /**
-   * An access-protected deployment answers 200 with its own page, so the failure
-   * is indistinguishable from a broken API by status alone. Only this transport
-   * holds the Response, so it is the only place that can tell doctor which one
-   * happened (#218).
-   */
-  describe('gateSuspected on an invalid-json 2xx', () => {
-    /** A Response whose `url` is the FINAL one, as real fetch reports it after redirects. */
-    function landedAt(finalUrl: string, body: string, init: ResponseInit = {}): Response {
-      const res = new Response(body, { status: 200, ...init });
-      Object.defineProperty(res, 'url', { value: finalUrl });
-      return res;
-    }
-
-    it('is set when the body arrives as text/html', async () => {
-      const fetchImpl: typeof fetch = async () =>
-        new Response('<html><body>Authentication Required</body></html>', {
-          status: 200,
-          headers: { 'content-type': 'text/html; charset=utf-8' },
-        });
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl,
-      });
-      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
-    });
-
-    it('is set when a followed redirect landed the probe on another host', async () => {
-      const fetchImpl: typeof fetch = async () =>
-        landedAt('https://vercel.com/sso-api?url=shelf', 'not json{');
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl,
-      });
-      // The off-host landing is the stronger signal, so it is reported
-      // separately: it licenses the caller to name access protection outright.
-      expect(res).toMatchObject({
-        ok: false,
-        kind: 'invalid-json',
-        gateSuspected: true,
-        gateOffOrigin: true,
-      });
-    });
-
-    it('does not claim the off-origin signal on a same-host HTML page', async () => {
-      const fetchImpl: typeof fetch = async () =>
-        landedAt('https://shelf.example/openapi.json', '<html></html>', {
-          headers: { 'content-type': 'text/html' },
-        });
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl,
-      });
-      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
-      expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
-    });
-
-    it('is unset for plain bad JSON served by the requested origin', async () => {
-      const fetchImpl: typeof fetch = async () =>
-        landedAt('https://shelf.example/openapi.json', 'not json{', {
-          headers: { 'content-type': 'application/json' },
-        });
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl,
-      });
-      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: false });
-    });
-
-    // A Response built without a url (every stub in this file, and any non-fetch
-    // impl) must not read as a redirect: an unknown final host is not a foreign one.
-    it('is unset when the response carries no final URL to compare', async () => {
-      const fetchImpl: typeof fetch = async () => new Response('not json{', { status: 200 });
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl,
-      });
-      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: false });
-    });
-  });
-
-  it('flags a non-2xx status as an http failure carrying the status', async () => {
-    const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 500 });
-    const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
-    expect(res).toMatchObject({ ok: false, kind: 'http', status: 500 });
-  });
-
-  /**
-   * A sign-in wall that answers 401/403 with its page is the second of the
-   * three protection shapes (200 HTML, 401/403, 30x interstitial), so the gate
-   * signals ride on those statuses too; a JSON 401 is the API itself refusing,
-   * and any other status stays unmarked (a 404 HTML page is an ordinary broken
-   * deployment, not a credential problem).
-   */
-  describe('gateSuspected on a 401/403 http failure', () => {
-    const htmlPage = (status: number): typeof fetch =>
-      (async () =>
-        new Response('<html><body>Authentication Required</body></html>', {
-          status,
-          headers: { 'content-type': 'text/html; charset=utf-8' },
-        })) as typeof fetch;
-
-    it('is set on a 401 and a 403 that answer with an HTML page', async () => {
-      for (const status of [401, 403]) {
-        const res = await fetchJson('https://shelf.example/openapi.json', {
-          timeoutMs: 1000,
-          fetchImpl: htmlPage(status),
-        });
-        expect(res).toMatchObject({ ok: false, kind: 'http', status, gateSuspected: true });
-      }
-    });
-
-    it('is unset on a JSON 401 from the requested origin', async () => {
-      const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 401 });
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl,
-      });
-      expect(res).toMatchObject({ ok: false, kind: 'http', status: 401, gateSuspected: false });
-    });
-
-    it('is not computed at all for other statuses, an HTML 404 included', async () => {
-      const res = await fetchJson('https://shelf.example/openapi.json', {
-        timeoutMs: 1000,
-        fetchImpl: htmlPage(404),
-      });
-      expect(res).toMatchObject({ ok: false, kind: 'http', status: 404 });
-      expect((res as { gateSuspected?: boolean }).gateSuspected).toBeUndefined();
-    });
-  });
-
-  it('flags a rejected fetch as a network failure', async () => {
-    const fetchImpl: typeof fetch = async () => {
-      throw new TypeError('fetch failed');
-    };
-    const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
-    expect(res).toMatchObject({ ok: false, kind: 'network' });
-  });
-
+describe('httpRequest timeouts', () => {
   it('aborts and reports a timeout when the request outlasts timeoutMs', async () => {
     // A fetch that never settles on its own but honors the abort signal, so the
     // internal timer is what ends it — proving the AbortController wiring.
@@ -187,7 +26,7 @@ describe('fetchJson', () => {
           reject(new DOMException('The operation was aborted', 'AbortError')),
         );
       });
-    const res = await fetchJson('https://x.example/api', {
+    const res = await httpRequest('https://x.example/api', {
       timeoutMs: 10,
       fetchImpl: hangingFetch,
     });
@@ -197,7 +36,7 @@ describe('fetchJson', () => {
   it('times out on a response whose body never completes, instead of hanging', async () => {
     // Headers resolve immediately but the body stream never ends. It errors on
     // abort exactly as real fetch wires the signal into the body, so the timer —
-    // which must stay armed through res.json() — is what ends it.
+    // which must stay armed through the body read — is what ends it.
     const stalledFetch: typeof fetch = (async (_url, init) => {
       const body = new ReadableStream({
         start(controller) {
@@ -208,7 +47,7 @@ describe('fetchJson', () => {
       });
       return new Response(body, { status: 200 });
     }) as typeof fetch;
-    const res = await fetchJson('https://x.example/api', {
+    const res = await httpRequest('https://x.example/api', {
       timeoutMs: 20,
       fetchImpl: stalledFetch,
     });
@@ -240,7 +79,7 @@ describe('fetchJson', () => {
 
 /**
  * The tenjin-cli User-Agent identity (spec: user-agent-telemetry-and-client-
- * attribution.md PR 3). Both transports send it on every request from a single
+ * attribution.md PR 3). The transport sends it on every request from a single
  * source, merged through the Headers API so it survives regardless of what a
  * caller-supplied header carries or how it is cased.
  */
@@ -253,29 +92,6 @@ describe('User-Agent identity', () => {
     };
     return { fetchImpl, calls };
   }
-
-  it('fetchJson sends the tenjin-cli User-Agent with no caller headers at all', async () => {
-    const { fetchImpl, calls } = headerCapture();
-    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
-    expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
-  });
-
-  it('fetchJson merges caller headers alongside the User-Agent', async () => {
-    const { fetchImpl, calls } = headerCapture();
-    await fetchJson('https://tenjin.blog/openapi.json', {
-      timeoutMs: 1000,
-      headers: { accept: 'application/json' },
-      fetchImpl,
-    });
-    expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
-    expect(calls[0]?.get('accept')).toBe('application/json');
-  });
-
-  it('fetchJson never sends X-Tenjin-Client', async () => {
-    const { fetchImpl, calls } = headerCapture();
-    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
-    expect(calls[0]?.has('x-tenjin-client')).toBe(false);
-  });
 
   it('httpRequest sends the tenjin-cli User-Agent on a plain GET', async () => {
     const { fetchImpl, calls } = headerCapture();
@@ -337,7 +153,7 @@ describe('User-Agent identity', () => {
 /**
  * The caller handoff on the wire (spec: user-agent-telemetry-and-client-
  * attribution.md, "Composition contract"). `client-meta.test.ts` pins the
- * composer itself; these pin that both transports read BOTH seams and that the
+ * composer itself; these pin that the transport reads BOTH seams and that the
  * composed field reaches fetch as exactly one header.
  */
 describe('caller User-Agent handoff', () => {
@@ -356,39 +172,29 @@ describe('caller User-Agent handoff', () => {
     vi.unstubAllEnvs();
   });
 
-  it('composes the env handoff onto both transports', async () => {
+  it('composes the env handoff', async () => {
     vi.stubEnv(CALLER_USER_AGENT_ENV, 'codex/1.2.0');
     const { fetchImpl, calls } = headerCapture();
-    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
     await httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl });
     expect(calls[0]?.get('user-agent')).toBe(COMPOSED);
-    expect(calls[1]?.get('user-agent')).toBe(COMPOSED);
   });
 
   it('composes the programmatic handoff, which beats the env', async () => {
     vi.stubEnv(CALLER_USER_AGENT_ENV, 'from-env/9.9');
     const { fetchImpl, calls } = headerCapture();
-    await fetchJson('https://tenjin.blog/openapi.json', {
-      timeoutMs: 1000,
-      callerUserAgent: 'codex/1.2.0',
-      fetchImpl,
-    });
     await httpRequest('https://tenjin.blog/api/search', {
       timeoutMs: 1000,
       callerUserAgent: 'codex/1.2.0',
       fetchImpl,
     });
     expect(calls[0]?.get('user-agent')).toBe(COMPOSED);
-    expect(calls[1]?.get('user-agent')).toBe(COMPOSED);
   });
 
-  it('sends the identity alone when the handoff is unusable, on both transports', async () => {
+  it('sends the identity alone when the handoff is unusable', async () => {
     vi.stubEnv(CALLER_USER_AGENT_ENV, 'codex/1.2.0 (host=laptop.local)');
     const { fetchImpl, calls } = headerCapture();
-    await fetchJson('https://tenjin.blog/openapi.json', { timeoutMs: 1000, fetchImpl });
     await httpRequest('https://tenjin.blog/api/search', { timeoutMs: 1000, fetchImpl });
     expect(calls[0]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
-    expect(calls[1]?.get('user-agent')).toBe(TENJIN_USER_AGENT);
   });
 
   it('survives a call-specific User-Agent header, as exactly one field', async () => {
@@ -457,8 +263,7 @@ describe('fetchFailureToCliError', () => {
   const cases: Array<[FetchJsonFailure['kind'], string]> = [
     ['network', 'NETWORK_ERROR'],
     ['timeout', 'NETWORK_ERROR'],
-    ['http', 'API_UNREACHABLE'],
-    ['invalid-json', 'CONTRACT_MISMATCH'],
+    ['blocked-redirect', 'API_UNREACHABLE'],
   ];
   it.each(cases)('maps a %s failure to %s', (kind, code) => {
     const failure = { ok: false, kind, message: 'boom' } as FetchJsonFailure;
@@ -469,7 +274,7 @@ describe('fetchFailureToCliError', () => {
   });
 
   it('threads fix and details onto the CliError', () => {
-    const failure: FetchJsonFailure = { ok: false, kind: 'http', status: 503, message: 'down' };
+    const failure: FetchJsonFailure = { ok: false, kind: 'network', message: 'down' };
     const err = fetchFailureToCliError(failure, { fix: 'retry', details: { status: 503 } });
     expect(err.fix).toBe('retry');
     expect(err.details).toEqual({ status: 503 });
@@ -477,12 +282,12 @@ describe('fetchFailureToCliError', () => {
 });
 
 /**
- * The signed-redirect guard. `resource-ref` promises "nothing signed may leave for
- * a host the user did not configure", but it only checks the URL the caller asked
- * for — `fetch`'s default `redirect: 'follow'` re-sends request headers verbatim to
- * whatever `Location` names, stripping only `Authorization`. So a 3xx on the read
- * route would hand a signature bound to the real domain to another host, replayable
- * against it for the signature's lifetime. These pin that it cannot happen.
+ * The signed-redirect guard. Nothing signed may leave for a host the request did
+ * not name, but `fetch`'s default `redirect: 'follow'` re-sends request headers
+ * verbatim to whatever `Location` names, stripping only `Authorization`. So a 3xx
+ * on a signed route would hand a signature bound to the real domain to another
+ * host, replayable against it for the signature's lifetime. These pin that it
+ * cannot happen.
  */
 describe('httpRequest, signed requests never follow redirects', () => {
   /** Records the init `httpRequest` passed to fetch, so the redirect mode is assertable. */
@@ -500,56 +305,6 @@ describe('httpRequest, signed requests never follow redirects', () => {
 
   const redirect = (status: number, location: string): Response =>
     new Response('', { status, headers: { location } });
-
-  /**
-   * `gateOffOrigin` on a blocked redirect is what licenses doctor to say the key
-   * was refused rather than that the base URL is wrong, so each `Location` shape
-   * is pinned at the transport rather than through a caller. The probe carries the
-   * bypass header, which is what makes a 3xx `blocked-redirect` rather than a
-   * plain http error. The relative form is the commonest sign-in shape and must
-   * NOT read as off-host.
-   */
-  it.each([
-    ['an absolute Location on another host', 'https://vercel.com/sso-api?url=x', true],
-    [
-      'a relative Location, which cannot leave the host',
-      '/sign-in?next=%2Fopenapi.json',
-      undefined,
-    ],
-    ['a protocol-relative Location on another host', '//vercel.com/sso-api', true],
-    ['an absolute Location back to the same host', 'https://shelf.example/openapi.json', undefined],
-  ])('reports the off-host signal for %s', async (_label, location, expected) => {
-    const fetchImpl: typeof fetch = async () => redirect(302, location as string);
-    const res = await fetchJson('https://shelf.example/openapi.json', {
-      timeoutMs: 1000,
-      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
-      fetchImpl,
-    });
-    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
-    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBe(expected);
-  });
-
-  it('claims nothing about the host when the redirect carries no Location', async () => {
-    const fetchImpl: typeof fetch = async () => new Response('', { status: 302 });
-    const res = await fetchJson('https://shelf.example/openapi.json', {
-      timeoutMs: 1000,
-      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
-      fetchImpl,
-    });
-    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
-    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
-  });
-
-  it('claims nothing about the host when the Location cannot be parsed', async () => {
-    const fetchImpl: typeof fetch = async () => redirect(302, 'http://[not a url');
-    const res = await fetchJson('https://shelf.example/openapi.json', {
-      timeoutMs: 1000,
-      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
-      fetchImpl,
-    });
-    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
-    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
-  });
 
   it('refuses a cross-origin 3xx carrying a SIWX header, and never re-sends it', async () => {
     const { fetchImpl, calls } = recordingFetch(() =>
@@ -587,9 +342,8 @@ describe('httpRequest, signed requests never follow redirects', () => {
     const res = await httpRequest('https://tenjin.blog/api/posts', {
       method: 'POST',
       timeoutMs: 1000,
-      // The literal `session-key.ts` sends: a session-lifetime wallet signature,
-      // re-sent verbatim on every session-signed write, so the most replayable
-      // credential of the set.
+      // The session-lifetime wallet signature an earlier release sent on every
+      // session-signed write: still refused, so still pinned.
       headers: { 'Tenjin-Session-Delegation': 'delegation-value' },
       jsonBody: {},
       fetchImpl,
@@ -738,8 +492,8 @@ describe('httpRequest, signed requests never follow redirects', () => {
 });
 
 /**
- * Both transports document a returned discriminated failure for every
- * transport-layer refusal, so neither may throw where the other returns.
+ * The transport documents a returned discriminated failure for every
+ * transport-layer refusal, so it never throws one.
  */
 describe('a caller header the Headers API rejects is a returned failure, not a throw', () => {
   // A space is not a legal token character, so `new Headers` throws on it.
@@ -777,167 +531,6 @@ describe('a caller header the Headers API rejects is a returned failure, not a t
     });
     expect(res).toMatchObject({ ok: false, kind: 'network' });
     expect(calls).toHaveLength(0);
-  });
-
-  it('fetchJson returns a network failure', async () => {
-    const { fetchImpl, calls } = unreachedFetch();
-    const res = await fetchJson('https://tenjin.blog/openapi.json', {
-      timeoutMs: 1000,
-      headers: malformed,
-      fetchImpl,
-    });
-    expect(res).toMatchObject({ ok: false, kind: 'network' });
-    expect(calls).toHaveLength(0);
-  });
-});
-
-/**
- * THE ORIGIN TEST, IN THE TRANSPORT. The bypass secret opens a deployment, and
- * the CLI talks to two shelves in one session — sometimes inside one fire. The
- * decision therefore lives here, driven by the request URL, so a call site that
- * passes the key while fetching the wrong host sends nothing rather than the
- * key.
- */
-describe('the team shelf bypass header', () => {
-  const SECRET = 'shelf-secret-abc123';
-  const bypass = { origin: 'https://team.example', secret: SECRET };
-
-  function recorder(): { fetchImpl: typeof fetch; seen: Array<Record<string, string>> } {
-    const seen: Array<Record<string, string>> = [];
-    const fetchImpl: typeof fetch = async (_url, init) => {
-      seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
-      return jsonResponse({ ok: true });
-    };
-    return { fetchImpl, seen };
-  }
-
-  it('is attached on the bypass origin and on no other, through both transports', async () => {
-    for (const send of [
-      (url: string, o: { fetchImpl: typeof fetch }) =>
-        fetchJson(url, { timeoutMs: 1000, bypass, fetchImpl: o.fetchImpl }),
-      (url: string, o: { fetchImpl: typeof fetch }) =>
-        httpRequest(url, { timeoutMs: 1000, bypass, fetchImpl: o.fetchImpl }),
-    ]) {
-      const rec = recorder();
-      await send('https://team.example/api/search', rec);
-      await send('https://public.example/api/search', rec);
-      // Not a sibling host, and not a different port on the same host: an origin
-      // is scheme + host + port, and anything else is somebody else's server.
-      await send('https://evil.team.example/api/search', rec);
-      await send('https://team.example:8443/api/search', rec);
-      expect(rec.seen.map((h) => h[SHELF_BYPASS_HEADER])).toEqual([
-        SECRET,
-        undefined,
-        undefined,
-        undefined,
-      ]);
-    }
-  });
-
-  it('sends nothing for an empty secret or an unparseable URL', () => {
-    expect(
-      shelfBypassHeaders('https://team.example/x', { origin: bypass.origin, secret: '' }),
-    ).toEqual({});
-    expect(shelfBypassHeaders('https://team.example/x', undefined)).toEqual({});
-    expect(shelfBypassHeaders('not-a-url', bypass)).toEqual({});
-  });
-
-  /**
-   * A 3xx MUST NOT CARRY THE DOOR KEY ONWARD. `fetch` re-sends request headers
-   * verbatim to a redirect target (only `Authorization` is stripped), so a
-   * Vercel Authentication interstitial on the shelf origin — what a rotated
-   * bypass secret actually gets — would hand the key to `vercel.com` or to
-   * whatever else `Location` names, and the key is all anyone needs to walk in.
-   * The bypass is not replayable like a signature, so it is not in
-   * CREDENTIAL_HEADERS; it pins anyway, because disclosure is the harm here.
-   */
-  describe('pins redirects the way a signed header does', () => {
-    function recordingFetch(response: () => Response): {
-      fetchImpl: typeof fetch;
-      calls: { url: string; redirect: RequestInit['redirect'] }[];
-    } {
-      const calls: { url: string; redirect: RequestInit['redirect'] }[] = [];
-      const fetchImpl: typeof fetch = async (input, init) => {
-        calls.push({ url: String(input), redirect: init?.redirect });
-        return response();
-      };
-      return { fetchImpl, calls };
-    }
-
-    const ssoRedirect = (): Response =>
-      new Response('', {
-        status: 307,
-        headers: { location: 'https://vercel.com/sso-api?url=team.example' },
-      });
-
-    it('refuses a 3xx on the bypass origin, through httpRequest', async () => {
-      const { fetchImpl, calls } = recordingFetch(ssoRedirect);
-      const res = await httpRequest('https://team.example/api/search', {
-        method: 'POST',
-        timeoutMs: 1000,
-        bypass,
-        jsonBody: { query: 'q' },
-        fetchImpl,
-      });
-
-      expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 307 });
-      expect((res as { message: string }).message).toContain('bypass key');
-      // One request, to the configured origin, and the key was never re-sent.
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.redirect).toBe('manual');
-    });
-
-    it('refuses a 3xx on the bypass origin, through fetchJson (doctor probes)', async () => {
-      const { fetchImpl, calls } = recordingFetch(ssoRedirect);
-      const res = await fetchJson('https://team.example/api/search', {
-        timeoutMs: 1000,
-        bypass,
-        fetchImpl,
-      });
-
-      // NOT reported as a plain http status: an unfollowed redirect must not be
-      // mistaken for a server answer and retried by hand.
-      expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 307 });
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.redirect).toBe('manual');
-    });
-
-    it('leaves an off-origin request on ordinary transport', async () => {
-      // The public shelf gets no key, so it has nothing to disclose and keeps
-      // normal redirect following: the pin is armed by the header, not by intent.
-      for (const send of [
-        (fetchImpl: typeof fetch) =>
-          httpRequest('https://public.example/api/search', { timeoutMs: 1000, bypass, fetchImpl }),
-        (fetchImpl: typeof fetch) =>
-          fetchJson('https://public.example/api/search', { timeoutMs: 1000, bypass, fetchImpl }),
-      ]) {
-        const { fetchImpl, calls } = recordingFetch(() => jsonResponse({ ok: true }));
-        await send(fetchImpl);
-        expect(calls[0]?.redirect).toBeUndefined();
-      }
-    });
-  });
-
-  it('wins the slot on its own origin, and contributes nothing off it', async () => {
-    // The bypass is merged OVER the caller's headers, so on-origin the real
-    // secret replaces whatever a call site put in that slot; off-origin the rule
-    // adds nothing at all, and the caller's own header is the caller's business.
-    const rec = recorder();
-    const planted = { [SHELF_BYPASS_HEADER]: 'planted' };
-    await httpRequest('https://team.example/api/search', {
-      timeoutMs: 1000,
-      headers: planted,
-      bypass,
-      fetchImpl: rec.fetchImpl,
-    });
-    await httpRequest('https://public.example/api/search', {
-      timeoutMs: 1000,
-      headers: planted,
-      bypass,
-      fetchImpl: rec.fetchImpl,
-    });
-    expect(rec.seen[0]?.[SHELF_BYPASS_HEADER]).toBe(SECRET);
-    expect(rec.seen[1]?.[SHELF_BYPASS_HEADER]).toBe('planted');
   });
 });
 
@@ -1101,7 +694,7 @@ describe('the install id header', () => {
   const hop = (status: number, location: string) => (): Response =>
     new Response('', { status, headers: { location } });
 
-  it('rides Tenjin-origin requests on both transports, and no provider request', async () => {
+  it('rides Tenjin-origin requests, and no provider request', async () => {
     useIdentity(async () => INSTALL);
     const { fetchImpl, seen } = router({
       [`${TENJIN}/api/x402-router`]: ok,
@@ -1114,18 +707,11 @@ describe('the install id header', () => {
       blockRedirects: true,
       fetchImpl,
     });
-    await fetchJson(`${TENJIN}/api/x402-router`, { timeoutMs: 1000, fetchImpl });
     await httpRequest('https://api.exa.ai/search', { method: 'POST', timeoutMs: 1000, fetchImpl });
-    await fetchJson('https://api.exa.ai/search', { timeoutMs: 1000, fetchImpl });
 
-    expect(seen.map((s) => s.headers[INSTALL_ID_HEADER])).toEqual([
-      INSTALL,
-      INSTALL,
-      undefined,
-      undefined,
-    ]);
+    expect(seen.map((s) => s.headers[INSTALL_ID_HEADER])).toEqual([INSTALL, undefined]);
     // A provider request keeps `fetch`'s own transport, untouched.
-    expect(seen[2]?.redirect).toBeUndefined();
+    expect(seen[1]?.redirect).toBeUndefined();
   });
 
   it('is not sent to a sibling host or another port of the Tenjin host', async () => {

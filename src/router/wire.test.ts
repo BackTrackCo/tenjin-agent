@@ -10,23 +10,29 @@ import {
   buildToolSpecBody,
   acceptsFor,
   CLIENT_ACCEPTS,
+  MAX_SPEC_TIMEOUT_S,
   parseForTests,
+  REQUIRES_UNMET,
+  unmetRequires,
+  withoutUnmet,
+  type HookDecision,
   type SpecOutcome,
+  type ToolDecision,
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
-import { AUGMENT_WAIT_MS } from './augment';
-import { STDIN_TIMEOUT_MS } from './hook-command';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
+import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
+import { MAX_BINARY_BODY_BYTES } from '../lib/http';
 
 /**
- * The wire, pinned to bytes. These payloads are the SHARED ones: the same
- * shapes live beside tenjin's `lib/x402-router/`, which parses them with the
- * schemas this client writes against, so a rename on either side fails a test
- * in both repos instead of 400ing a lookup in production.
+ * The wire, pinned to bytes. These payloads are the canonical set: tenjin's
+ * `lib/x402-router/` parses the same files with the schemas it writes
+ * against, so a rename on either side fails a test in both repos instead of
+ * 400ing a lookup in production.
  *
  * THEY ARE READ FROM THE DIRECTORY, never from a hand-written import list. A
  * payload the canonical set gains and a list never names is how a nested field
@@ -154,20 +160,31 @@ describe('the request bodies', () => {
   });
 
   /**
-   * WHAT THIS BUILD SAYS IT RUNS. Each token is one the server's README names
-   * as read (`spec`, `catalog`, `label`, `fields`, `jobs`, `headers`, and
-   * `bazaar` behind its experiment), so the server sends each field this build
-   * parses and none it does not. A token is added only with the parser that
-   * takes its fields.
+   * WHAT THIS BUILD SAYS IT RUNS. Each token is one the wire README names
+   * (`spec`, `catalog`, `label`, `fields`, `jobs`, `note`, `bazaar` behind its
+   * experiment, and the client-side `headers` and `tolerant`, until the server
+   * reads them), so the server sends each field this build parses and none it
+   * does not. A token is added only with the parser that takes its fields.
    */
   it("sends this build's accepts: the contract tokens it parses and runs", () => {
-    expect(CLIENT_ACCEPTS).toEqual(['catalog', 'spec', 'label', 'fields', 'jobs', 'headers']);
+    expect(CLIENT_ACCEPTS).toEqual([
+      'catalog',
+      'spec',
+      'label',
+      'fields',
+      'jobs',
+      'headers',
+      'note',
+      'tolerant',
+    ]);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
       'label',
       'fields',
       'jobs',
       'headers',
+      'note',
+      'tolerant',
     ]);
     expect(acceptsFor(true)).toEqual([
       'catalog',
@@ -176,6 +193,8 @@ describe('the request bodies', () => {
       'fields',
       'jobs',
       'headers',
+      'note',
+      'tolerant',
       'bazaar',
     ]);
     const read = [
@@ -185,6 +204,8 @@ describe('the request bodies', () => {
       'fields',
       'jobs',
       'headers',
+      'note',
+      'tolerant',
       'discovered',
       'bazaar',
       'choices',
@@ -323,10 +344,10 @@ describe('the request bodies', () => {
 
 /**
  * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an `execute`
- * with no contract parsed and reached the host as a routine `needs_input`, a
- * non-execute with no diagnostics parsed with nothing to act on, and a hook
- * answer carrying a contract parsed as though the hook had quoted a price. Each
- * fixture must now match exactly one variant of exactly one parser.
+ * with no contract parsed and reached the host as a routine `needs_input`, and
+ * a non-execute with no diagnostics parsed with nothing to act on. Each fixture
+ * must match a variant of its own call's parser, and an `execute` the other's
+ * not at all.
  */
 describe('every answer payload on disk', () => {
   const hookAnswers = readdirSync(dir).filter(
@@ -405,7 +426,9 @@ describe('every answer payload on disk', () => {
     expect(skeleton.spec).not.toHaveProperty('id');
     expect(String(skeleton.hint)).toMatch(/request\(\{id: "[^"]+", input: \{"[a-z_]+":"<[^>]+>"/);
     const withInput = { ...payload, decision: { ...skeleton, input: { q: 'x' } } };
-    expect(parseForTests('tool', withInput).success).toBe(true);
+    const parsed = parseForTests('tool', withInput);
+    expect(parsed.success).toBe(true);
+    expect((parsed.data as { decision: object }).decision).not.toHaveProperty('input');
   });
 
   it.each([
@@ -428,15 +451,40 @@ describe('every answer payload on disk', () => {
     expect(parseForTests(kind as 'hook' | 'tool', { ...payload, decision }).success).toBe(false);
   });
 
-  it('refuses an unknown key on either side of the envelope', () => {
+  /**
+   * A TOLERANT READER (RFC 9413, and only that): a key this build does not
+   * know is dropped on either side of the envelope, so a server that adds one
+   * reaches this client without a release. Dropped, never passed through: a
+   * hook answer that also carries a contract parses as the hook's offer and
+   * nothing else, so no caller can read a price out of it.
+   */
+  it('drops an unknown key on either side of the envelope, and reads the rest', () => {
     const payload = fixture('wire-hook-execute.json');
-    expect(parseForTests('hook', { ...payload, surprise: 1 }).success).toBe(false);
-    expect(
-      parseForTests('hook', {
-        ...payload,
-        decision: { ...(payload.decision as object), contract: {} },
-      }).success,
-    ).toBe(false);
+    const outer = parseForTests('hook', { ...payload, surprise: 1 });
+    expect(outer.success).toBe(true);
+    expect(outer.data).not.toHaveProperty('surprise');
+    const inner = parseForTests('hook', {
+      ...payload,
+      decision: { ...(payload.decision as object), contract: {}, surprise: { nested: true } },
+    });
+    expect(inner.success).toBe(true);
+    const decision = (inner.data as { decision: Record<string, unknown> }).decision;
+    expect(decision).not.toHaveProperty('contract');
+    expect(decision).not.toHaveProperty('surprise');
+    expect(decision).toEqual(payload.decision);
+  });
+
+  it('still holds every known key to its type and bounds', () => {
+    const payload = fixture('wire-hook-execute.json');
+    const decision = payload.decision as Record<string, unknown>;
+    const withDecision = (patch: Record<string, unknown>) => ({
+      ...payload,
+      decision: { ...decision, ...patch, surprise: 1 },
+    });
+    expect(parseForTests('hook', withDecision({ id: 'a b' })).success).toBe(false);
+    expect(parseForTests('hook', withDecision({ providerPriceAtomic: '1.5' })).success).toBe(false);
+    expect(parseForTests('hook', withDecision({ hint: 'no call here' })).success).toBe(false);
+    expect(parseForTests('hook', { ...payload, schemaVersion: 2 }).success).toBe(false);
   });
 
   it('carries no fee, no billing and no settlement anywhere', () => {
@@ -497,12 +545,14 @@ describe('every answer payload on disk', () => {
    * THE DISCOVERED LINE IS HELD TO THE EXECUTE LINE'S SHAPE: one plain line,
    * the call it asks for, and this answer's own id. The seller's listing is
    * data beside it, and a field the server adds without this client knowing
-   * is a parse failure, not a silent pass.
+   * is dropped with the rest of the unknown keys.
    */
   it('holds a discovered hint to one plain line naming the call and its id', () => {
     const payload = fixture('wire-hook-discovered.json');
     const decision = payload.decision as Record<string, unknown>;
-    expect(Object.keys(decision).sort()).toEqual(['action', 'candidate', 'hint', 'id']);
+    // An open-Bazaar offer carries its one spec too, under the answer's own id.
+    expect(Object.keys(decision).sort()).toEqual(['action', 'candidate', 'hint', 'id', 'specs']);
+    expect((decision.specs as { id: string }[]).map((spec) => spec.id)).toEqual([decision.id]);
     expect(String(decision.hint)).toContain(`id: "${String(decision.id)}"`);
     expect(String(decision.hint)).toContain('input: {');
     const withHint = (hint: string) => ({ ...payload, decision: { ...decision, hint } });
@@ -517,12 +567,14 @@ describe('every answer payload on disk', () => {
         .success,
     ).toBe(false);
     const candidate = decision.candidate as Record<string, unknown>;
-    expect(
-      parseForTests('hook', {
-        ...payload,
-        decision: { ...decision, candidate: { ...candidate, surprise: 1 } },
-      }).success,
-    ).toBe(false);
+    const parsed = parseForTests('hook', {
+      ...payload,
+      decision: { ...decision, candidate: { ...candidate, surprise: 1 } },
+    });
+    expect(parsed.success).toBe(true);
+    expect((parsed.data as { decision: { candidate: object } }).decision.candidate).toEqual(
+      candidate,
+    );
   });
 
   /** ONE BOUND FOR EVERY LINE: up to 2000 characters, on either offering arm. */
@@ -541,9 +593,11 @@ describe('every answer payload on disk', () => {
   });
 
   /** A `jobs` CLIENT'S SPEC says how a call answered before its result is
-   *  ready is finished, and how many takes one call may run. The job block is
-   *  as strict as the rest: a field this build does not know is a parse
-   *  failure, never a poll it half understands. */
+   *  ready is finished, and how many takes one call may run. A field this
+   *  build does not know is dropped like any other: a poll is never signed, so
+   *  a job that asks for one is read as the unsigned poll it always was, and
+   *  one that needs more says so in `requires`. A field it knows is held to
+   *  its bounds, and a block naming two arms of one union is refused. */
   it('parses a spec with its job and takes, and refuses a job it cannot read', () => {
     const payload = fixture('wire-lookup-spec-job.json');
     const decision = payload.decision as { spec: Record<string, unknown>; hint: string };
@@ -561,10 +615,21 @@ describe('every answer payload on disk', () => {
     });
     const job = decision.spec.job as Record<string, unknown>;
     expect(parseForTests('tool', withJob(job)).success).toBe(true);
-    expect(parseForTests('tool', withJob({ ...job, surprise: 1 })).success).toBe(false);
-    // A poll is never signed, so a job that asks for one is not read.
-    expect(parseForTests('tool', withJob({ ...job, pollAuth: 'x402' })).success).toBe(false);
+    const read = parseForTests('tool', withJob({ ...job, surprise: 1, pollAuth: 'x402' }));
+    expect(read.success).toBe(true);
+    expect((read.data as { decision: { spec: { job: object } } }).decision.spec.job).toEqual(job);
     expect(parseForTests('tool', withJob({ ...job, maxWaitS: 601 })).success).toBe(false);
+    // Two arms of one union in one object: neither is guessed at.
+    expect(
+      parseForTests('tool', withJob({ ...job, pollUrl: { field: 'id', fixed: 'https://x.test/' } }))
+        .success,
+    ).toBe(false);
+    expect(
+      parseForTests(
+        'tool',
+        withJob({ ...job, running: { httpStatus: [200], field: 'status', values: ['queued'] } }),
+      ).success,
+    ).toBe(false);
     expect(
       parseForTests('tool', withJob({ ...job, pollMethod: 'POST', pollBody: { id: '$inputs.id' } }))
         .success,
@@ -575,6 +640,38 @@ describe('every answer payload on disk', () => {
         decision: { ...decision, spec: { ...decision.spec, takes: { max: 6 } } },
       }).success,
     ).toBe(false);
+  });
+
+  /** A SPEC'S OWN LIMITS: a deadline in seconds no longer than the paid
+   *  leg's ceiling, and a file cap no larger than the one every call had. */
+  it("bounds a spec's timeoutS and maxBytes", () => {
+    expect(MAX_SPEC_TIMEOUT_S * 1000).toBe(MAX_PAID_LEG_TIMEOUT_MS);
+    const payload = fixture('wire-lookup-spec-skeleton.json');
+    const decision = payload.decision as { spec: Record<string, unknown> };
+    const withSpec = (patch: Record<string, unknown>) => ({
+      ...payload,
+      decision: { ...decision, spec: { ...decision.spec, ...patch } },
+    });
+    expect(parseForTests('tool', withSpec({ timeoutS: 60, maxBytes: 1_048_576 })).success).toBe(
+      true,
+    );
+    for (const bad of [
+      { timeoutS: 0 },
+      { timeoutS: MAX_SPEC_TIMEOUT_S + 1 },
+      { timeoutS: 1.5 },
+      { maxBytes: 0 },
+      { maxBytes: MAX_BINARY_BODY_BYTES + 1 },
+    ]) {
+      expect(parseForTests('tool', withSpec(bad)).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  /** TOLERANT, ASKED FOR ON EVERY CALL: the server sends a new field, or
+   *  `requires`, only to a client that lists it, Bazaar or not. */
+  it('lists tolerant in what it accepts, with the open Bazaar and without it', () => {
+    expect(acceptsFor(false)).toContain('tolerant');
+    expect(acceptsFor(true)).toContain('tolerant');
+    expect(unmetRequires(['tolerant'])).toEqual([]);
   });
 
   it('answers a dead id with a plain note and a decision anyway', () => {
@@ -615,10 +712,10 @@ describe('every answer payload on disk', () => {
       holds: { WebSearch: 'query' },
       output: 'json',
     });
-    // Still strict: a field the contract does not name fails the answer.
+    // Tolerant of a field the contract does not name, never of a bad known one.
     expect(
       parseForTests('hook', { ...payload, decision: { ...decision, surprise: 1 } }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       parseForTests('hook', {
         ...payload,
@@ -642,6 +739,22 @@ describe('every answer payload on disk', () => {
       parseForTests('hook', { ...payload, decision: { ...decision, augmentUrl: 'not a url' } })
         .success,
     ).toBe(false);
+  });
+
+  it('takes note, with no augmentUrl, on the free docs lookup before a search', () => {
+    const payload = fixture('wire-hook-execute-note.json');
+    const decision = payload.decision as Record<string, unknown>;
+    expect(parseForTests('hook', payload).success).toBe(true);
+    expect(decision).toMatchObject({
+      delivery: 'note',
+      label: 'Context7 docs',
+      providerPriceAtomic: '0',
+    });
+    expect(decision).not.toHaveProperty('augmentUrl');
+    // The after-search line, with the search's own query and the id.
+    expect(String(decision.hint)).toContain(
+      `If WebSearch couldn't get this, call request({query: "next.js 16 middleware matcher", id: "${String(decision.id)}"})`,
+    );
   });
 
   /**
@@ -694,7 +807,7 @@ describe('every answer payload on disk', () => {
     expect(decision.hint).toContain(`id: "${decision.id}"`);
   });
 
-  it('parses the browse answer as rows, strictly, and nothing else as one', () => {
+  it('parses the browse answer as rows, and nothing else as one', () => {
     const payload = fixture('wire-browse.json');
     expect(parseForTests('browse', payload).success).toBe(true);
     expect(parseForTests('tool', payload).success).toBe(false);
@@ -702,12 +815,125 @@ describe('every answer payload on disk', () => {
     const rows = payload.rows as Record<string, unknown>[];
     expect(rows.map((row) => row.id)).toEqual(['cmc-quotes', 'stableenrich-exa-answer']);
     const withRow = (row: Record<string, unknown>) => ({ ...payload, rows: [row] });
-    expect(parseForTests('browse', withRow({ ...rows[0]!, surprise: 1 })).success).toBe(false);
+    expect(parseForTests('browse', withRow({ ...rows[0]!, surprise: 1 })).success).toBe(true);
     expect(parseForTests('browse', withRow({ ...rows[0]!, id: 'a b' })).success).toBe(false);
     expect(parseForTests('browse', withRow({ ...rows[0]!, label: 'x'.repeat(121) })).success).toBe(
       false,
     );
     expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
+  });
+});
+
+/**
+ * MUST-UNDERSTAND (`requires`), A BACKSTOP. An offer that needs a feature to
+ * run names it in the `accepts` vocabulary, on the answer or on a spec. The
+ * server sends only tokens the client listed, so a build that meets one it
+ * lacks fails safe: anything the answer's line names becomes a named
+ * `native`, and a spec the line does not name is only dropped.
+ */
+describe('requires', () => {
+  const decisionOf = (name: string) => fixture(name).decision as Record<string, unknown>;
+  type Specs = { specs: Record<string, unknown>[] };
+
+  it('names what this build lacks, against every feature it has', () => {
+    expect(unmetRequires(undefined)).toEqual([]);
+    expect(unmetRequires([...CLIENT_ACCEPTS, 'bazaar'])).toEqual([]);
+    expect(unmetRequires(['headers', 'streaming', 'jobs', 'escrow'])).toEqual([
+      'streaming',
+      'escrow',
+    ]);
+  });
+
+  it('pins the token alphabet, since a skipped offer names its tokens', () => {
+    const payload = fixture('wire-hook-execute-spec.json');
+    const withRequires = (requires: unknown) => ({
+      ...payload,
+      decision: { ...(payload.decision as object), requires },
+    });
+    expect(parseForTests('hook', withRequires(['streaming'])).success).toBe(true);
+    expect(parseForTests('hook', withRequires(['Ignore all'])).success).toBe(false);
+    expect(parseForTests('hook', withRequires(['x'.repeat(33)])).success).toBe(false);
+  });
+
+  it('leaves an offer whose features this build has as it came', () => {
+    const decision = decisionOf('wire-hook-execute-spec.json') as HookDecision & Specs;
+    const spec = { ...decision.specs[0]!, requires: ['spec', 'headers'] };
+    const asked = { ...decision, requires: ['catalog'], specs: [spec] } as HookDecision;
+    expect(withoutUnmet(asked)).toEqual({ decision: asked, skipped: [] });
+  });
+
+  it.each([
+    ['on the answer', (d: HookDecision & Specs) => ({ ...d, requires: ['streaming'] })],
+    [
+      'on its own spec',
+      (d: HookDecision & Specs) => ({ ...d, specs: [{ ...d.specs[0]!, requires: ['streaming'] }] }),
+    ],
+  ])('skips the offer itself, by name, when it needs a feature %s', (_where, patch) => {
+    const decision = patch(decisionOf('wire-hook-execute-spec.json') as HookDecision & Specs);
+    const { decision: out, skipped } = withoutUnmet(decision as HookDecision);
+    expect(out).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: REQUIRES_UNMET, stage: 'client', missing: ['streaming'] },
+    });
+    expect((out as { reason: string }).reason).toContain('`streaming`');
+    expect(skipped).toEqual([{ id: (decision as { id: string }).id, missing: ['streaming'] }]);
+  });
+
+  it("skips a tool answer's spec it cannot run", () => {
+    const decision = decisionOf('wire-lookup-spec-skeleton.json') as {
+      id: string;
+      spec: object;
+    };
+    const asked = { ...decision, spec: { ...decision.spec, requires: ['streaming'] } };
+    const { decision: out, skipped } = withoutUnmet(asked as ToolDecision);
+    expect(out).toMatchObject({ action: 'native', diagnostics: { reasonCode: REQUIRES_UNMET } });
+    expect(skipped).toEqual([{ id: decision.id, missing: ['streaming'] }]);
+  });
+
+  it('fails safe to native when a choice the line offers needs a feature it lacks', () => {
+    const decision = decisionOf('wire-hook-discovered-choices.json') as Specs & {
+      id: string;
+      choices: { options: { id: string }[] };
+    };
+    const other = decision.choices.options.find((option) => option.id !== decision.id)!;
+    const asked = {
+      ...decision,
+      specs: decision.specs.map((spec) =>
+        spec.id === other.id ? { ...spec, requires: ['streaming'] } : spec,
+      ),
+    } as HookDecision;
+    const { decision: out, skipped } = withoutUnmet(asked);
+    expect(out).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: REQUIRES_UNMET, missing: ['streaming'] },
+    });
+    expect(skipped).toEqual([{ id: other.id, missing: ['streaming'] }]);
+  });
+
+  const withAlternative = (named: boolean) => {
+    const decision = decisionOf('wire-hook-execute-spec.json') as Specs & { hint: string };
+    const alternative = { ...decision.specs[0]!, id: 'alt-offer-0001', requires: ['streaming'] };
+    return {
+      decision,
+      asked: {
+        ...decision,
+        hint: named ? `${decision.hint} Or request({id: "alt-offer-0001"}).` : decision.hint,
+        specs: [...decision.specs, alternative],
+      } as HookDecision,
+    };
+  };
+
+  it('fails safe to native when the line names a dropped spec', () => {
+    const { decision: out, skipped } = withoutUnmet(withAlternative(true).asked);
+    expect(out).toMatchObject({ action: 'native', diagnostics: { reasonCode: REQUIRES_UNMET } });
+    expect(skipped).toEqual([{ id: 'alt-offer-0001', missing: ['streaming'] }]);
+  });
+
+  it('only drops a spec the line does not name, and keeps the rest of the answer', () => {
+    const { decision, asked } = withAlternative(false);
+    const { decision: out, skipped } = withoutUnmet(asked);
+    expect(out).toEqual(decision);
+    expect(skipped).toEqual([{ id: 'alt-offer-0001', missing: ['streaming'] }]);
   });
 });
 
@@ -729,18 +955,10 @@ describe('the hook time budget', () => {
     expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
   });
 
-  /** The command form, always free, waits for stdin before the gate. */
-  it('fits stdin plus the decision inside the same timeout', () => {
-    const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
-    expect(budget - (STDIN_TIMEOUT_MS + GATE_TIMEOUT_MS)).toBeGreaterThanOrEqual(FLOOR_MS);
-  });
-
-  /** The after-call leg's one wait, for a search's free docs, can be followed
-   *  by the gate when none came back and the search was short: the wait and the
-   *  slowest paid call in a row fit its longer timeout with the same floor. */
-  it('fits the docs wait and the slowest paid call inside the after-call timeout', () => {
+  /** The after-call leg waits for nothing of its own: a noted search reads
+   *  one file, and a short call takes the slowest paid decision at most. */
+  it('fits the slowest paid call inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
-    const used = AUGMENT_WAIT_MS + GATE_TIMEOUT_MS;
-    expect(budget - used).toBeGreaterThanOrEqual(FLOOR_MS);
+    expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 });

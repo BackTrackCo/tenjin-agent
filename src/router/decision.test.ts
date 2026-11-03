@@ -6,14 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { packetForText } from './context';
-import { parseForTests, requestDecision, ROUTER_PATH } from './decision';
+import { parseForTests, requestDecision, ROUTE_PAID_PATH } from './decision';
 
 /**
- * THE DECISION IS FREE. No 402 on this route, no challenge to decode, no
- * signature and no ledger: a failure here costs the turn a routing answer and
- * nothing else. What is left to pin is the body that goes out, the shapes that
- * come back, and that a typed refusal arrives as its own code rather than as
- * "answered 400".
+ * THE DECISION, WITH NO PAYER. These calls go to the paid route unpaid, as a
+ * router with the fee off answers them: no 402, no challenge to decode, no
+ * signature and no ledger (the payer's are `routing-payer.test.ts`). What is
+ * left to pin is the body that goes out, the shapes that come back, and that
+ * a typed refusal arrives as its own code rather than as "answered 400".
  */
 
 let dir: string;
@@ -86,7 +86,7 @@ const HOOK_EXECUTE = {
     endpoint: 'https://pro-api.example.test/quotes',
     providerPriceAtomic: '10000',
     usage: 'the coins and currency',
-    hint: 'CoinMarketCap fits this. Call request({query: <the coins and currency>, id}) alone.',
+    hint: 'CoinMarketCap fits this. Call request({query: <the coins and currency>, id: "k3f9-abcd"}) alone.',
   },
 };
 
@@ -106,7 +106,7 @@ const TOOL_EXECUTE = {
   },
 };
 
-describe('one free decision', () => {
+describe('one decision, on the paid route', () => {
   it('sends the query and the packet, and nothing about money', async () => {
     const { fetchImpl, calls } = net(TOOL_EXECUTE);
     const outcome = await requestDecision(
@@ -117,11 +117,11 @@ describe('one free decision', () => {
 
     expect(outcome.status).toBe('decided');
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe(`${BASE}${ROUTER_PATH}`);
+    expect(calls[0]!.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
     expect(calls[0]!.method).toBe('POST');
     const body = calls[0]!.body as Record<string, unknown>;
     expect(body).toMatchObject({ schemaVersion: 1, query: 'BTC and ETH price' });
-    // One call, and no 402 probe before it: this route is free.
+    // One call, and the body carries no payment: that is the payer's, if any.
     expect(JSON.stringify(body)).not.toContain('billing');
   });
 
@@ -148,6 +148,8 @@ describe('one free decision', () => {
       'fields',
       'jobs',
       'headers',
+      'note',
+      'tolerant',
     ]);
   });
 
@@ -171,6 +173,8 @@ describe('one free decision', () => {
         'fields',
         'jobs',
         'headers',
+        'note',
+        'tolerant',
         'bazaar',
       ]);
     }
@@ -206,10 +210,11 @@ describe('one free decision', () => {
 
   /**
    * ONE VARIANT PER ANSWER. Optional fields made every shape legal: an execute
-   * with no contract came back to the host as a routine needs_input, and a hook
-   * answer quoting a price parsed as though the hook knew the task.
+   * with no contract came back to the host as a routine needs_input. A hook
+   * answer that also carries a contract is read as the hook's offer, the
+   * contract dropped as unknown, so no caller reads a price out of it.
    */
-  it('refuses a hook answer carrying a contract it cannot have', async () => {
+  it('reads a hook answer carrying a contract as the offer alone', async () => {
     // The gate names the service it chose; the CONTRACT is the tool call's,
     // because at gate time the task the host will run does not exist yet.
     const { fetchImpl } = net({
@@ -221,7 +226,10 @@ describe('one free decision', () => {
       { packet: packetForText('q') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    expect(outcome).toMatchObject({ status: 'failed' });
+    expect(outcome).toMatchObject({ status: 'decided' });
+    expect((outcome as { decision: { decision: object } }).decision.decision).toEqual(
+      HOOK_EXECUTE.decision,
+    );
   });
 
   it('refuses a tool execute with no contract', async () => {
@@ -265,12 +273,14 @@ describe('one free decision', () => {
   });
 
   /**
-   * STRICT, so a field in the wrong place fails loudly rather than being
-   * dropped into a shape check that then blames the whole response. Diagnostics
-   * nested one level deeper than the client expected shipped three times.
+   * TOLERANT OF WHAT IT DOES NOT KNOW, NEVER OF A KNOWN FIELD MISSING. A field
+   * in the wrong place is dropped as unknown, and the answer then lacks the
+   * field it needs, so it fails. Diagnostics nested one level deeper
+   * than the client expected shipped three times.
    */
-  it('refuses a body with a field in the wrong place', async () => {
-    const { fetchImpl } = net({ ...NATIVE, action: 'native' });
+  it('refuses a body with a required field in the wrong place', async () => {
+    const { diagnostics, ...decision } = NATIVE.decision;
+    const { fetchImpl } = net({ ...NATIVE, decision: { ...decision, detail: { diagnostics } } });
     const outcome = await requestDecision(
       'hook',
       { packet: packetForText('q') },

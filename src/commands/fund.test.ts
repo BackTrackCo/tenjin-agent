@@ -6,7 +6,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { Address } from 'viem';
 import { CliError } from '../lib/errors';
-import { SESSION_CHAIN_ID } from '../lib/session-key';
+import { SIWX_CHAIN_ID } from '../lib/siwx';
 import { rememberingBalanceReader } from '../lib/usdc-balance';
 import type { CommandContext } from '../context';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
@@ -156,7 +156,7 @@ describe('runFund', () => {
     // a proof bound to another domain, chain, or key would pass a defined-check.
     const proof = parseSIWxHeader(calls[0]!.headers['sign-in-with-x']!) as Record<string, unknown>;
     expect(proof.domain).toBe(EXPECTED_FUND_HOST);
-    expect(proof.chainId).toBe(SESSION_CHAIN_ID);
+    expect(proof.chainId).toBe(SIWX_CHAIN_ID);
     expect(String(proof.address).toLowerCase()).toBe(address.toLowerCase());
   });
 

@@ -6,7 +6,7 @@ import { payerDir } from './fee';
 /**
  * What the wallet's routing channel still holds for fees, from the SDK's own
  * files: what was deposited less what the router has charged against it. It is
- * the prepaid routing credit `tenjin status` and `tenjin wallet balance` show,
+ * the estimate of funds set aside for routing that status and wallet balance show,
  * and what `tenjin doctor` reads to know whether the next call needs a deposit.
  *
  * Not hook-safe (it loads the x402 SDK's storage), so `fee.ts` does not carry it.

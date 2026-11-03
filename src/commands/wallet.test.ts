@@ -1134,6 +1134,21 @@ describe('runWalletShow', () => {
 });
 
 describe('runWalletBalance', () => {
+  it('does not ask to fund an empty wallet while its routing funds can pay another fee', async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    await new FileClientChannelStorage({ directory: payerDir(dataDir, address) }).set(
+      `0x${'ab'.repeat(32)}`,
+      { balance: '30000', chargedCumulativeAmount: '12000' },
+    );
+    mockedBalance.mockResolvedValue(0n);
+    const res = await runWalletBalance(makeCtx(), { provider });
+    expect(res.humanLines).toEqual([
+      'Balance: 0 USDC on Base',
+      'Set aside for routing: approximately $0.018 (local estimate).',
+    ]);
+  });
+
   it('refreshes routing eligibility after funds arrive without waiting for the cached zero to expire', async () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(address);
@@ -1165,7 +1180,10 @@ describe('runWalletBalance', () => {
     mockedBalance.mockResolvedValue(1_700_000n);
     const res = await runWalletBalance(makeCtx(), { provider });
     expect(res.data).toMatchObject({ routingCredit: { atomic: '241000', usd: '0.241' } });
-    expect(res.humanLines).toEqual(['Balance: 1.7 USDC on Base (+0.241 routing credit)']);
+    expect(res.humanLines).toEqual([
+      'Balance: 1.7 USDC on Base',
+      'Set aside for routing: approximately $0.241 (local estimate).',
+    ]);
   });
 
   it('maps an RPC failure to RPC_ERROR with a config fix', async () => {

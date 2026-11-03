@@ -181,6 +181,29 @@ export async function readChoices(dataDir: string, id: string): Promise<KeptChoi
   }
 }
 
+function labelPath(dataDir: string, id: string): string {
+  return join(dataDir, SPECS_DIR, `${digest(id)}.label.json`);
+}
+
+/**
+ * KEEP A FREE OFFER'S NAME by its id, beside its specs and for as long: a
+ * free lookup carries no spec (the docs lookup has none), so this is the one
+ * place the mod finds the name its row draws before the call has run. Written
+ * for every free line the CLI shows. Never throws; with none kept, the row
+ * draws nothing.
+ */
+export async function storeLabel(dataDir: string, id: string, label: string): Promise<void> {
+  try {
+    await writeFileAtomic(labelPath(dataDir, id), JSON.stringify({ id, label }), {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+  } catch {
+    // The row draws nothing.
+  }
+  await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
+}
+
 /**
  * What an earlier call with a spec's id left. `paid`: money left for it.
  * `possibly_paid`: a payment was signed and may have left, but the call ended

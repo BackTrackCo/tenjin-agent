@@ -731,7 +731,7 @@ export interface RefreshOutcome {
  * has hooks belonging to THAT profile while a bare `tenjin update` resolves the
  * default one. Refreshing only the invoking profile there would leave the
  * registered scripts — the ones the harness actually fires — stale forever,
- * which is exactly the shelf runbook's manual re-install step. So the detector
+ * short of a manual re-install for each profile. So the detector
  * reads the harness settings and each profile it names is refreshed with
  * `TENJIN_DATA_DIR` set to it. A machine with no registered hooks has no other
  * profile to find, and gets one refresh for the invoking one.
@@ -1006,12 +1006,12 @@ function isExistingDir(path: string): boolean {
  * The manual command that converges THIS profile.
  *
  * A bare `tenjin install` resolves one data dir, so handing it to an operator
- * whose failed profile is a shelf — the case the per-profile loop exists for —
- * is advice that cannot repair the thing it names. The bare form is emitted only
+ * whose failed profile is another one — the case the per-profile loop exists
+ * for — is advice that cannot repair the thing it names. The bare form is emitted only
  * for a dir that is the default under this home AND the one this invocation
  * itself resolved, so it is right under either reading of "what a bare install
- * would do next"; every other profile gets the explicit env prefix, which is the
- * same form the shelf runbook uses and is right unconditionally.
+ * would do next"; every other profile gets the explicit env prefix, which is
+ * right unconditionally.
  */
 function manualFix(dataDir: string, home: string, invoking: string): string {
   const bare =

@@ -1,4 +1,4 @@
-import { decode, splitWebrun } from '../adapters/codex-wire';
+import { decode, splitWebrun } from './codex-wire';
 import type { HookEvent } from './hooks';
 
 /**
@@ -15,7 +15,7 @@ export function codexRouterEvent(raw: unknown): HookEvent | null {
   const common = {
     sessionId: input.session,
     ...(input.cwd ? { cwd: input.cwd } : {}),
-    ...(input.transcript?.path !== undefined ? { transcriptPath: input.transcript.path } : {}),
+    ...(input.transcriptPath !== undefined ? { transcriptPath: input.transcriptPath } : {}),
   };
   if (input.event === 'prompt' && input.prompt !== undefined)
     return { kind: 'prompt', ...common, prompt: input.prompt };
@@ -40,8 +40,6 @@ export function codexRouterEvent(raw: unknown): HookEvent | null {
     ...call,
     eventName: 'PostToolUse',
     nativeOutcome: text === '' ? { error: 'Web search returned no results' } : null,
-    search:
-      text === undefined || split.entry.tool !== 'WebSearch' ? null : { raw: {}, results: [] },
     savedPdf: null,
   };
 }
@@ -52,12 +50,13 @@ export function codexSession(sessionId: string): string {
 }
 
 /**
- * Codex cannot replace a tool's output, so free docs ride beside the result as
- * `additionalContext`. The one other field kept is `systemMessage`, the line
- * for the user (an unpaid routing fee, a deposit): Codex takes it on every
- * event and shows it as a warning (openai/codex `hooks/src/events/*.rs`, CLI
- * 0.157.1). Nothing else in a Claude-shaped answer survives, because Codex
- * refuses an answer carrying a field it does not know.
+ * A Claude-shaped answer as Codex takes it: `hookSpecificOutput` as it is (a
+ * deny, or a line after the call in `additionalContext`, such as a free
+ * lookup noted on a search), and `systemMessage`, the line for the user (an
+ * unpaid routing fee, a deposit): Codex takes it on every event and shows it
+ * as a warning (openai/codex `hooks/src/events/*.rs`, CLI 0.157.1). Nothing
+ * else survives, because Codex refuses an answer carrying a field it does not
+ * know.
  */
 export function codexResponse(response: unknown): unknown {
   if (response === null || typeof response !== 'object') return null;
@@ -66,19 +65,6 @@ export function codexResponse(response: unknown): unknown {
     systemMessage?: unknown;
   };
   const message = typeof systemMessage === 'string' ? { systemMessage } : {};
-  const specific = codexSpecific(output);
-  if (specific === null) return Object.keys(message).length > 0 ? message : null;
-  return { hookSpecificOutput: specific, ...message };
-}
-
-function codexSpecific(
-  output: Record<string, unknown> | undefined,
-): Record<string, unknown> | null {
-  if (output === undefined) return null;
-  if (output.updatedToolOutput !== undefined) {
-    const results = (output.updatedToolOutput as { results?: unknown[] }).results;
-    if (typeof results?.[0] !== 'string') return null;
-    return { hookEventName: 'PostToolUse', additionalContext: results[0] };
-  }
-  return output;
+  if (output === undefined) return Object.keys(message).length > 0 ? message : null;
+  return { hookSpecificOutput: output, ...message };
 }

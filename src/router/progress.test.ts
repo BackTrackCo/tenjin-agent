@@ -1,17 +1,18 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  AUGMENT_REPEAT_MS,
-  augmentOf,
   bindDecision,
-  claimQuery,
+  claimNote,
   claimRedirect,
   EXPIRY_MS,
-  markAugment,
+  markNoted,
   newCallId,
+  NOTE_REPEAT_MS,
+  noteOf,
   noteSession,
   openLookupFooter,
   pruneProgress,
@@ -263,76 +264,100 @@ describe('housekeeping', () => {
   });
 
   /**
-   * A DOCS BODY IS NOT A RECORD, and neither is a temp file between its write
-   * and its rename: read as records they are damaged, and the prune a parallel
-   * hook runs deleted them from under the prefetch. Both age by their mtime.
+   * A TEMP FILE IS NOT A RECORD between its write and its rename: read as one
+   * it is damaged, and the prune a parallel hook runs deleted it from under the
+   * writer. It ages by its mtime. A docs body an older build left is damaged,
+   * and goes on the next prune.
    */
-  it('keeps a fresh docs body and a temp file mid-rename, and ages them out by mtime', async () => {
+  it('keeps a temp file mid-rename, ages it out by mtime, and drops an old docs body', async () => {
     const session = sessionDir(dir, 'session-a');
-    const body = await markAugment(dir, 'session-a', 'toolu_1', { provider: 'Context7' }, NOW);
-    expect(body).not.toBeNull();
-    // A body the size of real docs, far past what a record may be.
-    await writeFile(body!, JSON.stringify({ status: 200, text: 'x'.repeat(20_000) }));
-    const temp = join(session, '.augment-abc.docs.123.tmp');
+    await noteSession(dir, 'session-a', NOW);
+    const temp = join(session, '.note-abc.json.123.tmp');
     await writeFile(temp, '{"stat');
+    const body = join(session, `augment-${'a'.repeat(64)}.docs`);
+    await writeFile(body, JSON.stringify({ status: 200, text: 'x'.repeat(20_000) }));
     const seconds = NOW / 1000;
-    for (const path of [body!, temp]) await utimes(path, seconds, seconds);
+    for (const path of [temp, body]) await utimes(path, seconds, seconds);
 
     await pruneProgress(session, NOW + 1_000);
-    expect(existsSync(body!)).toBe(true);
     expect(existsSync(temp)).toBe(true);
+    expect(existsSync(body)).toBe(false);
 
     await pruneProgress(session, NOW + EXPIRY_MS + 1_000);
-    expect(existsSync(body!)).toBe(false);
     expect(existsSync(temp)).toBe(false);
   });
 });
 
 describe('the free-docs records', () => {
-  it('finds the marker by the call id, with its provider and body path beside it', async () => {
-    const body = await markAugment(
-      dir,
-      'session-a',
-      'toolu_1',
-      { provider: 'Context7\u001b[2J' },
-      NOW,
+  const ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d23';
+  const LINE = `Context7 docs, free: docs. If WebSearch couldn't get this, call request({query: "zod", id: "${ID}"}) and wait for its result.`;
+
+  it('finds the note by the call id, with its offer and line', async () => {
+    expect(await markNoted(dir, 'session-a', 'toolu_1', { offerId: ID, line: LINE }, NOW)).toBe(
+      true,
     );
-    const marker = await augmentOf(dir, 'session-a', 'toolu_1', NOW + 1_000);
-    expect(marker).toEqual({ at: NOW, provider: 'Context7 [2J', body });
-    // The label rides beside the provider when the decision carried one.
-    await markAugment(
-      dir,
-      'session-a',
-      'toolu_3',
-      { provider: 'Context7', label: 'Context7 docs\u001b[2J' },
-      NOW,
-    );
-    expect(await augmentOf(dir, 'session-a', 'toolu_3', NOW)).toMatchObject({
-      provider: 'Context7',
-      label: 'Context7 docs [2J',
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW + 1_000)).toEqual({
+      offerId: ID,
+      line: LINE,
     });
-    expect(await augmentOf(dir, 'session-a', 'toolu_2', NOW)).toBeNull();
-    expect(await augmentOf(dir, 'session-b', 'toolu_1', NOW)).toBeNull();
-    expect(await augmentOf(dir, 'session-a', 'toolu_1', NOW + EXPIRY_MS + 1)).toBeNull();
+    expect(await noteOf(dir, 'session-a', 'toolu_2', NOW)).toBeNull();
+    expect(await noteOf(dir, 'session-b', 'toolu_1', NOW)).toBeNull();
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW + EXPIRY_MS + 1)).toBeNull();
   });
 
-  it('claims one agent query once in the window, and again after it', async () => {
-    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', NOW)).toBe(true);
-    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', NOW + 1_000)).toBe(false);
-    // Another agent, another query, another session: each its own claim.
-    expect(await claimQuery(dir, 'session-a', 'a1', 'zod v4 coerce', NOW)).toBe(true);
-    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 transform', NOW)).toBe(true);
-    expect(await claimQuery(dir, 'session-b', undefined, 'zod v4 coerce', NOW)).toBe(true);
-    const later = NOW + AUGMENT_REPEAT_MS + 1;
-    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', later)).toBe(true);
-    expect(await claimQuery(dir, 'session-a', undefined, 'zod v4 coerce', later + 1)).toBe(false);
-  });
-
-  it('gives two parallel copies of one query a single claim', async () => {
-    const claims = await Promise.all(
-      Array.from({ length: 6 }, () => claimQuery(dir, 'session-a', undefined, 'same', NOW)),
+  it('writes nothing for a record past the bound, or a line without its own id', async () => {
+    const long = `${LINE} ${'x'.repeat(4_096)}`;
+    expect(await markNoted(dir, 'session-a', 'toolu_1', { offerId: ID, line: long }, NOW)).toBe(
+      false,
     );
-    expect(claims.filter(Boolean)).toHaveLength(1);
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW)).toBeNull();
+    const other = LINE.replace(ID, 'another-id');
+    expect(await markNoted(dir, 'session-a', 'toolu_2', { offerId: ID, line: other }, NOW)).toBe(
+      false,
+    );
+    expect(await markNoted(dir, 'session-a', 'toolu_3', { offerId: 'a b', line: LINE }, NOW)).toBe(
+      false,
+    );
+  });
+
+  it('reads a record whose line no longer carries its offer id as absent', async () => {
+    const key = createHash('sha256').update('toolu_1').digest('hex');
+    const path = join(sessionDir(dir, 'session-a'), `note-${key}.json`);
+    await markNoted(dir, 'session-a', 'toolu_1', { offerId: ID, line: LINE }, NOW);
+    await writeFile(
+      path,
+      JSON.stringify({ version: 1, at: NOW, offerId: ID, line: 'Call request({query}).' }),
+    );
+    expect(await noteOf(dir, 'session-a', 'toolu_1', NOW)).toBeNull();
+  });
+
+  /** The start of a NOTE_REPEAT_MS window, so a test can stand either side of one. */
+  const WINDOW = Math.ceil(NOW / NOTE_REPEAT_MS) * NOTE_REPEAT_MS;
+
+  it('claims one agent query once in its span, and again after it', async () => {
+    const at = WINDOW + 1_000;
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', at)).toBe(true);
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', at + 1_000)).toBe(false);
+    // Another agent, another query, another session: each its own claim.
+    expect(await claimNote(dir, 'session-a', 'a1', 'zod v4 coerce', at)).toBe(true);
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 transform', at)).toBe(true);
+    expect(await claimNote(dir, 'session-b', undefined, 'zod v4 coerce', at)).toBe(true);
+    // Across the window boundary the claim still holds its full span.
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', at + NOTE_REPEAT_MS)).toBe(
+      false,
+    );
+    const later = at + NOTE_REPEAT_MS + 1;
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', later)).toBe(true);
+    expect(await claimNote(dir, 'session-a', undefined, 'zod v4 coerce', later + 1)).toBe(false);
+  });
+
+  it('gives six parallel copies of one query a single claim, after the window too', async () => {
+    const copies = (now: number) =>
+      Promise.all(
+        Array.from({ length: 6 }, () => claimNote(dir, 'session-a', undefined, 'same', now)),
+      );
+    expect((await copies(WINDOW + 1_000)).filter(Boolean)).toHaveLength(1);
+    expect((await copies(WINDOW + 1_000 + NOTE_REPEAT_MS + 1)).filter(Boolean)).toHaveLength(1);
   });
 });
 
