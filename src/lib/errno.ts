@@ -1,7 +1,6 @@
 /**
  * True when `err` is a Node system error carrying the given `code` (ENOENT,
- * EEXIST, …). One definition so the fs-error checks across the CLI stay
- * identical.
+ * EEXIST, …).
  */
 export function hasCode(err: unknown, code: string): boolean {
   return (
