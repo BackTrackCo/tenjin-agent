@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, opendir, rm } from 'node:fs/promises';
+import { lstat, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
+import { writeFileAtomicExclusive } from '../lib/atomic-json';
 import { sha256Hex } from '../lib/hash';
+import { PRIVATE, readJsonFile, sweep, writePrivate } from './store-files';
 
 /**
  * The live status line's evidence: what this session is looking up right now,
@@ -419,10 +419,7 @@ async function claimOnce(
   if (previous !== null && now - previous.at <= span) return false;
   const stamp: Stamp = { version: 1, at: now };
   try {
-    await writeFileAtomicExclusive(pathFor(window), JSON.stringify(stamp), {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writeFileAtomicExclusive(pathFor(window), JSON.stringify(stamp), PRIVATE);
     return true;
   } catch {
     // Taken in this window, which is always inside the span, or not writable.
@@ -575,21 +572,15 @@ export async function openLookupFooter(
  * renderer: the footer refreshes once a second and must stay read-only.
  */
 export async function pruneProgress(directory: string, now = Date.now()): Promise<void> {
-  try {
-    const dir = await opendir(directory);
-    let count = 0;
-    for await (const entry of dir) {
-      if (++count > MAX_RECORDS) return;
-      if (!entry.isFile() || entry.name === SESSION_FILE) continue;
-      const path = join(directory, entry.name);
-      const record = agesByMtime(entry.name) ? await mtimeOf(path) : await readStamp(path);
-      if (record === null || now - record.at > EXPIRY_MS) {
-        await rm(path, { force: true }).catch(() => undefined);
-      }
-    }
-  } catch {
-    // Housekeeping only. Nothing downstream depends on it having run.
-  }
+  await sweep(
+    directory,
+    async (name, path) => {
+      if (name === SESSION_FILE) return false;
+      const record = agesByMtime(name) ? await mtimeOf(path) : await readStamp(path);
+      return record === null || now - record.at > EXPIRY_MS;
+    },
+    { limit: MAX_RECORDS },
+  );
 }
 
 /**
@@ -621,24 +612,18 @@ async function mtimeOf(path: string): Promise<Stamp | null> {
  * fires on every turn; a directory whose session is still live is never touched.
  */
 export async function pruneSessions(dataDir: string, now = Date.now()): Promise<void> {
-  const root = join(dataDir, PROGRESS_DIR);
-  try {
-    const directory = await opendir(root);
-    let seen = 0;
-    for await (const entry of directory) {
-      if (++seen > MAX_SESSIONS) return;
-      if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) continue;
-      const path = join(root, entry.name);
+  await sweep(
+    join(dataDir, PROGRESS_DIR),
+    async (name, path) => {
+      if (!/^[a-f0-9]{64}$/.test(name)) return false;
       const session = await readStamp(join(path, SESSION_FILE));
-      if (session !== null && now - session.at <= SESSION_ACTIVE_MS) continue;
+      if (session !== null && now - session.at <= SESSION_ACTIVE_MS) return false;
       // The touch is gone or old, so the only thing that can keep this
       // directory is a record still inside the renderer's window.
-      if (await hasLiveRecord(path, now)) continue;
-      await rm(path, { recursive: true, force: true }).catch(() => undefined);
-    }
-  } catch {
-    // Housekeeping only. Nothing downstream depends on it having run.
-  }
+      return !(await hasLiveRecord(path, now));
+    },
+    { limit: MAX_SESSIONS, directories: true },
+  );
 }
 
 async function hasLiveRecord(directory: string, now: number): Promise<boolean> {
@@ -760,7 +745,7 @@ function line(row: SavedProgress, now: number): string {
 /** Whether it landed. Every caller but the note record ignores the answer. */
 async function write(path: string, body: Stamp | SavedProgress | SavedNote): Promise<boolean> {
   try {
-    await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
+    await writePrivate(path, JSON.stringify(body));
     return true;
   } catch {
     // The footer is the only thing that can be lost here, by design.
@@ -798,26 +783,7 @@ async function readCall(path: string): Promise<SavedProgress | null> {
   };
 }
 
-/**
- * One bounded JSON object, or null. `O_NOFOLLOW` because these files live under
- * a directory the user can write: a symlink planted here must not turn a footer
- * read into a read of something else.
- */
-async function readJson(path: string): Promise<Record<string, unknown> | null> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
-  if (file === undefined) return null;
-  try {
-    if ((await file.stat()).size > MAX_RECORD_BYTES) return null;
-    const buffer = Buffer.alloc(MAX_RECORD_BYTES + 1);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > MAX_RECORD_BYTES) return null;
-    const parsed: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
-    return parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
-      ? null
-      : (parsed as Record<string, unknown>);
-  } catch {
-    return null;
-  } finally {
-    await file.close().catch(() => undefined);
-  }
+/** One bounded JSON object, or null: see {@link readJsonFile}. */
+function readJson(path: string): Promise<Record<string, unknown> | null> {
+  return readJsonFile(path, MAX_RECORD_BYTES);
 }

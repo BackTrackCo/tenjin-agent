@@ -20,12 +20,12 @@ import {
 } from '../lib/update-check';
 import { loadRawConfig } from '../lib/config';
 import { defaultDataDir, isDefaultDataDir, runtimeDir, tilde } from '../lib/paths';
-import type { ensureNode, placeVersion, stageTarball } from '../lib/runtime';
+import type { ensureNode, placeVersion, stageTarball } from '../lib/runtime-place';
 import type { CommandContext, CommandResult } from '../context';
 import { persistRouterProject } from './config';
 import { projectInstallAt } from '../router/install';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../router/mcp-processes';
-import { RUNTIME_MISSING_FIX } from '../router/plugin-files';
+import { RUNTIME_MISSING_FIX } from '../router/launcher-files';
 
 /**
  * `tenjin update`: move this machine to the newest version npm's `latest` tag
@@ -49,7 +49,7 @@ import { RUNTIME_MISSING_FIX } from '../router/plugin-files';
  *   the check and the install cannot disagree about what ships, and the version
  *   string is certified parseable by the same `isNewer` gate the nudge trusts
  *   before it goes anywhere near an argv.
- * - That version passes the runtime branch's provenance check (lib/runtime's
+ * - That version passes the runtime branch's provenance check (lib/runtime-provenance's
  *   `checkReleaseProvenance`) before the manager is spawned: what npm installs
  *   here can become the first runtime on its refresh.
  * - The owner performs the install. npm, pnpm and bun are each driven with their
@@ -80,7 +80,7 @@ const NODE_TIMEOUT_MS = 300_000;
  * HOW OLD A RELEASE MUST BE BEFORE THE BACKGROUND RUN TAKES IT: a day since
  * the registry published it. The window lets maintainers move `latest` back
  * (`npm dist-tag add tenjin-cli@<good> latest`) before any auto-updater runs
- * a bad or malicious release, which the provenance check (lib/runtime's
+ * a bad or malicious release, which the provenance check (lib/runtime-provenance's
  * `RELEASE_WORKFLOW`) cannot catch when the release workflow itself was
  * compromised. Publish times are set by the registry and cannot be backdated.
  * A manual `tenjin update` is the person choosing the release now, and does
@@ -352,7 +352,7 @@ async function update(
   // was matched to, which a published version can never change, so it
   // installs the attested bytes. A manager configured to fetch from another
   // registry (a mirror) gets them from there, which this check does not see.
-  const { checkReleaseProvenance } = await import('../lib/runtime');
+  const { checkReleaseProvenance } = await import('../lib/runtime-provenance');
   await checkReleaseProvenance(latest, {
     timeoutMs: ctx.flags.timeout,
     fetchImpl: deps.fetchImpl,
@@ -556,7 +556,7 @@ async function runtimeUpdate(
 ): Promise<CommandResult> {
   const { root, base, latest } = o;
   const [rt, layout] = await Promise.all([
-    import('../lib/runtime'),
+    import('../lib/runtime-place'),
     import('../lib/runtime-layout'),
   ]);
   const stays = `so ${base} stays`;

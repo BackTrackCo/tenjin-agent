@@ -1,10 +1,10 @@
 import {
-  runPay,
+  payRequest as runPay,
   settlementTx,
   type AdvertisedTerms,
   type PaidLeg,
   type PayDeps,
-} from '../commands/pay';
+} from './pay-request';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { downloadsDir } from '../lib/paths';

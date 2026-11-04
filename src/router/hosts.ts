@@ -56,12 +56,8 @@ export async function claudePluginPresent(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): Promise<boolean> {
-  const [{ listedInClaudeFiles }, { folderState }] = await Promise.all([
-    import('./doctor'),
-    import('./plugin-registration'),
-  ]);
-  if (await listedInClaudeFiles(env, home)) return true;
-  return (await folderState('user', env, home, home)).state === 'ours';
+  const { claudeInstallAt } = await import('./claude-install');
+  return claudeInstallAt('user', env, home, home, ['record', 'folder']);
 }
 
 /**

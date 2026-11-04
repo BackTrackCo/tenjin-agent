@@ -1,7 +1,7 @@
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
 import { sha256Hex } from '../lib/hash';
+import { writePrivate } from './store-files';
 
 /**
  * ONE MEMO FOR "DO NOT ASK THE ROUTER YET", per machine and per router origin,
@@ -71,10 +71,7 @@ export async function writeRouterMemo(
     ...(memo.detail !== undefined ? { detail: memo.detail.slice(0, 300) } : {}),
   };
   try {
-    await writeFileAtomic(memoPath(dataDir, kind, baseUrl), `${JSON.stringify(body)}\n`, {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writePrivate(memoPath(dataDir, kind, baseUrl), `${JSON.stringify(body)}\n`);
   } catch {
     // Best effort: a memo that did not land costs one more call.
   }

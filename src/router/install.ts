@@ -13,7 +13,8 @@ import { isSourceCheckout } from '../lib/install-location';
 import { runningGlibc, unpinnedPlatform } from '../lib/runtime-fetch';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
-import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
+import type { RuntimeSetup, setupRuntime } from '../lib/runtime';
+import type { LauncherResult } from '../lib/runtime-launchers';
 import { hasRuntime, runtimeBuild, type RuntimePointer } from '../lib/runtime-layout';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import {
@@ -28,14 +29,12 @@ import { SUGGESTED_FUND_USD } from './fee';
 import {
   findClaudeBinary,
   readClaudeCode,
-  userMcpFile,
-  userSettingsPath,
   type ClaudeBinary,
   type ClaudeCodeState,
 } from './claude-cli';
+import { claudeInstallAt, settingsInstallPaths } from './claude-install';
 import {
   inspectLegacyInstall,
-  projectMcpFile,
   removeLegacyInstall,
   type LegacyInstall,
   type LegacyRemoval,
@@ -69,7 +68,7 @@ import {
   spendOptions,
   FEE_APPROVAL,
 } from './spend-question';
-import { shQuote } from './plugin-files';
+import { shQuote } from './launcher-files';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -210,32 +209,6 @@ export interface RouterInstallDeps extends WalletDeps {
 
 export type LimitsChoice = 'approve' | 'own';
 
-/** Where a settings install of this scope kept its entries and its server. */
-export interface SettingsInstallPaths {
-  settingsPath: string;
-  mcpFile: string;
-  mcpScope: 'user' | 'project';
-}
-
-export function settingsInstallPaths(
-  project: boolean,
-  env: NodeJS.ProcessEnv,
-  home: string,
-  cwd: string,
-): SettingsInstallPaths {
-  return project
-    ? {
-        settingsPath: join(cwd, '.claude', 'settings.json'),
-        mcpFile: projectMcpFile(cwd),
-        mcpScope: 'project',
-      }
-    : {
-        settingsPath: userSettingsPath(env, home),
-        mcpFile: userMcpFile(env, home),
-        mcpScope: 'user',
-      };
-}
-
 /** The settings install's state, as install, update, doctor and uninstall report it. */
 export interface Migration {
   /**
@@ -332,14 +305,14 @@ export async function projectInstallAt(
   home: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  const local = await readFile(join(dir, '.claude', 'settings.local.json'), 'utf8')
-    .then((raw) => JSON.parse(raw) as { enabledPlugins?: Record<string, unknown> })
-    .catch(() => null);
-  if (local?.enabledPlugins?.[PLUGIN_ID] === true) return true;
-  if (await samePath(dir, home)) return false;
-  if ((await folderState('local', env, home, dir)).state === 'ours') return true;
-  const paths = settingsInstallPaths(true, env, home, dir);
-  return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).events.length > 0;
+  const atHome = await samePath(dir, home);
+  return claudeInstallAt(
+    'local',
+    env,
+    home,
+    dir,
+    atHome ? ['enabled'] : ['enabled', 'folder', 'settings-hooks'],
+  );
 }
 
 /** How a refresh with no Claude Code install to converge refuses. */
@@ -724,7 +697,7 @@ function runtimeOnlyRefresh(ctx: CommandContext, rt: RuntimeSetup, home: string)
  */
 async function collectRuntime(root: string, folders: readonly string[]): Promise<void> {
   try {
-    const { collect } = await import('../lib/runtime');
+    const { collect } = await import('../lib/runtime-activate');
     await collect(root, { lockWaitMs: 5_000, keep: await folderPointers(root, folders) });
   } catch {
     // The next install collects them.

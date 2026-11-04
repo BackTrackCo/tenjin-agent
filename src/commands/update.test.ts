@@ -21,7 +21,7 @@ import { RECONNECT_FIX } from '../router/mcp-processes';
 import { ROUTING_FEE_TERMS } from '../router/spend-question';
 import { attestationsFor } from '../lib/fixtures/npm-attestations';
 import { nodeBinPath, versionEntry } from '../lib/runtime-layout';
-import type { NodePin } from '../lib/runtime';
+import type { NodePin } from '../lib/runtime-place';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;

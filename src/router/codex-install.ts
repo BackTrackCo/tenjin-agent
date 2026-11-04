@@ -46,7 +46,7 @@ import {
 } from './install';
 import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/codex-trust';
 import { readInstalledHosts, withNote } from './hosts';
-import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
+import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './codex-plugin-files';
 import { shownLimits } from './spend-question';
 
 /**

@@ -22,7 +22,8 @@ import {
 } from './doctor';
 import { canPayRouting, canSign, type SignVerdict, type Verdict } from './eligibility';
 import { checkEligibility, type Eligibility } from './eligibility-check';
-import { LAUNCHER_MARKER, renderHostFiles } from './plugin-files';
+import { renderHostFiles } from './plugin-files';
+import { LAUNCHER_MARKER } from './launcher-files';
 import type { RouterCheck } from './reachability';
 import type { RouterObservation } from './router-observation';
 import { KEYCHAIN_LOCKED_FIX, NO_SESSION_CHECKED, WALLET_REASONS } from './wallet-reasons';

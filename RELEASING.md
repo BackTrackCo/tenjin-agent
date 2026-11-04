@@ -47,9 +47,10 @@ then.
 **Updater contract.** Every installed copy fetches the next version with its own
 code, not the new release's. So the update side must stay compatible once
 shipped: `src/lib/auto-update.ts`, the runtime branch of
-`src/commands/update.ts`, `src/lib/runtime.ts` (`checkReleaseProvenance`,
-`stageTarball`, `readNodePin`, `ensureNode`, `placeVersion`),
-`src/lib/runtime-layout.ts`, `src/lib/runtime-fetch.ts`,
+`src/commands/update.ts`, `src/lib/runtime-provenance.ts`
+(`checkReleaseProvenance`), `src/lib/runtime-place.ts` (`stageTarball`,
+`readNodePin`, `ensureNode`, `placeVersion`), `src/lib/lock.ts`
+(`withRuntimeLock`), `src/lib/runtime-layout.ts`, `src/lib/runtime-fetch.ts`,
 `src/lib/version-order.ts`, and the `install --refresh` entry the old build
 spawns the new one with. So must what the old build reads from the new
 release: `package.json` `tenjinRuntime.node` (an `X.Y.Z` Node version and a
@@ -126,7 +127,7 @@ token, so there is **no `NPM_TOKEN`** to store or rotate.
 **What the updater trusts.** `tenjin update` and the background auto-update
 install a release only when its npm provenance names exactly
 `BackTrackCo/tenjin-agent`, `.github/workflows/release.yml` and
-`refs/heads/main` (`RELEASE_WORKFLOW` in `src/lib/runtime.ts`), whether the
+`refs/heads/main` (`RELEASE_WORKFLOW` in `src/lib/runtime-provenance.ts`), whether the
 update downloads it into the runtime or has npm install it (an npm mirror the
 user configured is outside that check). Every CLI since that check shipped
 carries the triple, so a release published any other way (a manual

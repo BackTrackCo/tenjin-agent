@@ -13,6 +13,7 @@ import { noticeFor } from './notice-markers';
 import { sessionStartMessage } from './wallet-reasons';
 import { sha256Hex } from '../lib/hash';
 import { ADDRESS_RE } from '../lib/ids';
+import { sweep } from './store-files';
 
 /**
  * THE PLUGIN SAYS IT IS HERE. While a machine carries both the plugin and the
@@ -136,12 +137,11 @@ export async function walletAtStart(
 }
 
 async function pruneMarkers(dir: string, now: number): Promise<void> {
-  for (const name of await readdir(dir).catch(() => [] as string[])) {
-    if (!/^[0-9a-f]{32}$/.test(name)) continue;
-    const path = join(dir, name);
+  await sweep(dir, async (name, path) => {
+    if (!/^[0-9a-f]{32}$/.test(name)) return false;
     const s = await stat(path).catch(() => null);
-    if (s !== null && now - s.mtimeMs > MARKER_TTL_MS) await rm(path, { force: true });
-  }
+    return s !== null && now - s.mtimeMs > MARKER_TTL_MS;
+  });
 }
 
 /** Has the plugin's `alive` leg marked this session? False on any doubt. */

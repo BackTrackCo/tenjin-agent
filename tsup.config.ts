@@ -1,12 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { defineConfig, type Options } from 'tsup';
-import {
-  MOD_FILES,
-  PLUGIN_DIR,
-  renderCodexHostFiles,
-  renderHostFiles,
-} from './src/router/plugin-files';
+import { MOD_FILES, PLUGIN_DIR, renderHostFiles } from './src/router/plugin-files';
+import { renderCodexHostFiles } from './src/router/codex-plugin-files';
 
 /**
  * THE PLUGINS SHIP IN `dist/hosts/claude` AND `dist/hosts/codex`, rendered from

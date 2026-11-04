@@ -10,13 +10,13 @@ import { hasRuntime } from '../lib/runtime-layout';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { removeAliveState } from './alive';
 import { findClaudeBinary, jsonList, jsonResult, runClaude, type ClaudeBinary } from './claude-cli';
-import { projectInstallAt, settingsInstallPaths } from './install';
+import { claudeInstallAt, settingsInstallPaths } from './claude-install';
+import { projectInstallAt } from './install';
 import { inspectLegacyInstall, removeLegacyInstall, type LegacyRemoval } from './legacy-install';
 import { MARKETPLACE_NAME, PLUGIN_ID } from './names';
 import { removePluginFolder, type FolderRemoval } from './plugin-folder';
 import {
   folderFor,
-  folderState,
   ownMarketplace,
   recordedInstalls,
   type InstallRecord,
@@ -427,9 +427,7 @@ async function liveOthers(others: InstallRecord[]): Promise<InstallRecord[]> {
 /** An install of ours Claude Code does not record: a plugin folder, or a settings install. */
 async function leftHere(r: InstallRecord, env: NodeJS.ProcessEnv, home: string): Promise<boolean> {
   if (r.projectPath !== null) return projectInstallAt(r.projectPath, home, env);
-  if ((await folderState('user', env, home, home)).state === 'ours') return true;
-  const paths = settingsInstallPaths(false, env, home, home);
-  return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).present;
+  return claudeInstallAt('user', env, home, home, ['folder', 'settings']);
 }
 
 const keyOf = (r: Pick<InstallRecord, 'projectPath'>): string => r.projectPath ?? USER;
@@ -580,7 +578,7 @@ async function keptBlock(
 
 export interface RuntimeRemovalDeps {
   platform?: NodeJS.Platform;
-  /** Tests inject these; the defaults are `runtime.ts`'s own. */
+  /** Tests inject these; the defaults are `runtime-launchers.ts`'s and `runtime-activate.ts`'s. */
   removeLaunchers?: (
     home: string,
     platform?: NodeJS.Platform,
@@ -594,8 +592,8 @@ export interface RuntimeRemovalDeps {
  * non-default data dir, whose installs never had either.
  *
  * NOTHING IS IMPORTED AFTER THE REMOVAL. When this build runs from the
- * runtime, its own files are gone once it returns, so `runtime.ts` is loaded
- * first and every line after is plain string work. On Windows a running
+ * runtime, its own files are gone once it returns, so both runtime modules are
+ * loaded first and every line after is plain string work. On Windows a running
  * `node.exe` keeps its folder; it is named, to delete once this exits.
  */
 export async function removeRuntimeAndLaunchers(
@@ -606,12 +604,10 @@ export async function removeRuntimeAndLaunchers(
   if (!isDefaultDataDir(dataDir, home)) {
     return { data: { runtime: null, launcher: null }, humanLines: [] };
   }
-  const lib =
-    deps.removeLaunchers !== undefined && deps.removeRuntime !== undefined
-      ? null
-      : await import('../lib/runtime');
-  const removeLaunchers = deps.removeLaunchers ?? lib!.removeLaunchers;
-  const removeRuntime = deps.removeRuntime ?? lib!.removeRuntime;
+  const removeLaunchers =
+    deps.removeLaunchers ?? (await import('../lib/runtime-launchers')).removeLaunchers;
+  const removeRuntime =
+    deps.removeRuntime ?? (await import('../lib/runtime-activate')).removeRuntime;
   const root = runtimeDir(dataDir);
   const launcher = await removeLaunchers(home, deps.platform ?? process.platform).catch(() => ({
     removed: [] as string[],

@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { activate, type LauncherResult, type RuntimeSetup } from '../lib/runtime';
+import type { RuntimeSetup } from '../lib/runtime';
+import { activate } from '../lib/runtime-activate';
+import type { LauncherResult } from '../lib/runtime-launchers';
 import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/runtime-layout';
 import type { CommandContext } from '../context';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
@@ -19,7 +21,8 @@ import {
   runtimeOncePerRun,
   type RouterInstallDeps,
 } from './install';
-import { renderLauncherSh, renderPluginFiles, shQuote } from './plugin-files';
+import { renderPluginFiles } from './plugin-files';
+import { renderLauncherSh, shQuote } from './launcher-files';
 
 /**
  * INSTALL ON TENJIN'S RUNTIME, through a fake `claude` and an injected

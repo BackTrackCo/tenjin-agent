@@ -1,16 +1,8 @@
 import { PAY_SKILL, PAY_SKILL_PATH } from './plugin-skill';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
+import { HOOK_TOOL, hookToolInput, type HookKind } from './hook-tool';
+import { renderPluginBin, type RuntimeLaunch } from './launcher-files';
 import {
-  CODEX_HOOK_KINDS,
-  codexHookToolInput,
-  HOOK_TOOL,
-  hookToolInput,
-  type CodexHookKind,
-  type HookKind,
-} from './hook-tool';
-import {
-  CODEX_HOOK_TOOL,
-  CODEX_REQUEST_TOOL,
   MARKETPLACE_NAME,
   MCP_SERVER_NAME,
   PLUGIN_HOOK_TOOL,
@@ -31,9 +23,9 @@ import {
  * under the config dir's `skills/`. The checked-in `hosts/claude/` templates are
  * pinned to the package render by a test, so the two cannot drift.
  *
- * NOTHING HERE IMPORTS MORE THAN THE NAMES AND THE PRODUCTION ORIGIN:
- * `tsup.config.ts` loads this module to render the shipped files, and its
- * import graph is the build's.
+ * NOTHING HERE IMPORTS MORE THAN THE NAMES, THE LAUNCHERS AND THE PRODUCTION
+ * ORIGIN: `tsup.config.ts` loads this module and `codex-plugin-files.ts` to
+ * render the shipped files, and their import graph is the build's.
  */
 
 /**
@@ -266,7 +258,7 @@ export const OWNER_MARKER = 'tenjin-cli';
 /** The marker's value in the checked-in templates, which carry no version. */
 const UNBUILT = 'source';
 
-const DESCRIPTION =
+export const PLUGIN_DESCRIPTION =
   'Tenjin picks the right tool when your agent needs one, and one wallet on this machine pays for every call.';
 
 /**
@@ -282,7 +274,7 @@ export function renderPluginManifest(
   return {
     name: PLUGIN_NAME,
     ...(version !== undefined ? { version } : {}),
-    description: DESCRIPTION,
+    description: PLUGIN_DESCRIPTION,
     // The mod's `$.state` contract, which `claude plugin validate` checks.
     ...(o.mod !== undefined ? { types: `./${MOD_TYPES}` } : {}),
     author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
@@ -306,7 +298,7 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
       {
         name: PLUGIN_NAME,
         source: `./${PLUGIN_DIR}`,
-        description: DESCRIPTION,
+        description: PLUGIN_DESCRIPTION,
         ...(version !== undefined ? { version } : {}),
       },
     ],
@@ -339,7 +331,8 @@ export const MOD_TYPES = 'types/index.d.ts';
 export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
 export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 
-const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+/** A JSON file's text as the plugin renders write it. */
+export const jsonText = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
  * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
@@ -355,24 +348,12 @@ export function renderPluginFiles(
   o: RenderOptions = {},
 ): Record<string, string> {
   return {
-    '.mcp.json': json(renderPluginMcp(entry, o)),
+    '.mcp.json': jsonText(renderPluginMcp(entry, o)),
     ...(o.mod ?? {}),
-    'hooks/hooks.json': json(renderPluginHooks(entry, o)),
+    'hooks/hooks.json': jsonText(renderPluginHooks(entry, o)),
     [PAY_SKILL_PATH]: PAY_SKILL,
-    '.claude-plugin/plugin.json': json(renderPluginManifest(version, o)),
+    '.claude-plugin/plugin.json': jsonText(renderPluginManifest(version, o)),
   };
-}
-
-/**
- * What the runtime render runs: the runtime's absolute Node and the version's
- * absolute `dist/index.js`. `home` is needed only for the win32 `.cmd`
- * launcher, which names both from `%USERPROFILE%`.
- */
-export interface RuntimeLaunch {
-  node: string;
-  entry: string;
-  platform?: NodeJS.Platform;
-  home?: string;
 }
 
 /** How a marketplace folder render departs from the package render; see {@link RenderOptions}. */
@@ -406,307 +387,7 @@ export function renderHostFiles(
     ([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const,
   );
   return {
-    '.claude-plugin/marketplace.json': json(renderMarketplace(version)),
+    '.claude-plugin/marketplace.json': jsonText(renderMarketplace(version)),
     ...Object.fromEntries(plugin),
-  };
-}
-
-/**
- * The line every launcher carries. A file at a launcher's path without it is
- * not Tenjin's, and is never overwritten or removed.
- */
-export const LAUNCHER_MARKER = 'tenjin-runtime-launcher';
-/** Official recovery instructions: the installer includes Node and needs no working launcher. */
-export const RUNTIME_MISSING_FIX = `Reinstall from ${PRODUCTION_ORIGIN}/agents (no Node or npm needed), then follow the installer's activation instruction.`;
-
-const missingSentence = (entry: string): string =>
-  `tenjin: Tenjin's runtime is missing (${entry}). ${RUNTIME_MISSING_FIX}`;
-
-/** A single-quoted sh word: everything literal, a `'` closed, escaped and reopened. */
-export const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
-/**
- * THE `tenjin` LAUNCHER, as sh, for `~/.local/bin` and the plugin's `bin/`.
- * It bakes the absolute Node and entry, so it reads no state and the atomic
- * rename of the file is the switch. When either is gone it says how to put the
- * runtime back instead of failing with a bare `not found`. On win32 it is for
- * Git Bash, so the paths are written with forward slashes.
- */
-export function renderLauncherSh(launch: RuntimeLaunch): string {
-  const slash = (p: string) =>
-    (launch.platform ?? process.platform) === 'win32' ? p.replaceAll('\\', '/') : p;
-  return [
-    '#!/bin/sh',
-    `# ${LAUNCHER_MARKER}`,
-    `node=${shQuote(slash(launch.node))}`,
-    `entry=${shQuote(slash(launch.entry))}`,
-    'if [ -x "$node" ] && [ -f "$entry" ]; then exec "$node" "$entry" "$@"; fi',
-    `echo "${missingSentence('$entry').replaceAll('`', '\\`')}" >&2`,
-    'exit 1',
-    '',
-  ].join('\n');
-}
-
-/** `path` relative to `home`, both Windows paths, or null when it is not under it. */
-function underHome(path: string, home: string): string | null {
-  const back = (p: string) => p.replaceAll('/', '\\');
-  const base = back(home).replace(/\\+$/, '');
-  const full = back(path);
-  if (!full.toLowerCase().startsWith(`${base.toLowerCase()}\\`)) return null;
-  return full.slice(base.length + 1);
-}
-
-/**
- * `path` as cmd reads it: `%USERPROFILE%` plus its part under `home`. It throws
- * when `path` is outside `home`, or its part holds a non-ASCII character, `"`
- * or `%`, which cmd would read.
- */
-function cmdPath(path: string, home: string): string {
-  const part = underHome(path, home);
-  if (part === null) throw new Error(`${path} is not under ${home}`);
-  if (/[^\x20-\x7e]|["%]/.test(part)) {
-    throw new Error(`${path} holds a character a .cmd launcher cannot carry`);
-  }
-  return `%USERPROFILE%\\${part}`;
-}
-
-/**
- * THE `tenjin.cmd` LAUNCHER, for a Windows terminal and the Codex runtime
- * render's commands (never a Claude Code plugin command). Both paths are
- * `%USERPROFILE%` plus their part under the home folder, which is ASCII by
- * construction, so a non-ASCII user name never has to survive cmd's code page. It throws when a path is outside `home`, or its part
- * holds a non-ASCII character, `"` or `%`, which cmd would read. The run line is
- * one parenthesized block, so cmd parses it whole before Node starts and a
- * rewrite of the file mid-run cannot inject a stray line.
- */
-export function renderLauncherCmd(launch: RuntimeLaunch & { home: string }): string {
-  const node = cmdPath(launch.node, launch.home);
-  const entry = cmdPath(launch.entry, launch.home);
-  return [
-    '@echo off',
-    `rem ${LAUNCHER_MARKER}`,
-    `if exist "${node}" if exist "${entry}" ( "${node}" "${entry}" %* & exit /b )`,
-    `echo ${missingSentence(entry)} 1>&2`,
-    'exit /b 1',
-    '',
-  ].join('\r\n');
-}
-
-/**
- * The plugin's `bin/`: Claude Code appends it to the END of its Bash tool's
- * PATH, so this `tenjin` answers there when nothing earlier is named `tenjin`.
- * `activate` writes these at 0o755: Claude Code never sets the exec bit, and
- * skips a file without it.
- */
-export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
-  const files: Record<string, string> = { 'bin/tenjin': renderLauncherSh(launch) };
-  if ((launch.platform ?? process.platform) === 'win32') {
-    if (launch.home === undefined) throw new Error('the .cmd launcher needs the home folder');
-    files['bin/tenjin.cmd'] = renderLauncherCmd({ ...launch, home: launch.home });
-  }
-  return files;
-}
-
-/**
- * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
- * checked-in `hosts/codex/` by the same test. Its legs are `mcp_tool` hooks
- * into the plugin's own `router` server, as Claude Code's are, so each leg
- * runs in the process that holds the wallet and pays the routing fee: the
- * prompt, and one web call before it runs and after (Codex has no
- * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.149.0: 0.148 parses
- * them but skips them, and an older Codex rejects the file, so install and
- * update leave an older Codex's copy as it is and doctor names the build.
- * The server's `env_vars` passes `CODEX_HOME` through Codex's cleared MCP
- * environment, so the hook tool finds the session's rollout where Codex
- * wrote it.
- * Nothing in it names a release or a path, so `codex plugin add` copies the
- * same hooks from every build and their trust holds across a `tenjin update`.
- * The runtime render, `~/.tenjin/runtime/codex`, differs only in `.mcp.json`:
- * Codex starts the server through the `tenjin` launcher in its own `bin/` by
- * absolute path, which never changes, and `activate` rewrites only the
- * launcher on each switch.
- */
-export const CODEX_WEB_MATCHER = 'webrun';
-export const CODEX_LEGS = CODEX_HOOK_KINDS;
-/**
- * The first Codex that runs `mcp_tool` hooks: rust-v0.149.0 adds
- * `core/src/hook_mcp_executor.rs`; rust-v0.148.0 builds hooks with no MCP
- * executor and skips each one (`hooks/src/engine/mod.rs`).
- */
-export const CODEX_MCP_HOOKS_VERSION = '0.149.0';
-
-/** What the Codex runtime render runs: the launch its launchers bake, and the absolute folder they are in. */
-export interface CodexRuntime {
-  launch: RuntimeLaunch;
-  /** `<runtime>/codex/tenjin/bin`. */
-  binDir: string;
-}
-
-const onWindows = (o: CodexRuntime): boolean => (o.launch.platform ?? process.platform) === 'win32';
-
-/** The sh launcher's absolute path. */
-const codexLauncherSh = (o: CodexRuntime): string => `${o.binDir}/tenjin`;
-
-/** The `.cmd` launcher's absolute path, for a process Codex spawns directly. */
-const codexLauncherCmd = (o: CodexRuntime): string => `${o.binDir}\\tenjin.cmd`;
-
-/** The command form of a leg: what a plugin copy from an older build still runs. */
-export function codexHookCommand(kind: CodexHookKind): string {
-  return `tenjin hook ${kind} --harness codex`;
-}
-
-/** One Codex routing leg: Codex calls the plugin server's `hook` tool. */
-function codexLeg(kind: CodexHookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS) {
-  return [
-    {
-      type: 'mcp_tool',
-      server: MCP_SERVER_NAME,
-      tool: HOOK_TOOL,
-      input: codexHookToolInput(kind),
-      timeout,
-    },
-  ];
-}
-
-/** A fixed hook answer, echoed: `cmd.exe` takes the bare form, a POSIX shell the quoted one. */
-function echoed(answer: string): { command: string; commandWindows: string } {
-  return { command: `echo '${answer}'`, commandWindows: `echo ${answer}` };
-}
-
-/**
- * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL, as {@link DENY_HOOK} is in
- * Claude Code: a model call to it fires PreToolUse as `mcp__router__hook`,
- * while Codex's own `mcp_tool` hook calls go straight to the server and fire
- * no PreToolUse (openai/codex `core/src/hook_mcp_executor.rs`).
- */
-export const CODEX_DENY_HOOK = echoed(
-  JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: `Only the Tenjin hooks call this tool. To make a lookup, call ${CODEX_REQUEST_TOOL}.`,
-    },
-  }),
-);
-
-/**
- * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link allowHook}
- * is in Claude Code. Codex runs a `PermissionRequest` hook before its approval
- * policy, `never` included, so the tool runs without a prompt once the user
- * trusts this hook with the others in `/hooks`. It also overrides a user's own
- * `approval_mode = "prompt"` for the tool; that user turns this one hook off in
- * `/hooks`. The wallet's spend limits still bound every payment.
- */
-const CODEX_ALLOW_ANSWER = JSON.stringify({
-  hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
-});
-export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
-/**
- * The same answer under Windows' `cmd.exe /C`, through Codex's `commandWindows`
- * override: cmd's `echo` prints single quotes as written, and Codex then
- * rejects the output as JSON. The answer holds none of cmd's special
- * characters, so a bare `echo` prints it as is.
- */
-export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
-
-/** Every hook the Codex plugin carries: the three legs, the deny and the allow answer. */
-export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 2;
-
-/** `hooks/hooks.json`: the same for the package and the runtime render. */
-export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
-  return {
-    hooks: {
-      UserPromptSubmit: [{ hooks: codexLeg('prompt') }],
-      PreToolUse: [
-        { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') },
-        {
-          matcher: CODEX_HOOK_TOOL,
-          hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: CODEX_WEB_MATCHER,
-          hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS),
-        },
-      ],
-      PermissionRequest: [
-        {
-          matcher: CODEX_REQUEST_TOOL,
-          hooks: [
-            {
-              type: 'command',
-              command: CODEX_ALLOW_HOOK_COMMAND,
-              commandWindows: CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
-              timeout: LOCAL_HOOK_TIMEOUT_SECONDS,
-            },
-          ],
-        },
-      ],
-    },
-  };
-}
-
-export const CODEX_MCP_ARGS = ['mcp', '--harness', 'codex'] as const;
-
-/**
- * `.mcp.json`. Codex spawns the server directly, with no shell: the runtime
- * render names the sh launcher, or on win32 the `.cmd` one, which Codex starts
- * through cmd.exe.
- */
-export function renderCodexMcp(o?: CodexRuntime): { mcpServers: Record<string, unknown> } {
-  const command =
-    o === undefined ? 'tenjin' : onWindows(o) ? codexLauncherCmd(o) : codexLauncherSh(o);
-  return {
-    mcpServers: {
-      [MCP_SERVER_NAME]: { command, args: [...CODEX_MCP_ARGS], env_vars: ['CODEX_HOME'] },
-    },
-  };
-}
-
-/** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */
-export function renderCodexManifest(): Record<string, unknown> {
-  return {
-    name: PLUGIN_NAME,
-    description: DESCRIPTION,
-    author: { name: 'Tenjin', url: PRODUCTION_ORIGIN },
-    homepage: `${PRODUCTION_ORIGIN}/agents`,
-    repository: 'https://github.com/BackTrackCo/tenjin-agent',
-    interface: { displayName: 'Tenjin', developerName: 'Tenjin', category: 'Productivity' },
-    mcpServers: './.mcp.json',
-  };
-}
-
-/** `.agents/plugins/marketplace.json`: one local plugin, copied by `codex plugin add`. */
-export function renderCodexMarketplace(): Record<string, unknown> {
-  return {
-    name: MARKETPLACE_NAME,
-    interface: { displayName: 'Tenjin' },
-    plugins: [
-      {
-        name: PLUGIN_NAME,
-        source: { source: 'local', path: `./${PLUGIN_DIR}` },
-        policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
-        category: 'Productivity',
-      },
-    ],
-  };
-}
-
-/**
- * The Codex marketplace folder's files: its catalog and the plugin under
- * {@link PLUGIN_DIR}. With no `o`, the package render; with one, the runtime
- * render, whose commands run the launchers it carries in `bin/`.
- */
-export function renderCodexHostFiles(o?: CodexRuntime): Record<string, string> {
-  const bin = o === undefined ? {} : renderPluginBin(o.launch);
-  return {
-    '.agents/plugins/marketplace.json': json(renderCodexMarketplace()),
-    [`${PLUGIN_DIR}/.mcp.json`]: json(renderCodexMcp(o)),
-    ...Object.fromEntries(
-      Object.entries(bin).map(([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const),
-    ),
-    [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
-    [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest()),
   };
 }

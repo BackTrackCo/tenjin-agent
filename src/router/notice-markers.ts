@@ -1,11 +1,11 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
 import { hasCode } from '../lib/errno';
 import type { UnlockReason } from '../lib/wallet-unlock';
 import { WALLET_CLASS, walletClearedSentence } from './wallet-reasons';
 import { sha256Hex } from '../lib/hash';
+import { PRIVATE, sweep, writePrivate } from './store-files';
 
 /**
  * WHAT A SESSION HAS ALREADY BEEN TOLD, on disk, because every hook leg is its
@@ -30,7 +30,7 @@ import { sha256Hex } from '../lib/hash';
  * that line, so old markers, new ones and `.current` all age out the same way:
  * a week after they were last written.
  *
- * Hook-safe: node, `lib/atomic-json`, `lib/errno` and the reason strings.
+ * Hook-safe: node, `./store-files`, `lib/errno` and the reason strings.
  */
 
 /** How long a session's notice marker is kept. */
@@ -78,10 +78,7 @@ async function writeCurrent(
   now: number,
   why: string,
 ): Promise<void> {
-  await writeFileAtomic(currentPath(dataDir, sessionId), `${now}\n${why}`, {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
+  await writePrivate(currentPath(dataDir, sessionId), `${now}\n${why}`);
 }
 
 /**
@@ -190,23 +187,21 @@ export async function firstNoticeFor(
  * never pulls a file out from under a writer.
  */
 async function pruneNotices(dataDir: string, now: number): Promise<void> {
-  const dir = noticesDir(dataDir);
-  for (const entry of await readdir(dir).catch(() => [] as string[])) {
-    if (entry.startsWith('.')) continue;
-    const path = join(dir, entry);
+  await sweep(noticesDir(dataDir), async (name, path) => {
+    if (name.startsWith('.')) return false;
     const text = await readFile(path, 'utf8').catch(() => 'NaN');
-    if (text.length === 0) continue;
+    if (text.length === 0) return false;
     const at = Number(text.split('\n')[0]);
-    if (!Number.isFinite(at) || now - at > NOTICE_KEEP_MS) await rm(path, { force: true });
-  }
+    return !Number.isFinite(at) || now - at > NOTICE_KEEP_MS;
+  });
 }
 
 /** Create `path` holding `body`, only if it is not already there: true when
  *  this call made it, false on EEXIST, and any other failure rethrown. */
 export async function createExclusive(path: string, body: string): Promise<boolean> {
   try {
-    await mkdir(join(path, '..'), { recursive: true, mode: 0o700 });
-    const handle = await open(path, 'wx', 0o600);
+    await mkdir(join(path, '..'), { recursive: true, mode: PRIVATE.dirMode });
+    const handle = await open(path, 'wx', PRIVATE.mode);
     try {
       await handle.writeFile(body);
     } finally {

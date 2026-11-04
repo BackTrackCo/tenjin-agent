@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runPay } from './pay';
 import {
   MAX_PAID_LEG_TIMEOUT_MS,
   paidLegTimeoutMs,
   quoteRouterCall,
-  runPay,
   type PaidLeg,
-} from './pay';
+} from '../router/pay-request';
 import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
 import { createQuote } from '../lib/spend-quotes';
 import { saveSweepListings } from '../lib/bazaar';

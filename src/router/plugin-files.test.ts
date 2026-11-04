@@ -16,17 +16,23 @@ import {
   PLUGIN_DIR,
   PLUGIN_FILES,
   PLUGIN_ROOT_ENTRY,
-  LAUNCHER_MARKER,
-  RUNTIME_MISSING_FIX,
   renderHostFiles,
-  renderLauncherCmd,
-  renderLauncherSh,
   renderMarketplace,
   renderPluginFiles,
   renderPluginHooks,
   renderPluginManifest,
   renderPluginMcp,
   type ExecLaunch,
+  type ModSources,
+} from './plugin-files';
+import {
+  LAUNCHER_MARKER,
+  RUNTIME_MISSING_FIX,
+  renderLauncherCmd,
+  renderLauncherSh,
+  renderPluginBin,
+} from './launcher-files';
+import {
   CODEX_ALLOW_HOOK_COMMAND,
   CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
   CODEX_DENY_HOOK,
@@ -36,10 +42,8 @@ import {
   renderCodexMarketplace,
   renderCodexMcp,
   codexHookCommand,
-  renderPluginBin,
   type CodexRuntime,
-  type ModSources,
-} from './plugin-files';
+} from './codex-plugin-files';
 import { readModSources } from './plugin-folder';
 
 const HOSTS = fileURLToPath(new URL('../../hosts/claude', import.meta.url));

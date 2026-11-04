@@ -1,4 +1,4 @@
-import { quoteRouterCall } from '../commands/pay';
+import { quoteRouterCall } from './pay-request';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import type { SpendPolicy } from '../lib/policy';

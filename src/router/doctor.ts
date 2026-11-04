@@ -22,7 +22,6 @@ import { agentsWithoutRequestTool } from './agent-tools';
 import { readAliveStamp, type AliveStamp } from './alive';
 import {
   CLAUDE_CODE_FLOOR,
-  claudeConfigDir,
   findClaudeBinary,
   jsonList,
   readClaudeCode,
@@ -30,6 +29,7 @@ import {
   type ClaudeBinary,
   type ClaudeCodeState,
 } from './claude-cli';
+import { claudeInstallAt, settingsInstallPaths } from './claude-install';
 import { isDefiniteBlock } from './eligibility';
 import { checkEligibility, type Eligibility, type EligibilityInput } from './eligibility-check';
 import {
@@ -39,11 +39,12 @@ import {
   unpaid,
   usd,
 } from './fee';
-import { NEW_SESSION_STEP, pluginProof, projectInstallHere, settingsInstallPaths } from './install';
+import { NEW_SESSION_STEP, pluginProof, projectInstallHere } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { MARKETPLACE_NAME, MCP_SERVER_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
-import { LAUNCHER_MARKER, PLUGIN_DIR, RUNTIME_MISSING_FIX } from './plugin-files';
+import { PLUGIN_DIR } from './plugin-files';
+import { LAUNCHER_MARKER, RUNTIME_MISSING_FIX } from './launcher-files';
 import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import {
@@ -837,7 +838,7 @@ async function pluginCheck(
                 },
     };
   }
-  if (await listedInClaudeFiles(c.env, c.home)) {
+  if (await claudeInstallAt(c.scope, c.env, c.home, c.cwd, ['record'])) {
     return {
       registered: true,
       check: {
@@ -850,20 +851,6 @@ async function pluginCheck(
     };
   }
   return missing(`${PLUGIN_ID} is not registered`);
-}
-
-/** Claude Code's own record, read when no binary can be asked. */
-export async function listedInClaudeFiles(env: NodeJS.ProcessEnv, home: string): Promise<boolean> {
-  try {
-    const raw = await readFile(
-      join(claudeConfigDir(env, home), 'plugins', 'installed_plugins.json'),
-      'utf8',
-    );
-    const plugins = (JSON.parse(raw) as { plugins?: unknown }).plugins;
-    return plugins !== null && typeof plugins === 'object' && PLUGIN_ID in plugins;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -1157,7 +1144,7 @@ async function runtimeCheck(i: {
   // Off PATH is only worth a row when the terminal finds no `tenjin` at all: npm's
   // copy hands off to the runtime, and an old one gets its own row below.
   if (i.onPath === null && !launcherOnPath(launcherDir(i.home), i.env, platform)) {
-    const { pathLine } = await import('../lib/runtime');
+    const { pathLine } = await import('../lib/runtime-launchers');
     return {
       name,
       status: 'warn',
@@ -1212,7 +1199,7 @@ export async function findPathTenjin(
     let root: string | null;
     if (platform === 'win32') root = join(dir, 'node_modules', 'tenjin-cli');
     else {
-      const { packageRootOf } = await import('../lib/runtime');
+      const { packageRootOf } = await import('../lib/runtime-place');
       root = packageRootOf(dirname(await realpath(path).catch(() => path)));
     }
     // The first one on PATH is what a terminal runs, identified or not.

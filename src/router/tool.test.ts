@@ -10,7 +10,7 @@ import { CliError } from '../lib/errors';
 import { resolveSpendAuthorizer } from '../lib/wallet';
 import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
-import { runPay } from '../commands/pay';
+import { payRequest as runPay } from './pay-request';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
@@ -30,9 +30,9 @@ import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons'
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
-vi.mock('../commands/pay', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../commands/pay')>();
-  return { ...actual, runPay: vi.fn(actual.runPay) };
+vi.mock('./pay-request', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./pay-request')>();
+  return { ...actual, payRequest: vi.fn(actual.payRequest) };
 });
 
 /**

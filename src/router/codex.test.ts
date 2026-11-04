@@ -22,7 +22,7 @@ import {
   type CodexSetupDeps,
 } from './codex-install';
 import { runHookKind } from './hook-command';
-import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
+import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './codex-plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
 import { CODEX_REQUEST_TOOL, requestToolName } from './names';

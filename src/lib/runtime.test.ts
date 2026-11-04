@@ -18,28 +18,22 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ALPHA32_ATTESTATIONS, attestationsFor } from './fixtures/npm-attestations';
-import { LockTimeoutError } from './lock';
-import { renderCodexHostFiles, renderHostFiles, RUNTIME_MISSING_FIX } from '../router/plugin-files';
+import { renderHostFiles } from '../router/plugin-files';
+import { RUNTIME_MISSING_FIX } from '../router/launcher-files';
+import { renderCodexHostFiles } from '../router/codex-plugin-files';
+import { setupRuntime } from './runtime';
+import { activate, collect, NewerRuntime, removeRuntime } from './runtime-activate';
+import { pathLine, removeLaunchers, writeLaunchers } from './runtime-launchers';
 import {
-  activate,
-  collect,
   ensureNode,
-  NewerRuntime,
-  pathLine,
   placeVersion,
-  provenanceProblem,
   readNodePin,
-  removeLaunchers,
-  removeRuntime,
-  setupRuntime,
   stageSelf,
   stageTarball,
-  verifyBuild,
-  withRuntimeLock,
-  writeLaunchers,
   type NodePin,
-  type VerifySpawn,
-} from './runtime';
+} from './runtime-place';
+import { provenanceProblem } from './runtime-provenance';
+import { verifyBuild, type VerifySpawn } from './runtime-verify';
 import {
   nodeBinPath,
   readRuntimeState,
@@ -168,109 +162,6 @@ describe('readNodePin', () => {
     expect(readNodePin(npmPackage('0.1.0-alpha.32', null))).toBeNull();
     const bad = npmPackage('0.1.0-alpha.32', { version: '../24', sha256: {} });
     expect(readNodePin(bad)).toBeNull();
-  });
-});
-
-describe('withRuntimeLock', () => {
-  const DEAD = 999_999;
-  const lockAt = (pid: number, startedAt: Date): void => {
-    mkdirSync(join(root, '.lock'), { recursive: true });
-    writeFileSync(join(root, '.lock', 'owner.json'), JSON.stringify({ pid, startedAt }));
-  };
-  const trashLocks = () =>
-    readdirSync(join(root, 'tmp')).filter((name) => name.startsWith('trash-lock-'));
-
-  it('writes owner.json while held and removes the lock after', async () => {
-    const seen = await withRuntimeLock(root, async () =>
-      JSON.parse(readFileSync(join(root, '.lock', 'owner.json'), 'utf8')),
-    );
-    expect(seen.pid).toBe(process.pid);
-    expect(Number.isNaN(Date.parse(seen.startedAt))).toBe(false);
-    expect(existsSync(join(root, '.lock'))).toBe(false);
-  });
-
-  it('takes over a lock whose owner pid is dead', async () => {
-    lockAt(DEAD, new Date());
-    const ran = await withRuntimeLock(root, async () => 'ran', {
-      isAlive: (pid) => pid !== DEAD,
-      lockWaitMs: 1_000,
-    });
-    expect(ran).toBe('ran');
-    expect(trashLocks()).toHaveLength(1);
-  });
-
-  it('takes over a live owner whose startedAt is 11 minutes old', async () => {
-    lockAt(process.pid, new Date(Date.now() - 11 * 60_000));
-    await expect(
-      withRuntimeLock(root, async () => 'ran', { isAlive: () => true, lockWaitMs: 1_000 }),
-    ).resolves.toBe('ran');
-  });
-
-  it('waits, then times out, on a live owner under 10 minutes', async () => {
-    lockAt(process.pid, new Date(Date.now() - 9 * 60_000));
-    const started = Date.now();
-    const err = await withRuntimeLock(root, async () => 'ran', {
-      isAlive: () => true,
-      lockWaitMs: 200,
-    }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(LockTimeoutError);
-    expect((err as Error).message).toContain(join(root, '.lock'));
-    expect(Date.now() - started).toBeGreaterThanOrEqual(200);
-    expect(existsSync(join(root, '.lock', 'owner.json'))).toBe(true);
-  });
-
-  it('takes over an ownerless lock only once it is older than 10 s', async () => {
-    mkdirSync(join(root, '.lock'), { recursive: true });
-    await expect(
-      withRuntimeLock(root, async () => 'ran', { lockWaitMs: 100 }),
-    ).rejects.toBeInstanceOf(LockTimeoutError);
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(join(root, '.lock'), old, old);
-    await expect(withRuntimeLock(root, async () => 'ran', { lockWaitMs: 100 })).resolves.toBe(
-      'ran',
-    );
-  });
-
-  /**
-   * Both waiters judge the SAME dead holder's lock stale: the second arrives
-   * inside the first's judgement, before the first moves anything, takes the
-   * lock over and is running its body when the first gets to its takeover.
-   * The first must find a different lock there and wait, not move the live one.
-   */
-  it('lets exactly one of two waiters take over a stale lock, and never overlaps the bodies', async () => {
-    lockAt(DEAD, new Date());
-    let inside = 0;
-    let overlapped = false;
-    const body = async () => {
-      inside += 1;
-      if (inside > 1) overlapped = true;
-      await new Promise((done) => setTimeout(done, 80));
-      inside -= 1;
-    };
-    const alive = (pid: number) => pid !== DEAD;
-    let second: Promise<void> | undefined;
-    const first = withRuntimeLock(root, body, {
-      lockWaitMs: 5_000,
-      isAlive: (pid) => {
-        second ??= withRuntimeLock(root, body, { isAlive: alive, lockWaitMs: 5_000 });
-        return alive(pid);
-      },
-    });
-    await Promise.all([first, second]);
-    expect(second).toBeDefined();
-    expect(overlapped).toBe(false);
-    expect(trashLocks()).toHaveLength(1);
-  });
-
-  it('releases on a throw, and tolerates its directory going with the root', async () => {
-    await expect(
-      withRuntimeLock(root, async () => {
-        throw new Error('boom');
-      }),
-    ).rejects.toThrow('boom');
-    expect(existsSync(join(root, '.lock'))).toBe(false);
-    await withRuntimeLock(root, async () => rmSync(root, { recursive: true, force: true }));
-    expect(existsSync(root)).toBe(false);
   });
 });
 
