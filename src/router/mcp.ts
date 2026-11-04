@@ -32,6 +32,7 @@ import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { createRouterObserver, type RouterObserver } from './router-observer';
 import {
   chainReader,
+  DETACHED_CEILING_MS,
   RoutingPayer,
   TOP_UP_TIMEOUT_MS,
   type RoutingPayerDeps,
@@ -610,16 +611,17 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
 /**
  * A SESSION THAT ENDS MID-DEPOSIT STILL RECORDS IT. The process waits for a
  * top-up in flight, or a payment still finishing, before it exits: at most
- * the top-up's own budget, the 15 s a detached payment already gets. A
- * deposit cut off here would settle with the SDK's channel file never told,
- * and the next session would sign a second one; it would also go unsaid.
+ * the top-up's own budget plus the ceiling of the detached payment it can
+ * leave behind. A deposit cut off here would settle with the SDK's channel
+ * file never told, and the next session would sign a second one; it would
+ * also go unsaid.
  */
 async function drained(payer: RoutingPayer): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     payer.idle(),
     new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, TOP_UP_TIMEOUT_MS);
+      timer = setTimeout(resolve, TOP_UP_TIMEOUT_MS + DETACHED_CEILING_MS);
     }),
   ]);
   clearTimeout(timer);
