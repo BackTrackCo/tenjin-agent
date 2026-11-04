@@ -17,7 +17,8 @@ import { payRequest as runPay } from './pay-request';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { readSpec, storeChoices, storeSpecs } from './specs';
+import { readSpec, SPEC_TTL_MS, storeChoices, storeSpecs } from './specs';
+import { claimIgnored, noteShown } from './untaken';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTE_PAID_PATH,
@@ -207,6 +208,20 @@ describe('the request tool, one decision and one payment per lookup', () => {
     expect(calls[0]!.method).toBe('POST');
     expect(calls[0]!.url).toBe(`${ROUTER}${ROUTE_PAID_PATH}`);
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
+  });
+
+  /** "Help improve routing" rides the tool form as it rides the hook's. */
+  it('says improve on the query only while router.improve is on', async () => {
+    for (const improve of [true, false]) {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000', router: { improve } }),
+      );
+      const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+      await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+      const body = JSON.parse(calls[0]!.body ?? '{}') as Record<string, unknown>;
+      expect(body.improve).toBe(improve ? true : undefined);
+    }
   });
 
   it('works the same with no id at all', async () => {
@@ -1608,6 +1623,15 @@ describe('an offer with a request spec', () => {
     expect(result.summary).toContain('symbol (string, required); Comma-separated symbols');
     expect(result.summary).toContain('Returns: JSON quotes keyed by symbol');
     expect(calls).toEqual([]);
+  });
+
+  /** A call naming the offer's id took it: it is never reported as ignored. */
+  it('takes the offer it names, so it never expires as ignored', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const now = Date.now();
+    await noteShown(dir, { id: SPEC_ID, ids: [SPEC_ID], harness: 'claude' }, now);
+    await runRequestTool({ id: SPEC_ID }, deps(net([]).fetchImpl));
+    expect(await claimIgnored(dir, { now: now + SPEC_TTL_MS + 1 })).toEqual([]);
   });
 
   it('builds the request from the input, pays the provider, and reports how it ended', async () => {

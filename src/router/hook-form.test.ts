@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,6 +80,8 @@ describe('runHookKind and wallet news', () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'hook-news-'));
     await mkdir(join(dir, '.git'));
+    // Asked Help improve routing already, so a leg's answer is its news alone.
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { improveAsked: true } }));
   });
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });

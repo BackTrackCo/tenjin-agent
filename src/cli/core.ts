@@ -216,7 +216,8 @@ Examples:
   const config = leaf(SETUP, 'config', 'read and set config values').description(
     'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default). ' +
       'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
-      'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends.',
+      'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends. ' +
+      'router.improve is "Help improve routing", off by default: true lets Tenjin keep the secret-masked text of the turns the router sees, to grade its offers, and false turns it off and deletes what was kept.',
   );
   config.addHelpText(
     'after',
@@ -226,6 +227,7 @@ Examples:
   $ tenjin config set router.context turn
   $ tenjin config set maxAutoSpend 0.25
   $ tenjin config set --project router.enabled false
+  $ tenjin config set router.improve false
 `,
   );
   config.action(async function (this: Command) {

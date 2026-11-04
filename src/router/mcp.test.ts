@@ -65,9 +65,14 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-mcp-'));
   // Its own git root: `router.*` resolves from here, never from the suite's cwd.
   await mkdir(join(dir, '.git'));
+  // Asked Help improve routing already, so a prompt carries only its own answer.
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ maxAutoSpend: '100000', baseUrl: 'https://tenjin.sh' }),
+    JSON.stringify({
+      maxAutoSpend: '100000',
+      baseUrl: 'https://tenjin.sh',
+      install: { improveAsked: true },
+    }),
   );
 });
 afterEach(async () => {

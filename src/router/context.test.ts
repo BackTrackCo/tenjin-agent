@@ -7,7 +7,9 @@ import {
   buildNativePacket,
   buildPromptPacket,
   literalUrlsIn,
+  MAX_MESSAGE_CHARS,
   seal,
+  splitPasted,
   type Packet,
 } from './context';
 
@@ -375,6 +377,10 @@ describe('what a packet gives up to fit', () => {
     expect(fitted.literalUrls.length).toBeLessThan(urls.length);
     expect(fitted.current.text).toBe('read that page for me');
     expect(fitted.pendingCall).toEqual(packet.pendingCall);
+    // `ownUrls` names only what is still in `literalUrls`.
+    const own = fit({ ...packet, ownUrls: urls });
+    expect(own.ownUrls).toEqual(own.literalUrls);
+    expect(Buffer.byteLength(JSON.stringify(own))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
   });
 
   it('gives up history before URLs, and URLs before the task', async () => {
@@ -389,6 +395,158 @@ describe('what a packet gives up to fit', () => {
     expect(fitted.history).toHaveLength(0);
     expect(fitted.literalUrls).toHaveLength(1);
     expect(fitted.current.text).toHaveLength(200);
+  });
+});
+
+/**
+ * A PASTE THE HARNESS MARKED GOES TO `quoted`, and the text keeps the user's
+ * own words. Only the Codex desktop app marks one: it saves a long paste as a
+ * file and writes its sections around the request. Nothing else is moved,
+ * and nothing is moved from what text merely looks like.
+ */
+describe('pasted text', () => {
+  const PATH = '/Users/dev/.codex/attachments/3b1c2d3e-0000-4000-8000-000000000000/Pasted text.txt';
+  const ERROR = 'Error: connect ECONNREFUSED 127.0.0.1:5432 at TCPConnectWrap.afterConnect…';
+  const pasted = (request: string, before = '') =>
+    `${before}\n# Files pasted by the user:\n\n## "${ERROR}": ${PATH}\n\n## My request:\n${request}\n\n`;
+
+  it("moves the Codex desktop app's pasted files out of the prompt, leaving the request", async () => {
+    const packet = await sent(undefined, 's', pasted('why does this fail?'), 'codex');
+    expect(packet.current).toEqual({ role: 'user', text: 'why does this fail?', quoted: [ERROR] });
+    expect(JSON.stringify(packet)).not.toContain(PATH);
+  });
+
+  it("keeps the app's other sections, and moves only the pasted one", () => {
+    const browser = '# In app browser:\n- Current page: https://example.test/a';
+    expect(splitPasted(pasted('fix it', browser).trim(), 'codex')).toEqual({
+      text: `${browser}\n\n## My request:\nfix it`,
+      quoted: [ERROR],
+    });
+  });
+
+  it.each([
+    ["the Codex app's sections in a Claude Code prompt", pasted('why does this fail?'), 'claude'],
+    ['a request with no words of its own', pasted(''), 'codex'],
+    ['no request section', `# Files pasted by the user:\n\n## "${ERROR}": ${PATH}`, 'codex'],
+    [
+      'a line the app does not write there',
+      pasted('why?').replace('## My request:', 'something else\n## My request:'),
+      'codex',
+    ],
+    ['text that only looks pasted', 'why?\n\n```\nError: connect ECONNREFUSED\n```', 'codex'],
+  ] as const)('leaves %s unchanged', (_label, text, harness) => {
+    expect(splitPasted(text, harness)).toBeNull();
+  });
+
+  it("reads a native call's turn from the Codex rollout the same way", async () => {
+    const session = 'aaaaaaaa-0000-7000-8000-000000000000';
+    const path = await transcript([
+      {
+        type: 'session_meta',
+        payload: { id: session, session_id: session, thread_source: 'user' },
+      },
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          thread_id: session,
+          item: {
+            type: 'UserMessage',
+            id: 'u1',
+            content: [{ type: 'text', text: pasted('why does this fail?'), text_elements: [] }],
+          },
+        },
+      },
+    ]);
+    const packet = await buildNativePacket(
+      path,
+      session,
+      { tool: 'WebSearch', query: 'x' },
+      {
+        harness: 'codex',
+      },
+    );
+    expect(packet.current).toEqual({ role: 'user', text: 'why does this fail?', quoted: [ERROR] });
+  });
+
+  it('masks and bounds each block, keeps eight, and gives blocks up before the task', () => {
+    const big = 'q'.repeat(MAX_MESSAGE_CHARS + 50);
+    const sealed = seal({
+      current: { role: 'user', text: 'why?', quoted: Array.from({ length: 10 }, () => big) },
+      history: [],
+      literalUrls: [],
+      historyStatus: 'ok',
+    }).packet;
+    expect(sealed.current.text).toBe('why?');
+    expect(sealed.current.quoted!.length).toBeLessThanOrEqual(8);
+    expect(sealed.current.quoted!.every((b) => b.length <= MAX_MESSAGE_CHARS)).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(sealed))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
+  });
+});
+
+/**
+ * CLAUDE CODE WRAPS A PASTE IN TAGS whose closing tag repeats the opening
+ * one's id. Every prompt here is synthetic.
+ */
+describe('pasted text in Claude Code', () => {
+  const ERROR = 'Error: connect ECONNREFUSED 127.0.0.1:5432\n    at TCPConnectWrap.afterConnect';
+  const tag = (id: string, body: string) =>
+    `\n\n<pasted_content id="${id}">\n${body}\n</pasted_content id="${id}">\n`;
+
+  it('moves each tagged block to quoted, in order, and keeps the words around them', async () => {
+    const prompt = `why does this fail?${tag('a1f3', ERROR)}and this one${tag('09be', 'second paste')}fix both`;
+    const packet = await sent(undefined, 's', prompt, 'claude');
+    expect(packet.current).toEqual({
+      role: 'user',
+      text: 'why does this fail?\nand this one\nfix both',
+      quoted: [ERROR, 'second paste'],
+    });
+  });
+
+  it('keeps tag text escaped inside a paste as part of that paste', () => {
+    const body = 'a log that quotes <\\pasted_content id="ffff"> itself';
+    expect(splitPasted(`look${tag('c0de', body)}`, 'claude')).toEqual({
+      text: 'look',
+      quoted: [body],
+    });
+  });
+
+  it.each([
+    ['an unclosed block', `look\n\n<pasted_content id="a1f3">\n${ERROR}`],
+    [
+      'a closing tag with another id',
+      `look\n\n<pasted_content id="a1f3">\n${ERROR}\n</pasted_content id="b2e4">\n`,
+    ],
+    ['an id that is not four hex digits', `look${tag('zz99', ERROR)}`],
+    ['a closing tag alone', `look\n</pasted_content id="a1f3">\n`],
+    [
+      'the tag text in the words beside a paste',
+      `what is <pasted_content id="1234">?${tag('a1f3', ERROR)}`,
+    ],
+    ['nothing but a paste', tag('a1f3', ERROR)],
+    [
+      'more blocks than the server takes',
+      `look${Array.from({ length: 9 }, (_, i) => tag(`000${i}`, `paste ${i}`)).join('and')}`,
+    ],
+  ])('leaves %s unchanged', async (_label, prompt) => {
+    const packet = await buildPromptPacket(undefined, 's', prompt, 'claude');
+    expect(packet.current).toEqual({ role: 'user', text: prompt.trim() });
+  });
+
+  it("splits a native call's turn from the transcript, and leaves history and a task as they are", async () => {
+    const earlier = `earlier${tag('beef', 'old paste')}`;
+    const path = await transcript([
+      user(earlier),
+      assistant('ok'),
+      user(`now this${tag('a1f3', ERROR)}`),
+    ]);
+    const packet = await buildNativePacket(path, 's', { tool: 'WebSearch', query: 'x' });
+    expect(packet.current).toEqual({ role: 'user', text: 'now this', quoted: [ERROR] });
+    expect(packet.history[0]).toEqual({ role: 'user', text: earlier });
+    const task = await buildPromptPacket(undefined, 's', `do this${tag('a1f3', ERROR)}`, 'claude', {
+      delegated: true,
+    });
+    expect(task.current.quoted).toBeUndefined();
   });
 });
 
@@ -421,7 +579,7 @@ describe('seal, the one way a packet leaves', () => {
 
   function planted(text: string, pendingCall: Packet['pendingCall']): Packet {
     return {
-      current: { role: 'user', text },
+      current: { role: 'user', text, quoted: [text] },
       history: [
         { role: 'user', text },
         { role: 'assistant', text },

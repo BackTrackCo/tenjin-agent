@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import type { RuntimeSetup } from '../lib/runtime';
@@ -98,15 +98,21 @@ afterEach(async () => {
  */
 function router(answer: unknown) {
   const bodies: Record<string, unknown>[] = [];
+  /** Outcome reports (an ignored offer's), apart from the decisions. */
+  const reports: Record<string, unknown>[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     if (body.jsonrpc !== undefined) {
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0xf4240' }));
     }
+    if (body.status !== undefined) {
+      reports.push(body);
+      return new Response(null, { status: 204 });
+    }
     bodies.push(body);
     return new Response(JSON.stringify(answer));
   }) as typeof fetch;
-  return { bodies, fetchImpl };
+  return { bodies, reports, fetchImpl };
 }
 
 const codexDeps = (fetchImpl: typeof fetch) => ({
@@ -455,7 +461,7 @@ describe('Codex routing through the router', () => {
   };
 
   it('denies a batch once, naming the rest as exact JSON, and lets the re-run through', async () => {
-    const { bodies, fetchImpl } = router(paidOffer);
+    const { bodies, reports, fetchImpl } = router(paidOffer);
     const event = { ...native, tool_input: batch, cwd: dir, transcript_path: transcript };
     const out = await runNativeHook(event, codexDeps(fetchImpl));
     expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
@@ -480,6 +486,15 @@ describe('Codex routing through the router', () => {
       expect(again.response).toBeNull();
     }
     expect(bodies.length).toBe(routerCalls);
+    // Running the rest natively, with the offer untaken, ignored it: said once.
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    expect(reports[0]).toEqual({
+      schemaVersion: 1,
+      id: at(paidOffer, 'decision', 'id'),
+      harness: 'codex',
+      status: 'ignored',
+      reason: 'native_after_offer',
+    });
   });
 
   it('routes a lone URL open as WebFetch, and runs a batch untouched on a free or no offer', async () => {
@@ -566,6 +581,8 @@ function host(config: unknown = {}, rt: Partial<RuntimeSetup> = {}) {
   const steps: string[] = [];
   const deps: CodexSetupDeps = {
     homeDir: join(dir, 'home'),
+    // No harness: the suite may itself run inside one.
+    env: {},
     runtime: async () => ({
       state: 'skipped',
       root: join(dir, 'runtime'),
@@ -651,6 +668,24 @@ describe('Codex install, uninstall and doctor', () => {
     const { deps } = host();
     const out = await runCodexInstall({}, ctx(), deps);
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+  });
+
+  /** The Claude install's Help improve routing question, once per machine. */
+  it('hands an agent in Codex the Help improve routing question once, after the spend answer', async () => {
+    await writeFile(join(dir, 'config.json'), '{}');
+    const { deps } = host();
+    const env = { CODEX_SESSION_ID: 'thread-1' };
+    const steps = async (args: Parameters<typeof runCodexInstall>[0]) =>
+      (
+        (await runCodexInstall(args, ctx(), { ...deps, env })).data as {
+          nextSteps: { id: string; options: { command: string | null }[] }[];
+        }
+      ).nextSteps;
+    expect((await steps({})).map((q) => q.id)).toEqual(['spend']);
+    const answered = await steps({ yes: true });
+    expect(answered.map((q) => q.id)).toEqual(['improve']);
+    expect(answered[0]!.options[0]!.command).toBe('tenjin config set router.improve true');
+    expect(await steps({ yes: true })).toEqual([]);
   });
 
   it('writes the limits the two flags name, and asks nothing', async () => {
