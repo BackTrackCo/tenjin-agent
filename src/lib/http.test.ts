@@ -403,6 +403,7 @@ describe('httpRequest, signed requests never follow redirects', () => {
     [SIWX_HEADER, 'siwx-value'],
     ['payment-signature', 'pay-value'],
     ['x-payment', 'pay-value'],
+    ['tenjin-session-delegation', 'delegation-value'],
   ];
 
   for (const [header, value] of CREDENTIALS) {
