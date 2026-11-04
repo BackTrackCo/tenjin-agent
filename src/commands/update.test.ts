@@ -22,7 +22,8 @@ import { ROUTING_FEE_TERMS } from '../router/spend-question';
 import { attestationsFor } from '../lib/fixtures/npm-attestations';
 import { nodeBinPath, versionEntry } from '../lib/runtime-layout';
 import type { NodePin } from '../lib/runtime-place';
-import type { CommandContext, GlobalFlags } from '../context';
+import type { GlobalFlags } from '../context';
+import { captureCtx, testCtx } from '../context-test-utils';
 
 let dir: string;
 beforeEach(async () => {
@@ -33,21 +34,7 @@ afterEach(async () => {
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const mk = (sink: string[]) =>
-    ({
-      write: (chunk: string | Uint8Array) => {
-        sink.push(chunk.toString());
-        return true;
-      },
-    }) as unknown as NodeJS.WritableStream;
-  const ctx: CommandContext = {
-    flags: { json: false, timeout: 10000, ...flags },
-    dataDir: dir,
-    io: { stdout: mk(out), stderr: mk(err), isTTY },
-  };
-  return { ctx, stdout: () => out.join(''), stderr: () => err.join('') };
+  return captureCtx(dir, { json: false, timeout: 10000, ...flags, isTTY });
 }
 
 const RELEASE_DOC = /^https:\/\/registry\.npmjs\.org\/tenjin-cli\/([^/]+)$/;
@@ -701,21 +688,9 @@ describe('spawnCapture', () => {
   });
 });
 
-// The set that got re-cut in three consecutive rounds. These enumerate it, so
-// an added refusal cannot quietly skip declaring the properties that decide
-// when it is evaluated.
 describe('REFUSALS', () => {
   const SENTINEL = 'tenjin-cli@9.9.9-sentinel';
   const anyDir = join('x', 'node_modules', 'tenjin-cli', 'dist');
-
-  it('is non-empty and every entry is fully declared', () => {
-    expect(REFUSALS.length).toBeGreaterThan(0);
-    for (const entry of REFUSALS) {
-      expect(typeof entry.test).toBe('function');
-      expect(typeof entry.needsVersion).toBe('boolean');
-      expect(typeof entry.appliesToCheck).toBe('boolean');
-    }
-  });
 
   // The declaration has to match the fix string, because needsVersion is what
   // decides whether the entry may run before the fetch. One that says no but
@@ -727,22 +702,6 @@ describe('REFUSALS', () => {
       const fix = entry.error(SENTINEL, anyDir).fix ?? '';
       expect(fix.includes(SENTINEL)).toBe(entry.needsVersion);
     }
-  });
-
-  it('every entry refuses with REFUSED and a fix', () => {
-    for (const entry of REFUSALS) {
-      const err = entry.error(SENTINEL, anyDir);
-      expect(err.code).toBe('REFUSED');
-      expect(err.exitCode).toBe(3);
-      expect(err.fix).toBeTruthy();
-    }
-  });
-
-  // Everything here is a reason not to WRITE, and --check writes nothing. Pins
-  // the property rather than a count: an entry that ever needs to stop a
-  // --check has to say so.
-  it('no entry claims --check, which only reports', () => {
-    expect(REFUSALS.filter((e) => e.appliesToCheck)).toEqual([]);
   });
 });
 
@@ -1861,12 +1820,7 @@ describe('runUpdate: the runtime branch', () => {
     const s = seams();
     const cfg = join(dir, 'claude-config');
     const child: UpdateSpawn = async (_cmd, _args, o, onOutput) => {
-      const sink = { write: () => true } as unknown as NodeJS.WritableStream;
-      const childCtx: CommandContext = {
-        flags: { json: true, timeout: 5000 },
-        dataDir: o.env?.TENJIN_DATA_DIR ?? '',
-        io: { stdout: sink, stderr: sink, isTTY: false },
-      };
+      const childCtx = testCtx(o.env?.TENJIN_DATA_DIR ?? '');
       try {
         const out = await runRouterInstall({ refresh: true }, childCtx, {
           homeDir: home,

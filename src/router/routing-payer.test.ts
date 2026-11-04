@@ -7,11 +7,13 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliError } from '../lib/errors';
+import { testSigner } from '../lib/payment-test-utils';
 import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { decodePaymentRequiredHeader, encodePaymentRequiredHeader } from '@x402/core/http';
 import { requestDecision, RouteSkipped } from './decision';
 import {
@@ -23,7 +25,7 @@ import {
   ROUTING_FEE_CEILING_ATOMIC,
   unpaidSentence,
 } from './fee';
-import { BASE, FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
+import { BASE, FakeRouter, payerDeps, TEST_POLICY } from './fee-test-utils';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { WALLET_REASONS } from './wallet-reasons';
 import {
@@ -109,15 +111,7 @@ function payer(router: FakeRouter, opts: PayerOpts = {}): RoutingPayer {
   );
 }
 
-const ctx = (): CommandContext => ({
-  flags: { json: true, timeout: 5_000 },
-  dataDir: dir,
-  io: {
-    stdout: { write: () => true } as unknown as NodeJS.WritableStream,
-    stderr: { write: () => true } as unknown as NodeJS.WritableStream,
-    isTTY: false,
-  },
-});
+const ctx = (): CommandContext => testCtx(dir);
 
 /** One routing call the way the hook and the tool make it. */
 async function routeOnce(p: RoutingPayer, router: FakeRouter) {

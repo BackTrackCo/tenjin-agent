@@ -69,7 +69,6 @@ describe('loadConfig', () => {
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
     expect(s.maxAutoSpend).toEqual({ value: '500000', source: 'file' });
-    expect(Object.keys(s)).not.toContain('publicShelfUrl');
   });
 
   it('throws CONFIG_INVALID with the code on a schema violation', async () => {

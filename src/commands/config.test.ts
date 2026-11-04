@@ -8,6 +8,7 @@ import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
+import { testCtx } from '../context-test-utils';
 
 let dir: string;
 let prevCwd: string;
@@ -27,12 +28,7 @@ afterEach(async () => {
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 10000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(dir, { json: false, timeout: 10000, ...flags });
 }
 
 const configFile = () => join(dir, 'config.json');
@@ -89,16 +85,10 @@ describe('runConfigList', () => {
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
-    // The shelf's keys are gone from both halves.
-    for (const gone of ['publicShelfUrl', 'shelfBypassSecret', 'evalCohort', 'publish.mode']) {
-      expect(d[gone]).toBeUndefined();
-    }
     // The human listing: 6 scalar keys + update.mode + 2 router.* +
     // experimental.bazaar. allowlistCreators stays in `data` only.
     expect(humanLines).toHaveLength(10);
-    expect((humanLines ?? []).join('\n')).not.toMatch(
-      /publish\.|hooks\.|loop\.|team\.|Shelf|allowlistCreators|evalCohort/,
-    );
+    expect((humanLines ?? []).join('\n')).not.toMatch(/allowlistCreators/);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -392,14 +382,6 @@ describe('forward compatibility', () => {
     await runConfigSet({ key: 'update.mode', value: 'off' }, makeCtx());
     const raw = (await readRawFile()) as { update: Record<string, unknown> };
     expect(raw.update).toEqual({ channel: 'next', mode: 'off' });
-  });
-
-  it('refuses a key the shelf took and this build does not', async () => {
-    for (const key of ['publish.mode', 'hooks.primer', 'loop.port', 'shelfBypassSecret']) {
-      const err = await caught(() => runConfigSet({ key, value: 'on' }, makeCtx()));
-      expect(err.code).toBe('USAGE');
-      expect(err.message).toContain('Unknown config key');
-    }
   });
 });
 

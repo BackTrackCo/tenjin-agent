@@ -10,7 +10,7 @@ import {
 import { SIWX_HEADER } from './siwx';
 import { CliError, exitCodeFor } from './errors';
 import { CALLER_USER_AGENT_ENV, TENJIN_PRODUCT, TENJIN_USER_AGENT } from './client-meta';
-import type { FetchJsonFailure, HttpRequestOptions } from './http';
+import type { FetchJsonFailure } from './http';
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { status: 200, ...init });
@@ -395,74 +395,47 @@ describe('httpRequest, signed requests never follow redirects', () => {
     expect(res).toMatchObject({ ok: true, status: 200 });
   });
 
-  /**
-   * Everything above is read-path shaped: GETs plus one POST, all proving the guard
-   * on the route this PR touches. tenjin-agent#46 (`tenjin edit`) adds the first
-   * wallet-signed PUT — `PUT /api/posts/<id>` — and widens this module's `method`
-   * union to admit it, so the guard is about to carry a class of traffic no case
-   * here covers.
-   *
-   * It already holds for that traffic: `pinned` is derived from the headers alone
-   * and is consulted before the status is read, so every verb inherits the refusal
-   * for free. "For free" is precisely the kind of property a later refactor drops
-   * without noticing, and a signed mutation is the worst place to find out — where
-   * a replayed read signature leaks one purchase, a replayed PUT signature edits
-   * the author's post on a host of the attacker's choosing. So the method axis gets
-   * pinned explicitly rather than left as an implication, and neither PR has to
-   * land first for it to hold.
-   *
-   * 307/308 are the dangerous statuses for a mutation specifically: unlike 301/302
-   * they preserve the method AND the body, so a followed hop re-sends the entire
-   * signed write rather than degrading it to a GET.
-   */
-  const MUTATING_METHODS: string[] = ['POST', 'PUT', 'PATCH', 'DELETE'];
+  // The refusal reads only the headers, so one mutating method stands for every
+  // verb; 307/308 keep the method and body, so a followed hop re-sends the write.
   const CREDENTIALS: [string, string][] = [
     [SIWX_HEADER, 'siwx-value'],
     ['payment-signature', 'pay-value'],
     ['x-payment', 'pay-value'],
   ];
 
-  for (const method of MUTATING_METHODS) {
-    for (const [header, value] of CREDENTIALS) {
-      for (const status of [307, 308]) {
-        it(`refuses a ${status} on a signed ${method} carrying ${header}`, async () => {
-          const { fetchImpl, calls } = recordingFetch(() =>
-            redirect(status, 'https://evil.example/collect'),
-          );
-          const res = await httpRequest('https://tenjin.blog/api/posts/abc', {
-            // Cast because THIS branch's union is still GET|POST; #46 widens it to
-            // include PUT. The assertion is on the method literal, never on the
-            // guard, and stays valid after that lands. PATCH/DELETE are not in the
-            // union on either branch — they are here because the property under
-            // test is that the refusal is header-derived and method-independent,
-            // so a verb added later is covered the day it is added.
-            method: method as NonNullable<HttpRequestOptions['method']>,
-            timeoutMs: 1000,
-            headers: { [header]: value },
-            jsonBody: { title: 'edited' },
-            fetchImpl,
-          });
-
-          expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status });
-          expect((res as { message: string }).message).toContain('signed header');
-          // The signature left exactly once, to the configured origin, and the body
-          // went nowhere else.
-          expect(calls).toHaveLength(1);
-          expect(calls[0]?.url).toBe('https://tenjin.blog/api/posts/abc');
-          expect(calls[0]?.redirect).toBe('manual');
+  for (const [header, value] of CREDENTIALS) {
+    for (const status of [307, 308]) {
+      it(`refuses a ${status} on a signed POST carrying ${header}`, async () => {
+        const { fetchImpl, calls } = recordingFetch(() =>
+          redirect(status, 'https://evil.example/collect'),
+        );
+        const res = await httpRequest('https://tenjin.blog/api/posts/abc', {
+          method: 'POST',
+          timeoutMs: 1000,
+          headers: { [header]: value },
+          jsonBody: { title: 'edited' },
+          fetchImpl,
         });
-      }
+
+        expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status });
+        expect((res as { message: string }).message).toContain('signed header');
+        // The signature left exactly once, to the configured origin, and the body
+        // went nowhere else.
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.url).toBe('https://tenjin.blog/api/posts/abc');
+        expect(calls[0]?.redirect).toBe('manual');
+      });
     }
   }
 
-  it('still lets a signed PUT through when the origin answers without a hop', async () => {
-    // Without this, the matrix above would be satisfied by a guard that simply
-    // failed every signed mutation, which would break `edit` rather than secure it.
+  it('still lets a signed POST through when the origin answers without a hop', async () => {
+    // Without this, the refusals above would be satisfied by a guard that simply
+    // failed every signed mutation.
     const { fetchImpl, calls } = recordingFetch(
       () => new Response(JSON.stringify({ id: 'post-1' }), { status: 200 }),
     );
     const res = await httpRequest('https://tenjin.blog/api/posts/abc', {
-      method: 'PUT' as NonNullable<HttpRequestOptions['method']>,
+      method: 'POST',
       timeoutMs: 1000,
       headers: { [SIWX_HEADER]: 'siwx-value' },
       jsonBody: { title: 'edited' },

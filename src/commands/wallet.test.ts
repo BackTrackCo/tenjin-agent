@@ -8,6 +8,7 @@ import * as Keystore from 'ox/Keystore';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 import { StoreExecError, describeStoreLocation, type ExecFn } from '../lib/wallet/passphrase';
 import { passphraseFilePathFor, passphraseRecordPath } from '../lib/paths';
@@ -89,12 +90,7 @@ afterEach(async () => {
 });
 
 function makeCtx(): CommandContext {
-  const sink = { write: () => true } as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 10000 },
-    dataDir,
-    io: { stdout: sink, stderr: sink, isTTY: false },
-  };
+  return testCtx(dataDir, { timeout: 10000 });
 }
 
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {

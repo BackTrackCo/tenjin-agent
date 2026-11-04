@@ -2,11 +2,16 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import {
+  buildPaymentRequired,
+  testAuthorizer,
+  testWalletProvider,
+} from '../lib/payment-test-utils';
 import { resolveContextSettings } from '../lib/settings';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
+import type { SpendAuthorizer } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { ROUTER_PATH, type OfferSpec } from './decision';
 import type { PollTransport } from './jobs';
 import { storeSpecs } from './specs';
@@ -66,30 +71,7 @@ const policy = (config: Record<string, string>) =>
   writeFile(join(dir, 'config.json'), JSON.stringify(config));
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: ROUTER },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
-
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: 'allow',
-      reason: 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
+  return testCtx(dir, { baseUrl: ROUTER });
 }
 
 /** The seller: a 402, then the image, except the paid takes `failing` names
@@ -133,7 +115,7 @@ const noPolls: PollTransport = async (target) => {
   throw new Error(`no poll expected: ${target.url.toString()}`);
 };
 
-function deps(fetchImpl: typeof fetch, auth: SpendAuthorizer = authorizer()) {
+function deps(fetchImpl: typeof fetch, auth: SpendAuthorizer = testAuthorizer()) {
   return {
     ctx: ctx(),
     cwd: dir,
@@ -187,7 +169,7 @@ describe('several takes of one call', () => {
   });
 
   it('returns partial when one take fails, with every take keyed apart', async () => {
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller([2]);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
     expect(result.isError).toBe(false);
@@ -212,7 +194,7 @@ describe('several takes of one call', () => {
 
   it('signs nothing, and keeps no claim, when the takes together are over the budget', async () => {
     await policy({ maxAutoSpend: '250000', sessionBudget: '120000' });
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller();
     const result = await runRequestTool(
       { id: ID, input: INPUT, count: 3 },
@@ -241,7 +223,7 @@ describe('several takes of one call', () => {
    *  limit, though each one alone would fit it. */
   it('plans the takes as one call: their total against the per-call limit', async () => {
     await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller();
     const result = await runRequestTool(
       { id: ID, input: INPUT, count: 3 },
@@ -262,14 +244,14 @@ describe('several takes of one call', () => {
     const two = seller();
     const ran = await runRequestTool(
       { id: ID, input: INPUT, count: 2 },
-      deps(two.fetchImpl, authorizer()),
+      deps(two.fetchImpl, testAuthorizer()),
     );
     expect(ran.envelope).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.1 USD'] });
   });
 
   it('refuses a take over the per-call cap before anything is signed', async () => {
     await policy({ maxAutoSpend: '40000', sessionBudget: '5000000' });
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller();
     const result = await runRequestTool({ id: ID, input: INPUT, count: 2 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
@@ -291,7 +273,7 @@ describe('several takes of one call', () => {
 
   it('checks the takes at the live quote, not the ceiling, so GPT Image 2 runs three', async () => {
     await storeSpecs(dir, [GPT_IMAGE_2]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller([], 0, ['64000']);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({
@@ -306,7 +288,7 @@ describe('several takes of one call', () => {
   it('checks the session budget at the live quote too', async () => {
     await storeSpecs(dir, [GPT_IMAGE_2]);
     await policy({ maxAutoSpend: '250000', sessionBudget: '150000' });
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller([], 0, ['64000']);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 3 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({ status: 'needs_approval' });
@@ -318,7 +300,7 @@ describe('several takes of one call', () => {
 
   it("refuses the count when the live quote is over the spec's ceiling, with nothing claimed", async () => {
     await storeSpecs(dir, [GPT_IMAGE_2]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = seller([], 0, ['1500000']);
     const result = await runRequestTool({ id: ID, input: INPUT, count: 2 }, deps(fetchImpl, auth));
     expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });

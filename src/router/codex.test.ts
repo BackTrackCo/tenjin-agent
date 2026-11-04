@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
@@ -21,6 +20,7 @@ import {
   type CodexRun,
   type CodexSetupDeps,
 } from './codex-install';
+import { fixture } from './fixture-test-utils';
 import { runHookKind } from './hook-command';
 import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './codex-plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
@@ -54,10 +54,7 @@ const native = {
   tool_use_id: 'call-1',
   tool_input: { search_query: [{ q: 'example search' }] },
 };
-const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-const paidOffer = JSON.parse(
-  readFileSync(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'),
-) as { decision: { id: string } };
+const paidOffer = fixture('wire-hook-execute-spec.json') as { decision: { id: string } };
 const nativeAnswer = {
   schemaVersion: 1,
   routerVersion: 'v',
@@ -416,9 +413,7 @@ describe('Codex routing through the router', () => {
   });
 
   /** The free docs lookup before a search, from the shared fixture. */
-  const freeNote = JSON.parse(
-    readFileSync(join(fixtures, 'wire-hook-execute-note.json'), 'utf8'),
-  ) as { decision: { id: string } };
+  const freeNote = fixture('wire-hook-execute-note.json') as { decision: { id: string } };
 
   it('notes a free lookup on a web.run search, and shows it after the search ran', async () => {
     const pre = router(freeNote);

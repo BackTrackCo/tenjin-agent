@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import { buildSiwxHeader, SIWX_HEADER } from './siwx';
-import { testSigner } from './read-test-utils';
+import { testSigner } from './payment-test-utils';
 
 describe('buildSiwxHeader', () => {
   it('is the SIGN-IN-WITH-X header name', () => {

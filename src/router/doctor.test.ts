@@ -7,6 +7,7 @@ import { CliError } from '../lib/errors';
 import { createLocalProvider } from '../lib/wallet/local';
 import { REPAIR_CLAUSE, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import {
   doctorLines,
@@ -22,6 +23,7 @@ import {
 } from './doctor';
 import { canPayRouting, canSign, type SignVerdict, type Verdict } from './eligibility';
 import { checkEligibility, type Eligibility } from './eligibility-check';
+import { installSandbox, probe400 } from './install-test-utils';
 import { renderHostFiles } from './plugin-files';
 import { LAUNCHER_MARKER } from './launcher-files';
 import type { RouterCheck } from './reachability';
@@ -557,20 +559,8 @@ describe('runRouterDoctor, with its seams injected', () => {
   let work: string;
   let fake: FakeClaude;
 
-  const probe400 = (async () =>
-    new Response('{}', {
-      status: 400,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
-
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), 'router-doctor-'));
-    home = join(root, 'home');
-    data = join(root, 'data');
-    work = join(root, 'work');
-    await mkdir(join(work, '.git'), { recursive: true });
-    await mkdir(home, { recursive: true });
-    await mkdir(data, { recursive: true });
+    ({ root, home, data, work } = await installSandbox('router-doctor-'));
     fake = await fakeClaude(root);
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     vi.stubGlobal('fetch', probe400);
@@ -581,12 +571,7 @@ describe('runRouterDoctor, with its seams injected', () => {
   });
 
   function ctx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir: data,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return testCtx(data);
   }
 
   function deps(over: Partial<RouterDoctorDeps> = {}): RouterDoctorDeps {
@@ -794,18 +779,9 @@ describe('the runtime rows', () => {
   const CLI = '0.1.0-alpha.32';
   const NODE = '24.14.0';
 
-  const probe400 = (async () =>
-    new Response('{}', {
-      status: 400,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
-
   beforeEach(async () => {
-    root = await realpath(await mkdtemp(join(tmpdir(), 'router-doctor-runtime-')));
-    home = join(root, 'home');
+    ({ root, home } = await installSandbox('router-doctor-runtime-', { dataInHome: true }));
     runtime = join(home, '.tenjin', 'runtime');
-    await mkdir(join(root, 'work', '.git'), { recursive: true });
-    await mkdir(home, { recursive: true });
     fake = await fakeClaude(root);
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     vi.stubGlobal('fetch', probe400);
@@ -845,12 +821,7 @@ describe('the runtime rows', () => {
   });
 
   function ctx(dataDir = join(home, '.tenjin')): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return testCtx(dataDir);
   }
 
   async function run(over: Partial<RouterDoctorDeps> = {}, dataDir?: string) {

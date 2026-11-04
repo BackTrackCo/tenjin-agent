@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { verifyTypedData } from 'viem';
 import { buildExactPayment, TENJIN_CLI_BUILDER_CODE } from './x402-pay';
-import { buildPaymentRequired, testSigner, withBuilderCode } from './read-test-utils';
+import { buildPaymentRequired, testSigner, withBuilderCode } from './payment-test-utils';
 
 describe('buildExactPayment', () => {
   it('builds a PAYMENT-SIGNATURE header offline and reports the exact amount', async () => {

@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { testSigner } from '../lib/payment-test-utils';
 import { readSpendSummary } from '../lib/wallet/spend';
-import { FakeRouter, testSigner } from './fee-test-utils';
+import { FakeRouter } from './fee-test-utils';
+import { fixture } from './fixture-test-utils';
 import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
 import { createRouterMcpServer } from './mcp';
 import { renderProgress } from './progress';
@@ -27,7 +29,6 @@ import type { RoutingPayerDeps } from './routing-payer';
 const BASE = 'https://router.test';
 const SESSION = '01a1658a-1223-73f1-91f9-62ecb164c700';
 const HOOKS = fileURLToPath(new URL('../../hosts/codex/tenjin/hooks/hooks.json', import.meta.url));
-const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const wallet = privateKeyToAccount(generatePrivateKey());
 
 let dir: string;
@@ -186,7 +187,7 @@ async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) 
 }
 
 async function offer(): Promise<unknown> {
-  return JSON.parse(await readFile(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'));
+  return fixture('wire-hook-execute-spec.json');
 }
 
 describe('Codex automatic hooks', () => {

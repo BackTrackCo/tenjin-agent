@@ -25,8 +25,11 @@ vi.mock('../lib/wallet', async (importOriginal) => {
 });
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
+import {
+  buildPaymentRequired,
+  testAuthorizer,
+  testWalletProvider,
+} from '../lib/payment-test-utils';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { FakeRouter, payerDeps } from './fee-test-utils';
 import { runAliveHook, sessionServedByPlugin } from './alive';
@@ -71,24 +74,6 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: 'allow',
-      reason: 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
-}
-
 /** The one decision this server asks for, from a router with the fee off:
  *  no 402, nothing signed. */
 function router(body: unknown): typeof fetch {
@@ -120,7 +105,7 @@ describe('the router MCP server', () => {
       handlerDeps: {
         cwd: dir,
         signer: await testWalletProvider().getSigner(),
-        authorizer: authorizer(),
+        authorizer: testAuthorizer(),
         fetchImpl,
         payDeps: { fetchImpl },
       },
@@ -181,7 +166,7 @@ describe('the router MCP server', () => {
       const server = buildRouterMcpServer({
         dataDir: dir,
         ...(harness !== undefined ? { harness } : {}),
-        handlerDeps: { cwd: dir, authorizer: authorizer(), fetchImpl },
+        handlerDeps: { cwd: dir, authorizer: testAuthorizer(), fetchImpl },
       });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: 'test', version: '0.0.0' });
@@ -204,7 +189,7 @@ describe('the router MCP server', () => {
       handlerDeps: {
         cwd: dir,
         signer: await testWalletProvider().getSigner(),
-        authorizer: authorizer(),
+        authorizer: testAuthorizer(),
       },
     });
     // No wallet exists under this data dir, so a background unlock would throw.
@@ -272,7 +257,7 @@ describe('the approve tool', () => {
       dataDir: dir,
       handlerDeps: {
         cwd: dir,
-        authorizer: authorizer(),
+        authorizer: testAuthorizer(),
         provider: testWalletProvider(),
         fetchImpl,
         payDeps: {
@@ -970,7 +955,7 @@ describe('the base URL the MCP server routes against', () => {
         handlerDeps: {
           cwd: dir,
           signer: await testWalletProvider().getSigner(),
-          authorizer: authorizer(),
+          authorizer: testAuthorizer(),
           fetchImpl,
           payDeps: { fetchImpl },
         },
@@ -1007,7 +992,7 @@ describe('what the tool tells the model to send', () => {
       handlerDeps: {
         cwd: dir,
         signer: await testWalletProvider().getSigner(),
-        authorizer: authorizer(),
+        authorizer: testAuthorizer(),
       },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1109,7 +1094,7 @@ describe('a free answer on a machine with no wallet', () => {
     // No wallet under this data dir at all: `getSigner` throws WALLET_MISSING.
     const server = buildRouterMcpServer({
       dataDir: dir,
-      handlerDeps: { cwd: dir, authorizer: authorizer(), fetchImpl },
+      handlerDeps: { cwd: dir, authorizer: testAuthorizer(), fetchImpl },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test', version: '0.0.0' });

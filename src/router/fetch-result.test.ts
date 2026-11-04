@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
+import { fixture } from './fixture-test-utils';
 
 interface Sample {
   url: string;
@@ -9,12 +8,11 @@ interface Sample {
 }
 
 /** Real WebFetch results: what came back from a shell, and what came back fine. */
-const samples = JSON.parse(
-  readFileSync(
-    fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
-    'utf8',
-  ),
-) as { shell: Sample[]; page: Sample[]; pdf: Sample };
+const samples = fixture('harness/claude-WebFetch-results.json') as {
+  shell: Sample[];
+  page: Sample[];
+  pdf: Sample;
+};
 
 describe('readsAsEmptyPage', () => {
   /**

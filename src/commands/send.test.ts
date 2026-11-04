@@ -31,12 +31,13 @@ import {
   SendRevertedError,
   type PreparedUsdcSend,
 } from '../lib/usdc';
-import { testWalletProvider } from '../lib/read-test-utils';
+import { testWalletProvider } from '../lib/payment-test-utils';
 import { createLocalProvider } from '../lib/wallet/local';
 import { writeWalletRecord } from '../lib/wallet/store';
 import { fakeRecord } from '../lib/wallet/test-support';
 import type { WalletProvider } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { testCtx } from '../context-test-utils';
 
 const balanceMock = vi.mocked(getUsdcBalance);
 const prepareMock = vi.mocked(prepareUsdcSend);
@@ -79,12 +80,7 @@ afterEach(async () => {
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY },
-  };
+  return testCtx(dir, { json: false, ...flags, isTTY });
 }
 
 /** A wallet provider whose getSigner is spied, so "no signature" is provable. */

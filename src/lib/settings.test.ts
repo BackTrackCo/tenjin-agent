@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { resolveContextSettings } from './settings';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 
 let dataDir: string;
 let prevBaseUrl: string | undefined;
@@ -20,12 +21,11 @@ afterEach(async () => {
 });
 
 function ctx(baseUrl?: string): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 10000, ...(baseUrl !== undefined ? { baseUrl } : {}) },
-    dataDir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(dataDir, {
+    json: false,
+    timeout: 10000,
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
+  });
 }
 
 describe('resolveContextSettings', () => {

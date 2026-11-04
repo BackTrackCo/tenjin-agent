@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NATIVE } from './fee-test-utils';
 import { runHookKind } from './hook-command';
 import { handlersIn } from './hook-form';
 import { commandForm, shellDependence } from './hook-form-test-utils';
@@ -75,14 +76,6 @@ describe('handlersIn', () => {
  * the response carrying it is built.
  */
 describe('runHookKind and wallet news', () => {
-  const NATIVE = {
-    schemaVersion: 1,
-    routerVersion: 'v',
-    decision: {
-      action: 'native',
-      diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
-    },
-  };
   let dir: string;
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'hook-news-'));

@@ -1,15 +1,18 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import {
+  buildPaymentRequired,
+  testAuthorizer,
+  testWalletProvider,
+} from '../lib/payment-test-utils';
 import { CliError } from '../lib/errors';
 import { resolveSpendAuthorizer } from '../lib/wallet';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
+import { fixture } from './fixture-test-utils';
 import { payRequest as runPay } from './pay-request';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
@@ -60,30 +63,7 @@ const ROUTER = 'https://tenjin.sh';
 const PROVIDER = 'https://pro-api.example.test/x402/v3/quotes';
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: ROUTER },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
-
-function authorizer(decision: SpendAuthorization['decision'] = 'allow'): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision,
-      reason: decision === 'allow' ? 'within_policy' : 'confirm_always',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
+  return testCtx(dir, { baseUrl: ROUTER });
 }
 
 function contract(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -115,6 +95,7 @@ function decision(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/** Native with no next action, so the tool supplies its own next step. */
 const NATIVE = {
   schemaVersion: 1,
   routerVersion: 'v',
@@ -179,7 +160,7 @@ const noMediaNetwork: MediaTransport = async (target) => {
   throw new Error(`no network in tests: ${target.url.toString()}`);
 };
 
-function deps(fetchImpl: typeof fetch, auth = authorizer()) {
+function deps(fetchImpl: typeof fetch, auth = testAuthorizer()) {
   return {
     ctx: ctx(),
     cwd: dir,
@@ -257,7 +238,7 @@ describe('the request tool, one decision and one payment per lookup', () => {
   });
 
   it('sends nothing, and pays nothing, for a query carrying a credential', async () => {
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: decision() }]);
     const result = await runRequestTool(
       { query: 'https://api.acme.io/v1/items?api-key=Zx81QpLm0aTe', id: 'k3f9-abcd' },
@@ -656,7 +637,7 @@ describe('what the tool refuses to execute', () => {
   });
 
   it('refuses a live 402 above the advertised price before anything is signed', async () => {
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: decision() },
       {
@@ -915,7 +896,7 @@ describe('the request tool in a directory where the router is off', () => {
       { url: ROUTER, status: 200, body: decision() },
       ...providerLegs(),
     ]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const result = await runRequestTool(
       { query: 'BTC and ETH price', id: 'k3f9-abcd' },
       { ...deps(fetchImpl, auth), cwd: repo },
@@ -936,9 +917,6 @@ describe('the request tool in a directory where the router is off', () => {
  * as an ordinary execute and pays through the same path and caps as any other.
  */
 describe('a discovered service', () => {
-  const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-  const wire = async (name: string): Promise<Record<string, unknown>> =>
-    JSON.parse(await readFile(join(fixtures, name), 'utf8')) as Record<string, unknown>;
   const SELLER = 'https://blockrun.ai/api/v1/audio/sound-effects';
   const SOUND_ID = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02';
   /** The spec the hook kept for the sound-effect offer: the only way a list
@@ -974,8 +952,8 @@ describe('a discovered service', () => {
     ]);
 
   it("shows an open-Bazaar answer's spec under its id, keeps it, and pays nothing", async () => {
-    const auth = authorizer();
-    const answer = await wire('wire-lookup-discovered.json');
+    const auth = testAuthorizer();
+    const answer = fixture('wire-lookup-discovered.json');
     const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool(
       { query: 'generate a short whoosh sound effect' },
@@ -990,8 +968,8 @@ describe('a discovered service', () => {
   /** An answer with no specs, as a router before specs sent: the server's
    *  line and the seller's listing, and nothing kept to run. */
   it('hands the host the server line and the listing, and pays nothing', async () => {
-    const auth = authorizer();
-    const wired = await wire('wire-lookup-discovered.json');
+    const auth = testAuthorizer();
+    const wired = fixture('wire-lookup-discovered.json');
     const bare = { ...(wired.decision as Record<string, unknown>) };
     delete bare.specs;
     const answer = { ...wired, decision: bare };
@@ -1019,7 +997,7 @@ describe('a discovered service', () => {
 
   it("runs a kept list service's spec, paying the seller under its price", async () => {
     await kept();
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([
       { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: SELLER, status: 200, body: { ok: true } },
@@ -1040,7 +1018,7 @@ describe('a discovered service', () => {
   });
 
   it('answers an input whose spec is no longer kept with a fresh query, sending nothing', async () => {
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
       { id: SOUND_ID, input: { text: 'whoosh' } },
@@ -1056,7 +1034,7 @@ describe('a discovered service', () => {
 
   it('refuses a live 402 above the listed price before anything is signed', async () => {
     await kept();
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([
       {
         url: SELLER,
@@ -1450,7 +1428,7 @@ describe('a discovered service', () => {
    *  offer as a `catalog` client gets it, still has its files saved: its spec
    *  says `media` where the `discovered:` id used to. */
   it('saves the linked files of a list service kept under its catalog id', async () => {
-    const { decision } = (await wire('wire-hook-discovered-catalog.json')) as {
+    const { decision } = fixture('wire-hook-discovered-catalog.json') as {
       decision: { id: string; specs: OfferSpec[] };
     };
     const spec = decision.specs[0]!;
@@ -1673,13 +1651,8 @@ describe('an offer with a request spec', () => {
       status: 'fulfilled',
       httpStatus: 200,
     });
-    const fixture = JSON.parse(
-      await readFile(
-        fileURLToPath(new URL('./fixtures/wire-outcome-request.json', import.meta.url)),
-        'utf8',
-      ),
-    ) as Record<string, unknown>;
-    expect(Object.keys(report).sort()).toEqual([...Object.keys(fixture), 'harness'].sort());
+    const pinned = fixture('wire-outcome-request.json');
+    expect(Object.keys(report).sort()).toEqual([...Object.keys(pinned), 'harness'].sort());
   });
 
   it('refuses an input that misses the spec, naming every problem, and reports it unpaid', async () => {
@@ -1720,7 +1693,7 @@ describe('an offer with a request spec', () => {
     const open = quoteSpec();
     delete open.input.additionalProperties;
     await storeSpecs(dir, [open]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
       { id: SPEC_ID, input: { symbol: 'BTC', limit: 3 } },
@@ -1745,7 +1718,7 @@ describe('an offer with a request spec', () => {
         input: { type: 'object', properties: { symbol: { type: 'text' } }, required: ['symbol'] },
       }),
     ]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: {} }]);
     const result = await runRequestTool(
       { id: SPEC_ID, input: { symbol: 'BTC' } },
@@ -1788,7 +1761,7 @@ describe('an offer with a request spec', () => {
 
   it('asks for a smaller input when a varying price lands over the spec ceiling', async () => {
     await storeSpecs(dir, [quoteSpec({ priceVaries: true, maxAmountAtomic: '1000000' })]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([
       {
         url: PROVIDER,
@@ -1840,7 +1813,7 @@ describe('an offer with a request spec', () => {
 
   it('reports needs_approval when the spend policy refuses the call before signing', async () => {
     await storeSpecs(dir, [quoteSpec()]);
-    const auth = authorizer('deny');
+    const auth = testAuthorizer('deny');
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
     ]);
@@ -1860,7 +1833,7 @@ describe('an offer with a request spec', () => {
 
   it('pays once per spec id: a retry after a paid call sends and pays nothing', async () => {
     await storeSpecs(dir, [quoteSpec()]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
     const first = await runRequestTool(
       { id: SPEC_ID, input: { symbol: 'BTC' } },
@@ -1887,7 +1860,7 @@ describe('an offer with a request spec', () => {
 
   it('keeps the claim when the spend ledger fails after the payment left: a retry signs nothing', async () => {
     await storeSpecs(dir, [quoteSpec()]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     // The authorization has left, then the ledger write behind `commit` fails:
     // the error carries no amount, so the call reads as unpaid.
     vi.mocked(auth.commit).mockRejectedValueOnce(
@@ -1960,7 +1933,7 @@ describe('an offer with a request spec', () => {
 
   it('reports a wallet that cannot be opened as unpaid for the wallet, not the terms', async () => {
     await storeSpecs(dir, [quoteSpec()]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([
       { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: ROUTER, status: 200, body: {} },
@@ -2041,7 +2014,7 @@ describe('an offer with a request spec', () => {
 
   it('pays nothing from a query with no id, even when the answer carries an input', async () => {
     const PICKED = '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d22';
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const answer = specAnswer(PICKED);
     (answer.decision as Record<string, unknown>).input = { symbol: 'BTC' };
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
@@ -2062,11 +2035,10 @@ describe('an offer with a request spec', () => {
   });
 
   it("shows the paired skeleton answer's spec and the line to fill, and pays nothing", async () => {
-    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-    const answer = JSON.parse(
-      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
-    ) as { decision: { id: string; hint: string; spec: OfferSpec } };
-    const auth = authorizer();
+    const answer = fixture('wire-lookup-spec-skeleton.json') as {
+      decision: { id: string; hint: string; spec: OfferSpec };
+    };
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool(
       { query: 'Patrick Collison at Stripe' },
@@ -2081,10 +2053,9 @@ describe('an offer with a request spec', () => {
   });
 
   it("shows a list service's own spec for a query, not its line", async () => {
-    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-    const answer = JSON.parse(
-      await readFile(join(fixtures, 'wire-hook-discovered-spec.json'), 'utf8'),
-    ) as { decision: { id: string; specs: OfferSpec[] } };
+    const answer = fixture('wire-hook-discovered-spec.json') as {
+      decision: { id: string; specs: OfferSpec[] };
+    };
     const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool({ query: 'an image of a red fox' }, deps(fetchImpl));
     const [spec] = answer.decision.specs;
@@ -2127,12 +2098,9 @@ describe('an offer with a request spec', () => {
  */
 describe('a choice from the set a line offered', () => {
   const read = async () =>
-    JSON.parse(
-      await readFile(
-        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
-        'utf8',
-      ),
-    ) as { decision: { id: string; hint: string; specs: OfferSpec[]; choices: Choices } };
+    fixture('wire-hook-discovered-choices.json') as {
+      decision: { id: string; hint: string; specs: OfferSpec[]; choices: Choices };
+    };
   const keep = async () => {
     const { decision } = await read();
     await storeSpecs(dir, decision.specs);
@@ -2216,10 +2184,9 @@ describe('a choice from the set a line offered', () => {
  */
 describe('a spec that names the fields it returns', () => {
   async function apolloSpec(id: string): Promise<OfferSpec> {
-    const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-    const answer = JSON.parse(
-      await readFile(join(fixtures, 'wire-lookup-spec-skeleton.json'), 'utf8'),
-    ) as { decision: { spec: Omit<OfferSpec, 'id'> } };
+    const answer = fixture('wire-lookup-spec-skeleton.json') as {
+      decision: { spec: Omit<OfferSpec, 'id'> };
+    };
     return { ...answer.decision.spec, id };
   }
   const INPUT = { first_name: 'Patrick', last_name: 'Collison', domain: 'stripe.com' };
@@ -2475,12 +2442,8 @@ describe('the fix a failed request hands the model', () => {
  * runs that spec like any offer. Neither read takes the paid routing path.
  */
 describe('the tool list, read for free', () => {
-  const wire = (name: string): Record<string, unknown> =>
-    JSON.parse(
-      readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'),
-    ) as Record<string, unknown>;
-  const BROWSE = wire('wire-browse.json');
-  const BY_ID = wire('wire-lookup-spec-by-id.json');
+  const BROWSE = fixture('wire-browse.json');
+  const BY_ID = fixture('wire-lookup-spec-by-id.json');
   const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'];
   /** A paid routing path that must never be asked. */
   const route = vi.fn((): never => {
@@ -2489,7 +2452,7 @@ describe('the tool list, read for free', () => {
 
   it('lists the rows for a need, sends only the browse, and pays nothing', async () => {
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: BROWSE }]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const result = await runRequestTool(
       { browse: 'live crypto prices' },
       { ...deps(fetchImpl, auth), route },

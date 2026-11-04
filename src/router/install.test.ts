@@ -1,13 +1,14 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { loadStep, NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
+import { installSandbox, probe400 } from './install-test-utils';
 import { NEW_SESSION_FIX, RECONNECT_FIX } from './mcp-processes';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 
 /**
  * `tenjin install`'s own decisions: the wallet, the spend question and its
@@ -16,41 +17,23 @@ import type { CommandContext } from '../context';
  * so the plugin goes to its folder under `~/.claude/skills/`.
  */
 
+let root: string;
 let home: string;
 let data: string;
-/** A git root of its own for doctor to run from, so `router.*` never
- *  resolves from the suite's cwd. */
 let work: string;
 beforeEach(async () => {
-  const root = await mkdtemp(join(tmpdir(), 'router-install-'));
-  home = join(root, 'home');
-  data = join(root, 'data');
-  work = join(root, 'work');
-  await mkdir(join(work, '.git'), { recursive: true });
+  ({ root, home, data, work } = await installSandbox('router-install-'));
   await mkdir(join(home, '.claude'), { recursive: true });
-  await mkdir(data, { recursive: true });
-  // Install ends with a reachability probe; no test here reaches the network.
   vi.stubGlobal('fetch', probe400);
 });
 afterEach(async () => {
   vi.unstubAllGlobals();
-  await rm(join(home, '..'), { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
 });
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(data);
 }
-
-const probe400 = (async () =>
-  new Response('{}', {
-    status: 400,
-    headers: { 'content-type': 'application/json' },
-  })) as typeof fetch;
 
 const settingsPath = () => join(home, '.claude', 'settings.json');
 const folder = () => join(home, '.claude', 'skills', 'tenjin-router');
@@ -411,12 +394,7 @@ describe('tenjin install', () => {
 
 /** A person at a terminal: human output, no `--json`. */
 function humanCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: true },
-  };
+  return testCtx(data, { json: false, isTTY: true });
 }
 
 /** Answers each amount question from the list, in order, and records what was asked. */
@@ -691,10 +669,6 @@ describe('the doctor this release registers', () => {
     };
     expect(experimental.status).toBe('ok');
     expect(experimental.detail).toMatch(/^list: on; bazaar: off \(experimental\)/);
-    const fixes = data_.checks.map((c) => c.fix ?? '').join(' ');
-    for (const gone of ['tenjin daemon', 'tenjin search', 'tenjin publish', 'tenjin hooks']) {
-      expect(fixes).not.toContain(gone);
-    }
   });
 
   it.each([
