@@ -85,7 +85,8 @@ import {
   type PaidRecord,
   type SignedAuthorization,
 } from './paid';
-import { routerSettings } from './settings';
+import { routerSettings, type RouterSettings } from './settings';
+import { markTaken } from './untaken';
 import type { Harness } from './names';
 import {
   answerState,
@@ -304,8 +305,8 @@ export async function runApproveTool(
   args: ApproveToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
-  const off = await routerOff(deps);
-  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  const here = await routerHere(deps);
+  if ('off' in here) return fail('needs_input', here.off, { nextStep: ROUTER_OFF_NEXT_STEP });
   const { dataDir } = deps.ctx;
   const now = deps.now ?? Date.now;
   const fresh = 'Call request again with the same call for a fresh quote.';
@@ -445,8 +446,8 @@ async function requestTool(
   // THE SAME SWITCH THE HOOKS OBEY, read first. The tool is pre-allowed, so
   // without this it would be a second path off the machine in a repository the
   // user marked private: nothing is sent and nothing is paid.
-  const off = await routerOff(deps);
-  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  const here = await routerHere(deps);
+  if ('off' in here) return fail('needs_input', here.off, { nextStep: ROUTER_OFF_NEXT_STEP });
   if (args.browse !== undefined || args.tool !== undefined) return readToolList(args, deps);
   // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
   // its record, with nothing built and nothing paid.
@@ -459,6 +460,9 @@ async function requestTool(
     return resumeJob(args.job, deps);
   }
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  // A call naming an offer's id takes it, whatever it asks: that offer was not
+  // ignored, so nothing reports it so (`untaken.ts`).
+  if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
   let id = offered;
   const { input } = args;
   const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
@@ -584,6 +588,7 @@ async function requestTool(
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
     harness: deps.harness ?? 'claude',
+    improve: here.settings.improve.value,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -2575,20 +2580,26 @@ const ROUTER_OFF_NEXT_STEP =
   'Continue with your own tools. Nothing was sent to the router and nothing was bought.';
 
 /**
- * Why the router is off for this directory, naming the key and the file that
- * set it, or null when it is on. A layer that cannot be read is off: a switch
- * the user set must not fail open.
+ * `router.*` for this directory, or why the router is off here, naming the key
+ * and the file that set it. A layer that cannot be read is off: a switch the
+ * user set must not fail open.
  */
-async function routerOff(deps: RequestToolDeps): Promise<string | null> {
+async function routerHere(
+  deps: RequestToolDeps,
+): Promise<{ settings: RouterSettings } | { off: string }> {
   try {
-    const { enabled } = await routerSettings({
+    const settings = await routerSettings({
       cwd: deps.cwd ?? process.cwd(),
       dataDir: deps.ctx.dataDir,
     });
-    if (enabled.value) return null;
-    return `router.enabled is false in ${enabled.path ?? 'the config'}, so the router is off here.`;
+    if (settings.enabled.value) return { settings };
+    return {
+      off: `router.enabled is false in ${settings.enabled.path ?? 'the config'}, so the router is off here.`,
+    };
   } catch (err) {
-    return `router.enabled could not be read (${err instanceof Error ? err.message : String(err)}), so the router is off here.`;
+    return {
+      off: `router.enabled could not be read (${err instanceof Error ? err.message : String(err)}), so the router is off here.`,
+    };
   }
 }
 

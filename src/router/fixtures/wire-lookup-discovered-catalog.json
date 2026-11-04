@@ -6,77 +6,150 @@
     "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d48",
     "candidate": {
       "source": "tenjin",
-      "provider": "kadec0 (arXiv/PubMed/OpenAlex/Crossref/Semantic Scholar)",
-      "url": "https://api.kadec0.xyz/v1/papers",
+      "provider": "apitoll (SEC EDGAR)",
+      "url": "https://edgar.apitoll.cloud/v1/edgar/filings",
       "method": "GET",
-      "description": "Search academic papers across arXiv, PubMed, OpenAlex, Crossref and Semantic Scholar in one call.",
-      "providerPriceAtomic": "20000",
+      "description": "Latest SEC filings of one form (10-K, 10-Q or 8-K) for a US-listed company by ticker or CIK, as links to the filings.",
+      "providerPriceAtomic": "3000",
       "network": "eip155:8453",
-      "payTo": "0x4df66B6c140778fe0717880A7c6dDE5Ea53AcDeA",
+      "payTo": "0x58BdAD5e654691aC5eD4631758f3d8DA00666B6c",
       "input": {
         "location": "query",
         "schema": {
           "type": "object",
           "properties": {
-            "q": {
+            "cik": {
               "type": "string",
-              "description": "search query / keywords"
+              "pattern": "^\\d{1,10}$",
+              "description": "SEC CIK (1-10 digits). XOR with ticker."
             },
-            "source": {
+            "ticker": {
               "type": "string",
-              "enum": ["all", "arxiv", "pubmed", "openalex", "crossref", "semanticscholar"],
-              "default": "all"
+              "pattern": "^[A-Za-z.\\-]{1,10}$",
+              "description": "Stock ticker, case-insensitive. XOR with cik."
             },
-            "maxItems": {
+            "form": {
               "type": "string",
-              "default": "20",
-              "description": "1-50"
+              "enum": ["10-K", "10-Q", "8-K"],
+              "description": "SEC form for /filings: 10-K, 10-Q, 8-K. Aliases accepted (10k, 10-q, 8k, annual, quarterly, current-report, material-event). Form 4 and 13F-HR have their own routes — GET /v1/edgar/insider and GET /v1/edgar/holdings."
             },
-            "year_from": {
+            "since": {
               "type": "string",
-              "description": "earliest publication year (inclusive)"
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "description": "Inclusive lower bound on filingDate (YYYY-MM-DD), within the last 5 years."
             },
-            "year_to": {
-              "type": "string",
-              "description": "latest publication year (inclusive)"
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "Per-form ceiling: 10-K/10-Q/8-K=50."
             },
-            "sort": {
-              "type": "string",
-              "enum": ["relevance", "recency", "citations"],
-              "default": "relevance"
+            "includeAmendments": {
+              "type": "boolean",
+              "description": "When true (default), amendment suffixes (10-K/A) surface alongside the base form."
             }
           },
-          "required": ["q"]
+          "required": ["form"]
         }
       }
     },
-    "hint": "Tenjin router found pay-per-call services for this step, no API key needed: 1) kadec0 (arXiv/PubMed/OpenAlex/Crossref/Semantic Scholar) (Search academic papers across arXiv, PubMed, OpenAlex, Crossref and Semantic Scholar in one call.), GET https://api.kadec0.xyz/v1/papers , about $0.02 per call. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d48\", input: {\"q\":\"<search query / keywords>\"}}). 2) kadec0 (Open-access full text) (Get the readable full text of a paper by arXiv id, DOI or PMID.), GET https://api.kadec0.xyz/v1/paper-fulltext , about $0.04 per call. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d49\", input: {\"id\":\"<arXiv id, DOI, OpenAlex id, PMID, or PMCID>\",\"doi\":\"<DOI, only when id is not given>\"}}). Tenjin reviewed these listings. Pick the one that fits. Call request alone and wait for its result, then tell the user which service you used through Tenjin and what it cost. The Tenjin list also has images, video clips, text to speech, sound effects, music, speech to text, deep research, cited answer, people search, company search, linkedin, sec filings, local leads, x twitter, reddit, instagram, tiktok, ocr, pdf, screenshot, hosting, messaging; call request({query: \"<the piece you need>\"}) whenever a step needs one.",
+    "hint": "Tenjin router found pay-per-call services for this step, no API key needed: 1) apitoll (SEC EDGAR) (Latest SEC filings of one form (10-K, 10-Q or 8-K) for a US-listed company by ticker or CIK, as lin…), GET https://edgar.apitoll.cloud/v1/edgar/filings , about $0.003 per call. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d48\", input: {\"form\":\"<10-K|10-Q|8-K>\"}}). 2) agent402 (SEC EDGAR full-text search) (Full-text search across every SEC filing since 2001.), GET https://agent402.tools/api/edgar-search , about $0.005 per call. To use it, call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d49\", input: {\"q\":\"<search phrase>\"}}). Tenjin reviewed these listings. Pick the one that fits. Call request alone and wait for its result, then tell the user which service you used through Tenjin and what it cost. The Tenjin list also has images, video clips, text to speech, sound effects, music, speech to text, deep research, cited answer, papers, people search, company search, linkedin, local leads, x twitter, reddit, instagram, tiktok, ocr, pdf, screenshot, hosting, messaging; call request({query: \"<the piece you need>\"}) whenever a step needs one.",
     "specs": [
       {
         "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d48",
-        "capabilityId": "kadec0-papers",
-        "provider": "kadec0 (arXiv/PubMed/OpenAlex/Crossref/Semantic Scholar)",
+        "capabilityId": "edgar-apitoll-filings",
+        "provider": "apitoll (SEC EDGAR)",
+        "holds": {},
+        "output": "media",
+        "description": "Latest SEC filings of one form (10-K, 10-Q or 8-K) for a US-listed company by ticker or CIK, as links to the filings.",
+        "priceAtomic": "3000",
+        "priceVaries": false,
+        "maxAmountAtomic": "3000",
+        "payTo": "0x58BdAD5e654691aC5eD4631758f3d8DA00666B6c",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "request": {
+          "method": "GET",
+          "url": "https://edgar.apitoll.cloud/v1/edgar/filings",
+          "fields": {
+            "cik": "query",
+            "ticker": "query",
+            "form": "query",
+            "since": "query",
+            "limit": "query",
+            "includeAmendments": "query"
+          },
+          "location": "query"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "cik": {
+              "type": "string",
+              "pattern": "^\\d{1,10}$",
+              "description": "SEC CIK (1-10 digits). XOR with ticker."
+            },
+            "ticker": {
+              "type": "string",
+              "pattern": "^[A-Za-z.\\-]{1,10}$",
+              "description": "Stock ticker, case-insensitive. XOR with cik."
+            },
+            "form": {
+              "type": "string",
+              "enum": ["10-K", "10-Q", "8-K"],
+              "description": "SEC form for /filings: 10-K, 10-Q, 8-K. Aliases accepted (10k, 10-q, 8k, annual, quarterly, current-report, material-event). Form 4 and 13F-HR have their own routes — GET /v1/edgar/insider and GET /v1/edgar/holdings."
+            },
+            "since": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "description": "Inclusive lower bound on filingDate (YYYY-MM-DD), within the last 5 years."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "Per-form ceiling: 10-K/10-Q/8-K=50."
+            },
+            "includeAmendments": {
+              "type": "boolean",
+              "description": "When true (default), amendment suffixes (10-K/A) surface alongside the base form."
+            }
+          },
+          "required": ["form"]
+        },
+        "pinned": {},
+        "example": {
+          "ticker": "PLTR",
+          "form": "10-K"
+        },
+        "returns": "JSON {resolved, form, count, items[]}: recent filings (form, filingDate, reportDate, filingUrl) as links to SEC documents, not figures"
+      },
+      {
+        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d49",
+        "capabilityId": "agent402-edgar-search",
+        "provider": "agent402 (SEC EDGAR full-text search)",
         "holds": {
           "WebSearch": "q"
         },
         "output": "media",
-        "description": "Search academic papers across arXiv, PubMed, OpenAlex, Crossref and Semantic Scholar in one call.",
-        "priceAtomic": "20000",
+        "description": "Full-text search across every SEC filing since 2001.",
+        "priceAtomic": "5000",
         "priceVaries": false,
-        "maxAmountAtomic": "20000",
-        "payTo": "0x4df66B6c140778fe0717880A7c6dDE5Ea53AcDeA",
+        "maxAmountAtomic": "5000",
+        "payTo": "0xaBF4FAbd7c416fB67202E5f9002389Fc75e2a9D0",
         "network": "eip155:8453",
         "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         "request": {
           "method": "GET",
-          "url": "https://api.kadec0.xyz/v1/papers",
+          "url": "https://agent402.tools/api/edgar-search",
           "fields": {
             "q": "query",
-            "source": "query",
-            "maxItems": "query",
-            "year_from": "query",
-            "year_to": "query",
-            "sort": "query"
+            "forms": "query",
+            "ticker": "query",
+            "cik": "query",
+            "days": "query",
+            "locationCode": "query",
+            "limit": "query"
           },
           "location": "query"
         },
@@ -85,89 +158,40 @@
           "properties": {
             "q": {
               "type": "string",
-              "description": "search query / keywords"
+              "description": "Search phrase (quote-wrap for exact match, e.g. \"material weakness\")"
             },
-            "source": {
+            "forms": {
               "type": "string",
-              "enum": ["all", "arxiv", "pubmed", "openalex", "crossref", "semanticscholar"],
-              "default": "all"
+              "description": "Comma-separated form filter, e.g. \"10-K,10-Q\" or \"8-K\""
             },
-            "maxItems": {
+            "ticker": {
               "type": "string",
-              "default": "20",
-              "description": "1-50"
+              "description": "Restrict to a single company by ticker"
             },
-            "year_from": {
+            "cik": {
               "type": "string",
-              "description": "earliest publication year (inclusive)"
+              "description": "Restrict to a single company by CIK"
             },
-            "year_to": {
-              "type": "string",
-              "description": "latest publication year (inclusive)"
+            "days": {
+              "type": "number",
+              "description": "Lookback window in days, 1-3650 (default unset = all-time)"
             },
-            "sort": {
+            "locationCode": {
               "type": "string",
-              "enum": ["relevance", "recency", "citations"],
-              "default": "relevance"
+              "description": "Two-letter US state code to filter by issuer location (e.g. \"CA\")"
+            },
+            "limit": {
+              "type": "number",
+              "description": "Max hits to return, 1-100 (default 25)"
             }
           },
           "required": ["q"]
         },
         "pinned": {},
         "example": {
-          "q": "retrieval augmented generation"
+          "q": "going concern"
         },
-        "returns": "JSON {count, items[]}: per paper title, authors, year, venue, abstract, DOI, citationCount, url and pdfUrl; up to 50 items"
-      },
-      {
-        "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d49",
-        "capabilityId": "kadec0-paper-fulltext",
-        "provider": "kadec0 (Open-access full text)",
-        "holds": {},
-        "output": "media",
-        "description": "Get the readable full text of a paper by arXiv id, DOI or PMID.",
-        "priceAtomic": "40000",
-        "priceVaries": false,
-        "maxAmountAtomic": "40000",
-        "payTo": "0x4df66B6c140778fe0717880A7c6dDE5Ea53AcDeA",
-        "network": "eip155:8453",
-        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "request": {
-          "method": "GET",
-          "url": "https://api.kadec0.xyz/v1/paper-fulltext",
-          "fields": {
-            "id": "query",
-            "doi": "query"
-          },
-          "location": "query"
-        },
-        "input": {
-          "type": "object",
-          "properties": {
-            "id": {
-              "type": "string",
-              "description": "arXiv id, DOI, OpenAlex id, PMID, or PMCID"
-            },
-            "doi": {
-              "type": "string",
-              "description": "A DOI, only when id is not given"
-            }
-          },
-          "required": [],
-          "anyOf": [
-            {
-              "required": ["id"]
-            },
-            {
-              "required": ["doi"]
-            }
-          ]
-        },
-        "pinned": {},
-        "example": {
-          "id": "arXiv:1706.03762"
-        },
-        "returns": "JSON {count, items[]}: the readable text split into sections (heading, text), plus the open-access PDF location when open access"
+        "returns": "JSON {total, returned, hits[{form, filedDate, displayNames, cik, url}]}: filings containing the phrase, as links to the SEC document"
       }
     ]
   },

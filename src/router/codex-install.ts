@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
-import { persistRouterDefaults } from '../commands/config';
+import { persistImproveAnswer, persistRouterDefaults } from '../commands/config';
 import { versionFreeEntry } from '../commands/update';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import { autoUpdateLine } from '../lib/auto-update';
@@ -48,6 +48,8 @@ import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/co
 import { readInstalledHosts, withNote } from './hosts';
 import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
+import { askImprove, improveLines, improveStep, type ImproveDeps } from './improve-question';
+import { underAgentHarness } from '../lib/session';
 
 /**
  * `tenjin install|uninstall|doctor` for Codex. Codex's own commands do
@@ -76,7 +78,7 @@ export interface CodexRun {
 }
 
 export interface CodexSetupDeps
-  extends WalletDeps, Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'> {
+  extends WalletDeps, ImproveDeps, Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'> {
   /** One `codex` command, recorded in tests. */
   run?: (args: string[]) => Promise<CodexRun>;
   /** Codex's merged config (`config/read`), or null when it could not be read. */
@@ -367,6 +369,12 @@ export async function runCodexInstall(
         : canPrompt && unasked
           ? await approveLimits(deps)
           : {};
+  // "Help improve routing", asked once per machine, as the Claude install asks it.
+  const improve = await askImprove(
+    config,
+    { canPrompt, yes: args.yes === true, refresh: false },
+    deps,
+  );
 
   const rt = await (deps.runtime ?? defaultRuntime)({
     dataDir: ctx.dataDir,
@@ -385,6 +393,7 @@ export async function runCodexInstall(
     false,
   );
   const spend = await persistRouterDefaults(ctx.dataDir, false, limits, named.keys);
+  if (improve !== undefined) await persistImproveAnswer(ctx.dataDir, improve);
   const fromRuntime = runtimeHosts(rt);
   const hosts =
     rt.state === 'skipped'
@@ -419,6 +428,12 @@ export async function runCodexInstall(
   ].join(' ');
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
+  // Read again: a Claude install earlier in this run may have handed it over.
+  const improveAsk = await improveStep(ctx.dataDir, await loadRawConfig(ctx.dataDir), {
+    asksAgent: !canPrompt && underAgentHarness(deps.env ?? process.env),
+    spendPending: spendAsk !== undefined,
+    command: continuationCommand(rt),
+  });
   const daily =
     policy.sessionBudgetAtomic === null
       ? effective.sessionBudget
@@ -429,7 +444,10 @@ export async function runCodexInstall(
       wallet,
       spend: { ...spend, effective },
       runtime: runtimeData(rt),
-      nextSteps: spendAsk !== undefined ? [spendAsk] : [],
+      nextSteps: [
+        ...(spendAsk !== undefined ? [spendAsk] : []),
+        ...(improveAsk !== undefined ? [improveAsk] : []),
+      ],
       next,
     },
     humanLines: [
@@ -447,6 +465,7 @@ export async function runCodexInstall(
             ),
           ]
         : []),
+      ...(improveAsk !== undefined ? improveLines(improveAsk) : []),
       'Request tool: its plugin hook allows it, under your wallet spend limits. Turn that hook off in /hooks to be asked first.',
       next,
     ],

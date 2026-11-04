@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -22,8 +22,8 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
-import { readChoices, readSpec } from './specs';
-import { ROUTE_PAID_PATH } from './decision';
+import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
+import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import {
   claimRedirect,
   renderProgress,
@@ -32,6 +32,7 @@ import {
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
+import { claimIgnored, offerScope } from './untaken';
 import type { SignVerdict } from './eligibility';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { writePassphraseRecord } from '../lib/passphrase-record';
@@ -57,8 +58,14 @@ async function offerRecord(sessionId: string, toolUseId: string): Promise<unknow
   return JSON.parse(await readFile(join(sessionDir(dir, sessionId), `offer-${key}.json`), 'utf8'));
 }
 
-/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
-const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
+/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto, and
+ *  that it asked Help improve routing, so a prompt carries only its offer. */
+const ROUTER_POLICY = {
+  maxAutoSpend: '250000',
+  sessionBudget: '5000000',
+  confirm: 'above:250000',
+  install: { improveAsked: true },
+};
 /** The wallet file's cleartext address, which is all a hook reads of it. */
 const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 /** The configured default `rpcUrl`, where the balance read goes. */
@@ -99,11 +106,21 @@ const BASE = 'https://tenjin.sh';
  * A recorded decision answer; `calls` is what the hook sent the router. The
  * balance read goes to {@link RPC}, or a fallback, through the same fetch and
  * is answered from {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ * An outcome report (an ignored offer's) is answered 204 and kept in
+ * `reports`, apart from the decisions.
  */
-function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
+function router(
+  body: unknown,
+  status = 200,
+): { fetchImpl: typeof fetch; calls: unknown[]; reports: { url: string; body: unknown }[] } {
   const calls: unknown[] = [];
+  const reports: { url: string; body: unknown }[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
+    if (sent.url.endsWith(ROUTER_PATH) && (sent.body as { status?: unknown })?.status) {
+      reports.push(sent);
+      return new Response(null, { status: 204 });
+    }
     if (RPCS.includes(sent.url)) {
       rpcCalls.push(sent);
       if (typeof rpcAnswer === 'function') return rpcAnswer(init);
@@ -116,7 +133,7 @@ function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: 
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, reports };
 }
 
 const NATIVE = {
@@ -283,6 +300,98 @@ describe('the prompt hook', () => {
       'sessionId',
     ]);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
+  });
+
+  /** A link the host opens itself, on this repository's forge or claude.ai,
+   *  is named in `ownUrls`; any other link is not. */
+  it("names the user's own links: the repository's remote host and claude.ai", async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/widgets.git\n',
+    );
+    const { fetchImpl, calls } = router(NATIVE);
+    const pr = 'https://github.com/acme/widgets/pull/12';
+    const artifact = 'https://claude.ai/code/artifact/0195f3a1';
+    await runPromptHook(promptEvent(`compare ${pr} with ${artifact} and https://example.test/x`), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
+    expect(packet.ownUrls).toEqual([pr, artifact]);
+    expect(packet.literalUrls).toHaveLength(3);
+  });
+
+  /** "HELP IMPROVE ROUTING", ON IN THE GLOBAL FILE, rides as one flag; off
+   *  (the default, above) the body is unchanged. */
+  it('says improve when the person turned on Help improve routing', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, router: { improve: true } }),
+    );
+    const { fetchImpl, calls } = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect((calls[0] as { body: Record<string, unknown> }).body.improve).toBe(true);
+  });
+
+  /**
+   * A MACHINE INSTALLED BEFORE HELP IMPROVE ROUTING EXISTED never runs the
+   * install that asks it, so its first routed prompt hands the agent the
+   * question, with no shell command for the person: recorded as asked, still
+   * off, and never asked again.
+   */
+  it('hands the agent Help improve routing once on a machine nobody asked, then never again', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    const { fetchImpl } = router(NATIVE);
+    const prompt = () =>
+      runPromptHook(promptEvent('what is the weather'), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    const first = await prompt();
+    const line = (first.response as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(line).toContain('"Help improve routing? ');
+    expect(line).toContain('You can ask your agent to turn it off any time.');
+    expect(line).toContain('On yes, run `tenjin config set router.improve true` yourself');
+    expect(line).not.toContain('Turn it off any time with');
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+      install?: unknown;
+      router?: unknown;
+    };
+    expect(config.install).toEqual({ improveAsked: true });
+    expect(config.router).toBeUndefined();
+    expect((await prompt()).response).toBeNull();
+  });
+
+  it('never holds a prompt on a held config lock: the question waits, the answer does not', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    // A leftover lock from a crashed writer; the file lock never steals one.
+    await fs.mkdir(join(dir, 'config.json.lock'));
+    const { fetchImpl } = router(NATIVE);
+    const started = Date.now();
+    const out = await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(out.response).toBeNull();
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+      install?: unknown;
+    };
+    expect(config.install).toBeUndefined();
   });
 
   /**
@@ -2622,6 +2731,7 @@ describe('a free lookup noted after a search', () => {
       at: expect.any(Number) as number,
       offerId: ID,
       line: NOTE_HINT,
+      ids: [ID],
     });
     expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
       id: ID,
@@ -2674,6 +2784,26 @@ describe('a free lookup noted after a search', () => {
     });
     expect(cut.out).toEqual({ response: null });
     expect(cut.calls).toHaveLength(0);
+  });
+
+  it('keeps the line untaken from when the after-call arm shows it, never on an interrupt', async () => {
+    const main = offerScope('sess-1', undefined);
+    await before('next.js middleware matcher', 'toolu_1');
+    // Not shown yet: a native call the agent starts meanwhile ignored nothing.
+    expect(await claimIgnored(dir, { now: Date.now(), nativeScope: main })).toEqual([]);
+    await after('next.js middleware matcher', 'toolu_1');
+    expect(await claimIgnored(dir, { now: Date.now(), nativeScope: main })).toEqual([
+      { id: ID, harness: 'claude', reason: 'native_after_offer' },
+    ]);
+    // A search cut short shows nothing, so nothing is reported for it, ever.
+    await before('zod v4 coerce', 'toolu_2');
+    await after('zod v4 coerce', 'toolu_2', undefined, {
+      hook_event_name: 'PostToolUseFailure',
+      tool_response: undefined,
+      error: 'Interrupted',
+      is_interrupt: true,
+    });
+    expect(await claimIgnored(dir, { now: Date.now() + SPEC_TTL_MS + 1 })).toEqual([]);
   });
 
   it('gives a noted search that came back short the note, and asks the router nothing', async () => {
@@ -3105,7 +3235,11 @@ describe('a discovered service', () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+      JSON.stringify({
+        maxAutoSpend: '50000',
+        experimental: { bazaar: 'on' },
+        install: { improveAsked: true },
+      }),
     );
     const { fetchImpl } = router(DISCOVERED);
     const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
@@ -3496,5 +3630,80 @@ describe('a question to the user', () => {
       });
       expect(answer).toMatchObject({ hookSpecificOutput: expected });
     }
+  });
+});
+
+/**
+ * AN OFFER THE HOST WAS SHOWN AND NEVER TOOK IS SAID ONCE, by id and why, at
+ * the next routed leg: a native call by the same agent while it was untaken,
+ * or its 15 minutes running out. No text, and no wait on the report.
+ */
+describe('an offer the host ignored', () => {
+  const T = 1_800_000_000_000;
+  const ignored = (reason: string) => ({
+    url: `${BASE}${ROUTER_PATH}`,
+    body: { schemaVersion: 1, id: 'k3f9-abcd', harness: 'claude', status: 'ignored', reason },
+  });
+
+  it('reports a prompt offer the agent answered with a native search instead', async () => {
+    const offer = router(EXECUTE);
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: offer.fetchImpl,
+      now: () => T,
+    });
+    const native = router(NATIVE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: native.fetchImpl, homeDir: dir };
+    await runNativeHook(await callEvent('example spec', 'WebSearch', 'PreToolUse'), {
+      ...deps,
+      now: () => T + 5_000,
+    });
+    await vi.waitFor(() => expect(native.reports).toEqual([ignored('native_after_offer')]));
+    // Said once: the next native call finds nothing left to report.
+    await runNativeHook(await callEvent('example spec 2', 'WebSearch', 'PreToolUse'), {
+      ...deps,
+      now: () => T + 6_000,
+    });
+    expect(native.reports).toHaveLength(1);
+  });
+
+  it('reports an offer past its 15 minutes at the next prompt, as expired', async () => {
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      now: () => T,
+    });
+    const later = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: later.fetchImpl,
+      now: () => T + 16 * 60_000,
+    });
+    await vi.waitFor(() => expect(later.reports).toEqual([ignored('expired')]));
+  });
+
+  it('never reports an offer that was withheld, since the host never saw it', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '14999', confirm: 'above:14999' }),
+    );
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      now: () => T,
+    });
+    const later = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: later.fetchImpl,
+      now: () => T + 16 * 60_000,
+    });
+    expect(later.reports).toEqual([]);
   });
 });
