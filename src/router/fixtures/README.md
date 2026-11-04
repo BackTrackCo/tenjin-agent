@@ -14,6 +14,12 @@ writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
 `2026-10-24.1`.
 
+The service ids these fixtures name (`capabilityId`, a browse row's `id`,
+`tool`, a `discovered:tenjin:` id) resolve against `tenjin`'s test catalog,
+`lib/x402-router/fixtures/test-catalog/`, never its live one, so a service can
+leave the live catalog with no change here. A fixture that needs a service or
+a shape the test catalog lacks adds that entry there in the same change.
+
 ## The calls
 
 A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
