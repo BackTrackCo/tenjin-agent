@@ -447,6 +447,8 @@ Take these from here; do not re-derive them.
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first; a discovery run's search text (built from the user's words) is cleared at the same expiry.
 
-The enumerated values live in code: the task ids in `fixtures/catalog/tasks.json`,
-`DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.
+The enumerated values live in `tenjin`'s code: the live task ids in
+`fixtures/catalog/tasks.json` (a fixture's task ids are checked against the
+test catalog's own `tasks.json`), `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in
+`diagnostics.ts`.
 `docs/ENVIRONMENTS.md` covers the kill switch and the rate limits.
