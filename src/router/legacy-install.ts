@@ -5,6 +5,7 @@ import { inspectHooksFile } from './hooks-file';
 import { runClaude, type ClaudeBinary } from './claude-cli';
 import { LEGACY_HOOK_TOOL, LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL } from './names';
 import { classifyStatusLine, decomposeCommand, type StatusLineState } from './status-line-wiring';
+import { isRecord } from '../lib/guards';
 
 /**
  * THE SETTINGS-BASED INSTALL, READ AND REMOVED. Releases up to alpha.26 wrote
@@ -31,13 +32,9 @@ import { classifyStatusLine, decomposeCommand, type StatusLineState } from './st
 
 const LEGACY_COMMAND_RE = /^(\S*\/)?tenjin hook [a-z]+$/;
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /** One handler, in an exact shape a settings install wrote. */
 export function ownsLegacyHandler(handler: unknown): boolean {
-  if (!isPlainObject(handler)) return false;
+  if (!isRecord(handler)) return false;
   if (handler.type === 'mcp_tool') {
     return handler.server === LEGACY_MCP_SERVER_NAME && handler.tool === 'hook';
   }
@@ -47,7 +44,7 @@ export function ownsLegacyHandler(handler: unknown): boolean {
 
 /** A handler that mentions `tenjin hook` without being one of ours: reported, never removed. */
 function lookalike(handler: unknown): string | null {
-  if (!isPlainObject(handler) || ownsLegacyHandler(handler)) return null;
+  if (!isRecord(handler) || ownsLegacyHandler(handler)) return null;
   const command = handler.command;
   return typeof command === 'string' && command.includes('tenjin hook') ? command : null;
 }
@@ -91,7 +88,7 @@ export async function readLegacyMcpEntry(path: string): Promise<McpEntryState> {
   }
   const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
   if (servers === undefined) return 'absent';
-  if (!isPlainObject(servers)) return 'unreadable';
+  if (!isRecord(servers)) return 'unreadable';
   const entry = servers[LEGACY_MCP_SERVER_NAME];
   return entry === undefined ? 'absent' : classifyMcpEntry(entry);
 }
@@ -161,12 +158,12 @@ export async function inspectLegacyInstall(
 }
 
 function handlersOf(entry: unknown): unknown[] {
-  return isPlainObject(entry) && Array.isArray(entry.hooks) ? entry.hooks : [];
+  return isRecord(entry) && Array.isArray(entry.hooks) ? entry.hooks : [];
 }
 
 function listOf(settings: Record<string, unknown>, key: 'allow' | 'deny'): unknown[] {
   const permissions = settings.permissions;
-  if (!isPlainObject(permissions)) return [];
+  if (!isRecord(permissions)) return [];
   const list = permissions[key];
   return Array.isArray(list) ? list : [];
 }
@@ -227,7 +224,7 @@ async function removeFromSettings(found: LegacyInstall, out: LegacyRemoval): Pro
   }
   if (read.raw === null) return;
   const next: Record<string, unknown> = { ...read.settings };
-  if (isPlainObject(read.settings.hooks)) {
+  if (isRecord(read.settings.hooks)) {
     const hooks: Record<string, unknown> = {};
     for (const [event, list] of Object.entries(read.hooks)) {
       const kept: unknown[] = [];
@@ -243,7 +240,7 @@ async function removeFromSettings(found: LegacyInstall, out: LegacyRemoval): Pro
     }
     next.hooks = hooks;
   }
-  if ((found.allowRule || found.denyRule) && isPlainObject(read.settings.permissions)) {
+  if ((found.allowRule || found.denyRule) && isRecord(read.settings.permissions)) {
     const permissions = { ...read.settings.permissions };
     if (found.allowRule && Array.isArray(permissions.allow)) {
       permissions.allow = permissions.allow.filter((r) => r !== LEGACY_REQUEST_TOOL);
@@ -258,7 +255,7 @@ async function removeFromSettings(found: LegacyInstall, out: LegacyRemoval): Pro
   if (found.statusLine === 'ours') {
     delete next.statusLine;
     out.statusLine = 'removed';
-  } else if (found.statusLine === 'composed' && isPlainObject(read.settings.statusLine)) {
+  } else if (found.statusLine === 'composed' && isRecord(read.settings.statusLine)) {
     const command = read.settings.statusLine.command;
     const original = typeof command === 'string' ? decomposeCommand(command) : null;
     if (original !== null) {

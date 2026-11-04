@@ -75,8 +75,8 @@ export interface LocalProviderDeps {
   onWarning?: (w: WalletWarning) => void;
 }
 
-const isWindows = process.platform === 'win32';
-const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
+export const isWindows = process.platform === 'win32';
+export const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 
 /**
  * A one-shot decrypt cache. The CLI is a single invocation, so a signer derived

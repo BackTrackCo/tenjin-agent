@@ -14,7 +14,6 @@ import {
   findClaudeBinary,
   jsonList,
   jsonResult,
-  meetsFloor,
   parseClaudeVersion,
   readClaudeCode,
   userMcpFile,
@@ -78,14 +77,9 @@ describe('finding the claude binary', () => {
 });
 
 describe('reading the plugin commands', () => {
-  it('parses versions and compares them to the floor', () => {
+  it('parses versions', () => {
     expect(parseClaudeVersion('2.1.296 (Claude Code)')).toBe('2.1.296');
     expect(parseClaudeVersion('nonsense')).toBeNull();
-    expect(meetsFloor('2.1.287')).toBe(true);
-    expect(meetsFloor('2.1.286')).toBe(false);
-    expect(meetsFloor('2.2.0')).toBe(true);
-    expect(meetsFloor('3.0.0')).toBe(true);
-    expect(meetsFloor('2.0.999')).toBe(false);
   });
 
   it('takes the last JSON object line, and a list wherever it starts', () => {

@@ -3,6 +3,7 @@ import { formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import { NO_PAYER, type DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
+import { LOWERCASE_ADDRESS_RE } from '../lib/ids';
 
 /**
  * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call goes to the
@@ -219,13 +220,11 @@ export function unpaidSentence(
   return `Tenjin could not pay the routing fee (${reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 
-const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
-
 /** One wallet's folder: the SDK's file storage for its routing channel
  *  (`client/<channelId>.json`). */
 export function payerDir(dataDir: string, payer: string): string {
   const name = payer.toLowerCase();
-  if (!ADDRESS_RE.test(name)) throw new Error(`not a wallet address: ${payer}`);
+  if (!LOWERCASE_ADDRESS_RE.test(name)) throw new Error(`not a wallet address: ${payer}`);
   return join(dataDir, 'router', 'fee', name);
 }
 

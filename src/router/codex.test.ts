@@ -8,12 +8,11 @@ import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import type { RuntimeSetup } from '../lib/runtime';
 import { parseCodexHistory } from './codex-history';
-import { codexRouterEvent, codexResponse } from './codex-event';
+import { codexRouterEvent, codexResponse } from './codex-wire';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
   alongsideCodexRefresh,
   CODEX_REFRESH_LINES,
-  codexAtLeast,
   ownCodexRow,
   refreshCodexPlugin,
   runCodexDoctor,
@@ -938,14 +937,6 @@ describe('Codex install, uninstall and doctor', () => {
     });
     // Nothing ran: no codex command, and the only reads are the stand-ins above.
     expect(steps).toEqual([]);
-  });
-
-  it('compares Codex builds by number, a suffix ignored', () => {
-    expect(codexAtLeast('0.157.1', '0.148.0')).toBe(true);
-    expect(codexAtLeast('0.149.0', '0.149.0')).toBe(true);
-    expect(codexAtLeast('0.149.0-alpha.2', '0.149.0')).toBe(true);
-    expect(codexAtLeast('0.148.9', '0.149.0')).toBe(false);
-    expect(codexAtLeast('1.0.0', '0.148.0')).toBe(true);
   });
 
   it('reads one hooks/list, runs no codex command, and never calls the build a gate', async () => {

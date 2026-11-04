@@ -1,14 +1,14 @@
 import { execFile } from 'node:child_process';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, posix, resolve, sep, win32 } from 'node:path';
+import { dirname, join, posix, resolve, win32 } from 'node:path';
 import pkg from '../../package.json';
 import { autoUpdateLine } from '../lib/auto-update';
 import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { hasCode } from '../lib/errno';
 import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
-import { defaultDataDir, launcherDir, runtimeDir } from '../lib/paths';
+import { isDefaultDataDir, launcherDir, realOr, runtimeDir, samePath, tilde } from '../lib/paths';
 import { readRuntimeState, runtimeBuild, type RuntimeState } from '../lib/runtime-layout';
 import { resolveContextSettings } from '../lib/settings';
 import { isNewer } from '../lib/update-check';
@@ -227,7 +227,7 @@ export async function runRouterDoctor(
   );
 
   // Only the default profile owns plugin registration and a private runtime.
-  const runtime = resolve(ctx.dataDir) === resolve(defaultDataDir(home));
+  const runtime = isDefaultDataDir(ctx.dataDir, home);
   const root = runtimeDir(ctx.dataDir);
   const state = runtime ? readRuntimeState(root) : null;
   const launch = await (
@@ -639,9 +639,8 @@ export function pluginStart(i: {
 
 /** Does any of `paths` name the same directory as `dir`, links resolved? */
 async function sameDirAsAny(paths: string[], dir: string): Promise<boolean> {
-  const real = (p: string) => realpath(p).catch(() => p);
-  const here = await real(dir);
-  for (const path of paths) if ((await real(path)) === here) return true;
+  const here = await realOr(dir);
+  for (const path of paths) if ((await realOr(path)) === here) return true;
   return false;
 }
 
@@ -1012,13 +1011,6 @@ async function pluginGone(launch: PluginLaunch, root: string): Promise<boolean> 
 
 const exists = async (path: string): Promise<boolean> =>
   (await stat(path).catch(() => null)) !== null;
-const samePath = async (a: string, b: string): Promise<boolean> =>
-  (await realpath(a).catch(() => resolve(a))) === (await realpath(b).catch(() => resolve(b)));
-
-/** `path` with the home folder written as `~`. */
-function tilde(path: string, home: string): string {
-  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
-}
 
 /**
  * THE RUNTIME CLAUDE CODE STARTS, by what the plugin's `.mcp.json` names:

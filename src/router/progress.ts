@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
+import { sha256Hex } from '../lib/hash';
 
 /**
  * The live status line's evidence: what this session is looking up right now,
@@ -154,8 +155,6 @@ export interface ProgressStep {
   price?: string;
 }
 
-const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
-
 function bounded(value: string, limit: number): string {
   const chars = Array.from(value);
   return chars.length <= limit ? value : `${chars.slice(0, limit - 1).join('')}…`;
@@ -210,7 +209,7 @@ async function parametersOf(value: unknown): Promise<string | undefined> {
 }
 
 export function sessionDir(dataDir: string, sessionId: string): string {
-  return join(dataDir, PROGRESS_DIR, digest(sessionId));
+  return join(dataDir, PROGRESS_DIR, sha256Hex(sessionId));
 }
 
 /** A fresh key for one call, so two overlapping lookups never share a record. */
@@ -238,10 +237,13 @@ export async function bindDecision(
   decisionId: string,
   now = Date.now(),
 ): Promise<void> {
-  await write(join(sessionDir(dataDir, sessionId), `${BINDING_PREFIX}${digest(decisionId)}.json`), {
-    version: 1,
-    at: now,
-  });
+  await write(
+    join(sessionDir(dataDir, sessionId), `${BINDING_PREFIX}${sha256Hex(decisionId)}.json`),
+    {
+      version: 1,
+      at: now,
+    },
+  );
 }
 
 /**
@@ -267,7 +269,7 @@ export async function markOffered(
     ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
   };
   await write(
-    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
+    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${sha256Hex(toolUseId)}.json`),
     saved,
   );
 }
@@ -278,7 +280,7 @@ export async function wasOffered(
   toolUseId: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`);
+  const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${sha256Hex(toolUseId)}.json`);
   const stamp = await readStamp(path);
   return stamp !== null && now - stamp.at <= EXPIRY_MS;
 }
@@ -326,7 +328,7 @@ export async function noteOf(
 }
 
 function notePath(dataDir: string, sessionId: string, toolUseId: string): string {
-  return join(sessionDir(dataDir, sessionId), `${NOTE_PREFIX}${digest(toolUseId)}.json`);
+  return join(sessionDir(dataDir, sessionId), `${NOTE_PREFIX}${sha256Hex(toolUseId)}.json`);
 }
 
 /**
@@ -344,7 +346,7 @@ export async function claimNote(
 ): Promise<boolean> {
   return claimOnce(
     (window) => {
-      const key = digest(JSON.stringify([agentId ?? '', query, window]));
+      const key = sha256Hex(JSON.stringify([agentId ?? '', query, window]));
       return join(sessionDir(dataDir, sessionId), `${QUERY_PREFIX}${key}.json`);
     },
     NOTE_REPEAT_MS,
@@ -368,7 +370,7 @@ function redirectPath(
   target: string,
   window: number,
 ): string {
-  const key = digest(JSON.stringify([agentId ?? '', target, window]));
+  const key = sha256Hex(JSON.stringify([agentId ?? '', target, window]));
   return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${key}.json`);
 }
 
@@ -473,7 +475,7 @@ export async function resolveProgressSession(
     return null;
   }
   if (opts.id !== undefined && opts.id.length > 0) {
-    const marker = `${BINDING_PREFIX}${digest(opts.id)}.json`;
+    const marker = `${BINDING_PREFIX}${sha256Hex(opts.id)}.json`;
     for (const name of names) {
       const bound = await readStamp(join(root, name, marker));
       if (bound !== null && now - bound.at <= EXPIRY_MS) return join(root, name);
@@ -515,7 +517,7 @@ export async function writeProgress(
     ...(parameters !== undefined ? { parameters } : {}),
     ...(step.price !== undefined ? { price: sanitize(step.price, 24) } : {}),
   };
-  await write(join(directory, `${digest(callId)}.json`), saved);
+  await write(join(directory, `${sha256Hex(callId)}.json`), saved);
 }
 
 export interface LookupFooter {

@@ -270,7 +270,6 @@ describe('runPay, tenjin lane', () => {
     });
     for (const call of calls) {
       expect(Object.keys(call.headers)).not.toContain('sign-in-with-x');
-      expect(Object.keys(call.headers)).not.toContain('tenjin-session-delegation');
     }
   });
 
@@ -1055,7 +1054,6 @@ describe('runPay, operator headers (-H)', () => {
       'Payment-Signature: forged',
       'X-PAYMENT: forged',
       'Sign-In-With-X: forged',
-      'Tenjin-Session-Delegation: forged',
       'X-Vercel-Protection-Bypass: secret',
       'Tenjin-Install-Id: other',
       'Content-Type: text/plain',

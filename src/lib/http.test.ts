@@ -337,22 +337,6 @@ describe('httpRequest, signed requests never follow redirects', () => {
     expect(calls[0]?.redirect).toBe('manual');
   });
 
-  it('refuses a 3xx carrying the session delegation header (reusable SIWX signature)', async () => {
-    const { fetchImpl, calls } = recordingFetch(() => redirect(302, 'https://evil.example/'));
-    const res = await httpRequest('https://tenjin.blog/api/posts', {
-      method: 'POST',
-      timeoutMs: 1000,
-      // The session-lifetime wallet signature an earlier release sent on every
-      // session-signed write: still refused, so still pinned.
-      headers: { 'Tenjin-Session-Delegation': 'delegation-value' },
-      jsonBody: {},
-      fetchImpl,
-    });
-
-    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect', status: 302 });
-    expect(calls[0]?.redirect).toBe('manual');
-  });
-
   it('refuses a 3xx carrying the x402 v1 X-PAYMENT spelling (drift insurance)', async () => {
     const { fetchImpl, calls } = recordingFetch(() => redirect(302, 'https://evil.example/'));
     const res = await httpRequest('https://tenjin.blog/api/read/x', {
@@ -436,7 +420,6 @@ describe('httpRequest, signed requests never follow redirects', () => {
     [SIWX_HEADER, 'siwx-value'],
     ['payment-signature', 'pay-value'],
     ['x-payment', 'pay-value'],
-    ['tenjin-session-delegation', 'delegation-value'],
   ];
 
   for (const method of MUTATING_METHODS) {
@@ -481,7 +464,7 @@ describe('httpRequest, signed requests never follow redirects', () => {
     const res = await httpRequest('https://tenjin.blog/api/posts/abc', {
       method: 'PUT' as NonNullable<HttpRequestOptions['method']>,
       timeoutMs: 1000,
-      headers: { 'tenjin-session-delegation': 'delegation-value' },
+      headers: { [SIWX_HEADER]: 'siwx-value' },
       jsonBody: { title: 'edited' },
       fetchImpl,
     });

@@ -169,7 +169,6 @@ export const DENY_HOOK = denyHook();
 export function allowHook(o: RenderOptions = {}): ExecLaunch {
   return printed(permissionAnswer('allow', 'Tenjin lookup'), o.node ?? 'node');
 }
-export const ALLOW_HOOK = allowHook();
 
 /** One routing leg: Claude Code calls the plugin server's `hook` tool. */
 function leg(kind: HookKind, timeout = ROUTE_HOOK_TIMEOUT_SECONDS): unknown[] {
@@ -591,7 +590,7 @@ export const CODEX_DENY_HOOK = echoed(
 );
 
 /**
- * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link ALLOW_HOOK_COMMAND}
+ * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link allowHook}
  * is in Claude Code. Codex runs a `PermissionRequest` hook before its approval
  * policy, `never` included, so the tool runs without a prompt once the user
  * trusts this hook with the others in `/hooks`. It also overrides a user's own

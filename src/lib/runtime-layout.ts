@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultDataDir, runtimeDir } from './paths';
+import { defaultDataDir, isDefaultDataDir, runtimeDir } from './paths';
 import { isNewer, parseVersion } from './version-order';
 
 /**
@@ -35,6 +35,11 @@ const NODE_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 export function runtimeStatePath(root: string): string {
   return join(root, 'state.json');
+}
+
+/** Is there a runtime here? Only the default data dir has one, and only once an install set it up. */
+export function hasRuntime(dataDir: string, home: string): boolean {
+  return isDefaultDataDir(dataDir, home) && existsSync(runtimeStatePath(runtimeDir(dataDir)));
 }
 
 /**

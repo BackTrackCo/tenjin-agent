@@ -61,19 +61,17 @@ export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
  * value formatted as decimal dollars. Emit both so agents compute on `atomic`
  * and humans read `usd` without either side re-deriving the other.
  */
-export const MoneySchema = z.object({
-  atomic: z.string(),
-  usd: z.string(),
-});
-export type Money = z.infer<typeof MoneySchema>;
+export interface Money {
+  atomic: string;
+  usd: string;
+}
 
-export const OutputErrorSchema = z.object({
-  code: ErrorCodeSchema,
-  message: z.string(),
-  fix: z.string().optional(),
-  details: z.unknown().optional(),
-});
-export type OutputError = z.infer<typeof OutputErrorSchema>;
+export interface OutputError {
+  code: ErrorCode;
+  message: string;
+  fix?: string;
+  details?: unknown;
+}
 
 /**
  * "A newer tenjin-cli exists", carried on the envelope so an AGENT learns it.
@@ -84,34 +82,27 @@ export type OutputError = z.infer<typeof OutputErrorSchema>;
  * `tenjin update` itself. Read from the check's cache, never fetched here: the
  * envelope must not wait on a network call it did not need.
  */
-export const UpdateAvailableSchema = z.object({
-  current: z.string(),
-  latest: z.string(),
-});
-export type UpdateAvailable = z.infer<typeof UpdateAvailableSchema>;
+export interface UpdateAvailable {
+  current: string;
+  latest: string;
+}
 
-export const SuccessEnvelopeSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  command: z.string(),
-  ok: z.literal(true),
-  data: z.unknown(),
+export interface SuccessEnvelope {
+  schemaVersion: typeof SCHEMA_VERSION;
+  command: string;
+  ok: true;
+  data: unknown;
   /** Present only when a newer version is known and update.mode is not `off`. */
-  updateAvailable: UpdateAvailableSchema.optional(),
-});
-export type SuccessEnvelope = z.infer<typeof SuccessEnvelopeSchema>;
+  updateAvailable?: UpdateAvailable;
+}
 
-export const FailureEnvelopeSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  command: z.string(),
-  ok: z.literal(false),
-  error: OutputErrorSchema,
-  updateAvailable: UpdateAvailableSchema.optional(),
-});
-export type FailureEnvelope = z.infer<typeof FailureEnvelopeSchema>;
+export interface FailureEnvelope {
+  schemaVersion: typeof SCHEMA_VERSION;
+  command: string;
+  ok: false;
+  error: OutputError;
+  updateAvailable?: UpdateAvailable;
+}
 
 /** The one thing every invocation prints to stdout, discriminated on `ok`. */
-export const OutputEnvelopeSchema = z.discriminatedUnion('ok', [
-  SuccessEnvelopeSchema,
-  FailureEnvelopeSchema,
-]);
-export type OutputEnvelope = z.infer<typeof OutputEnvelopeSchema>;
+export type OutputEnvelope = SuccessEnvelope | FailureEnvelope;

@@ -4,6 +4,7 @@ import { writeFileAtomic } from './atomic-json';
 import { CliError } from './errors';
 import { passphraseRecordPath } from './paths';
 import type { DurableStore } from './wallet-unlock';
+import { LOWERCASE_ADDRESS_RE } from './ids';
 
 /**
  * WHERE EACH WALLET'S PASSPHRASE WAS SAVED, beside the wallet:
@@ -56,8 +57,6 @@ const RecordSchema = z
   })
   .strict();
 
-const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
-
 /** The parsed sidecar's wallets, or null when there is none worth keeping. */
 async function readWallets(dir: string): Promise<Record<string, unknown> | null> {
   try {
@@ -80,7 +79,7 @@ export async function readPassphraseRecord(
   address: string,
 ): Promise<PassphraseRecordEntry | null> {
   const key = address.toLowerCase();
-  if (!ADDRESS_RE.test(key)) return null;
+  if (!LOWERCASE_ADDRESS_RE.test(key)) return null;
   const wallets = await readWallets(dir);
   if (wallets === null) return null;
   // Keys are written lowercase; a hand-edited mixed-case key still matches.
@@ -104,7 +103,7 @@ export async function writePassphraseRecord(
   now: Date = new Date(),
 ): Promise<void> {
   const key = address.toLowerCase();
-  if (!ADDRESS_RE.test(key)) {
+  if (!LOWERCASE_ADDRESS_RE.test(key)) {
     throw new CliError('INTERNAL', `Not a wallet address: ${address}`);
   }
   const wallets = { ...((await readWallets(dir)) ?? {}) };

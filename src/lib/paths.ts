@@ -1,5 +1,6 @@
+import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 /**
  * Where the CLI keeps its config and wallet. Defaults to ~/.tenjin, overridable
@@ -21,6 +22,27 @@ export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
  */
 export function defaultDataDir(home: string = homedir()): string {
   return join(home, '.tenjin');
+}
+
+/** Is `dir` the default data dir for `home`? Only that profile owns the runtime and plugin registration. */
+export function isDefaultDataDir(dir: string, home: string = homedir()): boolean {
+  return resolve(dir) === resolve(defaultDataDir(home));
+}
+
+/** `path` with links resolved, or made absolute as given when it cannot be. */
+export function realOr(path: string): Promise<string> {
+  return realpath(path).catch(() => resolve(path));
+}
+
+/** Do `a` and `b` name the same place, links resolved? */
+export async function samePath(a: string, b: string): Promise<boolean> {
+  const [x, y] = await Promise.all([realOr(a), realOr(b)]);
+  return x === y;
+}
+
+/** `path` with the home folder written as `~`. */
+export function tilde(path: string, home: string): string {
+  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
 /**

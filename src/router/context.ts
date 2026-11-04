@@ -253,21 +253,6 @@ function isLocalTarget(raw: string): boolean {
 }
 
 /**
- * A packet for a caller that has no conversation to send: the query itself is
- * the current message, because the server's message text is `min(1)` and an
- * empty one is a 400 after the routing fee has already settled.
- */
-export function packetForText(text: string): Packet {
-  const bounded = text.trim().slice(0, MAX_MESSAGE_CHARS);
-  return fit({
-    current: { role: 'user', text: bounded.length > 0 ? bounded : '(no task text)' },
-    history: [],
-    literalUrls: literalUrlsIn(bounded),
-    historyStatus: 'unavailable',
-  });
-}
-
-/**
  * Build the packet for one user prompt. `transcriptPath` is the harness's own
  * path for this session; an absent or unusable one yields `unavailable`. The
  * result is neither masked nor bounded: {@link seal} does both.

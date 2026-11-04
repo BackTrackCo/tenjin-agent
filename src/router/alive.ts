@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
@@ -9,8 +8,11 @@ import {
   rememberingBalanceReader,
 } from '../lib/usdc-balance';
 import { readWalletFacts } from '../lib/wallet-facts';
+import { readCappedStdin, sessionIdOf } from './harness-event';
 import { noticeFor } from './notice-markers';
 import { sessionStartMessage } from './wallet-reasons';
+import { sha256Hex } from '../lib/hash';
+import { ADDRESS_RE } from '../lib/ids';
 
 /**
  * THE PLUGIN SAYS IT IS HERE. While a machine carries both the plugin and the
@@ -38,21 +40,13 @@ import { sessionStartMessage } from './wallet-reasons';
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAMP = 'plugin-loaded.json';
-/** A session id names a file only through its hash, so any string is safe. */
-const MAX_SESSION_ID = 200;
 
 export function aliveDir(dataDir: string): string {
   return join(dataDir, 'alive');
 }
 
 function markerName(sessionId: string): string {
-  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
-}
-
-function sessionIdOf(event: unknown): string | null {
-  if (event === null || typeof event !== 'object') return null;
-  const id = (event as { session_id?: unknown }).session_id;
-  return typeof id === 'string' && id.length > 0 && id.length <= MAX_SESSION_ID ? id : null;
+  return sha256Hex(sessionId, 32);
 }
 
 export interface AliveStamp {
@@ -198,7 +192,7 @@ export async function walletNotice(
 ): Promise<string | null> {
   const wallet = await readJson(walletPath(dataDir));
   const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
-  if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
+  if (address === undefined || !ADDRESS_RE.test(address)) return null;
   const config = await readJson(configPath(dataDir));
   const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
   const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
@@ -251,7 +245,7 @@ export async function aliveMain(opts: {
   readEvent?: () => Promise<string>;
   stdout?: Pick<NodeJS.WritableStream, 'write'>;
 }): Promise<void> {
-  const raw = await (opts.readEvent ?? (() => readStdin(1_000)))().catch(() => '');
+  const raw = await (opts.readEvent ?? (() => readCappedStdin(1_000_000, 1_000)))().catch(() => '');
   const answer = await runAliveHook(parseEvent(raw), {
     dataDir: opts.dataDir,
     version: opts.version,
@@ -276,31 +270,6 @@ function parseEvent(raw: string): unknown {
   } catch {
     return null;
   }
-}
-
-function readStdin(timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const timer = setTimeout(() => reject(new Error('no harness event')), timeoutMs);
-    process.stdin.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > 1_000_000) {
-        clearTimeout(timer);
-        reject(new Error('harness event too large'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    process.stdin.once('end', () => {
-      clearTimeout(timer);
-      resolve(Buffer.concat(chunks).toString('utf8'));
-    });
-    process.stdin.once('error', () => {
-      clearTimeout(timer);
-      reject(new Error('harness event unreadable'));
-    });
-  });
 }
 
 /**

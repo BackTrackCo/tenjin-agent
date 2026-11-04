@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,6 +6,7 @@ import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock } from '../lib/lock';
 import { jobsDir } from '../lib/paths';
 import { JobSchema } from './decision';
+import { sha256Hex } from '../lib/hash';
 
 /**
  * A PAID CALL WHOSE SELLER WAS STILL WORKING, kept on this machine so any later
@@ -101,10 +101,8 @@ const TakeSchema = z.strictObject({
 });
 export type JobTake = z.infer<typeof TakeSchema>;
 
-const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
-
 export function takePath(dataDir: string, offerId: string, take: number): string {
-  return join(jobsDir(dataDir), `${digest(offerId)}.${take}.json`);
+  return join(jobsDir(dataDir), `${sha256Hex(offerId)}.${take}.json`);
 }
 
 /**

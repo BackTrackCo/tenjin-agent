@@ -194,7 +194,7 @@ export async function planStop(
   if ('refused' in admission) {
     return {
       status: 'needs_approval',
-      reason: `${plan.sentence} ${admission.refused.message} ${policyFix('not_allowlisted', 'this host')}`,
+      reason: `${plan.sentence} ${admission.refused.message} ${policyFix('not_allowlisted')}`,
       extras: { nextStep: `Tell the user${or}; nothing was paid.` },
       outcome: { status: 'needs_approval' },
     };

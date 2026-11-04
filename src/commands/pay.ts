@@ -37,16 +37,15 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin pay <url>`: the standard x402 client verb, for ANY paid endpoint
- * rather than marketplace pieces. One probe; a 2xx delivers free; a 402 runs
- * shared payment gate (automatic limits for the router, mandatory consent for
- * manual pay, hard price/creator checks for both) and retries once with the
- * `PAYMENT-SIGNATURE`. Deliberately NOT `buy`: no library idempotence (every
- * paid call pays; manual consent and optional `--max-price` are the brakes) and no
- * search attribution. SIWX rides ONLY when the 402 advertises the standard
- * sign-in-with-x extension, and the signature is bound to the TARGET origin
- * (never the configured deployment's), so an entitled wallet re-reads free at
- * any seller that supports it while nothing origin-bound can leak elsewhere.
+ * `tenjin pay <url>`: the standard x402 client verb, for ANY paid endpoint.
+ * One probe; a 2xx delivers free; a 402 runs the payment gate (automatic
+ * limits for the router, mandatory consent for manual pay, hard price/creator
+ * checks for both) and retries once with the `PAYMENT-SIGNATURE`. Every paid
+ * call pays; manual consent and optional `--max-price` are the brakes. SIWX
+ * rides ONLY when the 402 advertises the standard sign-in-with-x extension,
+ * and the signature is bound to the TARGET origin (never the configured
+ * deployment's), so an entitled wallet re-reads free at any seller that
+ * supports it while nothing origin-bound can leak elsewhere.
  *
  * Direct third-party payments require acknowledgement of registry warnings.
  * Router calls retain their advertised-price and supplied-term hard checks,
@@ -375,7 +374,7 @@ async function executePay(
   const signer = await openWallet(provider);
   openedSigner.current = signer;
 
-  // The standard sign-in-with-x extension, same sequence as `buy`: when the 402
+  // The standard sign-in-with-x extension: when the 402
   // advertises it, an entitled wallet re-reads FREE before any payment exists,
   // and the re-check doubles as the fresh-challenge refetch the payment is
   // built against. The signature binds to the TARGET origin (host-with-port),
@@ -422,7 +421,7 @@ async function executePay(
     if (fresh === undefined) {
       throw noMatchingEntry(effectiveChallenge, args.terms);
     }
-    // Refuse a price bump between the first look and signing, exactly as `buy`.
+    // Refuse a price bump between the first look and signing.
     if (BigInt(fresh.amount) > firstSeenAmount) {
       throw new CliError('PAYMENT_FAILED', 'The price increased before signing; refusing to pay.', {
         fix: 'Re-run `tenjin pay` to review the new price, and set --max-price to cap it.',
@@ -495,8 +494,7 @@ async function executePay(
     settings.policy,
     deps.authorizer !== undefined ? { authorizer: deps.authorizer } : {},
   );
-  // The host is the creator identity here (`allowlistCreators` users pin
-  // hosts); the gate itself is shared with `buy` so the two verbs cannot drift.
+  // The host is the creator identity here: `allowlistCreators` users pin hosts.
   const verifiedVia = registry ?? termsLabel;
   const via = verifiedVia !== undefined ? ` (${sanitizeForTerminal(verifiedVia)})` : '';
   const mode = router && !approved ? 'automatic' : 'manual';
@@ -511,8 +509,6 @@ async function executePay(
     yes: args.yes === true || approved,
     ...(deps.confirm !== undefined ? { confirm: deps.confirm } : {}),
     payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
-    allowlistSubject: 'this host',
-    notConfirmedMessage: 'Payment not confirmed.',
   });
 
   // A failure BEFORE transmission (the build) releases: no signature exists,

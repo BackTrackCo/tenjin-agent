@@ -65,7 +65,7 @@ export interface ResolveWalletProviderOptions {
  * non-interactive context (io.isTTY:false — every `tenjin mcp` context, and any
  * piped-stdout run) can NEVER trigger a hidden-input passphrase prompt, which
  * under the MCP stdio transport would fight the transport for stdin. It fails with
- * the coded no-passphrase error instead. This mirrors buy's confirm gate, which
+ * the coded no-passphrase error instead. This mirrors pay's confirm gate, which
  * already declines when !ctx.io.isTTY. A real TTY passes isTTY:undefined, keeping
  * the resolver's existing process.stdin.isTTY default untouched.
  */

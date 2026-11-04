@@ -11,6 +11,7 @@ import pkg from '../../package.json';
 import { dataDir as defaultDataDir } from '../lib/paths';
 import { resolveContextSettings } from '../lib/settings';
 import { readUsdcBalance } from '../lib/usdc-balance';
+import { atLeast } from '../lib/version-order';
 import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -125,7 +126,7 @@ export const ALWAYS_LOAD_KEY = 'anthropic/alwaysLoad';
  */
 export const REQUIRES_USER_INTERACTION_KEY = 'anthropic/requiresUserInteraction';
 /** The first Claude Code that honours {@link REQUIRES_USER_INTERACTION_KEY}. */
-const PROMPTING_CLAUDE_CODE = [2, 1, 214] as const;
+const PROMPTING_CLAUDE_CODE = '2.1.214';
 
 /**
  * The first Claude Code that moves a main-conversation MCP call running past
@@ -133,20 +134,13 @@ const PROMPTING_CLAUDE_CODE = [2, 1, 214] as const;
  * Its idle timeout is reset by each progress notification, so a call that
  * reports each poll can wait out a job's own `maxWaitS`.
  */
-const BACKGROUNDING_CLAUDE_CODE = [2, 1, 212] as const;
+const BACKGROUNDING_CLAUDE_CODE = '2.1.212';
 
 type ClientInfo = { name: string; version: string } | undefined;
 
 /** Whether the client is Claude Code at `floor` or later. */
-function claudeCodeAtLeast(client: ClientInfo, floor: readonly number[]): boolean {
-  if (client?.name !== 'claude-code') return false;
-  const version = client.version.split('.').map((part) => Number.parseInt(part, 10));
-  for (const [index, least] of floor.entries()) {
-    const part = version[index] ?? 0;
-    if (!Number.isFinite(part) || part < least) return false;
-    if (part > least) return true;
-  }
-  return true;
+function claudeCodeAtLeast(client: ClientInfo, floor: string): boolean {
+  return client?.name === 'claude-code' && atLeast(client.version, floor);
 }
 
 /** Whether this client prompts a person before every `approve` call. */
@@ -532,7 +526,7 @@ function registerCodexHookTool(
           ...(opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {}),
         });
         if (event !== null) {
-          const { codexResponse } = await import('./codex-event');
+          const { codexResponse } = await import('./codex-wire');
           response = codexResponse(
             await runHookKind(args.kind, event, {
               dataDir: ctx.dataDir,

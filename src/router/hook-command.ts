@@ -9,6 +9,7 @@ import {
 } from './hooks';
 import type { Io } from '../lib/output';
 import { sessionServedByPlugin } from './alive';
+import { readCappedStdin, sessionIdOf } from './harness-event';
 import type { HookKind } from './hook-tool';
 import { launchedByPlugin } from './names';
 import { firstNoticeFor, noticeFor, settleCurrent } from './notice-markers';
@@ -57,7 +58,9 @@ export interface HookCommandDeps extends Pick<HookDeps, 'dataDir' | 'harness' | 
 export async function runHookCommand(io: Io, deps: HookCommandDeps): Promise<void> {
   let response: unknown = null;
   try {
-    const event = JSON.parse(await (deps.readEvent ?? readStdin)()) as unknown;
+    const event = JSON.parse(
+      await (deps.readEvent ?? (() => readCappedStdin(MAX_EVENT_BYTES, STDIN_TIMEOUT_MS)))(),
+    ) as unknown;
     // An entry an older settings install wrote stays silent in a session the
     // plugin serves (see `alive.ts`). SHIM: goes on or after 2026-12-01.
     if (
@@ -80,13 +83,6 @@ export async function runHookCommand(io: Io, deps: HookCommandDeps): Promise<voi
     response = null;
   }
   if (response !== null) io.stdout.write(`${JSON.stringify(response)}\n`);
-}
-
-/** A session id as the hook schemas take one: a string of 1 to 200 characters. */
-function sessionIdOf(event: unknown): string | null {
-  if (event === null || typeof event !== 'object') return null;
-  const id = (event as { session_id?: unknown }).session_id;
-  return typeof id === 'string' && id.length > 0 && id.length <= 200 ? id : null;
 }
 
 /**
@@ -162,30 +158,4 @@ function withNotices(response: unknown, notices: Set<string>): unknown | null {
   return response === null || typeof response !== 'object'
     ? { systemMessage }
     : { ...response, systemMessage };
-}
-
-async function readStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const timer = setTimeout(() => reject(new Error('no harness event')), STDIN_TIMEOUT_MS);
-    const done = (value: string): void => {
-      clearTimeout(timer);
-      resolve(value);
-    };
-    process.stdin.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_EVENT_BYTES) {
-        clearTimeout(timer);
-        reject(new Error('harness event too large'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    process.stdin.once('end', () => done(Buffer.concat(chunks).toString('utf8')));
-    process.stdin.once('error', () => {
-      clearTimeout(timer);
-      reject(new Error('harness event unreadable'));
-    });
-  });
 }

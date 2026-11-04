@@ -3,6 +3,7 @@ import { hasCode } from './errno';
 import { readPassphraseRecord } from './passphrase-record';
 import { passphraseFilePathFor, passphraseRecordPath, walletPath } from './paths';
 import { PRIVATE_KEY_RE, type DurableStore } from './wallet-unlock';
+import { ADDRESS_RE } from './ids';
 
 /**
  * WHAT THE FILES SAY ABOUT THE WALLET, without unlocking it. The hooks, `alive`
@@ -33,7 +34,6 @@ export interface WalletFacts {
 }
 
 /** The same address test `hooks.ts` applies to wallet.json's cleartext field. */
-const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 /**
  * Read {@link WalletFacts} for `dataDir` under `env`. Never rejects.

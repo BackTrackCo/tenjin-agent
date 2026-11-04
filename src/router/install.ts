@@ -1,5 +1,4 @@
-import { existsSync } from 'node:fs';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,13 +8,13 @@ import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
-import { defaultDataDir, runtimeDir } from '../lib/paths';
+import { isDefaultDataDir, realOr, samePath, tilde } from '../lib/paths';
 import { isSourceCheckout } from '../lib/install-location';
 import { runningGlibc, unpinnedPlatform } from '../lib/runtime-fetch';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
 import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
-import { runtimeBuild, runtimeStatePath, type RuntimePointer } from '../lib/runtime-layout';
+import { hasRuntime, runtimeBuild, type RuntimePointer } from '../lib/runtime-layout';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import {
   loadRawConfig,
@@ -318,7 +317,7 @@ export async function projectInstallHere(
   home: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  if (await isHome(cwd, home)) return false;
+  if (await samePath(cwd, home)) return false;
   return projectInstallAt(cwd, home, env);
 }
 
@@ -337,18 +336,10 @@ export async function projectInstallAt(
     .then((raw) => JSON.parse(raw) as { enabledPlugins?: Record<string, unknown> })
     .catch(() => null);
   if (local?.enabledPlugins?.[PLUGIN_ID] === true) return true;
-  if (await isHome(dir, home)) return false;
+  if (await samePath(dir, home)) return false;
   if ((await folderState('local', env, home, dir)).state === 'ours') return true;
   const paths = settingsInstallPaths(true, env, home, dir);
   return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).events.length > 0;
-}
-
-async function isHome(dir: string, home: string): Promise<boolean> {
-  const [dirPath, homePath] = await Promise.all([
-    realpath(dir).catch(() => dir),
-    realpath(home).catch(() => home),
-  ]);
-  return dirPath === homePath;
 }
 
 /** How a refresh with no Claude Code install to converge refuses. */
@@ -703,14 +694,6 @@ export function runtimeOncePerRun(setup = defaultRuntime): typeof defaultRuntime
   };
 }
 
-/** Is there a runtime here? Only the default data dir has one, and only once an install set it up. */
-export function hasRuntime(dataDir: string, home: string): boolean {
-  return (
-    resolve(dataDir) === resolve(defaultDataDir(home)) &&
-    existsSync(runtimeStatePath(runtimeDir(dataDir)))
-  );
-}
-
 /**
  * A refresh that brought only the runtime up to date, for a machine with no
  * Claude Code surface of Tenjin's: `plugin` is null, and the runtime's
@@ -807,7 +790,7 @@ export function assertPluginInstallation(
   home: string,
   env: NodeJS.ProcessEnv,
 ): void {
-  if (env.TENJIN_DATA_DIR && resolve(dataDir) !== resolve(defaultDataDir(home))) {
+  if (env.TENJIN_DATA_DIR && !isDefaultDataDir(dataDir, home)) {
     throw new CliError('REFUSED', 'Plugin installation needs the default data directory.', {
       fix: 'Run without TENJIN_DATA_DIR. Other CLI commands still support it.',
     });
@@ -901,21 +884,13 @@ async function recordClaudeProjects(
 ): Promise<void> {
   const records = await recordedInstalls(env, home).catch(() => null);
   if (records === null || records.every((r) => r.projectPath === null)) return;
-  const seen = new Set([
-    ...known,
-    ...(await Promise.all(known.map((dir) => realpath(dir).catch(() => dir)))),
-  ]);
+  const seen = new Set([...known, ...(await Promise.all(known.map(realOr)))]);
   for (const { projectPath } of records) {
     if (projectPath === null || seen.has(projectPath)) continue;
     if ((await stat(projectPath).catch(() => null))?.isDirectory() !== true) continue;
     seen.add(projectPath);
     await persistRouterProject(dataDir, projectPath).catch(() => undefined);
   }
-}
-
-/** `path` with the home folder written as `~`. */
-export function tilde(path: string, home: string): string {
-  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
 /** The first activation's line, said once: where Tenjin runs from now. */

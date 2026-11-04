@@ -1,13 +1,12 @@
-import { existsSync } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { persistRouterProject } from '../commands/config';
 import type { CommandContext, CommandResult } from '../context';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { defaultDataDir, runtimeDir } from '../lib/paths';
-import { runtimeStatePath } from '../lib/runtime-layout';
+import { isDefaultDataDir, realOr, runtimeDir, tilde } from '../lib/paths';
+import { hasRuntime } from '../lib/runtime-layout';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { removeAliveState } from './alive';
 import { findClaudeBinary, jsonList, jsonResult, runClaude, type ClaudeBinary } from './claude-cli';
@@ -71,7 +70,6 @@ export interface Removal {
 /** `remaining`'s name for the user install; a project is its folder. */
 const USER = 'user';
 
-const real = (path: string): Promise<string> => realpath(path).catch(() => resolve(path));
 const isDir = async (path: string): Promise<boolean> =>
   (await stat(path).catch(() => null))?.isDirectory() === true;
 
@@ -106,14 +104,14 @@ async function installRecords(
   const records: InstallRecord[] = [];
   const seen = new Set<string>();
   for (const r of claude) {
-    const key = r.projectPath === null ? USER : await real(r.projectPath);
+    const key = r.projectPath === null ? USER : await realOr(r.projectPath);
     if (seen.has(key)) continue;
     seen.add(key);
     records.push(r.projectPath === null ? r : { scope: 'local', projectPath: key });
   }
   const recorded = records.length;
   for (const dir of listed) {
-    const key = await real(dir);
+    const key = await realOr(dir);
     if (seen.has(key) || !(await projectInstallAt(key, home, env))) continue;
     seen.add(key);
     records.push({ scope: 'local', projectPath: key });
@@ -131,7 +129,7 @@ async function nearestProject(
   dir: string,
   home: string,
 ): Promise<(InstallRecord & { projectPath: string }) | undefined> {
-  const homeReal = await real(home);
+  const homeReal = await realOr(home);
   return records
     .filter(
       (r): r is InstallRecord & { projectPath: string } =>
@@ -158,13 +156,13 @@ export async function resolveUninstallTarget(
   const cwd = deps.cwd ?? process.cwd();
   const records = await installRecords(ctx.dataDir, env, home);
   if (o.project !== undefined) {
-    const dir = await real(o.project === true ? cwd : resolve(cwd, o.project));
+    const dir = await realOr(o.project === true ? cwd : resolve(cwd, o.project));
     return {
       kind: 'project',
       path: (await nearestProject(records, dir, home))?.projectPath ?? dir,
     };
   }
-  const here = await nearestProject(records, await real(cwd), home);
+  const here = await nearestProject(records, await realOr(cwd), home);
   return here !== undefined ? { kind: 'project', path: here.projectPath } : { kind: 'user' };
 }
 
@@ -215,7 +213,7 @@ export async function runRouterUninstall(
         : { scope: 'user', projectPath: null };
     const live = await liveOthers(others);
     if (live.length > 0 && !(await leftHere(fallback, env, home))) {
-      return nothingHere(target, await real(cwd), live.map(labelOf), ctx.dataDir, env, home);
+      return nothingHere(target, await realOr(cwd), live.map(labelOf), ctx.dataDir, env, home);
     }
     targets = [fallback];
   }
@@ -248,7 +246,7 @@ export async function runRouterUninstall(
   // WHAT CLAUDE CODE STILL RECORDS decides, not the exit codes alone.
   const after = (await recordedInstalls(env, home)) ?? [];
   const afterKeys = new Set(
-    await Promise.all(after.map((r) => (r.projectPath === null ? USER : real(r.projectPath)))),
+    await Promise.all(after.map((r) => (r.projectPath === null ? USER : realOr(r.projectPath)))),
   );
   const left = removals.filter(
     (r) =>
@@ -472,19 +470,6 @@ function sharedParts(dataDir: string, home: string): string {
     : `the ${MARKETPLACE_NAME} marketplace`;
 }
 
-/**
- * Is there a runtime to keep? Only the default data dir has one, and only once
- * an install set it up: a platform Tenjin pins no Node for, or an install that
- * fell back, has none.
- */
-function hasRuntime(dataDir: string, home: string): boolean {
-  return isDefaultDataDir(dataDir, home) && existsSync(runtimeStatePath(runtimeDir(dataDir)));
-}
-
-function isDefaultDataDir(dataDir: string, home: string): boolean {
-  return resolve(dataDir) === resolve(defaultDataDir(home));
-}
-
 async function nothingHere(
   target: UninstallTarget,
   cwd: string,
@@ -557,11 +542,6 @@ function settingsLines(settingsPath: string, settings: LegacyRemoval | null): st
   }
   lines.push(...settings.warnings.map((w) => `settings: ${w}`));
   return lines;
-}
-
-/** `path` with the home folder written as `~`. */
-function tilde(path: string, home: string): string {
-  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
 /**

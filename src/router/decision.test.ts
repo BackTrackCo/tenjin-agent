@@ -5,8 +5,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
-import { packetForText } from './context';
+import type { Packet } from './context';
 import { parseForTests, requestDecision, ROUTE_PAID_PATH } from './decision';
+
+/** A packet holding just `text` as the current message. */
+const packetForText = (text: string): Packet => ({
+  current: { role: 'user', text },
+  history: [],
+  literalUrls: [],
+  historyStatus: 'unavailable',
+});
 
 /**
  * THE DECISION, WITH NO PAYER. These calls go to the paid route unpaid, as a

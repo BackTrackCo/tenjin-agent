@@ -21,7 +21,6 @@ import { rememberingBalanceReader } from '../lib/usdc-balance';
 // suite stays offline and deterministic. viem's key derivation stays real.
 vi.mock('../lib/usdc', () => ({
   USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  USDC_DECIMALS: 6,
   getUsdcBalance: vi.fn(),
 }));
 

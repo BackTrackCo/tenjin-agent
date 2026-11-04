@@ -78,21 +78,7 @@ export async function findNearestProjectFiles(
   names: readonly string[],
   deps: ProjectWalkDeps & { homeIsProject?: boolean } = {},
 ): Promise<ProjectWalkHit | null> {
-  const homeDir = deps.homeDir ?? homedir();
-
-  let dir = cwd;
-  // Bounded by $HOME (a shared-host trust boundary) and the filesystem root
-  // (dirname('/') === '/'), whichever comes first.
-  for (;;) {
-    if (dir === homeDir && deps.homeIsProject === false) return null;
-    const found = await ownedCandidates(dir, names, deps);
-    if (found.length > 0) return { dir, found };
-    if (await pathExists(join(dir, '.git'))) return null; // repo root, no file
-    if (dir === homeDir) return null; // never cross above $HOME
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  return (await walkUp(cwd, names, deps, true)).levels[0] ?? null;
 }
 
 /**
@@ -101,10 +87,24 @@ export async function findNearestProjectFiles(
  * {@link findNearestProjectFiles}; `gitRoot` is null outside a repository.
  * For layers that each only tighten, where reading one more can never loosen.
  */
-export async function findAllProjectFiles(
+export function findAllProjectFiles(
   cwd: string,
   names: readonly string[],
   deps: ProjectWalkDeps & { homeIsProject?: boolean } = {},
+): Promise<{ levels: ProjectWalkHit[]; gitRoot: string | null }> {
+  return walkUp(cwd, names, deps, false);
+}
+
+/**
+ * The walk itself, up from `cwd`: it stops at a git root, at $HOME (a
+ * shared-host trust boundary) and at the filesystem root, whichever comes
+ * first, and with `nearest` at the first directory holding one of `names`.
+ */
+async function walkUp(
+  cwd: string,
+  names: readonly string[],
+  deps: ProjectWalkDeps & { homeIsProject?: boolean },
+  nearest: boolean,
 ): Promise<{ levels: ProjectWalkHit[]; gitRoot: string | null }> {
   const homeDir = deps.homeDir ?? homedir();
   const levels: ProjectWalkHit[] = [];
@@ -112,7 +112,10 @@ export async function findAllProjectFiles(
   for (;;) {
     if (dir === homeDir && deps.homeIsProject === false) return { levels, gitRoot: null };
     const found = await ownedCandidates(dir, names, deps);
-    if (found.length > 0) levels.push({ dir, found });
+    if (found.length > 0) {
+      levels.push({ dir, found });
+      if (nearest) return { levels, gitRoot: null };
+    }
     if (await pathExists(join(dir, '.git'))) return { levels, gitRoot: dir };
     if (dir === homeDir) return { levels, gitRoot: null };
     const parent = dirname(dir);
@@ -176,14 +179,7 @@ export async function ownedCandidates(
  * above `cwd`, or `cwd` itself outside a repository. Same bounds as the walk.
  */
 export async function projectRoot(cwd: string, homeDir: string = homedir()): Promise<string> {
-  let dir = cwd;
-  for (;;) {
-    if (await pathExists(join(dir, '.git'))) return dir;
-    if (dir === homeDir) return cwd;
-    const parent = dirname(dir);
-    if (parent === dir) return cwd;
-    dir = parent;
-  }
+  return (await walkUp(cwd, [], { homeDir }, false)).gitRoot ?? cwd;
 }
 
 /**

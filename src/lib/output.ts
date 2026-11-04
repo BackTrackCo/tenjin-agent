@@ -170,7 +170,7 @@ export const ANSI_ESCAPE_RE =
  * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
  * formatting, and invisible tag/BOM characters from a string headed for a
  * terminal. Commands apply this to every SERVER-sourced string (titles,
- * handles) they put into human lines or the buy confirm prompt; without it a
+ * handles) they put into human lines or the pay confirm prompt; without it a
  * malicious deployment could use cursor-movement escapes to overwrite the very
  * price a human is being asked to confirm, a right-to-left override to reorder
  * that same line on screen into one that reads as a different price, or tag

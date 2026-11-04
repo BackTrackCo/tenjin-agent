@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { sha256Hex } from '../lib/hash';
 
 /**
  * ONE MEMO FOR "DO NOT ASK THE ROUTER YET", per machine and per router origin,
@@ -35,7 +35,7 @@ export const UNREACHABLE_BACKOFF_MS = 60_000;
 
 function memoPath(dataDir: string, kind: RouterMemoKind, baseUrl: string): string {
   const origin = new URL(baseUrl).origin;
-  const key = createHash('sha256').update(origin).digest('hex').slice(0, 16);
+  const key = sha256Hex(origin, 16);
   return join(dataDir, 'router-memo', `${kind}-${key}.json`);
 }
 

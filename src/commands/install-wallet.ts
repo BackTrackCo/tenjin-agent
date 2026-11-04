@@ -167,10 +167,9 @@ export function walletValue(w: WalletOutcome): string {
 }
 
 /**
- * The wallet decision. A wallet is now created BY DEFAULT on both paths, because
- * the loop this command exists to set up does not close without one: `buy` needs
- * a funded key and publish-on-MISS needs a key to sign the write, so a walletless
- * install is a setup that stops at the first useful thing the agent tries.
+ * The wallet decision. A wallet is created BY DEFAULT on both paths, because
+ * the router pays every call from it, so a walletless install is a setup that
+ * stops at the first useful thing the agent tries.
  *
  * The headless path creates without asking. Create never prompts for the new
  * secret (Q1): it uses TENJIN_WALLET_PASSPHRASE when set, else a strong

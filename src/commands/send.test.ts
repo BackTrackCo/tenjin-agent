@@ -12,7 +12,6 @@ vi.mock('../lib/usdc', async () => {
   const actual = await vi.importActual<typeof import('../lib/usdc')>('../lib/usdc');
   return {
     USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    USDC_DECIMALS: 6,
     FeeCapExceededError: actual.FeeCapExceededError,
     SendRevertedError: actual.SendRevertedError,
     SendPendingError: actual.SendPendingError,

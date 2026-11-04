@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { hookToolInput } from './hook-tool';
 import { PLUGIN_HOOK_TOOL, PLUGIN_SERVER, REQUEST_TOOL } from './names';
-import { commandForm, handlersIn, shellDependence } from './hook-form';
+import { handlersIn } from './hook-form';
+import { commandForm, shellDependence } from './hook-form-test-utils';
 import {
   ALIVE_ARGS,
-  ALLOW_HOOK,
+  allowHook,
   cliLaunch,
   DENY_HOOK,
   MOD_FILES,
@@ -149,7 +150,7 @@ describe("the plugin's hooks", () => {
       { matcher: 'Agent|Task', hooks: leg('agent') },
       { matcher: 'AskUserQuestion', hooks: leg('ask') },
       { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
-      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
+      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(allowHook()) },
     ]);
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
@@ -183,7 +184,7 @@ describe("the plugin's hooks", () => {
       permissionDecision: 'deny',
       permissionDecisionReason: `Only the Tenjin hooks call this tool. To make a lookup, call ${REQUEST_TOOL}.`,
     });
-    expect(answer(ALLOW_HOOK).hookSpecificOutput).toMatchObject({
+    expect(answer(allowHook()).hookSpecificOutput).toMatchObject({
       hookEventName: 'PreToolUse',
       permissionDecision: 'allow',
     });
@@ -260,7 +261,7 @@ describe('the runtime render', () => {
     expect(renderPluginFiles('1.2.3', undefined, {})).toEqual(renderPluginFiles('1.2.3'));
     expect(Object.keys(renderHostFiles('1.2.3')).some((p) => p.includes('/bin/'))).toBe(false);
     expect(DENY_HOOK.command).toBe('node');
-    expect(ALLOW_HOOK.command).toBe('node');
+    expect(allowHook().command).toBe('node');
   });
 
   /** One trailing options object, so another render option joins it rather than a new position. */

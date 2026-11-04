@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext, CommandResult } from '../context';
 import { CliError } from '../lib/errors';
 import {
-  agentHost,
   checkEach,
   claudePluginPresent,
   detectHosts,
@@ -256,16 +255,6 @@ describe('the first record on a machine with a released Claude Code install', ()
     expect(await readInstalledHosts(dir)).toEqual(['codex']);
     await recordInstalledHost(dir, 'codex', async () => true);
     expect(await readInstalledHosts(dir)).toEqual(['codex']);
-  });
-});
-
-describe('agentHost', () => {
-  it('tells Claude Code from Codex by environment, Claude Code first', () => {
-    expect(agentHost({ CLAUDECODE: '1' })).toBe('claude');
-    expect(agentHost({ CODEX_SESSION_ID: 'abc' })).toBe('codex');
-    expect(agentHost({ CODEX_SESSION_ID: 'abc', CLAUDE_CODE_SESSION_ID: 'x' })).toBe('claude');
-    expect(agentHost({ CODEX_SESSION_ID: '  ' })).toBeUndefined();
-    expect(agentHost({})).toBeUndefined();
   });
 });
 

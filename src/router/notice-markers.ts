@@ -1,10 +1,11 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { hasCode } from '../lib/errno';
 import type { UnlockReason } from '../lib/wallet-unlock';
 import { WALLET_CLASS, walletClearedSentence } from './wallet-reasons';
+import { sha256Hex } from '../lib/hash';
 
 /**
  * WHAT A SESSION HAS ALREADY BEEN TOLD, on disk, because every hook leg is its
@@ -57,11 +58,11 @@ function noticesDir(dataDir: string): string {
 }
 
 function sessionHash(sessionId: string): string {
-  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
+  return sha256Hex(sessionId, 32);
 }
 
 function reasonMarker(dataDir: string, sessionId: string, why: string): string {
-  const reason = createHash('sha256').update(why).digest('hex').slice(0, 8);
+  const reason = sha256Hex(why, 8);
   return join(noticesDir(dataDir), `${sessionHash(sessionId)}-${reason}`);
 }
 

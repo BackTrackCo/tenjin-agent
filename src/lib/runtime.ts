@@ -46,7 +46,7 @@ import { hasCode } from './errno';
 import { CliError } from './errors';
 import { isSourceCheckout } from './install-location';
 import { LockTimeoutError } from './lock';
-import { defaultDataDir, launcherDir, runtimeDir } from './paths';
+import { isDefaultDataDir, launcherDir, runtimeDir } from './paths';
 import {
   download,
   downloadViaCurl,
@@ -1707,7 +1707,7 @@ export async function setupRuntime(o: {
   if (isSourceCheckout(o.moduleDir)) {
     return { state: 'skipped', root, firstTime: false, launcher: null };
   }
-  if (resolve(o.dataDir) !== resolve(defaultDataDir(o.home))) {
+  if (!isDefaultDataDir(o.dataDir, o.home)) {
     return {
       state: 'failed',
       root,

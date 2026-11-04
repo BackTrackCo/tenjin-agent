@@ -1,4 +1,5 @@
 import { withAppServer } from './codex-app-server';
+import { isRecord } from './guards';
 
 /**
  * The one write that makes the hook handlers this CLI registered run: `install`
@@ -57,10 +58,6 @@ export interface ListedHook {
   sourcePath?: unknown;
   currentHash?: unknown;
   command?: unknown;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 export interface TrustProbeOptions {
