@@ -35,6 +35,7 @@ import { hookToolInput } from './hook-tool';
 import type { OfferSpec } from './decision';
 import {
   buildRouterMcpServer,
+  createRouterMcpServer,
   MAX_RESULT_SIZE_CHARS,
   ALWAYS_LOAD_KEY,
   MAX_RESULT_SIZE_KEY,
@@ -643,11 +644,15 @@ describe('the hook tool', () => {
         name: 'hook',
         arguments: substituted('prompt', promptEvent('sess-paid', transcript)),
       });
+      // The leg's 402, the background top-up it waited for, then its voucher.
       expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route warm unpaid',
+        'POST /api/x402-router/route warm paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
       ]);
-      expect(fake.deposits).toBe(1);
+      expect(fake.depositedOn).toEqual(['warm']);
       expect(fake.settledFees).toBe(1);
     } finally {
       await client.close();
@@ -896,13 +901,12 @@ describe('the payer verdict and the wallet news', () => {
   });
 
   it("offers on the payer's ready verdict though the files alone would withhold", async () => {
-    const payer = new RoutingPayer(
-      payerDeps(new FakeRouter(), dir, privateKeyToAccount(generatePrivateKey())),
-    );
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer(payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())));
     await payer.prewarm();
     expect(payer.signVerdict().status).toBe('ready');
     // No wallet.json and no key in the hook env: the files alone say no_wallet.
-    const { answer, asked } = await promptLeg(payer, {});
+    const { answer, asked } = await promptLeg(payer, {}, observer(), fake);
     expect(asked).toBeGreaterThan(0);
     expect(answer.hookSpecificOutput?.additionalContext ?? '').toContain('CoinMarketCap fits this');
   });
@@ -1120,6 +1124,72 @@ describe('a free answer on a machine with no wallet', () => {
       expect(envelopeOf(called)).toMatchObject({ status: 'native' });
     } finally {
       await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * THE SESSION'S FIRST TOP-UP: `tenjin mcp` funds a channel that
+ * cannot cover a fee once its prewarm unlock settles, so the first prompt
+ * meets no deposit; where the router is off it sends nothing.
+ */
+describe('the top-up at the start of tenjin mcp', () => {
+  const observers: RouterObserver[] = [];
+  afterEach(() => {
+    for (const o of observers.splice(0)) o.dispose();
+  });
+
+  async function started(config: Record<string, unknown>) {
+    await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer(payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())));
+    const observer = createRouterObserver({
+      dataDir: dir,
+      pid: process.pid,
+      startedAt: Date.now(),
+      cliVersion: 'test',
+      harness: 'claude',
+      launchedByPlugin: true,
+      cwd: dir,
+      env: {},
+    });
+    observers.push(observer);
+    const server = await createRouterMcpServer({
+      dataDir: dir,
+      flags: { baseUrl: 'https://router.test' },
+      payer,
+      observer,
+      // `router.*` resolves from this test's own git root, never the suite's cwd.
+      handlerDeps: { cwd: dir },
+      topUpAtStart: true,
+    });
+    return { fake, payer, server };
+  }
+
+  it('funds a new channel in the background, with no prompt asking, where the router is on', async () => {
+    const { fake, payer, server } = await started({ maxAutoSpend: '250000' });
+    try {
+      await vi.waitFor(() => expect(fake.depositedOn).toEqual(['warm']));
+      // Its channel write and memo clear land before the folder goes.
+      await payer.idle();
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route warm unpaid',
+        'POST /api/x402-router/route warm paid',
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('sends nothing where the router is off', async () => {
+    const { fake, payer, server } = await started({ router: { enabled: false } });
+    try {
+      await payer.prewarm();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await payer.idle();
+      expect(fake.log).toEqual([]);
+    } finally {
       await server.close();
     }
   });
