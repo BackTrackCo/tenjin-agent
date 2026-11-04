@@ -42,6 +42,14 @@ describe('result body validation', () => {
     expect(validateResultBody(schema, OVER_CAP).reason).toContain('validation limit');
   });
 
+  it('refuses a body nested past the depth limit', () => {
+    let deep: unknown = 'leaf';
+    for (let i = 0; i < 40; i++) deep = { next: deep };
+    const check = validateResultBody(schema, JSON.stringify({ data: deep }));
+    expect(check.valid).toBe(false);
+    expect(check.reason).toContain('nesting limit');
+  });
+
   /**
    * AN ORDINARY PROVIDER BODY IS CHECKED. An Apollo person hit is 60-180 KB;
    * one past 64 KB was refused by the input cap, and one past 128 KB never

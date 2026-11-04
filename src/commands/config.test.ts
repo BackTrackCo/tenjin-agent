@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -384,6 +384,25 @@ describe('forward compatibility', () => {
     const raw = (await readRawFile()) as { update: Record<string, unknown> };
     expect(raw.update).toEqual({ channel: 'next', mode: 'off' });
   });
+});
+
+describe('config set rpcUrl file mode', () => {
+  // rpcUrl can carry an RPC provider's key, so config.json gets 0600 even in a
+  // data dir that already exists at 0755 (recursive mkdir never chmods it).
+  const KEYED = 'https://base.example/v2/rpc-key-abc123';
+  it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
+    await runConfigSet({ key: 'rpcUrl', value: KEYED }, makeCtx());
+    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'still lands at 0600 inside a data dir that already exists at 0755',
+    async () => {
+      await chmod(dir, 0o755);
+      await runConfigSet({ key: 'rpcUrl', value: KEYED }, makeCtx());
+      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+    },
+  );
 });
 
 describe('update.mode', () => {

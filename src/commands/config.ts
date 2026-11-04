@@ -651,9 +651,9 @@ function parseHttpUrl(value: string): string {
 
 /**
  * Apply `merge` to the raw file and write it back atomically. Uses the partial
- * schema and writeFileAtomic (not writeConfig, which would materialize every
- * default into the file and corrupt provenance). loadRawConfig surfaces a
- * corrupt existing file as CONFIG_INVALID, which propagates.
+ * schema, so no default is materialized into the file and provenance stays
+ * intact. loadRawConfig surfaces a corrupt existing file as CONFIG_INVALID,
+ * which propagates.
  *
  * The whole read-merge-write runs under a cross-process file lock: without it two
  * concurrent `config set` on different keys race on the read, and the last writer
@@ -674,9 +674,11 @@ async function persist(
         const existing = await loadRawConfig(dir);
         const merged = merge(existing);
         const validated = RawConfigSchema.parse(merged);
-        // 0600, matching lib/config.ts's `writeConfig`: `rpcUrl` can carry an RPC
-        // provider's key, and this is the writer `config set` uses to put it
-        // there. See that function for why dirMode alone is not enough.
+        // 0600: `rpcUrl` can carry an RPC provider's key, and this is the writer
+        // `config set` uses to put it there. dirMode 0o700 is no backstop: node's
+        // recursive mkdir does not chmod a directory that already exists, so a
+        // data dir created at 0755 (a devcontainer volume, a restored backup)
+        // would leave a 0644 config readable by anyone on the box.
         await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
           mode: 0o600,
           dirMode: 0o700,
