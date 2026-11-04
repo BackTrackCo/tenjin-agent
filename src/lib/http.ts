@@ -127,8 +127,15 @@ export interface TransportFailure {
  * Both wallet-signed families this CLI sends are here: the SIWX auth header,
  * and the x402 payment header (`payment-signature` for x402 v2, plus
  * `x-payment`, the v1 spelling `@x402/core` can emit, as drift insurance).
+ * `tenjin-session-delegation` is a reusable SIWX signature this client no
+ * longer sends; it stays so a spec can never set it.
  */
-const CREDENTIAL_HEADERS = new Set(['sign-in-with-x', 'payment-signature', 'x-payment']);
+const CREDENTIAL_HEADERS = new Set([
+  'sign-in-with-x',
+  'payment-signature',
+  'x-payment',
+  'tenjin-session-delegation',
+]);
 
 function carriesSignedMaterial(headers: Record<string, string>): boolean {
   return Object.keys(headers).some((name) => CREDENTIAL_HEADERS.has(name.toLowerCase()));
