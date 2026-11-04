@@ -78,10 +78,11 @@ describe('httpRequest timeouts', () => {
 });
 
 /**
- * The tenjin-cli User-Agent identity (spec: user-agent-telemetry-and-client-
- * attribution.md PR 3). The transport sends it on every request from a single
- * source, merged through the Headers API so it survives regardless of what a
- * caller-supplied header carries or how it is cased.
+ * The tenjin-cli User-Agent identity (spec: tenjin-notes
+ * `deprecated/plans/user-agent-telemetry-and-client-attribution.md`). The
+ * transport sends it on every request from a single source, merged through
+ * the Headers API so it survives regardless of what a caller-supplied header
+ * carries or how it is cased.
  */
 describe('User-Agent identity', () => {
   function headerCapture(): { fetchImpl: typeof fetch; calls: Headers[] } {
@@ -151,10 +152,11 @@ describe('User-Agent identity', () => {
 });
 
 /**
- * The caller handoff on the wire (spec: user-agent-telemetry-and-client-
- * attribution.md, "Composition contract"). `client-meta.test.ts` pins the
- * composer itself; these pin that the transport reads BOTH seams and that the
- * composed field reaches fetch as exactly one header.
+ * The caller handoff on the wire (spec: tenjin-notes
+ * `deprecated/plans/user-agent-telemetry-and-client-attribution.md`,
+ * "Composition contract"). `client-meta.test.ts` pins the composer itself;
+ * these pin that the transport reads BOTH seams and that the composed field
+ * reaches fetch as exactly one header.
  */
 describe('caller User-Agent handoff', () => {
   function headerCapture(): { fetchImpl: typeof fetch; calls: Headers[] } {

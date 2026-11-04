@@ -11,7 +11,8 @@
  * protection work: a vendor prefix fires on format alone, the generic
  * assignment rule needs a secret-named word plus `=` or `:`, and entropy is
  * never a trigger. Paths, hosts, IPs, commit SHAs, env names and prose are
- * never touched: search availability over scrubbing, since a broader scrub
+ * never touched: search availability over scrubbing (tenjin-notes
+ * `deprecated/loop-redesign/06-pr-a-redact.md`), since a broader scrub
  * altered 16% of real prompts to stop two vendor tokens.
  *
  * Two invariants, pinned by redact.fixtures.test.ts and redact.test.ts:
