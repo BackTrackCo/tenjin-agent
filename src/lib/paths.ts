@@ -3,9 +3,8 @@ import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
 /**
- * Where the CLI keeps its config and wallet. Defaults to ~/.tenjin, overridable
- * via TENJIN_DATA_DIR (CI, ephemeral agents, and every test — which point it at
- * a temp dir so the real home is never touched).
+ * Where the CLI keeps its config and wallet: ~/.tenjin, or TENJIN_DATA_DIR
+ * (CI, ephemeral agents, and every test, so the real home is never touched).
  */
 export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.TENJIN_DATA_DIR;
@@ -16,9 +15,8 @@ export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * The data dir a run with no override resolves. Split out of {@link dataDir} so
- * a caller holding a home directory can ask whether some other profile IS the
- * default one, without a second copy of the `.tenjin` literal.
+ * The data dir a run with no override resolves, for a caller that holds a
+ * home directory and asks whether some profile is the default one.
  */
 export function defaultDataDir(home: string = homedir()): string {
   return join(home, '.tenjin');
@@ -73,20 +71,17 @@ export function walletPath(dir: string = dataDir()): string {
 }
 
 /**
- * The anonymous install id sent to Tenjin as `tenjin-install-id` (lib/install-identity).
- * Under the data dir so it survives upgrades and reinstalls of the CLI itself.
+ * The anonymous install id sent as `tenjin-install-id` (lib/install-identity).
+ * Under the data dir so it survives upgrades and reinstalls of the CLI.
  */
 export function installIdPath(dir: string = dataDir()): string {
   return join(dir, 'install-id');
 }
 
 /**
- * Where the client-side rolling spend ledger lives (lib/wallet/spend.ts).
- *
- * Its own file, NOT `session.json`, which an earlier release cached a session
- * key in: the two schemas were incompatible and both readers treated a parse
- * failure as "absent", so a shared path meant each writer silently destroyed
- * the other's file.
+ * The client-side rolling spend ledger (lib/wallet/spend.ts). Not
+ * `session.json`: an older release wrote a different schema there, and a
+ * shared path would let each reader silently drop the other's file.
  */
 export function spendLedgerPath(dir: string = dataDir()): string {
   return join(dir, 'spend.json');
@@ -101,19 +96,17 @@ export function balanceCachePath(dir: string = dataDir()): string {
 }
 
 /**
- * Where the once-a-day "a newer tenjin-cli exists" check caches the registry
- * answer. A pure cache: nothing here is authoritative, so an unreadable file is
- * simply re-fetched.
+ * The once-a-day update check's cache of the registry answer. An unreadable
+ * file is simply re-fetched.
  */
 export function updateCheckPath(dir: string = dataDir()): string {
   return join(dir, 'update-check.json');
 }
 
 /**
- * Where the LEGACY (pre-per-wallet) Windows DPAPI passphrase blob lives. The
- * file holds a DPAPI CurrentUser ciphertext, not the passphrase in plaintext.
- * New writes go to the per-wallet path below; this one is only read as a
- * migration fallback and removed after a verified per-wallet copy exists.
+ * The legacy single Windows DPAPI passphrase blob (a CurrentUser ciphertext).
+ * Read only as a migration fallback, and removed once a verified per-wallet
+ * copy exists.
  */
 export function passphraseBlobPath(dir: string = dataDir()): string {
   return join(dir, 'passphrase.dpapi');
@@ -129,11 +122,10 @@ export function passphraseBlobPathFor(account: string, dir: string = dataDir()):
 }
 
 /**
- * The sidecar that records WHERE each wallet's passphrase was saved
- * (`src/lib/passphrase-record.ts`), keyed by lowercase address. A separate
- * file rather than a field in wallet.json, so the funded key file is never
- * rewritten and an older CLI still reads it. No sidecar means today's lookup
- * order, unchanged.
+ * The sidecar that records where each wallet's passphrase was saved
+ * (`src/lib/passphrase-record.ts`), keyed by lowercase address. Its own file,
+ * so the funded key file is never rewritten. No sidecar means the default
+ * lookup order.
  */
 export function passphraseRecordPath(dir: string = dataDir()): string {
   return join(dir, 'passphrase-store.json');
@@ -152,11 +144,9 @@ export function passphraseFilePathFor(account: string, dir: string = dataDir()):
 }
 
 /**
- * Where `wallet create --replace` parks the outgoing wallet's keystore, keyed by
- * its lowercase address so successive replaces can never collide. Together with
- * the wallet's per-address passphrase entry in the OS store, this file keeps the
- * replaced wallet's funds recoverable; it is never read by the active-wallet
- * path.
+ * Where `wallet create --replace` parks the outgoing keystore, keyed by its
+ * lowercase address so replaces never collide. With the per-address passphrase
+ * entry, it keeps the replaced wallet's funds recoverable.
  */
 export function archivedWalletPath(account: string, dir: string = dataDir()): string {
   return join(dir, `wallet.${account}.json.bak`);

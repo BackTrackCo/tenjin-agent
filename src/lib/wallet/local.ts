@@ -88,7 +88,7 @@ export const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
 const signerCache = new Map<string, { account: PrivateKeyAccount; envShadowed: boolean }>();
 
 /**
- * The only real B1 provider: a local viem account whose key comes from the env
+ * The local provider: a viem account whose key comes from the env
  * override or the encrypted wallet file. `describe()` returns just the address
  * and posture WITHOUT a passphrase (the address is stored cleartext on purpose);
  * `getSigner()` is the single door to key material a caller can SIGN with.
@@ -197,7 +197,7 @@ function isCancellation(err: unknown): boolean {
   return err instanceof Error && ['AbortError', 'TimeoutError'].includes(err.name);
 }
 
-/** The person's fix when TENJIN_WALLET_PASSPHRASE opens nothing and no saved passphrase does either (B1). */
+/** The person's fix when TENJIN_WALLET_PASSPHRASE opens nothing and no saved passphrase does either. */
 const ENV_WRONG_FIX = `TENJIN_WALLET_PASSPHRASE is set but does not open this wallet. Remove it from the environment, then: ${REPAIR_IN_TERMINAL}`;
 
 /** The person's fix when a STORED passphrase does not decrypt the wallet (the line-568 shape). */
@@ -236,7 +236,7 @@ function legacyWrongFix(source: PassphraseSource, account: string, dir: string):
  * same way signing does: verified with `warning: ENV_PASSPHRASE_WRONG` when that
  * opens it, broken `env_passphrase_wrong` when nothing does.
  *
- * The one read path with a deadline (B3): `doctor` and `install` run unattended
+ * The one read path with a deadline: `doctor` and `install` run unattended
  * and a locked keychain would otherwise hang them, so every store read here,
  * fallback included, gets `STORE_TIMEOUTS.verifyReadMs`. A killed read is
  * `keychain_locked`, which is unknown, never a block. Signing passes none.
@@ -318,10 +318,10 @@ export async function verifyLocalWallet(deps: LocalProviderDeps): Promise<Wallet
   }
   if (opened.kind === 'mismatch') return tamperedVerification(cred.address, opened);
 
-  // The #70 shape: the only durable passphrase is the pre-per-address shared
-  // slot and it belongs to some later wallet, so this keystore is unopenable
-  // and the address it identifies you by is unsignable. Named apart from a
-  // plain wrong passphrase because the remedy is different.
+  // The orphaned-slot shape: the only durable passphrase is the pre-per-address
+  // shared slot and it belongs to some later wallet, so this keystore is
+  // unopenable and its address unsignable. Named apart from a plain wrong
+  // passphrase because the remedy is different.
   if (resolved.migrateLegacy !== undefined) {
     return {
       status: 'broken',
@@ -610,12 +610,12 @@ export interface ArchivedWalletInfo extends PreservedWalletInfo {
  * fully prepared, so every failure here leaves the old wallet active and
  * untouched.
  *
- * THE ONE PROMPT LEFT IN CREATE (decision 6). When no env value or saved store
+ * The one prompt left in create. When no env value or saved store
  * serves the OUTGOING wallet's passphrase, a person at a terminal is asked for
  * it, by that wallet's address. The new wallet's secret is never prompted for.
  * A prompt-entered passphrase is then saved durably: to the platform store when
  * its probe answers, the 0600 file where there is none, and the replace refuses
- * when the store does not answer or does not read the passphrase back (S1):
+ * when the store does not answer or does not read the passphrase back:
  * parking a funded wallet with no durable copy of its passphrase is how funds
  * get stranded. Only a proven write records the sidecar (`by: 'replace'`). The
  * one exception kept from before: a typed passphrase the keychain writer cannot
@@ -721,7 +721,7 @@ async function archivePromptedPassphrase(
   const target: DurableStore = probed.probe === 'available' ? probed.store : 'file';
   const written = await storeDurablyDetailed(passphraseDeps, target, address, passphrase);
   // A file cannot be "locked": an fs error there is a failed write, and its
-  // fix is the directory, never a keychain (decision 6).
+  // fix is the directory, never a keychain.
   const outcome =
     target === 'file' && written.outcome === 'uncertain'
       ? 'store-failed'
@@ -859,18 +859,18 @@ async function loadCredential(deps: LocalProviderDeps): Promise<Credential | nul
  * legacy-served passphrase migrates only AFTER that proof; a decrypt failure
  * with one surfaces the ambiguity and leaves the legacy entry untouched.
  *
- * WRONG ENV FALLS THROUGH (decision 8). A correct TENJIN_WALLET_PASSPHRASE
+ * A wrong env passphrase falls through. A correct TENJIN_WALLET_PASSPHRASE
  * opens on the first try and no store is read. One that does not open the
  * wallet is passed over: the passphrase is resolved again without it and
  * without a prompt, and when the saved one opens the wallet, signing goes
  * ahead and `onWarning` says the variable is wrong, once per provider per
- * keystore. That fallback read passes no deadline (B3). A locked store on the
+ * keystore. That fallback read passes no deadline. A locked store on the
  * way is rethrown as `keychain_locked`; nothing else opening it is
  * `env_passphrase_wrong`.
  *
  * Every throw carries `details.unlock`, so the payer, the hooks and doctor can
  * act on the reason without reading the message. No fix here tells anyone to
- * set TENJIN_WALLET_PASSPHRASE to a value (B1): repair asks the person for it.
+ * set TENJIN_WALLET_PASSPHRASE to a value: repair asks the person for it.
  */
 async function accountForSigning(
   cred: Credential,
@@ -1071,11 +1071,11 @@ export interface RepairOutcome {
  * 2. The target: the store the sidecar names when it already reads this
  *    passphrase back (nothing to do); the 0600 file with `insecureStorage`;
  *    otherwise the platform store when its probe answers, the 0600 file when
- *    there is none (S4), and a refusal when it does not answer (S3: never a
- *    hint at plaintext).
+ *    there is none, and a refusal when it does not answer (never a hint at
+ *    plaintext).
  * 3. storeDurablyDetailed, allowed to replace an existing entry ONLY after proving that
  *    entry does not open the wallet. It succeeds only when the store reads this
- *    passphrase back (S1): a different value after the write is a refusal,
+ *    passphrase back: a different value after the write is a refusal,
  *    never "saved".
  * 4. Only then the sidecar records the store (`by: 'repair'`).
  *
@@ -1167,7 +1167,7 @@ export async function repairLocalWalletPassphrase(
   });
   const reason = fileReason !== undefined ? { fileReason } : {};
   // A file cannot be "locked": an fs error there is a failed write, and its
-  // fix is the directory, never a keychain (decision 6).
+  // fix is the directory, never a keychain.
   const outcome =
     target === 'file' && written.outcome === 'uncertain' ? 'store-failed' : written.outcome;
   switch (outcome) {

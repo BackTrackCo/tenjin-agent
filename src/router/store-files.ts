@@ -4,15 +4,14 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 
 /**
- * THE FILE MECHANICS THE ROUTER'S STATE STORES SHARE. `progress`,
- * `notice-markers`, `alive`, `router-memo` and `job-store` each keep one
- * directory under the data dir, name a file by a hashed key, and age their
- * files out on a lifetime of their own. The write, the read and the sweep are
- * here; what a store's files say, what they are named and how long they live
- * stay in the store.
+ * The file mechanics the router's state stores share (`progress`,
+ * `notice-markers`, `alive`, `router-memo`, `job-store`): each keeps one
+ * directory under the data dir, names files by a hashed key, and ages them out
+ * on its own lifetime. The write, read and sweep live here; contents, names
+ * and lifetimes stay in each store.
  *
- * Hook-safe: node and `lib/atomic-json` only. Four of the stores load on every
- * prompt, and `dist-chunks.test.ts` pins what that graph may pull in.
+ * Hook-safe: node and `lib/atomic-json` only, since most of the stores load on
+ * every prompt (`dist-chunks.test.ts` pins that graph).
  */
 
 /** A store file is the user's alone: 0600, in a directory made 0700. */
@@ -66,10 +65,7 @@ export async function readJsonFile(
  * lifetime: its regular files, or with `directories` its subdirectories, each
  * removed whole. An `expired` that rejects keeps the entry. `limit` ends the
  * pass after that many entries of any kind, so a directory flooded past what
- * its store ever writes is never walked in full.
- *
- * Housekeeping only: never throws, and nothing downstream depends on it having
- * run.
+ * its store ever writes is never walked in full. Never throws.
  */
 export async function sweep(
   dir: string,

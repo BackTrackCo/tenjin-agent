@@ -15,10 +15,10 @@ import {
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin pay <url>`: the standard x402 client verb, for ANY paid endpoint.
- * The payment itself is the engine's (`router/pay-request.ts`), the same one
- * every router call pays through; what is here is the operator's own request
- * (`-H`, `--data`, `--data-raw`) and `--quote`.
+ * `tenjin pay <url>`: the standard x402 client verb, for any paid endpoint. The
+ * payment is the engine's (`router/pay-request.ts`), the same one every router
+ * call pays through; this file holds the operator's own request (`-H`,
+ * `--data`, `--data-raw`) and `--quote`.
  */
 
 export interface PayArgs extends PayRequestArgs {
@@ -158,9 +158,9 @@ function parseBody(data: string | undefined): unknown {
  * the terminal line says so.
  *
  * `usd` rides only on a canonical USDC entry, the one kind whose amount is
- * 6-decimal by construction: a seller listing an 18-decimal entry first had it
- * labelled as dollars. `payable` marks the entry the paid path would sign, and
- * the headline prices that entry or says there is none.
+ * 6-decimal by construction, so an 18-decimal entry is never labelled as
+ * dollars. `payable` marks the entry the paid path would sign, and the
+ * headline prices that entry or says there is none.
  */
 function deliverQuote(
   url: string,

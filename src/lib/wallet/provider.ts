@@ -3,24 +3,21 @@ import type { DurableStore, SigningSource, UnlockReason } from '../wallet-unlock
 
 /**
  * The wallet seam. Commands resolve a WalletProvider and never touch a raw key:
- * `describe()` is enough for `show`/`balance` (address + posture, no signing),
- * and `getSigner()` returns a structural signer only when a command needs to
- * sign (B2+). B1 ships exactly one provider (`local`); a hosted signer later is
- * an adapter that implements these interfaces, not a refactor of the callers.
+ * `describe()` is enough for `show`/`balance`, and `getSigner()` returns a
+ * signer only when a command signs. A hosted signer would be another adapter
+ * for these interfaces, not a change to the callers.
  */
 
 /**
- * Where a provider's key material lives. B1's `local` provider only ever reports
- * `file` or `env`; `keychain`/`remote` exist so a hosted or OS-keychain signer
- * can describe its true source honestly instead of masquerading as `env`.
+ * Where a provider's key material lives. The `local` provider reports `file`
+ * or `env`; `keychain`/`remote` let another signer name its true source.
  */
 export type CredentialSource = 'file' | 'env' | 'keychain' | 'remote';
 
 /**
  * `client-only`: guardrails (spend limits, allowlist) are enforced in this
  * process and any local caller can bypass them. `provider`: the signer refuses
- * out-of-policy requests server-side. `describe()` reports this so agents and
- * humans see the honest custody posture. B1's `local` provider is `client-only`.
+ * out-of-policy requests server-side. The `local` provider is `client-only`.
  */
 export type PolicyEnforcement = 'client-only' | 'provider';
 
@@ -32,14 +29,12 @@ export interface WalletDescription {
 }
 
 /**
- * Provider-owned custody diagnostics for `show`/`doctor`. Each provider reports its
- * OWN warnings and path: the local provider knows about file perms and an env key
- * shadowing its file, a remote provider has none of that. Callers render exactly
- * what the active provider returns, so a remote provider's output can never be
- * contaminated by a stale local wallet file. `walletPath` is present only when the
- * provider is backed by an on-disk file that exists.
+ * Provider-owned custody diagnostics for `show`/`doctor`. Callers render only
+ * what the active provider returns, so a stale local wallet file never leaks
+ * into another provider's output.
  */
 export interface WalletDiagnostics {
+  /** Present only when the provider is backed by an on-disk file that exists. */
   walletPath?: string;
   /**
    * Human description of how the key is protected at rest, e.g.
@@ -54,12 +49,9 @@ export interface WalletDiagnostics {
    */
   passphraseSource?: string;
   /**
-   * Addresses of wallets parked by `wallet create --replace` (their keystores
-   * live at wallet.<address>.json.bak beside the active wallet, with their
-   * passphrases preserved per-address in the OS store). A recovery hint only —
-   * the single-active-wallet model is unchanged and nothing else reads these.
-   * Present only when at least one archive exists; discovered by a cheap dir
-   * scan, never a keychain probe.
+   * Addresses of wallets parked by `wallet create --replace` as
+   * `wallet.<address>.json.bak`. A recovery hint only, found by a dir scan,
+   * never a keychain probe.
    */
   archivedWallets?: string[];
   /**
@@ -72,15 +64,12 @@ export interface WalletDiagnostics {
 }
 
 /**
- * Structural signer. All methods are async because a remote signer can require
- * network authorization and can refuse by policy — the local provider just wraps
- * a viem account, but callers must not assume signing is synchronous or free.
+ * Structural signer. Every method is async because a remote signer can need
+ * network authorization or refuse by policy.
  *
- * `signTransaction` is the ONLY door to a raw signed transaction (the `tenjin
- * send` escape hatch); there is deliberately no second signing path outside this
- * seam. A hosted provider whose backend cannot produce a raw signed transaction
- * (or refuses one by policy) must throw a coded error here rather than sign
- * through some other channel.
+ * `signTransaction` is the only door to a raw signed transaction (`tenjin
+ * send`). A provider that cannot or will not produce one throws a coded error
+ * here rather than sign through another channel.
  */
 export interface TenjinSigner {
   address: Address;
@@ -90,19 +79,14 @@ export interface TenjinSigner {
 }
 
 /**
- * Whether the credential can actually produce a signature, as far as the provider
- * can tell WITHOUT prompting anyone.
+ * Whether the credential can produce a signature, as far as the provider can
+ * tell without prompting anyone. `unverified` covers a keystore whose
+ * passphrase only a TTY prompt can reach: neither proven good nor bad.
  *
- * `unverified` is the honest third answer and the reason this type is not a
- * boolean: a keystore whose passphrase is only reachable through a TTY prompt is
- * neither proven good nor proven bad, and reporting either would be a guess.
- *
- * `reason` lets callers stop parsing `detail`: it is the same {@link UnlockReason}
- * the signing path throws with. `unverified` with `keychain_locked` or
- * `unlock_timeout` is unknown (the store or the clock did not answer); with
- * `passphrase_missing` it is definite (no source holds a passphrase at all).
- * `source` and `warning` on `verified` say what opened the wallet, and that a
- * wrong TENJIN_WALLET_PASSPHRASE was passed over to get there.
+ * `reason` is the same {@link UnlockReason} the signing path throws.
+ * `unverified` with `keychain_locked` or `unlock_timeout` is unknown; with
+ * `passphrase_missing` it is definite. `source` and `warning` on `verified` say
+ * what opened the wallet, and that a wrong TENJIN_WALLET_PASSPHRASE was skipped.
  */
 export type WalletVerification =
   | { status: 'verified'; detail: string; source?: SigningSource; warning?: string }
@@ -116,15 +100,10 @@ export interface WalletProvider {
   /** Provider-owned custody warnings; keyless, safe for `show`/`doctor`. */
   diagnostics(): Promise<WalletDiagnostics>;
   /**
-   * Prove the credential can sign, for `doctor` only (#70: a keystore whose
-   * passphrase is gone reported `wallet: ok` until the first signing failed).
-   *
-   * Two hard constraints, because `doctor` is an allowlisted verb an unattended
-   * agent runs on its own: it MUST NOT prompt, and it MUST NOT mutate anything
-   * (no legacy-slot re-key, no cache write) — a diagnostic that changes the thing
-   * it is diagnosing is not one. A provider that cannot answer under those terms
-   * omits the method entirely, and `doctor` reports the wallet as present but
-   * unverified rather than inventing a verdict for it.
+   * Prove the credential can sign, for `doctor` only. An unattended agent runs
+   * `doctor`, so this must not prompt and must not mutate anything (no re-key,
+   * no cache write). A provider that cannot answer on those terms omits it, and
+   * `doctor` reports the wallet as unverified.
    */
   verify?(): Promise<WalletVerification>;
 }

@@ -36,22 +36,18 @@ import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * THE PAYMENT ENGINE: the x402 client every router call pays through, and the
- * one `tenjin pay <url>` (`commands/pay.ts`) runs under the operator's own
- * request, for ANY paid endpoint. One probe; a 2xx delivers free; a 402 runs
- * the payment gate (automatic limits for the router, mandatory consent for
- * manual pay, hard price/creator checks for both) and retries once with the
- * `PAYMENT-SIGNATURE`. Every paid call pays; manual consent and optional
- * `--max-price` are the brakes. SIWX rides ONLY when the 402 advertises the
- * standard sign-in-with-x extension, and the signature is bound to the TARGET
- * origin (never the configured deployment's), so an entitled wallet re-reads
- * free at any seller that supports it while nothing origin-bound can leak
- * elsewhere.
+ * The payment engine: the x402 client every router call pays through, and the
+ * one `tenjin pay <url>` (`commands/pay.ts`) runs for any paid endpoint. One
+ * probe; a 2xx delivers free; a 402 runs the payment gate (automatic limits for
+ * the router, consent for manual pay, hard price and creator checks for both)
+ * and retries once with the `PAYMENT-SIGNATURE`. SIWX rides only when the 402
+ * advertises sign-in-with-x, and the signature binds to the target origin, so
+ * an entitled wallet re-reads free while nothing origin-bound leaks elsewhere.
  *
- * Direct third-party payments require acknowledgement of registry warnings.
- * Router calls retain their advertised-price and supplied-term hard checks,
- * and each is signed only against its call's spend plan (`admit`).
- * Every positive payment checks the actual signer's balance before signing.
+ * Direct third-party payments need registry warnings acknowledged. Router
+ * calls keep their advertised-term checks and are signed only against their
+ * call's spend plan (`admit`). Every positive payment checks the signer's
+ * balance before signing.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
@@ -72,11 +68,10 @@ export function bodyPreview(text: string, printBody: boolean): string {
 }
 
 /**
- * What a caller was told this endpoint costs, BEFORE the live 402 is seen. It
- * stands in for the registry lookup on a lane that has one from elsewhere (the
- * router's paid decision carries it), and it is a ceiling, never a licence: the
- * live requirement has to match the network and asset exactly and may not
- * exceed the amount. Direct calls without offered terms use registry warning acknowledgement.
+ * What a caller was told this endpoint costs, before the live 402 is seen. It
+ * stands in for the registry lookup when the router's decision carries it, and
+ * it is a ceiling, never a licence: the live requirement must match network
+ * and asset exactly and may not exceed the amount.
  */
 export interface AdvertisedTerms {
   /** Pins the deal's chain and token when the caller was told them. */
@@ -136,11 +131,10 @@ export interface PayRequestArgs {
   /** The same-turn duplicate guard's identity for this request. */
   requestKey?: string;
   /**
-   * The caller's APPLICATION success rule for the delivered body. On a free or
+   * The caller's application success rule for the delivered body. On a free or
    * entitled 2xx, a body that fails it is refused: nothing was paid. On the
-   * PAID leg the money already moved, so the body is always delivered: one
-   * that fails the rule, or that is past this client's own validation limit so
-   * the rule never ran, comes back with `resultUnverified` and a
+   * paid leg the money already moved, so a body that fails the rule, or is too
+   * large to check, still comes back, with `resultUnverified` and a
    * `resultCaveat` saying which.
    */
   resultSchema?: unknown;
@@ -152,11 +146,10 @@ export interface PayRequestArgs {
    */
   onPaidLeg?: (leg: PaidLeg) => void;
   /**
-   * THE CALL'S SPEND PLAN, which every router payment is signed against.
-   * Handed the live price before the wallet is opened, it returns the slot an
-   * admitted plan holds for this payment (`lib/spend-plan.ts`), or throws the
-   * refusal: over the limits, the router's quote. Required in router mode: a
-   * router payment no plan admitted is refused with nothing sent.
+   * The call's spend plan, which every router payment is signed against.
+   * Handed the live price before the wallet is opened, it returns the plan's
+   * slot for this payment (`lib/spend-plan.ts`) or throws the refusal.
+   * Required in router mode: an unadmitted router payment sends nothing.
    */
   admit?: (amountAtomic: bigint) => Promise<PlanSlot>;
 }
@@ -270,10 +263,9 @@ async function executePay(
   const openedSigner: { current?: TenjinSigner } = {};
   const url = args.url.trim();
   const lane = resolveLane(url, settings);
-  // BEFORE the probe, and only on the third-party lane: the configured base URL
-  // is the operator's own deployment and is legitimately a local origin in
-  // development, while any other host is a destination something else chose, so
-  // that is the one that has to prove it is not on this network.
+  // Before the probe, and only on the third-party lane: the configured base URL
+  // may legitimately be local in development, while any other host was chosen
+  // by something else and must prove it is not on this network.
   if (lane === 'bazaar') await assertPublicDestination(url, deps.destination ?? {});
   const method = resolveMethod(args, manual);
   const { headers: operator, body } = manual?.resolve() ?? {
@@ -321,10 +313,9 @@ async function executePay(
     });
   }
   if (probe.status !== 402) {
-    // THE PROVIDER'S OWN WORDS, when it sent `{error: {message}}`: a free docs
-    // lookup's 404 says no library matched and to use your own tools, which a
-    // bare status line turned into "retry". A 404 is the endpoint's answer, not
-    // a transient failure, so it is never told to retry either.
+    // The provider's own words, when it sent `{error: {message}}`: a free docs
+    // lookup's 404 says no library matched. A 404 is the endpoint's answer, not
+    // a transient failure, so it is never told to retry.
     const said = providerMessage(probe.json);
     throw new CliError(
       'API_UNREACHABLE',
@@ -340,28 +331,25 @@ async function executePay(
   }
 
   const paymentRequired = decodeChallenge(probe, url);
-  // The client is built BEFORE the wallet is opened on purpose: selection needs
-  // only the registered networks and the policies, never a key, so an
-  // unpayable or unverifiable deal is refused before a signer exists.
+  // The client is built before the wallet is opened: selection needs no key, so
+  // an unpayable or unverifiable deal is refused before a signer exists.
   const payer = createPayerClient(() => signerOrThrow(openedSigner));
   const requirement = selectRequirement(payer.core, paymentRequired, args.terms);
-  // `--quote` is a READ: the 402 is reported as it came, with the entry the
-  // paid path would sign marked by the same selection. Nothing below this line
-  // runs, so no wallet is opened and nothing is signed.
+  // `--quote` is a read: the 402 as it came, with the entry the paid path would
+  // sign marked. No wallet is opened and nothing is signed.
   if (manual?.quote !== undefined) {
     return manual.quote(url, lane, probe, paymentRequired, requirement);
   }
   if (requirement === undefined) {
     throw noMatchingEntry(paymentRequired, args.terms);
   }
-  // The FIRST-SEEN amount: a later challenge may never cost more than this.
+  // The first-seen amount: a later challenge may never cost more than this.
   const firstSeenAmount = BigInt(requirement.amount);
   const host = new URL(url).host;
 
-  // Both checks run BEFORE the wallet is even opened: an unverifiable deal must
-  // not reach a signer. Terms a caller was given bind on EVERY lane, since a
-  // routing decision can name a contract on the configured origin too; the
-  // registry check is the Bazaar lane's own.
+  // Both checks run before the wallet is opened, so an unverifiable deal never
+  // reaches a signer. Given terms bind on every lane, since a routing decision
+  // can name the configured origin too; the registry check is the Bazaar lane's.
   let registry: string | undefined;
   let termsLabel: string | undefined;
   if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, requirement);
@@ -375,11 +363,10 @@ async function executePay(
       warnings,
     );
   }
-  // THE CALL'S PLAN ADMITS ONLY A PAYMENT STILL NEEDED. With no entitlement
-  // to check, it is admitted here, at the price first seen, before the wallet
-  // is opened; over the limits, the refusal is the router's quote. A seller
-  // that takes sign-in-with-x is asked first, below: a wallet that already
-  // owns the result re-reads it free, and is never quoted a payment for it.
+  // The plan admits only a payment still needed. With no entitlement to check,
+  // it is admitted here at the first-seen price, before the wallet is opened.
+  // A sign-in-with-x seller is asked first, below, so a wallet that already
+  // owns the result re-reads it free.
   const entitlement = paymentRequired.extensions?.[SIGN_IN_WITH_X] !== undefined;
   let slot = router && !entitlement ? await args.admit!(firstSeenAmount) : undefined;
 
@@ -390,11 +377,10 @@ async function executePay(
   const signer = await openWallet(provider);
   openedSigner.current = signer;
 
-  // The standard sign-in-with-x extension: when the 402
-  // advertises it, an entitled wallet re-reads FREE before any payment exists,
-  // and the re-check doubles as the fresh-challenge refetch the payment is
-  // built against. The signature binds to the TARGET origin (host-with-port),
-  // so a foreign seller gets a credential worth nothing anywhere else.
+  // Sign-in-with-x: an entitled wallet re-reads free before any payment exists,
+  // and the re-check doubles as the fresh challenge the payment is built on.
+  // The signature binds to the target origin (host-with-port), so a foreign
+  // seller gets a credential worth nothing anywhere else.
   let effectiveChallenge = paymentRequired;
   let effectiveRequirement = requirement;
   if (entitlement) {
@@ -461,8 +447,8 @@ async function executePay(
       );
     }
     effectiveRequirement = fresh;
-    // The challenge it will actually SIGN is checked again: the store answers
-    // the registry question without a network round trip in the common case.
+    // The challenge it will actually sign is checked again; the store usually
+    // answers the registry question without a round trip.
     if (args.terms !== undefined) termsLabel = assertWithinTerms(args.terms, fresh);
     else if (lane === 'bazaar') {
       registry = await checkRegistry(
@@ -501,8 +487,8 @@ async function executePay(
       );
     }
   }
-  // A PLAN A PERSON APPROVED is theirs, as a manual payment is: it may pass
-  // the automatic limits, and it does not use up the automatic budget.
+  // A plan a person approved is theirs, like a manual payment: it may pass the
+  // automatic limits and does not use up the automatic budget.
   const approved = slot?.approved === true;
 
   const authorizer = resolveSpendAuthorizer(
@@ -527,14 +513,13 @@ async function executePay(
     payeeLabel: `${sanitizeForTerminal(url)}${via}; recipient ${sanitizeForTerminal(effectiveRequirement.payTo)}, ${sanitizeForTerminal(effectiveRequirement.network)} / ${sanitizeForTerminal(effectiveRequirement.asset)}`,
   });
 
-  // A failure BEFORE transmission (the build) releases: no signature exists,
-  // nothing can move. That is the last point where releasing is honest.
+  // A failure before transmission releases the reservation: no signature
+  // exists yet, so nothing can move. This is the last point where that holds.
   let payment: Awaited<ReturnType<typeof buildExactPayment>>;
   try {
-    // The SIGNED entry is the CHECKED entry, by construction: the challenge is
-    // narrowed to the one selection everything above ran against, so a seller
-    // advertising several chains cannot have one entry priced and another
-    // signed. Without this the builder re-picked `accepts[0]`.
+    // The signed entry is the checked entry: the challenge is narrowed to the
+    // selection everything above ran against, so a seller advertising several
+    // chains cannot have one entry priced and another signed.
     await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
@@ -543,14 +528,11 @@ async function executePay(
   }
 
   // From here the signed EIP-3009 authorization leaves the process, and it is a
-  // bearer instrument: the counterparty can settle it whatever it answers, or
-  // if it answers nothing. So EVERY post-transmission outcome commits the
-  // reservation; money that may move is money accounted. Releasing here let a
-  // hostile registry-listed seller answer 402 after each signature while
-  // sessionBudget counted zero of the authorizations it was stacking up.
-  // (httpRequest never throws on transport failure; it returns ok:false.)
-  // A spec's deadline may lengthen this leg, never shorten it: the
-  // authorization has left, and a cut here loses a result already paid for.
+  // bearer instrument: the seller can settle it whatever it answers. So every
+  // post-transmission outcome commits the reservation; releasing would let a
+  // hostile seller answer 402 after each signature while sessionBudget counts
+  // none of them. (httpRequest returns ok:false on transport failure.) A spec's
+  // deadline may lengthen this leg, never shorten it.
   const paidTimeoutMs = paidLegTimeoutMs(
     effectiveRequirement,
     Math.max(legTimeoutMs, ctx.flags.timeout),
@@ -570,15 +552,12 @@ async function executePay(
       ...(paid.header !== undefined ? { header: paid.header } : {}),
     });
   }
-  // A TRANSPORT failure on this leg is a post-transmission outcome like any
-  // other: the authorization has left, the reservation is committed above, and
-  // a receipt that said nothing was paid would report a provider cost of zero
-  // for money the ledger has already counted. The transport's own reason and
-  // code survive; only the fix and the amounts are this leg's to state.
+  // A transport failure here is still post-transmission: the reservation is
+  // committed, so the error carries the amount rather than claim nothing was
+  // paid. The transport's reason and code survive; the fix is this leg's.
   if (!paid.ok) {
-    // A LONG JOB THAT NAMED WHERE ITS RESULT WILL BE: the seller is still
-    // working, so the agent is pointed there rather than told it failed.
-    // Settlement is just as unknown as on any other timeout.
+    // A long job that named where its result will be: point the agent there
+    // rather than call it a failure. Settlement is unknown, as on any timeout.
     const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
     if (statusUrl !== null) {
       throw new CliError(
@@ -614,12 +593,9 @@ async function executePay(
     let caveat: string | undefined;
     if (args.resultSchema !== undefined) {
       const check = validateResultBody(args.resultSchema, paid.text);
-      // A PAID BODY IS ALWAYS DELIVERED. The authorization has already left and
-      // the money moved, so the success rule is a check on the body, never a
-      // reason to withhold it: withholding charged the caller and threw the
-      // product away. A body past this client's validation limit (never
-      // checked) and one that fails the rule (checked, and missed) both come
-      // back whole, flagged unverified, with a caveat that says which.
+      // A paid body is always delivered: the money moved, so the success rule
+      // flags the body, never withholds it. Too large to check, or checked and
+      // failed, it comes back whole with a caveat that says which.
       if (check.unvalidated === true) caveat = unvalidatedCaveat(check);
       else if (!check.valid) caveat = failedRuleCaveat(check);
     }
@@ -634,12 +610,11 @@ async function executePay(
       printBody: args.printBody === true,
     });
   }
-  // Still 402 (payment rejected) or anything else: nothing was delivered, but
-  // the seller holds a live authorization, so the amount stays counted and the
-  // fix must NOT coach a retry loop, since each retry signs a fresh authorization.
-  // A SELLER THAT SAYS IT DID NOT SETTLE is named as saying so, with its reason
-  // from the payment-response header: its body can be an empty `{}`. The
-  // authorization stays valid until it expires, so settlement is still unknown.
+  // Still 402 or anything else: nothing was delivered, but the seller holds a
+  // live authorization, so the amount stays counted and the fix must not coach
+  // a retry loop, since each retry signs a fresh authorization. A seller that
+  // says it did not settle is quoted from its payment-response header (its body
+  // can be `{}`); the authorization stays valid, so settlement is still unknown.
   const refusal = settlementRefusal(paid);
   throw new CliError(
     'PAYMENT_FAILED',
@@ -653,8 +628,7 @@ async function executePay(
         refusal !== undefined
           ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
           : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
-      // The amount rides on the failure so a caller can report what is at risk
-      // rather than a zero. Settlement is unknown by construction here.
+      // The amount rides on the failure so a caller reports what is at risk.
       details: {
         status: paid.status,
         body: paid.json,
@@ -669,15 +643,11 @@ async function executePay(
 }
 
 /**
- * THE PAID LEG WAITS AS LONG AS THE SELLER SAID IT WOULD TAKE, within reason.
- * A signed authorization is already out when this leg starts, so a client
- * timeout here abandons money the seller can still settle: a 10 s default cut
- * off a provider advertising 360 s of work and threw its answer away. The
- * requirement's `maxTimeoutSeconds` is that promise; it is clamped to
- * {@link MAX_PAID_LEG_TIMEOUT_MS} so a hostile seller cannot hang the caller,
- * and it never shortens what the user asked for with `--timeout`, nor does a
- * spec's `timeoutS`. The probe leg takes the spec's deadline, else the CLI
- * timeout: nothing is at stake there.
+ * The paid leg waits as long as the seller said it would take, within reason:
+ * the authorization is already out, so a client timeout abandons money the
+ * seller can still settle. The requirement's `maxTimeoutSeconds` is clamped to
+ * this cap so a hostile seller cannot hang the caller, and never shortens
+ * `--timeout` or a spec's `timeoutS`.
  */
 export const MAX_PAID_LEG_TIMEOUT_MS = 120_000;
 
@@ -690,10 +660,9 @@ export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs:
 }
 
 /**
- * THE WALLET HOLDS THE AMOUNT, read live, or a refusal before anything is
- * signed. Live, never the hooks' remembered balance: a minute-old read can
- * count funds the wallet has since spent. The default RPC's public fallbacks
- * are live reads too.
+ * The wallet holds the amount, read live, or a refusal before anything is
+ * signed. Never the cached balance: a minute-old read can count funds the
+ * wallet has since spent.
  */
 async function assertBalanceCovers(
   address: string,
@@ -739,15 +708,12 @@ async function assertBalanceCovers(
 }
 
 /**
- * WHAT A ROUTER CALL WILL COST, from one unpaid probe: the live 402's amount
- * on the entry this call would sign, held to the advertised terms, with
- * nothing signed and nothing reserved. It is the number a single call gates
- * on, so several takes of one call are checked at it rather than at the
- * spec's ceiling: a price that varies by input is quoted for this input.
- * A probe that answers 2xx is free: 0. A seller that takes sign-in-with-x is
- * asked as the paid leg asks it, so a wallet that already owns the result
- * quotes 0 and is never planned a payment for it. Every refusal is the paid
- * leg's own, with nothing sent but the probe and that re-read.
+ * What a router call will cost, from one unpaid probe: the live 402's amount on
+ * the entry this call would sign, held to the advertised terms, with nothing
+ * signed or reserved. Several takes of one call are checked at it rather than
+ * at the spec's ceiling, so a price that varies by input is quoted for this
+ * input. A 2xx probe, or a sign-in-with-x wallet that already owns the result,
+ * quotes 0. Every refusal is the paid leg's own.
  */
 export async function quoteRouterCall(
   args: Pick<
@@ -849,10 +815,8 @@ function resolveLane(url: string, settings: ResolvedSettings): Lane {
       fix: 'Pass an absolute http(s) URL.',
     });
   }
-  // Same deployment, not merely the same spelling: without this a URL on the
-  // deployment's other origin falls through to the Bazaar lane, which then
-  // refuses it as a third-party endpoint or pays it under registry rules meant
-  // for one. The SIWX signature below binds to the TARGET origin either way.
+  // Same deployment, not merely the same spelling, so the deployment's other
+  // origin never falls through to the Bazaar lane's third-party rules.
   if (isSameDeployment(target.origin, new URL(settings.baseUrl).origin)) return 'tenjin';
   if (target.protocol !== 'https:') {
     throw new CliError('USAGE', 'The Bazaar lane pays https endpoints only.', {
@@ -958,14 +922,11 @@ function decodeChallenge(res: HttpResponse, url: string): PaymentRequired {
 }
 
 /**
- * The caller's success rule, on EVERY delivery this command makes: a body that
- * fails it is not a result, whether it arrived free, by entitlement or paid.
- * Applying it only to the paid branch let a `{success:false}` body come back as
- * `fulfilled` the moment the wallet was already entitled.
- *
- * Returns the caveat for a body the rule could not be RUN against, so the three
- * branches treat an over-limit body the same way; `undefined` when the rule
- * passed or there was none.
+ * The caller's success rule, on every unpaid delivery: a body that fails it is
+ * not a result, whether it arrived free or by entitlement. Returns the caveat
+ * for a body the rule could not run against, so every branch treats an
+ * over-limit body the same way; `undefined` when the rule passed or there was
+ * none.
  */
 function assertUsableResult(
   schema: unknown,
@@ -989,16 +950,15 @@ function assertUsableResult(
 }
 
 /**
- * What the caller is told INSTEAD of a refusal when the success rule could not
- * run: the byte count, that the check was skipped, and that the body in hand is
- * unverified. It rides in the result rather than only in a log, because the
- * agent reading the envelope is the one that has to discount it.
+ * What the caller is told instead of a refusal when the success rule could not
+ * run. It rides in the result, not a log, because the agent reading the
+ * envelope is the one that has to discount it.
  */
 function unvalidatedCaveat(check: ResultCheck): string {
   return `${check.reason ?? 'The result could not be validated.'} The body is delivered unverified: its shape was never checked against the success rule.`;
 }
 
-/** What the caller is told when a PAID body was checked and missed its success
+/** What the caller is told when a paid body was checked and missed its success
  *  rule: the rule that failed, and that the body is handed back unverified. */
 function failedRuleCaveat(check: ResultCheck): string {
   return `${check.reason ?? 'The result does not satisfy its success schema.'} The payment settled, so the body is delivered as received, unverified: treat it as possibly not the answer that was paid for.`;
@@ -1055,11 +1015,10 @@ function providerMessage(body: unknown): string | null {
 const PROVIDER_ERROR_CHARS = 500;
 
 /**
- * WHY THE PROVIDER REFUSED, in its own words: the first
+ * Why the provider refused, in its own words: the first
  * {@link PROVIDER_ERROR_CHARS} characters of a non-2xx body, redacted and on
- * one plain line, whatever its type. `body` above is the parse, which an HTML
- * error page has none of, and without this a 403 reached the agent as a bare
- * status. Other people's content, never instructions.
+ * one plain line, whatever its type, since an HTML error page has no parsed
+ * `body`. Other people's content, never instructions.
  */
 function providerError(text: string): { providerError?: string } {
   const line = sellerLine(text);
@@ -1101,7 +1060,7 @@ function noMatchingEntry(challenge: PaymentRequired, terms: AdvertisedTerms | un
 }
 
 /**
- * WHICH advertised entry this call is about, from the SDK's own selection
+ * Which advertised entry this call is about, from the SDK's own selection
  * (`src/lib/x402-pay.ts`): the registered networks, the `exact` scheme and the
  * canonical-USDC policy, narrowed further by advertised terms when the caller
  * has them. Every paying path asks this one question, so a 402 that lists
@@ -1203,7 +1162,7 @@ function warningMessage(warning: RegistryWarning): string {
 /** Discriminated on `paid`: a paid delivery always carries what it paid and to
  *  whom, so no branch ever reaches for an amount that might not be there. */
 type DeliverOpts = {
-  /** Set when the body is delivered UNVERIFIED: the success rule could not run. */
+  /** Set when the body is delivered unverified: the success rule could not run. */
   caveat?: string;
   warnings?: RegistryWarning[];
 } & (
@@ -1244,10 +1203,8 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
         ? { entitled: true }
         : {}),
     ...(settlementTxHash !== undefined ? { settlementTxHash } : {}),
-    // Beside the body, never instead of it: the caller gets the product AND the
-    // fact that its shape was never checked. The flag is what a machine reads:
-    // a caller branching on a delivery must not have to match on prose, which
-    // is how an unchecked body passed for a checked one one layer up.
+    // Beside the body, never instead of it. The flag is what a machine reads,
+    // so a caller never has to match on prose to tell an unchecked body.
     ...(opts.caveat !== undefined ? { resultUnverified: true, resultCaveat: opts.caveat } : {}),
     // The body is the product: JSON when the endpoint spoke it, raw text always,
     // and the bytes themselves when it was a file.
@@ -1288,7 +1245,7 @@ export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefi
 }
 
 /**
- * The seller's own word that it did NOT settle: its payment-response header
+ * The seller's own word that it did not settle: its payment-response header
  * with `success: false`, and the `errorReason` (or `errorMessage`) it gave, as
  * one bounded redacted line. Seller text, never instructions. `undefined` when
  * the header is absent, unreadable or says it settled.
@@ -1319,12 +1276,11 @@ function paymentResponse(res: Pick<HttpResponse, 'header'>): Record<string, unkn
 }
 
 /**
- * THE WALLET, OPENED, and a refusal from it marked as the wallet's
- * (`walletUnavailable`): a missing wallet, one with no passphrase in a process
- * that cannot prompt, or a key that will not decrypt. The locked wallet's
- * `USAGE` reads the same as a refused destination's otherwise, and a caller
- * reporting why nothing was paid has to tell the two apart. The code, message
- * and fix stay the wallet's own.
+ * The wallet, opened, with a refusal from it marked as the wallet's
+ * (`walletUnavailable`): a missing wallet, no passphrase where nothing can
+ * prompt, or a key that will not decrypt. Otherwise the locked wallet's `USAGE`
+ * reads like a refused destination's, and a caller reporting why nothing was
+ * paid must tell the two apart.
  */
 async function openWallet(provider: WalletProvider): Promise<TenjinSigner> {
   try {

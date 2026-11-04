@@ -6,7 +6,7 @@ import { PLUGIN_ID } from './names';
 import { folderState, installedThroughCommands, type PluginScope } from './plugin-registration';
 
 /**
- * IS TENJIN INSTALLED FOR CLAUDE CODE HERE? Read from disk, with no `claude`
+ * Is Tenjin installed for Claude Code here? Read from disk, with no `claude`
  * binary asked. Install, uninstall, doctor and the host record each count
  * different signs of an install, so each caller names the ones it counts.
  */

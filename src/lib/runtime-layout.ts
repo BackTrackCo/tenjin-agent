@@ -6,11 +6,10 @@ import { defaultDataDir, isDefaultDataDir, runtimeDir } from './paths';
 import { isNewer, parseVersion } from './version-order';
 
 /**
- * WHERE THINGS SIT IN TENJIN'S RUNTIME, and nothing that changes it. Kept apart
- * from `runtime.ts` so the hand-off in `index.ts` and the live marker in
- * `tenjin mcp` can read the layout with `node:*` alone: everything here is
- * synchronous and imports no other Tenjin module but the paths and the version
- * order.
+ * Where things sit in Tenjin's runtime, and nothing that changes it. Kept apart
+ * from the other `runtime-*` modules so the hand-off in `index.ts` and the live
+ * marker in `tenjin mcp` read the layout with `node:*` alone: everything here
+ * is synchronous and imports only the paths and the version order.
  *
  *   <root>/state.json                 which version is current, previous, pending,
  *                                     and the id of the activation that wrote it
@@ -103,13 +102,12 @@ export function runtimeBuild(moduleDir: string): { root: string; cli: string } |
 }
 
 /**
- * THE RUNTIME TO HAND A COMMAND TO, or null to run this build. A copy of the
- * CLI outside the runtime (npm's, typically, found first on PATH) defers to the
- * runtime's current version when that one is the same or newer, so an old npm copy
- * never answers for a machine that has moved on. Null for a runtime build
- * itself, a non-default data dir (the runtime belongs to `~/.tenjin` alone), no
- * state, a current older than this build, or a current whose files are gone; any
- * error is null too, and this build runs.
+ * The runtime to hand a command to, or null to run this build. A copy outside
+ * the runtime (npm's, found first on PATH) defers to the runtime's current
+ * version when it is the same or newer, so an old npm copy never answers for a
+ * machine that has moved on. Null for a runtime build itself, a non-default
+ * data dir, no state, an older current, a current whose files are gone, or any
+ * error.
  */
 export function handoffTarget(
   moduleUrl: string,
@@ -140,9 +138,8 @@ export function handoffTarget(
 
 /**
  * A `tenjin mcp` running from a runtime version marks it in use, so `collect`
- * leaves it alone while a session still runs it. Returns an idempotent unlink,
- * also run at exit. A no-op outside a runtime build, and every error is
- * swallowed: the marker only spares GC a version, it is never a reason for the
+ * spares it. Returns an idempotent unlink, also run at exit. A no-op outside a
+ * runtime build, and errors are swallowed: the marker is never a reason for the
  * server not to start.
  */
 export function markLive(moduleDir: string, pid: number = process.pid): () => void {

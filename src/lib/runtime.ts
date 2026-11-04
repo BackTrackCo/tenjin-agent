@@ -37,18 +37,17 @@ import { verifyBuild } from './runtime-verify';
 import { isNewer } from './version-order';
 
 /**
- * TENJIN'S OWN RUNTIME, `~/.tenjin/runtime`: a copy of each CLI version, the
- * pinned Node that runs it, and the plugin folder Claude Code loads, so that
- * neither a Node upgrade nor `npm rm -g tenjin-cli` can take the plugin away.
- * Only the default data dir has one (see `setupRuntime`).
+ * Tenjin's own runtime, `~/.tenjin/runtime`: a copy of each CLI version, the
+ * pinned Node that runs it, and the plugin folder Claude Code loads, so neither
+ * a Node upgrade nor `npm rm -g tenjin-cli` can take the plugin away. Only the
+ * default data dir has one.
  *
- * Every change runs under one lock (`withRuntimeLock`), and every step that
- * puts something in place stages it under `tmp/`, marks it `.complete` last and
- * renames it in, so a crash never leaves a half copy at a live path. The switch
- * itself is `activate`: `state.json` records the version as `pending` before
- * the plugin folder is rendered, and the same write that makes it `current`
- * clears it. Nothing here reads or writes the wallet, the passphrase store, the
- * config or the spend ledger.
+ * Every change runs under one lock (`withRuntimeLock`), and every step stages
+ * under `tmp/`, marks `.complete` last and renames in, so a crash never leaves
+ * a half copy at a live path. The switch is `activate`: `state.json` records
+ * the version as `pending` before the plugin folder is rendered, and the write
+ * that makes it `current` clears it. Nothing here touches the wallet, the
+ * passphrase store, the config or the spend ledger.
  */
 
 // ---------------------------------------------------------------------------
@@ -126,13 +125,12 @@ async function hostsMatch(root: string, version: string, launch: RuntimeLaunch):
 }
 
 /**
- * SET UP TENJIN'S RUNTIME FOR THIS BUILD, as install runs it. `skipped` for a
- * source checkout. Non-default plugin data directories are refused.
- * Otherwise: `current` when this version is already in place, `active` once it
- * was placed, verified and switched to, `kept` when it could not be and a
- * usable runtime stays (or, under `refresh`, a newer one is already there),
- * and `failed` when there is no runtime to register. Only `active` changed
- * anything Claude Code reads, and only after `verify` passed.
+ * Set up Tenjin's runtime for this build, as install runs it. `skipped` for a
+ * source checkout; a non-default data dir fails. Otherwise `current` when this
+ * version is already in place, `active` once it was placed, verified and
+ * switched to, `kept` when it could not be (or a newer one is there) and a
+ * usable runtime stays, and `failed` with nothing to register. Only `active`
+ * changes anything Claude Code reads, and only after `verify` passed.
  */
 export async function setupRuntime(o: {
   dataDir: string;
@@ -202,10 +200,10 @@ export async function setupRuntime(o: {
 
   const state = readRuntimeState(root);
   const usable = state !== null && runnable(root, state.current, platform) ? state.current : null;
-  // AN OLDER BUILD NEVER REPLACES A NEWER ONE, refresh or not: npm's copy can
-  // outlive an update and still answer `tenjin`, and an install run from it must
-  // not silently roll every scope back. Going back is `tenjin uninstall`, then
-  // installing the older version. `activate` checks again under the lock.
+  // An older build never replaces a newer one: npm's copy can outlive an update
+  // and still answer `tenjin`, and must not silently roll every scope back.
+  // Going back is `tenjin uninstall`, then the older install. `activate` checks
+  // again under the lock.
   if (usable !== null && isNewer(usable.cli, o.version)) return keptNewer(usable);
   const alreadyCurrent =
     usable !== null &&
@@ -217,11 +215,10 @@ export async function setupRuntime(o: {
     (await hostsMatch(root, o.version, launchOf(usable)));
 
   /**
-   * THE LAUNCHERS OF A BUILD ALREADY CURRENT, written under the lock and only
+   * The launchers of a build already current, written under the lock and only
    * while it still is: a newer install may have switched the runtime since
-   * `state` was read, and this build's launchers would then point every
-   * terminal back at it. Null when the state moved some other way, so the
-   * whole setup runs and re-renders.
+   * `state` was read. Null when the state moved some other way, so the whole
+   * setup runs and re-renders.
    */
   const stillCurrent = (p: RuntimePointer): Promise<RuntimeSetup | null> =>
     withRuntimeLock(
@@ -250,7 +247,7 @@ export async function setupRuntime(o: {
       : { state: 'failed', root, firstTime, launcher: null, reason };
 
   // Set while the pinned Node downloads: a failure then, on a Node that skips
-  // the shell's proxy, is the proxy's (#470), which no retry on that Node fixes.
+  // the shell's proxy, is the proxy's, which no retry on that Node fixes.
   let downloading = false;
   let usedProxyTransport = false;
   try {

@@ -10,17 +10,16 @@ export interface FileLockOptions {
   /** Poll interval between acquisition attempts (ms). */
   retryMs?: number;
   /**
-   * Called when the lock could not be removed on release. The protected work
-   * succeeded, so this is not a failure of the command; it is a leftover that will
-   * block later runs, and the caller is the only one able to say so.
+   * Called when the lock could not be removed on release. The work succeeded,
+   * but the leftover blocks later runs, and only the caller can say so.
    */
   onReleaseError?: (lockPath: string, err: unknown) => void;
 }
 
 const DEFAULTS = { timeoutMs: 5000, retryMs: 25 };
 
-/** Thrown when the lock cannot be acquired within `timeoutMs`. Carries the lock
- * path so a caller can surface the manual-recovery step in its own error contract. */
+/** Thrown when the lock cannot be acquired within `timeoutMs`, carrying the path
+ * so a caller can show the manual-recovery step. */
 export class LockTimeoutError extends Error {
   readonly lockPath: string;
   constructor(lockPath: string, timeoutMs: number) {
@@ -62,20 +61,11 @@ async function acquire(
 }
 
 /**
- * Minimal cross-process mutex: the lock IS a directory, and mkdir is atomic, so a
- * second holder gets EEXIST and retries with backoff until `timeoutMs`, then
- * throws LockTimeoutError. There is deliberately NO auto-steal of a "stale" lock:
- * concurrent waiters each judging a lock stale could remove a fresh holder's
- * directory and lose its update. A crashed holder's lock is recovered by hand (the
- * timeout error names the path); the pid+acquiredAt meta exists only to make that
- * manual call diagnosable. Always released in the finally.
- *
- * NO LONGER MIRRORED IN THE HOOKS. The generated scripts used to reimplement
- * this protocol byte for byte — they run as standalone .mjs files outside the
- * CLI and cannot import this module, yet wrote the same searches.json, and two
- * writers of one file that disagree about the mutex have no mutex. That file is
- * gone (tenjin-agent#209): hook state is one SQLite database and WAL serializes
- * the writers, so nothing outside this module implements this protocol any more.
+ * Minimal cross-process mutex: the lock is a directory, and mkdir is atomic, so
+ * a second holder gets EEXIST and retries until `timeoutMs`. A stale lock is
+ * never stolen: waiters that each judged it stale could remove a fresh holder's
+ * directory and lose its update. A crashed holder's lock is removed by hand (the
+ * timeout error names the path); the pid+acquiredAt meta only helps diagnose it.
  */
 export async function withFileLock<T>(
   lockPath: string,
@@ -96,13 +86,11 @@ export async function withFileLock<T>(
   try {
     return await fn();
   } finally {
-    // With no stealing, nothing else ever removes or replaces this directory, so
-    // the lock here is provably the one we created: the unconditional rm is sound.
+    // Nothing steals this lock, so it is still ours and the plain rm is safe.
     try {
       rmSync(lockPath, { recursive: true, force: true });
     } catch (err) {
-      // A leftover blocks every later run, so the caller is told rather than left
-      // to discover it as a timeout.
+      // A leftover blocks every later run; tell the caller now, not as a timeout.
       opts.onReleaseError?.(lockPath, err);
     }
   }

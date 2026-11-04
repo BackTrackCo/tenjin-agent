@@ -15,7 +15,7 @@ import { isRecord } from './guards';
  * keys through `config/batchWrite`, then list again and require them back
  * trusted. That is the same call the `/hooks` browser makes, and it matches
  * Claude Code's contract that installing a hook activates it, rather than
- * reporting success over a loop that cannot run (tenjin-agent#342/#343).
+ * reporting success over a loop that cannot run.
  *
  * WHAT STAYS FORBIDDEN, and the distinction is the whole of the boundary:
  *

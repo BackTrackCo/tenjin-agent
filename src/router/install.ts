@@ -76,20 +76,20 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * `tenjin install` for the router product: the wallet, the spend limits, and
  * the Claude Code plugin `tenjin`, registered with no step left to the person.
  *
- * WHAT IT WRITES. The wallet and the spend defaults under the data dir, as
- * before. With the default data dir, this build is copied into Tenjin's own
- * runtime, `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
+ * What it writes: the wallet and the spend defaults under the data dir. With
+ * the default data dir, this build is copied into Tenjin's own runtime,
+ * `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
  * `~/.local/bin` (see `lib/runtime.ts`), and the plugin is registered from
  * the runtime's `claude` folder, whose commands run that Node and that copy,
  * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. Unsupported
  * profiles and runtime failures stop registration. Only source checkouts use
- * this package's development plugin folder. The plugin goes through Claude Code's own `claude
- * plugin` commands (see `plugin-registration.ts`), or is written as a folder
- * under the config dir's `skills/` where no `claude` binary can be run. The
- * plugin carries the seven routing legs, the `router` MCP server, and the
- * hooks that allow the request tool and deny the legs' own tool to the model,
- * so this command writes nothing into `settings.json` or `~/.claude.json`
- * itself.
+ * this package's development plugin folder. The plugin goes through Claude
+ * Code's own `claude plugin` commands (see `plugin-registration.ts`), or is
+ * written as a folder under the config dir's `skills/` where no `claude`
+ * binary can be run. The plugin carries the seven routing legs, the `router`
+ * MCP server, and the hooks that allow the request tool and deny the legs' own
+ * tool to the model, so this command writes nothing into `settings.json` or
+ * `~/.claude.json` itself.
  *
  * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
  * the spend question comes back for the agent to ask there, the funding question
@@ -535,8 +535,8 @@ export async function runRouterInstall(
   // lookup cannot be paid without a wallet, so install makes one. A failure is
   // reported, never fatal; everything above is useful without it. It checks
   // that the wallet can SIGN (`verify`), and nothing about routing or funds:
-  // install computes no routing eligibility, and its funding step below is
-  // today's (S6). Loaded lazily: the status line shares this module's chunk
+  // install computes no routing eligibility. Loaded lazily: the status line
+  // shares this module's chunk
   // and must not load the wallet layer.
   const { resolveWallet } = await import('../commands/install-wallet');
   const wallet = await resolveWallet(ctx, deps, args.noWallet === true ? 'flag' : undefined, false);
@@ -939,9 +939,9 @@ const REPAIRABLE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The repair step, worded for whoever reads install's output (decision 15):
- * a person at a terminal runs it; an agent (no TTY) asks the person to, and
- * never asks for the passphrase (B1).
+ * The repair step, worded for whoever reads install's output: a person at a
+ * terminal runs it; an agent (no TTY) asks the person to, and never asks for
+ * the passphrase.
  */
 function repairStep(tty: boolean): string {
   return tty
@@ -952,7 +952,7 @@ function repairStep(tty: boolean): string {
 /**
  * The one step after the install, for the agent to relay in the session. A
  * wallet whose saved passphrase is gone or wrong is repaired first; otherwise
- * today's steps, unchanged (no new funding step for an existing wallet, S6).
+ * the usual steps (no funding step for an existing wallet).
  */
 function nextStep(
   plugin: PluginRegistration,
@@ -1346,15 +1346,15 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
 }
 
 /**
- * THE WALLET LINE, and who reads it. At a TTY a person ran install, so the
+ * The wallet line, and who reads it. At a TTY a person ran install, so the
  * person's wording; without one an agent did, and relays it, so a blocked
- * wallet's fix and the S7 passphrase line take the agent's wording (B1,
- * decision 15): ask the person, never ask for the passphrase.
+ * wallet's fix and the passphrase line take the agent's wording: ask the
+ * person, never ask for the passphrase.
  *
  * A ✓ only for a wallet every Claude Code can unlock: a durable store, a
  * legacy entry, or a variable a served router has already signed with. A
- * wallet that signs only through a variable in this shell is a yellow `!`
- * (S7), as is one that cannot be unlocked, or could not be checked.
+ * wallet that signs only through a variable in this shell is a yellow `!`,
+ * as is one that cannot be unlocked, or could not be checked.
  */
 function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
   const warn = (text: string) => paint(ctx.io, 'yellow', text);

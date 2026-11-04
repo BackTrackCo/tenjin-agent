@@ -18,23 +18,20 @@ import {
 } from './plugin-files';
 
 /**
- * THE CODEX PLUGIN, AS FILES, shipped in `dist/hosts/codex` and pinned to the
- * checked-in `hosts/codex/` by the same test. Its legs are `mcp_tool` hooks
- * into the plugin's own `router` server, as Claude Code's are, so each leg
- * runs in the process that holds the wallet and pays the routing fee: the
- * prompt, and one web call before it runs and after (Codex has no
- * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.149.0: 0.148 parses
- * them but skips them, and an older Codex rejects the file, so install and
- * update leave an older Codex's copy as it is and doctor names the build.
+ * The Codex plugin as files, shipped in `dist/hosts/codex` and pinned to the
+ * checked-in `hosts/codex/` by a test. Its legs are `mcp_tool` hooks into the
+ * plugin's own `router` server, so each runs in the process that holds the
+ * wallet: the prompt, and a web call before and after (Codex has no
+ * PostToolUseFailure). An older Codex rejects or skips `mcp_tool` hooks (see
+ * {@link CODEX_MCP_HOOKS_VERSION}), so install and update leave its copy alone.
  * The server's `env_vars` passes `CODEX_HOME` through Codex's cleared MCP
- * environment, so the hook tool finds the session's rollout where Codex
- * wrote it.
- * Nothing in it names a release or a path, so `codex plugin add` copies the
- * same hooks from every build and their trust holds across a `tenjin update`.
- * The runtime render, `~/.tenjin/runtime/codex`, differs only in `.mcp.json`:
- * Codex starts the server through the `tenjin` launcher in its own `bin/` by
- * absolute path, which never changes, and `activate` rewrites only the
- * launcher on each switch.
+ * environment, so the hook tool finds the session's rollout.
+ *
+ * Nothing in the package render names a release or a path, so `codex plugin
+ * add` copies the same bytes from every build and the hooks' trust holds
+ * across a `tenjin update`. The runtime render (`~/.tenjin/runtime/codex`)
+ * differs only in `.mcp.json`, which names the `bin/` launcher by its fixed
+ * absolute path; `activate` rewrites only the launcher on each switch.
  */
 export const CODEX_WEB_MATCHER = 'webrun';
 export const CODEX_LEGS = CODEX_HOOK_KINDS;
@@ -60,7 +57,7 @@ const codexLauncherSh = (o: CodexRuntime): string => `${o.binDir}/tenjin`;
 /** The `.cmd` launcher's absolute path, for a process Codex spawns directly. */
 const codexLauncherCmd = (o: CodexRuntime): string => `${o.binDir}\\tenjin.cmd`;
 
-/** The command form of a leg: what a plugin copy from an older build still runs. */
+/** The command form of a leg, which a plugin copy from an older build runs. */
 export function codexHookCommand(kind: CodexHookKind): string {
   return `tenjin hook ${kind} --harness codex`;
 }
@@ -84,10 +81,10 @@ function echoed(answer: string): { command: string; commandWindows: string } {
 }
 
 /**
- * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL, as {@link DENY_HOOK} is in
- * Claude Code: a model call to it fires PreToolUse as `mcp__router__hook`,
- * while Codex's own `mcp_tool` hook calls go straight to the server and fire
- * no PreToolUse (openai/codex `core/src/hook_mcp_executor.rs`).
+ * The hook legs' tool is denied to the model, as `DENY_HOOK` does in Claude
+ * Code (`plugin-files.ts`): a model call to it fires PreToolUse as
+ * `mcp__router__hook`, while Codex's own `mcp_tool` hook calls go straight to
+ * the server and fire no PreToolUse (openai/codex `core/src/hook_mcp_executor.rs`).
  */
 export const CODEX_DENY_HOOK = echoed(
   JSON.stringify({
@@ -100,12 +97,12 @@ export const CODEX_DENY_HOOK = echoed(
 );
 
 /**
- * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, as {@link allowHook}
- * is in Claude Code. Codex runs a `PermissionRequest` hook before its approval
+ * The request tool is allowed by the plugin itself, as `allowHook` does in
+ * Claude Code. Codex runs a `PermissionRequest` hook before its approval
  * policy, `never` included, so the tool runs without a prompt once the user
- * trusts this hook with the others in `/hooks`. It also overrides a user's own
- * `approval_mode = "prompt"` for the tool; that user turns this one hook off in
- * `/hooks`. The wallet's spend limits still bound every payment.
+ * trusts the hooks in `/hooks`. It also overrides a user's own
+ * `approval_mode = "prompt"`; that user turns this hook off in `/hooks`. The
+ * wallet's spend limits still bound every payment.
  */
 const CODEX_ALLOW_ANSWER = JSON.stringify({
   hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
@@ -174,7 +171,7 @@ export function renderCodexMcp(o?: CodexRuntime): { mcpServers: Record<string, u
   };
 }
 
-/** `.codex-plugin/plugin.json`. No version: see {@link renderCodexHostFiles}. */
+/** `.codex-plugin/plugin.json`. No version, so every build copies the same bytes. */
 export function renderCodexManifest(): Record<string, unknown> {
   return {
     name: PLUGIN_NAME,

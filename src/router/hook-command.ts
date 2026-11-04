@@ -72,10 +72,9 @@ export async function runHookCommand(io: Io, deps: HookCommandDeps): Promise<voi
     }
     const sessionId = sessionIdOf(event);
     if (sessionId === null) return;
-    // The session's once-per-session marker under `router/notices/`, which
-    // builds up to alpha.31 also wrote for their unpaid-fee notice: a session
-    // one of those told already hears nothing more. It leaves the reason told
-    // last (`noticeFor`'s `.current`) to the wallet notices that read it.
+    // The once-per-session marker under `router/notices/`, shared with older
+    // builds' unpaid-fee notice, so a session already told hears nothing more.
+    // It leaves `noticeFor`'s `.current` to the wallet notices that read it.
     if (await firstNoticeFor(deps.dataDir, sessionId, deps.now?.() ?? Date.now())) {
       response = { systemMessage: STALE_HOOK_LINE };
     }
@@ -86,18 +85,16 @@ export async function runHookCommand(io: Io, deps: HookCommandDeps): Promise<voi
 }
 
 /**
- * ONE HOOK EVENT, by kind, to its handler; the harness's answer or null. The
+ * One hook event, by kind, to its handler; the harness's answer or null. The
  * `hook` tool of `tenjin mcp` runs it for each routing leg.
  *
- * THE ROUTER'S WALLET NEWS (B2, decision 14). Inside `tenjin mcp`,
- * {@link HookDeps.walletNews} hands this leg the one-time wallet lines
- * ("Tenjin wallet unlocked.", a still-locked line, a wrong-variable warning),
- * and only for an event carrying a session id: that call is what marks the
- * router as serving a session, and a leg without one must not. The lines ride in `systemMessage` beside the
- * leg's own notices, and are acknowledged only once the response carrying them
- * is built: a leg that throws releases them instead of acking, so the next
- * leg offers them again rather than losing them. A leg running at the same
- * time is never handed lines another leg holds.
+ * Inside `tenjin mcp`, {@link HookDeps.walletNews} hands this leg the one-time
+ * wallet lines ("Tenjin wallet unlocked.", a still-locked line, a
+ * wrong-variable warning), only for an event with a session id: that call
+ * marks the router as serving a session. The lines ride in `systemMessage`
+ * and are acknowledged only once the response is built; a leg that throws
+ * releases them, so the next leg offers them again. Concurrent legs never
+ * share lines.
  */
 export async function runHookKind(
   kind: HookKind,

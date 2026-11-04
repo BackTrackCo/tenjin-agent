@@ -71,12 +71,11 @@ const said = (run: { code: number | null; stderr: string }): string => {
 };
 
 /**
- * DOES THIS BUILD RUN, THE WAY CLAUDE CODE WILL RUN IT? Before anything points
- * at a version: (a) `--version` prints it, (b) every command hook of its
- * runtime render exits 0 with empty or JSON output, all at once, and (c) its
- * MCP server answers `initialize`. The same checks as
- * `scripts/plugin-spawn-smoke.mjs`, against a throwaway data dir.
- * `timeoutMs` bounds all three together.
+ * Does this build run the way Claude Code will run it? Before anything points at
+ * a version: `--version` prints it, every command hook of its runtime render
+ * exits 0 with empty or JSON output, and its MCP server answers `initialize`.
+ * The same checks as `scripts/plugin-spawn-smoke.mjs`, against a throwaway
+ * data dir; `timeoutMs` bounds all three together.
  */
 export async function verifyBuild(
   launch: RuntimeLaunch,

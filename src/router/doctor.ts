@@ -215,10 +215,10 @@ export async function runRouterDoctor(
   const scope: PluginScope = project ? 'local' : 'user';
   const paths = settingsInstallPaths(project, env, home, cwd);
   const legacy = await inspectLegacyInstall(paths.settingsPath, paths.mcpFile);
-  // THE PROCESSES AND WHAT THE ROUTERS SAW, READ FIRST: before `claude mcp
+  // The processes and what the routers saw, read first: before `claude mcp
   // get` (serverCheck) starts a `tenjin mcp` of its own. That router serves no
-  // hook, so it never reads as a session anyway (servedSession stays false,
-  // B2), but nothing it does can reach this snapshot either.
+  // hook, so it never reads as a session, and nothing it does reaches this
+  // snapshot either.
   const [{ snapshot, installed }, observations] = await Promise.all([
     readProcessSnapshot(deps),
     (deps.readObservations ?? readObservations)(ctx.dataDir).catch(() => [] as RouterObservation[]),
@@ -234,7 +234,7 @@ export async function runRouterDoctor(
   const launch = await (
     deps.readLaunch ?? ((binary) => readPluginLaunch(binary, { env, home, cwd, scope }))
   )(claude.binary).catch(() => null);
-  // A platform Tenjin pins no Node for never gets a runtime (decision 15).
+  // A platform Tenjin pins no Node for never gets a runtime.
   const unpinned = runtime ? await (deps.unpinnedPlatform ?? thisPlatformUnpinned)() : null;
   // Which fixes fit: the ones that blame the `node` on Claude Code's PATH only
   // when that is what starts the plugin, read from the folder Claude Code
@@ -409,13 +409,13 @@ function walletProviderFor(
 }
 
 /**
- * THE ONE ELIGIBILITY CHECK, for the wallet, routing-fee and session rows.
- * Never rejects: a check that throws (an injected one included) reads as
- * "could not check" on every row it feeds, never as ok and never as a block.
+ * The one eligibility check, for the wallet, routing-fee and session rows.
+ * Never rejects: a check that throws reads as "could not check" on every row
+ * it feeds, never as ok and never as a block.
  *
- * SAVED PASSPHRASE FIRST (S7, decision 19). With TENJIN_WALLET_PASSPHRASE set,
- * `verifySaved` asks the same question install's default signing check asks
- * first: does the keychain or the file open the wallet WITHOUT the variable?
+ * Saved passphrase first: with TENJIN_WALLET_PASSPHRASE set, `verifySaved`
+ * asks what install's signing check asks first: does the keychain or the file
+ * open the wallet without the variable?
  * So a correct variable that a store also holds reports that store, and the
  * session row can say whether a Claude Code started without it could sign.
  */
@@ -581,7 +581,7 @@ interface PluginContext {
   /** When this build was installed, for {@link pluginStart}. */
   installed: number | null;
   snapshot: ProcessSnapshot | null;
-  /** The served live observations (B2). */
+  /** The live observations that served a session. */
   live: RouterObservation[];
   /** How Claude Code starts the plugin, for the fixes that fit. */
   layout: Layout;
@@ -602,10 +602,10 @@ function didNotStartFix(layout: Layout): string {
 }
 
 /**
- * HAS A SESSION STARTED THE PLUGIN AT THIS VERSION, first match wins:
+ * Has a session started the plugin at this version? First match wins:
  *
  * 1. `proven`: the `alive` stamp is at or above `version`; or a router that
- *    served a Claude session (B2) runs `version`; or a plugin router under a
+ *    served a Claude session runs `version`; or a plugin router under a
  *    Claude Code started at or after this install.
  * 2. `unknown`: no stamp, and no process list to look at (`ps` could not run).
  * 3. `did-not-start`: a Claude Code started at or after this install is
@@ -1309,7 +1309,7 @@ function routingCheck(router: RouterSettings | Error): RouterCheck {
   return { name, status: 'ok', required: false, detail: 'on' };
 }
 
-/** The unlock reasons a routing-fee row words from WALLET_REASONS, with the PERSON fix (decision 15). */
+/** The unlock reasons a routing-fee row words from WALLET_REASONS, with the person's fix. */
 const UNLOCK_WHY: ReadonlySet<string> = new Set([
   'wallet_corrupt',
   'env_key_invalid',
@@ -1321,10 +1321,10 @@ const UNLOCK_WHY: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * THE ROUTING FEE, AS THE NEXT PAID CALL WOULD MEET IT: `canPayRouting`, the
- * verdict the payer and the hooks reach on the same facts, in TODAY'S words
- * (S5). Never a failure: a call the fee cannot pay is skipped, and the native
- * tools run.
+ * The routing fee as the next paid call would meet it: `canPayRouting`, the
+ * verdict the payer and the hooks reach on the same facts, in fee.ts's words.
+ * Never a failure: a call the fee cannot pay is skipped, and the native tools
+ * run.
  *
  * - ready: ok, with the fee's terms; whether the router's live quote is
  *   within the ceiling is the router check's to say;
@@ -1463,14 +1463,13 @@ const WARN_UNLOCK: ReadonlySet<string> = new Set<UnlockReason>([
 ]);
 
 /**
- * THE WALLET ROW: can this shell's wallet SIGN, and with what.
+ * The wallet row: can this shell's wallet sign, and with what?
  *
- * Exit codes keep their meaning (S11): no wallet, a wallet.json `describe`
- * cannot read, and an invalid TENJIN_WALLET_KEY fail as required, exactly as
- * before. A wallet that is there but cannot be unlocked only warns: the
- * native tools still run, and the fix is a person's, never `agentFix`
- * (decision 15), never "set TENJIN_WALLET_PASSPHRASE" and never the plaintext
- * file (B1, S3). A check that could not answer is said as not checked.
+ * No wallet, a wallet.json `describe` cannot read, and an invalid
+ * TENJIN_WALLET_KEY fail as required. A wallet that is there but cannot be
+ * unlocked only warns: the native tools still run, and the fix is a person's,
+ * never `agentFix`, never "set TENJIN_WALLET_PASSPHRASE" and never the
+ * plaintext file. A check that could not answer is said as not checked.
  */
 export function walletRow(e: Eligibility, dataDir: string): RouterCheck {
   const name = 'wallet';
@@ -1540,7 +1539,7 @@ export function walletRow(e: Eligibility, dataDir: string): RouterCheck {
   };
 }
 
-/** The S7 repair fix: the person saves the passphrase where every Claude Code can read it. */
+/** The repair fix: the person saves the passphrase where every Claude Code can read it. */
 const SAVE_FOR_EVERY_SESSION_FIX = `Run \`tenjin wallet repair\` yourself to save the passphrase where every Claude Code can read it ${REPAIR_CLAUSE}.`;
 
 /** `HH:MM`, local time, for a router's start. */
@@ -1549,23 +1548,23 @@ function clock(ms: number): string {
 }
 
 /**
- * THE `claude session` ROW: what the router a running Claude Code started saw
+ * The `claude session` row: what the router a running Claude Code started saw
  * when it tried to unlock this wallet, read from the observation it wrote.
  * Doctor's own shell is not that session: its environment, its PATH and its
  * keychain answer can all differ, which is the whole point of this row.
  *
- * Only a router that has served a Claude hook counts (B2): one started by
+ * Only a router that has served a Claude hook counts: one started by
  * `claude mcp get` or `list`, a Codex one, or one prewarmed with no hook
  * served yet, is not "the running Claude session" and is ignored.
  *
  * With none, the row says what this shell alone can say, and is not checked,
- * except in the one case it can say more (S7): this shell signs only through
- * TENJIN_WALLET_PASSPHRASE and the saved stores DEFINITELY do not open the
+ * except in the one case it can say more: this shell signs only through
+ * TENJIN_WALLET_PASSPHRASE and the saved stores definitely do not open the
  * wallet, so a Claude Code started without the variable cannot unlock it. An
  * unknown saved-store answer (a locked keychain) makes no such claim.
  *
- * Never a failure, and never new routing-fee wording (S5): the routing-fee
- * row says that.
+ * Never a failure, and never routing-fee wording: the routing-fee row says
+ * that.
  */
 export function sessionRow(
   shell: Eligibility,

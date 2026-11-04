@@ -11,7 +11,7 @@ import { ADDRESS_RE } from '../ids';
 /**
  * A 0x-prefixed 32-byte hex private key (case-insensitive). Defined once, in the
  * hook-safe `wallet-unlock.ts`, so the hooks' wallet facts and `loadCredential`
- * test exactly the same thing (S12); re-exported here for the wallet layer.
+ * test exactly the same thing; re-exported here for the wallet layer.
  */
 export { PRIVATE_KEY_RE } from '../wallet-unlock';
 

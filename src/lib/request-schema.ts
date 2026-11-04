@@ -8,8 +8,7 @@ import { mask } from './redact';
 /**
  * JSON Schema validation for anything a remote party asks this CLI to send or
  * accepts back: the router's decision arguments, and a result body a caller
- * declared a success condition for. Ported from the draft auto-mode experiment
- * (PR #369 `contracts.ts`) into a shared path so `tenjin pay` gets it too.
+ * declared a success condition for. Shared by the router and `tenjin pay`.
  *
  * SCHEMAS ARE UNTRUSTED INPUT. Ajv compiles keywords, never merchant code, but a
  * schema still reaches a compiler, so the checks below run BEFORE compilation:

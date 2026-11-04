@@ -4,32 +4,26 @@ const REGISTRY = 'https://registry.npmjs.org/tenjin-cli';
 const REGISTRY_FIX = 'Check access to registry.npmjs.org and run `tenjin update` again.';
 
 /**
- * WAS THIS RELEASE BUILT BY TENJIN'S RELEASE WORKFLOW? `dist.integrity` alone
- * cannot say: it sits in the same registry document the publisher writes, so
- * whoever holds npm credentials (a phished maintainer, a leftover token) names
- * both the tarball and its hash, and every runtime that updates itself would
- * run their release within a day, wallet and all. So a release this machine
- * installs from the registry must also carry npm's SLSA provenance, whose
- * signed statement names
+ * Was this release built by Tenjin's release workflow? `dist.integrity` alone
+ * cannot say: the publisher writes it, so whoever holds npm credentials (a
+ * phished maintainer, a leftover token) names both the tarball and its hash,
+ * and every self-updating runtime would run their release within a day. So a
+ * release must also carry npm's SLSA provenance, whose signed statement names
  * `pkg:npm/tenjin-cli@<version>` with that same sha512, built by exactly
- * {@link RELEASE_WORKFLOW}: this repository's release workflow, on `main`.
+ * {@link RELEASE_WORKFLOW}.
  *
- * WHAT THIS TRUSTS IS NPM. npm verifies the Sigstore bundle and its signing
- * identity (the GitHub Actions OIDC identity of the workflow that published)
- * when the version is published, and refuses provenance that does not match,
- * so an attacker holding only npm credentials cannot produce this statement
- * for BackTrackCo's workflow. The bundle is not verified again here: full
- * client-side Sigstore verification (certificate chain, transparency log)
- * needs dependencies this package does not carry, and is out of scope.
+ * This trusts npm, which verifies the Sigstore bundle and the workflow's
+ * GitHub Actions OIDC identity at publish, so npm credentials alone cannot
+ * forge the statement. Full client-side Sigstore verification needs
+ * dependencies this package does not carry.
  *
- * IT DOES NOT STOP A COMPROMISE OF THE RELEASE WORKFLOW ITSELF (a malicious
- * commit on `main`, a hijacked run): that release carries valid provenance.
- * The background update's day of waiting (`BACKGROUND_COOLDOWN_MS` in
- * commands/update) is the window to move `latest` back before any runtime
- * takes it.
+ * It does not stop a compromised release workflow (a malicious commit on
+ * `main`, a hijacked run). The background update's day of waiting
+ * (`BACKGROUND_COOLDOWN_MS` in commands/update) is the window to move `latest`
+ * back before any runtime takes it.
  *
- * Nothing skips this: no environment variable and no flag, because a bypass is
- * exactly what an attacker would set.
+ * Nothing skips this, no env var and no flag, because a bypass is exactly what
+ * an attacker would set.
  */
 const RELEASE_WORKFLOW = {
   repository: 'https://github.com/BackTrackCo/tenjin-agent',
@@ -134,17 +128,13 @@ export interface AttestedRelease {
 }
 
 /**
- * THE GATE EVERY RELEASE FROM THE REGISTRY PASSES before anything of it is
- * downloaded or installed: `tenjin-cli@<version>`'s metadata must name a
- * tarball on the registry itself and its sha512, and npm's provenance must
- * show that sha512 was built by Tenjin's release workflow (see
- * {@link RELEASE_WORKFLOW}), or this throws UPDATE_FAILED and the version
- * that runs keeps running. Two callers: {@link stageTarball}, which then
- * downloads the tarball and checks its bytes against the result, and the npm
- * branch of `tenjin update`, which then has the package manager install that
- * exact version (see commands/update). The registry is asked with the same
- * fetch, timeout and proxy either way; a registry that cannot answer is the
- * network's.
+ * The gate every registry release passes before anything is downloaded or
+ * installed: the metadata must name a tarball on the registry itself and its
+ * sha512, and npm's provenance must show Tenjin's release workflow built that
+ * sha512 (see {@link RELEASE_WORKFLOW}), or this throws UPDATE_FAILED and the
+ * running version keeps running. Callers: `stageTarball` (`runtime-place.ts`),
+ * which then checks the downloaded bytes against the result, and the npm
+ * branch of `tenjin update`, which installs that exact version.
  */
 export async function checkReleaseProvenance(
   version: string,

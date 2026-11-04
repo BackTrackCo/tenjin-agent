@@ -24,7 +24,7 @@ import { LOWERCASE_ADDRESS_RE } from './ids';
  *
  * Only `wallet create`, `wallet create --replace` and `wallet repair` write it,
  * and they hold `wallet.create.lock` while they do, so the read-modify-write
- * below never races another writer. An entry is never deleted in PR 1: a
+ * below never races another writer. An entry is never deleted: a
  * restored archive (`mv wallet.<addr>.json.bak wallet.json`) finds its own
  * entry again by address.
  */

@@ -1,9 +1,9 @@
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 
 /**
- * THE `tenjin` LAUNCHERS, AS FILES: the sh and `.cmd` scripts the runtime
- * writes to `~/.local/bin` and to each plugin's `bin/`. Imports nothing but
- * the production origin, since `tsup.config.ts` loads the plugin renders.
+ * The `tenjin` launchers as files: the sh and `.cmd` scripts the runtime writes
+ * to `~/.local/bin` and each plugin's `bin/`. Imports nothing but the
+ * production origin, since `tsup.config.ts` loads the plugin renders.
  */
 
 /**
@@ -33,11 +33,10 @@ const missingSentence = (entry: string): string =>
 export const shQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 /**
- * THE `tenjin` LAUNCHER, as sh, for `~/.local/bin` and the plugin's `bin/`.
- * It bakes the absolute Node and entry, so it reads no state and the atomic
- * rename of the file is the switch. When either is gone it says how to put the
- * runtime back instead of failing with a bare `not found`. On win32 it is for
- * Git Bash, so the paths are written with forward slashes.
+ * The `tenjin` launcher as sh. It bakes the absolute Node and entry, so it reads
+ * no state and the file's atomic rename is the switch. When either is gone it
+ * says how to restore the runtime. On win32 it is for Git Bash, so paths use
+ * forward slashes.
  */
 export function renderLauncherSh(launch: RuntimeLaunch): string {
   const slash = (p: string) =>
@@ -78,13 +77,10 @@ function cmdPath(path: string, home: string): string {
 }
 
 /**
- * THE `tenjin.cmd` LAUNCHER, for a Windows terminal and the Codex runtime
- * render's commands (never a Claude Code plugin command). Both paths are
- * `%USERPROFILE%` plus their part under the home folder, which is ASCII by
- * construction, so a non-ASCII user name never has to survive cmd's code page. It throws when a path is outside `home`, or its part
- * holds a non-ASCII character, `"` or `%`, which cmd would read. The run line is
- * one parenthesized block, so cmd parses it whole before Node starts and a
- * rewrite of the file mid-run cannot inject a stray line.
+ * The `tenjin.cmd` launcher, for a Windows terminal and the Codex runtime
+ * render's commands. Paths go through {@link cmdPath}, so a non-ASCII user name
+ * never has to survive cmd's code page. The run line is one parenthesized
+ * block, so cmd parses it whole and a rewrite mid-run cannot inject a line.
  */
 export function renderLauncherCmd(launch: RuntimeLaunch & { home: string }): string {
   const node = cmdPath(launch.node, launch.home);

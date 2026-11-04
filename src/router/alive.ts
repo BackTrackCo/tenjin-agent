@@ -16,7 +16,7 @@ import { ADDRESS_RE } from '../lib/ids';
 import { sweep } from './store-files';
 
 /**
- * THE PLUGIN SAYS IT IS HERE. While a machine carries both the plugin and the
+ * The plugin says it is here. While a machine carries both the plugin and the
  * settings install it replaces, every event would run two sets of routing legs
  * and offer the same lookup twice. The plugin's `SessionStart` entry runs
  * `tenjin hook alive` before any other event of the session, and it writes:
@@ -33,10 +33,10 @@ import { sweep } from './store-files';
  * SHIM: the per-session check goes on or after 2026-12-01, the first release
  * cut 30 or more days after the plugin PR 2 ships; the stamp stays for doctor.
  *
- * It also says, once, when the wallet's FILES already show it cannot sign in
+ * It also says, once, when the wallet's files already show it cannot sign in
  * this session ({@link walletAtStart}). That is a file fact, not a verdict:
  * `alive` never unlocks, never execs, never reads a keychain and never replays
- * what a router saw (Q4). Everything else waits for the router's first notice.
+ * what a router saw. Everything else waits for the router's first notice.
  */
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -70,7 +70,7 @@ export interface AliveAnswer {
  * is added to the session's context and nothing else there is definite before
  * a router has tried to unlock; everything else waits for the router's first
  * notice. The answer carries the person's fix in `systemMessage` and the
- * model's `agentFix` in `additionalContext` (B1), and the reason's notice
+ * model's `agentFix` in `additionalContext`, and the reason's notice
  * marker is written so the session's first prompt leg does not say it again.
  * ({@link aliveMain} adds the balance notice as JSON when there is no answer.)
  * It never fails the session: every error is swallowed, and gives null.
@@ -110,7 +110,7 @@ export async function runAliveHook(
 }
 
 /**
- * WHAT THE FILES ALONE SAY AT SESSION START, and only what is definite (Q4).
+ * What the files alone say at session start, and only what is definite.
  * Filesystem only: one wallet.json read, the sidecar read and a few stats; no
  * exec, no keychain, no scrypt, and never the router's unlock-state, so it
  * cannot repeat a verdict that has since changed. In order:

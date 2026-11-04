@@ -19,7 +19,7 @@ import { PRIVATE, sweep, writePrivate } from './store-files';
  * `<sha32>` is the first 32 hex of sha256(session id) and `<sha8>` the first 8
  * of sha256(reason), so neither a session id nor a reason ever names a file.
  *
- * ONCE PER (SESSION, REASON), WITH A CLEAR LINE (decision 15). A wallet that
+ * Once per (session, reason), with a clear line. A wallet that
  * goes from "no passphrase" to "wrong passphrase" is news twice; the same
  * reason on every prompt is news once. Once a paid call succeeds after a
  * wallet-class reason was told, the session hears that it cleared, once

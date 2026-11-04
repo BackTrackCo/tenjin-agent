@@ -111,10 +111,9 @@ function renderOrder(files: Record<string, string>): string[] {
 }
 
 /**
- * THE MOD THE BUILD AT `launch.entry` SHIPS, as written in its own
- * `dist/hosts/claude/tenjin`, so the runtime render carries the mod of the
- * version it runs, never the running package's. Undefined when that build
- * carries none: the render then names no module.
+ * The mod the build at `launch.entry` ships in its own `dist/hosts/claude/tenjin`,
+ * so the runtime render carries the mod of the version it runs, never the
+ * running package's. Undefined when that build carries none.
  */
 export function runtimeMod(launch: RuntimeLaunch): Promise<ModSources | undefined> {
   return readModSources(join(dirname(launch.entry), 'hosts', 'claude', PLUGIN_DIR));
@@ -165,15 +164,14 @@ export class NewerRuntime extends Error {
 }
 
 /**
- * SWITCH THE RUNTIME TO `next`, under the lock: record it as `pending`, render
- * `runtime/claude` and `runtime/codex` for it, write the launchers, then make it `current` and
- * clear `pending` in one write. It throws {@link NewerRuntime}, writing
- * nothing, when `current` is already a newer build that runs. A crash in
+ * Switch the runtime to `next`, under the lock: record it as `pending`, render
+ * `runtime/claude` and `runtime/codex`, write the launchers, then make it
+ * `current` and clear `pending` in one write. Throws {@link NewerRuntime},
+ * writing nothing, when `current` is a newer build that runs. A crash in
  * between leaves `pending` set, which GC keeps and the next install
- * re-renders; a render that throws puts the old files back and leaves
- * `pending`. `restore()` undoes the whole switch, for a caller whose
- * registration then failed, and does nothing once a later activation has
- * written `state.json` (its random `activation` id is gone).
+ * re-renders; a render that throws puts the old files back. `restore()` undoes
+ * the switch for a caller whose registration failed, unless a later activation
+ * has written `state.json` since.
  */
 export async function activate(
   root: string,
@@ -190,10 +188,8 @@ export async function activate(
   return withRuntimeLock(
     root,
     async () => {
-      // AN OLDER BUILD NEVER REPLACES A NEWER ONE, checked again here: the
-      // caller read `current` before staging, without the lock, and a newer
-      // install may have switched to its own build since. Writing `next` now
-      // would silently roll every scope back.
+      // An older build never replaces a newer one, checked again under the
+      // lock: a newer install may have switched since the caller read `current`.
       const old = readRawState(root);
       if (
         old.current !== null &&
@@ -202,9 +198,8 @@ export async function activate(
       ) {
         throw new NewerRuntime(old.current);
       }
-      // THE BUILD MUST STILL BE THERE: it was placed under an earlier hold of
-      // the lock, and a collect may have run since. A switch to a folder that
-      // is gone would leave Claude Code starting nothing.
+      // The build must still be there: it was placed under an earlier hold of
+      // the lock, and a collect may have run since.
       if (
         !completeValid(versionDir(root, next.cli)) ||
         !existsSync(launch.entry) ||
@@ -248,11 +243,9 @@ export async function activate(
         withRuntimeLock(
           root,
           async () => {
-            // ONLY WHILE THIS ACTIVATION IS STILL THE LAST ONE. The lock is
-            // released between this switch and the caller's registration, so
-            // another install may have activated (and registered) since;
-            // putting back what was here before this one would overwrite its
-            // switch, or, on a first activation, delete its files.
+            // Only while this activation is still the last one: the lock is
+            // released before the caller registers, so another install may have
+            // activated since, and putting back the old files would undo it.
             if (readRawState(root).activation !== activation) return;
             for (const path of [...order].reverse()) {
               await putBack(join(root, path), oldBodies.get(path) ?? null, modeFor(path));
@@ -294,14 +287,13 @@ const KEPT_FOR_FOLDER = 'a plugin folder runs it';
 
 /**
  * GC, under the lock. Keeps the current, previous and pending versions, every
- * version in `keep` (a plugin folder that runs it by absolute path, which
- * `state.json` does not name), every version a running `tenjin mcp` marked
- * live, the Node versions they pin, and any version or Node placed in the
- * last 15 minutes (by its `.complete`): the lock is held per step, so one
- * placed for an activation still on its way (update's child verifying it) has
- * no role yet. Removes the rest by renaming each into `tmp/trash-*` first. A
- * folder held open (Windows: a running `node.exe`) is kept for a later
- * install. Then sweeps `tmp/` of trash and of anything older than an hour.
+ * version in `keep` (a plugin folder that runs it by absolute path), every
+ * version a running `tenjin mcp` marked live, the Node versions they pin, and
+ * anything placed in the last {@link PLACED_GRACE_MS}: the lock is held per
+ * step, so a version placed for an activation still on its way has no role
+ * yet. Removes the rest by renaming into `tmp/trash-*` first; a folder held
+ * open (Windows: a running `node.exe`) waits for a later install. Then sweeps
+ * `tmp/` of trash and of anything older than an hour.
  */
 export async function collect(
   root: string,

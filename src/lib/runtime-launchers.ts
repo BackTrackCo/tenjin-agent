@@ -89,12 +89,10 @@ export async function inspectLauncher(path: string): Promise<LauncherFile> {
 }
 
 /**
- * THE `tenjin` LAUNCHER IN `~/.local/bin` (and `tenjin.cmd` beside it on
- * Windows), written atomically at 0o755, so a terminal finds Tenjin with no npm
- * folder and no `node` on PATH. Only a file carrying {@link LAUNCHER_MARKER} is
- * ever replaced: npm's own link is left as `npm` and anything else as
- * `foreign`. Never throws; a write that fails is `failed`, and the runtime
- * works without it.
+ * The `tenjin` launcher in `~/.local/bin` (and `tenjin.cmd` on Windows), written
+ * atomically at 0o755, so a terminal finds Tenjin with no npm folder and no
+ * `node` on PATH. Only a file carrying {@link LAUNCHER_MARKER} is replaced.
+ * Never throws; a failed write is `failed`, and the runtime works without it.
  */
 export async function writeLaunchers(
   home: string,

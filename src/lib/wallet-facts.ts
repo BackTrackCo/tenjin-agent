@@ -18,7 +18,7 @@ import { ADDRESS_RE } from './ids';
  * what that means is `src/router/eligibility.ts`'s job.
  */
 export interface WalletFacts {
-  /** TENJIN_WALLET_KEY trimmed vs PRIVATE_KEY_RE (S12); whitespace-only = absent. */
+  /** TENJIN_WALLET_KEY trimmed vs PRIVATE_KEY_RE; whitespace-only = absent. */
   envKey: 'absent' | 'valid' | 'malformed';
   /** unparsable = unreadable, bad JSON, or no valid address. */
   walletFile: 'present' | 'absent' | 'unparsable';

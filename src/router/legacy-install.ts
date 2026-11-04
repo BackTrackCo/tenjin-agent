@@ -8,14 +8,14 @@ import { classifyStatusLine, decomposeCommand, type StatusLineState } from './st
 import { isRecord } from '../lib/guards';
 
 /**
- * THE SETTINGS-BASED INSTALL, READ AND REMOVED. Releases up to alpha.26 wrote
- * seven hook entries, an allow and a deny rule and a status line into
- * settings.json, and registered an `x402` MCP server with `claude mcp add`.
- * The plugin replaces all of it. `install` and `update` remove it only once the
- * plugin has proven to load on this machine, `uninstall` removes it outright,
- * and doctor only reads it.
+ * The settings-based install, read and removed. Older releases wrote seven
+ * hook entries, an allow and a deny rule and a status line into settings.json,
+ * and registered an `x402` MCP server with `claude mcp add`. The plugin
+ * replaces all of it. `install` and `update` remove it only once the plugin has
+ * proven to load on this machine, `uninstall` removes it outright, and doctor
+ * only reads it.
  *
- * EXACT SHAPES ONLY. A hook handler is Tenjin's when it is an `mcp_tool` call
+ * Exact shapes only. A hook handler is Tenjin's when it is an `mcp_tool` call
  * to the `x402` server's `hook` tool, or a command that is exactly
  * `tenjin hook <leg>` (optionally with a path). Any other command that merely
  * contains `tenjin hook` is the user's, kept and reported. Removal is handler

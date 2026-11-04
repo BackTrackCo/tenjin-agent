@@ -12,39 +12,30 @@ import {
 } from './names';
 
 /**
- * THE CLAUDE CODE PLUGIN, AS FILES, in two renders. `tenjin install` registers
- * it with Claude Code's own `claude plugin` commands from Tenjin's runtime,
+ * The Claude Code plugin as files, in two renders. The runtime render lives in
  * `~/.tenjin/runtime/claude`, which `activate` renders with the runtime's
- * absolute Node and entry (the runtime render). Installation requires that
- * runtime; a non-default data dir, unsupported platform or runtime setup
- * failure stops before registration. The build also renders the package's
- * `dist/hosts/claude` with `node` from PATH for source development (the package
- * render). With no `claude` binary, install writes the runtime-backed plugin
- * under the config dir's `skills/`. The checked-in `hosts/claude/` templates are
- * pinned to the package render by a test, so the two cannot drift.
+ * absolute Node and entry, and `tenjin install` registers with `claude plugin`.
+ * The package render is the build's `dist/hosts/claude`, with `node` from PATH,
+ * for source development. With no `claude` binary, install writes the runtime
+ * render under the config dir's `skills/`. A test pins the checked-in
+ * `hosts/claude/` templates to the package render.
  *
- * NOTHING HERE IMPORTS MORE THAN THE NAMES, THE LAUNCHERS AND THE PRODUCTION
- * ORIGIN: `tsup.config.ts` loads this module and `codex-plugin-files.ts` to
- * render the shipped files, and their import graph is the build's.
+ * Imports stay limited to the names, the launchers and the production origin:
+ * `tsup.config.ts` loads this module and `codex-plugin-files.ts`, so their
+ * import graph is the build's.
  */
 
 /**
- * The harness's kill budget for each routing leg: a stuck server never holds a
- * prompt longer than this. Every wait inside the leg is cut from it: the gate's
- * 3.5 s, which holds the paid path's 402, the reads before a deposit and the
- * paid request, with 500 ms left for the transcript read and the reply
- * (`wire.test.ts` pins the sum). A whole leg whose call carried a deposit took
- * 2.8 to 3.3 s on Base Sepolia, so it fits; a slower one (a wallet unlock, a
- * slow settlement) loses only that prompt's hint, and the SDK recovers the
- * channel on the next call.
+ * The harness's kill budget for each routing leg, so a stuck server never holds
+ * a prompt longer. `gate.ts` splits it and `wire.test.ts` pins the sum. A
+ * slower leg (a wallet unlock, a slow settlement) loses only that prompt's
+ * hint, and the SDK recovers the channel on the next call.
  */
 export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
 /**
- * The after-call entries' kill budget. No after-call leg waits on anything of
- * its own: a noted search reads one file, and a short call takes one decision,
- * the slowest a paid one with a deposit (`wire.test.ts` pins it). The number
- * is a ceiling, not a cost, and lowering it would rewrite both hosts' hook
- * entries and re-trust Codex's for no change a user sees.
+ * The after-call entries' kill budget: a ceiling, not a cost, that covers one
+ * paid decision with a deposit (`wire.test.ts` pins it). Lowering it would
+ * rewrite both hosts' hook entries and make Codex re-trust them for nothing.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
 /** The `alive` leg and the two permission answers do no network work. */
@@ -58,15 +49,12 @@ export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 export const ASK_MATCHER = 'AskUserQuestion';
 
 /**
- * EVERY COMMAND RUNS NODE IN EXEC FORM, with no shell (see `hook-form.ts`).
- * The package render loads in place from the package's `dist/hosts/claude/tenjin`,
- * so the bundle's entry is three folders above `${CLAUDE_PLUGIN_ROOT}`, which
- * Claude Code substitutes into each argument, and the checked-in template
- * stays static; its `node` is whichever one is on Claude Code's PATH. The
- * runtime render names an absolute Node and entry instead, so neither a Node
- * upgrade nor `npm rm -g` can take them away. The folder fallback lives under
- * the config dir, and `install` renders it with the absolute entry of the CLI
- * that wrote it.
+ * Every command runs Node in exec form, with no shell (see `hook-form.ts`). The
+ * package render loads in place from `dist/hosts/claude/tenjin`, so the entry
+ * is three folders above `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes
+ * into each argument, and the checked-in template stays static. The runtime
+ * render names an absolute Node and entry instead, so neither a Node upgrade
+ * nor `npm rm -g` can take them away.
  */
 export const PLUGIN_ROOT_ENTRY = '${CLAUDE_PLUGIN_ROOT}/../../../index.js';
 
@@ -77,9 +65,8 @@ export interface ExecLaunch {
 }
 
 /**
- * HOW A PLUGIN RENDER DEPARTS FROM THE PACKAGE RENDER, one optional field
- * each, passed as the last argument of every render that takes it: a render
- * that sets none is byte for byte what the build ships.
+ * How a plugin render departs from the package render. A render that sets
+ * none of these is byte for byte what the build ships.
  */
 export interface RenderOptions {
   /** The Node every command runs: the runtime's absolute Node, or `node` from PATH when unset. */
@@ -104,12 +91,10 @@ export function cliLaunch(
 }
 
 /**
- * The `alive` leg: the plugin's `SessionStart` entry, so it runs before any
- * other event of a session. It marks the session as one the plugin serves, so
- * a settings-install leg in the same session stays silent, and stamps the
- * machine as one the plugin has loaded on, which the migration waits for. A
- * command, not an `mcp_tool` call: a session's MCP servers may still be
- * connecting when `SessionStart` fires, and a command needs nothing running.
+ * The `alive` leg, the plugin's `SessionStart` entry. It marks the session as
+ * one the plugin serves, so a settings-install leg stays silent, and stamps the
+ * machine for the migration. A command, not an `mcp_tool` call: MCP servers may
+ * still be connecting when `SessionStart` fires.
  */
 export const ALIVE_ARGS = ['hook', 'alive'] as const;
 
@@ -132,13 +117,11 @@ function printed(answer: string, node: string): ExecLaunch {
 }
 
 /**
- * THE HOOK LEGS' TOOL IS DENIED TO THE MODEL. Its event fields are plain
- * arguments, so the model calling it could forge a routing leg. This blocking
- * hook replaces the settings install's `permissions.deny` rule: a plugin cannot
- * carry permission rules, and a blocking hook takes precedence over allow rules
- * in every mode, bypass included, while Claude Code's own `mcp_tool` hook calls
- * still run (lab, Claude Code 2.1.296). The tool stays in the model's list. The
- * tool's transcript check (`admitHookEvent`) stays for a machine with hooks off.
+ * The hook legs' tool is denied to the model: its event fields are plain
+ * arguments, so the model could forge a routing leg. A plugin cannot carry
+ * permission rules, and a blocking hook beats allow rules in every mode, bypass
+ * included, while Claude Code's own `mcp_tool` hook calls still run (checked on
+ * Claude Code 2.1.296). `admitHookEvent` still covers a machine with hooks off.
  */
 export function denyHook(o: RenderOptions = {}): ExecLaunch {
   return printed(
@@ -152,11 +135,9 @@ export function denyHook(o: RenderOptions = {}): ExecLaunch {
 export const DENY_HOOK = denyHook();
 
 /**
- * THE REQUEST TOOL IS ALLOWED BY THE PLUGIN ITSELF, replacing the settings
- * install's `permissions.allow` rule, so an install needs no rule the user
- * adds. A hook's allow never overrides the user's own `deny` or `ask` rule for
- * the tool. The tool still pays only within the local spend policy, and an
- * amount over it returns `needs_approval` with nothing paid.
+ * The request tool is allowed by the plugin itself, so an install needs no rule
+ * the user adds. A hook's allow never overrides the user's own `deny` or `ask`
+ * rule, and the tool still pays only within the local spend policy.
  */
 export function allowHook(o: RenderOptions = {}): ExecLaunch {
   return printed(permissionAnswer('allow', 'Tenjin lookup'), o.node ?? 'node');
@@ -180,14 +161,11 @@ function command(launch: ExecLaunch): unknown[] {
 }
 
 /**
- * The seven routing legs. The native tools are routed twice over one lookup:
- * BEFORE the call, with a line pointing to a paid lookup when one fits; and
- * AFTER it, only when it came back short and nothing was said before, or to
- * add the free docs the pre-call arm fetched to a search's results. A failed
- * call fires PostToolUseFailure rather than PostToolUse, so the second takes
- * both. The host's question to the user is routed the same two ways: before it
- * is asked, when a service could stand in for what it asks for, and after,
- * with the user's answers read as their own words.
+ * The seven routing legs. The native tools are routed before the call, when a
+ * paid lookup fits, and after it, when it came back short or to add the free
+ * docs the pre-call arm fetched. A failed call fires PostToolUseFailure, not
+ * PostToolUse, so the after leg takes both. The host's question to the user is
+ * routed before it is asked and after, with the answers read as the user's.
  */
 export function routerHookPlan(): { event: string; matcher?: string; hooks: unknown[] }[] {
   const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
@@ -232,15 +210,13 @@ export function renderPluginHooks(
 }
 
 /**
- * `.mcp.json`: the server Claude Code starts for the plugin, the CLI's entry
- * run by Node (`node` from PATH, or the runtime's absolute `node.exe` on
- * Windows), which Windows can spawn where it cannot spawn the shim.
+ * `.mcp.json`: the CLI's entry run by Node, which Windows can spawn where it
+ * cannot spawn the shim.
  *
- * `--plugin` KEEPS IT FROM BEING SUPPRESSED. Claude Code drops a plugin's MCP
- * server whose command and arguments match a server the user configured, and
- * a settings install's `x402` entry runs `tenjin mcp`; with the same command
- * the plugin's `router` server would not start while the two coexist, its legs
- * would fail, and the old ones stay silent (checked on Claude Code 2.1.296).
+ * `--plugin` keeps the server from being suppressed: Claude Code drops a
+ * plugin's MCP server whose command matches one the user configured, and a
+ * settings install's `x402` entry runs `tenjin mcp` (checked on Claude Code
+ * 2.1.296).
  */
 export const PLUGIN_MCP_ARGS = ['mcp', '--plugin'] as const;
 
@@ -262,10 +238,9 @@ export const PLUGIN_DESCRIPTION =
   'Tenjin picks the right tool when your agent needs one, and one wallet on this machine pays for every call.';
 
 /**
- * `.claude-plugin/plugin.json`. The version is the CLI's, stamped at build time,
- * so Claude Code's plugin list names the build that runs; the checked-in
- * template carries none. `metadata[tenjin-cli]` is the ownership marker the
- * folder fallback, `update` and `uninstall` check before they touch a folder.
+ * `.claude-plugin/plugin.json`. The version is the CLI's, stamped at build
+ * time, so the plugin list names the build that runs. `metadata[tenjin-cli]` is
+ * the ownership marker checked before anything touches a folder.
  */
 export function renderPluginManifest(
   version?: string,
@@ -306,10 +281,9 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 }
 
 /**
- * EVERY FILE THE PLUGIN FOLDER HOLDS, relative to the plugin's root, and the
- * only paths install, update and uninstall ever write or unlink in a folder.
- * The manifest is last: a crash mid-write never leaves a manifest pointing at
- * parts that are not there yet.
+ * Every file the plugin folder holds, and the only paths install, update and
+ * uninstall write or unlink there. The manifest is last, so a crash mid-write
+ * never leaves a manifest pointing at missing parts.
  */
 export const PLUGIN_FILES = [
   '.mcp.json',
@@ -323,10 +297,9 @@ export const PLUGIN_FILES = [
 /** The mod's `$.state` contract, shipped as written. */
 export const MOD_TYPES = 'types/index.d.ts';
 /**
- * THE MOD SHIPS AS WRITTEN, NOT RENDERED: `hosts/claude/tenjin/` holds its
- * source, the build copies it into `dist/hosts/claude/tenjin/`, and the folder
- * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
- * later); nothing here builds or imports it.
+ * The mod ships as written, not rendered: the build copies its source from
+ * `hosts/claude/tenjin/` into `dist/hosts/claude/tenjin/`. Claude Code compiles
+ * it at load (2.1.287 or later); nothing here builds or imports it.
  */
 export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
 export type ModSources = Record<(typeof MOD_FILES)[number], string>;
@@ -337,10 +310,7 @@ export const jsonText = (value: unknown): string => `${JSON.stringify(value, nul
 /**
  * The plugin folder's files, by {@link PLUGIN_FILES} path. `entry` is the CLI
  * entry the commands run, {@link PLUGIN_ROOT_ENTRY} unless the folder lives
- * outside the package, `o.node` the Node that runs them (`node` from PATH
- * unless this is the runtime render), and `o.mod` the mod's sources. Without
- * them the folder carries the legs and the server alone, and its hooks file
- * names no module.
+ * outside the package.
  */
 export function renderPluginFiles(
   version?: string,
@@ -366,10 +336,8 @@ export interface HostRenderOptions {
 
 /**
  * The marketplace folder's files: its catalog and the plugin under
- * {@link PLUGIN_DIR}. With no `o.launch`, the package render, byte for byte
- * what the build ships when `o.mod` is the mod as written; with one, the
- * runtime render, which runs `launch.node` and `launch.entry`, carries the
- * plugin's `bin/` launchers, and carries the mod when `o.mod` does.
+ * {@link PLUGIN_DIR}. With no `o.launch`, the package render; with one, the
+ * runtime render, which also carries the plugin's `bin/` launchers.
  */
 export function renderHostFiles(
   version?: string,
