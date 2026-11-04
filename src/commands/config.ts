@@ -31,7 +31,7 @@ import type {
 } from '../lib/config';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
-import { withFileLock, LockTimeoutError } from '../lib/lock';
+import { withFileLock, LockTimeoutError, type FileLockOptions } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
 import type { CommandContext, CommandResult } from '../context';
@@ -90,6 +90,8 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'false stops every router hook and the request tool; --project sets it for this repository, --project --local for you alone in it',
   'router.context':
     'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
+  'router.improve':
+    'Help improve routing: true=Tenjin keeps the secret-masked text of turns the router sees, to grade its offers; false (the default) keeps none, and turning it off deletes what was kept; this machine only, never --project',
   'experimental.bazaar':
     "EXPERIMENTAL. on=the router may also suggest unreviewed sellers from Coinbase's open x402 Bazaar, off=curated services and Tenjin's reviewed list only",
 };
@@ -116,9 +118,22 @@ function isRouterKey(key: string): key is RouterConfigKey {
 
 /** The list/get shape for a router key, with the file that set it. */
 function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): RenderedSetting {
-  const { value, source, path } = key === 'router.enabled' ? settings.enabled : settings.context;
+  const { value, source, path } =
+    key === 'router.enabled'
+      ? settings.enabled
+      : key === 'router.context'
+        ? settings.context
+        : settings.improve;
   return { value, source, ...(path !== undefined ? { path } : {}) };
 }
+
+/**
+ * What turning "Help improve routing" on means, said when it is turned on:
+ * what is kept, and how to stop it.
+ */
+export const IMPROVE_ON_NOTE =
+  'Help improve routing is on: Tenjin keeps the secret-masked text of turns the router sees, including anything pasted into them, to check and improve its offers. ' +
+  'Turn it off any time with `tenjin config set router.improve false`, which also deletes what was kept.';
 
 /** Router keys resolve against the directory the command runs in, as a hook would. */
 async function resolveRouterFromContext(ctx: CommandContext): Promise<RouterSettings> {
@@ -219,12 +234,20 @@ export async function runConfigSet(
       fix: `Run \`tenjin config set --project --local ${key} ${value}\`.`,
     });
   }
-  if (isRouterKey(key)) {
+  if (key === 'router.improve') {
+    if (project === true) {
+      throw new CliError('USAGE', 'router.improve is not a project key', {
+        fix: 'It is your own choice for this machine: drop --project to set it.',
+      });
+    }
+    return setImprove(value, ctx);
+  }
+  if (isProjectRouterKey(key)) {
     return setRouterKey(key, value, ctx, project === true ? { local: local === true } : undefined);
   }
   if (project === true) {
     throw new CliError('USAGE', `${key} is not a project key`, {
-      fix: `--project applies to ${ROUTER_CONFIG_KEYS.join(' and ')} only; drop it to set ${key} for this machine.`,
+      fix: `--project applies to ${PROJECT_ROUTER_KEYS.join(' and ')} only; drop it to set ${key} for this machine.`,
     });
   }
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
@@ -274,6 +297,52 @@ async function setExperimentalKey(
   };
 }
 
+/** The router keys a project file may carry: both only ever tighten. */
+type ProjectRouterKey = Exclude<RouterConfigKey, 'router.improve'>;
+const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = ['router.enabled', 'router.context'];
+
+function isProjectRouterKey(key: string): key is ProjectRouterKey {
+  return (PROJECT_ROUTER_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * `config set router.improve true|false`, "Help improve routing", into the
+ * global config only. Turning it off also asks the server to delete every
+ * packet it kept for this install (the `forget` form), under a short deadline:
+ * the setting is written first and stays written whatever the server says, and
+ * a send that fails is said, never thrown. The request goes whenever the file
+ * named the key before (it was on, or this is a repeat), so running the same
+ * command again retries a failed one; the server's delete is idempotent.
+ */
+async function setImprove(value: string, ctx: CommandContext): Promise<CommandResult> {
+  const key = 'router.improve';
+  const parsed = parseBoolean(value);
+  let before: boolean | undefined;
+  await persist(ctx.dataDir, (existing) => {
+    before = existing.router?.improve;
+    return { ...existing, router: { ...existing.router, improve: parsed } };
+  });
+  const written: RenderedSetting = { value: parsed, source: 'file', path: configPath(ctx.dataDir) };
+  if (parsed) {
+    return {
+      data: { key, ...written, note: IMPROVE_ON_NOTE },
+      humanLines: [formatLine(key, written), IMPROVE_ON_NOTE],
+    };
+  }
+  if (before === undefined)
+    return { data: { key, ...written }, humanLines: [formatLine(key, written)] };
+  const { requestForget } = await import('../router/decision');
+  const { baseUrl } = await resolveFromContext(ctx);
+  const forget = await requestForget({ baseUrl: baseUrl.value });
+  const said = forget.ok
+    ? 'Tenjin was asked to delete the turns it kept for this machine.'
+    : `Tenjin could not be asked to delete the turns it kept (${forget.reason}); run \`tenjin config set router.improve false\` again to retry.`;
+  return {
+    data: { key, ...written, forget: forget.ok ? 'sent' : 'failed', note: said },
+    humanLines: [formatLine(key, written), forget.ok ? said : style('yellow', said)],
+  };
+}
+
 /**
  * `config set [--project [--local]] router.enabled|router.context`. Without
  * `--project` the key goes into the global config through the same locked merge
@@ -283,7 +352,7 @@ async function setExperimentalKey(
  * when an outer layer is tighter.
  */
 async function setRouterKey(
-  key: RouterConfigKey,
+  key: ProjectRouterKey,
   value: string,
   ctx: CommandContext,
   project: { local: boolean } | undefined,
@@ -389,6 +458,28 @@ export async function persistRouterProject(
     else known.delete(projectDir);
     return { ...existing, install: { ...existing.install, routerProjects: [...known].sort() } };
   });
+}
+
+/**
+ * Record that install put the "Help improve routing" question to this
+ * machine's person, and the answer when they gave one at a terminal: a yes
+ * turns `router.improve` on; a no, or a question handed to an agent, leaves
+ * the key as it was (off unless set). One locked write.
+ */
+export async function persistImproveAnswer(
+  dir: string,
+  on: boolean | undefined,
+  lock?: FileLockOptions,
+): Promise<void> {
+  await persist(
+    dir,
+    (existing) => ({
+      ...existing,
+      install: { ...existing.install, improveAsked: true },
+      ...(on === true ? { router: { ...existing.router, improve: true } } : {}),
+    }),
+    lock,
+  );
 }
 
 /** Absent-only automatic router defaults; defined beside the spend question that shows them. */
@@ -572,22 +663,27 @@ function parseHttpUrl(value: string): string {
 async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
+  lock?: FileLockOptions,
 ): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const lockPath = `${configPath(dir)}.lock`;
   try {
-    await withFileLock(lockPath, async () => {
-      const existing = await loadRawConfig(dir);
-      const merged = merge(existing);
-      const validated = RawConfigSchema.parse(merged);
-      // 0600, matching lib/config.ts's `writeConfig`: `rpcUrl` can carry an RPC
-      // provider's key, and this is the writer `config set` uses to put it
-      // there. See that function for why dirMode alone is not enough.
-      await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o600,
-        dirMode: 0o700,
-      });
-    });
+    await withFileLock(
+      lockPath,
+      async () => {
+        const existing = await loadRawConfig(dir);
+        const merged = merge(existing);
+        const validated = RawConfigSchema.parse(merged);
+        // 0600, matching lib/config.ts's `writeConfig`: `rpcUrl` can carry an RPC
+        // provider's key, and this is the writer `config set` uses to put it
+        // there. See that function for why dirMode alone is not enough.
+        await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
+          mode: 0o600,
+          dirMode: 0o700,
+        });
+      },
+      lock,
+    );
   } catch (err) {
     // A lock timeout is not the user's malformed input; surface it as INTERNAL with
     // the one manual step (there is no auto-steal), keeping the JSON error contract.

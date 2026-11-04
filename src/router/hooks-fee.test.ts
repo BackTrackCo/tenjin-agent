@@ -55,10 +55,15 @@ let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-hooks-fee-'));
   await mkdir(join(dir, '.git'));
-  // What `tenjin install` writes, so the fixture's offer clears the spend vet.
+  // What `tenjin install` writes, so the fixture's offer clears the spend vet
+  // and a prompt carries no Help improve routing question.
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+      install: { improveAsked: true },
+    }),
   );
 });
 afterEach(async () => {

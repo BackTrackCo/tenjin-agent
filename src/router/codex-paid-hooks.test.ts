@@ -36,9 +36,14 @@ let transcript: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-codex-paid-'));
   await mkdir(join(dir, '.git'));
+  // Installed, and asked Help improve routing, so a prompt carries only its offer.
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+      install: { improveAsked: true },
+    }),
   );
   homeDir = join(dir, 'home');
   const day = join(homeDir, '.codex', 'sessions', '2026', '10', '22');
@@ -207,12 +212,16 @@ describe('Codex automatic hooks', () => {
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Every call went to the paid route: one deposit, then a voucher.
-      expect(fake.log).toEqual([
+      // Every routing call went to the paid route: one deposit, then a voucher.
+      expect(fake.log.filter((line) => line.includes('/route'))).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
+      ]);
+      // The web call ran with the prompt's offer untaken: one free outcome report.
+      expect(fake.log.filter((line) => !line.includes('/route'))).toEqual([
+        'POST /api/x402-router unpaid',
       ]);
       expect(fake.deposits).toBe(1);
       // The deposit counts against the daily budget, as an MCP lookup's does.

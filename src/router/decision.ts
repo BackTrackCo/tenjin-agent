@@ -678,8 +678,14 @@ export function acceptsFor(bazaar: boolean): string[] {
 
 /**
  * The exact body the hook call sends, spelled once and pinned to the shared
- * fixtures. The route reads it with a strict object, so an extra field is a
- * 400, and a 400 is a turn with no hint.
+ * fixtures. The route ignores a field it does not know (the tolerant
+ * contract), so a new optional field reaches a server that predates it as
+ * nothing at all.
+ *
+ * `improve: true` rides only while the person has turned on "Help improve
+ * routing" (`router.improve`): the server then keeps this call's sealed packet
+ * beside its decision row, with no expiry, until they turn it off. Absent, it
+ * keeps nothing past the id's 15 minutes.
  *
  * ONE BODY FOR BOTH HOOKS. Which hook is asking is not a field: the route reads
  * it from `packet.pendingCall`, which the native hook sets and the prompt hook
@@ -690,7 +696,12 @@ export function acceptsFor(bazaar: boolean): string[] {
  */
 export function buildHookBody(
   packet: Packet,
-  extras: { sessionId?: string; accepts?: readonly string[]; harness?: Harness } = {},
+  extras: {
+    sessionId?: string;
+    accepts?: readonly string[];
+    harness?: Harness;
+    improve?: boolean;
+  } = {},
 ): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -698,18 +709,20 @@ export function buildHookBody(
     ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
     ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
     packet,
+    ...(extras.improve === true ? { improve: true } : {}),
   };
 }
 
 /** The exact body the tool call sends. `id` is the offer the query is for,
  *  sent only for an offer with no spec kept; `gateHint` is evidence, never
- *  authority. */
+ *  authority; `improve` as on the hook body. */
 export function buildToolBody(request: {
   query?: string;
   id?: string;
   gateHint?: GateHint;
   accepts?: readonly string[];
   harness?: Harness;
+  improve?: boolean;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -718,6 +731,7 @@ export function buildToolBody(request: {
     ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.improve === true ? { improve: true } : {}),
   };
 }
 
@@ -797,6 +811,9 @@ export interface DecisionDeps {
   /** The payer, inside `tenjin mcp`: it sends the call and pays the routing
    *  fee with the stock x402 client. Absent, the call goes unpaid. */
   route?: DecisionRoute;
+  /** `router.improve`: the person turned on "Help improve routing", so the
+   *  call says `improve: true`. Off by default. */
+  improve?: boolean;
 }
 
 /** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
@@ -907,6 +924,7 @@ export async function requestDecision(
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
+            improve: deps.improve === true,
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
@@ -914,6 +932,7 @@ export async function requestDecision(
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
+            improve: deps.improve === true,
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
@@ -1005,17 +1024,32 @@ export interface SpecOutcome {
   ms?: number;
 }
 
+/**
+ * Why a shown offer was never taken. `expired`: its 15 minutes ran out with no
+ * `request` call naming it. `native_after_offer`: the same agent in the same
+ * session made a native WebSearch or WebFetch call while it was still untaken.
+ */
+export type IgnoredReason = 'expired' | 'native_after_offer';
+
+/** An offer the host was shown and did not take: its id and why, no text. */
+export interface IgnoredOutcome {
+  id: string;
+  status: 'ignored';
+  reason: IgnoredReason;
+}
+
 /** The outcome report's own deadline: it is telemetry and never holds a result. */
 export const OUTCOME_TIMEOUT_MS = 3_000;
 
 /**
  * TELL THE SERVER A SPEC WAS USED. The client called and paid the provider
  * itself, so this is the only word the server gets that its offer was taken,
- * or that a call for it stopped before payment and why. Never throws and never
- * waits on anything the caller needs: a lost report costs one count.
+ * or that a call for it stopped before payment and why, or that it was shown
+ * and never taken. Never throws and never waits on anything the caller needs:
+ * a lost report costs one count.
  */
 export async function reportSpecOutcome(
-  outcome: SpecOutcome,
+  outcome: SpecOutcome | IgnoredOutcome,
   deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>,
 ): Promise<void> {
   try {
@@ -1031,17 +1065,59 @@ export async function reportSpecOutcome(
   }
 }
 
-/** The exact body of an outcome report, pinned to the shared fixtures. */
-export function buildOutcomeBody(outcome: SpecOutcome, harness?: Harness): Record<string, unknown> {
+/**
+ * The exact body of an outcome report, pinned to the shared fixtures. Built
+ * field by field, so it NEVER CARRIES `result`: a paid call that ran is not a
+ * call that helped, and the useful rate comes from labelled samples, not from
+ * this client's say-so. The server keeps reading `result` from custom setups.
+ */
+export function buildOutcomeBody(
+  outcome: SpecOutcome | IgnoredOutcome,
+  harness?: Harness,
+): Record<string, unknown> {
+  const spec: Partial<SpecOutcome> = outcome.status === 'ignored' ? {} : outcome;
   return {
     schemaVersion: 1,
     id: outcome.id,
     ...(harness !== undefined ? { harness } : {}),
     status: outcome.status,
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
-    ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),
-    ...(outcome.ms !== undefined ? { ms: Math.max(0, Math.round(outcome.ms)) } : {}),
+    ...(spec.httpStatus !== undefined ? { httpStatus: spec.httpStatus } : {}),
+    ...(spec.ms !== undefined ? { ms: Math.max(0, Math.round(spec.ms)) } : {}),
   };
+}
+
+/**
+ * The `forget` form, pinned to the shared fixture: delete every packet the
+ * server kept for this install. The install is the `tenjin-install-id` header
+ * the transport already sends to Tenjin's origins, so the body names nothing.
+ */
+export function buildForgetBody(): Record<string, unknown> {
+  return { schemaVersion: 1, forget: 'samples' };
+}
+
+/**
+ * ASK THE SERVER TO DELETE WHAT "HELP IMPROVE ROUTING" KEPT, on the free
+ * route, under the outcome report's short deadline. Never throws: the answer
+ * is whether it was done, or why not, for the caller to say.
+ */
+export async function requestForget(
+  deps: Pick<DecisionDeps, 'baseUrl' | 'fetchImpl'>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: OUTCOME_TIMEOUT_MS,
+      blockRedirects: true,
+      jsonBody: buildForgetBody(),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    if (!response.ok) return { ok: false, reason: fetchFailureToCliError(response).message };
+    if (response.status >= 200 && response.status < 300) return { ok: true };
+    return { ok: false, reason: `the router endpoint answered ${response.status}` };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 function readDecision<T extends z.ZodTypeAny>(
