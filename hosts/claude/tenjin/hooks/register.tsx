@@ -49,9 +49,6 @@ const LINKS = { plugin: 'tenjin', key: 'links' } as const;
 const PROMPTS = { plugin: 'tenjin', key: 'prompts' } as const;
 /** Names a surface gives a lookup with no label of its own; never an offer's. */
 const FALLBACK_LABELS = new Set(['Tenjin', 'Tenjin lookup']);
-/** When the person last sent a prompt: an offer record older than it is an
- *  earlier prompt's. Module memory, lost on a reload, which then draws nothing. */
-let submittedAt: number | undefined;
 /**
  * Calls of a run the ENGINE expanded (ctrl+o, --verbose), where our rows step
  * aside for the engine's own. The module's own memory, not `$.state`: a drawing may
@@ -159,28 +156,33 @@ export const register: Register = (on) => {
     return ran;
   });
 
-  // A PROMPT-TIME OFFER: the CLI's prompt hook keeps an offer record keyed
-  // `prompt:<the prompt>`, after `prompt.submit` and before `turn.start`.
-  on('prompt.submit', async ($, e, next) => {
-    submittedAt = await $.clock.now();
-    return next(e);
-  });
-
+  // The CLI's prompt hook keeps the record before this existing turn surface.
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined && e.text.length > 0) {
-      const record = await offerFile($, `prompt:${e.text}`);
-      const label = labelOf(record?.label);
-      const offered =
-        label !== undefined &&
-        !FALLBACK_LABELS.has(label) &&
-        record?.priceAtomic !== '0' &&
-        typeof record?.at === 'number' &&
-        record.at >= (submittedAt ?? Infinity);
-      const ref = { ...PROMPTS, id: await sha256Hex(e.text) };
-      if (offered || (await $.state.get(ref)).value) {
-        await $.state.set(ref, offered ? label : '');
-        $.ui.invalidate('ui.render');
+    if (e.agentId === undefined) {
+      const now = await $.clock.now();
+      const last = { ...PROMPTS, id: 'last-turn-start' };
+      const previous = (await $.state.get(last)).value;
+      if (e.text.length > 0) {
+        const record = await offerFile($, `prompt:${e.text}`);
+        const label = labelOf(record?.label);
+        const hash = await sha256Hex(e.text);
+        const seen = { ...PROMPTS, id: `seen:${hash}` };
+        const offered =
+          label !== undefined &&
+          !FALLBACK_LABELS.has(label) &&
+          record?.priceAtomic !== '0' &&
+          typeof record?.at === 'number' &&
+          (typeof previous !== 'number' || record.at > previous) &&
+          record.at <= now &&
+          record.offerId !== (await $.state.get(seen)).value;
+        const ref = { ...PROMPTS, id: hash };
+        if (offered || (await $.state.get(ref)).value) {
+          if (offered) await $.state.set(seen, record.offerId);
+          await $.state.set(ref, offered ? label : '');
+          $.ui.invalidate('ui.render');
+        }
       }
+      await $.state.set(last, now);
     }
     return next(e);
   });

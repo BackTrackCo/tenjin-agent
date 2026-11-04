@@ -3,6 +3,7 @@ import { expect, test, type TestBody } from 'claude-code/testing';
 
 import {
   MODEL_TEXT,
+  NOW,
   SESSION,
   SURFACES,
   keepOffer,
@@ -109,6 +110,22 @@ test('a later prompt with no offer draws nothing, the same words again included'
   await clock.advance(60_000);
   await send($, PROMPT);
   for (const lines of await promptRow($, PROMPT)) expect(lines).toEqual([`> ${PROMPT}`]);
+});
+
+test('an offer must be newer than the previous turn, even for repeated words', async ($, on) => {
+  enginePrompt(on);
+  const { files, clock } = machine(on);
+  await send($, PROMPT, () => keepPromptOffer(files, PROMPT));
+  await clock.advance(1);
+  await send($, 'another turn');
+  await clock.advance(1);
+  await send($, PROMPT, () => keepPromptOffer(files, PROMPT, { offerId: 'older-offer', at: NOW }));
+  for (const lines of await promptRow($, PROMPT)) expect(lines).toEqual([`> ${PROMPT}`]);
+  await clock.advance(1);
+  await send($, PROMPT, () =>
+    keepPromptOffer(files, PROMPT, { offerId: 'new-offer', at: NOW + 3 }),
+  );
+  for (const lines of await promptRow($, PROMPT)) expect(lines).toEqual([`> ${PROMPT}`, LINE]);
 });
 
 test("a subagent's run with the same words leaves the prompt's line alone", async ($, on) => {
