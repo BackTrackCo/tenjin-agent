@@ -267,6 +267,8 @@ describe('Codex automatic hooks', () => {
   });
 
   it('route on the leg alone when Codex records no transcript', async () => {
+    // A null path must work even when there is no session file to fall back to.
+    await rm(transcript);
     const fake = new FakeRouter();
     fake.body = await offer();
     const server = await connect(fake);
