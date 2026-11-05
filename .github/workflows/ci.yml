@@ -89,8 +89,10 @@ jobs:
           node-version: '22.0.0'
       # Claude Code itself, so the smoke runs `claude plugin validate` and the
       # mod's own tests (`claude plugin test` on hosts/claude/tenjin/tests),
-      # which vitest never collects. Pinned, and installed under the floor Node
-      # so it is on PATH for the smoke, which then fails without it.
+      # which vitest never collects. No bot bumps a version pinned in `run:`, so
+      # raise it by hand when a Claude Code release changes `claude plugin`.
+      # Installed under the floor Node so it is on PATH for the smoke, which
+      # then fails without it.
       - name: Install Claude Code
         if: matrix.node == '22'
         run: npm install -g @anthropic-ai/claude-code@2.1.317 --no-audit --no-fund
