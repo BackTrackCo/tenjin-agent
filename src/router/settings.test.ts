@@ -43,6 +43,20 @@ describe('routerSettings', () => {
     expect(await resolve(repo)).toEqual({
       enabled: { value: true, source: 'default' },
       context: { value: 'session', source: 'default' },
+      improve: { value: false, source: 'default' },
+    });
+  });
+
+  /** Help improve routing is the person's own consent: only the global file
+   *  carries it, so a repository's file cannot turn it on for anyone. */
+  it('reads router.improve from the global file alone', async () => {
+    await put(project(repo), { router: { improve: true } });
+    expect((await resolve(repo)).improve).toEqual({ value: false, source: 'default' });
+    await put(join(data, 'config.json'), { router: { improve: true } });
+    expect((await resolve(repo)).improve).toEqual({
+      value: true,
+      source: 'file',
+      path: join(data, 'config.json'),
     });
   });
 

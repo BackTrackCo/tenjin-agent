@@ -4,7 +4,12 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
-import { persistRouterDefaults, persistRouterProject, type RouterLimits } from '../commands/config';
+import {
+  persistImproveAnswer,
+  persistRouterDefaults,
+  persistRouterProject,
+  type RouterLimits,
+} from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -71,6 +76,7 @@ import {
   FEE_APPROVAL,
 } from './spend-question';
 import { shQuote } from './plugin-files';
+import { askImprove, improveLines, improveStep, type ImproveDeps } from './improve-question';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -178,7 +184,7 @@ export interface RouterInstallArgs {
   sessionBudget?: string;
 }
 
-export interface RouterInstallDeps extends WalletDeps {
+export interface RouterInstallDeps extends WalletDeps, ImproveDeps {
   /** This user's running routers and Claude Code processes; tests inject them. */
   listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -452,6 +458,12 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
+  // "Help improve routing", asked once per machine, right after the limits.
+  const improve = await askImprove(
+    config,
+    { canPrompt, yes: args.yes === true, refresh: args.refresh === true },
+    deps,
+  );
   // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
   // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
   // any version and would silence the settings install in every session,
@@ -471,6 +483,7 @@ export async function runRouterInstall(
   }
 
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
+  if (improve !== undefined) await persistImproveAnswer(ctx.dataDir, improve);
   const removedKeysLines =
     spend.removed.length > 0
       ? [
@@ -598,9 +611,15 @@ export async function runRouterInstall(
       : Promise.resolve(undefined),
   ]);
   const fund = funding?.step;
+  const improveAsk = await improveStep(ctx.dataDir, config, {
+    asksAgent,
+    spendPending: spendAsk !== undefined,
+    command,
+  });
   const nextSteps: QuestionStep[] = [
     ...(spendAsk !== undefined ? [spendAsk] : []),
     ...(fund !== undefined ? [fund] : []),
+    ...(improveAsk !== undefined ? [improveAsk] : []),
   ];
 
   const data = {
@@ -612,7 +631,7 @@ export async function runRouterInstall(
       claude,
       wallet,
       migration,
-      asksAgent && nextSteps.length > 0,
+      asksAgent ? nextSteps.length : 0,
       ctx.io.isTTY,
       command,
       env,
@@ -644,8 +663,9 @@ export async function runRouterInstall(
         migration,
         wallet,
         ...(fund !== undefined ? { fund } : {}),
+        ...(improveAsk !== undefined ? { improveAsk } : {}),
         ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
-        asks: asksAgent && nextSteps.length > 0,
+        asks: asksAgent ? nextSteps.length : 0,
         policy: effective.policy,
         ...(spendAsk !== undefined ? { spendAsk } : {}),
         router,
@@ -1011,13 +1031,13 @@ function nextStep(
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  asksQuestion: boolean,
+  questions: number,
   tty: boolean,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command, env);
+  const steps = todaysSteps(plugin, claude, wallet, migration, questions, command, env);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -1030,12 +1050,16 @@ function todaysSteps(
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  asksQuestion: boolean,
+  questions: number,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string[] {
   const steps: string[] = [];
-  if (asksQuestion) {
+  if (questions > 1) {
+    steps.push(
+      'ask the person each question in nextSteps, one at a time, then run what each answer names',
+    );
+  } else if (questions === 1) {
     steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
     steps.push(`fund the wallet with \`${command} wallet fund ${SUGGESTED_FUND_USD}\``);
@@ -1196,7 +1220,7 @@ export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
 
 /** One question install hands to the agent that ran it, with what each answer runs. */
 export interface QuestionStep {
-  id: 'spend' | 'fund';
+  id: 'spend' | 'fund' | 'improve';
   /** For the agent to put to the person as written, with `options`. */
   question: string;
   options: {
@@ -1523,8 +1547,10 @@ function lines(
     migration: Migration;
     wallet: WalletOutcome;
     fund?: FundStep;
+    improveAsk?: QuestionStep;
     fundingWarning?: string;
-    asks: boolean;
+    /** How many questions the agent is handed. */
+    asks: number;
     policy: SpendPolicy;
     spendAsk?: QuestionStep;
     router: RouterCheck;
@@ -1576,6 +1602,7 @@ function lines(
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...(s.fund !== undefined ? fundLines(s.fund) : []),
+    ...(s.improveAsk !== undefined ? improveLines(s.improveAsk) : []),
     ...(s.fundingWarning !== undefined ? [warn(s.fundingWarning)] : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),
