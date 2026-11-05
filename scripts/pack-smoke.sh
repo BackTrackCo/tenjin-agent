@@ -23,6 +23,14 @@ trap cleanup EXIT
 
 export TENJIN_DATA_DIR="$DATA_DIR"
 
+# The mod's tests and Claude Code's validator run only where `claude` is on
+# PATH. CI installs it and sets PACK_SMOKE_REQUIRE_CLAUDE=1, so there they
+# always run; a local run without `claude` skips them.
+if [ "${PACK_SMOKE_REQUIRE_CLAUDE:-}" = 1 ] && ! command -v claude >/dev/null 2>&1; then
+  echo "pack-smoke: FAIL: PACK_SMOKE_REQUIRE_CLAUDE=1 but claude is not on PATH" >&2
+  exit 1
+fi
+
 # The `check` CI step builds first; only rebuild if the entry is genuinely absent
 # (e.g. a bare local run) so this stays cheap on the CI path.
 if [ ! -f "$PKG_DIR/dist/index.js" ]; then
@@ -183,7 +191,8 @@ if command -v claude >/dev/null 2>&1; then
   MOD_DIR="$DATA_DIR/mod-under-test"
   cp -R "$HOSTS/tenjin" "$MOD_DIR"
   cp -R "$PKG_DIR/hosts/claude/tenjin/tests" "$MOD_DIR/tests"
-  CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin test "$MOD_DIR" >/dev/null 2>&1 || {
+  CLAUDE_CONFIG_DIR="$DATA_DIR/claude" claude plugin test "$MOD_DIR" >"$DATA_DIR/plugin-test.log" 2>&1 || {
+    cat "$DATA_DIR/plugin-test.log" >&2
     echo "pack-smoke: FAIL: claude plugin test failed against the packed mod" >&2
     exit 1
   }
