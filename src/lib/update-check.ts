@@ -11,30 +11,24 @@ import { updateCheckPath } from './paths';
 import { isNewer, parseVersion } from './version-order';
 
 /**
- * "A newer tenjin-cli exists", asked of npm at most once a day and reported
- * three ways: one dim stderr line for a human at a terminal, `updateAvailable`
- * on the JSON envelope, and a line on the generated hook scripts' output.
+ * "A newer tenjin-cli exists", asked of npm at most once a day and reported as a
+ * dim stderr line for a human at a terminal and as `updateAvailable` on the
+ * JSON envelope.
  *
- * It REPORTS and never installs. Installing needs a deferred-activation window,
- * and Tenjin's runtime is that window (versions side by side, a running session
- * keeps its own), so `update.mode auto` installs from lib/auto-update, which
- * the session hooks start; `auto` reports here exactly as `nudge` does. After a
- * switch the running version equals `latest`, so this line goes quiet by itself.
+ * It reports and never installs: `update.mode auto` installs from
+ * lib/auto-update, which the session hooks start, because Tenjin's runtime lets
+ * a running session keep its own version.
  *
- * Everything here is subordinate to the command that ran: the fetch happens
- * AFTER the envelope is written, it never touches stdout, it never changes an
- * exit code, and every failure it can have (offline, slow registry, junk JSON, a
- * tag that does not exist) is swallowed. CI skips the whole thing: a build log
- * can act on none of it. `update.mode off` is the opt-out and silences all three
- * surfaces, including the request to npm.
+ * It never affects the command that ran: the fetch happens after the envelope
+ * is written, never touches stdout or the exit code, and swallows every
+ * failure. CI skips it, and `update.mode off` silences it, npm request included.
  */
 
 /**
  * Silences this check for one process, cache write and registry request
- * included. Set by `update` on the `install --refresh` children it spawns: their
- * data dirs come out of a settings file this CLI does not own, and this check is
- * the one thing in a refresh that would CREATE such a directory — `writeCache`
- * mkdirs the tree — where the refresh itself only converges what exists.
+ * included. `update` sets it on its `install --refresh` children: their data
+ * dirs come from a settings file this CLI does not own, and `writeCache` would
+ * create such a directory where the refresh only converges what exists.
  */
 export const NUDGE_OPT_OUT = 'TENJIN_NO_UPDATE_CHECK';
 
@@ -43,32 +37,26 @@ const FETCH_TIMEOUT_MS = 1500;
 const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags';
 const PACKUMENT_URL = 'https://registry.npmjs.org/tenjin-cli';
 
-/** What is known about ONE dist-tag: when it was asked, and what it said. */
+/** What is known about one dist-tag: when it was asked, and what it said. */
 const TagEntrySchema = z.object({
   checkedAtMs: z.number(),
   /** The version the tag named. Absent when the answer was unusable. */
   latest: z.string().optional(),
-  /** When the nudge was last PRINTED for this tag. Absent until one has been. */
+  /** When the nudge was last printed for this tag. */
   notifiedAtMs: z.number().optional(),
 });
 
 /**
- * The cache is a pure optimization, so a bad one is re-fetched, never repaired.
- * Keyed by dist-tag: an entry this build did not ask about is carried forward
- * untouched rather than evicted.
+ * A pure cache, so a bad one is re-fetched, never repaired. Keyed by dist-tag;
+ * an entry this build did not ask about is carried forward untouched.
  */
 const CacheSchema = z.object({
   schemaVersion: z.literal(1),
   tags: z.record(z.string(), TagEntrySchema),
   /**
    * The resolved "you could upgrade" fact, written whenever it changes and
-   * cleared when it stops being true.
-   *
-   * Denormalized from `tags` on purpose: the generated hook scripts are
-   * standalone .mjs that cannot import this module and do not know which
-   * version is running, so a per-tag entry would leave them unable to tell an
-   * upgrade from a match. Storing the comparison's ANSWER is what lets a hook
-   * report it without reimplementing any of it.
+   * cleared when it stops being true, so a reader that does not know the
+   * running version can still report it.
    */
   signal: z.object({ current: z.string(), latest: z.string() }).optional(),
 });
@@ -94,9 +82,8 @@ export interface UpdateCheckDeps {
 }
 
 /**
- * Print the update nudge if one is due. NEVER rejects — the caller awaits it
- * between a command's output and its exit, so a throw here would replace a
- * finished command's result with an internal error.
+ * Print the update nudge if one is due. Never rejects: the caller awaits it
+ * after a command's output, so a throw would replace a finished result.
  */
 export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
   try {
@@ -121,12 +108,9 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     const entry = cached?.tags[tag];
     const fresh = entry !== undefined && nowMs - entry.checkedAtMs < CHECK_INTERVAL_MS;
 
-    // Resolved through the same function `tenjin update` uses, so the nudge can
-    // never advertise a version the command would decline to install, nor stay
-    // quiet about one it would.
-    //
-    // Only a registry that could not be ASKED returns without caching; an answer
-    // this build cannot use has still been answered, and moves the clock below.
+    // The same resolver `tenjin update` uses, so the nudge never names a version
+    // the command would not install. Only an unreachable registry skips the
+    // cache; an unusable answer still moves the clock.
     let latest: string | null;
     if (fresh) {
       latest = entry.latest ?? null;
@@ -138,15 +122,10 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
 
     const upgradeable = latest !== null && isNewer(latest, current);
 
-    // Once a day means once a day, not once per FETCH: a fresh cache would
-    // otherwise repeat the same line on every command for 24h. The two clocks are
-    // separate because they answer separate questions — when we last asked npm,
-    // and when we last interrupted the human.
-    //
-    // `human` is part of `due` for the second of those: this code now runs on
-    // every surface, to feed the envelope signal, so without it an agent run
-    // would stamp the nudge clock having printed nothing and leave a shared
-    // machine's terminal quiet for 24h.
+    // Two clocks: when we last asked npm, and when we last interrupted the
+    // human, so a fresh cache does not repeat the line on every command.
+    // `human` gates `due` so an agent run, which prints nothing, never stamps
+    // the nudge clock and silences a shared machine's terminal for 24h.
     const human = deps.io.isTTY && !deps.json;
     const notifiedAtMs = entry?.notifiedAtMs;
     const due =
@@ -154,25 +133,21 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
       upgradeable &&
       (notifiedAtMs === undefined || nowMs - notifiedAtMs >= CHECK_INTERVAL_MS);
 
-    // Carried forward when nothing is printed: the day since the last nudge does
-    // not restart just because the registry was asked again.
+    // Carried forward when nothing is printed, so asking npm again does not
+    // restart the day since the last nudge.
     const nudgedAtMs = due ? nowMs : notifiedAtMs;
 
-    // Carries the agent-visible half of the answer, so a hook or an envelope can
-    // report it without knowing which version is running.
     const signal = upgradeable && latest !== null ? { current, latest } : undefined;
     const signalChanged =
       cached?.signal?.current !== signal?.current || cached?.signal?.latest !== signal?.latest;
 
-    // Nothing learned and nothing said means nothing to write. Deliberately NOT
-    // locked: two concurrent CLI processes can both nudge, and one duplicated
-    // line is cheaper than a lock on the exit path of every command.
+    // Nothing learned and nothing said means nothing to write. Not locked: one
+    // duplicated line is cheaper than a lock on every command's exit path.
     if (!fresh || due || signalChanged) {
       await writeCache(path, {
         schemaVersion: 1,
         ...(signal !== undefined ? { signal } : {}),
-        // Read-modify-write: the tag this run did not ask about keeps whatever it
-        // knew, including its own nudge clock.
+        // The tag this run did not ask about keeps what it knew.
         tags: {
           ...cached?.tags,
           [tag]: {
@@ -184,9 +159,8 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
       });
     }
 
-    // Named as the command, not the npm invocation it wraps: `update` prints the
-    // right instructions itself for an install it cannot perform (a source
-    // checkout, a yarn global), so this line is correct everywhere.
+    // Names the command, not npm: `update` prints its own instructions for an
+    // install it cannot perform (a source checkout, a yarn global).
     if (due && latest !== null) {
       emitNotice(
         deps.io,
@@ -195,20 +169,14 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
       );
     }
   } catch {
-    // Unreachable by construction (every step below is already guarded); here so
-    // that staying invisible does not depend on that remaining true.
+    // Every step is already guarded; this keeps the check invisible regardless.
   }
 }
 
 /**
  * What the last check learned, for the envelope. Cache only: this runs before
- * every command's output, so it may not fetch, may not block, and may not throw.
- * Null when nothing newer is known, when the cache is absent or stale-shaped, or
- * when `update.mode` is `off` — off silences BOTH surfaces, not just the line a
- * human sees.
- *
- * Reporting only: where Tenjin's runtime is set up, lib/auto-update installs in
- * the background; everywhere else the agent is told and decides for itself.
+ * every command's output, so it may not fetch, block or throw. Null when
+ * nothing newer is known, the cache is absent or bad, or `update.mode` is `off`.
  */
 export async function readUpdateSignal(
   dir: string,
@@ -229,25 +197,20 @@ export async function readUpdateSignal(
 }
 
 /**
- * Which dist-tag this build follows, or null for a version string this package
- * has no channel for. Null rather than a default, because every caller's right
- * answer differs: the nudge goes quiet, and `tenjin update` refuses instead of
- * silently reporting a foreign build "up to date" against a tag it never
- * belonged to.
- *
- * Every build follows `latest`; see RELEASING.md, which changes with this.
+ * Which dist-tag this build follows, or null for a version this package has no
+ * channel for, so the nudge goes quiet and `tenjin update` refuses rather than
+ * call a foreign build "up to date". Every build follows `latest`; see
+ * RELEASING.md, which changes with this.
  */
 export function channelTag(version: string): 'latest' | null {
   return parseVersion(version) === null ? null : 'latest';
 }
 
 /**
- * The version this build can move to: whatever sits on the tag it follows.
- * Consulting a second tag added no reachable version and one way to be wrong: a
- * tag sitting ahead of `latest` could redirect the self-update to a build the
- * release line never promoted. Null both when that tag is absent and when it
- * names a version VERSION_RE rejects; `runUpdate` separates those, and neither
- * means the registry was unreachable.
+ * The version this build can move to: whatever sits on the tag it follows, and
+ * only that tag, so a tag ahead of `latest` cannot redirect the self-update to
+ * an unpromoted build. Null when the tag is absent or names an unparseable
+ * version; neither means the registry was unreachable.
  */
 export function resolveTarget(current: string, tags: Record<string, string>): string | null {
   const channel = channelTag(current);
@@ -260,17 +223,10 @@ export function resolveTarget(current: string, tags: Record<string, string>): st
 }
 
 /**
- * Ask the registry for tenjin-cli's whole dist-tag map. Returns null for every
- * failure there is, INCLUDING a response that arrives too late — the AbortSignal
- * is what bounds the delay a finished command can suffer. Nothing is written
- * here: a failed check caches nothing, so the next command retries rather than
- * going quiet for 24h over one dropped packet. The nudge passes its own short
- * budget; `tenjin update` passes the run's request timeout, because there the
- * fetch IS the command rather than a stowaway on someone else's exit path.
- *
- * The whole map rather than one tag, so a caller can tell an unreachable
- * registry (null) from one that answered without the tag it asked for (a map
- * that lacks the key) — two failures with two different fixes.
+ * Ask the registry for tenjin-cli's whole dist-tag map, or null on any failure,
+ * a late response included: the timeout bounds the delay a finished command can
+ * suffer. The whole map, so a caller can tell an unreachable registry (null)
+ * from one that answered without its tag.
  */
 export async function fetchDistTags(opts: {
   fetchImpl?: typeof fetch;
@@ -290,12 +246,11 @@ export async function fetchDistTags(opts: {
 }
 
 /**
- * When the registry says `version` was published, in ms since the epoch, from
- * the packument's `time` map (the per-version document carries no time). Null
- * when the registry could not be asked; `{ publishedAt: null }` when it
- * answered with no time for that version, or one that does not parse. The
- * registry sets these times itself at publish, and a publisher cannot backdate
- * them, which is what lets `tenjin update --background` wait on one.
+ * When the registry says `version` was published (ms since epoch), from the
+ * packument's `time` map, since the per-version document has none. Null when
+ * the registry could not be asked; `{ publishedAt: null }` when it has no
+ * usable time. The registry sets these at publish and a publisher cannot
+ * backdate them, which is why `tenjin update --background` can wait on one.
  */
 export async function fetchPublishTime(
   version: string,
@@ -345,6 +300,5 @@ async function readCache(path: string): Promise<Cache | null> {
   }
 }
 
-// Version comparison lives in ./version-order, which the runtime's layout code
-// shares; re-exported so existing importers keep their path.
+// Re-exported from ./version-order for existing importers.
 export { isNewer };

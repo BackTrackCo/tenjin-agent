@@ -117,16 +117,7 @@ function buildContext(cmd: Command, io: Io): CommandContext {
  * (eventual) viem chunk. `setExit` is how a failed command reports its exit code
  * back to main without anyone calling process.exit here.
  */
-export type ProductRegistration = (registration: Registration) => void;
-
-/** This release's products, in `--help` order. */
-export const PRODUCTS: readonly ProductRegistration[] = [registerCore, registerRouter];
-
-export function buildProgram(
-  io: Io,
-  setExit: (code: number) => void,
-  products: readonly ProductRegistration[] = PRODUCTS,
-): Command {
+export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   const program = new Command();
 
   // The single choke point for command output: run the body, emit exactly one
@@ -223,7 +214,9 @@ export function buildProgram(
     addGlobalFlags,
     buildContext: (cmd) => buildContext(cmd, io),
   };
-  for (const register of products) register(registration);
+  // In `--help` order.
+  registerCore(registration);
+  registerRouter(registration);
 
   // clig.dev: show examples first and link the web documentation. Three
   // invocations, one per thing people install this for, and the pointers.
@@ -250,19 +243,11 @@ Learn more:
  * tests drive it with injected streams and assert on the code. The bin wrapper
  * (index.ts) is what turns the return into a real exit.
  */
-export async function main(
-  argv: string[],
-  io: Io = defaultIo(),
-  products: readonly ProductRegistration[] = PRODUCTS,
-): Promise<number> {
+export async function main(argv: string[], io: Io = defaultIo()): Promise<number> {
   let exitCode = 0;
-  const program = buildProgram(
-    io,
-    (code) => {
-      exitCode = code;
-    },
-    products,
-  );
+  const program = buildProgram(io, (code) => {
+    exitCode = code;
+  });
   try {
     await program.parseAsync(argv, { from: 'user' });
   } catch (err) {

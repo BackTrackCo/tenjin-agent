@@ -411,8 +411,6 @@ Examples:
     .option('--data-raw <text>', "request body sent byte for byte; needs -H 'Content-Type: <type>'")
     .option('--max-price <usd>', 'hard price cap in decimal USD (never bypassed by --yes)')
     .option('--yes', 'bypass the interactive confirm only (not the price cap)')
-    // NOT the same flag as `read`/`buy` carry: there it adds `body` to the
-    // machine output, here it un-caps the preview the human line prints.
     .option(
       '--ignore-warnings',
       'acknowledge direct-payment registry warnings only; all payment checks still apply',

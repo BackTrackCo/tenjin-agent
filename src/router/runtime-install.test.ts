@@ -1,15 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { activate, type LauncherResult, type RuntimeSetup } from '../lib/runtime';
+import type { RuntimeSetup } from '../lib/runtime';
+import { activate } from '../lib/runtime-activate';
+import type { LauncherResult } from '../lib/runtime-launchers';
 import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/runtime-layout';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { runCodexInstall } from './codex-install';
 import { hookToolInput } from './hook-tool';
@@ -19,6 +21,7 @@ import {
   runtimeOncePerRun,
   type RouterInstallDeps,
 } from './install';
+import { installSandbox, probe400 } from './install-test-utils';
 import { renderLauncherSh, renderPluginFiles, shQuote } from './plugin-files';
 
 /**
@@ -41,22 +44,12 @@ let fake: FakeClaude;
 
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 const NODE_V = '24.15.0';
-const probe400 = (async () =>
-  new Response('{}', {
-    status: 400,
-    headers: { 'content-type': 'application/json' },
-  })) as typeof fetch;
-
 beforeEach(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-install-')));
-  home = join(root, 'home');
-  data = join(home, '.tenjin');
-  cfg = join(root, 'cfg');
-  work = join(root, 'work');
+  ({ root, home, data, cfg, work } = await installSandbox('runtime-install-', {
+    dataInHome: true,
+  }));
   hosts = join(root, 'pkg', 'dist', 'hosts', 'claude');
   runtimeRoot = join(data, 'runtime');
-  await mkdir(join(work, '.git'), { recursive: true });
-  await mkdir(data, { recursive: true });
   fake = await fakeClaude(root);
   vi.stubGlobal('fetch', probe400);
 });
@@ -66,12 +59,7 @@ afterEach(async () => {
 });
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(data);
 }
 
 const launcherOk: LauncherResult = {

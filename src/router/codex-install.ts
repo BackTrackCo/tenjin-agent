@@ -12,7 +12,9 @@ import { autoUpdateLine } from '../lib/auto-update';
 import { resolveCodex } from '../lib/codex-bin';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { runtimeDir } from '../lib/paths';
+import { atLeast } from '../lib/version-order';
+import { runtimeDir, tilde } from '../lib/paths';
+import { hasRuntime } from '../lib/runtime-layout';
 import type { RuntimeSetup, setupRuntime } from '../lib/runtime';
 import type { CommandContext, CommandResult } from '../context';
 import {
@@ -34,13 +36,11 @@ import {
   requireRuntime,
   defaultRuntime,
   effectiveLimits,
-  hasRuntime,
   namedLimits,
   NOTHING_TO_REFRESH,
   runtimeData,
   runtimeLines,
   spendStepFor,
-  tilde,
   type QuestionStep,
   type RouterInstallDeps,
 } from './install';
@@ -316,7 +316,7 @@ export async function refreshCodexPlugin(
     if (rows.state === 'absent') return undefined;
     if (rows.state === 'unknown') return CODEX_REFRESH_LINES.failed;
     if (rows.routing !== 'free') return undefined;
-    if (!codexAtLeast(version, CODEX_MCP_HOOKS_VERSION)) return CODEX_REFRESH_LINES.old;
+    if (!atLeast(version, CODEX_MCP_HOOKS_VERSION)) return CODEX_REFRESH_LINES.old;
     const runtimeCodex = join(runtimeDir(ctx.dataDir), 'codex');
     const hosts = existsSync(join(runtimeCodex, '.agents', 'plugins', 'marketplace.json'))
       ? runtimeCodex
@@ -404,7 +404,7 @@ export async function runCodexInstall(
   // A Codex too old to run `mcp_tool` hooks keeps whatever copy it has: the
   // new hooks would be skipped, or the file refused. An unknown build installs.
   const version = await (deps.version ?? codexVersion)();
-  const tooOld = version !== null && !codexAtLeast(version, CODEX_MCP_HOOKS_VERSION);
+  const tooOld = version !== null && !atLeast(version, CODEX_MCP_HOOKS_VERSION);
   let next: string = CODEX_TOO_OLD;
   if (!tooOld) {
     const codexConfig = await (deps.config ?? (() => readCodexConfig(process.cwd(), 3_000)))();
@@ -512,22 +512,6 @@ function runsFrom(ctx: CommandContext, deps: CodexSetupDeps, source: unknown): s
   return "`tenjin` from your PATH; run `tenjin install --harness codex` to move it to Tenjin's runtime";
 }
 
-/** Whether `version` (`x.y.z`, any suffix ignored) is `floor` or later. */
-export function codexAtLeast(version: string, floor: string): boolean {
-  const parts = (v: string) =>
-    v
-      .split(/[-+]/)[0]!
-      .split('.')
-      .map((n) => Number.parseInt(n, 10));
-  const have = parts(version);
-  for (const [i, least] of parts(floor).entries()) {
-    const part = have[i] ?? 0;
-    if (!Number.isFinite(part)) return false;
-    if (part !== least) return part > least;
-  }
-  return true;
-}
-
 const ROUTING_LINE: Record<CodexHookRows['routing'], string> = {
   paid: 'its routing hooks call the router MCP server, which pays the routing fee under your wallet spend limits',
   free: 'its routing hooks are commands from an older build, which cannot pay the routing fee, so they offer nothing. Run `tenjin update` or `tenjin install --harness codex` to replace them',
@@ -555,7 +539,7 @@ export async function runCodexDoctor(
   // With its allow hook off, `approval_policy = "never"` refuses the tool.
   const refused = hooks.allowOff && at(config, 'approval_policy') === 'never';
   // An unknown build is not failed on: only a known older one cannot run the legs.
-  const tooOld = version !== null && !codexAtLeast(version, CODEX_MCP_HOOKS_VERSION);
+  const tooOld = version !== null && !atLeast(version, CODEX_MCP_HOOKS_VERSION);
   const routing = hooks.state === 'absent' ? null : hooks.routing;
   // Command legs from an older build warn without failing: `tenjin update`
   // replaces them, and Codex still runs the rest of the plugin.

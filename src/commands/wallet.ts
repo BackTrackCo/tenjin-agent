@@ -46,11 +46,8 @@ import {
   type CreatePassphraseResult,
   type DurableStore,
 } from '../lib/wallet/passphrase';
-import type { PassphraseOverrides } from '../lib/wallet/local';
+import { isWindows, KEY_STORAGE, type PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
-
-const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
-const isWindows = process.platform === 'win32';
 
 /** The last line `tenjin wallet repair` prints: the save is proven, the unlock is not yet. */
 export const REPAIR_DONE_LINE = 'Passphrase saved; start a new Claude Code session to verify.';

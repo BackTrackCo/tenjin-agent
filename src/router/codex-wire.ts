@@ -1,3 +1,5 @@
+import { isRecord } from '../lib/guards';
+
 /**
  * Codex CLI's hook payloads, as the router reads them. Every mapping here is
  * backed by a payload the installed `codex-cli 0.153.4` sent
@@ -42,10 +44,6 @@ export interface CodexHookInput {
   prompt?: string;
   transcriptPath?: string;
   tool?: CodexTool;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function str(v: unknown): string | undefined {

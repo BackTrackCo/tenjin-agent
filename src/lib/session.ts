@@ -1,19 +1,19 @@
 /**
- * Is this command run by an agent under a harness (Claude Code, which Claude
- * Desktop runs too, or Codex), from the variables each exports to the commands
- * its agent runs? A person's own terminal sets none of them.
+ * The harness whose agent runs this command (Claude Code, which Claude Desktop
+ * runs too, or Codex), from the variables each exports to the commands its
+ * agent runs, or undefined in a person's own terminal, which sets none of them.
+ * A Claude Code variable wins when both are set.
  */
-export function underAgentHarness(env: NodeJS.ProcessEnv = process.env): boolean {
-  return [
-    env.CLAUDECODE,
-    env.CLAUDE_CODE_SESSION_ID,
-    env.CLAUDE_CODE_EXECPATH,
-    env.CODEX_SESSION_ID,
-  ].some((v) => firstNonEmpty(v) !== undefined);
+export function agentHost(env: NodeJS.ProcessEnv = process.env): 'claude' | 'codex' | undefined {
+  const set = (v: string | undefined) => typeof v === 'string' && v.trim().length > 0;
+  if (set(env.CLAUDECODE) || set(env.CLAUDE_CODE_SESSION_ID) || set(env.CLAUDE_CODE_EXECPATH)) {
+    return 'claude';
+  }
+  if (set(env.CODEX_SESSION_ID)) return 'codex';
+  return undefined;
 }
 
-function firstNonEmpty(raw: string | undefined): string | undefined {
-  if (typeof raw !== 'string') return undefined;
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+/** Is this command run by an agent under a harness? */
+export function underAgentHarness(env: NodeJS.ProcessEnv = process.env): boolean {
+  return agentHost(env) !== undefined;
 }

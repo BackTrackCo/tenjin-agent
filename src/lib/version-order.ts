@@ -50,3 +50,20 @@ export function isNewer(candidate: string, current: string): boolean {
   if (b.alpha === null) return false;
   return a.alpha > b.alpha;
 }
+
+/**
+ * Is another tool's `version` (Claude Code, Codex) at or above `floor`, by
+ * `major.minor.patch`? A `-` or `+` suffix is ignored, and a part that is not
+ * a number is never at least anything.
+ */
+export function atLeast(version: string, floor: string): boolean {
+  const parts = (v: string): number[] =>
+    (v.split(/[-+]/)[0] ?? '').split('.').map((n) => Number.parseInt(n, 10));
+  const have = parts(version);
+  for (const [i, least] of parts(floor).entries()) {
+    const part = have[i] ?? 0;
+    if (!Number.isFinite(part)) return false;
+    if (part !== least) return part > least;
+  }
+  return true;
+}

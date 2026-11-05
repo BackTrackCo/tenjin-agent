@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   loadConfig,
   loadRawConfig,
   resolveSettings,
-  writeConfig,
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
   DEFAULT_BAZAAR_REGISTRIES,
@@ -70,7 +69,6 @@ describe('loadConfig', () => {
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
     expect(s.maxAutoSpend).toEqual({ value: '500000', source: 'file' });
-    expect(Object.keys(s)).not.toContain('publicShelfUrl');
   });
 
   it('throws CONFIG_INVALID with the code on a schema violation', async () => {
@@ -146,37 +144,6 @@ describe('resolveSettings — precedence and provenance', () => {
     });
     expect(s.baseUrl).toEqual({ value: 'https://flag.example', source: 'flag' });
   });
-});
-
-describe('writeConfig', () => {
-  it('round-trips through loadConfig', async () => {
-    const next = { ...CONFIG_DEFAULTS, maxAutoSpend: '250000', allowlistCreators: ['0xabc'] };
-    await writeConfig(dir, next);
-    expect(await loadConfig(dir)).toEqual(next);
-  });
-
-  /**
-   * config.json can hold an RPC provider's key inside `rpcUrl`, so it gets the
-   * 0600 every other secret in this tree gets. dirMode 0o700 is not the
-   * backstop it looks like: node's recursive mkdir does not chmod a directory
-   * that already exists, so a data dir a devcontainer volume or a restored
-   * backup created at 0755 leaves a 0644 config readable by anyone on the box.
-   */
-  const WITH_KEY = { ...CONFIG_DEFAULTS, rpcUrl: 'https://base.example/v2/rpc-key-abc123' };
-  it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
-    await writeConfig(dir, WITH_KEY);
-    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'still lands at 0600 inside a data dir that already exists at 0755',
-    async () => {
-      await mkdir(dir, { recursive: true });
-      await chmod(dir, 0o755);
-      await writeConfig(dir, WITH_KEY);
-      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
-    },
-  );
 });
 
 describe('install block', () => {

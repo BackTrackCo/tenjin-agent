@@ -4,7 +4,6 @@ import { hasCode } from './errno';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
-import { writeFileAtomic } from './atomic-json';
 import { DEFAULT_RPC_URL } from './usdc-balance';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -417,26 +416,6 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   const fromFile = config.update?.mode;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
-}
-
-/**
- * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
- *
- * 0600 BECAUSE config.json CAN HOLD A CREDENTIAL: `rpcUrl` commonly embeds an
- * RPC provider's API key, and every other secret in this tree is 0600 (the
- * wallet, the passphrase, the spend ledger). `dirMode: 0o700` is not a
- * substitute: node's recursive mkdir does not chmod a directory that already
- * exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created at 0755 by a
- * devcontainer volume, a restored backup or a shared CI image would leave the
- * file world-readable. Keep this in step with `persist` in commands/config.ts,
- * the other writer of this file.
- */
-export async function writeConfig(dir: string, config: Config): Promise<void> {
-  const validated = ConfigSchema.parse(config);
-  await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
 }
 
 /**

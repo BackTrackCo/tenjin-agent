@@ -1,14 +1,15 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { aliveDir, runAliveHook } from './alive';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { hookToolInput, type HookKind } from './hook-tool';
 import { NEW_SESSION_STEP, RELOAD_STEP, runRouterInstall } from './install';
+import { installSandbox, probe400 } from './install-test-utils';
 import { fileURLToPath } from 'node:url';
 import { RECONNECT_FIX } from './mcp-processes';
 import {
@@ -40,22 +41,9 @@ let fake: FakeClaude;
 let mod: ModSources;
 
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
-const probe400 = (async () =>
-  new Response('{}', {
-    status: 400,
-    headers: { 'content-type': 'application/json' },
-  })) as typeof fetch;
-
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'plugin-install-'));
-  home = join(root, 'home');
-  data = join(root, 'data');
-  cfg = join(root, 'cfg');
-  work = join(root, 'work');
+  ({ root, home, data, cfg, work } = await installSandbox('plugin-install-'));
   hosts = join(root, 'pkg', 'dist', 'hosts', 'claude');
-  await mkdir(join(work, '.git'), { recursive: true });
-  await mkdir(home, { recursive: true });
-  await mkdir(data, { recursive: true });
   // The package as the build lays it: the rendered files and the mod as written.
   mod = (await readModSources(
     join(fileURLToPath(new URL('../../hosts/claude', import.meta.url)), PLUGIN_DIR),
@@ -73,12 +61,7 @@ afterEach(async () => {
 });
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(data);
 }
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {

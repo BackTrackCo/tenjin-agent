@@ -24,8 +24,8 @@ export const PRODUCTION_HOST = new URL(PRODUCTION_ORIGIN).host;
  * it. Membership means a request to any of them reaches the same server,
  * publishers, prices, and SIWX domain acceptance. It exists because the server
  * builds candidate URLs from its own `NEXT_PUBLIC_APP_URL`, not the request
- * host, so the moment tenjin#402 flips that global a CLI on the other origin
- * sees every candidate as off-origin (tenjin#738).
+ * host, so when that global names one origin a CLI on the other would see
+ * every candidate as off-origin.
  *
  * Membership is NOT trust and NOT an allowlist of places the CLI may pay, but it
  * IS the widest set a wallet-signed credential can reach, so widening it is a
