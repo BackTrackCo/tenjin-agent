@@ -40,7 +40,7 @@ export interface SignFacts {
   envKey: WalletFacts['envKey'];
   walletFile: WalletFacts['walletFile'];
   passphraseFileMissing?: boolean;
-  /** With this set, canSign never returns blocked passphrase_missing. */
+  /** S13: with this set, canSign never returns blocked passphrase_missing. */
   envPassphraseSet?: boolean;
   unlock?:
     | { ok: true; source?: SigningSource; warning?: string }
@@ -62,7 +62,7 @@ export interface ProviderFacts {
 }
 
 /** A definite unlock block, worded from WALLET_REASONS: the fragment as the
- *  detail, the person's fix unless the caller supplied its own. */
+ *  detail, the PERSON fix (decision 15) unless the caller supplied its own. */
 function unlockBlocked(reason: UnlockReason, fix?: string): SignVerdict {
   const r = WALLET_REASONS[reason as keyof typeof WALLET_REASONS];
   return { status: 'blocked', reason, detail: r.reason, fix: fix ?? r.fix };
@@ -93,8 +93,8 @@ function ready(
 }
 
 /**
- * A money or policy block: `detail` and `fix` are fee.ts's `unpaid(reason)`,
- * byte for byte, so no fee or funding wording is invented here.
+ * A money or policy block in TODAY'S words (S5): `detail` and `fix` are fee.ts's
+ * `unpaid(reason)`, byte for byte. No new fee or funding wording comes from here.
  */
 function moneyBlocked(reason: string): Verdict {
   const u = unpaid(reason);
@@ -107,16 +107,16 @@ function moneyBlocked(reason: string): Verdict {
 }
 
 /**
- * Can this wallet sign? First match wins.
+ * CAN THIS WALLET SIGN, first match wins (section 2.4).
  *
  * The file facts that are definite come first (a malformed key, no wallet, a
  * wallet.json nobody can read), then what an actual unlock said, then the one
  * file fact that is definite only without the env variable: the sidecar names
  * the file store and the file is gone.
  *
- * A set TENJIN_WALLET_PASSPHRASE is itself a passphrase source, so "no
- * passphrase can be reached" is never definite while it is set: until an
- * unlock has tried it, the answer is unknown.
+ * S13: a set TENJIN_WALLET_PASSPHRASE is itself a passphrase source, so "no
+ * passphrase can be reached" is never definite while it is set. Until an
+ * unlock has actually tried it, the answer is unknown.
  */
 export function canSign(f: SignFacts): SignVerdict {
   if (f.envKey === 'valid') return ready('key-env');
@@ -140,13 +140,15 @@ export function canSign(f: SignFacts): SignVerdict {
 }
 
 /**
- * Can the next routing call pay its fee? First match wins.
+ * CAN THE NEXT ROUTING CALL PAY ITS FEE, first match wins (section 2.4).
  *
- * Definite money facts come ahead of an unknown signer: a command-mode hook
- * cannot unlock, so its signer is always unknown, and a balance below the
- * payer's floor (ten fees at the ceiling) must still withhold there. A channel
- * that already holds the fee needs no deposit, so neither the deposit policy
- * nor the balance matters to it.
+ * Definite money facts come AHEAD of an unknown signer (decision 11): a
+ * command-mode hook cannot unlock, so its signer is always unknown, and a
+ * balance below the smallest deposit must still withhold there as it does
+ * today. That is the payer's floor, ten fees at the ceiling: a wallet under
+ * the hint but over the floor deposits all it holds and routes. A
+ * channel that already holds the fee needs no deposit, so neither the deposit
+ * policy nor the balance matters to it (checklist item 8: $0 with credit).
  */
 export function canPayRouting(r: RoutingFacts): Verdict {
   if (r.feeRefusal !== null) return moneyBlocked(r.feeRefusal);
@@ -165,10 +167,11 @@ export function canPayRouting(r: RoutingFacts): Verdict {
 }
 
 /**
- * Can this wallet pay a provider `priceAtomic`? First match wins.
+ * CAN THIS WALLET PAY A PROVIDER `priceAtomic`, first match wins (section 2.4).
  *
  * `needs_approval` keeps the policy's own reason, and it and `wallet_short`
- * carry empty text on purpose: the hooks render them with their own strings.
+ * carry empty text on purpose: the hooks render them with today's Shortfall
+ * strings, and nothing here may invent new ones.
  */
 export function canPayProvider(
   p: ProviderFacts,
@@ -196,11 +199,14 @@ export function canPayProvider(
  * A provider's `verify()` answer as a sign verdict.
  *
  * verified is ready (with its source and warning); broken is blocked
- * (`reason`, else `passphrase_wrong`); unverified is blocked only with a
- * definite reason, and unknown otherwise; no answer at all is unknown.
+ * (`reason`, else `passphrase_wrong`, the one thing today's broken verdicts
+ * all were before they carried one); unverified is blocked only with a
+ * DEFINITE reason, and unknown otherwise; no answer at all is unknown.
  *
- * A blocked verdict is worded from WALLET_REASONS, not the verification's own
- * `detail` and `fix`, which can tell a person to set TENJIN_WALLET_PASSPHRASE.
+ * A blocked verdict is worded from WALLET_REASONS, not from the verification's
+ * own `detail` and `fix`: those predate B1 and can tell a person to set
+ * TENJIN_WALLET_PASSPHRASE, and doctor shows the WALLET_REASONS person fix for
+ * every unlock reason (decision 15).
  */
 export function signFromVerification(v: WalletVerification | null | undefined): SignVerdict {
   if (v === null || v === undefined) return unknown('not_checked');

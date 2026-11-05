@@ -31,7 +31,7 @@ import {
   SendRevertedError,
   type PreparedUsdcSend,
 } from '../lib/usdc';
-import { testWalletProvider } from '../lib/payment-test-utils';
+import { testWalletProvider } from '../lib/read-test-utils';
 import { createLocalProvider } from '../lib/wallet/local';
 import { writeWalletRecord } from '../lib/wallet/store';
 import { fakeRecord } from '../lib/wallet/test-support';

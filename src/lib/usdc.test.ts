@@ -17,7 +17,7 @@ import {
   parseTransaction,
 } from 'viem';
 import { base } from 'viem/chains';
-import { testSigner } from './payment-test-utils';
+import { testSigner } from './read-test-utils';
 import {
   broadcastUsdcSend,
   FeeCapExceededError,

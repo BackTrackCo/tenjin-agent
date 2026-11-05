@@ -10,7 +10,7 @@ import {
   CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
   CODEX_HOOK_COUNT,
   CODEX_LEGS,
-} from './codex-plugin-files';
+} from './plugin-files';
 
 /**
  * WHAT CODEX SAYS ABOUT THE TENJIN PLUGIN, read through Codex's own app server

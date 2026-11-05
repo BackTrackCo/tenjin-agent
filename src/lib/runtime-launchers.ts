@@ -5,7 +5,7 @@ import {
   renderLauncherCmd,
   renderLauncherSh,
   type RuntimeLaunch,
-} from '../router/launcher-files';
+} from '../router/plugin-files';
 import { writeFileAtomic } from './atomic-json';
 import { launcherDir } from './paths';
 import { packageRootOf } from './runtime-place';

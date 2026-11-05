@@ -9,13 +9,13 @@
 import { readFile, rm } from 'node:fs/promises';
 import { writeFileAtomic } from './atomic-json';
 import { balanceCachePath } from './paths';
-import { ADDRESS_RE } from './ids';
 
 // Values mirror the app's lib/chain.ts Base mainnet entry (chain 8453).
 export const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
 /** `balanceOf(address)`: the first four bytes of its keccak-256. */
 const BALANCE_OF_SELECTOR = '0x70a08231';
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 /** One ABI word: what `balanceOf` returns. */
 const WORD_RE = /^0x[0-9a-fA-F]{64}$/;
 

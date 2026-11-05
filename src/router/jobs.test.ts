@@ -2,11 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buildPaymentRequired,
-  testAuthorizer,
-  testWalletProvider,
-} from '../lib/payment-test-utils';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
 import type { SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';

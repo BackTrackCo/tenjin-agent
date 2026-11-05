@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { testSigner } from '../lib/payment-test-utils';
+import { testSigner } from '../lib/read-test-utils';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { FakeRouter } from './fee-test-utils';
 import { fixture } from './fixture-test-utils';

@@ -6,12 +6,14 @@ import type { SpendAuthorizer } from './wallet';
 import type { CommandContext } from '../context';
 
 /**
- * The money gate `pay` runs between seeing a price and building a signature:
- * policy authorization, the confirm ceremony, and the refusal shapes. The
- * caller owns everything around it: the challenge it priced, the payment
- * build, and settling the reservation after a failure: releasing only while no
- * signature has left the process, committing once one has, because a
- * transmitted authorization can still settle.
+ * The one money gate `buy` and `pay` share: policy authorization, the confirm
+ * ceremony, and the refusal shapes. Both verbs run EXACTLY this sequence
+ * between seeing a price and building a signature, so the two cannot drift on
+ * what `--yes` clears (the confirm only), what a deny looks like, or when a
+ * reservation is released. The caller still owns everything around it: the
+ * challenge it priced, the payment build, and settling the reservation after a
+ * failure: releasing only while no signature has left the process, committing
+ * once one has (pay.ts), because a transmitted authorization can still settle.
  */
 
 export interface SpendGateInput {
@@ -19,7 +21,7 @@ export interface SpendGateInput {
   mode: PaymentMode;
   authorizer: SpendAuthorizer;
   amountAtomic: bigint;
-  /** The policy's creator identity: the target host. */
+  /** The policy's creator identity (a handle for buy, the target host for pay). */
   creator: string;
   maxPriceAtomic?: bigint;
   /** The same-turn duplicate guard's identity for this request; see SpendRequest. */
@@ -34,11 +36,15 @@ export interface SpendGateInput {
    * sequences could never repaint the amount being approved.
    */
   payeeLabel: string;
+  /** "Add the creator" (buy) vs "Add this host" (pay) in the allowlist fix. */
+  allowlistSubject: string;
+  /** "Purchase not confirmed." (buy) vs "Payment not confirmed." (pay). */
+  notConfirmedMessage: string;
 }
 
 /** Runs the gate; returns the reservation to commit or release (undefined
- *  mirrors the authorizer's own optionality). Throws POLICY_REFUSED (deny, or
- *  confirm declined), releasing first. */
+ *  mirrors the authorizer's own optionality, same as before the extraction).
+ *  Throws POLICY_REFUSED (deny, or confirm declined), releasing first. */
 export async function gateSpend(input: SpendGateInput): Promise<string | undefined> {
   const { authorizer, amountAtomic } = input;
   const authorization = await authorizer.authorize({
@@ -50,7 +56,7 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
   });
   if (authorization.decision === 'deny') {
     throw new CliError('POLICY_REFUSED', authorization.message, {
-      fix: policyFix(authorization.reason),
+      fix: policyFix(authorization.reason, input.allowlistSubject),
       details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
     });
   }
@@ -65,7 +71,7 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
     }
     if (!approved) {
       await authorizer.release(reservationId);
-      throw new CliError('POLICY_REFUSED', 'Payment not confirmed.', {
+      throw new CliError('POLICY_REFUSED', input.notConfirmedMessage, {
         fix: 'Obtain explicit user consent for this quoted payment, then re-run with --yes or confirm interactively. Manual pay is never an autonomous workaround for a router refusal.',
         details: { reason: authorization.reason, amountAtomic: amountAtomic.toString() },
       });
@@ -75,12 +81,12 @@ export async function gateSpend(input: SpendGateInput): Promise<string | undefin
 }
 
 /** What follows a refusal, by its policy reason. */
-export function policyFix(reason: string): string {
+export function policyFix(reason: string, allowlistSubject: string): string {
   switch (reason) {
     case 'price_cap_exceeded':
       return 'Raise --max-price if this price is acceptable.';
     case 'not_allowlisted':
-      return 'Add this host to allowlistCreators, or clear the allowlist.';
+      return `Add ${allowlistSubject} to allowlistCreators, or clear the allowlist.`;
     case 'session_budget_exceeded':
       return "Today's automatic budget is spent; it comes back as the rolling 24 hours pass. Nothing more is paid without the user's yes.";
     case 'duplicate_in_flight':

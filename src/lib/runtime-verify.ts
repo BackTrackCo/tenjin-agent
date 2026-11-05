@@ -3,8 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handlersIn } from '../router/hook-form';
-import { renderPluginHooks, renderPluginMcp } from '../router/plugin-files';
-import { type RuntimeLaunch } from '../router/launcher-files';
+import { renderPluginHooks, renderPluginMcp, type RuntimeLaunch } from '../router/plugin-files';
 
 // ---------------------------------------------------------------------------
 // Verifying a build before anything points at it

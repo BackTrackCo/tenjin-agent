@@ -73,7 +73,7 @@ import {
   spendOptions,
   FEE_APPROVAL,
 } from './spend-question';
-import { shQuote } from './launcher-files';
+import { shQuote } from './plugin-files';
 import { askImprove, improveLines, improveStep, type ImproveDeps } from './improve-question';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';

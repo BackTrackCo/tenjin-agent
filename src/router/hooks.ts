@@ -34,7 +34,7 @@ import {
   writeRouterMemo,
 } from './router-memo';
 import { requestToolName, type Harness } from './names';
-import { codexRouterEvent, codexSession } from './codex-wire';
+import { codexRouterEvent, codexSession } from './codex-event';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import {
   bindDecision,

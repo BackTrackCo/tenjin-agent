@@ -1,16 +1,12 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buildPaymentRequired,
-  testAuthorizer,
-  testWalletProvider,
-} from '../lib/payment-test-utils';
+import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
-import { testCtx } from '../context-test-utils';
 import { ROUTER_PATH, type Choices, type OfferSpec } from './decision';
-import { fixture } from './fixture-test-utils';
 import type { MediaTransport } from './paid';
 import { storeChoices, storeSpecs } from './specs';
 import { runRequestTool } from './tool';
@@ -24,16 +20,13 @@ import { runRequestTool } from './tool';
  * image bytes, $0.085 together.
  */
 
-const {
-  id: ID,
-  hint: HINT,
-  specs: SPECS,
-  choices: CHOICES,
-} = (
-  fixture('wire-hook-discovered-choices.json') as {
-    decision: { id: string; hint: string; specs: OfferSpec[]; choices: Choices };
-  }
-).decision;
+const fixture = JSON.parse(
+  await readFile(
+    fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+    'utf8',
+  ),
+) as { decision: { id: string; hint: string; specs: OfferSpec[]; choices: Choices } };
+const { id: ID, hint: HINT, specs: SPECS, choices: CHOICES } = fixture.decision;
 const [GPT, BANANA] = SPECS as [OfferSpec, OfferSpec];
 const ROUTER = 'https://tenjin.sh';
 const IMAGE_URL = 'https://cdn.example.test/out/gpt.png';
@@ -60,7 +53,30 @@ const policy = (config: Record<string, string>) =>
   writeFile(join(dir, 'config.json'), JSON.stringify(config));
 
 function ctx(): CommandContext {
-  return testCtx(dir, { baseUrl: ROUTER });
+  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
+  return {
+    flags: { json: true, timeout: 5000, baseUrl: ROUTER },
+    dataDir: dir,
+    io: { stdout: sink(), stderr: sink(), isTTY: false },
+  };
+}
+
+function authorizer(): SpendAuthorizer {
+  return {
+    policyEnforcement: 'client-only',
+    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
+      decision: 'allow',
+      reason: 'within_policy',
+      message: 'test',
+      amountAtomic: req.amountAtomic,
+      sessionSpentAtomic: 0n,
+      sessionBudgetAtomic: 0n,
+      policyEnforcement: 'client-only',
+      reservationId: 'rsv',
+    })),
+    commit: vi.fn(async () => undefined),
+    release: vi.fn(async () => undefined),
+  };
 }
 
 /** How one model answers its paid call. */
@@ -135,7 +151,7 @@ const mediaTransport: MediaTransport = async () => ({
   discard: () => undefined,
 });
 
-function deps(fetchImpl: typeof fetch, auth = testAuthorizer()) {
+function deps(fetchImpl: typeof fetch, auth = authorizer()) {
   return {
     ctx: ctx(),
     cwd: dir,
@@ -181,7 +197,7 @@ const claims = async () =>
 
 describe('running every choice', () => {
   it('pays each model once under its own id, saves every image, and returns one result', async () => {
-    const auth = testAuthorizer();
+    const auth = authorizer();
     const { fetchImpl, calls } = sellers({ 'gpt-image-2-5-sunburst': 'unsettled' });
     const result = await runRequestTool(
       { id: ID, choice: 'all', input: INPUT },
@@ -256,7 +272,7 @@ describe('running every choice', () => {
   it('pays nothing the second time: every choice already ran under its own id', async () => {
     const first = sellers();
     await runRequestTool({ id: ID, choice: 'all', input: INPUT }, deps(first.fetchImpl));
-    const auth = testAuthorizer();
+    const auth = authorizer();
     const again = sellers();
     const result = await runRequestTool(
       { id: ID, choice: 'all', input: INPUT },
@@ -315,7 +331,7 @@ describe('running every choice', () => {
   it('quotes a set whose total is over the per-call limit, and signs nothing', async () => {
     // Each image fits $0.06 alone; the set does not.
     await policy({ maxAutoSpend: '60000', sessionBudget: '5000000' });
-    const auth = testAuthorizer();
+    const auth = authorizer();
     const { fetchImpl, calls } = sellers();
     const result = await runRequestTool(
       { id: ID, choice: 'all', input: INPUT },
@@ -344,7 +360,7 @@ describe('running every choice', () => {
 
   it('signs nothing, and keeps no claim, when the set is over the session budget', async () => {
     await policy({ maxAutoSpend: '500000', sessionBudget: '80000' });
-    const auth = testAuthorizer();
+    const auth = authorizer();
     const { fetchImpl, calls } = sellers();
     const result = await runRequestTool(
       { id: ID, choice: 'all', input: INPUT },
@@ -367,7 +383,7 @@ describe('running every choice', () => {
    *  wallet short of the total would sign every one; the set reads it once,
    *  for the total, before any is signed. */
   it('signs nothing, and keeps no claim, when the wallet holds less than the set costs', async () => {
-    const auth = testAuthorizer();
+    const auth = authorizer();
     const { fetchImpl, calls } = sellers();
     const short = deps(fetchImpl, auth);
     const result = await runRequestTool(

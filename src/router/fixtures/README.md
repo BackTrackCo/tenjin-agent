@@ -6,9 +6,8 @@ parses the same files with its own parser, so a shape only one side validates
 is a contract only one side keeps. Four divergences so far (`pendingCall`, the
 grouped arguments, the nested `diagnostics`, and three files copied by hand
 that drifted by 2026-10-28) each cost a round trip; read these files rather
-than hand-writing an equivalent. `tenjin` keeps no copy: its CI checks out this
-directory from `main` (`tests/helpers/cli-fixtures.ts` there), so a change here
-reaches the server's tests once it merges.
+than hand-writing an equivalent. Until the server's CI reads them from here,
+`tenjin` keeps a copy, refreshed from this one.
 
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code

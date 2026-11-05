@@ -1,10 +1,10 @@
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
 import { ChoicesSchema, OfferSpecSchema, type Choices, type OfferSpec } from './decision';
-import { sha256Hex } from '../lib/hash';
 
 /**
  * THE REQUEST SPECS AN OFFER CARRIED, kept on this machine by the offer's id. The
@@ -30,12 +30,17 @@ export const SPEC_TTL_MS = 15 * 60_000;
  *  or in the next step of a chain. A day covers a working session. */
 export const RESULT_TTL_MS = 24 * 60 * 60_000;
 
+const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
+
 function specPath(dataDir: string, id: string): string {
-  return join(dataDir, SPECS_DIR, `${sha256Hex(id)}.json`);
+  return join(dataDir, SPECS_DIR, `${digest(id)}.json`);
 }
 
 /** The field of a kept spec that names the one input a row may show. */
 export const SHOWN_KEY = 'shown';
+
+/** Past this many characters an input is a prompt, not the key of a lookup. */
+export const SHOWN_INPUT_MAX_CHARS = 80;
 
 /**
  * WHICH INPUT A ROW MAY SHOW FOR A SERVICE, decided here so the mod reads a
@@ -58,6 +63,20 @@ export function shownInputField(spec: OfferSpec): string | null {
     ? spec.input.required.filter((name): name is string => typeof name === 'string')
     : [];
   return required.find(isString) ?? Object.keys(properties).find(isString) ?? null;
+}
+
+/**
+ * The input a row shows for this call, or undefined: the field
+ * {@link shownInputField} names, when its value is a short single key. The
+ * mod applies the same cap to the value it reads.
+ */
+export function shownInput(spec: OfferSpec, input: Record<string, unknown>): string | undefined {
+  const field = shownInputField(spec);
+  if (field === null) return undefined;
+  const value = input[field];
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text.length > 0 && Array.from(text).length <= SHOWN_INPUT_MAX_CHARS ? text : undefined;
 }
 
 /**
@@ -117,7 +136,7 @@ export const KeptChoicesSchema = z.strictObject({
 });
 
 function choicesPath(dataDir: string, id: string): string {
-  return join(dataDir, SPECS_DIR, `${sha256Hex(id)}.choices.json`);
+  return join(dataDir, SPECS_DIR, `${digest(id)}.choices.json`);
 }
 
 /**
@@ -163,7 +182,7 @@ export async function readChoices(dataDir: string, id: string): Promise<KeptChoi
 }
 
 function labelPath(dataDir: string, id: string): string {
-  return join(dataDir, SPECS_DIR, `${sha256Hex(id)}.label.json`);
+  return join(dataDir, SPECS_DIR, `${digest(id)}.label.json`);
 }
 
 /**
@@ -210,7 +229,7 @@ const PaymentSchema = z.discriminatedUnion('state', [
 ]);
 
 function paymentPath(dataDir: string, id: string): string {
-  return join(dataDir, SPECS_DIR, `${sha256Hex(id)}.paid.json`);
+  return join(dataDir, SPECS_DIR, `${digest(id)}.paid.json`);
 }
 
 /**
@@ -294,7 +313,7 @@ export async function storeFullResult(
   id: string,
   body: string,
 ): Promise<string | null> {
-  const path = join(dataDir, RESULTS_DIR, `${sha256Hex(id)}.json`);
+  const path = join(dataDir, RESULTS_DIR, `${digest(id)}.json`);
   try {
     await writeFileAtomic(path, body, { mode: 0o600, dirMode: 0o700 });
   } catch {

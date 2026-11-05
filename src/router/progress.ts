@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import { lstat, opendir } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomicExclusive } from '../lib/atomic-json';
-import { sha256Hex } from '../lib/hash';
-import { PRIVATE, readJsonFile, sweep, writePrivate } from './store-files';
+import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
 
 /**
  * The live status line's evidence: what this session is looking up right now,
@@ -158,6 +157,8 @@ export interface ProgressStep {
   price?: string;
 }
 
+const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
+
 function bounded(value: string, limit: number): string {
   const chars = Array.from(value);
   return chars.length <= limit ? value : `${chars.slice(0, limit - 1).join('')}…`;
@@ -212,7 +213,7 @@ async function parametersOf(value: unknown): Promise<string | undefined> {
 }
 
 export function sessionDir(dataDir: string, sessionId: string): string {
-  return join(dataDir, PROGRESS_DIR, sha256Hex(sessionId));
+  return join(dataDir, PROGRESS_DIR, digest(sessionId));
 }
 
 /** A fresh key for one call, so two overlapping lookups never share a record. */
@@ -240,13 +241,10 @@ export async function bindDecision(
   decisionId: string,
   now = Date.now(),
 ): Promise<void> {
-  await write(
-    join(sessionDir(dataDir, sessionId), `${BINDING_PREFIX}${sha256Hex(decisionId)}.json`),
-    {
-      version: 1,
-      at: now,
-    },
-  );
+  await write(join(sessionDir(dataDir, sessionId), `${BINDING_PREFIX}${digest(decisionId)}.json`), {
+    version: 1,
+    at: now,
+  });
 }
 
 /**
@@ -272,7 +270,7 @@ export async function markOffered(
     ...(/^\d{1,78}$/.test(offer.priceAtomic) ? { priceAtomic: offer.priceAtomic } : {}),
   };
   await write(
-    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${sha256Hex(toolUseId)}.json`),
+    join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`),
     saved,
   );
 }
@@ -283,7 +281,7 @@ export async function wasOffered(
   toolUseId: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${sha256Hex(toolUseId)}.json`);
+  const path = join(sessionDir(dataDir, sessionId), `${OFFER_PREFIX}${digest(toolUseId)}.json`);
   const stamp = await readStamp(path);
   return stamp !== null && now - stamp.at <= EXPIRY_MS;
 }
@@ -341,7 +339,7 @@ export async function noteOf(
 }
 
 function notePath(dataDir: string, sessionId: string, toolUseId: string): string {
-  return join(sessionDir(dataDir, sessionId), `${NOTE_PREFIX}${sha256Hex(toolUseId)}.json`);
+  return join(sessionDir(dataDir, sessionId), `${NOTE_PREFIX}${digest(toolUseId)}.json`);
 }
 
 /**
@@ -359,7 +357,7 @@ export async function claimNote(
 ): Promise<boolean> {
   return claimOnce(
     (window) => {
-      const key = sha256Hex(JSON.stringify([agentId ?? '', query, window]));
+      const key = digest(JSON.stringify([agentId ?? '', query, window]));
       return join(sessionDir(dataDir, sessionId), `${QUERY_PREFIX}${key}.json`);
     },
     NOTE_REPEAT_MS,
@@ -383,7 +381,7 @@ function redirectPath(
   target: string,
   window: number,
 ): string {
-  const key = sha256Hex(JSON.stringify([agentId ?? '', target, window]));
+  const key = digest(JSON.stringify([agentId ?? '', target, window]));
   return join(sessionDir(dataDir, sessionId), `${REDIRECT_PREFIX}${key}.json`);
 }
 
@@ -432,7 +430,10 @@ async function claimOnce(
   if (previous !== null && now - previous.at <= span) return false;
   const stamp: Stamp = { version: 1, at: now };
   try {
-    await writeFileAtomicExclusive(pathFor(window), JSON.stringify(stamp), PRIVATE);
+    await writeFileAtomicExclusive(pathFor(window), JSON.stringify(stamp), {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
     return true;
   } catch {
     // Taken in this window, which is always inside the span, or not writable.
@@ -485,7 +486,7 @@ export async function resolveProgressSession(
     return null;
   }
   if (opts.id !== undefined && opts.id.length > 0) {
-    const marker = `${BINDING_PREFIX}${sha256Hex(opts.id)}.json`;
+    const marker = `${BINDING_PREFIX}${digest(opts.id)}.json`;
     for (const name of names) {
       const bound = await readStamp(join(root, name, marker));
       if (bound !== null && now - bound.at <= EXPIRY_MS) return join(root, name);
@@ -527,7 +528,7 @@ export async function writeProgress(
     ...(parameters !== undefined ? { parameters } : {}),
     ...(step.price !== undefined ? { price: sanitize(step.price, 24) } : {}),
   };
-  await write(join(directory, `${sha256Hex(callId)}.json`), saved);
+  await write(join(directory, `${digest(callId)}.json`), saved);
 }
 
 export interface LookupFooter {
@@ -585,15 +586,21 @@ export async function openLookupFooter(
  * renderer: the footer refreshes once a second and must stay read-only.
  */
 export async function pruneProgress(directory: string, now = Date.now()): Promise<void> {
-  await sweep(
-    directory,
-    async (name, path) => {
-      if (name === SESSION_FILE) return false;
-      const record = agesByMtime(name) ? await mtimeOf(path) : await readStamp(path);
-      return record === null || now - record.at > EXPIRY_MS;
-    },
-    { limit: MAX_RECORDS },
-  );
+  try {
+    const dir = await opendir(directory);
+    let count = 0;
+    for await (const entry of dir) {
+      if (++count > MAX_RECORDS) return;
+      if (!entry.isFile() || entry.name === SESSION_FILE) continue;
+      const path = join(directory, entry.name);
+      const record = agesByMtime(entry.name) ? await mtimeOf(path) : await readStamp(path);
+      if (record === null || now - record.at > EXPIRY_MS) {
+        await rm(path, { force: true }).catch(() => undefined);
+      }
+    }
+  } catch {
+    // Housekeeping only. Nothing downstream depends on it having run.
+  }
 }
 
 /**
@@ -625,18 +632,24 @@ async function mtimeOf(path: string): Promise<Stamp | null> {
  * fires on every turn; a directory whose session is still live is never touched.
  */
 export async function pruneSessions(dataDir: string, now = Date.now()): Promise<void> {
-  await sweep(
-    join(dataDir, PROGRESS_DIR),
-    async (name, path) => {
-      if (!/^[a-f0-9]{64}$/.test(name)) return false;
+  const root = join(dataDir, PROGRESS_DIR);
+  try {
+    const directory = await opendir(root);
+    let seen = 0;
+    for await (const entry of directory) {
+      if (++seen > MAX_SESSIONS) return;
+      if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) continue;
+      const path = join(root, entry.name);
       const session = await readStamp(join(path, SESSION_FILE));
-      if (session !== null && now - session.at <= SESSION_ACTIVE_MS) return false;
+      if (session !== null && now - session.at <= SESSION_ACTIVE_MS) continue;
       // The touch is gone or old, so the only thing that can keep this
       // directory is a record still inside the renderer's window.
-      return !(await hasLiveRecord(path, now));
-    },
-    { limit: MAX_SESSIONS, directories: true },
-  );
+      if (await hasLiveRecord(path, now)) continue;
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    }
+  } catch {
+    // Housekeeping only. Nothing downstream depends on it having run.
+  }
 }
 
 async function hasLiveRecord(directory: string, now: number): Promise<boolean> {
@@ -758,7 +771,7 @@ function line(row: SavedProgress, now: number): string {
 /** Whether it landed. Every caller but the note record ignores the answer. */
 async function write(path: string, body: Stamp | SavedProgress | SavedNote): Promise<boolean> {
   try {
-    await writePrivate(path, JSON.stringify(body));
+    await writeFileAtomic(path, JSON.stringify(body), { mode: 0o600, dirMode: 0o700 });
     return true;
   } catch {
     // The footer is the only thing that can be lost here, by design.
@@ -796,7 +809,26 @@ async function readCall(path: string): Promise<SavedProgress | null> {
   };
 }
 
-/** One bounded JSON object, or null: see {@link readJsonFile}. */
-function readJson(path: string): Promise<Record<string, unknown> | null> {
-  return readJsonFile(path, MAX_RECORD_BYTES);
+/**
+ * One bounded JSON object, or null. `O_NOFOLLOW` because these files live under
+ * a directory the user can write: a symlink planted here must not turn a footer
+ * read into a read of something else.
+ */
+async function readJson(path: string): Promise<Record<string, unknown> | null> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  if (file === undefined) return null;
+  try {
+    if ((await file.stat()).size > MAX_RECORD_BYTES) return null;
+    const buffer = Buffer.alloc(MAX_RECORD_BYTES + 1);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_RECORD_BYTES) return null;
+    const parsed: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+    return parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+      ? null
+      : (parsed as Record<string, unknown>);
+  } catch {
+    return null;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
 }

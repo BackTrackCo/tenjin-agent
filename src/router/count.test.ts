@@ -2,11 +2,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buildPaymentRequired,
-  testAuthorizer,
-  testWalletProvider,
-} from '../lib/payment-test-utils';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendAuthorizer } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';

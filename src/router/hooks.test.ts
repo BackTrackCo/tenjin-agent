@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NATIVE } from './fee-test-utils';
-import { fixture } from './fixture-test-utils';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   HINT_SOURCE,
   hookOutcome,
@@ -45,10 +45,12 @@ interface WebFetchSample {
 
 /** Real WebFetch results (`tool_response`): shells, pages that read fine, and
  *  a PDF it saved whole. */
-const webFetchSamples = fixture('harness/claude-WebFetch-results.json') as Record<
-  'shell' | 'page',
-  WebFetchSample[]
-> & { pdf: WebFetchSample };
+const webFetchSamples = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('./fixtures/harness/claude-WebFetch-results.json', import.meta.url)),
+    'utf8',
+  ),
+) as Record<'shell' | 'page', WebFetchSample[]> & { pdf: WebFetchSample };
 
 /** The offer record a redirect leaves for the mod, as it lies on disk. */
 async function offerRecord(sessionId: string, toolUseId: string): Promise<unknown> {
@@ -134,6 +136,20 @@ function router(
   return { fetchImpl, calls, reports };
 }
 
+const NATIVE = {
+  schemaVersion: 1,
+  routerVersion: 'v',
+  decision: {
+    action: 'native',
+    reason: 'The host assistant and its own tools are enough.',
+    diagnostics: {
+      reasonCode: 'native_sufficient',
+      stage: 'capability',
+      missing: [],
+      nextAction: 'Answer with your own tools.',
+    },
+  },
+};
 const HINT =
   'Firecrawl fits this: scrapes one public URL and returns its content as clean markdown or HTML. ' +
   '$0.015 via https://api.munition.io/v1/firecrawl/scrape . ' +
@@ -1378,9 +1394,12 @@ describe('a wallet that cannot cover the lookup', () => {
  * mid-session. An unknown signer still offers: only `blocked` gates.
  */
 describe('a wallet that cannot sign', () => {
-  const DISCOVERED = fixture('wire-hook-discovered.json') as {
-    decision: { id: string; hint: string };
-  };
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string } };
   const blocked: SignVerdict = {
     status: 'blocked',
     reason: 'passphrase_missing',
@@ -3057,9 +3076,12 @@ describe('a free lookup noted after a search', () => {
  * wallet and one-block rules. The shape is the shared fixture's.
  */
 describe('a discovered service', () => {
-  const DISCOVERED = fixture('wire-hook-discovered.json') as {
-    decision: { id: string; hint: string; candidate: { url: string } };
-  };
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string; candidate: { url: string } } };
   const { id: ID, hint: LINE } = DISCOVERED.decision;
   const SEEN_LINE = `${HINT_SOURCE}: ${LINE.replace('request({', 'mcp__x402__request({')}`;
 
@@ -3089,9 +3111,12 @@ describe('a discovered service', () => {
   });
 
   it('keeps the spec of a shown offer, for request to read by its id', async () => {
-    const OFFERED = fixture('wire-hook-discovered-spec.json') as {
-      decision: { id: string; specs: unknown[] };
-    };
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-spec.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; specs: unknown[] } };
     const { fetchImpl } = router(OFFERED);
     await runPromptHook(promptEvent('make a hero image for the blog post'), {
       dataDir: dir,
@@ -3105,9 +3130,12 @@ describe('a discovered service', () => {
   /** A CHOICE SET is kept by the line's id, beside every option's spec, so
    *  `request({id, choice})` finds the option the user picked. */
   it('keeps the choice set of a shown offer, and every option spec', async () => {
-    const OFFERED = fixture('wire-hook-discovered-choices.json') as {
-      decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown };
-    };
+    const OFFERED = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { decision: { id: string; hint: string; specs: { id: string }[]; choices: unknown } };
     const { fetchImpl } = router(OFFERED);
     await runPromptHook(promptEvent('generate an image of a lighthouse at dusk'), {
       dataDir: dir,
@@ -3159,9 +3187,12 @@ describe('a discovered service', () => {
      *  never the line's prose, so a line that starts at a label and quotes
      *  its prices any way it likes still warns, and only when a field is over. */
     it("reads each listed service's price from its spec when the offer carries specs", async () => {
-      const labelled = fixture('wire-hook-execute-labelled.json') as {
-        decision: { specs: Record<string, unknown>[] };
-      };
+      const labelled = JSON.parse(
+        readFileSync(
+          fileURLToPath(new URL('./fixtures/wire-hook-execute-labelled.json', import.meta.url)),
+          'utf8',
+        ),
+      ) as { decision: { specs: Record<string, unknown>[] } };
       const base = labelled.decision.specs[0]!;
       const priced = (id: string, atomic: string) => ({
         ...base,
@@ -3446,9 +3477,12 @@ describe('a discovered service', () => {
  * their own words.
  */
 describe('a question to the user', () => {
-  const DISCOVERED = fixture('wire-hook-discovered.json') as {
-    decision: { id: string; hint: string };
-  };
+  const DISCOVERED = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-discovered.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as { decision: { id: string; hint: string } };
   const SEEN_LINE = `${HINT_SOURCE}: ${DISCOVERED.decision.hint.replace('request({', 'mcp__x402__request({')}`;
   /** Claude Code's AskUserQuestion input, as the transcript records it. */
   const QUESTIONS = {
@@ -3645,10 +3679,14 @@ describe('a question to the user', () => {
    * this exact turn as the search text "OG / social card Can try all".
    */
   it('routes the answers from a real AskUserQuestion PostToolUse event', async () => {
-    const real = fixture('harness/claude-PostToolUse-AskUserQuestion.json') as Record<
-      string,
-      unknown
-    >;
+    const real = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL('./fixtures/harness/claude-PostToolUse-AskUserQuestion.json', import.meta.url),
+        ),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
     const path = await transcriptFor([
       {
         type: 'user',

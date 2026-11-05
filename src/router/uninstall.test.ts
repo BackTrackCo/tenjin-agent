@@ -11,8 +11,7 @@ import type { ClaudeRun } from './claude-cli';
 import { runCodexUninstall } from './codex-install';
 import { recordInstalledHost, uninstallEach, type SharedParts } from './hosts';
 import { installSandbox } from './install-test-utils';
-import { renderPluginFiles } from './plugin-files';
-import { LAUNCHER_MARKER } from './launcher-files';
+import { LAUNCHER_MARKER, renderPluginFiles } from './plugin-files';
 import { pluginFolderPath, writePluginFolder } from './plugin-folder';
 import { folderFor } from './plugin-registration';
 import {

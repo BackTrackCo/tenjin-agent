@@ -7,7 +7,7 @@ import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import type { RuntimeSetup } from '../lib/runtime';
 import { parseCodexHistory } from './codex-history';
-import { codexRouterEvent, codexResponse } from './codex-wire';
+import { codexRouterEvent, codexResponse } from './codex-event';
 import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
   alongsideCodexRefresh,
@@ -22,7 +22,7 @@ import {
 } from './codex-install';
 import { fixture } from './fixture-test-utils';
 import { runHookKind } from './hook-command';
-import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './codex-plugin-files';
+import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
 import { CODEX_REQUEST_TOOL, requestToolName } from './names';

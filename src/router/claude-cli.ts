@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { atLeast } from '../lib/version-order';
 
 /**
  * CLAUDE CODE'S OWN COMMANDS, AND WHERE ITS CONFIG LIVES. Install, update,
@@ -171,6 +170,18 @@ export function parseClaudeVersion(text: string): string | null {
   return /(\d+)\.(\d+)\.(\d+)/.exec(text)?.[0] ?? null;
 }
 
+/** Is `version` at or above {@link CLAUDE_CODE_FLOOR}? */
+export function meetsFloor(version: string, floor: string = CLAUDE_CODE_FLOOR): boolean {
+  const a = version.split('.').map(Number);
+  const b = floor.split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
 export interface ClaudeCodeState {
   binary: ClaudeBinary | null;
   /** The version `claude --version` printed, or null when it could not be read. */
@@ -199,7 +210,7 @@ export async function readClaudeCode(
   if (binary === null) return { binary, version: null, meetsFloor: true };
   const run = await runClaude(binary, ['--version'], { env, cwd, timeoutMs: 15_000 });
   const version = run.code === 0 ? parseClaudeVersion(run.stdout) : null;
-  const ok = version === null || atLeast(version, CLAUDE_CODE_FLOOR);
+  const ok = version === null || meetsFloor(version);
   return {
     binary,
     version,

@@ -22,8 +22,7 @@ import {
   type RouterInstallDeps,
 } from './install';
 import { installSandbox, probe400 } from './install-test-utils';
-import { renderPluginFiles } from './plugin-files';
-import { renderLauncherSh, shQuote } from './launcher-files';
+import { renderLauncherSh, renderPluginFiles, shQuote } from './plugin-files';
 
 /**
  * INSTALL ON TENJIN'S RUNTIME, through a fake `claude` and an injected

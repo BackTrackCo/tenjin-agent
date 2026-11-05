@@ -27,7 +27,7 @@ import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
-import { MAX_PAID_LEG_TIMEOUT_MS } from './pay-request';
+import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
 import { MAX_BINARY_BODY_BYTES } from '../lib/http';
 
 /**

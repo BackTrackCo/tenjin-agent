@@ -1,6 +1,6 @@
 import { request as httpsRequest } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
-import { sellerLine } from './pay-request';
+import { sellerLine } from '../commands/pay';
 import { composeUserAgent } from '../lib/client-meta';
 import {
   assertPublicHttpsUrl,

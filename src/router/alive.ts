@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
@@ -8,15 +9,11 @@ import {
   rememberingBalanceReader,
 } from '../lib/usdc-balance';
 import { readWalletFacts } from '../lib/wallet-facts';
-import { readCappedStdin, sessionIdOf } from './harness-event';
 import { noticeFor } from './notice-markers';
 import { sessionStartMessage } from './wallet-reasons';
-import { sha256Hex } from '../lib/hash';
-import { ADDRESS_RE } from '../lib/ids';
-import { sweep } from './store-files';
 
 /**
- * The plugin says it is here. While a machine carries both the plugin and the
+ * THE PLUGIN SAYS IT IS HERE. While a machine carries both the plugin and the
  * settings install it replaces, every event would run two sets of routing legs
  * and offer the same lookup twice. The plugin's `SessionStart` entry runs
  * `tenjin hook alive` before any other event of the session, and it writes:
@@ -33,21 +30,29 @@ import { sweep } from './store-files';
  * SHIM: the per-session check goes on or after 2026-12-01, the first release
  * cut 30 or more days after the plugin PR 2 ships; the stamp stays for doctor.
  *
- * It also says, once, when the wallet's files already show it cannot sign in
+ * It also says, once, when the wallet's FILES already show it cannot sign in
  * this session ({@link walletAtStart}). That is a file fact, not a verdict:
  * `alive` never unlocks, never execs, never reads a keychain and never replays
- * what a router saw. Everything else waits for the router's first notice.
+ * what a router saw (Q4). Everything else waits for the router's first notice.
  */
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAMP = 'plugin-loaded.json';
+/** A session id names a file only through its hash, so any string is safe. */
+const MAX_SESSION_ID = 200;
 
 export function aliveDir(dataDir: string): string {
   return join(dataDir, 'alive');
 }
 
 function markerName(sessionId: string): string {
-  return sha256Hex(sessionId, 32);
+  return createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
+}
+
+function sessionIdOf(event: unknown): string | null {
+  if (event === null || typeof event !== 'object') return null;
+  const id = (event as { session_id?: unknown }).session_id;
+  return typeof id === 'string' && id.length > 0 && id.length <= MAX_SESSION_ID ? id : null;
 }
 
 export interface AliveStamp {
@@ -70,7 +75,7 @@ export interface AliveAnswer {
  * is added to the session's context and nothing else there is definite before
  * a router has tried to unlock; everything else waits for the router's first
  * notice. The answer carries the person's fix in `systemMessage` and the
- * model's `agentFix` in `additionalContext`, and the reason's notice
+ * model's `agentFix` in `additionalContext` (B1), and the reason's notice
  * marker is written so the session's first prompt leg does not say it again.
  * ({@link aliveMain} adds the balance notice as JSON when there is no answer.)
  * It never fails the session: every error is swallowed, and gives null.
@@ -110,7 +115,7 @@ export async function runAliveHook(
 }
 
 /**
- * What the files alone say at session start, and only what is definite.
+ * WHAT THE FILES ALONE SAY AT SESSION START, and only what is definite (Q4).
  * Filesystem only: one wallet.json read, the sidecar read and a few stats; no
  * exec, no keychain, no scrypt, and never the router's unlock-state, so it
  * cannot repeat a verdict that has since changed. In order:
@@ -137,11 +142,12 @@ export async function walletAtStart(
 }
 
 async function pruneMarkers(dir: string, now: number): Promise<void> {
-  await sweep(dir, async (name, path) => {
-    if (!/^[0-9a-f]{32}$/.test(name)) return false;
+  for (const name of await readdir(dir).catch(() => [] as string[])) {
+    if (!/^[0-9a-f]{32}$/.test(name)) continue;
+    const path = join(dir, name);
     const s = await stat(path).catch(() => null);
-    return s !== null && now - s.mtimeMs > MARKER_TTL_MS;
-  });
+    if (s !== null && now - s.mtimeMs > MARKER_TTL_MS) await rm(path, { force: true });
+  }
 }
 
 /** Has the plugin's `alive` leg marked this session? False on any doubt. */
@@ -192,7 +198,7 @@ export async function walletNotice(
 ): Promise<string | null> {
   const wallet = await readJson(walletPath(dataDir));
   const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
-  if (address === undefined || !ADDRESS_RE.test(address)) return null;
+  if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
   const config = await readJson(configPath(dataDir));
   const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
   const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
@@ -245,7 +251,7 @@ export async function aliveMain(opts: {
   readEvent?: () => Promise<string>;
   stdout?: Pick<NodeJS.WritableStream, 'write'>;
 }): Promise<void> {
-  const raw = await (opts.readEvent ?? (() => readCappedStdin(1_000_000, 1_000)))().catch(() => '');
+  const raw = await (opts.readEvent ?? (() => readStdin(1_000)))().catch(() => '');
   const answer = await runAliveHook(parseEvent(raw), {
     dataDir: opts.dataDir,
     version: opts.version,
@@ -270,6 +276,31 @@ function parseEvent(raw: string): unknown {
   } catch {
     return null;
   }
+}
+
+function readStdin(timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const timer = setTimeout(() => reject(new Error('no harness event')), timeoutMs);
+    process.stdin.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 1_000_000) {
+        clearTimeout(timer);
+        reject(new Error('harness event too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    process.stdin.once('end', () => {
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+    process.stdin.once('error', () => {
+      clearTimeout(timer);
+      reject(new Error('harness event unreadable'));
+    });
+  });
 }
 
 /**

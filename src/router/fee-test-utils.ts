@@ -4,9 +4,10 @@ import {
   encodePaymentResponseHeader,
 } from '@x402/core/http';
 import type { PaymentRequirements } from '@x402/core/types';
+import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
-import { testSigner } from '../lib/payment-test-utils';
 import type { SpendPolicy } from '../lib/policy';
+import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { ROUTE_PAID_PATH } from './decision';
 import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC } from './fee';
@@ -228,6 +229,18 @@ function json(body: unknown, status: number, headers: Record<string, string> = {
     status,
     headers: { 'content-type': 'application/json', ...headers },
   });
+}
+
+/** A wallet signer over a fresh test key. */
+export function testSigner(
+  account: PrivateKeyAccount = privateKeyToAccount(generatePrivateKey()),
+): TenjinSigner {
+  return {
+    address: account.address,
+    signMessage: (args) => account.signMessage(args),
+    signTypedData: (args: TypedDataDefinition) => account.signTypedData(args),
+    signTransaction: () => Promise.reject(new Error('unused')),
+  };
 }
 
 /** The spend policy the payer tests run under unless they say otherwise. */

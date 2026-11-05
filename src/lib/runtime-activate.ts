@@ -1,9 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { PLUGIN_DIR, renderHostFiles, type ModSources } from '../router/plugin-files';
-import { type RuntimeLaunch } from '../router/launcher-files';
-import { renderCodexHostFiles } from '../router/codex-plugin-files';
+import {
+  PLUGIN_DIR,
+  renderCodexHostFiles,
+  renderHostFiles,
+  type ModSources,
+  type RuntimeLaunch,
+} from '../router/plugin-files';
 import { readModSources } from '../router/plugin-folder';
 import { writeFileAtomic } from './atomic-json';
 import { hasCode } from './errno';

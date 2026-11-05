@@ -3,11 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
-import {
-  buildPaymentRequired,
-  testAuthorizer,
-  testWalletProvider,
-} from '../lib/payment-test-utils';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
 import { readQuote } from '../lib/spend-quotes';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';

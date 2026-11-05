@@ -43,8 +43,7 @@ import { NEW_SESSION_STEP, pluginProof, projectInstallHere } from './install';
 import { inspectLegacyInstall, type LegacyInstall } from './legacy-install';
 import { routerSettings, type RouterSettings } from './settings';
 import { MARKETPLACE_NAME, MCP_SERVER_NAME, PLUGIN_ID, PLUGIN_SERVER, REQUEST_TOOL } from './names';
-import { PLUGIN_DIR } from './plugin-files';
-import { LAUNCHER_MARKER, RUNTIME_MISSING_FIX } from './launcher-files';
+import { LAUNCHER_MARKER, PLUGIN_DIR, RUNTIME_MISSING_FIX } from './plugin-files';
 import { folderState, readPluginListing, type PluginScope } from './plugin-registration';
 import { probeRouter, type RouterCheck } from './reachability';
 import {

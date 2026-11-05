@@ -25,7 +25,7 @@ import type { CommandContext, CommandResult } from '../context';
 import { persistRouterProject } from './config';
 import { projectInstallAt } from '../router/install';
 import { readMcpServers, type InstalledAt, type ListMcpProcesses } from '../router/mcp-processes';
-import { RUNTIME_MISSING_FIX } from '../router/launcher-files';
+import { RUNTIME_MISSING_FIX } from '../router/plugin-files';
 
 /**
  * `tenjin update`: move this machine to the newest version npm's `latest` tag

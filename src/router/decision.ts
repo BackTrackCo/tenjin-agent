@@ -270,7 +270,7 @@ export const JobSchema = z
 export type Job = z.infer<typeof JobSchema>;
 
 /** A spec's `timeoutS` ceiling: the paid leg's own (`MAX_PAID_LEG_TIMEOUT_MS`
- *  in `router/pay-request.ts`), so no spec can hold a call longer than a seller's
+ *  in `commands/pay.ts`), so no spec can hold a call longer than a seller's
  *  402 already may. */
 export const MAX_SPEC_TIMEOUT_S = 120;
 

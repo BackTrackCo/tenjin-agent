@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { RuntimeLaunch } from '../router/launcher-files';
+import type { RuntimeLaunch } from '../router/plugin-files';
 import { proxyNodeStep, proxySkipped } from './env-proxy';
 import { CliError } from './errors';
 import { isSourceCheckout } from './install-location';
