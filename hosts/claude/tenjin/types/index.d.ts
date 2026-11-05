@@ -40,6 +40,8 @@ declare module 'claude-code' {
       /** By the SHA-256 of a prompt: the label of the paid offer the CLI made
        *  on it, or '' when it made none. */
       prompts: StateFamily<string>;
+      /** Start time of the latest root turn, used to reject an older offer. */
+      lastTurnStart: number;
     };
   }
 }

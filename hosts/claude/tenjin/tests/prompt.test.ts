@@ -113,11 +113,17 @@ test('a later prompt with no offer draws nothing, the same words again included'
 });
 
 test('an offer must be newer than the previous turn, even for repeated words', async ($, on) => {
+  let readLastTurnStart = false;
+  on('state.get', (_engine, e, next) => {
+    if (e.key === 'lastTurnStart') readLastTurnStart = true;
+    return next(e);
+  });
   enginePrompt(on);
   const { files, clock } = machine(on);
   await send($, PROMPT, () => keepPromptOffer(files, PROMPT));
   await clock.advance(1);
   await send($, 'another turn');
+  expect(readLastTurnStart).toBe(true);
   await clock.advance(1);
   await send($, PROMPT, () => keepPromptOffer(files, PROMPT, { offerId: 'older-offer', at: NOW }));
   for (const lines of await promptRow($, PROMPT)) expect(lines).toEqual([`> ${PROMPT}`]);
