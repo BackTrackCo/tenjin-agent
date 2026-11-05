@@ -474,7 +474,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
           ...(opts.payer !== undefined
             ? {
-                route: opts.payer.routeFor.bind(opts.payer),
+                route: hookRoute(opts.payer),
                 signer: opts.payer.signVerdict.bind(opts.payer),
               }
             : {}),
@@ -495,6 +495,12 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     },
   );
   return server;
+}
+
+/** The hook legs' route: a wallet known too low for the routing deposit
+ *  sends nothing (`RoutingPayer.routeFor`'s `trustKnownLow`). */
+function hookRoute(payer: RoutingPayer): RouteFor {
+  return (baseUrl) => payer.routeFor(baseUrl, { trustKnownLow: true });
 }
 
 /**
@@ -540,7 +546,7 @@ function registerCodexHookTool(
               ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
               ...(opts.payer !== undefined
                 ? {
-                    route: opts.payer.routeFor.bind(opts.payer),
+                    route: hookRoute(opts.payer),
                     signer: opts.payer.signVerdict.bind(opts.payer),
                   }
                 : {}),

@@ -660,6 +660,49 @@ describe('the hook tool', () => {
     }
   });
 
+  it('sends nothing from the hook tool for a wallet known too low, while the request tool still asks', async () => {
+    const { homeDir, transcript } = await home('sess-low');
+    const fake = new FakeRouter();
+    const payer = new RoutingPayer(
+      payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey()), {
+        walletBalance: async () => 20_000n,
+      }),
+    );
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      payer,
+      flags: { baseUrl: 'https://router.test' },
+      handlerDeps: {
+        cwd: dir,
+        signer: await testWalletProvider().getSigner(),
+        authorizer: authorizer(),
+        fetchImpl: fake.fetch,
+      },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: fake.fetch, warn: () => undefined },
+    });
+    const client = await connect(server);
+    const leg = () =>
+      client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-low', transcript)),
+      });
+    try {
+      await leg();
+      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+      await leg();
+      expect(fake.log).toHaveLength(1);
+      await client.callTool({ name: 'request', arguments: { query: 'weather' } });
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route unpaid',
+      ]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("routes and pays a session's first prompt, before Claude Code writes its transcript", async () => {
     const { homeDir, transcript } = await home('sess-first');
     await rm(transcript);
