@@ -6,13 +6,19 @@ parses the same files with its own parser, so a shape only one side validates
 is a contract only one side keeps. Four divergences so far (`pendingCall`, the
 grouped arguments, the nested `diagnostics`, and three files copied by hand
 that drifted by 2026-10-28) each cost a round trip; read these files rather
-than hand-writing an equivalent. Until the server's CI reads them from here,
-`tenjin` keeps a copy, refreshed from this one.
+than hand-writing an equivalent. `tenjin`'s CI reads them from here; it keeps
+no copy.
 
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
 `2026-10-24.1`.
+
+The service ids these fixtures name (`capabilityId`, a browse row's `id`,
+`tool`, a `discovered:tenjin:` id) resolve against `tenjin`'s test catalog,
+`lib/x402-router/fixtures/test-catalog/`, never its live one, so a service can
+leave the live catalog with no change here. A fixture that needs a service or
+a shape the test catalog lacks adds that entry there in the same change.
 
 ## The calls
 
@@ -470,6 +476,8 @@ Take these from here; do not re-derive them.
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first; a discovery run's search text (built from the user's words) is cleared at the same expiry.
 
-The enumerated values live in code: the task ids in `fixtures/catalog/tasks.json`,
-`DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.
+The enumerated values live in `tenjin`'s code: the live task ids in
+`fixtures/catalog/tasks.json` (a fixture's task ids are checked against the
+test catalog's own `tasks.json`), `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in
+`diagnostics.ts`.
 `docs/ENVIRONMENTS.md` covers the kill switch and the rate limits.

@@ -10,6 +10,7 @@
  * | `progress/specs/<sha256(id)>.choices.json` | `specs.ts` `storeChoices` | the set's own schema | `choices.options[].key`, `.label`, `.id`: a choice call's name and its option's spec |
  * | `progress/specs/<sha256(id)>.label.json` | `specs.ts` `storeLabel` | none: `{id, label}`, `id` must be the call's | `label`: a free lookup's name, which has no spec |
  * | `progress/<sha256(session)>/offer-<sha256(tool_use_id)>.json` | `progress.ts` `markOffered` | `version: 1` | `offerId`, `label` |
+ * | `progress/<sha256(session)>/offer-<sha256("prompt:" + prompt)>.json` | `progress.ts` `markOffered` | `version: 1` | `offerId`, `label`, `at`, `priceAtomic` |
  *
  * It also reads the request tool's result envelope (`tool.ts`) in the
  * transcript: `status`, `label`, `cost`, `reason`, and, for the expanded row,
