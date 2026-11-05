@@ -118,6 +118,20 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
   };
 }
 
+it('sends the paid hook its 3500 ms decision budget', async () => {
+  const fake = new FakeRouter();
+  const budgets: number[] = [];
+  const observe = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const request = new Request(input, init);
+    const body = (await request.clone().json()) as { budgetMs: number };
+    budgets.push(body.budgetMs);
+    return fake.fetch(input, init);
+  }) as typeof fetch;
+  const p = payer(fake, { fetchImpl: observe });
+  await runPromptHook(prompt(), deps(observe, p));
+  expect(budgets).toEqual([GATE_TIMEOUT_MS]);
+});
+
 /**
  * Holds the timers and the clock still; file I/O and microtasks keep running.
  * The budget tests advance it by exactly the wait they model instead of

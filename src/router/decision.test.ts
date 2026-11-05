@@ -132,14 +132,16 @@ describe('one decision, on the paid route', () => {
       { packet: packetForText('what is the weather') },
       { ctx: ctx(), baseUrl: BASE, fetchImpl },
     );
-    // Strict on the route: the packet and what this build accepts. Which hook
-    // is asking is read from `packet.pendingCall`, not from a field beside it.
+    // The packet, budget and what this build accepts. Which hook is asking
+    // is read from `packet.pendingCall`, not from a field beside it.
     expect(Object.keys(calls[0]!.body as object).sort()).toEqual([
       'accepts',
+      'budgetMs',
       'harness',
       'packet',
       'schemaVersion',
     ]);
+    expect((calls[0]!.body as { budgetMs: number }).budgetMs).toBe(5_000);
     // The catalog is on by default; the open Bazaar is not.
     expect((calls[0]!.body as { accepts: unknown }).accepts).toEqual([
       'catalog',
@@ -151,6 +153,26 @@ describe('one decision, on the paid route', () => {
       'note',
       'tolerant',
     ]);
+  });
+
+  it('sends the applied hook wait, capped at 5000 ms, without changing tool requests', async () => {
+    const { fetchImpl, calls } = net(NATIVE);
+    for (const timeoutMs of [1_200, 6_000]) {
+      await requestDecision(
+        'hook',
+        { packet: packetForText('what is the weather') },
+        { ctx: ctx(), baseUrl: BASE, fetchImpl, timeoutMs },
+      );
+    }
+    expect(calls.map((call) => (call.body as { budgetMs: number }).budgetMs)).toEqual([
+      1_200, 5_000,
+    ]);
+    await requestDecision(
+      'tool',
+      { query: 'what is the weather' },
+      { ctx: ctx(), baseUrl: BASE, fetchImpl },
+    );
+    expect(calls[2]!.body).not.toHaveProperty('budgetMs');
   });
 
   it('adds the open Bazaar to what it accepts only with the experiment on', async () => {
