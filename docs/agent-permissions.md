@@ -28,7 +28,7 @@ The agent prepares a link with `tenjin wallet fund 5 --no-open --no-wait`, recom
 
 If the host denies preparing the checkout link, the agent may explain it and ask once to retry the same command. Another refusal or managed deny stops the action; it never changes permissions to get through.
 
-Installation and the first task add no optional retention or second-host questionnaire. To install another host later, use `tenjin install --harness claude` or `tenjin install --harness codex`.
+Installation and the first task add no optional retention or second-host questionnaire. If another supported agent is detected and is not set up yet, installation shows one informational line about adding Tenjin there. You can also use `tenjin install --harness claude` or `tenjin install --harness codex`.
 
 ## What bounds a payment
 

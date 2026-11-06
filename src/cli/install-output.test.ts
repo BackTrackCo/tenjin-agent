@@ -14,6 +14,7 @@ const stubs = vi.hoisted(() => ({
   doctor: vi.fn(),
   select: vi.fn(),
   fund: vi.fn(),
+  otherHostNote: vi.fn(),
 }));
 vi.mock('../lib/clack', () => ({ selectOne: stubs.select }));
 vi.mock('../commands/fund', () => ({ runFund: stubs.fund }));
@@ -27,6 +28,7 @@ vi.mock('../router/hosts', async (original) => ({
   ...(await original<typeof import('../router/hosts')>()),
   installHosts: async () => ['claude', ...(process.env.TEST_BOTH_HOSTS ? ['codex'] : [])],
   recordInstalledHost: vi.fn(),
+  otherHostNote: stubs.otherHostNote,
   recordedHosts: async () => ['claude'],
 }));
 
@@ -108,6 +110,7 @@ beforeEach(async () => {
     'TEST_BOTH_HOSTS',
   ])
     vi.stubEnv(key, '');
+  stubs.otherHostNote.mockResolvedValue(undefined);
   stubs.install.mockResolvedValue({ data: full(), humanLines: ['Installed.'] });
   stubs.codex.mockResolvedValue({ data: { ...full(), plugin: 'tenjin' } });
   stubs.doctor.mockResolvedValue({ data: full() });
@@ -229,6 +232,18 @@ describe('the default agent install handoff', () => {
     expect(data.wallet).not.toHaveProperty('passphrase');
     expect(data).not.toHaveProperty('launcher');
     expect(data).not.toHaveProperty('compactJson');
+  });
+
+  it('keeps the informational host note in the compact handoff without adding a setup step', async () => {
+    vi.stubEnv('CLAUDECODE', '1');
+    const note =
+      'Codex is also installed. To add Tenjin there (experimental support), ask Codex to install it.';
+    stubs.otherHostNote.mockResolvedValueOnce(note);
+    const out = await run(['install']);
+    const data = JSON.parse(out.stdout).data;
+    expect(data.notices).toEqual([note]);
+    expect(data.nextSteps).toEqual(pending);
+    expect(stubs.codex).not.toHaveBeenCalled();
   });
 
   it.each([

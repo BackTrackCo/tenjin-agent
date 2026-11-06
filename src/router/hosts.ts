@@ -164,6 +164,23 @@ export async function installHosts(
   return HARNESSES.filter((h) => picked.includes(h));
 }
 
+/** Point to another available host without adding a setup question. */
+export async function otherHostNote(
+  args: InstallHostArgs,
+  dataDir: string,
+  deps: HostDeps = {},
+): Promise<string | undefined> {
+  if (args.harness !== undefined || args.refresh === true || args.project === true)
+    return undefined;
+  const env = deps.env ?? process.env;
+  const agent = agentHost(env);
+  if (agent === undefined) return undefined;
+  const other: Harness = agent === 'claude' ? 'codex' : 'claude';
+  if ((await readInstalledHosts(dataDir))?.includes(other)) return undefined;
+  if (!(await (deps.detect ?? detectHosts)(env)).includes(other)) return undefined;
+  return `${LABEL[other]} is also installed. To add Tenjin there${other === 'codex' ? ' (experimental support)' : ''}, ask ${LABEL[other]} to install it.`;
+}
+
 /** The install result with `note` in its `notices` and as its last line. */
 export function withNote(out: CommandResult, note: string | undefined): CommandResult {
   if (note === undefined) return out;

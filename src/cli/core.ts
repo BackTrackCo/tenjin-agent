@@ -51,7 +51,8 @@ Learn more:
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
-        const { installHosts, recordInstalledHost, runEach } = await import('../router/hosts');
+        const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
+          await import('../router/hosts');
         const hostArgs = {
           ...(harness !== undefined ? { harness } : {}),
           ...(o.project === true ? { project: true } : {}),
@@ -98,7 +99,8 @@ Learn more:
             o.refresh === true
               ? result
               : await finishTerminalFunding(result, ctx, { yes: o.yes === true });
-          return installOutput(finished, ctx, o.refresh === true);
+          const note = await otherHostNote(hostArgs, ctx.dataDir);
+          return installOutput(withNote(finished, note), ctx, o.refresh === true);
         }
         // `tenjin update` runs this refresh in the new build: a Codex that
         // already has the plugin gets the new hooks too, whatever Claude Code's

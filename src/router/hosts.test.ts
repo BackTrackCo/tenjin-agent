@@ -11,6 +11,7 @@ import {
   forgetInstalledHost,
   HOSTS_FILE,
   installHosts,
+  otherHostNote,
   readInstalledHosts,
   recordedHosts,
   recordInstalledHost,
@@ -296,6 +297,44 @@ describe('installHosts', () => {
     await expect(
       installHosts({}, ctx(), { env: {}, detect: both, ask, isInteractive: true }),
     ).rejects.toThrow('Install cancelled');
+  });
+});
+
+describe('otherHostNote', () => {
+  it.each([
+    [{ CLAUDECODE: '1' }, 'Codex'],
+    [{ CODEX_SESSION_ID: 'test' }, 'Claude Code'],
+  ])(
+    'names another detected host without a question or installation command: %j',
+    async (env, other) => {
+      const note = await otherHostNote({}, dir, { env, detect: both });
+      expect(note).toContain(`${other} is also installed.`);
+      expect(note).toContain(`ask ${other} to install it.`);
+      expect(note).not.toMatch(/\?|Should I|tenjin install/);
+      expect(await readInstalledHosts(dir)).toBeNull();
+    },
+  );
+
+  it('omits the note for a host that is unavailable or already set up', async () => {
+    const env = { CLAUDECODE: '1' };
+    expect(await otherHostNote({}, dir, { env, detect: async () => ['claude'] })).toBeUndefined();
+    await recordInstalledHost(dir, 'codex', async () => false);
+    const detect = async (): Promise<Harness[]> => {
+      throw new Error('no detection expected');
+    };
+    expect(await otherHostNote({}, dir, { env, detect })).toBeUndefined();
+  });
+
+  it('does not detect hosts for a terminal, override, refresh or project install', async () => {
+    const detect = async (): Promise<Harness[]> => {
+      throw new Error('no detection expected');
+    };
+    expect(await otherHostNote({}, dir, { env: {}, detect })).toBeUndefined();
+    for (const args of [{ harness: 'claude' as const }, { refresh: true }, { project: true }]) {
+      expect(
+        await otherHostNote(args, dir, { env: { CODEX_SESSION_ID: 'test' }, detect }),
+      ).toBeUndefined();
+    }
   });
 });
 
