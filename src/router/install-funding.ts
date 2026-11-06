@@ -65,7 +65,7 @@ export async function fundStep(
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Run the Add $${SUGGESTED_FUND_USD} option's command once to prepare the checkout link, without opening a browser or asking another funding question. Recommend adding $${SUGGESTED_FUND_USD} to use paid tools and show checkoutUrl as a clickable link. Preparing the link moves no money; the person decides whether to click and confirms payment in their browser. Follow the command's nextStep to check funds when they return. If they decline, continue activation and their task with available tools. Do not offer funding again unless requested. Run the command yourself; never ask the person to run it.`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Run the Add $${SUGGESTED_FUND_USD} option's command yourself once to prepare the checkout link, without opening a browser or asking another funding question. Do not wait for payment. Recommend adding $${SUGGESTED_FUND_USD} and show checkoutUrl as a clickable link. Preparing the link moves no money; the person decides whether to click and confirms payment in their browser. Follow its nextStep to check funds when they return. If they decline, continue activation and their task with available tools. Do not offer funding again unless requested.`,
     },
   };
 }

@@ -123,7 +123,7 @@ Example provider prices vary by tool and inputs and exclude Tenjin's routing fee
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $0.25   |
 
-A new chat does not reset the daily budget. A routing decision has a separate fee quoted by the server, never above $0.003. Funds set aside for routing remain yours until spent and count toward the budget once. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 

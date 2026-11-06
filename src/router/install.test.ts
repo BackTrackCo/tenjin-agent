@@ -1188,7 +1188,8 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(fund.next).toContain('without opening a browser or asking another funding question');
     expect(fund.next).toContain('show checkoutUrl as a clickable link');
     expect(fund.next).toContain('the person decides whether to click and confirms payment');
-    expect(fund.next).toContain('Run the command yourself; never ask the person to run it.');
+    expect(fund.next).toContain("option's command yourself once");
+    expect(fund.next).toContain('Do not wait for payment.');
     expect(fund.next).toContain('Do not offer funding again unless requested.');
     expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
     expect(result.humanLines!.at(-1)).toBe(

@@ -10,7 +10,7 @@ Use the activation step the installer returns:
 
 | Where you installed                                 | Activation                                                                                  |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Terminal outside an agent chat                      | Open a new Claude Code session.                                                             |
+| Terminal outside an agent chat                      | Open a new session in the agent you installed.                                              |
 | Existing Claude Code terminal chat                  | Run `/reload-plugins` in that chat.                                                         |
 | Claude Desktop's Code tab                           | Choose **New session** in the same folder. Carry a short task handoff into it.              |
 | Existing settings-based Claude setup being migrated | Start a new session so the old and new integrations do not run together.                    |
@@ -74,7 +74,7 @@ Use `tenjin config set router.context turn` to send no previous messages. `--pro
 
 Ordinary routing context expires after 15 minutes and is removed by subsequent requests or cleanup. Paid records retain the selected capability, hashes, wallet and transaction data; execution reports contain IDs and outcome metadata, not the input/result. The [reference](./router-reference.md#context-and-records) separates backend records from local saved results.
 
-Optional improvement collection is **off by default** and is not requested during setup. Explicit `tenjin config set router.improve true` allows masked routing packets to be retained without expiry for grading. Setting it to `false` requests their deletion; failures are reported and rerunning the command retries deletion. A project cannot opt you in. [Privacy policy →](https://tenjin.sh/privacy)
+You can optionally share masked task text to help improve Tenjin. Sharing is **off by default**, and setup does not ask you to enable it. Run `tenjin config set router.improve true` to opt in; Tenjin then keeps this text with no set expiry. Run `tenjin config set router.improve false` to stop sharing and request deletion. The CLI reports a failed deletion so you can retry. A project setting cannot enable sharing. [Privacy policy →](https://tenjin.sh/privacy)
 
 ## Wallet passphrase storage
 
