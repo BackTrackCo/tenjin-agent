@@ -72,7 +72,7 @@ npm install -g tenjin-cli
 tenjin install
 ```
 
-Setup asks about spending limits, then recommends **Add $5** so you can start using tools. Complete checkout in your browser and follow the activation step. **Not now** skips funding; paid tools will need funds before they can run.
+Setup asks about spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link to open when ready. In a terminal, choose **Add $5** to open checkout or **Not now** to skip it. Follow the activation step; paid tools need funds before they can run.
 
 Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 

@@ -4,7 +4,7 @@ Tenjin suggests tools for your task and runs chosen tools through a local `route
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then recommends **Add $5** so you can start using tools. Checkout opens in your browser. **Not now** completes installation without funding; paid tools need funds before they can run. `--yes` accepts spending defaults; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a link to open when ready. A terminal offers **Add $5**, which opens checkout, or **Not now** to skip funding. Paid tools need funds before they can run. `--yes` accepts spending defaults; it never consents to checkout.
 
 Use the activation step the installer returns:
 
@@ -22,11 +22,11 @@ Claude Code requires 2.1.287+. Codex routing hooks require 0.149.0+. Installatio
 
 ## When your agent runs the install
 
-The agent installs for its current host, relays only unanswered spending/funding questions and runs the selected commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
+The agent installs for its current host, asks only unanswered spending questions, prepares a funding link and runs the setup commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
 
-The agent recommends **Add $5** and asks once. Accepting runs `tenjin wallet fund 5`; the browser confirms the payment. **Not now** runs nothing: the agent explains that paid tools need funds and continues with available tools. It does not offer funding again unless requested. When you return from checkout, the agent checks the balance before continuing. An unknown balance or unconfirmed arrival does not justify another payment.
+The agent prepares a link with `tenjin wallet fund 5 --no-open --no-wait`, recommends adding $5 and shows the clickable checkout link. It does not open your browser or ask another question just to prepare the link. You choose when to open it and confirm payment there. If you skip funding, the agent explains that paid tools need funds and continues with available tools. It does not offer funding again unless requested. When you return from checkout, the agent checks the balance before continuing. An unknown balance or unconfirmed arrival does not justify another payment.
 
-If the host denies opening checkout, the agent may explain it and ask once to retry the same command. Another refusal or managed deny stops the action; it never changes permissions to get through.
+If the host denies preparing the checkout link, the agent may explain it and ask once to retry the same command. Another refusal or managed deny stops the action; it never changes permissions to get through.
 
 Installation and the first task add no optional retention or second-host questionnaire. To install another host later, use `tenjin install --harness claude` or `tenjin install --harness codex`.
 
