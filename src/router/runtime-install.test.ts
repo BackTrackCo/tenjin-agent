@@ -152,7 +152,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
 
   it.each([
     [{}, ['install', '--yes'], false],
-    [{ yes: true }, ['wallet', 'fund', '5'], false],
+    [{ yes: true }, ['wallet', 'fund', '5', '--no-open', '--no-wait'], false],
     [{}, ['install', '--yes'], true],
   ] as const)(
     'executes a continuation with a minimal or shadowed PATH: %j %j %j',
@@ -193,7 +193,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     },
   );
 
-  it('executes terminal funding and project-check instructions with a minimal PATH', async () => {
+  it('executes funding-link and project-check instructions with a minimal PATH', async () => {
     const entry = join(root, 'terminal-entry.mjs');
     const receipt = join(root, 'continued.json');
     const launcher = join(home, '.local', 'bin', 'tenjin');
@@ -229,7 +229,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     expect(data.next).not.toContain('fund the wallet');
     expect(result.humanLines).toContain(`  For this project only; check it with: ${project}`);
     for (const [command, expected] of [
-      [funding, ['wallet', 'fund', '5']],
+      [funding, ['wallet', 'fund', '5', '--no-open', '--no-wait']],
       [project, ['doctor', '--project']],
     ] as const) {
       expect(command).toBeDefined();
