@@ -696,7 +696,10 @@ describe('Codex install, uninstall and doctor', () => {
       nextSteps: [
         { id: 'fund', options: [{ command: 'tenjin wallet fund 5' }, { command: null }] },
       ],
-      disclosure: [expect.stringContaining('Relevant task context')],
+      disclosure: [
+        expect.stringContaining('Tenjin sends relevant task context'),
+        expect.stringContaining('https://tenjin.sh/privacy'),
+      ],
     });
     expect(JSON.stringify(out)).not.toContain('Help improve routing');
     expect(out.humanLines?.join('\n')).not.toContain('0x111111');
@@ -968,6 +971,7 @@ describe('Codex install, uninstall and doctor', () => {
       hooks: async () => listed(...stale),
     });
     expect(warned.data).toMatchObject({ routing: 'free', ok: true });
+    expect(warned.humanLines?.[0]).toBe('Setup: needs attention.');
     expect(warned.humanLines?.join('\n')).toContain('! Routing: its routing hooks are commands');
     await expect(
       runCodexDoctor({}, ctx(), {

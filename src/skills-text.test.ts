@@ -152,8 +152,13 @@ function localLinkProblems(
 ): string[] {
   const problems: string[] = [];
   const text = markdown.replace(/```[^\n]*\n[\s\S]*?```/g, '');
-  for (const match of text.matchAll(/!?\[[^\]]*\]\(([^)\s]+)\)/g)) {
-    const link = match[1]!;
+  const links = [
+    ...[...text.matchAll(/!?\[[^\]]*\]\(([^)\s]+)\)/g)].map((match) => match[1]!),
+    ...[...text.matchAll(/(?:href|src|srcset)="([^"]+)"/g)].flatMap((match) =>
+      match[1]!.split(',').map((candidate) => candidate.trim().split(/\s+/)[0]!),
+    ),
+  ];
+  for (const link of links) {
     if (/^(?:https?:|mailto:)/.test(link)) continue;
     const [path, fragment] = link.split('#', 2);
     const target = path ? resolve(dirname(file), decodeURIComponent(path)) : file;
@@ -199,6 +204,14 @@ describe('the first-use documentation reading path', () => {
       './reference.md#old-limits: missing heading',
       '#missing: missing heading',
     ]);
+  });
+
+  it('checks HTML navigation and embedded assets used by the README', () => {
+    const file = '/README.md';
+    const text = '<a href="#missing">Setup</a><img src="./demo.gif"><source srcset="./dark.svg">';
+    expect(localLinkProblems(file, text, (target) => (target === file ? text : undefined))).toEqual(
+      ['#missing: missing heading', './demo.gif: missing file', './dark.svg: missing file'],
+    );
   });
 
   it('accepts code-formatted headings and repeated headings without treating examples as links', () => {

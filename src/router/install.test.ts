@@ -229,7 +229,9 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({}, humanCtx(), deps({ isInteractive: false }));
     expect(result.humanLines?.[0]).toContain('Tenjin is set up for Claude Code');
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('Relevant task context');
+    expect(text).toContain('Tenjin sends relevant task context');
+    expect(text).toContain('https://tenjin.sh/privacy');
+    expect(text).toContain('https://tenjin.sh/terms');
     expect(text).toContain('daily budget $5 shared across chats');
     expect(text).toContain('open a new Claude Code session');
     expect(text).not.toContain('this conversation');

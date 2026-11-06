@@ -554,7 +554,7 @@ export async function runCodexDoctor(
     ? autoUpdateLine(runtimeDir(ctx.dataDir))
     : null;
   const lines = [
-    `Setup: ${ok ? 'ready for Codex' : 'needs attention'}.`,
+    `Setup: ${ok && routing !== 'free' ? 'ready for Codex' : 'needs attention'}.`,
     'Current Codex session: not verified by this check.',
     'Paid routing: wallet and funds not checked.',
     '',

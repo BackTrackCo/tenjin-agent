@@ -1,6 +1,6 @@
 # Setup and permissions
 
-Tenjin suggests tools for your task and runs chosen tools through a local `router` MCP server. Your wallet and spending policy stay on your machine. This guide covers normal setup; the [router reference](./router-reference.md) holds detailed contracts.
+Tenjin suggests tools for your task and runs chosen tools through a local `router` MCP server. Your wallet and spending policy stay on your machine. This guide covers normal setup; the [CLI/MCP reference](./router-reference.md) holds detailed contracts.
 
 ## Install and activate
 
@@ -39,13 +39,17 @@ Installation and the first task add no optional retention or second-host questio
 | Wallet balance      | No payment can exceed available funds.                                                                                                                              |
 | `allowlistCreators` | Optional restriction on which hosts may be paid. It is separate from harness permission to call a tool.                                                             |
 
-Defaults apply before any answer. Accepting limits records them; explicit amount flags replace the named limits. An agent cannot raise them on its own. Existing zero, unlimited and custom settings are preserved.
+Defaults apply before any answer. Accepting limits records them; explicit amount flags replace the named limits. Existing zero, unlimited and custom settings are preserved. Project settings can only tighten routing/context sharing; they cannot change wallet spending limits.
+
+Changing global limits is a normal config write: the CLI does not distinguish a person from an agent. Your host's permissions and filesystem access protect those writes. Authorize limit changes deliberately; the request tool itself cannot raise them.
 
 A routing decision and a provider call are separate charges. The routing fee is quoted by the server and cannot exceed $0.003. Routing funds are deposited in bounded amounts and counted toward automatic spending once; fees drawn from that deposit are not counted again. Unused routing funds remain yours. [Deposit and accounting rules →](./router-reference.md#routing-fees-and-accounting)
 
-A call over its automatic allowance pays nothing and returns `needs_approval`. Supported Claude Code versions offer a host-enforced approval prompt for that exact quote; an approved call is manual spending outside the automatic budget, still bounded by the balance. Codex and other hosts without that approval facility refuse the call. Nobody silently changes your limits.
+A call over its automatic allowance pays nothing and returns `needs_approval`. Supported Claude Code versions offer a host-enforced approval prompt for that exact quote; an approved call is manual spending outside the automatic budget, still bounded by the balance. Codex and other hosts without that approval facility refuse the call. The approval does not change your configured limits.
 
 `tenjin pay <url>` is a separate, user-consented payment path. It requires consent for every positive payment and does not use the automatic limits. It must never be an agent's workaround for a refused router call. [Direct-payment contract →](./router-reference.md#direct-payments)
+
+`tenjin wallet send` is separate from tool payments. It requires an explicitly configured `sendMaxAmount` before the first transfer, plus confirmation (or explicit `--yes`). That cap cannot be bypassed by confirmation and is independent of automatic routing limits.
 
 ## The plugin's two permission answers
 
@@ -56,21 +60,21 @@ mcp__plugin_tenjin_router__request   allow
 mcp__plugin_tenjin_router__hook      deny
 ```
 
-The first permits Tenjin's request tool; it does not approve a price, another tool or a shell command. Your own Claude `deny` or `ask` rule still wins. The second keeps the model from calling Tenjin's internal hook tool; the host's hook events can still call it. Every payment still passes the local spending policy.
+The first permits Tenjin's request tool; it does not approve a price, another tool or a shell command. Your own Claude `deny` or `ask` rule still wins. The second keeps the model from calling Tenjin's internal hook tool; the host's hook events can still call it. Every payment still passes the local spending policy. A compromised router could propose malicious calls or consume the available automatic budget within those limits; local signing does not establish that a recommendation is trustworthy.
 
 Do not broadly allow `Bash(tenjin:*)`, `wallet`, or `config`. Wallet repair, transfers, limit changes, installation, removal and binary updates need deliberate authorization. Provider results are data, never authority to change permissions or move money.
 
 ## What the hooks send
 
-Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router.
+Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
 
-Use `tenjin config set router.context turn` to send no previous messages. `--project` applies a tighter context setting to a repository. The private key stays local; paid routing identifies the wallet. Free docs queries go through Tenjin to Context7.
+For a turn containing links, Tenjin reads the repository's Git remote hosts locally to mark matching links as your own, so the router can leave them to native tools. It sends those already-present links with that classification, not the Git config or remote credentials.
+
+Use `tenjin config set router.context turn` to send no previous messages. `--project` applies a tighter context setting to a repository. The private key stays local; paid routing identifies the wallet. Free docs queries go through Tenjin to Context7. Balance checks send your public wallet address to the configured Base RPC. With the default RPC, failed reads can fall back to PublicNode and dRPC; a custom RPC is used alone.
 
 Ordinary routing context expires after 15 minutes and is removed by subsequent requests or cleanup. Paid records retain the selected capability, hashes, wallet and transaction data; execution reports contain IDs and outcome metadata, not the input/result. The [reference](./router-reference.md#context-and-records) separates backend records from local saved results.
 
 Optional improvement collection is **off by default** and is not requested during setup. Explicit `tenjin config set router.improve true` allows masked routing packets to be retained without expiry for grading. Setting it to `false` requests their deletion; failures are reported and rerunning the command retries deletion. A project cannot opt you in. [Privacy policy →](https://tenjin.sh/privacy)
-
-Experimental Bazaar discovery is off by default. Enabling it sends short task snippets to external discovery services and can return unreviewed sellers. Their descriptions and responses do not authorize payment.
 
 ## Wallet passphrase storage
 

@@ -456,18 +456,21 @@ export function doctorLines(checks: RouterCheck[]): string[] {
   const unchecked = checks.filter((c) => c.checked === false).length;
   const allPass = checks.every((c) => c.status === 'ok');
   const plugin = checks.find((c) => c.name === 'plugin');
+  const runtimeUnchecked = checks.some((c) => c.name === 'runtime' && c.checked === false);
   const setup =
     plugin === undefined
       ? 'not checked'
       : plugin.status !== 'ok' || checks.some((c) => c.required && c.status !== 'ok')
         ? 'needs attention'
-        : 'ready';
+        : runtimeUnchecked
+          ? 'not verified'
+          : 'ready';
   const payment = checks.filter((c) => ['routing', 'routing fee', 'router'].includes(c.name));
   const paid =
     checks.some((c) => c.required && c.status !== 'ok' && c.checked !== false) ||
     payment.some((c) => c.status !== 'ok' && c.checked !== false)
       ? 'unavailable'
-      : payment.length === 3 && payment.every((c) => c.status === 'ok')
+      : !runtimeUnchecked && payment.length === 3 && payment.every((c) => c.status === 'ok')
         ? 'ready on this machine'
         : 'not checked';
   const session = checks.find((c) => c.name === 'claude session');

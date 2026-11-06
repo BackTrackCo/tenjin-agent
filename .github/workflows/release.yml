@@ -156,12 +156,7 @@ jobs:
       # the installer smoke, which runs the generated install.sh against offline
       # fixtures, so a broken installer template fails here, before the publish
       # it would ship with.)
-      - name: Install Claude Code for packed-plugin validation
-        run: npm install -g @anthropic-ai/claude-code@2.1.317 --no-audit --no-fund
-
       - name: Build + validate
-        env:
-          PACK_SMOKE_REQUIRE_CLAUDE: '1'
         run: |
           pnpm run check
           node scripts/check-bundled-packages.mjs

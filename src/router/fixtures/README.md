@@ -40,9 +40,9 @@ below). Selected `{tool, query}` bypasses that fee gate and makes no model decis
 | forget    | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
 
 `improve: true` rides the hook and tool forms only while the person has turned
-on "Help improve routing" (`router.improve`, off by default, asked once per
-machine): the server then keeps that call's sealed packet beside its decision
-row, with no expiry. The `forget` form, on the free route, is sent once when
+on "Help improve routing" (`router.improve`, off by default, enabled explicitly
+with `tenjin config set router.improve true`): the server then keeps that call's
+sealed packet beside its decision row, with no expiry. The `forget` form, on the free route, is sent once when
 the person turns it off: the server deletes every packet it kept for the
 request's `tenjin-install-id` header, and with no install id deletes nothing.
 Neither carries `accepts`.

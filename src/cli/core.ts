@@ -169,7 +169,7 @@ Learn more:
 
   leaf(SETUP, 'doctor', 'show setup status and routing readiness')
     .description(
-      'Check the agents Tenjin installed, without making a paid call. Show setup status, session evidence and routing readiness, followed by diagnostics and fixes. Codex checks plugin hooks only; it does not verify the current chat, wallet or funds. Required failures exit nonzero; an unknown check remains a warning. Use --json for structured results.',
+      'Check the agents Tenjin installed, without making a paid call. Show setup status, session evidence and routing readiness, followed by diagnostics and fixes. Codex checks plugin hooks only; it does not verify the current chat, wallet or funds. A required failure shows its error and fix instead of the summary, and exits nonzero. An unknown check remains a warning. Use --json for structured results.',
     )
     .addOption(hostOverride())
     .option('--project', 'check the project-only install, as --project registered it')

@@ -973,12 +973,21 @@ describe('the runtime rows', () => {
     );
   });
 
-  it('says not checked when the version run times out', async () => {
+  it('does not claim readiness when the runtime location or startup could not be checked', async () => {
     await setUp();
-    const { by } = await run({
-      runVersion: async () => ({ code: null, stdout: '', stderr: '', timedOut: true }),
-    });
-    expect(by['runtime']).toMatchObject({ status: 'warn', required: false, checked: false });
+    for (const over of [
+      { readLaunch: async () => null },
+      { runVersion: async () => ({ code: null, stdout: '', stderr: '', timedOut: true }) },
+    ] satisfies Partial<RouterDoctorDeps>[]) {
+      const { out, by } = await run(over);
+      expect(out).not.toBeInstanceOf(CliError);
+      expect(by['runtime']).toMatchObject({ status: 'warn', required: false, checked: false });
+      expect((out as { humanLines: string[] }).humanLines.slice(0, 3)).toEqual([
+        'Setup: not verified.',
+        'Paid routing: not checked.',
+        'Claude Code session: not verified.',
+      ]);
+    }
   });
 
   it('warns when an older build moved the marketplace out of the runtime', async () => {
