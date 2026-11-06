@@ -22,22 +22,21 @@ a shape the test catalog lacks adds that entry there in the same change.
 
 ## The calls
 
-A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, selected `{tool, query}` free lookups, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
+A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
 each capability needs a client that runs its spec, so a client without it is
 answered `native` with the `client_outdated` diagnostic, on every form, before
 any model call. The free route `POST /api/x402-router` answers the routing forms `{packet}`
 and `{query, id?}` with `native` and `fee_required` first, with or without `spec` (The paid path,
-below). Selected `{tool, query}` bypasses that fee gate and makes no model decision. The outcome report is the one form that carries no `accepts`.
+below). The outcome report is the one form that carries no `accepts`.
 
-| call      | request                                                             | answer                                                                                                                      |
-| --------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| hook      | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
-| tool      | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
-| browse    | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
-| by id     | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| free tool | `{schemaVersion, tool, query, accepts}`                             | `execute` for the selected free service, or `needs_input`; no routing decision or payment                                   |
-| outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
-| forget    | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
+| call    | request                                                             | answer                                                                                                                      |
+| ------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
+| tool    | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
+| browse  | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
+| by id   | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
+| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
+| forget  | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
 
 `improve: true` rides the hook and tool forms only while the person has turned
 on "Help improve routing" (`router.improve`, off by default, enabled explicitly
@@ -97,7 +96,6 @@ lowest token it needs (`minContract`, `spec` for all of them today), and the
 gate is offered only the tasks whose capabilities a client runs.
 
 - `spec`: tool specs, the floor every capability needs.
-- `free-query`: inspection of a free docs row asks for `{tool, query}`. That form binds the selected free service without a routing fee; paid and unknown ids are refused.
 - `catalog`: a former Tenjin list service comes as a `discovered` offer under
   its catalog id, each spec with the `fields` below (a list service's `output`
   is `media`), and with `choices` when its service belongs to a compare group.

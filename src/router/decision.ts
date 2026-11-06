@@ -660,15 +660,10 @@ export const CLIENT_ACCEPTS: readonly string[] = [
   'tolerant',
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
-export const FREE_QUERY_ACCEPT = 'free-query';
 
 /** Every feature this build has, which a `requires` list is read against:
  *  `bazaar` included, which it runs whether or not it asks for one. */
-const CLIENT_FEATURES: ReadonlySet<string> = new Set([
-  ...CLIENT_ACCEPTS,
-  BAZAAR_ACCEPT,
-  FREE_QUERY_ACCEPT,
-]);
+const CLIENT_FEATURES: ReadonlySet<string> = new Set([...CLIENT_ACCEPTS, BAZAAR_ACCEPT]);
 
 /** The features a `requires` list names that this build lacks; none when it
  *  has them all. */
@@ -755,17 +750,15 @@ export function buildBrowseBody(request: {
   };
 }
 
-/** A browse row's spec, or a query bound to that selected free tool. */
+/** A browse row's id, answered with that tool's spec under a fresh offer id. */
 export function buildToolSpecBody(request: {
   tool: string;
-  query?: string;
   accepts: readonly string[];
   harness?: Harness;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
     tool: request.tool,
-    ...(request.query !== undefined ? { query: request.query } : {}),
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
   };
@@ -807,8 +800,8 @@ export interface DecisionDeps {
    *  open Bazaar may come back. Off by default: curated and the Tenjin list. */
   acceptsBazaar?: boolean;
   /**
-   * The host asking. Automatic routing avoids services the host already covers;
-   * explicit browsing and selection retain every runnable service. Absent is
+   * The host asking. The server filters out the lookups that host's own tools
+   * already do, and nothing else: never payment, limits or the fee. Absent is
    * `claude`, and every production caller sends it.
    */
   harness?: Harness;
@@ -991,11 +984,10 @@ export async function requestBrowse(
   );
 }
 
-/** `{tool}` reads a spec; `{tool, query}` binds a free lookup without paid routing. */
+/** `{tool}`: a browse row's spec, kept by the caller under the answer's id. */
 export async function requestToolSpec(
   tool: string,
   deps: Omit<DecisionDeps, 'route'>,
-  query?: string,
 ): Promise<DecisionOutcome<ToolResponse>> {
   return readOffer(
     await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
@@ -1004,8 +996,7 @@ export async function requestToolSpec(
       blockRedirects: true,
       jsonBody: buildToolSpecBody({
         tool,
-        ...(query !== undefined ? { query } : {}),
-        accepts: [...acceptsFor(deps.acceptsBazaar === true), FREE_QUERY_ACCEPT],
+        accepts: acceptsFor(deps.acceptsBazaar === true),
         harness: deps.harness ?? 'claude',
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),

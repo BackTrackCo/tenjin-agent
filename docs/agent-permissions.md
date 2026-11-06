@@ -70,7 +70,7 @@ Routing sends the current prompt and at most six earlier messages, bounded to 16
 
 For a turn containing links, Tenjin reads the repository's Git remote hosts locally to mark matching links as your own, so the router can leave them to native tools. It sends those already-present links with that classification, not the Git config or remote credentials.
 
-Use `tenjin config set router.context turn` to send no previous messages. `--project` applies a tighter context setting to a repository. The private key stays local; paid routing identifies the wallet. Free docs queries go through Tenjin to Context7. Balance checks send your public wallet address to the configured Base RPC. With the default RPC, failed reads can fall back to PublicNode and dRPC; a custom RPC is used alone.
+Use `tenjin config set router.context turn` to send no previous messages. `--project` applies a tighter context setting to a repository. The private key stays local; paid routing identifies the wallet. Library-doc queries go through Tenjin to Context7. Balance checks send your public wallet address to the configured Base RPC. With the default RPC, failed reads can fall back to PublicNode and dRPC; a custom RPC is used alone.
 
 Ordinary routing context expires after 15 minutes and is removed by subsequent requests or cleanup. Paid records retain the selected capability, hashes, wallet and transaction data; execution reports contain IDs and outcome metadata, not the input/result. The [reference](./router-reference.md#context-and-records) separates backend records from local saved results.
 
