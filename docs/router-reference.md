@@ -10,6 +10,7 @@ Claude Code exposes `mcp__plugin_tenjin_router__request`; Codex exposes `mcp__ro
 | ------------------------ | --------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `{browse: "<need>"}`     | Matching catalog rows; `""` lists available rows by kind. | Free discovery; sends the need text.                                                 |
 | `{tool: "<catalog id>"}` | A tool's spec under a fresh offer ID, when it has a spec. | Free inspection; sends the ID.                                                       |
+| `{tool, query}`          | Run a selected supported free documentation lookup.       | No wallet or routing fee; currently Context7 docs.                                   |
 | `{id}`                   | A locally kept spec or choice set.                        | Nothing sent to a provider or paid.                                                  |
 | `{id, input}`            | Validate inputs, build the specified request and run it.  | Provider payment under the spending policy; no new selection decision.               |
 | `{query}`                | Ask the router to select a service for one concrete task. | Quoted routing fee, separately from any provider execution.                          |
@@ -18,7 +19,7 @@ Claude Code exposes `mcp__plugin_tenjin_router__request`; Codex exposes `mcp__ro
 | `{id, input, count}`     | Run 2–5 takes, where that spec supports them.             | Each take is a separate provider payment; the total meets the limits before signing. |
 | `{job}`                  | Resume/check a previously submitted job.                  | No repeat submission or new payment for polling.                                     |
 
-A catalog row being free describes its provider price. It is not a promise that every selection route is free. Some library-doc offers have no spec and instead ask for a query; follow the response's supported form rather than inventing one. Do not retry a refused free or paid call through another payment path.
+A catalog row being free describes its provider price. It is not a promise that every selection route is free. When Context7 inspection asks for `{tool, query}`, that selected lookup bypasses paid selection and opens no wallet. An unexpected payment request is refused. Follow the response's supported form rather than sending a free lookup through paid `{query}` selection, and never retry a refusal through another payment path.
 
 Specs contain the real input schema, pinned fields and request construction. The CLI applies the pins over supplied input, validates it and refuses unsupported schemas before contacting a provider. Missing or invalid fields return the problems and spec so the agent can correct them without paying for a guess. A cached spec can expire; inspect the chosen tool again or follow the explicit recovery instruction.
 
@@ -107,7 +108,7 @@ The guide's [sharing section](./agent-permissions.md#what-the-hooks-send) descri
 - A delegated task is its own current message with bounded prior context. Subagents share the same wallet, reservations and limits; they are not separate daily budgets. A host known to lack the request tool is not redirected into it.
 - Session and install IDs correlate offers and outcomes. An execution report contains the offer ID, outcome, HTTP status, duration and refusal side, not its input or result. An ignored-offer report contains its ID and expiry/native-use reason, not task text or a claim that it helped.
 - Routing packets expire after 15 minutes and become unreadable before deferred deletion. Optional improvement collection keeps masked packets without expiry until disabled/deleted. Payment metadata and local masked parameters have different purposes and retention.
-- `accepts` advertises supported contract features, including `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note` and `tolerant`. Required unknown features are refused without paying. Unknown optional fields do not disable known-field validation.
+- `accepts` advertises supported contract features, including `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`, `tolerant` and selected docs' `free-query`. Required unknown features are refused without paying. Unknown optional fields do not disable known-field validation.
 - With experimental Bazaar enabled, task snippets can reach external discovery; unreviewed listings do not replace contract, destination or spending checks.
 
 ## Host integration

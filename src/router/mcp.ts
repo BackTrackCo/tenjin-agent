@@ -77,7 +77,8 @@ export const SCOPE_RULE =
  * that, per turn, from the server that actually knows.
  */
 const INSTRUCTIONS =
-  "When a hook line names a service from Tenjin's router, call it as the line says. " +
+  'Use Tenjin tools when they help your task, whether you chose them or a hook suggested them. ' +
+  'When a hook line names a service, call it as the line says. ' +
   'A line comes at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'a search or a call that comes back short, or in a delegated task. ' +
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
@@ -93,7 +94,9 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Routing costs a fee the router ` +
+  'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
+  'Free docs run with `{tool, query}`, without a wallet, routing fee or provider payment. ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs a fee the router ` +
   `quotes, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call; a wallet on THIS ` +
   'machine pays it and the provider under the local spend ' +
   'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
@@ -304,8 +307,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Sent alone: a row's id from `browse`. Returns that tool's spec under a fresh id, " +
-              'which `{id, input}` then runs. Free.',
+            "A row's id from `browse`: alone, its spec for `{id, input}`; with `query`, " +
+              'an explicitly selected free docs lookup. No routing fee.',
           ),
         count: z
           .number()

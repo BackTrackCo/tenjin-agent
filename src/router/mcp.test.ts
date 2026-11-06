@@ -49,6 +49,7 @@ import { CliError } from '../lib/errors';
 import { unlockDetails } from '../lib/wallet-unlock';
 import { readObservations } from './router-observation';
 import { createRouterObserver, type RouterObserver } from './router-observer';
+import docsLookup from './fixtures/wire-lookup-free-query.json';
 
 /** The envelope a call returned: the JSON text block after the summary line. */
 function envelopeOf(called: Record<string, unknown>): unknown {
@@ -105,6 +106,89 @@ function router(body: unknown): typeof fetch {
 }
 
 describe('the router MCP server', () => {
+  it.each([
+    { harness: 'claude', walletState: 'missing' },
+    { harness: 'codex', walletState: 'unfunded' },
+  ] as const)(
+    'dispatches selected free docs for $harness with a $walletState wallet without paid routing',
+    async ({ harness, walletState }) => {
+      const fake = new FakeRouter();
+      const payer = new RoutingPayer(
+        payerDeps(fake, dir, privateKeyToAccount(generatePrivateKey())),
+      );
+      vi.spyOn(payer, 'prewarm').mockResolvedValue(undefined);
+      const routeFor = vi.spyOn(payer, 'routeFor').mockImplementation(() => {
+        throw new Error('free docs must not route');
+      });
+      const provider = testWalletProvider();
+      const getSigner = vi.spyOn(provider, 'getSigner');
+      if (walletState === 'missing')
+        getSigner.mockRejectedValue(new CliError('WALLET_MISSING', 'No wallet exists.'));
+      const readBalance = vi.fn(async () => 0n);
+      const auth = authorizer();
+      const calls: { url: string; body?: unknown; payment: string | null }[] = [];
+      const fetchImpl: typeof fetch = async (url, init) => {
+        calls.push({
+          url: String(url),
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+          payment: new Headers(init?.headers).get('payment-signature'),
+        });
+        if (calls.length === 1) return Response.json(docsLookup);
+        if (String(url) !== docsLookup.decision.contract.request.url)
+          throw new Error('unexpected docs destination');
+        return new Response('Use z.email() to validate an email address.', {
+          headers: { 'content-type': 'text/plain' },
+        });
+      };
+      const server = buildRouterMcpServer({
+        dataDir: dir,
+        harness,
+        payer,
+        handlerDeps: {
+          cwd: dir,
+          provider,
+          authorizer: auth,
+          fetchImpl,
+          payDeps: { fetchImpl, provider, readBalance },
+        },
+      });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'test', version: '0.0.0' });
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        const called = await client.callTool({
+          name: 'request',
+          arguments: { tool: 'context7-docs', query: docsLookup.decision.contract.arguments.query },
+        });
+        expect(called.isError).toBe(false);
+        expect(envelopeOf(called)).toMatchObject({
+          status: 'fulfilled',
+          cost: ['provider price 0 USD'],
+          result: expect.stringContaining('Use z.email()'),
+        });
+        expect(calls).toHaveLength(2);
+        expect(calls[0]).toMatchObject({
+          url: 'https://tenjin.sh/api/x402-router',
+          body: {
+            tool: 'context7-docs',
+            query: docsLookup.decision.contract.arguments.query,
+            accepts: expect.arrayContaining(['free-query']),
+          },
+        });
+        expect(calls.every((call) => call.payment === null)).toBe(true);
+        expect(routeFor).not.toHaveBeenCalled();
+        expect(fake.log).toEqual([]);
+        expect(fake.deposits).toBe(0);
+        expect(getSigner).not.toHaveBeenCalled();
+        expect(readBalance).not.toHaveBeenCalled();
+        expect(auth.authorize).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+  );
+
   it('advertises one request tool and answers it, then closes cleanly', async () => {
     const fetchImpl = router({
       schemaVersion: 1,
@@ -1024,11 +1108,9 @@ describe('what the tool tells the model to send', () => {
       // WHAT THE AGENT DOES, and no catalog or list of kinds here: the client is
       // not a second source of what services exist, a list reads as all there
       // is, and the hook line names the one that fits the turn.
-      expect(
-        request.description?.startsWith(
-          "When a hook line names a service from Tenjin's router, call it as the line says.",
-        ),
-      ).toBe(true);
+      expect(request.description?.includes('whether you chose them or a hook suggested them')).toBe(
+        true,
+      );
       expect(request.description).not.toContain('Paid lookups');
       for (const name of ['Exa', 'Firecrawl', 'CoinMarketCap', 'Wolfram', 'Hunter', 'Minerva']) {
         expect(request.description).not.toContain(name);
@@ -1080,7 +1162,7 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // The router quotes the fee; the only amount written here is this CLI's ceiling.
       expect(request.description).toContain(
-        'Routing costs a fee the router quotes, never more than $0.003 a call;',
+        'Paid routing costs a fee the router quotes, never more than $0.003 a call;',
       );
     } finally {
       await client.close();

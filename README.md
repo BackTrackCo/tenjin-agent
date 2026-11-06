@@ -49,12 +49,12 @@ Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64. Claude Code ne
 Continue your work, or ask for a specific tool-backed task:
 
 ```text
+Use Tenjin to look up Zod object schemas in Context7.
 Use Tenjin to generate a hero image of plum blossoms in ukiyo-e style.
 Use Tenjin to make a 10-second welcome voiceover.
-Use Tenjin to summarize Nvidia's latest 10-K risk factors.
 ```
 
-The agent can follow a router suggestion or browse, inspect and run a catalog tool. Paid tools need funds and obey your spending policy. Browsing a tool and reading its inputs are free; provider prices and routing fees are separate. [How calls work →](./docs/router-reference.md#request-tool)
+The Context7 lookup runs without funds. Image and voice tools need funds and obey your spending policy. The agent can follow a router suggestion or browse, inspect and run a catalog tool. Browsing and inspection are free; provider prices and routing fees are separate. [How calls work →](./docs/router-reference.md#request-tool)
 
 ## Wallet and limits
 
