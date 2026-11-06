@@ -687,20 +687,25 @@ describe('Codex install, uninstall and doctor', () => {
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 
-  it('gives Codex the same funding choice and sharing disclosure, without optional setup questions', async () => {
+  it('gives Codex a link-preparation command and sharing disclosure, without extra setup questions', async () => {
     const { deps } = host();
     deps.env = { CODEX_SESSION_ID: 'session' };
     deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
     const out = await runCodexInstall({ yes: true }, ctx(), deps);
     expect(out.data).toMatchObject({
       nextSteps: [
-        { id: 'fund', options: [{ command: 'tenjin wallet fund 5' }, { command: null }] },
+        {
+          id: 'fund',
+          options: [{ command: 'tenjin wallet fund 5 --no-open --no-wait' }, { command: null }],
+          next: expect.stringContaining('show checkoutUrl as a clickable link'),
+        },
       ],
       disclosure: [
         expect.stringContaining('Tenjin sends relevant task context'),
         expect.stringContaining('https://tenjin.sh/privacy'),
       ],
     });
+    expect((out.data as { next: string }).next).toContain('Follow the instructions in nextSteps');
     expect(JSON.stringify(out)).not.toContain('Help improve routing');
     expect(out.humanLines?.join('\n')).not.toContain('0x111111');
   });

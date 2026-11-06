@@ -23,7 +23,7 @@ export interface FundingDeps {
   funding?: FundingCheck;
 }
 
-/** Checking an empty wallet never mints checkout; only the person's later yes does. */
+/** Installation prepares funding instructions; the separate command creates the link. */
 export async function fundStep(
   wallet: WalletOutcome,
   rpcUrl: string,
@@ -57,10 +57,15 @@ export async function fundStep(
       id: 'fund',
       question: `Add $${SUGGESTED_FUND_USD} to Tenjin now?`,
       options: [
-        { id: 'fund', label: `Add $${SUGGESTED_FUND_USD}`, recommended: true, command },
+        {
+          id: 'fund',
+          label: `Add $${SUGGESTED_FUND_USD}`,
+          recommended: true,
+          command: `${command} --no-open --no-wait`,
+        },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Recommend Add $${SUGGESTED_FUND_USD} so the person can start using paid tools. Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone and follow its nextStep. Run it only after their yes. On "Not now", explain that paid Tenjin tools need funds, then continue activation and the original task with available tools. Do not offer funding again unless requested. When the selected option includes a command, run it yourself; never ask the person to run it.`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Run the Add $${SUGGESTED_FUND_USD} option's command once to prepare the checkout link, without opening a browser or asking another funding question. Recommend adding $${SUGGESTED_FUND_USD} to use paid tools and show checkoutUrl as a clickable link. Preparing the link moves no money; the person decides whether to click and confirms payment in their browser. Follow the command's nextStep to check funds when they return. If they decline, continue activation and their task with available tools. Do not offer funding again unless requested. Run the command yourself; never ask the person to run it.`,
     },
   };
 }
@@ -118,7 +123,11 @@ export async function finishTerminalFunding(
       selectOne({
         message: step.question,
         choices: [
-          { value: 'fund', label: `Add $${SUGGESTED_FUND_USD} (recommended)` },
+          {
+            value: 'fund',
+            label: `Add $${SUGGESTED_FUND_USD} (recommended)`,
+            hint: 'Opens checkout in your browser',
+          },
           { value: 'later', label: 'Not now' },
         ],
         initialValue: 'fund',

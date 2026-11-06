@@ -92,8 +92,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * tool to the model, so this command writes nothing into `settings.json` or
  * `~/.claude.json` itself.
  *
- * An agent relays pending spending and funding choices; a terminal asks them
- * directly. Funding is optional. Activation follows the host-specific step.
+ * An agent relays the spending choice and prepares a funding link; a terminal
+ * asks both choices directly. Funding is optional. Activation follows the host-specific step.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -551,7 +551,7 @@ export async function runRouterInstall(
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     // The spend question comes first, because its answer picks the install
-    // command. The funding question rides on the install that follows it.
+    // command. Funding instructions ride on the install that follows it.
     (asksAgent || canPrompt) &&
     spendAsk === undefined &&
     plugin.state !== 'failed' &&
@@ -962,20 +962,20 @@ function repairStep(tty: boolean): string {
 /**
  * The one step after the install, for the agent to relay in the session. A
  * wallet whose saved passphrase is gone or wrong is repaired first; otherwise
- * the usual steps (no funding step for an existing wallet).
+ * the usual steps include funding instructions for an empty usable wallet.
  */
 function nextStep(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  questions: number,
+  pendingSteps: number,
   tty: boolean,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, questions, command, env);
+  const steps = todaysSteps(plugin, claude, wallet, migration, pendingSteps, command, env);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -988,18 +988,12 @@ function todaysSteps(
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  questions: number,
+  pendingSteps: number,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string[] {
   const steps: string[] = [];
-  if (questions > 1) {
-    steps.push(
-      'ask the person each question in nextSteps, one at a time, then run what each answer names',
-    );
-  } else if (questions === 1) {
-    steps.push('ask the person the question in nextSteps, then run what the answer names');
-  }
+  if (pendingSteps > 0) steps.push('follow the instructions in nextSteps');
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');
     steps.push(
@@ -1149,10 +1143,10 @@ export function namedLimits(
   return { limits, keys };
 }
 
-/** One question install hands to the agent that ran it, with what each answer runs. */
+/** A pending install step, handled according to its next instructions. */
 export interface QuestionStep {
   id: 'spend' | 'fund';
-  /** For the agent to put to the person as written, with `options`. */
+  /** Prompt text for the terminal choice or agent explanation; follow `next`. */
   question: string;
   options: {
     id: string;
@@ -1160,10 +1154,10 @@ export interface QuestionStep {
     recommended: boolean;
     /** What to ask the person after they pick this option, before running `command`. */
     ask?: string[];
-    /** The one command the agent runs alone for this answer, or null: run nothing. */
+    /** The command for this option; `next` says whether the agent asks first. */
     command: string | null;
   }[];
-  /** What the agent does with each answer. */
+  /** How the agent handles this step. */
   next: string;
 }
 
@@ -1387,7 +1381,7 @@ function lines(
     migration: Migration;
     wallet: WalletOutcome;
     fundingWarning?: string;
-    /** How many questions the agent is handed. */
+    /** How many pending steps the agent is handed. */
     asks: number;
     policy: SpendPolicy;
     spendAsk?: QuestionStep;

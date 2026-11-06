@@ -56,7 +56,14 @@ describe('installation funding', () => {
       humanLines: ['Complete checkout in your browser.'],
     }));
     const out = await finishTerminalFunding(result, ctx, { isInteractive: true, fund });
-    expect(selectOne).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'fund' }));
+    expect(selectOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialValue: 'fund',
+        choices: expect.arrayContaining([
+          expect.objectContaining({ value: 'fund', hint: 'Opens checkout in your browser' }),
+        ]),
+      }),
+    );
     expect(fund).toHaveBeenCalledWith(ctx, { amountUsd: '5', wait: false, qr: false });
     expect(out.humanLines).toEqual(['Complete checkout in your browser.']);
     expect(result.data).toMatchObject({
@@ -93,7 +100,7 @@ describe('installation funding', () => {
     const claude = await once(wallet, 'unused', {}, 'tenjin wallet fund 5');
     const codex = await once(wallet, 'unused', {}, 'tenjin wallet fund 5');
     expect(claude?.step?.options.map((option) => option.command)).toEqual([
-      'tenjin wallet fund 5',
+      'tenjin wallet fund 5 --no-open --no-wait',
       null,
     ]);
     expect(codex).toBeUndefined();

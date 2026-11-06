@@ -1139,7 +1139,7 @@ describe('install applies the spend answer an agent relays, in one command', () 
   });
 });
 
-describe('install run by an agent asks each question where its answer is needed', () => {
+describe('install run by an agent hands back spending and funding instructions', () => {
   type Step = {
     id: string;
     question: string;
@@ -1156,13 +1156,11 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
     expect(result.humanLines).not.toContain('  Ask the person: Add $5 to Tenjin now?');
     const { next } = result.data as { next: string };
-    expect(next).toBe(
-      `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
-    );
+    expect(next).toBe(`follow the instructions in nextSteps, then ${RELOAD}`);
     expect(next).not.toContain('wallet fund');
   });
 
-  it('the completed install asks funding once without exposing storage or minting checkout', async () => {
+  it('the completed install hands back a link-preparation command without minting checkout', async () => {
     // No link is minted: nothing reaches the fund route, and no wallet unlock is needed.
     const routes: string[] = [];
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
@@ -1182,25 +1180,24 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(fund).toMatchObject({
       question: 'Add $5 to Tenjin now?',
       options: [
-        { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5' },
+        { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5 --no-open --no-wait' },
         { id: 'later', label: 'Not now', command: null },
       ],
     });
     expect(fund).not.toHaveProperty('url');
-    expect(fund.next).toContain('Ask this question once.');
-    expect(fund.next).toContain('Run it only after their yes.');
-    expect(fund.next).toContain(
-      'When the selected option includes a command, run it yourself; never ask the person to run it.',
-    );
+    expect(fund.next).toContain('without opening a browser or asking another funding question');
+    expect(fund.next).toContain('show checkoutUrl as a clickable link');
+    expect(fund.next).toContain('the person decides whether to click and confirms payment');
+    expect(fund.next).toContain('Run the command yourself; never ask the person to run it.');
     expect(fund.next).toContain('Do not offer funding again unless requested.');
     expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
     expect(result.humanLines!.at(-1)).toBe(
-      `Next: ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
+      `Next: follow the instructions in nextSteps, then ${RELOAD}`,
     );
     expect((result.data as { next: string }).next).not.toContain('wallet fund');
   });
 
-  it('the custom-limits install asks the funding question too', async () => {
+  it('the custom-limits install includes funding instructions too', async () => {
     const result = await runRouterInstall(
       { maxAutoSpend: '0.50', sessionBudget: 'none' },
       ctx(),
@@ -1209,7 +1206,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
   });
 
-  it('asks only the funding question when the limits were answered earlier', async () => {
+  it('hands back only funding instructions when the limits were answered earlier', async () => {
     await writeFile(
       join(data, 'config.json'),
       JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
@@ -1456,16 +1453,14 @@ describe('the wallet line: can Claude Code unlock it', () => {
     expect(result.humanLines!.join('\n')).not.toContain('✓ Wallet');
   });
 
-  it('a reinstall with an empty existing wallet keeps today’s next step and funding question (S6)', async () => {
+  it('a reinstall with an empty existing wallet keeps today’s activation and funding instructions (S6)', async () => {
     const result = await runRouterInstall(
       { yes: true },
       ctx(),
       deps({ env: HARNESS_ENV, walletExists: async () => true, walletBalance: async () => 0n }),
     );
     const data_ = result.data as { next: string; nextSteps: { id: string; question: string }[] };
-    expect(data_.next).toBe(
-      `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
-    );
+    expect(data_.next).toBe(`follow the instructions in nextSteps, then ${RELOAD}`);
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',

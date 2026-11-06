@@ -439,7 +439,7 @@ export async function runCodexInstall(
     ...(funding?.step !== undefined ? [funding.step] : []),
   ];
   if (asksAgent && nextSteps.length > 0)
-    next = `Ask the person each question in nextSteps once, then ${next}`;
+    next = `Follow the instructions in nextSteps, then ${next}`;
   const daily =
     policy.sessionBudgetAtomic === null
       ? effective.sessionBudget

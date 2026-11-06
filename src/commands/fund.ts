@@ -132,9 +132,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // A Tenjin /fund link carries a token in its fragment, and it prints whole on
   // every path: a user who copies it into another browser needs the token. It is
   // not worth hiding, since it can only fund this wallet and expires in ~10 minutes.
-  // An agent's shell has no terminal, but an agent runs this only on the
-  // person's yes to "open the funding page" (`tenjin install` hands it that
-  // question), so under a harness the page opens too.
+  // An explicitly requested funding command can open under an agent harness
+  // even without a terminal. Install's link-preparation command uses --no-open.
   const willOpen =
     opts.open !== false && (ctx.io.isTTY || underAgentHarness(opts.env ?? process.env));
   const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
