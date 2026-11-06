@@ -43,46 +43,60 @@ With Tenjin, install once and keep working. The router suggests tools when they 
 
 ## Install
 
-Ask Claude Code or Codex:
+### Ask your agent
+
+Paste this into Claude Code or Codex:
 
 ```text
 Install Tenjin from tenjin.sh
 ```
 
-Setup briefly explains context sharing, asks about spending limits and offers **Add $5 / Not now**. Funding is optional. Follow the activation step, then continue your task. Optional improvement-data collection stays off unless explicitly enabled.
+### Install it yourself
 
-Or use a terminal; Node and npm are not required:
+**macOS / Linux** — no Node.js or npm required:
 
 ```sh
-(
-  tenjin_install_dir="$(mktemp -d ./.tenjin-install.XXXXXXXX)" || exit
-  trap 'rm -f "$tenjin_install_dir/install.sh"; rmdir "$tenjin_install_dir"' EXIT
-  curl -fsSL https://tenjin.sh/install.sh -o "$tenjin_install_dir/install.sh" &&
-    sh "$tenjin_install_dir/install.sh"
-)
+curl -fsSL https://tenjin.sh/install.sh | sh
 ```
 
-Windows PowerShell:
+**Windows** — run in PowerShell:
 
 ```powershell
 irm https://tenjin.sh/install.ps1 | iex
 ```
 
-Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`.
+**npm** — on any platform:
 
-Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64. Claude Code needs 2.1.287+. Codex support is experimental. Tenjin installs its own verified Node runtime, so changing your system Node does not stop it. [Setup, activation and permissions →](./docs/agent-permissions.md)
+```sh
+npm install -g tenjin-cli
+tenjin install
+```
+
+Setup asks about spending limits, then recommends **Add $5** so you can start using tools. Complete checkout in your browser and follow the activation step. **Not now** skips funding; paid tools will need funds before they can run.
+
+Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 
 ## Try it
 
-Add funds during setup or with `tenjin wallet fund 5`, then ask your agent:
+Once funded and activated, choose one prompt to try:
+
+**Look up a company**
+
+```text
+Use Tenjin to find the company profile for stripe.com.
+```
+
+**Generate an image**
 
 ```text
 Use Tenjin to generate a hero image of plum blossoms in ukiyo-e style.
-Use Tenjin to make a 10-second welcome voiceover.
-Use Tenjin to research what developers on Reddit say about Bun vs Node.
 ```
 
-Tool calls obey your spending policy. The agent can follow a router suggestion or browse, inspect and run a catalog tool. Browsing and inspection are free; provider prices and routing fees are separate. [How calls work →](./docs/router-reference.md#request-tool)
+**Make a voiceover**
+
+```text
+Use Tenjin to make a 10-second welcome voiceover for my app.
+```
 
 ## What your agent can do
 
@@ -111,14 +125,16 @@ Example provider prices vary by tool and inputs and exclude Tenjin's routing fee
 
 A new chat does not reset the daily budget. A routing decision has a separate fee quoted by the server, never above $0.003. Funds set aside for routing remain yours until spent and count toward the budget once. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
-```bash
-tenjin wallet fund 5    # open checkout; payment is confirmed in the browser
-tenjin wallet balance   # confirm available funds before paying again
-tenjin status           # spending and limits
-tenjin doctor           # setup and readiness diagnostics; unchecked is not success
-tenjin update           # update the CLI and its runtime
-tenjin uninstall        # remove the integration; keep your wallet
-```
+## Commands
+
+| Command                 | What it does                                  |
+| ----------------------- | --------------------------------------------- |
+| `tenjin wallet fund 5`  | Open checkout to add $5                       |
+| `tenjin wallet balance` | Check available funds                         |
+| `tenjin status`         | Show spending and limits                      |
+| `tenjin doctor`         | Check setup, activation and payment readiness |
+| `tenjin update`         | Update Tenjin                                 |
+| `tenjin uninstall`      | Remove the integration; keep your wallet      |
 
 ## Privacy and help
 

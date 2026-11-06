@@ -57,10 +57,10 @@ export async function fundStep(
       id: 'fund',
       question: `Add $${SUGGESTED_FUND_USD} to Tenjin now?`,
       options: [
-        { id: 'fund', label: `Add $${SUGGESTED_FUND_USD}`, recommended: false, command },
+        { id: 'fund', label: `Add $${SUGGESTED_FUND_USD}`, recommended: true, command },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone and follow its nextStep. Run it only after their yes. On "Not now", run nothing and continue activation and the original task. Do not offer funding again unless requested. When the selected option includes a command, run it yourself; never ask the person to run it.`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Recommend Add $${SUGGESTED_FUND_USD} so the person can start using paid tools. Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone and follow its nextStep. Run it only after their yes. On "Not now", explain that paid Tenjin tools need funds, then continue activation and the original task with available tools. Do not offer funding again unless requested. When the selected option includes a command, run it yourself; never ask the person to run it.`,
     },
   };
 }
@@ -118,13 +118,20 @@ export async function finishTerminalFunding(
       selectOne({
         message: step.question,
         choices: [
-          { value: 'fund', label: `Add $${SUGGESTED_FUND_USD}` },
+          { value: 'fund', label: `Add $${SUGGESTED_FUND_USD} (recommended)` },
           { value: 'later', label: 'Not now' },
         ],
-        initialValue: 'later',
+        initialValue: 'fund',
       }))
   )();
-  if (answer !== 'fund') return { ...result, humanLines: [] };
+  if (answer !== 'fund')
+    return {
+      ...result,
+      humanLines:
+        answer === 'later'
+          ? ['Paid Tenjin tools need funds. You can add them later from your agent.']
+          : [],
+    };
   try {
     const run = opts.fund ?? (await import('../commands/fund')).runFund;
     const funded = await run(ctx, {

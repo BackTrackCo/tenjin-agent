@@ -49,13 +49,26 @@ describe('installation funding', () => {
     },
   );
 
-  it('defaults to Not now, so pressing Enter does not open checkout', async () => {
+  it('recommends funding and opens checkout when the person accepts that choice', async () => {
     const { ctx, result } = await setup();
-    const fund = vi.fn();
+    const fund = vi.fn(async () => ({
+      data: { funded: false },
+      humanLines: ['Complete checkout in your browser.'],
+    }));
     const out = await finishTerminalFunding(result, ctx, { isInteractive: true, fund });
-    expect(selectOne).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'later' }));
-    expect(fund).not.toHaveBeenCalled();
-    expect(out.humanLines).toEqual([]);
+    expect(selectOne).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'fund' }));
+    expect(fund).toHaveBeenCalledWith(ctx, { amountUsd: '5', wait: false, qr: false });
+    expect(out.humanLines).toEqual(['Complete checkout in your browser.']);
+    expect(result.data).toMatchObject({
+      nextSteps: [
+        {
+          options: [
+            { id: 'fund', recommended: true },
+            { id: 'later', recommended: false },
+          ],
+        },
+      ],
+    });
   });
 
   it('does not ask when stdout is a terminal but stdin is a pipe', async () => {
@@ -87,7 +100,7 @@ describe('installation funding', () => {
   });
 
   it.each(['later', null] as const)(
-    'keeps a %s answer quiet after showing successful setup',
+    'keeps setup intact without checkout after a %s answer',
     async (answer) => {
       const { ctx, result, stdout } = await setup();
       const fund = vi.fn();
@@ -98,7 +111,11 @@ describe('installation funding', () => {
       });
       expect(stdout()).toContain('Next: Start a new session.');
       expect(fund).not.toHaveBeenCalled();
-      expect(out.humanLines).toEqual([]);
+      expect(out.humanLines).toEqual(
+        answer === 'later'
+          ? ['Paid Tenjin tools need funds. You can add them later from your agent.']
+          : [],
+      );
       expect(out.data).toEqual(result.data);
     },
   );

@@ -4,7 +4,7 @@ Tenjin suggests tools for your task and runs chosen tools through a local `route
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, and offers **Add $5 / Not now**. Declining funding still completes installation. `--yes` accepts spending defaults; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then recommends **Add $5** so you can start using tools. Checkout opens in your browser. **Not now** completes installation without funding; paid tools need funds before they can run. `--yes` accepts spending defaults; it never consents to checkout.
 
 Use the activation step the installer returns:
 
@@ -24,7 +24,7 @@ Claude Code requires 2.1.287+. Codex routing hooks require 0.149.0+. Installatio
 
 The agent installs for its current host, relays only unanswered spending/funding questions and runs the selected commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
 
-An accepted funding offer runs `tenjin wallet fund 5`. Checkout opens only after that answer; the browser confirms the payment. **Not now** runs nothing and is not offered again unless requested. When you return from checkout, the agent checks the balance before continuing. An unknown balance or unconfirmed arrival does not justify another payment.
+The agent recommends **Add $5** and asks once. Accepting runs `tenjin wallet fund 5`; the browser confirms the payment. **Not now** runs nothing: the agent explains that paid tools need funds and continues with available tools. It does not offer funding again unless requested. When you return from checkout, the agent checks the balance before continuing. An unknown balance or unconfirmed arrival does not justify another payment.
 
 If the host denies opening checkout, the agent may explain it and ask once to retry the same command. Another refusal or managed deny stops the action; it never changes permissions to get through.
 

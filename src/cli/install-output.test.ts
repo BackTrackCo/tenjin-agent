@@ -142,15 +142,17 @@ async function installedWithFunding() {
 }
 
 describe('terminal installation funding through the CLI', () => {
-  it('shows activation, defaults to Not now and leaves checkout unopened', async () => {
+  it('recommends funding but respects a person choosing Not now', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
     await installedWithFunding();
+    stubs.select.mockResolvedValueOnce('later');
     const out = await run(['install'], true);
     expect(out.code).toBe(0);
     expect(stubs.select).toHaveBeenCalledOnce();
-    expect(stubs.select).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'later' }));
+    expect(stubs.select).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'fund' }));
     expect(stubs.fund).not.toHaveBeenCalled();
-    expect(out.stdout).toBe('Installed.\nNext: Open a new Claude Code session.\n');
+    expect(out.stdout).toContain('Installed.\nNext: Open a new Claude Code session.\n');
+    expect(out.stdout).toContain('Paid Tenjin tools need funds.');
   });
 
   it('opens checkout only after the terminal user chooses Add funds', async () => {
