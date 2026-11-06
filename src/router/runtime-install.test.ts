@@ -127,7 +127,7 @@ async function routerProjects(): Promise<string[]> {
 }
 
 describe('install registers the plugin from Tenjin’s runtime', () => {
-  it('active: adds the runtime’s folder, says where it runs from once, and passes this build to setupRuntime', async () => {
+  it('registers the active runtime and keeps successful runtime details in diagnostics', async () => {
     const runtime = vi.fn(async () => setup());
     const result = await runRouterInstall({}, ctx(), deps(runtime));
     expect(await fake.calls()).toContain(
@@ -144,9 +144,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
       path: join(runtimeRoot, 'claude'),
       version: pkg.version,
     });
-    expect(runsLines(result.humanLines!)).toEqual([
-      `  Runs from ~/.tenjin/runtime on its own Node ${NODE_V}, so a Node upgrade or \`npm rm -g tenjin-cli\` no longer stops it.`,
-    ]);
+    expect(runsLines(result.humanLines!)).toEqual([]);
     expect(runtime).toHaveBeenCalledWith(
       expect.objectContaining({ dataDir: data, home, version: pkg.version, refresh: false }),
     );
@@ -219,12 +217,17 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
       context,
       deps(runtime, { isInteractive: true, walletExists: async () => false }),
     );
-    const funding = (result.data as { next: string }).next.match(
-      /fund the wallet with `([^`]+)`/,
-    )?.[1];
-    const project = result
-      .humanLines!.find((line) => line.startsWith('  For this project only; check it with: '))
-      ?.split('check it with: ')[1];
+    const data = result.data as {
+      next: string;
+      nextSteps: { id: string; options: { id: string; command: string | null }[] }[];
+      doctor: string;
+    };
+    const funding = data.nextSteps
+      .find((step) => step.id === 'fund')
+      ?.options.find((option) => option.id === 'fund')?.command;
+    const project = data.doctor;
+    expect(data.next).not.toContain('fund the wallet');
+    expect(result.humanLines).toContain(`  For this project only; check it with: ${project}`);
     for (const [command, expected] of [
       [funding, ['wallet', 'fund', '5']],
       [project, ['doctor', '--project']],

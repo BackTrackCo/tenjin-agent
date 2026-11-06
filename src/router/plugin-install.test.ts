@@ -173,8 +173,12 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     expect((await fake.configDirs()).every((d) => d === cfg)).toBe(true);
   });
 
-  it('ends with a step taken in the session, never a command run elsewhere', async () => {
-    const result = await runRouterInstall({}, ctx(), deps());
+  it('keeps activation in the agent session that installed it', async () => {
+    const result = await runRouterInstall(
+      { yes: true, noWallet: true },
+      ctx(),
+      deps({ env: env({ CLAUDECODE: '1' }) }),
+    );
     const next = (result.data as { next: string }).next;
     expect(next).toBe(RELOAD_STEP);
     const text = [next, ...(result.humanLines ?? [])].join('\n');
@@ -182,6 +186,13 @@ describe('tenjin install registers the plugin through Claude Code', () => {
     expect(result.humanLines).toContain(
       `✓ Tenjin is set up for Claude Code (plugin tenjin@tenjin)`,
     );
+  });
+
+  it('gives a terminal user a new-session step without inventing an open conversation', async () => {
+    const result = await runRouterInstall({ yes: true, noWallet: true }, ctx(), deps());
+    const next = (result.data as { next: string }).next;
+    expect(next).toMatch(/new Claude Code session/);
+    expect(next).not.toMatch(/reload-plugins|this conversation/);
   });
 
   it('updates the plugin when Claude Code holds an older version of it', async () => {
@@ -422,9 +433,11 @@ describe('tenjin install registers the plugin through Claude Code', () => {
       claudeCode: { version: '2.1.200', meetsFloor: false },
       plugin: { method: 'plugin' },
     });
-    expect((result.data as { next: string }).next).toMatch(
-      /^run `claude update`, then start a new Claude Code session/,
-    );
+    const next = (result.data as { next: string }).next;
+    expect(next).toContain('`claude update`');
+    expect(next).toMatch(/new Claude Code session/);
+    expect(next.indexOf('`claude update`')).toBeLessThan(next.indexOf('new Claude Code session'));
+    expect(next).not.toContain('/reload-plugins');
   });
 
   it('registers the plugin for this project only with --project', async () => {
@@ -590,7 +603,12 @@ describe('the settings install of an earlier release', () => {
       listMcpProcesses: async () => [{ pid: 9044, startedAt: 1 }],
       installedAt: async () => 2,
     };
-    const install = await runRouterInstall({}, ctx(), deps(stale));
+    const agent = {
+      ...stale,
+      env: env({ CLAUDECODE: '1' }),
+      walletBalance: async () => 1_000_000n,
+    };
+    const install = await runRouterInstall({ yes: true }, ctx(), deps(agent));
     const next = (install.data as { next: string }).next;
     expect(next).toBe(NEW_SESSION_STEP);
     const text = [next, ...(install.humanLines ?? [])].join('\n');
@@ -609,7 +627,7 @@ describe('the settings install of an earlier release', () => {
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     await runAliveHook({ session_id: 's' }, { dataDir: data, version: pkg.version });
     await runRouterInstall({ refresh: true }, ctx(), deps());
-    const after = await runRouterInstall({}, ctx(), deps(stale));
+    const after = await runRouterInstall({ yes: true }, ctx(), deps(agent));
     expect((after.data as { next: string }).next).toBe(RELOAD_STEP);
   });
 
