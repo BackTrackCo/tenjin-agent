@@ -1283,12 +1283,7 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
  * A ready wallet needs no first-use diagnostic. A wallet that only this
  * shell can unlock, a blocked signer or an unknown check retains its warning.
  */
-export function walletLines(
-  ctx: CommandContext,
-  ok: string,
-  w: WalletOutcome,
-  host = 'Claude Code',
-): string[] {
+export function walletLines(ctx: CommandContext, w: WalletOutcome, host = 'Claude Code'): string[] {
   const warn = (text: string) => paint(ctx.io, 'yellow', text);
   if (w.status === 'created' || w.status === 'existing') {
     const a = w.address ?? '';
@@ -1443,7 +1438,7 @@ function lines(
     ...DISCLOSURE,
     ...spend,
     ...runtimeLines(ctx, s.rt, s.home, true),
-    ...walletLines(ctx, ok, s.wallet),
+    ...walletLines(ctx, s.wallet),
     ...(s.fundingWarning !== undefined ? [warn(s.fundingWarning)] : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),

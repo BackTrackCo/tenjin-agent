@@ -1,25 +1,14 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-/**
- * The pages a person or an agent reads about the router are pinned here rather
- * than trusted to survive an edit: the permissions doc against the constants it
- * documents, the troubleshooting section against the reasons the CLI prints,
- * and no passphrase on a command line.
- */
-
-/**
- * The permissions doc is the ROUTER's now. Its old guards pinned it to the
- * shelf's nine-rule allowlist and its publish-mode consent, none of which this
- * release registers, so what they were protecting is what moved. These pin the
- * page against the constants it actually documents: one tool rule, one opt-in
- * shell rule, and the caps install sets.
- */
+/** Safety facts and the local reading path must survive documentation edits. */
 describe('the permissions doc matches the product this release ships', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const PERMISSIONS_DOC = readFileSync(join(root, 'docs', 'agent-permissions.md'), 'utf8');
+  const PERMISSIONS_DOC = ['agent-permissions.md', 'router-reference.md']
+    .map((name) => readFileSync(join(root, 'docs', name), 'utf8'))
+    .join('\n');
 
   /** The `Bash(...)` lines inside fenced blocks: what an operator pastes. */
   function fencedRules(text: string): string[] {
@@ -61,15 +50,6 @@ describe('the permissions doc matches the product this release ships', () => {
     }
     expect(ROUTER_DEFAULTS).not.toHaveProperty('confirm');
   });
-
-  it('still resolves every relative markdown link it carries', () => {
-    for (const match of PERMISSIONS_DOC.matchAll(/\]\((\.[^)]+\.md)\)/g)) {
-      const target = fileURLToPath(
-        new URL(`../docs/${match[1]!.replace(/^\.\//, '')}`, import.meta.url),
-      );
-      expect(existsSync(target), `${match[1]!} does not resolve`).toBe(true);
-    }
-  });
 });
 
 describe('docs/troubleshooting.md: a wallet Tenjin cannot unlock', () => {
@@ -107,15 +87,6 @@ describe('docs/troubleshooting.md: a wallet Tenjin cannot unlock', () => {
     expect(bullet).toContain(KEYCHAIN_LOCKED_FIX);
     expect(section).not.toContain('--insecure-storage');
   });
-
-  it('resolves every relative markdown link it carries', () => {
-    const links = [...TROUBLE.matchAll(/\]\((\.[^)#]+\.md)(#[^)]*)?\)/g)];
-    expect(links.length).toBeGreaterThan(0);
-    for (const match of links) {
-      const target = join(DOCS, match[1]!.replace(/^\.\//, ''));
-      expect(existsSync(target), `${match[1]!} does not resolve`).toBe(true);
-    }
-  });
 });
 
 /**
@@ -146,5 +117,94 @@ describe('no doc or skill puts a passphrase on a command line', () => {
 
   it.each(skills)('%s never offers --insecure-storage', (rel) => {
     expect(readFileSync(join(root, rel), 'utf8')).not.toContain('--insecure-storage');
+  });
+});
+
+/** GFM heading anchors ignore punctuation/code marks and suffix duplicate headings. */
+function headingIds(markdown: string): Set<string> {
+  const counts = new Map<string, number>();
+  const ids = new Set<string>();
+  let fenced = false;
+  for (const line of markdown.split('\n')) {
+    if (line.trimStart().startsWith('```')) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const heading = /^#{1,6}\s+(.+?)(?:\s+#+)?$/.exec(line)?.[1];
+    if (heading === undefined) continue;
+    const base = heading
+      .toLowerCase()
+      .replace(/<[^>]*>/g, '')
+      .replace(/[^\p{L}\p{N}_\-\s]/gu, '')
+      .replace(/\s/g, '-');
+    const count = counts.get(base) ?? 0;
+    counts.set(base, count + 1);
+    ids.add(count === 0 ? base : `${base}-${count}`);
+  }
+  return ids;
+}
+
+function localLinkProblems(
+  file: string,
+  markdown: string,
+  read: (path: string) => string | undefined,
+): string[] {
+  const problems: string[] = [];
+  const text = markdown.replace(/```[^\n]*\n[\s\S]*?```/g, '');
+  for (const match of text.matchAll(/!?\[[^\]]*\]\(([^)\s]+)\)/g)) {
+    const link = match[1]!;
+    if (/^(?:https?:|mailto:)/.test(link)) continue;
+    const [path, fragment] = link.split('#', 2);
+    const target = path ? resolve(dirname(file), decodeURIComponent(path)) : file;
+    const body = read(target);
+    if (body === undefined) problems.push(`${link}: missing file`);
+    else if (
+      fragment &&
+      target.endsWith('.md') &&
+      !headingIds(body).has(decodeURIComponent(fragment))
+    )
+      problems.push(`${link}: missing heading`);
+  }
+  return problems;
+}
+
+describe('the first-use documentation reading path', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const files = [
+    'README.md',
+    'RELEASING.md',
+    ...readdirSync(join(root, 'docs'))
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => join('docs', name)),
+  ];
+
+  it.each(files)('%s has no broken local link or heading', (name) => {
+    const file = join(root, name);
+    const read = (target: string): string | undefined =>
+      existsSync(target) ? readFileSync(target, 'utf8') : undefined;
+    expect(localLinkProblems(file, readFileSync(file, 'utf8'), read)).toEqual([]);
+  });
+
+  it('catches a moved reference and a renamed section, including links to the current page', () => {
+    const guide = '/guide.md';
+    const text =
+      '# Setup\n[details](./gone.md) [limits](./reference.md#old-limits) [here](#missing)';
+    const files = new Map([
+      [guide, text],
+      ['/reference.md', '# Limits'],
+    ]);
+    expect(localLinkProblems(guide, text, (target) => files.get(target))).toEqual([
+      './gone.md: missing file',
+      './reference.md#old-limits: missing heading',
+      '#missing: missing heading',
+    ]);
+  });
+
+  it('accepts code-formatted headings and repeated headings without treating examples as links', () => {
+    const file = '/reference.md';
+    const text =
+      '# `request` tool\n## Details\n## Details\n[request](#request-tool) [second](#details-1)\n```text\n[example](./not-a-real-file.md)\n```';
+    expect(localLinkProblems(file, text, () => text)).toEqual([]);
   });
 });

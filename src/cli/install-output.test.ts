@@ -6,8 +6,17 @@ import { main } from '../cli';
 import type { Io } from '../lib/output';
 import { CliError } from '../lib/errors';
 import type { WalletOutcome } from '../commands/install-wallet';
+import { fundStep } from '../router/install-funding';
 
-const stubs = vi.hoisted(() => ({ install: vi.fn(), codex: vi.fn(), doctor: vi.fn() }));
+const stubs = vi.hoisted(() => ({
+  install: vi.fn(),
+  codex: vi.fn(),
+  doctor: vi.fn(),
+  select: vi.fn(),
+  fund: vi.fn(),
+}));
+vi.mock('../lib/clack', () => ({ selectOne: stubs.select }));
+vi.mock('../commands/fund', () => ({ runFund: stubs.fund }));
 vi.mock('../router/install', () => ({
   runRouterInstall: stubs.install,
   runtimeOncePerRun: () => vi.fn(),
@@ -85,6 +94,7 @@ const full = () => ({
 });
 
 let sandbox: string;
+const stdinTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 beforeEach(async () => {
   sandbox = await mkdtemp(join(tmpdir(), 'tenjin-install-output-'));
   vi.stubEnv('CI', '1');
@@ -101,11 +111,85 @@ beforeEach(async () => {
   stubs.install.mockResolvedValue({ data: full(), humanLines: ['Installed.'] });
   stubs.codex.mockResolvedValue({ data: { ...full(), plugin: 'tenjin' } });
   stubs.doctor.mockResolvedValue({ data: full() });
+  stubs.select.mockImplementation(
+    async (options: { initialValue: string }) => options.initialValue,
+  );
+  stubs.fund.mockResolvedValue({
+    data: { funded: false },
+    humanLines: ['Complete checkout in your browser.'],
+  });
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
   vi.clearAllMocks();
+  if (stdinTTY) Object.defineProperty(process.stdin, 'isTTY', stdinTTY);
+  else delete (process.stdin as { isTTY?: boolean }).isTTY;
   await rm(sandbox, { recursive: true, force: true });
+});
+
+async function installedWithFunding() {
+  const data = full();
+  const funding = await fundStep(
+    data.wallet as WalletOutcome,
+    'unused',
+    {},
+    "'/private runtime/tenjin' wallet fund 5",
+  );
+  stubs.install.mockResolvedValueOnce({
+    data: { ...data, nextSteps: [funding!.step], next: 'Open a new Claude Code session.' },
+    humanLines: ['Installed.', 'Next: Open a new Claude Code session.'],
+  });
+}
+
+describe('terminal installation funding through the CLI', () => {
+  it('shows activation, defaults to Not now and leaves checkout unopened', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+    await installedWithFunding();
+    const out = await run(['install'], true);
+    expect(out.code).toBe(0);
+    expect(stubs.select).toHaveBeenCalledOnce();
+    expect(stubs.select).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'later' }));
+    expect(stubs.fund).not.toHaveBeenCalled();
+    expect(out.stdout).toBe('Installed.\nNext: Open a new Claude Code session.\n');
+  });
+
+  it('opens checkout only after the terminal user chooses Add funds', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+    await installedWithFunding();
+    stubs.select.mockResolvedValueOnce('fund');
+    const out = await run(['install'], true);
+    expect(out.code).toBe(0);
+    expect(stubs.fund).toHaveBeenCalledOnce();
+    expect(stubs.fund).toHaveBeenCalledWith(
+      expect.objectContaining({ dataDir: join(sandbox, '.tenjin') }),
+      {
+        amountUsd: '5',
+        wait: false,
+        qr: false,
+      },
+    );
+    expect(out.stdout.indexOf('Installed.')).toBeLessThan(out.stdout.indexOf('Complete checkout'));
+  });
+
+  it('does not treat install --yes as consent to open checkout', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+    await installedWithFunding();
+    const out = await run(['install', '--yes'], true);
+    expect(out.code).toBe(0);
+    expect(stubs.select).not.toHaveBeenCalled();
+    expect(stubs.fund).not.toHaveBeenCalled();
+    expect(out.stdout).toContain('Next: Open a new Claude Code session.');
+  });
+
+  it('keeps piped stdin non-interactive even when stdout is a terminal', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+    await installedWithFunding();
+    const out = await run(['install'], true);
+    expect(out.code).toBe(0);
+    expect(stubs.select).not.toHaveBeenCalled();
+    expect(stubs.fund).not.toHaveBeenCalled();
+    expect(out.stdout).toContain('Next: Open a new Claude Code session.');
+  });
 });
 
 async function run(args: string[], isTTY = false) {

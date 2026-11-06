@@ -407,13 +407,19 @@ describe('tenjin install registers the plugin through Claude Code', () => {
   it('changes nothing when the marketplace list is unreadable and the plugin is already enabled', async () => {
     await fake.respond('mkt-list', 'garbage', 0);
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
-    const result = await runRouterInstall({}, ctx(), deps());
+    const funding = vi.fn(async () => undefined);
+    const result = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ env: env({ CLAUDECODE: '1' }), funding }),
+    );
     expect((await fake.calls()).some((c) => c.startsWith('plugin marketplace add'))).toBe(false);
     expect(pluginOf(result)).toMatchObject({
       method: 'none',
       id: 'tenjin@tenjin',
       state: 'failed',
     });
+    expect(funding).not.toHaveBeenCalled();
     expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
   });
 
@@ -569,7 +575,12 @@ describe('the settings install of an earlier release', () => {
     await writeLegacy();
     await fake.respond('version', '2.1.200 (Claude Code)\n');
     const before = await readFile(join(cfg, 'settings.json'), 'utf8');
-    const install = await runRouterInstall({}, ctx(), deps());
+    const funding = vi.fn(async () => undefined);
+    const install = await runRouterInstall(
+      { yes: true },
+      ctx(),
+      deps({ env: env({ CLAUDECODE: '1' }), funding }),
+    );
     const refresh = await runRouterInstall({ refresh: true }, ctx(), deps());
     expect(await fake.calls()).toEqual(['--version', '--version']);
     for (const result of [install, refresh]) {
@@ -578,6 +589,7 @@ describe('the settings install of an earlier release', () => {
     }
     expect(await readFile(join(cfg, 'settings.json'), 'utf8')).toBe(before);
     expect(await exists(join(cfg, 'skills', 'tenjin-router'))).toBe(false);
+    expect(funding).not.toHaveBeenCalled();
     expect((install.data as { next: string }).next).toBe(
       'run `claude update`, then run `tenjin install` again; until then the earlier Tenjin setup stays as it is',
     );

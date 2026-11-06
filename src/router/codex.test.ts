@@ -647,6 +647,9 @@ describe('Codex install, uninstall and doctor', () => {
   it('keeps the defaults with no answer and hands the spend question back', async () => {
     await writeFile(join(dir, 'config.json'), '{}');
     const { deps } = host();
+    deps.env = { CODEX_SESSION_ID: 'session' };
+    const funding = vi.fn(async () => undefined);
+    deps.funding = funding;
     const out = await runCodexInstall({}, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
     expect(config).not.toHaveProperty('maxAutoSpend');
@@ -662,6 +665,20 @@ describe('Codex install, uninstall and doctor', () => {
       'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
     ]);
     expect(out.data).not.toHaveProperty('approval');
+    expect(funding).not.toHaveBeenCalled();
+  });
+
+  it('offers funding after an interactive Codex installation', async () => {
+    const { deps } = host();
+    deps.isInteractive = true;
+    deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
+    const terminal = ctx();
+    terminal.flags.json = false;
+    terminal.io.isTTY = true;
+    const out = await runCodexInstall({}, terminal, deps);
+    expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
+    expect(out.humanLines?.join(' ')).toContain('/hooks and trust the five Tenjin hooks');
+    expect(out.humanLines?.join(' ')).toContain('then start a new session');
   });
 
   it('asks nothing again once the file names a limit', async () => {
@@ -979,6 +996,11 @@ describe('Codex install, uninstall and doctor', () => {
       version: '0.157.1',
     });
     expect(ready.data).not.toHaveProperty('elicitation');
+    expect(ready.humanLines?.slice(0, 3)).toEqual([
+      'Setup: ready for Codex.',
+      'Current Codex session: not verified by this check.',
+      'Paid routing: wallet and funds not checked.',
+    ]);
     expect(ready.humanLines?.join('\n')).toContain('information only');
     expect(ready.humanLines?.join('\n')).not.toContain('Pay once');
   });
@@ -1119,14 +1141,18 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       [null, true],
     ] as const) {
       const { steps, deps } = host();
+      const funding = vi.fn(async () => undefined);
       const out = await runCodexInstall({ yes: true }, ctx(), {
         ...deps,
+        env: { CODEX_SESSION_ID: 'session' },
+        funding,
         version: async () => version,
       });
       expect(
         steps.some((s) => s.startsWith('codex plugin add')),
         String(version),
       ).toBe(adds);
+      expect(funding).toHaveBeenCalledTimes(adds ? 1 : 0);
       if (!adds) {
         expect(out.data).toMatchObject({ next: CODEX_REFRESH_LINES.old });
         expect(CODEX_REFRESH_LINES.old).toContain('0.149.0');

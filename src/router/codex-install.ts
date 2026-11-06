@@ -462,7 +462,7 @@ export async function runCodexInstall(
       ...DISCLOSURE,
       `Automatic router: up to $${effective.maxAutoSpend} per call; ${daily}`,
       ...runtimeLines(ctx, rt, home, true),
-      ...walletLines(ctx, '✓', wallet, 'Codex'),
+      ...walletLines(ctx, wallet, 'Codex'),
       ...(funding?.warning !== undefined ? [funding.warning] : []),
       ...(spendAsk !== undefined
         ? [
@@ -554,6 +554,10 @@ export async function runCodexDoctor(
     ? autoUpdateLine(runtimeDir(ctx.dataDir))
     : null;
   const lines = [
+    `Setup: ${ok ? 'ready for Codex' : 'needs attention'}.`,
+    'Current Codex session: not verified by this check.',
+    'Paid routing: wallet and funds not checked.',
+    '',
     `Codex plugin: ${PLUGIN_LINE[hooks.state]}`,
     `Request tool: ${refused ? 'refused: its allow hook is off in /hooks and approval_policy is never' : hooks.allowOff ? 'asks before each call (its allow hook is off in /hooks)' : 'allowed by its plugin hook, under your wallet spend limits'}`,
     ...(routing !== null

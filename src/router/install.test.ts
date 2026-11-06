@@ -1144,7 +1144,6 @@ describe('install run by an agent asks each question where its answer is needed'
     options: { id: string; label: string; command: string | null }[];
     next: string;
     address?: string;
-    show?: string;
   };
   const stepsOf = (result: { data: unknown }) => (result.data as { nextSteps: Step[] }).nextSteps;
 
@@ -1178,15 +1177,12 @@ describe('install run by an agent asks each question where its answer is needed'
     const steps = stepsOf(result);
     expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
-    const show =
-      'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
     expect(fund).toMatchObject({
       question: 'Add $5 to Tenjin now?',
       options: [
         { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5' },
         { id: 'later', label: 'Not now', command: null },
       ],
-      show,
     });
     expect(fund).not.toHaveProperty('url');
     expect(fund.next).toContain('Ask this question once.');

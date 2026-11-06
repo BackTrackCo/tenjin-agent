@@ -125,12 +125,6 @@ const InstallConfigSchema = z.object({
    * project's settings file no longer carries our entries.
    */
   routerProjects: z.array(z.string()),
-  /**
-   * Install has put the "Help improve routing" question to this machine's
-   * person once: asked at a terminal, or handed to the agent that ran it. A
-   * later install or update never asks again, whatever the answer was.
-   */
-  improveAsked: z.boolean(),
 });
 
 /**
@@ -241,7 +235,7 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: PRODUCTION_ORIGIN,
   rpcUrl: DEFAULT_RPC_URL,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
-  install: { routerProjects: [], improveAsked: false },
+  install: { routerProjects: [] },
   update: { mode: 'auto' },
   router: { enabled: true, context: 'session', improve: false },
   experimental: { bazaar: 'off' },
@@ -336,7 +330,6 @@ export async function loadConfig(dir: string): Promise<Config> {
     ...raw,
     install: {
       routerProjects: raw.install?.routerProjects ?? CONFIG_DEFAULTS.install.routerProjects,
-      improveAsked: raw.install?.improveAsked ?? CONFIG_DEFAULTS.install.improveAsked,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     router: {

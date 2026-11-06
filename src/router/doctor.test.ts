@@ -534,6 +534,10 @@ describe('doctorLines', () => {
       },
     ]);
     expect(lines).toEqual([
+      'Setup: not checked.',
+      'Paid routing: unavailable.',
+      'Claude Code session: not verified.',
+      '',
       'ok    node: v24',
       'warn  routing fee: the wallet is low',
       '      fix: Fund it.',
@@ -548,6 +552,36 @@ describe('doctorLines', () => {
     expect(doctorLines([ok, { ...ok, status: 'warn', checked: false }]).at(-1)).toBe(
       '2 checks, 0 to act on, 1 not checked.',
     );
+  });
+
+  it('does not present a funded shell as proof of a working session', () => {
+    const checks: RouterCheck[] = [
+      { name: 'plugin', status: 'ok', required: true, detail: 'registered' },
+      { name: 'routing', status: 'ok', required: false, detail: 'on' },
+      { name: 'routing fee', status: 'ok', required: false, detail: 'funded' },
+      { name: 'router', status: 'ok', required: true, detail: 'reachable' },
+      {
+        name: 'claude session',
+        status: 'warn',
+        required: false,
+        checked: false,
+        detail: NO_SESSION_CHECKED,
+      },
+    ];
+    expect(doctorLines(checks).slice(0, 3)).toEqual([
+      'Setup: ready.',
+      'Paid routing: ready on this machine.',
+      'Claude Code session: not verified.',
+    ]);
+    checks[2] = {
+      ...checks[2]!,
+      status: 'warn',
+      checked: false,
+      detail: 'balance could not be checked',
+    };
+    expect(doctorLines(checks)[1]).toBe('Paid routing: not checked.');
+    checks[1] = { ...checks[1]!, status: 'warn', detail: 'off' };
+    expect(doctorLines(checks)[1]).toBe('Paid routing: unavailable.');
   });
 });
 
@@ -602,6 +636,11 @@ describe('runRouterDoctor, with its seams injected', () => {
       eligibility: async () => eligibility({ canPayRouting: low, balanceAtomic: 0n }),
     });
     expect(out).not.toBeInstanceOf(CliError);
+    expect((out as { humanLines: string[] }).humanLines.slice(0, 3)).toEqual([
+      'Setup: ready.',
+      'Paid routing: unavailable.',
+      'Claude Code session: not verified.',
+    ]);
     const act = checks.filter((c) => c.status !== 'ok' && c.checked !== false);
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({

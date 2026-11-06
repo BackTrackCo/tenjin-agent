@@ -8,7 +8,6 @@ import type { QuestionStep } from './install';
 
 export interface FundStep extends QuestionStep {
   id: 'fund';
-  show: string;
 }
 
 type Funding = { step?: FundStep; warning?: string } | undefined;
@@ -51,10 +50,8 @@ export async function fundStep(
   if (funded === null)
     return {
       warning:
-        'Could not check your Tenjin funds. This does not mean you need to add money again. Check the balance later.',
+        'Could not check your Tenjin funds. This does not mean you need to add money again. Ask your agent to check your balance later.',
     };
-  const show =
-    'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
   return {
     step: {
       id: 'fund',
@@ -64,7 +61,6 @@ export async function fundStep(
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
       next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone and follow its nextStep. Run it only after their yes. On "Not now", run nothing and continue activation and the original task. Do not offer funding again unless requested. When the selected option includes a command, run it yourself; never ask the person to run it.`,
-      show,
     },
   };
 }
@@ -142,7 +138,7 @@ export async function finishTerminalFunding(
       ...result,
       humanLines: [
         `Checkout could not be opened: ${error instanceof Error ? error.message : String(error)}`,
-        'Tenjin remains installed. Continue the activation step above; you can run `tenjin wallet fund` later.',
+        'Tenjin remains installed. Continue the activation step above. Ask your agent to add funds later.',
       ],
     };
   }
