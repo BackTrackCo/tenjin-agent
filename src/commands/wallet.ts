@@ -13,7 +13,7 @@ import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { channelCredit } from '../router/channel-credit';
-import { FUND_COMMAND_LINE, FUNDING_LINE, ROUTING_FEE_ATOMIC } from '../router/fee';
+import { FUND_COMMAND_LINE, FUNDING_LINE, ROUTING_FEE_CEILING_ATOMIC } from '../router/fee';
 import { markUnlockPending } from '../router/router-observation';
 import {
   commitLocalWallet,
@@ -46,11 +46,8 @@ import {
   type CreatePassphraseResult,
   type DurableStore,
 } from '../lib/wallet/passphrase';
-import type { PassphraseOverrides } from '../lib/wallet/local';
+import { isWindows, KEY_STORAGE, type PassphraseOverrides } from '../lib/wallet/local';
 import type { CommandContext, CommandResult } from '../context';
-
-const KEY_STORAGE = 'encrypted (keystore v3, scrypt)';
-const isWindows = process.platform === 'win32';
 
 /** The last line `tenjin wallet repair` prints: the save is proven, the unlock is not yet. */
 export const REPAIR_DONE_LINE = 'Passphrase saved; start a new Claude Code session to verify.';
@@ -661,7 +658,9 @@ export async function runWalletBalance(
       ...(credit.atomic !== '0'
         ? [`Set aside for routing: approximately $${credit.usd} (local estimate).`]
         : []),
-      ...(atomic === 0n && BigInt(credit.atomic) < ROUTING_FEE_ATOMIC ? [FUND_COMMAND_LINE] : []),
+      ...(atomic === 0n && BigInt(credit.atomic) < ROUTING_FEE_CEILING_ATOMIC
+        ? [FUND_COMMAND_LINE]
+        : []),
     ],
   };
 }

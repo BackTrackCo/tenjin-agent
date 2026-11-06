@@ -14,7 +14,7 @@ import { readUsdcBalance } from '../lib/usdc-balance';
 import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
-import type { RouteFor } from './fee';
+import { ROUTING_FEE_CEILING_ATOMIC, usd, type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitCodexHookEvent, admitHookEvent } from './hook-session';
@@ -77,7 +77,8 @@ export const SCOPE_RULE =
  * that, per turn, from the server that actually knows.
  */
 const INSTRUCTIONS =
-  "When a hook line names a service from Tenjin's router, call it as the line says. " +
+  'Use Tenjin tools when they help your task, whether you chose them or a hook suggested them. ' +
+  'When a hook line names a service, call it as the line says. ' +
   'A line comes at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'a search or a call that comes back short, or in a delegated task. ' +
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
@@ -93,9 +94,11 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  'Run free docs with `{tool: "<row id>", query: "<what to look up>"}`; it needs no funds or routing fee. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs $0.003 per call, ` +
-  'separate from provider charges; a wallet on THIS machine pays them under the local spend ' +
+  'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
+  'Free docs run with `{tool, query}`, without a wallet, routing fee or provider payment. ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs a fee the router ` +
+  `quotes, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call; a wallet on THIS ` +
+  'machine pays it and the provider under the local spend ' +
   'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin wallet fund` ' +
@@ -225,8 +228,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   const provider = opts.handlerDeps?.provider ?? resolveWalletProvider(ctx);
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
   // session is idle so a paid lookup does not wait 2.3 s for it, and its
-  // rejection is swallowed: a machine with no wallet still routes, because
-  // deciding is free and only the paying leg needs a key. With a payer it is
+  // rejection is swallowed: a machine with no wallet still browses the tool
+  // list and reads specs, which are free, and where the router charges for
+  // routing it is told why it cannot route. With a payer it is
   // the payer's: the same single-flight unlock its calls await, whose verdict
   // the hooks gate on and the observer records. The request tool's provider is
   // not unlocked a second time beside it: both share the wallet layer's signer
@@ -266,7 +270,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .describe(
             `${SCOPE_RULE} Carry the inputs and constraints your task gives for that lookup, ` +
               'and nothing else. Send this for a task no line offered, or with an id when the ' +
-              'line asks for a query; send it with `tool` to run a selected free tool. An offer that has a spec takes `input` instead.',
+              'line asks for a query; an offer that has a spec takes `input` instead.',
           ),
         id: z
           .string()
@@ -303,8 +307,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "A row's id from `browse`. Alone, returns its spec under a fresh id for `{id, input}`. " +
-              'With `query`, runs that selected free tool without a routing fee. Paid tools take their spec, not a query.',
+            "A row's id from `browse`: alone, its spec for `{id, input}`; with `query`, " +
+              'an explicitly selected free docs lookup. No routing fee.',
           ),
         count: z
           .number()
@@ -350,9 +354,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         },
         {
           ctx,
-          // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's. Routing
-          // is free, so a missing or locked wallet must not stop a `native` or
-          // a `needs_input` answer from being delivered; `runPay` requires a
+          // THE WALLET IS THE PAYING LEG'S TO OPEN, not this handler's: a
+          // missing or locked wallet must not stop a skip, a browse or a
+          // `needs_input` answer from being delivered; `runPay` requires a
           // signer only once a provider actually needs signing. The prewarm
           // above stays best effort and this just hands the provider along, so
           // a paid lookup still skips the second key derivation.

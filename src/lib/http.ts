@@ -127,9 +127,8 @@ export interface TransportFailure {
  * Both wallet-signed families this CLI sends are here: the SIWX auth header,
  * and the x402 payment header (`payment-signature` for x402 v2, plus
  * `x-payment`, the v1 spelling `@x402/core` can emit, as drift insurance).
- * `tenjin-session-delegation`, the reusable session-lifetime SIWX signature an
- * earlier release attached to shelf writes, stays on the list: this client no
- * longer sends it, and refusing to let a caller send it costs nothing.
+ * `tenjin-session-delegation` is a reusable SIWX signature this client no
+ * longer sends; it stays so a spec can never set it.
  */
 const CREDENTIAL_HEADERS = new Set([
   'sign-in-with-x',
@@ -228,12 +227,6 @@ export interface HttpRequestOptions {
   rawBody?: string;
   fetchImpl?: typeof fetch;
   /**
-   * A caller's own abort, combined with (never replacing) `timeoutMs`. The loop's
-   * legs pass the fire's signal here so a harness that closed its socket stops the
-   * request in flight; a caller with no such signal is unchanged.
-   */
-  signal?: AbortSignal;
-  /**
    * Refuse redirects even when the request carries no signed header. For a
    * caller whose response becomes a durable local artifact, following a
    * cross-origin redirect would let another host's bytes be recorded as if the
@@ -262,6 +255,11 @@ export interface HttpRequestOptions {
 
 /** The same cap the router's linked-media download uses. */
 export const MAX_BINARY_BODY_BYTES = 200 * 1024 * 1024;
+
+/** A body cap as a person reads it: whole MB, or bytes under one. */
+function capText(bytes: number): string {
+  return bytes >= 1_048_576 ? `${Math.round(bytes / 1_048_576)} MB` : `${bytes}-byte`;
+}
 
 /**
  * The body's bytes, read chunk by chunk and abandoned the moment they pass
@@ -386,13 +384,6 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     timedOut = true;
     controller.abort();
   }, opts.timeoutMs);
-  // The caller's abort is combined with the timeout rather than chosen between:
-  // whichever fires first ends the request, and `timedOut` still says which.
-  const signal =
-    opts.signal === undefined
-      ? controller.signal
-      : AbortSignal.any([controller.signal, opts.signal]);
-
   try {
     const prepared = prepareRequest(url, opts);
     if (!prepared.ok) return prepared;
@@ -405,7 +396,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
         headers:
           opts.anonymous === true ? headers : { ...headers, ...(await tenjinIdentityHeaders(url)) },
         body,
-        signal,
+        signal: controller.signal,
         ...(pinned ? { redirect: 'manual' as const } : {}),
       });
     } catch (err) {
@@ -452,7 +443,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
             kind: 'network',
             status: res.status,
             ...(requestId !== undefined ? { requestId } : {}),
-            message: `Request to ${url} returned a file over the ${Math.round((opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES) / 1_048_576)} MB cap; it was not kept.`,
+            message: `Request to ${url} returned a file over the ${capText(opts.maxBinaryBytes ?? MAX_BINARY_BODY_BYTES)} cap; it was not kept.`,
           };
         }
         bytes = read;

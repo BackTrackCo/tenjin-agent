@@ -1,28 +1,25 @@
-import { createHash } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
+import { sha256Hex } from '../lib/hash';
+import { writePrivate } from './store-files';
 
 /**
  * ONE MEMO FOR "DO NOT ASK THE ROUTER YET", per machine and per router origin,
  * in the data dir, so every hook leg and every `tenjin mcp` process reads the
- * same answer. Two facts use it:
+ * same answer:
  *
  * - `unreachable`: a routing leg's call could not reach the router (DNS, TLS,
  *   a refused connection, a proxy refusing the tunnel; see `isUnreachable`). For
  *   {@link UNREACHABLE_BACKOFF_MS} every leg skips the router and the native
  *   tool runs at once, instead of each prompt and search waiting out the gate.
  *   Doctor's probe ends it early when it reaches the router.
- * - `paid-path-absent`: the router answered no paid path (the fee is off), so
- *   calls take the free path without asking for an hour, or until the free
- *   path answers `fee_required`.
  *
  * A memo is a file written atomically and read with the clock: one older than
  * its window, or dated in the future, reads as absent, so nothing cleans up
  * after it. An unreadable file reads as absent too: the cost of a lost memo is
  * one more call to the router.
  */
-export type RouterMemoKind = 'unreachable' | 'paid-path-absent';
+export type RouterMemoKind = 'unreachable';
 
 export interface RouterMemo {
   /** When it was written, in epoch ms. */
@@ -38,7 +35,7 @@ export const UNREACHABLE_BACKOFF_MS = 60_000;
 
 function memoPath(dataDir: string, kind: RouterMemoKind, baseUrl: string): string {
   const origin = new URL(baseUrl).origin;
-  const key = createHash('sha256').update(origin).digest('hex').slice(0, 16);
+  const key = sha256Hex(origin, 16);
   return join(dataDir, 'router-memo', `${kind}-${key}.json`);
 }
 
@@ -74,10 +71,7 @@ export async function writeRouterMemo(
     ...(memo.detail !== undefined ? { detail: memo.detail.slice(0, 300) } : {}),
   };
   try {
-    await writeFileAtomic(memoPath(dataDir, kind, baseUrl), `${JSON.stringify(body)}\n`, {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writePrivate(memoPath(dataDir, kind, baseUrl), `${JSON.stringify(body)}\n`);
   } catch {
     // Best effort: a memo that did not land costs one more call.
   }

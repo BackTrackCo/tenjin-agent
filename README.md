@@ -111,13 +111,15 @@ The router names the tool and its price, and your agent calls it.
 | Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
 | PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-Provider prices above exclude Tenjin's $0.003 fee per paid routing call. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
+Provider prices above exclude Tenjin's routing fee, quoted per call and never more than $0.003. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
 
 ## How it works
 
 1. The router watches the moments a tool could help: your prompt, each web search or page fetch, each task handed to a subagent, and each question your agent asks you.
 2. Jev, a decision model from [TypeSafe](https://typesafe.ai), picks one tool from the catalog, or none. Your agent sees one line naming the tool and its price.
 3. Your agent calls it through the plugin's `request` tool, and your wallet pays the provider. When nothing fits, your agent carries on with its own tools.
+
+Your agent can also choose a tool directly: browse, inspect its inputs, then run it. Selected Context7 docs need no wallet or routing fee.
 
 The router sees your prompt and up to six earlier messages, with secrets masked, and never sees tool results. [What the hooks send →](./docs/agent-permissions.md#what-the-hooks-send)
 
@@ -133,7 +135,7 @@ The router sees your prompt and up to six earlier messages, with secrets masked,
 The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
 
 - A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each paid routing call costs $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside $0.25 at a time for these fees, or $0.03 while your balance is under $0.50 so the rest stays available for paid tools, and stops routing below $0.03; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free. Selecting the free Context7 docs tool also needs no funds or routing fee.
+- Each routing call costs a fee the router quotes, never more than $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees, the router's suggested amount at a time ($0.03 today, $0.05 once the router's update ships): less when your balance or per-call limit is smaller, but never less than ten fees ($0.03) or more than $0.25, so the rest stays available for paid tools. It stops routing when those funds run out and your balance is under $0.03; unused funds remain yours, and deposits count toward your spending limits once. Browsing and inspection are free. A selected tool pays only its provider; selected Context7 docs need no funds.
 - Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
 
 [How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)

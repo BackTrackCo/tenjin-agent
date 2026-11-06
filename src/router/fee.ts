@@ -1,43 +1,73 @@
 import { join } from 'node:path';
 import { formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
-import type { DecisionRoute } from './decision';
+import { NO_PAYER, type DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
 /**
- * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call on the paid
- * path pays $0.003 over x402 `batch-settlement`, and the stock SDK client in
- * `tenjin mcp` does all of it (`routing-payer.ts`). Everything else, `tenjin
- * hook` included, is the free path exactly as before this fee existed.
+ * THE ROUTING FEE, WITHOUT ANYTHING THAT PAYS. Every routing call goes to the
+ * paid route and pays the fee its 402 quotes over x402 `batch-settlement`, and
+ * the stock SDK client in `tenjin mcp` does all of it (`routing-payer.ts`).
+ * Nothing else pays it: a call without that payer is skipped when the route
+ * asks for it.
+ *
+ * THE SERVER QUOTES, THIS CLIENT CAPS. The fee is the server's to set, so no
+ * fee amount lives here: only the ceiling a quote must not pass, like
+ * EIP-1559's `maxFeePerGas`, and the spend limits that bound it beside that.
  *
  * Hook-safe: `tenjin hook` loads this module, and its chunk graph stays free
  * of the wallet and the x402 SDK (`dist-chunks.test.ts`).
  */
 
-export const ROUTE_PAID_PATH = '/api/x402-router/route';
-
-/** The flat fee per routing call, atomic USDC ($0.003). */
-export const ROUTING_FEE_ATOMIC = 3_000n;
-/** The production server's default deposit hint, ten routing fees ($0.03):
- *  the smallest deposit Tenjin signs, so a wallet below it is `wallet_low`. */
-export const CHANNEL_DEPOSIT_ATOMIC = 10n * ROUTING_FEE_ATOMIC;
+/**
+ * THE ROUTING FEE CEILING, atomic USDC ($0.003): the most one routing call
+ * pays, and the fee every install so far agreed to. A quote at or below it is
+ * paid inside the spend limits; one above it is not paid at all
+ * ({@link FEE_ABOVE_CEILING}). A lower price needs no release; a higher one
+ * does. A count that has no quote to go on (calls a channel still covers, a
+ * funded-enough check) uses it, so it never overstates.
+ */
+export const ROUTING_FEE_CEILING_ATOMIC = 3_000n;
+/** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
+export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
+/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`, and the
+ *  one doctor sizes from with no 402. Production announces $0.03, the SDK's
+ *  ten-quote default, until the router's update makes it $0.05. */
+export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
+/** The fewest quoted fees a deposit covers, so a deposit's on-chain settle is
+ *  not spent on one or two calls. */
+export const DEPOSIT_FLOOR_FEES = 10n;
 
 /**
- * THE DEPOSIT TENJIN SIGNS: the ceiling only when the wallet holds twice it, so
- * the ceiling still stays in the wallet for the paid tools routing suggests,
- * which pay from the wallet, never the channel. Any smaller or unread balance,
- * or no ceiling, signs the server's hint. The caller refuses a wallet below it.
+ * THE DEPOSIT TENJIN SIGNS: the smallest of the server's hint
+ * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
+ * wallet holding more than the hint keeps the rest for the paid tools routing
+ * suggests, which pay from the wallet, never the channel; one between the
+ * floor and the hint deposits all it holds. Never below {@link DEPOSIT_FLOOR_FEES}
+ * quoted fees or what the next voucher needs, and never above the SDK's
+ * ceiling. A balance that could not be read bounds nothing. The caller
+ * refuses a wallet below the result (`wallet_low`), and the spend authorizer
+ * a limit below it.
  */
 export function routingDepositAtomic(o: {
-  walletAtomic: bigint | null;
   hintAtomic: bigint;
-  maxAtomic: bigint | null;
+  quoteAtomic: bigint;
+  walletAtomic: bigint | null;
+  perCallAtomic: bigint;
+  maxAtomic: bigint;
+  neededAtomic?: bigint;
 }): bigint {
-  if (o.walletAtomic === null || o.maxAtomic === null) return o.hintAtomic;
-  return o.walletAtomic >= 2n * o.maxAtomic ? o.maxAtomic : o.hintAtomic;
+  const least = (a: bigint, b: bigint) => (b < a ? b : a);
+  let amount = least(o.hintAtomic, o.perCallAtomic);
+  if (o.walletAtomic !== null) amount = least(amount, o.walletAtomic);
+  const floor = DEPOSIT_FLOOR_FEES * o.quoteAtomic;
+  const needed = o.neededAtomic ?? 0n;
+  if (amount < floor) amount = floor;
+  if (amount < needed) amount = needed;
+  return least(amount, o.maxAtomic);
 }
 
 /**
@@ -68,40 +98,29 @@ export function refusedWhy(reason: PolicyReason): string {
 /**
  * THE DEPOSIT IS THE SPEND. It meets the whole policy once, the day's budget
  * included, when the SDK's `depositStrategy` reserves it. Each fee paid from
- * it then gets only the per-payment checks: the per-call limit, the creator
- * allowlist (the router's host) and an explicit zero daily limit. It is never
- * refused for the day's running total, which the deposit already consumed.
- * Null when those checks allow the fee.
+ * it then gets only the per-payment checks, at the amount quoted: the per-call
+ * limit, the creator allowlist (the router's host) and an explicit zero daily
+ * limit. It is never refused for the day's running total, which the deposit
+ * already consumed. Null when those checks allow the fee.
  */
-export function feeRefusal(policy: SpendPolicy, host: string): string | null {
+export function feeRefusal(policy: SpendPolicy, host: string, feeAtomic: bigint): string | null {
   const evaluation = evaluateSpendPolicy(
     { ...policy, sessionBudgetAtomic: policy.sessionBudgetAtomic === 0n ? 0n : null },
-    { mode: 'automatic', amountAtomic: ROUTING_FEE_ATOMIC, creator: host, sessionSpentAtomic: 0n },
+    { mode: 'automatic', amountAtomic: feeAtomic, creator: host, sessionSpentAtomic: 0n },
   );
   return evaluation.decision === 'allow' ? null : refusedWhy(evaluation.reason);
 }
 
-/** The paid path for this call, or null for the free path. `tenjin mcp` passes
- *  its payer's; absent, every call is free. */
-export type RouteFor = (baseUrl: string) => Promise<DecisionRoute | null>;
-
-/** The free path's reason code once the server routes only paid calls. */
-export const FEE_REQUIRED = 'fee_required';
-
-/** Whether a decision is the free path's `fee_required` answer. */
-export function isFeeRequired(response: unknown): boolean {
-  const decision = (response as { decision?: { action?: unknown; diagnostics?: unknown } })
-    ?.decision;
-  const diagnostics = decision?.diagnostics as { reasonCode?: unknown } | undefined;
-  return decision?.action === 'native' && diagnostics?.reasonCode === FEE_REQUIRED;
-}
+/** The payer's route for a call to the router at `baseUrl`. `tenjin mcp`
+ *  passes its payer's; absent, a call goes unpaid. */
+export type RouteFor = (baseUrl: string) => DecisionRoute;
 
 /**
  * WHY A CALL WAS NOT PAID, for the user: the reason and the fix, keyed by the
- * payer's skip reason (or `fee_required`, when the free path answered it and
- * nothing else explains why). Null for a reason that is no fault and needs no
- * fix: another session's call on the channel, a server with no paid path, or
- * a call queued past its own budget, or a payment still out when the call's
+ * payer's skip reason (or `no_payer`, when the route asked for the fee and
+ * nothing could pay it). Null for a reason that is no fault and needs no
+ * fix: another session's call on the channel, or a call queued past its own
+ * budget, or a payment still out when the call's
  * budget ran out (it finishes in the background), or an unlock that did not
  * finish inside the call's budget (it keeps running, and the next call gets
  * its answer).
@@ -117,7 +136,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(CHANNEL_DEPOSIT_ATOMIC)} Tenjin needs to set aside for routing`,
+    reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
@@ -137,14 +156,17 @@ const UNPAID: Record<string, { reason: string; fix: string }> = {
     reason: 'the routing payment failed',
     fix: 'Run `tenjin doctor`.',
   },
-  [FEE_REQUIRED]: {
-    reason: 'the router now charges it, and this session cannot pay it',
+  [FEE_ABOVE_CEILING]: {
+    reason: 'the router asks more per call than this install agreed to pay',
+    fix: 'Your usual tools still work.',
+  },
+  [NO_PAYER]: {
+    reason: 'the router charges it, and this session cannot pay it',
     fix: 'Run `tenjin doctor`.',
   },
 };
 const NO_FAULT = new Set([
   'channel_busy',
-  'paid_path_absent',
   'busy',
   'no_call',
   'deadline_after_payment_sent',
@@ -159,11 +181,13 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 
 /**
  * The one line said when a routing call's deposit went through: the money is
- * funds set aside for the next routing fees, not a lookup it bought. It still
- * counts toward the daily limit ({@link feeRefusal}).
+ * funds set aside for the next routing fees, not a lookup it bought. Each fee
+ * from it is the router's quote at that call, so the line names the ceiling,
+ * the one bound every later call keeps. It still counts toward the daily limit
+ * ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing decision costs $${usd(ROUTING_FEE_ATOMIC)}. Unused funds remain yours.`;
+  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing call costs at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}. Unused funds remain yours.`;
 }
 
 /**
@@ -171,8 +195,13 @@ export function depositSentence(amountAtomic: bigint): string {
  * paid. Its reader picks the fix (B1): the person's by default; for the model
  * (the `request` tool's text) a wallet unlock reason's `agentFix`, which asks
  * the person to act and never for the passphrase, and any other reason's own.
+ * A quote above the ceiling names the price quoted, when the payer read one.
  */
-export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person'): string | null {
+export function unpaidSentence(
+  why: string,
+  reader: 'person' | 'agent' = 'person',
+  quotedAtomic?: bigint,
+): string | null {
   const u = unpaid(why);
   if (u === null) return null;
   // An automatic fallback explains the missing funds without reopening checkout.
@@ -183,7 +212,11 @@ export function unpaidSentence(why: string, reader: 'person' | 'agent' = 'person
       : reader === 'agent'
         ? agentFixFor(why, u.fix)
         : u.fix;
-  return `Tenjin routing could not pay its $${usd(ROUTING_FEE_ATOMIC)} fee (${u.reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
+  const reason =
+    why === FEE_ABOVE_CEILING && quotedAtomic !== undefined
+      ? `the router quoted $${usd(quotedAtomic)} a call, more than this install agreed to pay`
+      : u.reason;
+  return `Tenjin could not pay the routing fee (${reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;

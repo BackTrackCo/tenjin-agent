@@ -14,7 +14,6 @@ import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 // The only chain touch is the balance read; mock it so the suite is offline.
 vi.mock('../lib/usdc', () => ({
   USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  USDC_DECIMALS: 6,
   getUsdcBalance: vi.fn(),
 }));
 

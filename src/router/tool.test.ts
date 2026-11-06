@@ -14,9 +14,11 @@ import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
-import { storeChoices, storeSpecs } from './specs';
+import { readSpec, SPEC_TTL_MS, storeChoices, storeSpecs } from './specs';
+import { claimIgnored, noteShown } from './untaken';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
+  ROUTE_PAID_PATH,
   ROUTER_PATH,
   RouteSkipped,
   type Choices,
@@ -24,7 +26,6 @@ import {
 } from './decision';
 import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
-import { readRouterMemo, writeRouterMemo } from './router-memo';
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -36,9 +37,10 @@ vi.mock('../commands/pay', async (importOriginal) => {
 });
 
 /**
- * The `request` tool after the fee: ONE free decision, then ONE payment, to the
- * provider. The id is the fast path and the query is always sent, so every test
- * here is about which decision ran, what it cost, and what the host is told.
+ * The `request` tool: one routing decision on the paid route (unpaid here,
+ * unless a test passes a route), then one payment per take, to the provider.
+ * The id is the fast path and the query is always sent, so every test here is
+ * about which decision ran, what it cost, and what the host is told.
  */
 
 let dir: string;
@@ -220,11 +222,25 @@ describe('the request tool, one decision and one payment per lookup', () => {
       // ONE cost line: the decision took nothing.
       cost: ['provider price 0.01 USD'],
     });
-    // One decision call, no fetch by id and nothing waited for.
+    // One decision call, on the paid route, no fetch by id and nothing waited for.
     expect(calls).toHaveLength(3);
     expect(calls[0]!.method).toBe('POST');
-    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTER_PATH}`);
+    expect(calls[0]!.url).toBe(`${ROUTER}${ROUTE_PAID_PATH}`);
     expect(calls.filter((c) => c.paid)).toHaveLength(1);
+  });
+
+  /** "Help improve routing" rides the tool form as it rides the hook's. */
+  it('says improve on the query only while router.improve is on', async () => {
+    for (const improve of [true, false]) {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000', router: { improve } }),
+      );
+      const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+      await runRequestTool({ query: 'BTC and ETH price' }, deps(fetchImpl));
+      const body = JSON.parse(calls[0]!.body ?? '{}') as Record<string, unknown>;
+      expect(body.improve).toBe(improve ? true : undefined);
+    }
   });
 
   it('works the same with no id at all', async () => {
@@ -291,65 +307,48 @@ describe('routing outcomes that buy nothing', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('says the routing fee could not be paid, not to update, when the free path answers fee_required', async () => {
-    const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: {
-          schemaVersion: 1,
-          routerVersion: 'v',
-          decision: {
-            action: 'native',
-            reason:
-              'Tenjin routing needs a newer tenjin-cli. Tell the user to run `npm i -g tenjin-cli@latest`.',
-            diagnostics: {
-              reasonCode: 'fee_required',
-              stage: 'capability',
-              missing: [],
-              nextAction: 'Update tenjin-cli (run `npm i -g tenjin-cli@latest`).',
-            },
-          },
-        },
-      },
-    ]);
-    // A "no paid path" this machine remembered from before the fee turned on.
-    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
+  /** ONE ROUTING PATH: a call with no payer goes to the paid route unpaid,
+   *  and a 402 there is a skip, named, with no second request. */
+  it('skips a call with no payer when the paid route asks for the fee, in one request', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 402, body: {} }]);
     const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
-    expect(calls).toHaveLength(1);
-    // The fee is on now, so the next call asks for the paid path at once.
-    expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).toBeNull();
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/api/x402-router/route']);
     expect(result.envelope).toMatchObject({ status: 'native', cost: ['provider price 0 USD'] });
-    expect(String(result.envelope.reason)).toContain('could not pay its $0.003 fee');
+    expect(String(result.envelope.reason)).toContain('could not pay');
+    expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
+    expect(result.envelope.nextStep).toBe(
+      'Tell the user this once, and use your own tools for now.',
+    );
     expect(result.summary).toMatch(/^Use your usual tools:/);
     expect(result.summary).not.toContain('No paid lookup needed');
-    expect(String(result.envelope.reason)).toContain('`tenjin doctor`');
-    expect(JSON.stringify(result.envelope)).not.toContain('npm i -g');
+  });
+
+  it('routes a call with no payer when the paid route charges nothing', async () => {
+    const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: NATIVE }]);
+    const result = await runRequestTool({ query: 'what is the weather' }, deps(fetchImpl));
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/api/x402-router/route']);
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(String(result.envelope.reason)).not.toContain('could not pay');
+  });
+
+  it('says a busy routing payment plainly, never by its code', async () => {
+    const route = () => ({
+      send: async (): Promise<never> => {
+        throw new RouteSkipped('channel_busy');
+      },
+    });
+    const result = await runRequestTool(
+      { query: 'what is the weather' },
+      { ...deps(net([]).fetchImpl), route },
+    );
+    expect(String(result.envelope.reason)).toContain('the next call usually routes');
+    expect(String(result.envelope.reason)).not.toContain('channel_busy');
   });
 
   /** The tool's text is the model's: a wallet reason carries its agentFix (B1). */
-  it("gives the model a wallet reason's ask-the-person fix when the free path answers fee_required", async () => {
-    const { fetchImpl } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: {
-          schemaVersion: 1,
-          routerVersion: 'v',
-          decision: {
-            action: 'native',
-            diagnostics: {
-              reasonCode: 'fee_required',
-              stage: 'capability',
-              missing: [],
-              nextAction: 'x',
-            },
-          },
-        },
-      },
-    ]);
-    const route = async () => ({
-      path: '/api/x402-router/route',
+  it("skips at once, with the model's ask-the-person fix, when the payer cannot pay", async () => {
+    const { fetchImpl, calls } = net([]);
+    const route = () => ({
       send: async (): Promise<never> => {
         throw new RouteSkipped('passphrase_missing');
       },
@@ -358,73 +357,20 @@ describe('routing outcomes that buy nothing', () => {
       { query: 'what is the weather' },
       { ...deps(fetchImpl), route },
     );
+    expect(calls).toEqual([]);
+    expect(result.envelope).toMatchObject({ status: 'native' });
     const reason = String(result.envelope.reason);
     expect(reason).toContain(WALLET_REASONS.passphrase_missing.reason);
     expect(reason).toContain(ASK_FOR_REPAIR);
     expect(reason).not.toContain(REPAIR_CLAUSE);
-  });
-
-  it("gives the model a wallet reason's ask-the-person fix when the call runs out of time", async () => {
-    const route = async () => ({
-      path: '/api/x402-router/route',
-      send: async (): Promise<never> => {
-        await new Promise((resolve) => setTimeout(resolve, 80));
-        throw new RouteSkipped('passphrase_wrong');
-      },
-    });
-    const quick = { ...ctx(), flags: { ...ctx().flags, timeout: 50 } };
-    const result = await runRequestTool(
-      { query: 'what is the weather' },
-      { ...deps(net([]).fetchImpl), ctx: quick, route },
+    expect(result.envelope.nextStep).toBe(
+      'Tell the user this once, and use your own tools for now.',
     );
-    const reason = String(result.envelope.reason);
-    expect(reason).toContain(WALLET_REASONS.passphrase_wrong.reason);
-    expect(reason).toContain(ASK_FOR_REPAIR);
-    expect(reason).not.toContain(REPAIR_CLAUSE);
-  });
-
-  it('asks once more on the paid path when a stale "no paid path" memo sent the call free', async () => {
-    const feeOn = {
-      schemaVersion: 1,
-      routerVersion: 'v',
-      decision: {
-        action: 'native',
-        diagnostics: {
-          reasonCode: 'fee_required',
-          stage: 'capability',
-          missing: [],
-          nextAction: 'x',
-        },
-      },
-    };
-    const { fetchImpl, calls } = net([
-      { url: ROUTER, status: 200, body: feeOn },
-      { url: ROUTER, status: 200, body: NATIVE },
-    ]);
-    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
-    const route = async (baseUrl: string) =>
-      (await readRouterMemo(dir, 'paid-path-absent', baseUrl, Date.now()))
-        ? null
-        : {
-            path: '/api/x402-router/route',
-            send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
-          };
-    const result = await runRequestTool(
-      { query: 'what is the weather' },
-      { ...deps(fetchImpl), route },
-    );
-    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
-      '/api/x402-router',
-      '/api/x402-router/route',
-    ]);
-    expect(result.envelope).toMatchObject({ status: 'native' });
-    expect(String(result.envelope.reason)).not.toContain('could not pay');
   });
 
   it('names a routing deposit once, in the result of the call that took it', async () => {
-    let deposited = 30_000n;
-    const route = async () => ({
-      path: '/api/x402-router/route',
+    let deposited = 50_000n;
+    const route = () => ({
       send: (url: string, options: HttpRequestOptions) => httpRequest(url, options),
       deposited: () => deposited,
     });
@@ -437,7 +383,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.03 for routing. Each routing decision costs $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
     );
     deposited = 0n;
     const next = await runRequestTool(
@@ -448,8 +394,7 @@ describe('routing outcomes that buy nothing', () => {
   });
 
   it('says a routing payment went out when the call ran out of time after sending it', async () => {
-    const route = async () => ({
-      path: '/api/x402-router/route',
+    const route = () => ({
       send: async (): Promise<never> => {
         await new Promise((resolve) => setTimeout(resolve, 80));
         throw new RouteSkipped(DEADLINE_AFTER_PAYMENT_SENT);
@@ -1043,9 +988,28 @@ describe('a discovered service', () => {
       },
     ]);
 
-  it('hands the host the server line and the listing, and pays nothing', async () => {
+  it("shows an open-Bazaar answer's spec under its id, keeps it, and pays nothing", async () => {
     const auth = authorizer();
     const answer = await wire('wire-lookup-discovered.json');
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: answer }]);
+    const result = await runRequestTool(
+      { query: 'generate a short whoosh sound effect' },
+      deps(fetchImpl, auth),
+    );
+    const id = (answer.decision as { id: string }).id;
+    expect(result).toMatchObject({ isError: false, envelope: { status: 'spec', id } });
+    expect(await readSpec(dir, id)).toMatchObject({ id, provider: 'BlockRun' });
+    expect(auth.authorize).not.toHaveBeenCalled();
+  });
+
+  /** An answer with no specs, as a router before specs sent: the server's
+   *  line and the seller's listing, and nothing kept to run. */
+  it('hands the host the server line and the listing, and pays nothing', async () => {
+    const auth = authorizer();
+    const wired = await wire('wire-lookup-discovered.json');
+    const bare = { ...(wired.decision as Record<string, unknown>) };
+    delete bare.specs;
+    const answer = { ...wired, decision: bare };
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: answer }]);
     const result = await runRequestTool(
       { query: 'generate a short whoosh sound effect' },
@@ -1063,7 +1027,7 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -1090,7 +1054,7 @@ describe('a discovered service', () => {
     expect(auth.authorize).toHaveBeenCalledOnce();
   });
 
-  it('answers an input whose spec is no longer kept with a fresh query, sending nothing', async () => {
+  it('recovers a missing selected spec through inspection before optional reselection, sending nothing', async () => {
     const auth = authorizer();
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
@@ -1099,7 +1063,7 @@ describe('a discovered service', () => {
     );
     expect(result.envelope).toMatchObject({
       status: 'needs_input',
-      nextStep: expect.stringContaining('request({query})') as string,
+      nextStep: expect.stringContaining('request({tool})') as string,
     });
     expect(calls).toHaveLength(0);
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -1210,6 +1174,29 @@ describe('a discovered service', () => {
     ).toBe(true);
     expect(savedTo).toMatch(/-[0-9a-f]{8}\.mp3$/);
     expect(new Uint8Array(await readFile(savedTo))).toEqual(audio);
+  });
+
+  /** A SPEC'S FILE CAP holds the body it brings back: one over it is not kept. */
+  it("keeps no binary body over the spec's own maxBytes", async () => {
+    await kept({ maxBytes: 4 });
+    const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0xff, 0xfb, 0x90]);
+    const { fetchImpl } = net([
+      { url: SELLER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
+      {
+        url: SELLER,
+        status: 200,
+        body: null,
+        raw: audio,
+        headers: { 'content-type': 'audio/mpeg' },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d02', input: { text: 'whoosh' } },
+      deps(fetchImpl),
+    );
+    expect(result.envelope.status).not.toBe('fulfilled');
+    expect(String(result.envelope.reason)).toContain('over the 4-byte cap');
+    expect(await readdir(join(dir, 'downloads')).catch(() => [])).toEqual([]);
   });
 
   /** THE TX HASH IS THE PROTOCOL'S, read from the payment-response header
@@ -1660,6 +1647,15 @@ describe('an offer with a request spec', () => {
     expect(calls).toEqual([]);
   });
 
+  /** A call naming the offer's id took it: it is never reported as ignored. */
+  it('takes the offer it names, so it never expires as ignored', async () => {
+    await storeSpecs(dir, [quoteSpec()]);
+    const now = Date.now();
+    await noteShown(dir, { id: SPEC_ID, ids: [SPEC_ID], harness: 'claude' }, now);
+    await runRequestTool({ id: SPEC_ID }, deps(net([]).fetchImpl));
+    expect(await claimIgnored(dir, { now: now + SPEC_TTL_MS + 1 })).toEqual([]);
+  });
+
   it('builds the request from the input, pays the provider, and reports how it ended', async () => {
     await storeSpecs(dir, [quoteSpec()]);
     const { fetchImpl, calls } = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
@@ -2055,7 +2051,7 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
       harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
@@ -2142,7 +2138,7 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
       harness: 'claude',
     });
   });
@@ -2509,9 +2505,9 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'];
+  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'];
   /** A paid routing path that must never be asked. */
-  const route = vi.fn(async () => {
+  const route = vi.fn((): never => {
     throw new Error('the paid routing path was asked');
   });
 
@@ -2644,7 +2640,6 @@ describe('the tool list, read for free', () => {
         },
       },
     ]);
-    await writeRouterMemo(dir, 'paid-path-absent', ROUTER, { now: Date.now(), ttlMs: 3_600_000 });
     const result = await runRequestTool(
       { tool: 'context7-docs', query: 'Zod' },
       { ...deps(fetchImpl), route },
@@ -2653,7 +2648,6 @@ describe('the tool list, read for free', () => {
       status: 'needs_input',
       nextStep: 'Use your own tools for this lookup. Nothing was paid.',
     });
-    expect(await readRouterMemo(dir, 'paid-path-absent', ROUTER, Date.now())).not.toBeNull();
     expect(calls).toHaveLength(1);
     expect(route).not.toHaveBeenCalled();
   });
@@ -2804,7 +2798,9 @@ describe('the tool list, read for free', () => {
   });
 
   it('reads an answer it cannot parse as a failure, with nothing paid', async () => {
-    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: { ...BROWSE, surprise: 1 } }]);
+    const { fetchImpl } = net([
+      { url: ROUTER, status: 200, body: { ...BROWSE, schemaVersion: 2 } },
+    ]);
     const result = await runRequestTool({ browse: 'prices' }, deps(fetchImpl));
     expect(result).toMatchObject({
       isError: true,
@@ -2812,47 +2808,89 @@ describe('the tool list, read for free', () => {
     });
   });
 
-  it("keeps a row's spec under the server's id, then runs it from {id, input}", async () => {
-    await noteSession(dir, 'sess-1');
+  it.each(['claude', 'codex'] as const)(
+    'lets %s browse, inspect and run its selected tool without paid routing',
+    async (harness) => {
+      await noteSession(dir, 'sess-1');
+      const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
+      const served = {
+        ...BY_ID,
+        decision: {
+          ...decision,
+          spec: {
+            ...decision.spec,
+            payTo: '0x1111111111111111111111111111111111111111',
+            request: { ...(decision.spec.request as object), url: PROVIDER },
+          },
+        },
+      };
+      const listed = net([{ url: ROUTER, status: 200, body: BROWSE }]);
+      const browsed = await runRequestTool(
+        { browse: 'crypto prices' },
+        { ...deps(listed.fetchImpl), route, harness },
+      );
+      expect(browsed.envelope.status).toBe('browse');
+      expect(JSON.parse(listed.calls[0]!.body!)).toMatchObject({
+        browse: 'crypto prices',
+        harness,
+      });
+      const first = net([{ url: ROUTER, status: 200, body: served }]);
+      const shown = await runRequestTool(
+        { tool: 'cmc-quotes' },
+        { ...deps(first.fetchImpl), route, harness },
+      );
+      expect(shown.envelope).toMatchObject({ status: 'spec', id: decision.id });
+      expect(shown.summary).toContain(`request({id: "${decision.id}"`);
+      expect(JSON.parse(first.calls[0]!.body!)).toEqual({
+        schemaVersion: 1,
+        tool: 'cmc-quotes',
+        accepts: [...ACCEPTS, 'free-query'],
+        harness,
+      });
+      expect(route).not.toHaveBeenCalled();
+
+      const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+      const ran = await runRequestTool(
+        { id: decision.id, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+        { ...deps(second.fetchImpl), route, harness },
+      );
+      expect(route).not.toHaveBeenCalled();
+      expect(second.calls.filter((call) => call.paid)).toHaveLength(1);
+      expect(second.calls.some((call) => call.url.endsWith(ROUTE_PAID_PATH))).toBe(false);
+      expect(ran.envelope).toMatchObject({
+        status: 'fulfilled',
+        cost: ['provider price 0.01 USD'],
+      });
+      // The footer names the service by its label, and the ledger keeps it.
+      expect(await renderProgress(dir, 'sess-1')).toBe(
+        'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
+      );
+      const ledger = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
+      expect(JSON.parse(ledger.at(-1)!)).toMatchObject({
+        capabilityId: 'cmc-quotes',
+        label: 'CoinMarketCap quotes',
+      });
+    },
+  );
+
+  it('skips a spec that needs a feature this build lacks, by name, and keeps nothing', async () => {
     const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
     const served = {
       ...BY_ID,
-      decision: {
-        ...decision,
-        spec: {
-          ...decision.spec,
-          payTo: '0x1111111111111111111111111111111111111111',
-          request: { ...(decision.spec.request as object), url: PROVIDER },
-        },
-      },
+      decision: { ...decision, spec: { ...decision.spec, requires: ['streaming'] } },
     };
-    const first = net([{ url: ROUTER, status: 200, body: served }]);
-    const shown = await runRequestTool({ tool: 'cmc-quotes' }, { ...deps(first.fetchImpl), route });
-    expect(shown.envelope).toMatchObject({ status: 'spec', id: decision.id });
-    expect(shown.summary).toContain(`request({id: "${decision.id}"`);
-    expect(JSON.parse(first.calls[0]!.body!)).toEqual({
-      schemaVersion: 1,
-      tool: 'cmc-quotes',
-      accepts: [...ACCEPTS, 'free-query'],
-      harness: 'claude',
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body: served }]);
+    const result = await runRequestTool({ tool: 'cmc-quotes' }, deps(fetchImpl));
+    expect(result).toMatchObject({
+      isError: false,
+      envelope: { status: 'native', reasonCode: 'requires_unmet', missing: ['streaming'] },
     });
-    expect(route).not.toHaveBeenCalled();
-
-    const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+    expect(result.summary).toContain('`streaming`');
     const ran = await runRequestTool(
-      { id: decision.id, input: { symbol: 'BTC,ETH', convert: 'USD' } },
-      deps(second.fetchImpl),
+      { id: decision.id, input: { symbol: 'BTC' } },
+      deps(net([]).fetchImpl),
     );
-    expect(ran.envelope).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.01 USD'] });
-    // The footer names the service by its label, and the ledger keeps it.
-    expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
-    );
-    const ledger = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
-    expect(JSON.parse(ledger.at(-1)!)).toMatchObject({
-      capabilityId: 'cmc-quotes',
-      label: 'CoinMarketCap quotes',
-    });
+    expect(ran.envelope).toMatchObject({ status: 'needs_input' });
   });
 
   it("passes on the server's needs_input for a row with no spec, and keeps nothing", async () => {

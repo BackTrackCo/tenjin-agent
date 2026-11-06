@@ -2,8 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import type { RuntimeSetup } from '../lib/runtime';
@@ -13,7 +12,6 @@ import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
   alongsideCodexRefresh,
   CODEX_REFRESH_LINES,
-  codexAtLeast,
   ownCodexRow,
   refreshCodexPlugin,
   runCodexDoctor,
@@ -22,7 +20,8 @@ import {
   type CodexRun,
   type CodexSetupDeps,
 } from './codex-install';
-import { runHookCommand } from './hook-command';
+import { fixture } from './fixture-test-utils';
+import { runHookKind } from './hook-command';
 import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
 import { runNativeHook, runPromptHook, runShortfallHook } from './hooks';
@@ -55,10 +54,7 @@ const native = {
   tool_use_id: 'call-1',
   tool_input: { search_query: [{ q: 'example search' }] },
 };
-const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-const paidOffer = JSON.parse(
-  readFileSync(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'),
-) as { decision: { id: string } };
+const paidOffer = fixture('wire-hook-execute-spec.json') as { decision: { id: string } };
 const nativeAnswer = {
   schemaVersion: 1,
   routerVersion: 'v',
@@ -102,15 +98,21 @@ afterEach(async () => {
  */
 function router(answer: unknown) {
   const bodies: Record<string, unknown>[] = [];
+  /** Outcome reports (an ignored offer's), apart from the decisions. */
+  const reports: Record<string, unknown>[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     if (body.jsonrpc !== undefined) {
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0xf4240' }));
     }
+    if (body.status !== undefined) {
+      reports.push(body);
+      return new Response(null, { status: 204 });
+    }
     bodies.push(body);
     return new Response(JSON.stringify(answer));
   }) as typeof fetch;
-  return { bodies, fetchImpl };
+  return { bodies, reports, fetchImpl };
 }
 
 const codexDeps = (fetchImpl: typeof fetch) => ({
@@ -417,9 +419,7 @@ describe('Codex routing through the router', () => {
   });
 
   /** The free docs lookup before a search, from the shared fixture. */
-  const freeNote = JSON.parse(
-    readFileSync(join(fixtures, 'wire-hook-execute-note.json'), 'utf8'),
-  ) as { decision: { id: string } };
+  const freeNote = fixture('wire-hook-execute-note.json') as { decision: { id: string } };
 
   it('notes a free lookup on a web.run search, and shows it after the search ran', async () => {
     const pre = router(freeNote);
@@ -461,7 +461,7 @@ describe('Codex routing through the router', () => {
   };
 
   it('denies a batch once, naming the rest as exact JSON, and lets the re-run through', async () => {
-    const { bodies, fetchImpl } = router(paidOffer);
+    const { bodies, reports, fetchImpl } = router(paidOffer);
     const event = { ...native, tool_input: batch, cwd: dir, transcript_path: transcript };
     const out = await runNativeHook(event, codexDeps(fetchImpl));
     expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
@@ -486,6 +486,15 @@ describe('Codex routing through the router', () => {
       expect(again.response).toBeNull();
     }
     expect(bodies.length).toBe(routerCalls);
+    // Running the rest natively, with the offer untaken, ignored it: said once.
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    expect(reports[0]).toEqual({
+      schemaVersion: 1,
+      id: at(paidOffer, 'decision', 'id'),
+      harness: 'codex',
+      status: 'ignored',
+      reason: 'native_after_offer',
+    });
   });
 
   it('routes a lone URL open as WebFetch, and runs a batch untouched on a free or no offer', async () => {
@@ -522,23 +531,13 @@ describe('Codex routing through the router', () => {
     }
   });
 
-  /** One hook command run, its stdout captured. */
-  async function hookRun(kind: 'prompt' | 'native', event: unknown, extra: object = {}) {
-    const writes: string[] = [];
-    const io = {
-      stdout: { write: (s: string) => (writes.push(s), true) } as unknown as NodeJS.WritableStream,
-      stderr: process.stderr,
-      isTTY: false,
-    };
+  /** One routing leg as the Codex plugin's `mcp_tool` hook runs it, in
+   *  Codex's answer shape. */
+  async function hookRun(kind: 'prompt' | 'native', event: unknown) {
     const { fetchImpl } = router(paidOffer);
-    await runHookCommand(kind, io, {
-      dataDir: dir,
-      harness: 'codex',
-      readEvent: async () => JSON.stringify(event),
-      fetchImpl,
-      ...extra,
-    });
-    return writes.length === 0 ? null : (JSON.parse(writes[0]!) as unknown);
+    return codexResponse(
+      await runHookKind(kind, event, { dataDir: dir, harness: 'codex', fetchImpl }),
+    );
   }
   // Built per test: `dir` and `transcript` are set in beforeEach.
   const promptEvent = () => ({
@@ -582,6 +581,8 @@ function host(config: unknown = {}, rt: Partial<RuntimeSetup> = {}) {
   const steps: string[] = [];
   const deps: CodexSetupDeps = {
     homeDir: join(dir, 'home'),
+    // No harness: the suite may itself run inside one.
+    env: {},
     runtime: async () => ({
       state: 'skipped',
       root: join(dir, 'runtime'),
@@ -667,6 +668,24 @@ describe('Codex install, uninstall and doctor', () => {
     const { deps } = host();
     const out = await runCodexInstall({}, ctx(), deps);
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+  });
+
+  /** The Claude install's Help improve routing question, once per machine. */
+  it('hands an agent in Codex the Help improve routing question once, after the spend answer', async () => {
+    await writeFile(join(dir, 'config.json'), '{}');
+    const { deps } = host();
+    const env = { CODEX_SESSION_ID: 'thread-1' };
+    const steps = async (args: Parameters<typeof runCodexInstall>[0]) =>
+      (
+        (await runCodexInstall(args, ctx(), { ...deps, env })).data as {
+          nextSteps: { id: string; options: { command: string | null }[] }[];
+        }
+      ).nextSteps;
+    expect((await steps({})).map((q) => q.id)).toEqual(['spend']);
+    const answered = await steps({ yes: true });
+    expect(answered.map((q) => q.id)).toEqual(['improve']);
+    expect(answered[0]!.options[0]!.command).toBe('tenjin config set router.improve true');
+    expect(await steps({ yes: true })).toEqual([]);
   });
 
   it('writes the limits the two flags name, and asks nothing', async () => {
@@ -948,14 +967,6 @@ describe('Codex install, uninstall and doctor', () => {
     });
     // Nothing ran: no codex command, and the only reads are the stand-ins above.
     expect(steps).toEqual([]);
-  });
-
-  it('compares Codex builds by number, a suffix ignored', () => {
-    expect(codexAtLeast('0.157.1', '0.148.0')).toBe(true);
-    expect(codexAtLeast('0.149.0', '0.149.0')).toBe(true);
-    expect(codexAtLeast('0.149.0-alpha.2', '0.149.0')).toBe(true);
-    expect(codexAtLeast('0.148.9', '0.149.0')).toBe(false);
-    expect(codexAtLeast('1.0.0', '0.148.0')).toBe(true);
   });
 
   it('reads one hooks/list, runs no codex command, and never calls the build a gate', async () => {

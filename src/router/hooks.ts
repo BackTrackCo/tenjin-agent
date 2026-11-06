@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
-import { parseUsdToAtomic, toMoney } from '../lib/money';
+import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
 import { readSpendSummary, spentOf } from '../lib/spend-ledger';
@@ -20,9 +20,9 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestDecision, ROUTER_PATH, type HookDecision } from './decision';
+import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
-import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
@@ -40,6 +40,7 @@ import {
   bindDecision,
   claimRedirect,
   markOffered,
+  promptOfferKey,
   type OfferedTerms,
   newCallId,
   claimNote,
@@ -54,25 +55,28 @@ import {
   writeProgress,
 } from './progress';
 import { routerSettings, type RouterSettings } from './settings';
+import { claimIgnored, noteShown, offerScope, reportIgnored } from './untaken';
+import { ownHostsFor } from './own-urls';
 
 /**
  * The six hook handlers. Between them they do exactly three things: build and
- * seal the packet, ask for one free decision, and say one thing back to the
+ * seal the packet, ask for one routing decision, and say one thing back to the
  * harness. Before an `execute` is shown where nobody can approve it, they also
  * read what the wallet's files say (`readWalletFacts`) and its USDC balance
  * from the RPC (`spendShortfall`). A free offer on a search keeps its line on
- * disk for after the search (`markNoted`); that is the only other thing they
- * touch.
+ * disk for after the search (`markNoted`), and every shown offer is kept until
+ * it is taken, so one that is ignored is reported once (`untaken.ts`); those
+ * are the only other things they touch.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
  * hooks run on every prompt and after every native search, and their cost is
  * the product's floor.
- * On the free path the decision costs nothing. The paid path exists only when
- * these handlers run inside `tenjin mcp`, behind Claude Code's `mcp_tool` hook
- * entries: that process passes its payer as {@link HookDeps.route}, and the
- * payer, not this file, signs and pays (`routing-payer.ts`). Run as
- * `tenjin hook <kind>`, every call is free.
+ * Every routing call goes to the paid route. These handlers run inside
+ * `tenjin mcp`, behind the plugins' `mcp_tool` hook entries: that process
+ * passes its payer as {@link HookDeps.route}, and the payer, not this file,
+ * signs and pays (`routing-payer.ts`). The `tenjin hook <kind>` command form
+ * runs none of them (`hook-command.ts`).
  *
  * EVERY FAILURE IS SILENT. A backend that is down, slow or answering nonsense
  * leaves the prompt and the native result unchanged; the cause goes to
@@ -555,16 +559,16 @@ export interface HookDeps {
    * protocol channel.
    */
   warn?: (line: string) => void;
-  /** The paid path, passed by `tenjin mcp`. Absent (`tenjin hook <kind>`),
-   *  every call takes the free path. */
+  /** The payer's route, passed by `tenjin mcp`. Absent, a call goes unpaid,
+   *  and a router that asks for the fee skips it. */
   route?: RouteFor;
   /** A line for the user beside this leg's answer (`runHookKind` puts it in
    *  the hook's `systemMessage`). */
   notice?: (line: string) => void;
   /**
    * Inside `tenjin mcp`: the payer's in-memory sign verdict (what its last
-   * unlock said, no I/O). Absent (`tenjin hook <kind>`, which cannot unlock),
-   * it is decided from the wallet's files alone ({@link spendShortfall}).
+   * unlock said, no I/O). Absent (a caller with no payer, which cannot
+   * unlock), it is decided from the wallet's files alone ({@link spendShortfall}).
    */
   signer?: () => SignVerdict;
   /**
@@ -628,8 +632,8 @@ function gateDeadline(deps: HookDeps): number {
  *   as the creator the way `pay` names it. Only `allow` runs alone. Nothing is
  *   reserved, and the amount actually signed is still `gateSpend`'s to cap.
  * - A WALLET THAT CANNOT SIGN. Inside `tenjin mcp` that is the payer's own
- *   verdict ({@link HookDeps.signer}); as `tenjin hook <kind>`, which cannot
- *   unlock, it is `canSign` over the wallet's files alone (`readWalletFacts`):
+ *   verdict ({@link HookDeps.signer}); with no payer, which cannot unlock,
+ *   it is `canSign` over the wallet's files alone (`readWalletFacts`):
  *   no wallet and no key, a malformed TENJIN_WALLET_KEY, a wallet.json nobody
  *   can read, or the saved passphrase file gone while TENJIN_WALLET_PASSPHRASE
  *   is unset. Approval cannot unlock a wallet mid-session, so this one
@@ -643,7 +647,7 @@ function gateDeadline(deps: HookDeps): number {
  *
  * ONLY A DEFINITE BLOCK OR A BALANCE READ BELOW THE PRICE WITHHOLDS. An
  * unknown signer (a keychain that did not answer, an unlock not tried yet,
- * every command-mode leg with a readable wallet) still offers: only `blocked`
+ * every payer-less leg with a readable wallet) still offers: only `blocked`
  * gates (`eligibility.ts`). A balance that cannot be read (an RPC that fails,
  * rate-limits or runs past the gate's budget) leaves the policy to decide
  * alone, as before this check. Base's public RPC refused the sixth `eth_call`
@@ -788,39 +792,15 @@ async function vetOffer<T extends OfferDecision>(
   return { withheld: shortfall.withheld };
 }
 
-/** Where the server (`lib/x402-router/policy.ts`) writes a price, and only
- *  there: "about $0.28 per call" in a list entry, "about $0.03: request(" or
- *  "about $0.03 (price can vary" in an alternative, "$0.30): request(" closing
- *  a curated alternative, and "$0.30 via https://" for a curated offer's own
- *  (already checked as a field, so it fits). A dollar amount anywhere else is
- *  a description's words ("seats from $500/month"), never a price. Read only
- *  for an offer that carries no specs: every other one names each service's
- *  price as a field. */
-const LISTED_PRICE_RE =
-  /about \$(\d+(?:\.\d+)?)(?= per call|: request\(| \(price can vary)|\$(\d+(?:\.\d+)?)(?=\): request\(| via https?:\/\/)/g;
-
-/** A JSON string in the hint: the user's query, an id, or a seller's own words.
- *  A dollar amount there is data ("a laptop under $1000"), never a price. */
-const QUOTED_RE = /"(?:[^"\\]|\\.)*"/g;
-
 /**
  * The other services an offer names, by price in atomic USDC: every spec
- * beside the offer's own (its line and its specs name the same ids), or, for
- * an offer with no specs, each price the line quotes.
+ * beside the offer's own (its line and its specs name the same ids). A price
+ * is a field, never the line's prose: an offer with no specs names none.
  */
 function listedPrices(offer: OfferDecision): bigint[] {
-  if (offer.specs !== undefined) {
-    return offer.specs
-      .filter((spec) => spec.id !== offer.id)
-      .map((spec) => BigInt(spec.priceAtomic));
-  }
-  return [...offer.hint.replace(QUOTED_RE, '""').matchAll(LISTED_PRICE_RE)].flatMap((match) => {
-    try {
-      return [BigInt(parseUsdToAtomic((match[1] ?? match[2]) as string))];
-    } catch {
-      return [];
-    }
-  });
+  return (offer.specs ?? [])
+    .filter((spec) => spec.id !== offer.id)
+    .map((spec) => BigInt(spec.priceAtomic));
 }
 
 /** A listed price as a line quotes one: dollars with at least two decimals. */
@@ -886,7 +866,8 @@ export interface PromptHookOutcome {
 }
 
 /**
- * `tenjin hook prompt` (UserPromptSubmit). One free decision from the user's
+ * The prompt leg (UserPromptSubmit), run by `tenjin mcp`'s `hook` tool. One
+ * routing decision from the user's
  * own words. Only an offer (`execute`, or a `discovered` service) gets a line:
  * the server's hint, attributed. `native`, `needs_input` and a decision that
  * failed or timed out are silence:
@@ -899,6 +880,9 @@ export interface PromptHookOutcome {
  * when the paid call would auto-execute, the same rule the pre-call deny
  * follows. A discovered line is shown anyway, with a sentence saying it needs
  * approval or funds ({@link vetOffer}): it may be the only service for the step.
+ *
+ * Once per machine, on a machine nobody has asked, it also hands the agent the
+ * "Help improve routing" question ({@link improveAsk}), offer or not.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = eventOf(raw, deps);
@@ -907,12 +891,13 @@ export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<Promp
 }
 
 /**
- * `tenjin hook answer` (PostToolUse on `AskUserQuestion`). THE USER JUST
- * ANSWERED, which is a user turn in all but name: an answer like "I can get an
- * API key" is exactly when a pay-per-call service would do instead. So it is
- * routed the way a prompt is, with the answers as the current message and the
- * session's history before them, and an offer is added beside the answers the
- * host reads next. Anything else is no output at all.
+ * The answer leg (PostToolUse on `AskUserQuestion`), run by `tenjin mcp`'s
+ * `hook` tool. THE USER JUST ANSWERED, which is a user turn in all but name: an
+ * answer like "I can get an API key" is exactly when a pay-per-call service
+ * would do instead. So it is routed the way a prompt is, with the answers as
+ * the current message and the session's history before them, and an offer is
+ * added beside the answers the host reads next. Anything else is no output at
+ * all.
  */
 export async function runAnswerHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = eventOf(raw, deps);
@@ -931,45 +916,79 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
+  // Beside the routing decision, never ahead of it.
+  const asking = hookEventName === 'UserPromptSubmit' ? improveAsk(router, deps) : undefined;
+  await sweepUntaken(deps, router);
 
-  const sealed = seal(
-    scoped(
-      await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
-      router.settings,
-    ),
-  );
-  const footer = await openFooter(deps, event.sessionId, 'prompt');
-  const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
+  const sealed = await sealHere(
+    await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
+    router,
+    event.cwd,
     deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
   );
+  const footer = await openFooter(deps, event.sessionId, 'prompt', {});
+  const deadline = gateDeadline(deps);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  const improve = await asking;
   if (!isOffer(outcome)) {
     await footer.close(outcome);
-    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+    return {
+      ...injection(hookEventName, improve),
+      ...(outcome !== null ? { action: outcome.action } : {}),
+    };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
-    return { response: null, action: outcome.action, withheld: true };
+    return { ...injection(hookEventName, improve), action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
+  if (hookEventName === 'UserPromptSubmit') {
+    // The mod draws `Tenjin offered <label>` under this prompt from this record.
+    await markOffered(
+      deps.dataDir,
+      localSession(event.sessionId, deps),
+      promptOfferKey(text),
+      offeredTerms(vetted.offer),
+      deps.now?.(),
+    );
+  }
   return {
     action: outcome.action,
     id: outcome.id,
-    ...injection(hookEventName, attributed(vetted.offer.hint, hostOf(deps))),
+    ...injection(hookEventName, attributed(vetted.offer.hint, hostOf(deps)), improve),
   };
 }
 
+/**
+ * "HELP IMPROVE ROUTING" FOR A MACHINE NOBODY HAS ASKED: one installed before
+ * the question existed, which no install will ask, since its updates never
+ * run one. The first prompt the router sees there hands the question to the
+ * agent, once per machine (`improve-question.ts`). Never while the router is
+ * off, which keeps nothing. Loaded lazily, as it brings the config writer the
+ * hook chunk does not load. A failure costs only the question, never this
+ * turn's offer.
+ */
+async function improveAsk(router: RouterHere, deps: HookDeps): Promise<string | undefined> {
+  try {
+    const { improveSessionAsk } = await import('./improve-question');
+    const ask = await improveSessionAsk(deps.dataDir, router.config);
+    return ask === undefined ? undefined : `${HINT_SOURCE}: ${ask}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The lines this leg adds to the agent's context, or no answer when there are none. */
 function injection(
   hookEventName: 'UserPromptSubmit' | 'PostToolUse',
-  line: string,
+  ...lines: (string | undefined)[]
 ): { response: unknown } {
-  return { response: { hookSpecificOutput: { hookEventName, additionalContext: line } } };
+  const said = lines.filter((line) => line !== undefined);
+  if (said.length === 0) return { response: null };
+  return {
+    response: { hookSpecificOutput: { hookEventName, additionalContext: said.join('\n\n') } },
+  };
 }
 
 /** What either native arm reports about itself; `response` is all the harness sees. */
@@ -1042,7 +1061,7 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
 
 /**
  * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
- * agent's tool list, the packet from the right transcript, one free decision,
+ * agent's tool list, the packet from the right transcript, one routing decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
  * as `offer`; everything else is the reason there is none. `repeated` is the
  * pre-call arm's one-block rule, asked only of an offer that would be shown;
@@ -1050,8 +1069,8 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
  * arm would only withhold costs no decision and writes no offer row.
  * `passFree` is the pre-call arm's too: a free offer comes back marked `free`
  * before the spend policy, the wallet or `repeated` is asked, since it is
- * never a redirect, and the arm closes its footer: shown when it kept the
- * offer's line, withheld when it did not.
+ * never a redirect, and the arm closes its footer: noted when it kept the
+ * offer's line for the after-call arm, withheld when it did not.
  */
 async function routeNativeCall(
   event: Omit<NativeCall, 'tool' | 'pending'>,
@@ -1066,10 +1085,13 @@ async function routeNativeCall(
     /** False where a discovered offer must be affordable as it stands: the
      *  call it would replace is the one way to reach the user. */
     canAskUser?: boolean;
+    /** The pre-call arm's: this is a native call, so an offer this agent was
+     *  shown and has not taken was ignored for it. */
+    native?: boolean;
   } = {},
 ): Promise<
   | { offer: OfferDecision; free?: undefined }
-  | { offer: ExecuteDecision; free: true; close: (shown: boolean) => Promise<void> }
+  | { offer: ExecuteDecision; free: true; close: (noted: boolean) => Promise<void> }
   | { offer: null; outcome: NativeHookOutcome }
 > {
   const { nativeOutcome, repeated } = opts;
@@ -1077,6 +1099,13 @@ async function routeNativeCall(
   // agent lookup and the transcript, for both native arms.
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { offer: null, outcome: { response: null } };
+  await sweepUntaken(
+    deps,
+    router,
+    opts.native === true
+      ? offerScope(localSession(event.sessionId, deps), event.agentId)
+      : undefined,
+  );
   // A SUBAGENT IS ROUTED ONLY WHEN IT IS KNOWN TO HAVE THE TOOL: redirecting
   // or offering to one that cannot make the call strands it (#377). Decided
   // before the router is asked, so an unknown one costs nothing.
@@ -1091,7 +1120,7 @@ async function routeNativeCall(
   // 45% of an active session's rows. The claim after the decision still
   // settles two parallel copies of one call.
   if (opts.redirected !== undefined && (await opts.redirected())) {
-    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
     await footer.close(null, { withheld: 'already redirected once' });
     return { offer: null, outcome: { response: null, alreadyRedirected: true } };
   }
@@ -1099,15 +1128,15 @@ async function routeNativeCall(
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate. Inside a subagent, its own task
   // comes first: see `buildNativePacket`.
-  const sealed = seal(
-    scoped(
-      await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
-        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
-        ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-        harness: hostOf(deps),
-      }),
-      router.settings,
-    ),
+  const sealed = await sealHere(
+    await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
+      ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+      harness: hostOf(deps),
+    }),
+    router,
+    event.cwd,
+    deps,
   );
   const { packet } = sealed;
   // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
@@ -1131,16 +1160,9 @@ async function routeNativeCall(
     );
     return { offer: null, outcome: { response: null } };
   }
-  const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+  const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1149,8 +1171,8 @@ async function routeNativeCall(
     };
   }
   if (opts.passFree === true && isFree(outcome)) {
-    const close = (shown: boolean) =>
-      footer.close(outcome, shown ? undefined : { withheld: 'free lookup, call runs' });
+    const close = (noted: boolean) =>
+      footer.close(outcome, noted ? { noted: true } : { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, close };
   }
   const vetted = await vetOffer(
@@ -1175,11 +1197,12 @@ async function routeNativeCall(
 }
 
 /**
- * `tenjin hook native` (PreToolUse on `WebSearch|WebFetch`). PER-LOOKUP
- * ROUTING BEFORE THE CALL, exactly as main: a clear offer denies the native
- * call with the server's hint as the reason, carrying the id so the redirected
- * call runs the decision just made. Anything else, including silence, a slow
- * backend and a `needs_input`, lets the call run with no output at all.
+ * The native leg (PreToolUse on `WebSearch|WebFetch`), run by `tenjin mcp`'s
+ * `hook` tool. PER-LOOKUP ROUTING BEFORE THE CALL, exactly as main: a clear
+ * offer denies the native call with the server's hint as the reason, carrying
+ * the id so the redirected call runs the decision just made. Anything else,
+ * including silence, a slow backend and a `needs_input`, lets the call run with
+ * no output at all.
  *
  * WHAT IS NEW is who can be denied. A subagent not known to have the request
  * tool, or whose spend would need an approval it cannot ask for, is never
@@ -1205,8 +1228,9 @@ async function routeNativeCall(
  * `delivery: "note"` the server's line is kept, once per query per agent in
  * five minutes, and the after-call arm shows it once the search has run; its
  * footer closes as a shown offer, so the lookup the agent may call resolves to
- * this session. Any other free offer, and any WebFetch, just runs: the server
- * owns which offer is a note.
+ * this session, but its untaken record waits for the after-call arm to show
+ * it. Any other free offer, and any WebFetch, just runs: the server owns which
+ * offer is a note.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1219,6 +1243,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const claim = (t: string) => claimRedirect(deps.dataDir, session, event.agentId, t, deps.now?.());
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
+    native: true,
     repeated: async () => {
       if (!(await claim(target))) return true;
       await Promise.all(targets.filter((t) => t !== target).map(claim));
@@ -1244,7 +1269,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       routed.offer.delivery === 'note' &&
       toolUseId !== undefined &&
       (await claimNote(deps.dataDir, session, event.agentId, pending.query, now)) &&
-      (await markNoted(deps.dataDir, session, toolUseId, { offerId: id, line: hint }, now));
+      (await markNoted(
+        deps.dataDir,
+        session,
+        toolUseId,
+        { offerId: id, line: hint, ids: offeredIds(routed.offer) },
+        now,
+      ));
     await routed.close(noted);
     return {
       response: null,
@@ -1313,13 +1344,13 @@ function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): Na
 }
 
 /**
- * `tenjin hook ask` (PreToolUse on `AskUserQuestion`). THE HOST IS ABOUT TO
- * ASK THE USER FOR SOMETHING, often an API key or an account for a one-off
- * step, which is the moment a pay-per-call service could answer instead. The
- * questions and their options ride as the pending call, and an offer denies
- * the question once with the server's line: never twice for the same
- * question, and a free offer never denies anything. The host can ask again,
- * and that question runs.
+ * The ask leg (PreToolUse on `AskUserQuestion`), run by `tenjin mcp`'s `hook`
+ * tool. THE HOST IS ABOUT TO ASK THE USER FOR SOMETHING, often an API key or an
+ * account for a one-off step, which is the moment a pay-per-call service could
+ * answer instead. The questions and their options ride as the pending call, and
+ * an offer denies the question once with the server's line: never twice for the
+ * same question, and a free offer never denies anything. The host can ask
+ * again, and that question runs.
  *
  * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
  * PLACE. Elsewhere a discovered offer over the cap or the balance is shown
@@ -1360,19 +1391,21 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
 }
 
 /**
- * `tenjin hook shortfall` (PostToolUse and PostToolUseFailure on
- * `WebSearch|WebFetch`). THE FREE TOOL HAS ALREADY RUN, and a result that is
- * fine ends here: no router call, no footer, no added latency. Only a clear
- * shortfall ({@link shortfallOf}) asks for one free decision, with what the
- * harness reported riding in the packet as `nativeOutcome`, and only an offer
- * (`execute` or `discovered`) says anything. A call the pre-call arm already redirected is not
- * offered on again. Two lines ask the router nothing: a PDF WebFetch saved
- * whole, where the agent is pointed at the file, and a noted search.
+ * The shortfall leg (PostToolUse and PostToolUseFailure on
+ * `WebSearch|WebFetch`), run by `tenjin mcp`'s `hook` tool. THE FREE TOOL HAS
+ * ALREADY RUN, and a result that is fine ends here: no router call, no footer,
+ * no added latency. Only a clear shortfall ({@link shortfallOf}) asks for one
+ * routing decision, with what the harness reported riding in the packet as
+ * `nativeOutcome`, and only an offer (`execute` or `discovered`) says anything.
+ * A call the pre-call arm already redirected is not offered on again. Two lines
+ * ask the router nothing: a PDF WebFetch saved whole, where the agent is
+ * pointed at the file, and a noted search.
  *
  * A SEARCH THE PRE-CALL ARM NOTED A FREE LOOKUP ON gets that line now, read
  * from disk, framed as the option it is, under this event's own name, and the
  * router is not asked: the note already names the service it picked for this
- * search, so a call shows one line at most. An interrupted call gets nothing,
+ * search, so a call shows one line at most, and its untaken record is kept
+ * here, where it is shown (`untaken.ts`). An interrupted call gets nothing,
  * since the agent never read a result for it to follow.
  *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
@@ -1395,6 +1428,16 @@ export async function runShortfallHook(
         );
   if (note !== null) {
     if (event.interrupted === true) return { response: null };
+    await noteShown(
+      deps.dataDir,
+      {
+        id: note.offerId,
+        ids: note.ids ?? [],
+        harness: hostOf(deps),
+        scope: offerScope(localSession(event.sessionId, deps), event.agentId),
+      },
+      deps.now?.(),
+    );
     return {
       response: {
         hookSpecificOutput: {
@@ -1480,12 +1523,13 @@ export interface DelegationHookOutcome {
 }
 
 /**
- * `tenjin hook agent` (PreToolUse on `Agent|Task`). The one moment a subagent's
- * whole assignment is visible: its task prompt IS the current message, and the
- * parent's own turn is the history, so the router decides on exactly what the
- * subagent will do. On a clear offer, it is appended to that task as
- * one optional line, which reaches the subagent as part of its instructions
- * from its parent, before it starts. Anything else is no output at all.
+ * The agent leg (PreToolUse on `Agent|Task`), run by `tenjin mcp`'s `hook`
+ * tool. The one moment a subagent's whole assignment is visible: its task
+ * prompt IS the current message, and the parent's own turn is the history, so
+ * the router decides on exactly what the subagent will do. On a clear offer, it
+ * is appended to that task as one optional line, which reaches the subagent as
+ * part of its instructions from its parent, before it starts. Anything else is
+ * no output at all.
  *
  * The subagent will be the payer, so the same auto-execute rule applies here.
  */
@@ -1499,14 +1543,20 @@ export async function runDelegationHook(
   if (task === null || task.trim().length === 0) return { response: null };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
+  await sweepUntaken(deps, router);
   // The subagent this task goes to is the one that would have to make the
   // call, so the same rule: only a type known to have the tool is offered. With
   // no type the harness runs its general-purpose agent, which inherits it.
   if ((await requestToolAccess(event.subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
     return { response: null, noRequestTool: true };
   }
-  const sealed = seal(
-    scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, task), router.settings),
+  const sealed = await sealHere(
+    await buildPromptPacket(event.transcriptPath, event.sessionId, task, hostOf(deps), {
+      delegated: true,
+    }),
+    router,
+    event.cwd,
+    deps,
   );
   // The native hook's two rules, with the task as the subject: a task the mask
   // would change is not sent, since the offer is written back into it, and a
@@ -1521,16 +1571,10 @@ export async function runDelegationHook(
   // The native hook's rule, for the same reason: a delegation routed without
   // the user's words could offer what they just ruled out.
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
-  const footer = await openFooter(deps, event.sessionId, 'delegate');
+  // Only the subagent could take this offer, so no native call here ignores it.
+  const footer = await openFooter(deps, event.sessionId, 'delegate', null);
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1569,17 +1613,26 @@ export async function runDelegationHook(
  *
  * Display only. Every write inside swallows its own failure, and a shown offer
  * also leaves the id-to-session binding the tool resolves its progress through,
- * and the request specs the line names, which the tool reads by id.
+ * the request specs the line names, which the tool reads by id, and its
+ * untaken record (`untaken.ts`), scoped to `shownTo`: the agent whose native
+ * call would ignore it, or null for a delegated task's. A noted line is not
+ * shown yet, so it gets no untaken record here: the after-call arm keeps one
+ * when it shows the line.
  */
 async function openFooter(
   deps: HookDeps,
   sessionId: string,
   operation: 'prompt' | 'search' | 'delegate',
+  shownTo: { agentId?: string } | null,
 ): Promise<{
   /** Why this call's routing fee was not paid, when it was not. */
   unpaid: (why: string) => void;
-  /** `withheld` is why an `execute` was not shown, in the footer's words. */
-  close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
+  /** `withheld` is why an `execute` was not shown, in the footer's words;
+   *  `noted` is a free line the after-call arm shows once the search has run. */
+  close: (
+    decision: HookDecision | null,
+    opts?: { withheld?: string; noted?: true },
+  ) => Promise<void>;
 }> {
   sessionId = localSession(sessionId, deps);
   const now = (): number => deps.now?.() ?? Date.now();
@@ -1616,6 +1669,18 @@ async function openFooter(
       );
       if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
+        if (opts?.noted !== true) {
+          await noteShown(
+            deps.dataDir,
+            {
+              id: decision.id,
+              ids: offeredIds(decision),
+              harness: hostOf(deps),
+              ...(shownTo !== null ? { scope: offerScope(sessionId, shownTo.agentId) } : {}),
+            },
+            now(),
+          );
+        }
         // The line is shown, so the specs of the services it names are what
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.
@@ -1635,10 +1700,43 @@ async function openFooter(
   };
 }
 
+/** Every id an offer's line names: its own, each spec's and each choice's. */
+function offeredIds(offer: OfferDecision): string[] {
+  return [
+    offer.id,
+    ...(offer.specs ?? []).map((spec) => spec.id),
+    ...(offer.action === 'discovered' ? (offer.choices?.options ?? []).map((o) => o.id) : []),
+  ];
+}
+
+/**
+ * ONE ROUTED LEG REPORTS WHAT WAS IGNORED SINCE THE LAST ONE: every offer
+ * past its 15 minutes and, with `nativeScope` (a native call about to run),
+ * every offer that same agent still holds. The claim is a few local file
+ * operations, made before this leg can show an offer of its own; the reports
+ * go without being waited on, so a slow router never holds the turn.
+ */
+async function sweepUntaken(
+  deps: HookDeps,
+  router: RouterHere,
+  nativeScope?: string,
+): Promise<void> {
+  const claimed = await claimIgnored(deps.dataDir, {
+    now: deps.now?.() ?? Date.now(),
+    ...(nativeScope !== undefined ? { nativeScope } : {}),
+  });
+  if (claimed.length === 0) return;
+  void reportIgnored(claimed, {
+    ctx: hookContext(deps),
+    baseUrl: resolveBaseUrl(deps, router.config),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
+}
+
 /** What the gate decided, in the footer's own words. A silent backend is not a
  *  blank line: the turn runs on native tools and the footer says which. A
- *  routing fee that was not paid (`fee_required`, `wallet_low` and the rest)
- *  is named as such, never passed off as the router choosing native tools. */
+ *  routing fee that was not paid (`wallet_low`, `no_payer` and the rest) is
+ *  named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
@@ -1646,14 +1744,19 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
     return `fee unpaid: ${unpaid}`;
   }
   if (decision === null) return 'native tools (router unavailable)';
+  // An offer this build skipped is not the router choosing native tools.
+  if (decision.action === 'native' && decision.diagnostics.reasonCode === REQUIRES_UNMET) {
+    return 'native tools (offer needs newer tenjin)';
+  }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }
 
 /** The one routing call, its packet SEALED (masked and bounded): a path that
- *  skips the mask does not typecheck. Inside `tenjin mcp` it takes the paid
- *  path; a call that path cannot pay takes the free path, and the first such
- *  call in a session tells the user why and what fixes it.
+ *  skips the mask does not typecheck. It goes to the paid route, whose fee
+ *  the payer in `tenjin mcp` pays; a call it cannot pay is skipped at once,
+ *  the native tool runs, and the first such call in a session tells the user
+ *  why and what fixes it.
  *
  *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the
@@ -1662,11 +1765,12 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
-  config: PartialConfig,
+  router: RouterHere,
   sessionId: string,
   deadline: number,
   unpaid?: (why: string) => void,
 ): Promise<HookDecision | null> {
+  const { config } = router;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1676,7 +1780,7 @@ async function decide(
     warn(`tenjin hook: ${baseUrl} did not answer a moment ago, so the native tool runs (${left}s)`);
     return null;
   }
-  const route = (await deps.route?.(baseUrl)) ?? null;
+  const route = deps.route?.(baseUrl);
   const outcome = await requestDecision(
     'hook',
     { packet, sessionId },
@@ -1685,47 +1789,34 @@ async function decide(
       baseUrl,
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
       harness: hostOf(deps),
+      improve: router.settings.improve.value,
       timeoutMs: Math.max(0, deadline - now),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-      ...(route !== null ? { route } : {}),
+      ...(route !== undefined ? { route } : {}),
     },
   );
+  for (const { id, missing } of outcome.status === 'decided' ? (outcome.skipped ?? []) : []) {
+    warn(
+      `tenjin hook: offer ${id} needs ${missing.join(', ')}, which this build lacks, so it was skipped`,
+    );
+  }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
   if (deposited > 0n) deps.notice?.(depositSentence(deposited));
-  const why =
-    outcome.status === 'skipped'
-      ? outcome.why
-      : (outcome.freePath ??
-        (outcome.status === 'decided' && isFeeRequired(outcome.decision)
-          ? FEE_REQUIRED
-          : undefined));
-  if (why !== undefined) unpaid?.(why);
-  // A `fee_required` on a call the machine's "no paid path" memo sent to the
-  // free path is stale news, not a fault: the memo is cleared below and the
-  // next call pays. It does not use up the session's one notice.
-  const memoed = deps.route !== undefined && route === null;
-  if (why !== undefined && !(memoed && why === FEE_REQUIRED)) {
-    await tellOnce(deps, sessionId, why, now);
-  }
-  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
-  // over, and the session hears so once ("Tenjin wallet unlocked." or
-  // "... funded."). Only a decided call that did not fall back to the free path.
-  if (route !== null && outcome.status === 'decided' && outcome.freePath === undefined) {
-    const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
-    if (cleared !== null) deps.notice?.(cleared);
-  }
-  // The fee is on: a "no paid path" remembered from before stops holding the
-  // machine's calls on the free path.
-  if (outcome.status === 'decided' && isFeeRequired(outcome.decision)) {
-    await clearRouterMemo(deps.dataDir, 'paid-path-absent', baseUrl);
-  }
   if (outcome.status === 'skipped') {
+    // The router answered (its 402, say) before the skip: it is reachable.
+    if (outcome.answered === true) await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
+    unpaid?.(outcome.why);
+    await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
-  if (outcome.freePath !== undefined) {
-    warn(`tenjin hook: the routing fee was not paid (${outcome.freePath}), so the free path ran`);
+  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
+  // over, and the session hears so once ("Tenjin wallet unlocked." or
+  // "... funded.").
+  if (route !== undefined && outcome.status === 'decided') {
+    const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
+    if (cleared !== null) deps.notice?.(cleared);
   }
   if (outcome.status === 'failed' && outcome.unreachable === true) {
     await writeRouterMemo(deps.dataDir, 'unreachable', baseUrl, {
@@ -1742,7 +1833,7 @@ async function decide(
     await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
   }
   if (outcome.status === 'failed') {
-    warn(`tenjin hook: ${baseUrl}${route?.path ?? ROUTER_PATH} ${outcome.reason}`);
+    warn(`tenjin hook: ${baseUrl}${ROUTE_PAID_PATH} ${outcome.reason}`);
     return null;
   }
   return outcome.decision.decision;
@@ -1755,8 +1846,14 @@ async function decide(
  * routing. A different reason later in the session is news again (a missing
  * passphrase repaired into a wrong one), the same one is not.
  */
-async function tellOnce(deps: HookDeps, sessionId: string, why: string, now: number) {
-  const sentence = unpaidSentence(why);
+async function tellOnce(
+  deps: HookDeps,
+  sessionId: string,
+  why: string,
+  now: number,
+  quotedAtomic?: bigint,
+) {
+  const sentence = unpaidSentence(why, 'person', quotedAtomic);
   if (sentence === null || deps.notice === undefined) return;
   const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
   if (told === 'tell') deps.notice(sentence);
@@ -1797,6 +1894,12 @@ function pendingCallOf(
   return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
 }
 
+/** `router.*` for one event's directory, and the global config it read. */
+interface RouterHere {
+  settings: RouterSettings;
+  config: PartialConfig;
+}
+
 /**
  * `router.*` for the event's directory with the global config it came from,
  * which is read ONCE per event and also names the base URL; null when the
@@ -1805,10 +1908,7 @@ function pendingCallOf(
  * machine. A config that cannot be read is off too, since a switch the user
  * set must not fail open.
  */
-async function routerFor(
-  cwd: string | undefined,
-  deps: HookDeps,
-): Promise<{ settings: RouterSettings; config: PartialConfig } | null> {
+async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<RouterHere | null> {
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   try {
     const config = await loadRawConfig(deps.dataDir);
@@ -1821,6 +1921,22 @@ async function routerFor(
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;
   }
+}
+
+/**
+ * The packet as it leaves: scoped to `router.context`, then sealed, with the
+ * links on the user's own hosts named (`own-urls.ts`), read only when it has
+ * a link at all.
+ */
+async function sealHere(
+  packet: Packet,
+  router: RouterHere,
+  cwd: string | undefined,
+  deps: HookDeps,
+): Promise<Sealed> {
+  const inScope = scoped(packet, router.settings);
+  const ownHosts = await ownHostsFor(inScope, cwd ?? process.cwd(), hostOf(deps), deps.homeDir);
+  return seal(inScope, ownHosts.length > 0 ? { ownHosts } : {});
 }
 
 /**

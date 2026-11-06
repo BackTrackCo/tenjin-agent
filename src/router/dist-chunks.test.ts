@@ -111,7 +111,10 @@ describe.skipIf(!existsSync(dist))('the hook chunk graph', () => {
     const sources = closure(entry!).flatMap(sourcesOf);
     for (const { label, re } of [
       ...FORBIDDEN,
-      { label: "the runtime's writer", re: /src[/\\]lib[/\\]runtime\.ts/ },
+      {
+        label: "the runtime's writer",
+        re: /src[/\\]lib[/\\]runtime(-(activate|launchers|place|provenance|verify))?\.ts/,
+      },
       { label: 'the update command', re: /src[/\\]commands[/\\]update/ },
       { label: 'zod', re: /[/\\]zod[@/\\]/ },
     ]) {

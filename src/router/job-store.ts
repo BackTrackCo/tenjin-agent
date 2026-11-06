@@ -1,12 +1,11 @@
-import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { open, opendir, rm } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock } from '../lib/lock';
 import { jobsDir } from '../lib/paths';
 import { JobSchema } from './decision';
+import { sha256Hex } from '../lib/hash';
+import { readJsonFile, sweep, writePrivate } from './store-files';
 
 /**
  * A PAID CALL WHOSE SELLER WAS STILL WORKING, kept on this machine so any later
@@ -101,10 +100,8 @@ const TakeSchema = z.strictObject({
 });
 export type JobTake = z.infer<typeof TakeSchema>;
 
-const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
-
 export function takePath(dataDir: string, offerId: string, take: number): string {
-  return join(jobsDir(dataDir), `${digest(offerId)}.${take}.json`);
+  return join(jobsDir(dataDir), `${sha256Hex(offerId)}.${take}.json`);
 }
 
 /**
@@ -112,10 +109,7 @@ export function takePath(dataDir: string, offerId: string, take: number): string
  * one no later process can finish, and the caller says so.
  */
 export async function writeTake(dataDir: string, take: JobTake): Promise<void> {
-  await writeFileAtomic(takePath(dataDir, take.offerId, take.take), JSON.stringify(take), {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
+  await writePrivate(takePath(dataDir, take.offerId, take.take), JSON.stringify(take));
   void pruneJobs(dataDir, Date.now());
 }
 
@@ -125,23 +119,12 @@ export async function readTake(
   offerId: string,
   take: number,
 ): Promise<JobTake | null> {
-  const file = await open(
-    takePath(dataDir, offerId, take),
-    constants.O_RDONLY | constants.O_NOFOLLOW,
-  ).catch(() => undefined);
-  if (file === undefined) return null;
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return null;
-    const parsed = TakeSchema.safeParse(JSON.parse(await file.readFile('utf8')));
-    return parsed.success && parsed.data.offerId === offerId && parsed.data.take === take
-      ? parsed.data
-      : null;
-  } catch {
-    return null;
-  } finally {
-    await file.close().catch(() => undefined);
-  }
+  const parsed = TakeSchema.safeParse(
+    await readJsonFile(takePath(dataDir, offerId, take), MAX_RECORD_BYTES),
+  );
+  return parsed.success && parsed.data.offerId === offerId && parsed.data.take === take
+    ? parsed.data
+    : null;
 }
 
 /** Every take kept for this offer, in order. */
@@ -206,45 +189,14 @@ export async function endTake(
   return ended !== null ? { won: false, take: ended } : null;
 }
 
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
-
 /** Drop every take past its `expiresAt`, and any unreadable one past two days.
  *  Housekeeping only: never throws. */
 export async function pruneJobs(dataDir: string, now: number): Promise<void> {
-  try {
-    const dir = jobsDir(dataDir);
-    for await (const entry of await opendir(dir)) {
-      if (!entry.isFile() || !/^[0-9a-f]{64}\.\d\.json$/.test(entry.name)) continue;
-      const path = join(dir, entry.name);
-      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
-        () => undefined,
-      );
-      if (file === undefined) continue;
-      let expired = false;
-      try {
-        const stat = await file.stat();
-        const parsed =
-          stat.size <= MAX_RECORD_BYTES
-            ? TakeSchema.safeParse(parseJson(await file.readFile('utf8')))
-            : undefined;
-        expired =
-          parsed?.success === true
-            ? Date.parse(parsed.data.expiresAt) < now
-            : now - stat.mtimeMs > UNREADABLE_TTL_MS;
-      } catch {
-        // Left for the next pass.
-      } finally {
-        await file.close().catch(() => undefined);
-      }
-      if (expired) await rm(path, { force: true }).catch(() => undefined);
-    }
-  } catch {
-    // Housekeeping only.
-  }
+  await sweep(jobsDir(dataDir), async (name, path) => {
+    if (!/^[0-9a-f]{64}\.\d\.json$/.test(name)) return false;
+    const parsed = TakeSchema.safeParse(await readJsonFile(path, MAX_RECORD_BYTES));
+    if (parsed.success) return Date.parse(parsed.data.expiresAt) < now;
+    // Unreadable, or gone (which rejects, and is left for the next pass).
+    return now - (await lstat(path)).mtimeMs > UNREADABLE_TTL_MS;
+  });
 }

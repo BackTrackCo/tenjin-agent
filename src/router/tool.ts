@@ -67,8 +67,7 @@ import {
   type PlanStop,
   type QuotedCall,
 } from './plan';
-import { depositSentence, FEE_REQUIRED, isFeeRequired, unpaidSentence, type RouteFor } from './fee';
-import { clearRouterMemo } from './router-memo';
+import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -87,7 +86,8 @@ import {
   type PaidRecord,
   type SignedAuthorization,
 } from './paid';
-import { routerSettings } from './settings';
+import { routerSettings, type RouterSettings } from './settings';
+import { markTaken } from './untaken';
 import type { Harness } from './names';
 import {
   answerState,
@@ -111,8 +111,8 @@ import {
 } from './job-store';
 
 /**
- * The `request` tool: one free decision per lookup, then ONE payment, to the
- * provider.
+ * The `request` tool: one routing decision per lookup, paid its routing fee
+ * by `tenjin mcp`'s payer, then one payment per take to the provider.
  *
  * AN OFFER WITH A SPEC RUNS HERE, IN ONE CALL. The hook keeps each offered
  * service's spec by its id, and its line is the skeleton of the call:
@@ -153,7 +153,7 @@ import {
  */
 
 export interface RequestToolArgs {
-  /** The task to route, or the lookup for an explicitly selected free tool. */
+  /** The task to route, or the query for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
    *  it grants nothing locally, every cap still applies. */
@@ -200,8 +200,8 @@ export interface RequestToolDeps {
   cwd?: string;
   /** Clock seam for a saved file's name. */
   now?: () => number;
-  /** The paid path, passed by `tenjin mcp`. Absent, the routing call takes
-   *  the free path. */
+  /** The payer's route, passed by `tenjin mcp`. Absent, the routing call goes
+   *  unpaid, and a router that asks for the fee skips it. */
   route?: RouteFor;
   /** Test seam for the media download; production pins each connection to
    *  the address it validated. */
@@ -265,9 +265,9 @@ export async function runRequestTool(
       ? call
       : {
           ...call,
-          route: async (baseUrl) => {
-            const picked = await route(baseUrl);
-            if (picked !== null) routes.push(picked);
+          route: (baseUrl) => {
+            const picked = route(baseUrl);
+            routes.push(picked);
             return picked;
           },
         },
@@ -306,8 +306,8 @@ export async function runApproveTool(
   args: ApproveToolArgs,
   deps: RequestToolDeps,
 ): Promise<RequestToolResult> {
-  const off = await routerOff(deps);
-  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  const here = await routerHere(deps);
+  if ('off' in here) return fail('needs_input', here.off, { nextStep: ROUTER_OFF_NEXT_STEP });
   const { dataDir } = deps.ctx;
   const now = deps.now ?? Date.now;
   const fresh = 'Call request again with the same call for a fresh quote.';
@@ -456,8 +456,8 @@ async function requestTool(
   // THE SAME SWITCH THE HOOKS OBEY, read first. The tool is pre-allowed, so
   // without this it would be a second path off the machine in a repository the
   // user marked private: nothing is sent and nothing is paid.
-  const off = await routerOff(deps);
-  if (off !== null) return fail('needs_input', off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  const here = await routerHere(deps);
+  if ('off' in here) return fail('needs_input', here.off, { nextStep: ROUTER_OFF_NEXT_STEP });
   if (args.browse !== undefined || (args.tool !== undefined && args.query === undefined))
     return readToolList(args, deps);
   if (args.tool !== undefined) {
@@ -479,6 +479,9 @@ async function requestTool(
     return resumeJob(args.job, deps);
   }
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  // A call naming an offer's id takes it, whatever it asks: that offer was not
+  // ignored, so nothing reports it so (`untaken.ts`).
+  if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
   let id = offered;
   const { input } = args;
   const choice = args.choice !== undefined && args.choice.length > 0 ? args.choice : undefined;
@@ -579,7 +582,10 @@ async function requestTool(
       return fail(
         'needs_input',
         'The spec for that offer is no longer kept on this machine (it expired or was pruned), so nothing was sent or paid.',
-        { nextStep: 'Call request({query}) with the task for a fresh offer, then fill its line.' },
+        {
+          nextStep:
+            'Inspect the selected tool again with request({tool}) (browse for its tool id if needed), then retry with the fresh id and input. Use request({query}) only to choose a tool again.',
+        },
       );
     }
   }
@@ -596,16 +602,18 @@ async function requestTool(
   // chain, BESIDE the lookup and never in front of it: a slow or rate-limited
   // RPC costs this call nothing, and a record it could not answer for waits
   // `RECHECK_MS` before it is asked about again. Its own errors are its own.
-  void reconcilePayments(deps.ctx.dataDir, {
-    rpcUrl: settings.rpcUrl,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-  }).catch(() => undefined);
+  if (args.tool === undefined)
+    void reconcilePayments(deps.ctx.dataDir, {
+      rpcUrl: settings.rpcUrl,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    }).catch(() => undefined);
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
     harness: deps.harness ?? 'claude',
+    improve: here.settings.improve.value,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -632,43 +640,33 @@ async function requestTool(
   // with no id the gate picks a service and answers with its spec. An id the
   // backend does not know is its own plain note, and the pick still runs from
   // the query.
-  // ON THE PAID PATH the payer pays the routing fee with the stock x402
-  // client, and a call it cannot pay takes the free path. Explicit selected
-  // free lookups bypass ask() and bind through requestToolSpec below.
-  const ask = async () => {
-    const route = (await deps.route?.(settings.baseUrl)) ?? null;
-    const outcome = await requestDecision(
-      'tool',
-      { query, ...(id !== undefined ? { id } : {}) },
-      { ...decisionDeps, ...(route !== null ? { route } : {}) },
-    );
-    return { route, outcome };
-  };
-  const first =
+  // ON THE PAID ROUTE the payer pays the routing fee with the stock x402
+  // client. A call it cannot pay is answered here at once: nothing was
+  // routed, and the agent uses its own tools.
+  const fresh =
     args.tool !== undefined
-      ? { route: null, outcome: await requestToolSpec(args.tool.trim(), decisionDeps, query) }
-      : await ask();
-  let fresh = first.outcome;
-  // The machine's "no paid path" memo sent this call to the free path, which
-  // now asks for the fee: the memo is stale, so ask once more on the paid path.
-  if (
-    deps.route !== undefined &&
-    args.tool === undefined &&
-    first.route === null &&
-    fresh.status === 'decided' &&
-    isFeeRequired(fresh.decision)
-  ) {
-    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
-    fresh = (await ask()).outcome;
-  }
+      ? await requestToolSpec(args.tool.trim(), decisionDeps, query)
+      : await requestDecision(
+          'tool',
+          { query, ...(id !== undefined ? { id } : {}) },
+          { ...decisionDeps, route: deps.route?.(settings.baseUrl) },
+        );
   if (fresh.status === 'skipped') {
     await footer.done('native');
+    // A reason that lasts (money, the wallet, a limit, the fee's price) is
+    // the user's to hear once; a busy channel or a slow unlock is not.
+    const lasting = unpaidSentence(fresh.why, 'agent', fresh.quotedAtomic);
     return fail(
       'native',
       fresh.why === DEADLINE_AFTER_PAYMENT_SENT
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
-        : `${unpaidSentence(fresh.why, 'agent') ?? ''} This call ran out of time before the free path answered, so nothing was routed or paid.`.trim(),
-      { nextStep: 'Use your own tools for this one.' },
+        : `${lasting ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, or the wallet was still unlocking); the next call usually routes.'} Nothing was routed and no provider was paid.`,
+      {
+        nextStep:
+          lasting !== null
+            ? 'Tell the user this once, and use your own tools for now.'
+            : 'Use your own tools for this one.',
+      },
     );
   }
   if (fresh.status === 'failed') {
@@ -679,44 +677,30 @@ async function requestTool(
   }
   const { decision, note } = fresh.decision;
 
-  if (
-    args.tool !== undefined &&
-    decision.action !== 'native' &&
-    decision.action !== 'needs_input' &&
-    (decision.action !== 'execute' ||
-      decision.capabilityId !== args.tool.trim() ||
-      BigInt(decision.providerPriceAtomic) !== 0n)
-  ) {
-    await footer.done('failed');
-    return fail(
-      'failed',
-      'The answer is not a runnable free lookup for the selected tool. Nothing was sent to a provider or paid.',
-      {
-        nextStep: 'Use your own tools for this lookup.',
-        ...(note !== undefined ? { note } : {}),
-      },
-    );
-  }
-
-  if (args.tool !== undefined && isFeeRequired(fresh.decision)) {
-    await footer.done('needs_input');
-    return fail('needs_input', 'This router does not support the selected free lookup.', {
-      nextStep: 'Use your own tools for this lookup. Nothing was paid.',
-    });
-  }
-
-  // THE FREE PATH NO LONGER ROUTES. The server's line says to update the CLI,
-  // which is wrong for this one: what stops routing here is a routing fee this
-  // call could not pay, for the reason the payer gave.
-  if (isFeeRequired(fresh.decision)) {
-    // The fee is on: the next call asks for the paid path again.
-    await clearRouterMemo(deps.ctx.dataDir, 'paid-path-absent', settings.baseUrl);
-    await footer.done('native');
-    return fail(
-      'native',
-      unpaidSentence(fresh.freePath ?? FEE_REQUIRED, 'agent') ?? unpaidSentence(FEE_REQUIRED)!,
-      { nextStep: 'Tell the user this once, and use your own tools for now.' },
-    );
+  if (args.tool !== undefined) {
+    if (decision.action === 'native' && decision.diagnostics.reasonCode === 'fee_required') {
+      await footer.done('needs_input');
+      return fail('needs_input', 'This router does not support the selected free lookup.', {
+        nextStep: 'Use your own tools for this lookup. Nothing was paid.',
+      });
+    }
+    if (
+      decision.action !== 'native' &&
+      decision.action !== 'needs_input' &&
+      (decision.action !== 'execute' ||
+        decision.capabilityId !== args.tool.trim() ||
+        BigInt(decision.providerPriceAtomic) !== 0n)
+    ) {
+      await footer.done('failed');
+      return fail(
+        'failed',
+        'The answer is not a runnable free lookup for the selected tool. Nothing was sent to a provider or paid.',
+        {
+          nextStep: 'Use your own tools for this lookup.',
+          ...(note !== undefined ? { note } : {}),
+        },
+      );
+    }
   }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
@@ -824,8 +808,8 @@ async function requestTool(
  * and keeps it under the fresh offer id the server minted, so `{id, input}`
  * runs it exactly as it runs a hook's offer. Neither is a lookup: no gate call,
  * no routing fee, nothing paid, and the hooks' per-lookup routing is unchanged.
- * This handles the list and spec reads; selected `{tool, query}` lookups run
- * above. The credential rule every other call follows applies to their words.
+ * This handles list and spec reads; selected `{tool, query}` runs above.
+ * The credential rule every other call follows applies to its words.
  */
 async function readToolList(
   args: RequestToolArgs,
@@ -1180,6 +1164,8 @@ export async function paySpec(
       ...(spec.job !== undefined
         ? { job: { spec: spec.job, offerId: id, take: take?.n ?? 1, input: merged } }
         : {}),
+      ...(spec.timeoutS !== undefined ? { timeoutMs: spec.timeoutS * 1000 } : {}),
+      ...(spec.maxBytes !== undefined ? { maxBytes: spec.maxBytes } : {}),
     },
     admission,
     deps,
@@ -1259,6 +1245,10 @@ export interface ProviderCall {
   /** The spec's job: how this call is finished when the seller answers
    *  before its result is ready, and which take of which offer it is. */
   job?: CallJob;
+  /** The spec's own deadline and file cap (its `timeoutS` and `maxBytes`),
+   *  in place of the CLI's. */
+  timeoutMs?: number;
+  maxBytes?: number;
 }
 
 interface CallJob {
@@ -1360,6 +1350,8 @@ async function payAndDeliver(
             : admitAlone(call, admission.alone, deps),
         requestKey: call.requestKey,
         ...(call.resultSchema !== undefined ? { resultSchema: call.resultSchema } : {}),
+        ...(call.timeoutMs !== undefined ? { timeoutMs: call.timeoutMs } : {}),
+        ...(call.maxBytes !== undefined ? { maxBytes: call.maxBytes } : {}),
         printBody: true,
         ...(call.job !== undefined
           ? {
@@ -1629,7 +1621,15 @@ interface DeliveredMoney {
 /** What delivering needs of a call: a provider call, or a job's record of one. */
 type DeliverCall = Pick<
   ProviderCall,
-  'capabilityId' | 'provider' | 'label' | 'media' | 'parameters' | 'sent' | 'note' | 'project'
+  | 'capabilityId'
+  | 'provider'
+  | 'label'
+  | 'media'
+  | 'parameters'
+  | 'sent'
+  | 'note'
+  | 'project'
+  | 'maxBytes'
 > & { request: { url: string } };
 
 /**
@@ -1697,6 +1697,7 @@ async function deliverResult(
         deps,
         call.capabilityId,
         mediaUrlsIn(bodyText ?? '', MAX_MEDIA_FILES - (inline?.savedFiles.length ?? 0)),
+        call.maxBytes,
       )
     : { saved: [], capped: false, failed: false };
   if (linked.capped) unsaved ??= CAP_REACHED;
@@ -1784,13 +1785,16 @@ async function deliverResult(
 }
 
 /** The files a paid result links to, saved within what this call may still
- *  write. Best effort, like every save after the money moved. */
+ *  write, each under the spec's file cap when it names one. Best effort, like
+ *  every save after the money moved. */
 async function saveLinked(
   deps: RequestToolDeps,
   stem: string,
   urls: string[],
+  maxBytes: number | undefined,
 ): Promise<{ saved: string[]; capped: boolean; failed: boolean }> {
   return saveMedia(deps.ctx.dataDir, stem, urls, {
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(deps.mediaTransport !== undefined ? { transport: deps.mediaTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
@@ -2630,20 +2634,26 @@ const ROUTER_OFF_NEXT_STEP =
   'Continue with your own tools. Nothing was sent to the router and nothing was bought.';
 
 /**
- * Why the router is off for this directory, naming the key and the file that
- * set it, or null when it is on. A layer that cannot be read is off: a switch
- * the user set must not fail open.
+ * `router.*` for this directory, or why the router is off here, naming the key
+ * and the file that set it. A layer that cannot be read is off: a switch the
+ * user set must not fail open.
  */
-async function routerOff(deps: RequestToolDeps): Promise<string | null> {
+async function routerHere(
+  deps: RequestToolDeps,
+): Promise<{ settings: RouterSettings } | { off: string }> {
   try {
-    const { enabled } = await routerSettings({
+    const settings = await routerSettings({
       cwd: deps.cwd ?? process.cwd(),
       dataDir: deps.ctx.dataDir,
     });
-    if (enabled.value) return null;
-    return `router.enabled is false in ${enabled.path ?? 'the config'}, so the router is off here.`;
+    if (settings.enabled.value) return { settings };
+    return {
+      off: `router.enabled is false in ${settings.enabled.path ?? 'the config'}, so the router is off here.`,
+    };
   } catch (err) {
-    return `router.enabled could not be read (${err instanceof Error ? err.message : String(err)}), so the router is off here.`;
+    return {
+      off: `router.enabled could not be read (${err instanceof Error ? err.message : String(err)}), so the router is off here.`,
+    };
   }
 }
 

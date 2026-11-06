@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   HINT_SOURCE,
+  hookOutcome,
   NEAR_EMPTY_BYTES,
   promptSkipReason,
   runAnswerHook,
@@ -20,9 +21,9 @@ import {
   toolNamed,
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
-import { runHookCommand } from './hook-command';
-import { readChoices, readSpec } from './specs';
-import { ROUTER_PATH } from './decision';
+import { runHookKind } from './hook-command';
+import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
+import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import {
   claimRedirect,
   renderProgress,
@@ -31,6 +32,7 @@ import {
   wasOffered,
 } from './progress';
 import { runRequestTool } from './tool';
+import { claimIgnored, offerScope } from './untaken';
 import type { SignVerdict } from './eligibility';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 import { writePassphraseRecord } from '../lib/passphrase-record';
@@ -56,8 +58,14 @@ async function offerRecord(sessionId: string, toolUseId: string): Promise<unknow
   return JSON.parse(await readFile(join(sessionDir(dir, sessionId), `offer-${key}.json`), 'utf8'));
 }
 
-/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto. */
-const ROUTER_POLICY = { maxAutoSpend: '250000', sessionBudget: '5000000', confirm: 'above:250000' };
+/** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto, and
+ *  that it asked Help improve routing, so a prompt carries only its offer. */
+const ROUTER_POLICY = {
+  maxAutoSpend: '250000',
+  sessionBudget: '5000000',
+  confirm: 'above:250000',
+  install: { improveAsked: true },
+};
 /** The wallet file's cleartext address, which is all a hook reads of it. */
 const WALLET = '0x1234567890AbcdEF1234567890aBcdef12345678';
 /** The configured default `rpcUrl`, where the balance read goes. */
@@ -98,11 +106,21 @@ const BASE = 'https://tenjin.sh';
  * A recorded decision answer; `calls` is what the hook sent the router. The
  * balance read goes to {@link RPC}, or a fallback, through the same fetch and
  * is answered from {@link rpcAnswer} and recorded in {@link rpcCalls} instead.
+ * An outcome report (an ignored offer's) is answered 204 and kept in
+ * `reports`, apart from the decisions.
  */
-function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: unknown[] } {
+function router(
+  body: unknown,
+  status = 200,
+): { fetchImpl: typeof fetch; calls: unknown[]; reports: { url: string; body: unknown }[] } {
   const calls: unknown[] = [];
+  const reports: { url: string; body: unknown }[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const sent = { url: String(input), body: JSON.parse(String(init?.body ?? 'null')) };
+    if (sent.url.endsWith(ROUTER_PATH) && (sent.body as { status?: unknown })?.status) {
+      reports.push(sent);
+      return new Response(null, { status: 204 });
+    }
     if (RPCS.includes(sent.url)) {
       rpcCalls.push(sent);
       if (typeof rpcAnswer === 'function') return rpcAnswer(init);
@@ -115,7 +133,7 @@ function router(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: 
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, reports };
 }
 
 const NATIVE = {
@@ -268,10 +286,10 @@ describe('the prompt hook', () => {
     // harness actually exposes; every other word, id included, is the server's.
     expect(line).toBe(SEEN);
     expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
-    // One free call, carrying the packet and nothing else.
+    // One call, on the paid route, carrying the packet and nothing else.
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
-    expect(sent.url).toBe(`${BASE}${ROUTER_PATH}`);
+    expect(sent.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
     // The route reads a STRICT object: an extra field is a 400, which is a
     // turn with no hint.
     expect(Object.keys(sent.body).sort()).toEqual([
@@ -282,6 +300,98 @@ describe('the prompt hook', () => {
       'sessionId',
     ]);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
+  });
+
+  /** A link the host opens itself, on this repository's forge or claude.ai,
+   *  is named in `ownUrls`; any other link is not. */
+  it("names the user's own links: the repository's remote host and claude.ai", async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/widgets.git\n',
+    );
+    const { fetchImpl, calls } = router(NATIVE);
+    const pr = 'https://github.com/acme/widgets/pull/12';
+    const artifact = 'https://claude.ai/code/artifact/0195f3a1';
+    await runPromptHook(promptEvent(`compare ${pr} with ${artifact} and https://example.test/x`), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    const packet = (calls[0] as { body: { packet: Record<string, unknown> } }).body.packet;
+    expect(packet.ownUrls).toEqual([pr, artifact]);
+    expect(packet.literalUrls).toHaveLength(3);
+  });
+
+  /** "HELP IMPROVE ROUTING", ON IN THE GLOBAL FILE, rides as one flag; off
+   *  (the default, above) the body is unchanged. */
+  it('says improve when the person turned on Help improve routing', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, router: { improve: true } }),
+    );
+    const { fetchImpl, calls } = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect((calls[0] as { body: Record<string, unknown> }).body.improve).toBe(true);
+  });
+
+  /**
+   * A MACHINE INSTALLED BEFORE HELP IMPROVE ROUTING EXISTED never runs the
+   * install that asks it, so its first routed prompt hands the agent the
+   * question, with no shell command for the person: recorded as asked, still
+   * off, and never asked again.
+   */
+  it('hands the agent Help improve routing once on a machine nobody asked, then never again', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    const { fetchImpl } = router(NATIVE);
+    const prompt = () =>
+      runPromptHook(promptEvent('what is the weather'), { dataDir: dir, baseUrl: BASE, fetchImpl });
+    const first = await prompt();
+    const line = (first.response as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext;
+    expect(line).toContain('"Help improve routing? ');
+    expect(line).toContain('You can ask your agent to turn it off any time.');
+    expect(line).toContain('On yes, run `tenjin config set router.improve true` yourself');
+    expect(line).not.toContain('Turn it off any time with');
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+      install?: unknown;
+      router?: unknown;
+    };
+    expect(config.install).toEqual({ improveAsked: true });
+    expect(config.router).toBeUndefined();
+    expect((await prompt()).response).toBeNull();
+  });
+
+  it('never holds a prompt on a held config lock: the question waits, the answer does not', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    );
+    // A leftover lock from a crashed writer; the file lock never steals one.
+    await fs.mkdir(join(dir, 'config.json.lock'));
+    const { fetchImpl } = router(NATIVE);
+    const started = Date.now();
+    const out = await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(out.response).toBeNull();
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
+      install?: unknown;
+    };
+    expect(config.install).toBeUndefined();
   });
 
   /**
@@ -315,6 +425,33 @@ describe('the prompt hook', () => {
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · prompt: native tools (offer needs approval)',
     );
+  });
+
+  /** The mod draws `Tenjin offered <label>` under the prompt from this record. */
+  it('keeps an offer record keyed by the prompt for a shown offer, and none for native', async () => {
+    const prompt = 'read https://example.test/spec for me';
+    const record = join(
+      sessionDir(dir, 'sess-1'),
+      `offer-${createHash('sha256').update(`prompt:${prompt}`).digest('hex')}.json`,
+    );
+    const labelled = { ...EXECUTE, decision: { ...EXECUTE.decision, label: 'Firecrawl scrape' } };
+    await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(NATIVE).fetchImpl,
+    });
+    await expect(readFile(record, 'utf8')).rejects.toThrow();
+    await runPromptHook(promptEvent(prompt), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(labelled).fetchImpl,
+    });
+    expect(JSON.parse(await readFile(record, 'utf8'))).toMatchObject({
+      version: 1,
+      offerId: 'k3f9-abcd',
+      label: 'Firecrawl scrape',
+      priceAtomic: '15000',
+    });
   });
 
   it('says nothing at all on native', async () => {
@@ -804,11 +941,6 @@ describe('shortfallOf', () => {
   });
 });
 
-/**
- * OLD INSTALLS KEEP WORKING. Every alpha install carries PreToolUse on
- * `WebSearch|WebFetch` running `tenjin hook native`; after a CLI update and
- * before a refresh, that command must be a hook with no opinion.
- */
 /** The same call as the harness reports it BEFORE it runs: no response yet. */
 async function preCall(
   subject: string,
@@ -959,23 +1091,10 @@ describe('the pre-call hook', () => {
     expect(after.response).not.toBeNull();
   });
 
-  it('is what `tenjin hook native` prints', async () => {
+  it('is what the hook tool answers for a `native` leg', async () => {
     const { fetchImpl } = router(EXECUTE);
-    const written: string[] = [];
-    const io = {
-      stdout: { write: (chunk: string) => written.push(chunk) },
-      stderr: { write: () => true },
-      isTTY: false,
-    } as never;
     const event = await preCall('https://example.test/spec');
-    await runHookCommand('native', io, {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      readEvent: async () => JSON.stringify(event),
-    });
-    expect(written).toHaveLength(1);
-    expect(JSON.parse(written[0]!)).toEqual({
+    expect(await runHookKind('native', event, { dataDir: dir, baseUrl: BASE, fetchImpl })).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
@@ -1778,13 +1897,7 @@ describe('what the hook leaves for the status line', () => {
   });
 
   it('names an unpaid routing fee as unpaid, never as the router choosing native tools', async () => {
-    const { fetchImpl } = router({
-      ...NATIVE,
-      decision: {
-        ...NATIVE.decision,
-        diagnostics: { ...NATIVE.decision.diagnostics, reasonCode: 'fee_required' },
-      },
-    });
+    const fetchImpl = (async () => Response.json({}, { status: 402 })) as typeof fetch;
 
     await runPromptHook(promptEvent('what is the current price of ETH in USD'), {
       dataDir: dir,
@@ -1792,7 +1905,20 @@ describe('what the hook leaves for the status line', () => {
       fetchImpl,
     });
 
-    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: fee_required');
+    expect(await renderProgress(dir, 'sess-1')).toBe('x402 · prompt: fee unpaid: no_payer');
+  });
+
+  it('names an offer this build skipped as such, never as the router choosing native tools', () => {
+    const skipped = {
+      action: 'native' as const,
+      diagnostics: {
+        reasonCode: 'requires_unmet',
+        stage: 'client',
+        missing: ['x'],
+        nextAction: '',
+      },
+    };
+    expect(hookOutcome(skipped)).toBe('native tools (offer needs newer tenjin)');
   });
 
   it('names the native search stage the way the demo does', async () => {
@@ -2734,6 +2860,7 @@ describe('a free lookup noted after a search', () => {
       at: expect.any(Number) as number,
       offerId: ID,
       line: NOTE_HINT,
+      ids: [ID],
     });
     expect(JSON.parse(await readFile(labelPath(), 'utf8'))).toEqual({
       id: ID,
@@ -2788,6 +2915,26 @@ describe('a free lookup noted after a search', () => {
     expect(cut.calls).toHaveLength(0);
   });
 
+  it('keeps the line untaken from when the after-call arm shows it, never on an interrupt', async () => {
+    const main = offerScope('sess-1', undefined);
+    await before('next.js middleware matcher', 'toolu_1');
+    // Not shown yet: a native call the agent starts meanwhile ignored nothing.
+    expect(await claimIgnored(dir, { now: Date.now(), nativeScope: main })).toEqual([]);
+    await after('next.js middleware matcher', 'toolu_1');
+    expect(await claimIgnored(dir, { now: Date.now(), nativeScope: main })).toEqual([
+      { id: ID, harness: 'claude', reason: 'native_after_offer' },
+    ]);
+    // A search cut short shows nothing, so nothing is reported for it, ever.
+    await before('zod v4 coerce', 'toolu_2');
+    await after('zod v4 coerce', 'toolu_2', undefined, {
+      hook_event_name: 'PostToolUseFailure',
+      tool_response: undefined,
+      error: 'Interrupted',
+      is_interrupt: true,
+    });
+    expect(await claimIgnored(dir, { now: Date.now() + SPEC_TTL_MS + 1 })).toEqual([]);
+  });
+
   it('gives a noted search that came back short the note, and asks the router nothing', async () => {
     await before('next.js middleware matcher', 'toolu_1');
     const post = await after('next.js middleware matcher', 'toolu_1', SHORT);
@@ -2795,25 +2942,16 @@ describe('a free lookup noted after a search', () => {
     expect(post.calls).toHaveLength(0);
   });
 
-  it('is what `tenjin hook shortfall` prints', async () => {
+  it('is what the hook tool answers for a `shortfall` leg', async () => {
     await before('next.js middleware matcher', 'toolu_1');
-    const written: string[] = [];
-    const io = {
-      stdout: { write: (chunk: string) => written.push(chunk) },
-      stderr: { write: () => true },
-      isTTY: false,
-    } as never;
     const event = {
       ...((await readableEvent('next.js middleware matcher', 'WebSearch')) as object),
       tool_use_id: 'toolu_1',
       tool_response: SEARCH,
     };
-    await runHookCommand('shortfall', io, {
-      ...deps(EXECUTE).deps,
-      readEvent: async () => JSON.stringify(event),
-    });
-    expect(written).toHaveLength(1);
-    expect(JSON.parse(written[0]!)).toEqual(noted(NOTE_HINT).response);
+    expect(await runHookKind('shortfall', event, deps(EXECUTE).deps)).toEqual(
+      noted(NOTE_HINT).response,
+    );
   });
 
   it("notes one agent's identical search once in five minutes, and each agent's own", async () => {
@@ -2992,7 +3130,7 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -3045,7 +3183,7 @@ describe('a discovered service', () => {
     const entry = (n: number, provider: string, usd: string, id: string) =>
       `${n}) ${provider} (finds a work email), POST https://${provider.toLowerCase()}.test/x , ` +
       `about $${usd} per call. Input: {name: string}. To use it, call request({id: "${id}", input: {...}}).`;
-    const list = (second: string, alternative = '') => ({
+    const list = (second: string) => ({
       ...DISCOVERED,
       decision: {
         ...DISCOVERED.decision,
@@ -3053,7 +3191,7 @@ describe('a discovered service', () => {
         hint:
           'Tenjin router found pay-per-call services for this step, no API key needed: ' +
           `${entry(1, 'OneShot', '0.005', ID)} ${entry(2, 'PDL', second, '04d63d65-cdbb-4a30')} ` +
-          `Tenjin reviewed these listings. Use your judgement: pick one.${alternative}`,
+          'Tenjin reviewed these listings. Use your judgement: pick one.',
       },
     });
     const shown = async (body: unknown): Promise<string> => {
@@ -3066,30 +3204,10 @@ describe('a discovered service', () => {
         .hookSpecificOutput.additionalContext;
     };
 
-    it('says which price is over the limit and to prefer one within it', async () => {
-      expect(await shown(list('0.28'))).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service; prefer one within the limit\.$/,
-      );
-    });
-
-    it('adds nothing when every listed service fits', async () => {
-      expect(await shown(list('0.03'))).not.toContain('Note:');
-    });
-
-    /** The server writes a curated alternative's price plain ("$0.30"), not
-     *  "about $0.30"; a dollar amount inside quotes is a seller's or the
-     *  user's words, never a price. */
-    it("reads a curated alternative's plain price, and never a quoted amount", async () => {
-      const curated =
-        " Alternative from Tenjin's catalog: Hunter (finds a work email, $0.30): " +
-        'request({query: <name and company>, id: "k3f9-abcd"}).';
-      expect(await shown(list('0.03', curated))).toMatch(
-        / Note: \$0\.30 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
-      );
-      const seller =
-        ' Alternative from Coinbase\'s Bazaar (unreviewed): "Pricey" (its listing says ' +
-        '"plans from $500 a month"), about $0.03: request({id: "x-1", input: {...}})';
-      expect(await shown(list('0.03', seller))).not.toContain('Note:');
+    /** PRICES ARE FIELDS, NEVER PROSE: an offer that carries no specs gets no
+     *  note, whatever dollar amounts its line quotes. */
+    it('reads no price out of the line itself', async () => {
+      expect(await shown(list('0.28'))).not.toContain('Note:');
     });
 
     /** WITH SPECS THE FIELDS SAY IT: each other service's `priceAtomic`,
@@ -3125,29 +3243,6 @@ describe('a discovered service', () => {
       );
       expect(await shown(offered('30000', 'about $0.28 per call'))).not.toContain('Note:');
     });
-
-    /** A Tenjin list entry's or curated alternative's description is prose,
-     *  unquoted: a dollar amount in it is the service's words, not its price. */
-    it('never reads a dollar amount in an unquoted description as a price', async () => {
-      const described = (body: ReturnType<typeof list>) => ({
-        ...body,
-        decision: {
-          ...body.decision,
-          hint: body.decision.hint.replaceAll(
-            '(finds a work email)',
-            '(finds a work email; seats elsewhere from $500/month)',
-          ),
-        },
-      });
-      const curated =
-        " Alternative from Tenjin's catalog: Hunter (finds a work email, plans from $1000 a year, $0.03): " +
-        'request({query: <name and company>, id: "k3f9-abcd"}).';
-      expect(await shown(described(list('0.03', curated)))).not.toContain('Note:');
-      const over = await shown(described(list('0.28', curated)));
-      expect(over).toMatch(
-        / Note: \$0\.28 is above this machine's automatic per-call limit \(\$0\.25\), so request returns needs_approval for that service;/,
-      );
-    });
   });
 
   /** THE TENJIN LIST IS ON BY DEFAULT; the open Bazaar is asked for only
@@ -3167,6 +3262,7 @@ describe('a discovered service', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3187,6 +3283,7 @@ describe('a discovered service', () => {
       'jobs',
       'headers',
       'note',
+      'tolerant',
       'bazaar',
     ]);
   });
@@ -3267,7 +3364,11 @@ describe('a discovered service', () => {
     const fs = await import('node:fs/promises');
     await fs.writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '50000', experimental: { bazaar: 'on' } }),
+      JSON.stringify({
+        maxAutoSpend: '50000',
+        experimental: { bazaar: 'on' },
+        install: { improveAsked: true },
+      }),
     );
     const { fetchImpl } = router(DISCOVERED);
     const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
@@ -3476,7 +3577,7 @@ describe('a question to the user', () => {
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
     expect(body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note'],
+      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
     });
   });
 
@@ -3644,7 +3745,7 @@ describe('a question to the user', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('is what `tenjin hook ask` and `tenjin hook answer` print', async () => {
+  it('is what the hook tool answers for `ask` and `answer` legs', async () => {
     for (const [kind, event, expected] of [
       ['ask', await askEvent(), { hookEventName: 'PreToolUse', permissionDecision: 'deny' }],
       [
@@ -3654,20 +3755,87 @@ describe('a question to the user', () => {
       ],
     ] as const) {
       await rm(join(dir, 'progress'), { recursive: true, force: true });
-      const written: string[] = [];
-      const io = {
-        stdout: { write: (chunk: string) => written.push(chunk) },
-        stderr: { write: () => true },
-        isTTY: false,
-      } as never;
-      await runHookCommand(kind, io, {
+      const answer = await runHookKind(kind, event, {
         dataDir: dir,
         baseUrl: BASE,
         fetchImpl: router(DISCOVERED).fetchImpl,
-        readEvent: async () => JSON.stringify(event),
       });
-      expect(written).toHaveLength(1);
-      expect(JSON.parse(written[0]!)).toMatchObject({ hookSpecificOutput: expected });
+      expect(answer).toMatchObject({ hookSpecificOutput: expected });
     }
+  });
+});
+
+/**
+ * AN OFFER THE HOST WAS SHOWN AND NEVER TOOK IS SAID ONCE, by id and why, at
+ * the next routed leg: a native call by the same agent while it was untaken,
+ * or its 15 minutes running out. No text, and no wait on the report.
+ */
+describe('an offer the host ignored', () => {
+  const T = 1_800_000_000_000;
+  const ignored = (reason: string) => ({
+    url: `${BASE}${ROUTER_PATH}`,
+    body: { schemaVersion: 1, id: 'k3f9-abcd', harness: 'claude', status: 'ignored', reason },
+  });
+
+  it('reports a prompt offer the agent answered with a native search instead', async () => {
+    const offer = router(EXECUTE);
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: offer.fetchImpl,
+      now: () => T,
+    });
+    const native = router(NATIVE);
+    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: native.fetchImpl, homeDir: dir };
+    await runNativeHook(await callEvent('example spec', 'WebSearch', 'PreToolUse'), {
+      ...deps,
+      now: () => T + 5_000,
+    });
+    await vi.waitFor(() => expect(native.reports).toEqual([ignored('native_after_offer')]));
+    // Said once: the next native call finds nothing left to report.
+    await runNativeHook(await callEvent('example spec 2', 'WebSearch', 'PreToolUse'), {
+      ...deps,
+      now: () => T + 6_000,
+    });
+    expect(native.reports).toHaveLength(1);
+  });
+
+  it('reports an offer past its 15 minutes at the next prompt, as expired', async () => {
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      now: () => T,
+    });
+    const later = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: later.fetchImpl,
+      now: () => T + 16 * 60_000,
+    });
+    await vi.waitFor(() => expect(later.reports).toEqual([ignored('expired')]));
+  });
+
+  it('never reports an offer that was withheld, since the host never saw it', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, maxAutoSpend: '14999', confirm: 'above:14999' }),
+    );
+    await runPromptHook(promptEvent('read https://example.test/spec for me'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: router(EXECUTE).fetchImpl,
+      now: () => T,
+    });
+    const later = router(NATIVE);
+    await runPromptHook(promptEvent('what is the weather'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl: later.fetchImpl,
+      now: () => T + 16 * 60_000,
+    });
+    expect(later.reports).toEqual([]);
   });
 });

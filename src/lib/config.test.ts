@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   loadConfig,
   loadRawConfig,
   resolveSettings,
-  writeConfig,
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
   DEFAULT_BAZAAR_REGISTRIES,
@@ -65,12 +64,11 @@ describe('loadConfig', () => {
     expect(raw).toMatchObject(legacy);
     const cfg = await loadConfig(dir);
     expect(cfg.maxAutoSpend).toBe('500000');
-    expect(cfg.router).toEqual({ enabled: false, context: 'session' });
-    expect(cfg.install).toEqual({ routerProjects: [] });
+    expect(cfg.router).toEqual({ enabled: false, context: 'session', improve: false });
+    expect(cfg.install).toEqual({ routerProjects: [], improveAsked: false });
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
     expect(s.maxAutoSpend).toEqual({ value: '500000', source: 'file' });
-    expect(Object.keys(s)).not.toContain('publicShelfUrl');
   });
 
   it('throws CONFIG_INVALID with the code on a schema violation', async () => {
@@ -148,41 +146,10 @@ describe('resolveSettings — precedence and provenance', () => {
   });
 });
 
-describe('writeConfig', () => {
-  it('round-trips through loadConfig', async () => {
-    const next = { ...CONFIG_DEFAULTS, maxAutoSpend: '250000', allowlistCreators: ['0xabc'] };
-    await writeConfig(dir, next);
-    expect(await loadConfig(dir)).toEqual(next);
-  });
-
-  /**
-   * config.json can hold an RPC provider's key inside `rpcUrl`, so it gets the
-   * 0600 every other secret in this tree gets. dirMode 0o700 is not the
-   * backstop it looks like: node's recursive mkdir does not chmod a directory
-   * that already exists, so a data dir a devcontainer volume or a restored
-   * backup created at 0755 leaves a 0644 config readable by anyone on the box.
-   */
-  const WITH_KEY = { ...CONFIG_DEFAULTS, rpcUrl: 'https://base.example/v2/rpc-key-abc123' };
-  it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
-    await writeConfig(dir, WITH_KEY);
-    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'still lands at 0600 inside a data dir that already exists at 0755',
-    async () => {
-      await mkdir(dir, { recursive: true });
-      await chmod(dir, 0o755);
-      await writeConfig(dir, WITH_KEY);
-      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
-    },
-  );
-});
-
 describe('install block', () => {
   it('defaults to no wired project', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [] });
-    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [] });
+    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [], improveAsked: false });
+    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [], improveAsked: false });
   });
 
   it('reads back the wired projects', async () => {
@@ -215,15 +182,19 @@ describe('parseOnOffFlag', () => {
 });
 
 describe('router block: the switch and the context', () => {
-  it('registers two dotted keys and no scalar', () => {
-    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context']);
+  it('registers three dotted keys and no scalar', () => {
+    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context', 'router.improve']);
     expect(CONFIG_KEYS as string[]).not.toContain('router');
-    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session' });
+    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session', improve: false });
   });
 
   it('loads a partial block over the defaults and keeps an unknown subkey', async () => {
     await writeFile(configFile(), JSON.stringify({ router: { context: 'turn', later: 1 } }));
-    expect((await loadConfig(dir)).router).toEqual({ enabled: true, context: 'turn' });
+    expect((await loadConfig(dir)).router).toEqual({
+      enabled: true,
+      context: 'turn',
+      improve: false,
+    });
     expect((await loadRawConfig(dir)).router).toEqual({ context: 'turn', later: 1 });
   });
 

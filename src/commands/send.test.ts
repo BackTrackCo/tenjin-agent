@@ -12,7 +12,6 @@ vi.mock('../lib/usdc', async () => {
   const actual = await vi.importActual<typeof import('../lib/usdc')>('../lib/usdc');
   return {
     USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    USDC_DECIMALS: 6,
     FeeCapExceededError: actual.FeeCapExceededError,
     SendRevertedError: actual.SendRevertedError,
     SendPendingError: actual.SendPendingError,
@@ -38,6 +37,7 @@ import { writeWalletRecord } from '../lib/wallet/store';
 import { fakeRecord } from '../lib/wallet/test-support';
 import type { WalletProvider } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { testCtx } from '../context-test-utils';
 
 const balanceMock = vi.mocked(getUsdcBalance);
 const prepareMock = vi.mocked(prepareUsdcSend);
@@ -80,12 +80,7 @@ afterEach(async () => {
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY },
-  };
+  return testCtx(dir, { json: false, ...flags, isTTY });
 }
 
 /** A wallet provider whose getSigner is spied, so "no signature" is provable. */

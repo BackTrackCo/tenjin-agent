@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { CommandContext, CommandResult } from '../context';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { CliError } from '../lib/errors';
+import { agentHost } from '../lib/session';
 import { HARNESSES, type Harness } from './names';
 import type { UninstallTarget } from './uninstall';
 
@@ -55,12 +56,8 @@ export async function claudePluginPresent(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): Promise<boolean> {
-  const [{ listedInClaudeFiles }, { folderState }] = await Promise.all([
-    import('./doctor'),
-    import('./plugin-registration'),
-  ]);
-  if (await listedInClaudeFiles(env, home)) return true;
-  return (await folderState('user', env, home, home)).state === 'ours';
+  const { claudeInstallAt } = await import('./claude-install');
+  return claudeInstallAt('user', env, home, home, ['record', 'folder']);
 }
 
 /**
@@ -90,20 +87,6 @@ export async function forgetInstalledHost(dataDir: string, host: Harness): Promi
     dataDir,
     hosts.filter((h) => h !== host),
   );
-}
-
-/**
- * The host whose agent runs this command, from the variables each exports, or
- * undefined in a person's own terminal. A Claude Code variable wins when both
- * are set.
- */
-export function agentHost(env: NodeJS.ProcessEnv): Harness | undefined {
-  const set = (v: string | undefined) => typeof v === 'string' && v.trim().length > 0;
-  if (set(env.CLAUDECODE) || set(env.CLAUDE_CODE_SESSION_ID) || set(env.CLAUDE_CODE_EXECPATH)) {
-    return 'claude';
-  }
-  if (set(env.CODEX_SESSION_ID)) return 'codex';
-  return undefined;
 }
 
 /** The hosts this machine can run: each counts only when its `--version` answers. */

@@ -26,7 +26,7 @@ import { stillLockedSentence, WALLET_UNLOCKED } from './wallet-reasons';
  *   unlocked." after a repair or an earlier block, a still-locked line when a
  *   repair did not take, and the payer provider's wrong-variable warning.
  *
- * A HEALTH-CHECK ROUTER IS NOT A SESSION (B2). `claude mcp get` and `claude mcp
+ * A health-check router is not a session: `claude mcp get` and `claude mcp
  * list` start a `tenjin mcp` that answers `tools/list` and exits. It prewarms
  * like any other, and its observation says what the prewarm saw, but it stays
  * `servedSession: false` and NEVER reads or writes unlock-state: otherwise a
@@ -47,8 +47,12 @@ export interface RouterObserver {
   queueNews: (line: string) => void;
   /** HookDeps.walletNews. */
   takeNews: (sessionId: string) => Promise<WalletNews>;
-  /** Remove the exit handler and the observation (tests; the process exit does it otherwise). */
-  dispose: () => void;
+  /**
+   * Remove the exit handler and the observation (tests; the process exit does
+   * it otherwise). Resolves once a write already under way has landed and been
+   * removed, so a test can delete the data directory after it.
+   */
+  dispose: () => Promise<void>;
 }
 
 export function createRouterObserver(o: {
@@ -229,7 +233,7 @@ export function createRouterObserver(o: {
       process.removeListener('exit', onExit);
       removeObservationSync(o.dataDir, o.pid);
       // A write already under way when this ran lands after it: remove again.
-      void writes.then(() => removeObservationSync(o.dataDir, o.pid));
+      return writes.then(() => removeObservationSync(o.dataDir, o.pid));
     },
   };
 }

@@ -1,21 +1,26 @@
-import { existsSync } from 'node:fs';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
-import { persistRouterDefaults, persistRouterProject, type RouterLimits } from '../commands/config';
+import {
+  persistImproveAnswer,
+  persistRouterDefaults,
+  persistRouterProject,
+  type RouterLimits,
+} from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { paint } from '../lib/output';
-import { defaultDataDir, runtimeDir } from '../lib/paths';
+import { isDefaultDataDir, realOr, samePath, tilde } from '../lib/paths';
 import { isSourceCheckout } from '../lib/install-location';
 import { runningGlibc, unpinnedPlatform } from '../lib/runtime-fetch';
 import { resolveContextSettings } from '../lib/settings';
 import type { SpendPolicy } from '../lib/policy';
-import type { LauncherResult, RuntimeSetup, setupRuntime } from '../lib/runtime';
-import { runtimeBuild, runtimeStatePath, type RuntimePointer } from '../lib/runtime-layout';
+import type { RuntimeSetup, setupRuntime } from '../lib/runtime';
+import type { LauncherResult } from '../lib/runtime-launchers';
+import { hasRuntime, runtimeBuild, type RuntimePointer } from '../lib/runtime-layout';
 import { removeRetiredSkills } from '../lib/skill-placement';
 import {
   loadRawConfig,
@@ -29,14 +34,12 @@ import { SUGGESTED_FUND_USD } from './fee';
 import {
   findClaudeBinary,
   readClaudeCode,
-  userMcpFile,
-  userSettingsPath,
   type ClaudeBinary,
   type ClaudeCodeState,
 } from './claude-cli';
+import { claudeInstallAt, settingsInstallPaths } from './claude-install';
 import {
   inspectLegacyInstall,
-  projectMcpFile,
   removeLegacyInstall,
   type LegacyInstall,
   type LegacyRemoval,
@@ -71,6 +74,7 @@ import {
   FEE_APPROVAL,
 } from './spend-question';
 import { shQuote } from './plugin-files';
+import { askImprove, improveLines, improveStep, type ImproveDeps } from './improve-question';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
@@ -78,20 +82,20 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * `tenjin install` for the router product: the wallet, the spend limits, and
  * the Claude Code plugin `tenjin`, registered with no step left to the person.
  *
- * WHAT IT WRITES. The wallet and the spend defaults under the data dir, as
- * before. With the default data dir, this build is copied into Tenjin's own
- * runtime, `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
+ * What it writes: the wallet and the spend defaults under the data dir. With
+ * the default data dir, this build is copied into Tenjin's own runtime,
+ * `~/.tenjin/runtime`, with a pinned Node and a `tenjin` launcher in
  * `~/.local/bin` (see `lib/runtime.ts`), and the plugin is registered from
  * the runtime's `claude` folder, whose commands run that Node and that copy,
  * so neither a Node upgrade nor `npm rm -g tenjin-cli` stops it. Unsupported
  * profiles and runtime failures stop registration. Only source checkouts use
- * this package's development plugin folder. The plugin goes through Claude Code's own `claude
- * plugin` commands (see `plugin-registration.ts`), or is written as a folder
- * under the config dir's `skills/` where no `claude` binary can be run. The
- * plugin carries the seven routing legs, the `router` MCP server, and the
- * hooks that allow the request tool and deny the legs' own tool to the model,
- * so this command writes nothing into `settings.json` or `~/.claude.json`
- * itself.
+ * this package's development plugin folder. The plugin goes through Claude
+ * Code's own `claude plugin` commands (see `plugin-registration.ts`), or is
+ * written as a folder under the config dir's `skills/` where no `claude`
+ * binary can be run. The plugin carries the seven routing legs, the `router`
+ * MCP server, and the hooks that allow the request tool and deny the legs' own
+ * tool to the model, so this command writes nothing into `settings.json` or
+ * `~/.claude.json` itself.
  *
  * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
  * the spend question comes back for the agent to ask there, the funding question
@@ -108,7 +112,7 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the free routing gate, beside this session's id. When your assistant calls the free library docs lookup, its query goes to Tenjin's docs lookup, which asks Context7.",
+  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the routing gate, beside this session's id and your wallet address. A free library docs lookup sends its query to Tenjin, which asks Context7.",
   'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
   'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
 ];
@@ -178,7 +182,7 @@ export interface RouterInstallArgs {
   sessionBudget?: string;
 }
 
-export interface RouterInstallDeps extends WalletDeps {
+export interface RouterInstallDeps extends WalletDeps, ImproveDeps {
   /** This user's running routers and Claude Code processes; tests inject them. */
   listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -210,32 +214,6 @@ export interface RouterInstallDeps extends WalletDeps {
 }
 
 export type LimitsChoice = 'approve' | 'own';
-
-/** Where a settings install of this scope kept its entries and its server. */
-export interface SettingsInstallPaths {
-  settingsPath: string;
-  mcpFile: string;
-  mcpScope: 'user' | 'project';
-}
-
-export function settingsInstallPaths(
-  project: boolean,
-  env: NodeJS.ProcessEnv,
-  home: string,
-  cwd: string,
-): SettingsInstallPaths {
-  return project
-    ? {
-        settingsPath: join(cwd, '.claude', 'settings.json'),
-        mcpFile: projectMcpFile(cwd),
-        mcpScope: 'project',
-      }
-    : {
-        settingsPath: userSettingsPath(env, home),
-        mcpFile: userMcpFile(env, home),
-        mcpScope: 'user',
-      };
-}
 
 /** The settings install's state, as install, update, doctor and uninstall report it. */
 export interface Migration {
@@ -318,7 +296,7 @@ export async function projectInstallHere(
   home: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  if (await isHome(cwd, home)) return false;
+  if (await samePath(cwd, home)) return false;
   return projectInstallAt(cwd, home, env);
 }
 
@@ -333,22 +311,14 @@ export async function projectInstallAt(
   home: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  const local = await readFile(join(dir, '.claude', 'settings.local.json'), 'utf8')
-    .then((raw) => JSON.parse(raw) as { enabledPlugins?: Record<string, unknown> })
-    .catch(() => null);
-  if (local?.enabledPlugins?.[PLUGIN_ID] === true) return true;
-  if (await isHome(dir, home)) return false;
-  if ((await folderState('local', env, home, dir)).state === 'ours') return true;
-  const paths = settingsInstallPaths(true, env, home, dir);
-  return (await inspectLegacyInstall(paths.settingsPath, paths.mcpFile)).events.length > 0;
-}
-
-async function isHome(dir: string, home: string): Promise<boolean> {
-  const [dirPath, homePath] = await Promise.all([
-    realpath(dir).catch(() => dir),
-    realpath(home).catch(() => home),
-  ]);
-  return dirPath === homePath;
+  const atHome = await samePath(dir, home);
+  return claudeInstallAt(
+    'local',
+    env,
+    home,
+    dir,
+    atHome ? ['enabled'] : ['enabled', 'folder', 'settings-hooks'],
+  );
 }
 
 /** How a refresh with no Claude Code install to converge refuses. */
@@ -452,11 +422,19 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
-  // BELOW THE FLOOR, A WORKING SETTINGS INSTALL WINS. The plugin's routing
-  // legs need Claude Code 2.1.287, but its `alive` leg is a command that runs
-  // on any version and would silence the settings install in every session,
-  // leaving the machine unrouted. So nothing is registered until `claude
-  // update`, and the settings install keeps routing, and no runtime is set up.
+  // "Help improve routing", asked once per machine, right after the limits.
+  const improve = await askImprove(
+    config,
+    { canPrompt, yes: args.yes === true, refresh: args.refresh === true },
+    deps,
+  );
+  // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
+  // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
+  // any version and would silence the settings install in every session,
+  // leaving the machine unrouted and the person untold. So nothing is
+  // registered until `claude update`, the settings install stays as it is
+  // (its `tenjin hook` commands, where it wrote those, only tell the person
+  // to set Tenjin up again), and no runtime is set up.
   const deferred = !claude.meetsFloor && legacy.present;
   const rt = deferred ? null : await setUpRuntime();
   requireRuntime(rt);
@@ -469,6 +447,7 @@ export async function runRouterInstall(
   }
 
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
+  if (improve !== undefined) await persistImproveAnswer(ctx.dataDir, improve);
   const removedKeysLines =
     spend.removed.length > 0
       ? [
@@ -536,7 +515,7 @@ export async function runRouterInstall(
   const notices = refreshNotices(plugin, claude, migration, rt, home);
   if (args.refresh === true) {
     // A refresh that could not register the plugin is not a converged install,
-    // unless the settings install it would replace still routes here.
+    // unless the settings install it would replace is still here.
     if (plugin.state === 'failed' && migration.state !== 'pending') {
       throw new CliError(
         'REFUSED',
@@ -569,8 +548,8 @@ export async function runRouterInstall(
   // lookup cannot be paid without a wallet, so install makes one. A failure is
   // reported, never fatal; everything above is useful without it. It checks
   // that the wallet can SIGN (`verify`), and nothing about routing or funds:
-  // install computes no routing eligibility, and its funding step below is
-  // today's (S6). Loaded lazily: the status line shares this module's chunk
+  // install computes no routing eligibility. Loaded lazily: the status line
+  // shares this module's chunk
   // and must not load the wallet layer.
   const { resolveWallet } = await import('../commands/install-wallet');
   const wallet = await resolveWallet(ctx, deps, args.noWallet === true ? 'flag' : undefined, false);
@@ -596,9 +575,15 @@ export async function runRouterInstall(
       : Promise.resolve(undefined),
   ]);
   const fund = funding?.step;
+  const improveAsk = await improveStep(ctx.dataDir, config, {
+    asksAgent,
+    spendPending: spendAsk !== undefined,
+    command,
+  });
   const nextSteps: QuestionStep[] = [
     ...(spendAsk !== undefined ? [spendAsk] : []),
     ...(fund !== undefined ? [fund] : []),
+    ...(improveAsk !== undefined ? [improveAsk] : []),
   ];
 
   const data = {
@@ -610,7 +595,7 @@ export async function runRouterInstall(
       claude,
       wallet,
       migration,
-      asksAgent && nextSteps.length > 0,
+      asksAgent ? nextSteps.length : 0,
       ctx.io.isTTY,
       command,
       env,
@@ -642,8 +627,9 @@ export async function runRouterInstall(
         migration,
         wallet,
         ...(fund !== undefined ? { fund } : {}),
+        ...(improveAsk !== undefined ? { improveAsk } : {}),
         ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
-        asks: asksAgent && nextSteps.length > 0,
+        asks: asksAgent ? nextSteps.length : 0,
         policy: effective.policy,
         ...(spendAsk !== undefined ? { spendAsk } : {}),
         router,
@@ -701,14 +687,6 @@ export function runtimeOncePerRun(setup = defaultRuntime): typeof defaultRuntime
   };
 }
 
-/** Is there a runtime here? Only the default data dir has one, and only once an install set it up. */
-export function hasRuntime(dataDir: string, home: string): boolean {
-  return (
-    resolve(dataDir) === resolve(defaultDataDir(home)) &&
-    existsSync(runtimeStatePath(runtimeDir(dataDir)))
-  );
-}
-
 /**
  * A refresh that brought only the runtime up to date, for a machine with no
  * Claude Code surface of Tenjin's: `plugin` is null, and the runtime's
@@ -739,7 +717,7 @@ function runtimeOnlyRefresh(ctx: CommandContext, rt: RuntimeSetup, home: string)
  */
 async function collectRuntime(root: string, folders: readonly string[]): Promise<void> {
   try {
-    const { collect } = await import('../lib/runtime');
+    const { collect } = await import('../lib/runtime-activate');
     await collect(root, { lockWaitMs: 5_000, keep: await folderPointers(root, folders) });
   } catch {
     // The next install collects them.
@@ -805,7 +783,7 @@ export function assertPluginInstallation(
   home: string,
   env: NodeJS.ProcessEnv,
 ): void {
-  if (env.TENJIN_DATA_DIR && resolve(dataDir) !== resolve(defaultDataDir(home))) {
+  if (env.TENJIN_DATA_DIR && !isDefaultDataDir(dataDir, home)) {
     throw new CliError('REFUSED', 'Plugin installation needs the default data directory.', {
       fix: 'Run without TENJIN_DATA_DIR. Other CLI commands still support it.',
     });
@@ -899,21 +877,13 @@ async function recordClaudeProjects(
 ): Promise<void> {
   const records = await recordedInstalls(env, home).catch(() => null);
   if (records === null || records.every((r) => r.projectPath === null)) return;
-  const seen = new Set([
-    ...known,
-    ...(await Promise.all(known.map((dir) => realpath(dir).catch(() => dir)))),
-  ]);
+  const seen = new Set([...known, ...(await Promise.all(known.map(realOr)))]);
   for (const { projectPath } of records) {
     if (projectPath === null || seen.has(projectPath)) continue;
     if ((await stat(projectPath).catch(() => null))?.isDirectory() !== true) continue;
     seen.add(projectPath);
     await persistRouterProject(dataDir, projectPath).catch(() => undefined);
   }
-}
-
-/** `path` with the home folder written as `~`. */
-export function tilde(path: string, home: string): string {
-  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 }
 
 /** The first activation's line, said once: where Tenjin runs from now. */
@@ -989,9 +959,9 @@ const REPAIRABLE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The repair step, worded for whoever reads install's output (decision 15):
- * a person at a terminal runs it; an agent (no TTY) asks the person to, and
- * never asks for the passphrase (B1).
+ * The repair step, worded for whoever reads install's output: a person at a
+ * terminal runs it; an agent (no TTY) asks the person to, and never asks for
+ * the passphrase.
  */
 function repairStep(tty: boolean): string {
   return tty
@@ -1002,20 +972,20 @@ function repairStep(tty: boolean): string {
 /**
  * The one step after the install, for the agent to relay in the session. A
  * wallet whose saved passphrase is gone or wrong is repaired first; otherwise
- * today's steps, unchanged (no new funding step for an existing wallet, S6).
+ * the usual steps (no funding step for an existing wallet).
  */
 function nextStep(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  asksQuestion: boolean,
+  questions: number,
   tty: boolean,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, asksQuestion, command, env);
+  const steps = todaysSteps(plugin, claude, wallet, migration, questions, command, env);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -1028,12 +998,16 @@ function todaysSteps(
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  asksQuestion: boolean,
+  questions: number,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string[] {
   const steps: string[] = [];
-  if (asksQuestion) {
+  if (questions > 1) {
+    steps.push(
+      'ask the person each question in nextSteps, one at a time, then run what each answer names',
+    );
+  } else if (questions === 1) {
     steps.push('ask the person the question in nextSteps, then run what the answer names');
   } else if (wallet.status === 'created') {
     steps.push(`fund the wallet with \`${command} wallet fund ${SUGGESTED_FUND_USD}\``);
@@ -1041,7 +1015,7 @@ function todaysSteps(
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');
     steps.push(
-      `run \`${command} install\` again; until then the earlier Tenjin setup keeps routing as before`,
+      `run \`${command} install\` again; until then the earlier Tenjin setup stays as it is`,
     );
     return steps;
   }
@@ -1063,7 +1037,7 @@ function deferredRegistration(scope: PluginScope, claude: ClaudeCodeState): Plug
     state: 'deferred',
     version: pkg.version,
     steps: [],
-    reason: `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, which the plugin needs, so it was not registered and the earlier settings setup keeps routing`,
+    reason: `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, which the plugin needs, so it was not registered and the earlier settings setup stays as it is`,
   };
 }
 
@@ -1094,7 +1068,7 @@ function refreshNotices(
   const out: string[] = [];
   if (plugin.state === 'deferred') {
     out.push(
-      `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, so the Tenjin plugin was not registered and the earlier settings setup keeps routing. Run \`claude update\`, then \`tenjin install\`.`,
+      `Claude Code ${claude.version ?? ''} is older than ${CLAUDE_CODE_FLOOR}, so the Tenjin plugin was not registered and the earlier settings setup stays as it is. Run \`claude update\`, then \`tenjin install\`.`,
     );
   } else if (plugin.state !== 'failed' && settingsInstallStays(migration)) {
     out.push(
@@ -1194,7 +1168,7 @@ export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
 
 /** One question install hands to the agent that ran it, with what each answer runs. */
 export interface QuestionStep {
-  id: 'spend' | 'fund';
+  id: 'spend' | 'fund' | 'improve';
   /** For the agent to put to the person as written, with `options`. */
   question: string;
   options: {
@@ -1396,15 +1370,15 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
 }
 
 /**
- * THE WALLET LINE, and who reads it. At a TTY a person ran install, so the
+ * The wallet line, and who reads it. At a TTY a person ran install, so the
  * person's wording; without one an agent did, and relays it, so a blocked
- * wallet's fix and the S7 passphrase line take the agent's wording (B1,
- * decision 15): ask the person, never ask for the passphrase.
+ * wallet's fix and the passphrase line take the agent's wording: ask the
+ * person, never ask for the passphrase.
  *
  * A ✓ only for a wallet every Claude Code can unlock: a durable store, a
  * legacy entry, or a variable a served router has already signed with. A
- * wallet that signs only through a variable in this shell is a yellow `!`
- * (S7), as is one that cannot be unlocked, or could not be checked.
+ * wallet that signs only through a variable in this shell is a yellow `!`,
+ * as is one that cannot be unlocked, or could not be checked.
  */
 function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
   const warn = (text: string) => paint(ctx.io, 'yellow', text);
@@ -1521,8 +1495,10 @@ function lines(
     migration: Migration;
     wallet: WalletOutcome;
     fund?: FundStep;
+    improveAsk?: QuestionStep;
     fundingWarning?: string;
-    asks: boolean;
+    /** How many questions the agent is handed. */
+    asks: number;
     policy: SpendPolicy;
     spendAsk?: QuestionStep;
     router: RouterCheck;
@@ -1549,11 +1525,16 @@ function lines(
         ]
       : []),
   ];
+  // A warning is the router answering with a 402 this CLI does not pay.
   const router =
     s.router.status === 'ok'
       ? []
       : [
-          warn(`The router did not answer: ${s.router.detail}`),
+          warn(
+            s.router.status === 'warn'
+              ? s.router.detail
+              : `The router did not answer: ${s.router.detail}`,
+          ),
           ...(s.router.fix !== undefined ? [`  ${s.router.fix}`] : []),
         ];
   return [
@@ -1569,6 +1550,7 @@ function lines(
     ...walletLines(ctx, ok, s.wallet),
     ...spend,
     ...(s.fund !== undefined ? fundLines(s.fund) : []),
+    ...(s.improveAsk !== undefined ? improveLines(s.improveAsk) : []),
     ...(s.fundingWarning !== undefined ? [warn(s.fundingWarning)] : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),

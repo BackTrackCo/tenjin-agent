@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "query": "papers on retrieval augmented generation evaluation",
+  "query": "SEC filings for Nvidia that mention export controls",
   "accepts": ["catalog", "spec"]
 }

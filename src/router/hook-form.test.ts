@@ -1,9 +1,11 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runHookCommand, runHookKind } from './hook-command';
-import { commandForm, handlersIn, shellDependence } from './hook-form';
+import { NATIVE } from './fee-test-utils';
+import { runHookKind } from './hook-command';
+import { handlersIn } from './hook-form';
+import { commandForm, shellDependence } from './hook-form-test-utils';
 import type { HookDeps } from './hooks';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { WALLET_UNLOCKED } from './wallet-reasons';
@@ -74,18 +76,12 @@ describe('handlersIn', () => {
  * the response carrying it is built.
  */
 describe('runHookKind and wallet news', () => {
-  const NATIVE = {
-    schemaVersion: 1,
-    routerVersion: 'v',
-    decision: {
-      action: 'native',
-      diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
-    },
-  };
   let dir: string;
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'hook-news-'));
     await mkdir(join(dir, '.git'));
+    // Asked Help improve routing already, so a leg's answer is its news alone.
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { improveAsked: true } }));
   });
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -200,15 +196,5 @@ describe('runHookKind and wallet news', () => {
     expect(await runHookKind('prompt', prompt('s1'), deps({ walletNews }))).toBeNull();
     expect(log).toEqual(['news:s1', 'ack']);
     expect(await runHookKind('prompt', prompt('s1'), deps())).toBeNull();
-  });
-
-  it('keeps the command form unchanged: it never passes walletNews', async () => {
-    let out = '';
-    await runHookCommand(
-      'prompt',
-      { stdout: { write: (s: string) => ((out += s), true) } } as never,
-      { ...deps(), readEvent: async () => JSON.stringify(prompt('s1')) },
-    );
-    expect(out).toBe('');
   });
 });

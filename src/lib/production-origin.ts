@@ -1,7 +1,8 @@
 /**
  * The one place the production Tenjin origin is written down. Every shipped
  * default, fallback, identity string, and piece of operator copy that names the
- * live site derives from here; `production-origin.test.ts` keeps it that way.
+ * live site derives from here; `production-origin.test.ts` checks the config
+ * default, the User-Agent and the package homepage against it.
  *
  * This is NOT the base URL a command talks to. Ordinary requests resolve
  * `baseUrl` through config/flag/env precedence (`CONFIG_DEFAULTS.baseUrl` merely
@@ -23,8 +24,8 @@ export const PRODUCTION_HOST = new URL(PRODUCTION_ORIGIN).host;
  * it. Membership means a request to any of them reaches the same server,
  * publishers, prices, and SIWX domain acceptance. It exists because the server
  * builds candidate URLs from its own `NEXT_PUBLIC_APP_URL`, not the request
- * host, so the moment tenjin#402 flips that global a CLI on the other origin
- * sees every candidate as off-origin (tenjin#738).
+ * host, so when that global names one origin a CLI on the other would see
+ * every candidate as off-origin.
  *
  * Membership is NOT trust and NOT an allowlist of places the CLI may pay, but it
  * IS the widest set a wallet-signed credential can reach, so widening it is a

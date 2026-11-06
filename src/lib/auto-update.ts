@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { configPath, defaultDataDir, runtimeDir } from './paths';
+import { join } from 'node:path';
+import { configPath, isDefaultDataDir, runtimeDir } from './paths';
 import { nodeBinPath, readRuntimeState, versionEntry } from './runtime-layout';
 
 /**
@@ -70,7 +70,7 @@ export function maybeAutoUpdate(o: {
     if (env.CI !== undefined && env.CI.length > 0) return;
     if (env.TENJIN_NO_UPDATE_CHECK === '1') return;
     const home = o.home ?? homedir();
-    if (resolve(o.dataDir) !== resolve(defaultDataDir(home))) return;
+    if (!isDefaultDataDir(o.dataDir, home)) return;
     if (!autoMode(o.dataDir)) return;
 
     const root = runtimeDir(o.dataDir);

@@ -1,4 +1,5 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
+import { isRecord } from '../lib/guards';
 
 /**
  * Claude Code's settings file, read once with every refusal decided here, for
@@ -25,10 +26,6 @@ export interface HooksRefusal {
   reason: HooksFileRefusalReason;
   message: string;
   path: string;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -80,7 +77,7 @@ export async function inspectHooksFile(
         },
       };
     }
-    if (!isPlainObject(parsed)) {
+    if (!isRecord(parsed)) {
       return {
         refusal: {
           reason: 'unexpected-shape',
@@ -93,7 +90,7 @@ export async function inspectHooksFile(
   }
 
   const hooksValue = settings.hooks;
-  if (hooksValue !== undefined && !isPlainObject(hooksValue)) {
+  if (hooksValue !== undefined && !isRecord(hooksValue)) {
     return {
       refusal: {
         reason: 'unexpected-shape',

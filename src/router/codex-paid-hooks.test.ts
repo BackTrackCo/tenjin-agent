@@ -6,11 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { testSigner } from '../lib/read-test-utils';
 import { readSpendSummary } from '../lib/wallet/spend';
-import { FakeRouter, testSigner } from './fee-test-utils';
-import { runHookCommand } from './hook-command';
+import { FakeRouter } from './fee-test-utils';
+import { fixture } from './fixture-test-utils';
+import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
 import { createRouterMcpServer } from './mcp';
 import { renderProgress } from './progress';
+import { createRouterObserver } from './router-observer';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -26,17 +29,7 @@ import type { RoutingPayerDeps } from './routing-payer';
 const BASE = 'https://router.test';
 const SESSION = '01a1658a-1223-73f1-91f9-62ecb164c700';
 const HOOKS = fileURLToPath(new URL('../../hosts/codex/tenjin/hooks/hooks.json', import.meta.url));
-const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const wallet = privateKeyToAccount(generatePrivateKey());
-/** What the free path answers every form since the fee became required. */
-const FEE_REQUIRED = {
-  schemaVersion: 1,
-  routerVersion: 'test',
-  decision: {
-    action: 'native',
-    diagnostics: { reasonCode: 'fee_required', stage: 'capability', missing: [], nextAction: '' },
-  },
-};
 
 let dir: string;
 let homeDir: string;
@@ -44,9 +37,14 @@ let transcript: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-codex-paid-'));
   await mkdir(join(dir, '.git'));
+  // Installed, and asked Help improve routing, so a prompt carries only its offer.
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+      install: { improveAsked: true },
+    }),
   );
   homeDir = join(dir, 'home');
   const day = join(homeDir, '.codex', 'sessions', '2026', '10', '22');
@@ -132,17 +130,30 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
       };
 }
 
-/** The production server with only the network and the signer faked. */
-async function connect(
-  fake: FakeRouter,
-  payer: Partial<RoutingPayerDeps> = {},
-  fetchImpl: typeof fetch = fake.fetch,
-) {
+/**
+ * The production server with only the network and the signer faked. The
+ * observer is the one the factory would build, made here so `close` can wait
+ * for the observation writes it queues in the background: the data directory
+ * is deleted next, and a write landing mid-delete fails it (ENOTEMPTY).
+ */
+async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
+  const fetchImpl = fake.fetch;
+  const observer = createRouterObserver({
+    dataDir: dir,
+    pid: process.pid,
+    startedAt: Date.now(),
+    cliVersion: 'test',
+    harness: 'codex',
+    launchedByPlugin: false,
+    cwd: dir,
+    env: {},
+  });
   const server = await createRouterMcpServer({
     dataDir: dir,
     harness: 'codex',
     homeDir,
     flags: { baseUrl: BASE },
+    observer,
     payerDeps: {
       getSigner: async () => testSigner(wallet),
       fetchImpl,
@@ -175,12 +186,13 @@ async function connect(
     close: async () => {
       await client.close();
       await server.close();
+      await observer.dispose();
     },
   };
 }
 
 async function offer(): Promise<unknown> {
-  return JSON.parse(await readFile(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'));
+  return fixture('wire-hook-execute-spec.json');
 }
 
 describe('Codex automatic hooks', () => {
@@ -195,22 +207,26 @@ describe('Codex automatic hooks', () => {
           hookEventName: 'UserPromptSubmit',
           additionalContext: expect.stringContaining('mcp__router__request'),
         },
-        systemMessage: expect.stringContaining('set aside $0.25 for routing'),
+        systemMessage: expect.stringContaining('set aside $0.05 for routing'),
       });
       const native = await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Nothing went to the free path: one deposit, then a voucher.
-      expect(fake.log).toEqual([
+      // Every routing call went to the paid route: one deposit, then a voucher.
+      expect(fake.log.filter((line) => line.includes('/route'))).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
       ]);
+      // The web call ran with the prompt's offer untaken: one free outcome report.
+      expect(fake.log.filter((line) => !line.includes('/route'))).toEqual([
+        'POST /api/x402-router unpaid',
+      ]);
       expect(fake.deposits).toBe(1);
       // The deposit counts against the daily budget, as an MCP lookup's does.
-      expect((await readSpendSummary(dir))?.committedAtomic).toBe('250000');
+      expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
     } finally {
       await server.close();
     }
@@ -219,18 +235,11 @@ describe('Codex automatic hooks', () => {
   it('show the real reason when the fee cannot be paid, and record it as unpaid', async () => {
     const fake = new FakeRouter();
     fake.body = await offer();
-    // The live free path since the fee is required: native, `fee_required`.
-    const free = fake.fetch;
-    const routed = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
-      new URL(input instanceof Request ? input.url : String(input)).pathname === '/api/x402-router'
-        ? Response.json(FEE_REQUIRED)
-        : free(input, init)) as typeof fetch;
-    const server = await connect(fake, { walletBalance: async () => 20_000n }, routed);
+    const server = await connect(fake, { walletBalance: async () => 20_000n });
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
-      expect(out).toEqual({
-        systemMessage: expect.stringContaining('could not pay its $0.003 fee'),
-      });
+      expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
+      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
       expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin wallet fund');
       expect(fake.paidRequests()).toBe(0);
@@ -259,6 +268,8 @@ describe('Codex automatic hooks', () => {
   });
 
   it('route on the leg alone when Codex records no transcript', async () => {
+    // A null path must work even when there is no session file to fall back to.
+    await rm(transcript);
     const fake = new FakeRouter();
     fake.body = await offer();
     const server = await connect(fake);
@@ -289,27 +300,17 @@ describe('Codex automatic hooks', () => {
 });
 
 describe('a Codex plugin copy from an older build', () => {
-  it('tells the user once why its command legs offer nothing, in the field Codex shows', async () => {
-    const feeRequired = (async () => Response.json(FEE_REQUIRED)) as typeof fetch;
+  it('tells the user once to set Tenjin up again, in the field Codex shows, and routes nothing', async () => {
     const run = async () => {
       let out = '';
-      await runHookCommand(
-        'prompt',
-        { stdout: { write: (s: string) => ((out += s), true) } } as never,
-        {
-          dataDir: dir,
-          harness: 'codex',
-          baseUrl: BASE,
-          fetchImpl: feeRequired,
-          warn: () => undefined,
-          readEvent: async () => JSON.stringify(codexEvent('prompt')),
-        },
-      );
+      await runHookCommand({ stdout: { write: (s: string) => ((out += s), true) } } as never, {
+        dataDir: dir,
+        harness: 'codex',
+        readEvent: async () => JSON.stringify(codexEvent('prompt')),
+      });
       return out;
     };
-    expect(JSON.parse(await run())).toEqual({
-      systemMessage: expect.stringContaining('`tenjin doctor`'),
-    });
+    expect(JSON.parse(await run())).toEqual({ systemMessage: STALE_HOOK_LINE });
     expect(await run()).toBe('');
   });
 });

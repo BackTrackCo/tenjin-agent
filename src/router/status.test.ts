@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { FUND_COMMAND_LINE } from './fee';
 import { runRouterStatus } from './status';
 
@@ -23,12 +24,7 @@ afterEach(async () => {
 });
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000 },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(dir, { json: false });
 }
 
 const status = (atomic: bigint | null) =>
@@ -44,7 +40,7 @@ describe('status, the wallet line', () => {
       wallet: async () => ({ address: ADDRESS, atomic: 0n }),
     });
     expect(result.humanLines).toContain(
-      'set aside for routing: approximately 0.018 USD (~6 calls; local estimate)',
+      'set aside for routing: approximately 0.018 USD (at least 6 calls; local estimate)',
     );
     expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
     expect(result.humanLines?.join('\n')).not.toMatch(/prepaid|routing credit/i);

@@ -1,32 +1,30 @@
 import { z } from 'zod';
-import { fetchFailureToCliError, httpRequest } from '../lib/http';
+import { fetchFailureToCliError, httpRequest, MAX_BINARY_BODY_BYTES } from '../lib/http';
 import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 import type { Harness } from './names';
 
 /**
- * `POST /api/x402-router`: ONE DECISION PER LOOKUP. On the free path it costs
- * nothing. Inside `tenjin mcp`, while the server answers its paid path, the
- * same body goes to that path through the stock x402 client
- * ({@link DecisionRoute}, `routing-payer.ts`); a call that path cannot take
- * falls back to the free path. The rest of this note describes the free path,
- * which is unchanged.
+ * ONE ROUTING PATH, ONE DECISION PER LOOKUP. Every routing call, the hook's
+ * and the `request` tool's, goes to the paid route ({@link ROUTE_PAID_PATH}).
+ * Inside `tenjin mcp` the payer sends it through the stock x402 client and
+ * pays the routing fee its 402 quotes ({@link DecisionRoute},
+ * `routing-payer.ts`); a call it cannot pay is skipped at once, with no second
+ * request. The free route ({@link ROUTER_PATH}) keeps only what stays free:
+ * browse, a browse row's spec and the outcome report.
  *
- * The routing decision costs nothing and nobody signs for it. The hook asks for
- * it from the user's own words, the backend answers with what it would do and
- * what the provider charges, and the only payment on the wire is the one
- * `runPay` makes to that provider. That deletes the router fee and everything
- * built to carry it: the 402 probe, the requirements cache, the stale-quote
- * retry, the settlement accounting and one Base settlement of about 1.5 s from
- * every paid lookup.
- *
- * The bounded packet travels with the hook request and the backend keeps it
- * against the decision id until that id expires. What this client keeps is
- * each offer's spec, by its id (`specs.ts`).
+ * The backend answers with what it would do and what the provider charges,
+ * and the provider is paid by `runPay`, from a spec, under the local spend
+ * policy. The bounded packet travels with the hook request and the backend
+ * keeps it against the decision id until that id expires. What this client
+ * keeps is each offer's spec, by its id (`specs.ts`).
  */
 
+/** The free route: browse, a browse row's spec, and the outcome report. */
 export const ROUTER_PATH = '/api/x402-router';
+/** The paid route, behind x402: every routing call. */
+export const ROUTE_PAID_PATH = '/api/x402-router/route';
 
 /**
  * The request the server builds and this client sends verbatim. Query assembly,
@@ -68,10 +66,17 @@ export type DecisionDiagnostics = z.infer<typeof DiagnosticsSchema>;
 /**
  * ONE VARIANT PER ANSWER, DISCRIMINATED ON THE ACTION. Optional fields made
  * every shape legal: an `execute` with no contract parsed and came back to the
- * host as a routine `needs_input`, a non-execute with no diagnostics parsed
- * with nothing to act on, and a hook answer carrying a contract parsed as
- * though the hook had quoted a price. Each of those is drift the shared
- * fixtures exist to catch, so each is now a parse failure that names itself.
+ * host as a routine `needs_input`, and a non-execute with no diagnostics
+ * parsed with nothing to act on. Each of those is drift the shared fixtures
+ * exist to catch, so each is a parse failure that names itself.
+ *
+ * A TOLERANT READER, AND ONLY THAT (RFC 9413). A field this build does not
+ * know is dropped, never a failure: a server that adds one reaches every
+ * released client without a release or a deploy order. A field it does know
+ * keeps its type, its bounds and its checks, and a job's `pollUrl` or
+ * `running` naming the keys of both its arms is still refused (an answer's
+ * own arms are told apart by `action`). An offer that a client
+ * must understand to run says so in `requires` ({@link withoutUnmet}).
  *
  * The two calls ask different questions and get different answers, so they get
  * different parsers. The HOOK asks whether a paid lookup is worth offering: an
@@ -89,7 +94,7 @@ const IdSchema = z
   );
 
 /** Every non-execute answer carries these, beside the action they explain. */
-const RefusedSchema = z.strictObject({
+const RefusedSchema = z.object({
   reason: z.string().max(2_000).optional(),
   diagnostics: DiagnosticsSchema,
 });
@@ -110,6 +115,22 @@ const LabelSchema = z.string().min(1).max(32);
 /** What a surface names a lookup whose decision carries no `label`. */
 export const UNLABELLED = 'Tenjin lookup';
 
+/**
+ * WHAT AN OFFER NEEDS THIS CLIENT TO UNDERSTAND, in the `accepts` vocabulary,
+ * on an offering answer or on any spec: a must-understand list, like JWS
+ * `crit` (RFC 7515 §4.1.11). The tolerant reader drops a field it does not
+ * know, which is right for a field a client may ignore and wrong for one that
+ * changes what a call is (a header it must send, a new kind of payment). Such
+ * an offer names that feature here, and a build without it skips that offer
+ * alone, by name, rather than run it half understood ({@link withoutUnmet}).
+ * The same bounds as `accepts`, with the alphabet pinned: a token is named
+ * in the model's text when its offer is skipped.
+ */
+const RequiresSchema = z
+  .array(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/))
+  .max(16)
+  .optional();
+
 const CapabilityFields = {
   capabilityId: z.string().min(1).max(200),
   category: z.string().min(1).max(64),
@@ -120,6 +141,7 @@ const CapabilityFields = {
   /** What the provider charges, atomic USDC. The `request` tool refuses a live
    *  402 above it; `gateSpend` still caps the amount actually signed. */
   providerPriceAtomic: z.string().regex(/^\d+$/),
+  requires: RequiresSchema,
 };
 
 /**
@@ -156,7 +178,7 @@ function checkHint(decision: { id: string; hint: string }, ctx: z.RefinementCtx)
  * the host builds the `input` and the tool call pays through the same `runPay`
  * path and caps as a curated lookup.
  */
-const DiscoveredCandidateSchema = z.strictObject({
+const DiscoveredCandidateSchema = z.object({
   source: z.string().min(1).max(64),
   provider: z.string().min(1).max(120),
   url: z.string().min(1).max(2_048),
@@ -165,17 +187,22 @@ const DiscoveredCandidateSchema = z.strictObject({
   providerPriceAtomic: z.string().regex(/^\d+$/),
   network: z.string().min(1).max(64),
   payTo: z.string().min(1).max(200),
-  input: z.strictObject({
+  input: z.object({
     location: z.enum(['body', 'query']),
     schema: z.record(z.string(), z.unknown()),
   }),
 });
 
+/** A key that belongs to another arm of the same union. The tolerant reader
+ *  drops a key it does not know; this one it knows, so an object naming the
+ *  keys of both arms is refused rather than read as whichever arm is first. */
+const OtherArm = z.never().optional();
+
 /** A field name a job reads from an answer or writes into a poll body. */
 const JobField = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/);
 
 /** A body field whose value names a state: Treza's `status: "running"`. */
-const JobFieldStateSchema = z.strictObject({
+const JobFieldStateSchema = z.object({
   field: JobField,
   values: z.array(z.string().min(1).max(64)).min(1).max(8),
 });
@@ -195,23 +222,24 @@ export const POLL_REFERENCE = /^\$(input|result)\.([A-Za-z_][A-Za-z0-9_]{0,63})$
  * still checked here against the submit's host (`jobs.ts`).
  */
 export const JobSchema = z
-  .strictObject({
+  .object({
     pollUrl: z.union([
       z
-        .strictObject({
+        .object({
           field: JobField.optional(),
           header: z
             .string()
             .regex(/^[A-Za-z0-9-]{1,64}$/)
             .optional(),
+          fixed: OtherArm,
         })
         .refine((at) => at.field !== undefined || at.header !== undefined, 'a field or a header'),
-      z.strictObject({ fixed: z.string().min(1).max(2_048) }),
+      z.object({ fixed: z.string().min(1).max(2_048), field: OtherArm, header: OtherArm }),
     ]),
     /** Sent once like a poll after the result is saved, never after a save
      *  that failed: it frees the seller's copy (AiSpace's `/complete`). Its
      *  answer is ignored. */
-    completeUrl: z.strictObject({ fixed: z.string().min(1).max(2_048) }).optional(),
+    completeUrl: z.object({ fixed: z.string().min(1).max(2_048) }).optional(),
     pollMethod: z.enum(['GET', 'POST']),
     pollBody: z
       .record(JobField, z.unknown())
@@ -225,8 +253,12 @@ export const JobSchema = z
       )
       .optional(),
     running: z.union([
-      z.strictObject({ httpStatus: z.array(z.number().int().min(200).max(299)).min(1).max(8) }),
-      JobFieldStateSchema,
+      z.object({
+        httpStatus: z.array(z.number().int().min(200).max(299)).min(1).max(8),
+        field: OtherArm,
+        values: OtherArm,
+      }),
+      JobFieldStateSchema.extend({ httpStatus: OtherArm }),
     ]),
     failed: JobFieldStateSchema.optional(),
     everyS: z.number().int().min(1).max(30),
@@ -237,6 +269,11 @@ export const JobSchema = z
   .refine((job) => !job.pollBody || job.pollMethod === 'POST', 'only a POST poll has a body');
 export type Job = z.infer<typeof JobSchema>;
 
+/** A spec's `timeoutS` ceiling: the paid leg's own (`MAX_PAID_LEG_TIMEOUT_MS`
+ *  in `commands/pay.ts`), so no spec can hold a call longer than a seller's
+ *  402 already may. */
+export const MAX_SPEC_TIMEOUT_S = 120;
+
 /**
  * A REQUEST SPEC: the offered service's real contract, sent beside the line only
  * because this build asks for it (`accepts: ["spec"]`). The hook stores it by
@@ -245,14 +282,14 @@ export type Job = z.infer<typeof JobSchema>;
  * is the server's, and so is checked like the rest of the answer: the payee and
  * price still meet the live 402 and the spend policy in `runPay`.
  */
-export const ToolSpecSchema = z.strictObject({
+export const ToolSpecSchema = z.object({
   capabilityId: z.string().min(1).max(200),
   provider: z.string().min(1).max(120),
   /** The display name, on a catalog service's spec; a Bazaar spec has none. */
   label: LabelSchema.optional(),
   /** The input field that takes a pending search's query or fetch's URL. */
   holds: z
-    .strictObject({
+    .object({
       WebSearch: z.string().min(1).max(64).optional(),
       WebFetch: z.string().min(1).max(64).optional(),
     })
@@ -267,7 +304,7 @@ export const ToolSpecSchema = z.strictObject({
   payTo: z.string().min(1).max(200),
   network: z.string().min(1).max(64),
   asset: z.string().min(1).max(200),
-  request: z.strictObject({
+  request: z.object({
     method: z.enum(['GET', 'POST']),
     url: z.string().min(1).max(2_048),
     fields: z.record(z.string(), z.enum(['path', 'query', 'body'])),
@@ -292,7 +329,16 @@ export const ToolSpecSchema = z.strictObject({
   /** How a call answered before its result is ready is finished. */
   job: JobSchema.optional(),
   /** A media service that runs several takes of one call: `count` up to `max`. */
-  takes: z.strictObject({ max: z.number().int().min(2).max(5) }).optional(),
+  takes: z.object({ max: z.number().int().min(2).max(5) }).optional(),
+  requires: RequiresSchema,
+  /** The provider call's own deadline in seconds: the unpaid probe's, and
+   *  the least the paid leg waits. Absent, the CLI's `--timeout`. */
+  timeoutS: z.number().int().min(1).max(MAX_SPEC_TIMEOUT_S).optional(),
+  /** The largest file the call may bring back, in bytes: a binary result,
+   *  and each file a media result links to, though not yet a job's polled
+   *  result. Absent, and at most, the {@link MAX_BINARY_BODY_BYTES} every
+   *  call had. */
+  maxBytes: z.number().int().min(1).max(MAX_BINARY_BODY_BYTES).optional(),
 });
 export type ToolSpec = z.infer<typeof ToolSpecSchema>;
 
@@ -321,13 +367,13 @@ const PlainLine = (max: number) =>
  * not a release here. `input` names the open fields the options share, the
  * only ones an `all` call may carry.
  */
-export const ChoicesSchema = z.strictObject({
+export const ChoicesSchema = z.object({
   group: PlainLine(64),
   default: PlainLine(64),
   input: z.array(PlainLine(64)).min(1).max(16),
   options: z
     .array(
-      z.strictObject({
+      z.object({
         key: PlainLine(64),
         label: PlainLine(120),
         strength: PlainLine(300),
@@ -336,7 +382,7 @@ export const ChoicesSchema = z.strictObject({
     )
     .min(2)
     .max(4),
-  all: z.strictObject({ totalAtomic: z.string().regex(/^\d+$/) }),
+  all: z.object({ totalAtomic: z.string().regex(/^\d+$/) }),
 });
 export type Choices = z.infer<typeof ChoicesSchema>;
 
@@ -371,7 +417,7 @@ function checkChoices(
 /** The same answer on both calls: the hook's offer, and the tool's answer
  *  when a query with no id found a service nobody curated. */
 const DiscoveredSchema = z
-  .strictObject({
+  .object({
     action: z.literal('discovered'),
     id: IdSchema,
     candidate: DiscoveredCandidateSchema,
@@ -380,13 +426,14 @@ const DiscoveredSchema = z
     hint: z.string().min(1).max(2_000),
     specs: SpecsSchema,
     choices: ChoicesSchema.optional(),
+    requires: RequiresSchema,
   })
   .superRefine(checkHint)
   .superRefine(checkChoices);
 
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
-    .strictObject({
+    .object({
       action: z.literal('execute'),
       id: IdSchema,
       ...CapabilityFields,
@@ -422,7 +469,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
 ]);
 
 const ToolDecisionSchema = z.discriminatedUnion('action', [
-  z.strictObject({
+  z.object({
     action: z.literal('execute'),
     ...CapabilityFields,
     contract: ContractSchema,
@@ -431,17 +478,15 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
    * A query with no id, answered with the spec of the service the server
    * picked under a fresh `id`: kept like a hook's, and never run in the same
    * call. `hint` is the line, with the skeleton of the next call:
-   * `request({id, input: {...}})` with the required fields. `input` is what a
-   * router from before the binder's removal still sends on a bound pick: it
-   * is accepted so that answer parses, and never read, so it never runs.
+   * `request({id, input: {...}})` with the required fields. What it needs
+   * this client to understand is its spec's `requires`.
    */
   z
-    .strictObject({
+    .object({
       action: z.literal('spec'),
       id: IdSchema,
       spec: ToolSpecSchema,
       hint: z.string().min(1).max(2_000),
-      input: z.record(z.string(), z.unknown()).optional(),
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -450,7 +495,7 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
 ]);
 
 function envelope<T extends z.ZodTypeAny>(decision: T) {
-  return z.strictObject({
+  return z.object({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
     decision,
@@ -467,12 +512,12 @@ const ToolResponseSchema = envelope(ToolDecisionSchema);
 /**
  * ONE ROW OF THE TOOL LIST, as the free browse answers it: the tool's id, its
  * display name (a list entry's upstream name runs to 120 characters), what it
- * does, its price as the server writes it, and its kind. Strict like every
+ * does, its price as the server writes it, and its kind. Read like every
  * answer here, with the server's own bounds. The id is the one field the model
  * sends back, so its alphabet is pinned; the text is flattened to one line
  * where it is shown (`tool.ts`).
  */
-const BrowseRowSchema = z.strictObject({
+const BrowseRowSchema = z.object({
   id: z
     .string()
     .min(1)
@@ -486,7 +531,7 @@ const BrowseRowSchema = z.strictObject({
 });
 export type BrowseRow = z.infer<typeof BrowseRowSchema>;
 
-const BrowseResponseSchema = z.strictObject({
+const BrowseResponseSchema = z.object({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
   rows: z.array(BrowseRowSchema).max(200),
@@ -497,6 +542,78 @@ export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
 export type HookDecision = HookResponse['decision'];
 export type ToolDecision = ToolResponse['decision'];
+
+/** The reason code of an offer this build skipped for a feature it lacks. */
+export const REQUIRES_UNMET = 'requires_unmet';
+
+/** An offer skipped for features this build lacks, named by its id. */
+export interface SkippedOffer {
+  id: string;
+  missing: string[];
+}
+
+/**
+ * A BACKSTOP, NOT A FILTER. The server sends only `requires` tokens a client
+ * lists in `accepts`, so a client meets an unmet one only when that rule was
+ * broken, and then it fails safe. A spec whose `requires` names a feature this
+ * build lacks is dropped. When the answer's line names what was dropped (the
+ * answer's own offer, through its `requires`, its own spec or a `spec`
+ * answer's spec; another spec whose id the line carries; or any option of its
+ * choice set), the line can no longer be shown as written, so the whole
+ * answer becomes a `native` that names the missing features: a named skip,
+ * never a guess. A dropped spec the line does not name is only dropped.
+ */
+export function withoutUnmet<T extends HookDecision | ToolDecision>(
+  decision: T,
+): { decision: T; skipped: SkippedOffer[] } {
+  if (decision.action === 'native' || decision.action === 'needs_input') {
+    return { decision, skipped: [] };
+  }
+  const specs = 'specs' in decision ? (decision.specs ?? []) : [];
+  const own = [
+    ...unmetRequires('requires' in decision ? decision.requires : undefined),
+    ...(decision.action === 'spec' ? unmetRequires(decision.spec.requires) : []),
+    ...('id' in decision ? unmetRequires(specs.find((s) => s.id === decision.id)?.requires) : []),
+  ];
+  if (own.length > 0) {
+    const missing = [...new Set(own)];
+    const id = 'id' in decision ? decision.id : decision.capabilityId;
+    return { decision: unmetRefusal(missing) as T, skipped: [{ id, missing }] };
+  }
+  const skipped = specs.flatMap((spec) => {
+    const missing = unmetRequires(spec.requires);
+    return missing.length > 0 ? [{ id: spec.id, missing }] : [];
+  });
+  if (skipped.length === 0) return { decision, skipped };
+  const options = new Set(
+    decision.action === 'discovered' ? (decision.choices?.options ?? []).map((o) => o.id) : [],
+  );
+  const hint = 'hint' in decision ? decision.hint : '';
+  if (skipped.some((s) => options.has(s.id) || hint.includes(s.id))) {
+    const missing = [...new Set(skipped.flatMap((s) => s.missing))];
+    return { decision: unmetRefusal(missing) as T, skipped };
+  }
+  const gone = new Set(skipped.map((s) => s.id));
+  return {
+    decision: { ...decision, specs: specs.filter((spec) => !gone.has(spec.id)) } as T,
+    skipped,
+  };
+}
+
+function unmetRefusal(missing: string[]) {
+  const named = missing.map((token) => `\`${token}\``).join(', ');
+  return {
+    action: 'native' as const,
+    reason: `This offer needs ${named}, which this build of tenjin-cli does not have, so it was skipped and no provider was paid.`,
+    diagnostics: {
+      reasonCode: REQUIRES_UNMET,
+      stage: 'client',
+      missing,
+      nextAction:
+        'Use your own tools for this one. A newer tenjin-cli (`tenjin update`) can run it.',
+    },
+  };
+}
 
 /** Which call this is, and therefore which answer is legal for it. */
 export type CallKind = 'hook' | 'tool' | 'browse';
@@ -518,15 +635,19 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * `discovered` in its place gets the same services under their
  * `discovered:tenjin:` ids. `spec` asks for each offered service's request
  * spec beside its line, and for the picked service's spec in place of a
- * decision on a query with no id, which only a build that parses them can
- * take: the decision schemas are strict. `jobs` asks for each spec's `job`,
+ * decision on a query with no id, which only a build that runs them can
+ * take. `jobs` asks for each spec's `job`,
  * for the services that never answer inline, and for `count` on a media
  * offer's line. `headers` asks for a spec's `request.headers`, the fixed
  * headers the catalog sets on a service's call (a provider's beta opt-in),
- * with the pins those headers unlock: `buildSpecRequest` sends them, and a
- * build without the token is never sent a spec it would refuse as strict.
- * `bazaar` widens discovery to the open Bazaar and is sent only while
- * `experimental.bazaar` is on.
+ * with the pins those headers unlock: `buildSpecRequest` sends them. A build
+ * without a token would drop the field as unknown, so a spec that cannot run
+ * without it lists the token in `requires`. `tolerant` says this build reads
+ * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}).
+ * Once the server reads it (tenjin R2), it sends a new field, `requires`
+ * included, only to a client that lists it, and today's shape to one that
+ * does not, which is every release from before it and reads strictly. `bazaar` widens discovery to the open
+ * Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
   'catalog',
@@ -536,8 +657,24 @@ export const CLIENT_ACCEPTS: readonly string[] = [
   'jobs',
   'headers',
   'note',
+  'tolerant',
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
+export const FREE_QUERY_ACCEPT = 'free-query';
+
+/** Every feature this build has, which a `requires` list is read against:
+ *  `bazaar` included, which it runs whether or not it asks for one. */
+const CLIENT_FEATURES: ReadonlySet<string> = new Set([
+  ...CLIENT_ACCEPTS,
+  BAZAAR_ACCEPT,
+  FREE_QUERY_ACCEPT,
+]);
+
+/** The features a `requires` list names that this build lacks; none when it
+ *  has them all. */
+export function unmetRequires(requires: readonly string[] | undefined): string[] {
+  return (requires ?? []).filter((token) => !CLIENT_FEATURES.has(token));
+}
 
 /** The `accepts` this build sends, with the open Bazaar or without it. */
 export function acceptsFor(bazaar: boolean): string[] {
@@ -546,8 +683,14 @@ export function acceptsFor(bazaar: boolean): string[] {
 
 /**
  * The exact body the hook call sends, spelled once and pinned to the shared
- * fixtures. The route reads it with a strict object, so an extra field is a
- * 400, and a 400 is a turn with no hint.
+ * fixtures. The route ignores a field it does not know (the tolerant
+ * contract), so a new optional field reaches a server that predates it as
+ * nothing at all.
+ *
+ * `improve: true` rides only while the person has turned on "Help improve
+ * routing" (`router.improve`): the server then keeps this call's sealed packet
+ * beside its decision row, with no expiry, until they turn it off. Absent, it
+ * keeps nothing past the id's 15 minutes.
  *
  * ONE BODY FOR BOTH HOOKS. Which hook is asking is not a field: the route reads
  * it from `packet.pendingCall`, which the native hook sets and the prompt hook
@@ -558,7 +701,12 @@ export function acceptsFor(bazaar: boolean): string[] {
  */
 export function buildHookBody(
   packet: Packet,
-  extras: { sessionId?: string; accepts?: readonly string[]; harness?: Harness } = {},
+  extras: {
+    sessionId?: string;
+    accepts?: readonly string[];
+    harness?: Harness;
+    improve?: boolean;
+  } = {},
 ): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -566,18 +714,20 @@ export function buildHookBody(
     ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
     ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
     packet,
+    ...(extras.improve === true ? { improve: true } : {}),
   };
 }
 
 /** The exact body the tool call sends. `id` is the offer the query is for,
  *  sent only for an offer with no spec kept; `gateHint` is evidence, never
- *  authority. */
+ *  authority; `improve` as on the hook body. */
 export function buildToolBody(request: {
   query?: string;
   id?: string;
   gateHint?: GateHint;
   accepts?: readonly string[];
   harness?: Harness;
+  improve?: boolean;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -586,6 +736,7 @@ export function buildToolBody(request: {
     ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.improve === true ? { improve: true } : {}),
   };
 }
 
@@ -622,8 +773,12 @@ export function buildToolSpecBody(request: {
 
 /** The parsers, exposed so the shared wire fixtures are checked against the
  *  same schemas production parses with rather than against a copy of them. */
-export function parseForTests(kind: CallKind, value: unknown): { success: boolean } {
-  return { success: schemaFor(kind).safeParse(value).success };
+export function parseForTests(
+  kind: CallKind,
+  value: unknown,
+): { success: boolean; data?: unknown } {
+  const parsed = schemaFor(kind).safeParse(value);
+  return parsed.success ? { success: true, data: parsed.data } : { success: false };
 }
 
 function schemaFor(kind: CallKind) {
@@ -652,84 +807,97 @@ export interface DecisionDeps {
    *  open Bazaar may come back. Off by default: curated and the Tenjin list. */
   acceptsBazaar?: boolean;
   /**
-   * The host asking. The server filters out the lookups that host's own tools
-   * already do, and nothing else: never payment, limits or the fee. Absent is
+   * The host asking. Automatic routing avoids services the host already covers;
+   * explicit browsing and selection retain every runnable service. Absent is
    * `claude`, and every production caller sends it.
    */
   harness?: Harness;
   fetchImpl?: typeof fetch;
   /** Overrides the per-call deadline; the hook passes its own, smaller one. */
   timeoutMs?: number;
-  /** The paid path, when `tenjin mcp` takes it: the body goes to `path` and is
-   *  sent by `send`, which pays the routing fee with the stock x402 client.
-   *  Absent is the free path. */
+  /** The payer, inside `tenjin mcp`: it sends the call and pays the routing
+   *  fee with the stock x402 client. Absent, the call goes unpaid. */
   route?: DecisionRoute;
+  /** `router.improve`: the person turned on "Help improve routing", so the
+   *  call says `improve: true`. Off by default. */
+  improve?: boolean;
 }
 
-/** How a routing call reaches the paid path. `send` throws
- *  {@link RouteSkipped} when it has no paid answer for the call, which then
- *  takes the free path. */
+/** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
+ *  no paid answer for the call, which then is skipped, or read as the
+ *  transport failure it carries in `unreached`. */
 export interface DecisionRoute {
-  path: string;
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
   /** What this route's calls deposited into the routing channel and the
    *  router took, 0n for none: the caller says so once, where it is read. */
   deposited?: () => bigint;
 }
 
-/** The paid path gave this call no answer: the wallet locked, low or over
- *  its spend limits, the channel busy, or the payment failed. */
+/** The paid route gave this call no answer: the wallet locked, low or over
+ *  its spend limits, the fee quoted above the ceiling, the channel busy, or
+ *  the payment failed. */
 export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
-   *  ({@link isUnreachable}), so the free path, on the same host, is not
-   *  tried and the call reads as that transport failure. */
+   *  ({@link isUnreachable}), so the call reads as that transport failure.
+   *  `quotedAtomic`: the fee the router quoted, when the payer read one.
+   *  `answered`: the router answered a request of this call (its 402, say). */
+  readonly unreached: FetchJsonFailure | undefined;
+  readonly quotedAtomic: bigint | undefined;
+  readonly answered: boolean;
   constructor(
     readonly why: string,
-    readonly unreached?: FetchJsonFailure,
+    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint; answered?: boolean } = {},
   ) {
     super(`routing fee not paid: ${why}`);
+    this.unreached = opts.unreached;
+    this.quotedAtomic = opts.quotedAtomic;
+    this.answered = opts.answered === true;
   }
 }
 
 /** Another session's call was in flight on the wallet's routing channel. */
 export const CHANNEL_BUSY = 'channel_busy';
-/** The server answered no paid path. */
-export const PAID_PATH_ABSENT = 'paid_path_absent';
 /** The paid call got no answer, a refused payment or a server error. */
 export const PAYMENT_FAILED = 'payment_failed';
 /** The payment went out and the call's budget ran out before its answer:
  *  no fault. `tenjin mcp` lets the request finish, so it is recorded. */
 export const DEADLINE_AFTER_PAYMENT_SENT = 'deadline_after_payment_sent';
+/** The route asked for the fee, and this call had no payer to pay it. */
+export const NO_PAYER = 'no_payer';
 
 export type DecisionOutcome<T> =
-  /** `freePath`: the paid path skipped the call for this reason and it went
-   *  to the free path instead, unpaid. */
-  | { status: 'decided'; decision: T; freePath?: string }
-  /** On the free path nothing was paid and nothing could be, so a failure here
-   *  costs the turn a routing answer and nothing else. */
+  /** `skipped`: offers in it this build cannot run, already taken out
+   *  ({@link withoutUnmet}). */
+  | { status: 'decided'; decision: T; skipped?: SkippedOffer[] }
+  /** No routing answer: the turn goes without one. */
   | {
       status: 'failed';
       reason: string;
       errorCode?: string;
-      freePath?: string;
       /** The router could not be reached at all ({@link isUnreachable}). */
       unreachable?: true;
       /** No answer came back at all: a transport failure or a timeout. */
       noAnswer?: true;
     }
-  /** The paid path gave no answer ({@link RouteSkipped}) and no time was left
-   *  for the free path: the native tool runs. */
-  | { status: 'skipped'; why: string };
+  /** The routing fee was not paid ({@link RouteSkipped}, {@link NO_PAYER}):
+   *  nothing was routed, and the native tool runs. `quotedAtomic`: the fee
+   *  the router quoted, when the payer read one. `answered`: the router
+   *  answered first, so it is reachable. */
+  | { status: 'skipped'; why: string; quotedAtomic?: bigint; answered?: true };
 
 /**
- * THE ROUTING CALLS. The hook sends `{ packet }`: the backend runs
- * the gate, and on `execute` stores that packet under an id and answers with
- * each offered service's spec. The tool sends `{ query }`, which the backend
- * answers with the spec of the service its gate picks, or `{ query, id }` for
- * the free docs offer, which has no spec and is bound from the query. Every
- * provider call is built here, from a spec, or for the docs lookup by the
- * backend from the query. Explicit `{tool, query}` free lookups use
- * `requestToolSpec` instead, without paid routing.
+ * ONE ROUTING CALL, IN TWO FORMS, ON THE PAID ROUTE. The hook sends
+ * `{ packet }`: the backend runs the gate, and on `execute` stores that packet
+ * under an id and answers with each offered service's spec. The tool sends
+ * `{ query }`, which the backend answers with the spec of the service its gate
+ * picks, or `{ query, id }` for the free docs offer, which has no spec and is
+ * bound from the query. Every provider call is built here, from a spec, or for
+ * the docs lookup by the backend from the query.
+ *
+ * ONE REQUEST, PAID OR SKIPPED. A call the payer cannot pay is `skipped` at
+ * once: no second request, on any route. With no payer the call goes unpaid,
+ * and a route that asks for the fee (a 402) is a skip with {@link NO_PAYER};
+ * a route that charges nothing (the fee off, in development) answers it.
  */
 export async function requestDecision(
   kind: 'hook',
@@ -752,7 +920,7 @@ export async function requestDecision(
   },
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
-  const url = new URL(deps.route?.path ?? ROUTER_PATH, deps.baseUrl).toString();
+  const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
   const options: HttpRequestOptions = {
     method: 'POST',
     timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
@@ -763,6 +931,7 @@ export async function requestDecision(
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
+            improve: deps.improve === true,
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
@@ -770,41 +939,28 @@ export async function requestDecision(
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
+            improve: deps.improve === true,
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const started = Date.now();
   const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
   let response: HttpResult;
   try {
     response = await (deps.route?.send ?? httpRequest)(url, options);
   } catch (err) {
     if (!(err instanceof RouteSkipped)) throw err;
-    if (err.unreached !== undefined) return readDecision(err.unreached, schema);
-    const left = options.timeoutMs - (Date.now() - started);
-    if (left <= 0) return { status: 'skipped', why: err.why };
-    // A CALL THE PAID PATH COULD NOT TAKE STILL ROUTES, on the free path,
-    // unpaid, inside what is left of its budget, and says why.
-    response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
-      ...options,
-      timeoutMs: left,
-    });
-    const free = readDecision(response, schema);
-    // A failure here ran on what a paid attempt left of the budget, so it says
-    // nothing about the router being down: it never starts the backoff.
-    if (free.status === 'failed') {
-      return {
-        status: 'failed',
-        reason: free.reason,
-        ...(free.errorCode !== undefined ? { errorCode: free.errorCode } : {}),
-        // Still no answer, which must not end another call's backoff.
-        ...(free.noAnswer === true ? { noAnswer: true as const } : {}),
-        freePath: err.why,
-      };
-    }
-    return free.status === 'skipped' ? free : { ...free, freePath: err.why };
+    if (err.unreached !== undefined) return readOffer(err.unreached, schema);
+    return {
+      status: 'skipped',
+      why: err.why,
+      ...(err.quotedAtomic !== undefined ? { quotedAtomic: err.quotedAtomic } : {}),
+      ...(err.answered ? { answered: true as const } : {}),
+    };
   }
-  return readDecision(response, schema);
+  if (deps.route === undefined && response.ok && response.status === 402) {
+    return { status: 'skipped', why: NO_PAYER, answered: true };
+  }
+  return readOffer(response, schema);
 }
 
 /**
@@ -813,7 +969,7 @@ export async function requestDecision(
  * row's id with that tool's spec under a fresh offer id, exactly as a query
  * with no id is answered. Neither makes a gate call on the server, neither is
  * charged the routing fee, and neither pays anything here, so both always take
- * the free path: `deps.route` is never read.
+ * the free route: `deps.route` is never read.
  */
 export async function requestBrowse(
   browse: string,
@@ -841,7 +997,7 @@ export async function requestToolSpec(
   deps: Omit<DecisionDeps, 'route'>,
   query?: string,
 ): Promise<DecisionOutcome<ToolResponse>> {
-  return readDecision(
+  return readOffer(
     await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
       method: 'POST',
       timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
@@ -849,13 +1005,13 @@ export async function requestToolSpec(
       jsonBody: buildToolSpecBody({
         tool,
         ...(query !== undefined ? { query } : {}),
-        accepts: [...acceptsFor(deps.acceptsBazaar === true), 'free-query'],
+        accepts: [...acceptsFor(deps.acceptsBazaar === true), FREE_QUERY_ACCEPT],
         harness: deps.harness ?? 'claude',
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     ToolResponseSchema,
-  );
+  ) as DecisionOutcome<ToolResponse>;
 }
 
 /** Why a call from a spec stopped before anything was signed: the input did
@@ -877,17 +1033,32 @@ export interface SpecOutcome {
   ms?: number;
 }
 
+/**
+ * Why a shown offer was never taken. `expired`: its 15 minutes ran out with no
+ * `request` call naming it. `native_after_offer`: the same agent in the same
+ * session made a native WebSearch or WebFetch call while it was still untaken.
+ */
+export type IgnoredReason = 'expired' | 'native_after_offer';
+
+/** An offer the host was shown and did not take: its id and why, no text. */
+export interface IgnoredOutcome {
+  id: string;
+  status: 'ignored';
+  reason: IgnoredReason;
+}
+
 /** The outcome report's own deadline: it is telemetry and never holds a result. */
 export const OUTCOME_TIMEOUT_MS = 3_000;
 
 /**
  * TELL THE SERVER A SPEC WAS USED. The client called and paid the provider
  * itself, so this is the only word the server gets that its offer was taken,
- * or that a call for it stopped before payment and why. Never throws and never
- * waits on anything the caller needs: a lost report costs one count.
+ * or that a call for it stopped before payment and why, or that it was shown
+ * and never taken. Never throws and never waits on anything the caller needs:
+ * a lost report costs one count.
  */
 export async function reportSpecOutcome(
-  outcome: SpecOutcome,
+  outcome: SpecOutcome | IgnoredOutcome,
   deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'harness'>,
 ): Promise<void> {
   try {
@@ -903,25 +1074,66 @@ export async function reportSpecOutcome(
   }
 }
 
-/** The exact body of an outcome report, pinned to the shared fixtures. */
-export function buildOutcomeBody(outcome: SpecOutcome, harness?: Harness): Record<string, unknown> {
+/**
+ * The exact body of an outcome report, pinned to the shared fixtures. Built
+ * field by field, so it NEVER CARRIES `result`: a paid call that ran is not a
+ * call that helped, and the useful rate comes from labelled samples, not from
+ * this client's say-so. The server keeps reading `result` from custom setups.
+ */
+export function buildOutcomeBody(
+  outcome: SpecOutcome | IgnoredOutcome,
+  harness?: Harness,
+): Record<string, unknown> {
+  const spec: Partial<SpecOutcome> = outcome.status === 'ignored' ? {} : outcome;
   return {
     schemaVersion: 1,
     id: outcome.id,
     ...(harness !== undefined ? { harness } : {}),
     status: outcome.status,
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
-    ...(outcome.httpStatus !== undefined ? { httpStatus: outcome.httpStatus } : {}),
-    ...(outcome.ms !== undefined ? { ms: Math.max(0, Math.round(outcome.ms)) } : {}),
+    ...(spec.httpStatus !== undefined ? { httpStatus: spec.httpStatus } : {}),
+    ...(spec.ms !== undefined ? { ms: Math.max(0, Math.round(spec.ms)) } : {}),
   };
+}
+
+/**
+ * The `forget` form, pinned to the shared fixture: delete every packet the
+ * server kept for this install. The install is the `tenjin-install-id` header
+ * the transport already sends to Tenjin's origins, so the body names nothing.
+ */
+export function buildForgetBody(): Record<string, unknown> {
+  return { schemaVersion: 1, forget: 'samples' };
+}
+
+/**
+ * ASK THE SERVER TO DELETE WHAT "HELP IMPROVE ROUTING" KEPT, on the free
+ * route, under the outcome report's short deadline. Never throws: the answer
+ * is whether it was done, or why not, for the caller to say.
+ */
+export async function requestForget(
+  deps: Pick<DecisionDeps, 'baseUrl' | 'fetchImpl'>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const response = await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: OUTCOME_TIMEOUT_MS,
+      blockRedirects: true,
+      jsonBody: buildForgetBody(),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    if (!response.ok) return { ok: false, reason: fetchFailureToCliError(response).message };
+    if (response.status >= 200 && response.status < 300) return { ok: true };
+    return { ok: false, reason: `the router endpoint answered ${response.status}` };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 function readDecision<T extends z.ZodTypeAny>(
   response: HttpResult,
   schema: T,
 ): DecisionOutcome<z.infer<T>> {
-  // A transport failure says its own reason; nothing was paid either way,
-  // because there is nothing to pay for on this route.
+  // A transport failure says its own reason.
   if (!response.ok) {
     return {
       status: 'failed',
@@ -950,6 +1162,22 @@ function readDecision<T extends z.ZodTypeAny>(
   return { status: 'decided', decision: parsed.data as z.infer<T> };
 }
 
+/** A hook or tool answer, read, with each offer this build cannot run taken
+ *  out ({@link withoutUnmet}). */
+function readOffer(
+  response: HttpResult,
+  schema: typeof HookResponseSchema | typeof ToolResponseSchema,
+): DecisionOutcome<HookResponse | ToolResponse> {
+  const read = readDecision<z.ZodType<HookResponse | ToolResponse>>(response, schema);
+  if (read.status !== 'decided') return read;
+  const { decision, skipped } = withoutUnmet(read.decision.decision);
+  return {
+    ...read,
+    decision: { ...read.decision, decision } as HookResponse | ToolResponse,
+    ...(skipped.length > 0 ? { skipped } : {}),
+  };
+}
+
 /** `{ error: { code, message } }`, the envelope every Tenjin route answers a
  *  refusal with. Anything else reads as no code rather than as a guess. */
 function errorOf(body: unknown): { code: string; message: string } | null {
@@ -971,7 +1199,7 @@ const RESET_CODES = new Set(['ECONNRESET', 'UND_ERR_SOCKET']);
  * and no status came back. Never the call's own timeout: that is the gate's
  * few seconds, and a slow decision or a cold start must not take the router
  * away from every session. Never a status, even with a body that failed to
- * read, and never a reset socket, which the free path retries on a fresh one.
+ * read, and never a reset socket, which a fresh connection usually gets past.
  */
 export function isUnreachable(failure: FetchJsonFailure): boolean {
   return (

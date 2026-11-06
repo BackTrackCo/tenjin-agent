@@ -1,9 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { hasCode } from './errno';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
-import { writeFileAtomic } from './atomic-json';
 import { DEFAULT_RPC_URL } from './usdc-balance';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -29,7 +29,14 @@ export const RouterLayerSchema = z.object({
   context: z.enum(ROUTER_CONTEXTS).optional(),
 });
 export type RouterLayer = z.infer<typeof RouterLayerSchema>;
-const RouterConfigSchema = RouterLayerSchema.required();
+/**
+ * The global file's router block: the project keys, and `improve`, "Help
+ * improve routing", which only this file carries. It is the person's consent
+ * for the router to keep the masked text of the turns it sees, so a file a
+ * repository commits can never give it ({@link parseRouterLayer} drops it).
+ */
+const RouterGlobalSchema = RouterLayerSchema.extend({ improve: z.boolean().optional() });
+const RouterConfigSchema = RouterGlobalSchema.required();
 
 /**
  * The `router` block of one project file's parsed JSON, and nothing else: an
@@ -118,6 +125,12 @@ const InstallConfigSchema = z.object({
    * project's settings file no longer carries our entries.
    */
   routerProjects: z.array(z.string()),
+  /**
+   * Install has put the "Help improve routing" question to this machine's
+   * person once: asked at a terminal, or handed to the agent that ran it. A
+   * later install or update never asks again, whatever the answer was.
+   */
+  improveAsked: z.boolean(),
 });
 
 /**
@@ -167,7 +180,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     install: InstallConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
-    router: RouterLayerSchema.passthrough().optional(),
+    router: RouterGlobalSchema.passthrough().optional(),
     experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
@@ -228,9 +241,9 @@ export const CONFIG_DEFAULTS: Config = {
   baseUrl: PRODUCTION_ORIGIN,
   rpcUrl: DEFAULT_RPC_URL,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
-  install: { routerProjects: [] },
+  install: { routerProjects: [], improveAsked: false },
   update: { mode: 'auto' },
-  router: { enabled: true, context: 'session' },
+  router: { enabled: true, context: 'session', improve: false },
   experimental: { bazaar: 'off' },
 };
 
@@ -263,7 +276,7 @@ export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
 export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the router block. */
-export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context'] as const;
+export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context', 'router.improve'] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
 
 export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
@@ -285,7 +298,7 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
   try {
     raw = await readFile(path, 'utf8');
   } catch (err) {
-    if (isNotFound(err)) return {};
+    if (hasCode(err, 'ENOENT')) return {};
     throw new CliError('CONFIG_INVALID', `Could not read config at ${path}`, {
       fix: `Check file permissions on ${path}.`,
       cause: err,
@@ -323,11 +336,13 @@ export async function loadConfig(dir: string): Promise<Config> {
     ...raw,
     install: {
       routerProjects: raw.install?.routerProjects ?? CONFIG_DEFAULTS.install.routerProjects,
+      improveAsked: raw.install?.improveAsked ?? CONFIG_DEFAULTS.install.improveAsked,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     router: {
       enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
       context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
+      improve: raw.router?.improve ?? CONFIG_DEFAULTS.router.improve,
     },
     experimental: {
       bazaar: raw.experimental?.bazaar ?? CONFIG_DEFAULTS.experimental.bazaar,
@@ -404,26 +419,6 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
 }
 
 /**
- * Persist a full, validated config via the atomic writer (0700 dir, 0600 file).
- *
- * 0600 BECAUSE config.json CAN HOLD A CREDENTIAL: `rpcUrl` commonly embeds an
- * RPC provider's API key, and every other secret in this tree is 0600 (the
- * wallet, the passphrase, the spend ledger). `dirMode: 0o700` is not a
- * substitute: node's recursive mkdir does not chmod a directory that already
- * exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created at 0755 by a
- * devcontainer volume, a restored backup or a shared CI image would leave the
- * file world-readable. Keep this in step with `persist` in commands/config.ts,
- * the other writer of this file.
- */
-export async function writeConfig(dir: string, config: Config): Promise<void> {
-  const validated = ConfigSchema.parse(config);
-  await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
-}
-
-/**
  * sendMaxAmount deliberately bypasses fileOrDefault: it has no usable default
  * (the operator's require-set-before-first-send posture). Absent from
  * config.json it resolves to the SEND_MAX_UNSET sentinel with source 'default',
@@ -460,13 +455,4 @@ function resolveBaseUrl(
   }
   if (config.baseUrl !== undefined) return { value: config.baseUrl, source: 'file' };
   return { value: CONFIG_DEFAULTS.baseUrl, source: 'default' };
-}
-
-function isNotFound(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === 'ENOENT'
-  );
 }

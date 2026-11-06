@@ -216,7 +216,8 @@ Examples:
   const config = leaf(SETUP, 'config', 'read and set config values').description(
     'Print every effective config value, or read and write one. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default). ' +
       'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
-      'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends.',
+      'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends. ' +
+      'router.improve is "Help improve routing", off by default: true lets Tenjin keep the secret-masked text of the turns the router sees, to grade its offers, and false turns it off and deletes what was kept.',
   );
   config.addHelpText(
     'after',
@@ -226,6 +227,7 @@ Examples:
   $ tenjin config set router.context turn
   $ tenjin config set maxAutoSpend 0.25
   $ tenjin config set --project router.enabled false
+  $ tenjin config set router.improve false
 `,
   );
   config.action(async function (this: Command) {
@@ -351,7 +353,7 @@ Examples:
   addGlobalFlags(wallet.command('fund [amountUsd]'))
     .summary('fund this wallet through a checkout link for your region')
     .description(
-      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. In the US: Apple Pay or Google Pay with no Coinbase account. Elsewhere: your Coinbase account. The link moves no money: a human completes the payment.',
+      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. The link moves no money: a human completes the payment.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
     .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')
@@ -409,8 +411,6 @@ Examples:
     .option('--data-raw <text>', "request body sent byte for byte; needs -H 'Content-Type: <type>'")
     .option('--max-price <usd>', 'hard price cap in decimal USD (never bypassed by --yes)')
     .option('--yes', 'bypass the interactive confirm only (not the price cap)')
-    // NOT the same flag as `read`/`buy` carry: there it adds `body` to the
-    // machine output, here it un-caps the preview the human line prints.
     .option(
       '--ignore-warnings',
       'acknowledge direct-payment registry warnings only; all payment checks still apply',

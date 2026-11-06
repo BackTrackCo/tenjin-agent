@@ -105,23 +105,27 @@ interface SavedProgress extends Stamp {
 /**
  * THE NOTE RECORD, one per WebSearch the pre-call hook let run with a free
  * offer, keyed by its `tool_use_id`: the offer's id and the server's line,
- * which the after-call hook shows once the search has run. The CLI's alone:
+ * which the after-call hook shows once the search has run, and every id the
+ * line offers, which it keeps untaken then (`untaken.ts`). The CLI's alone:
  * the mod draws nothing on the search.
  */
 interface SavedNote extends Stamp {
   offerId: string;
   line: string;
+  ids?: string[];
 }
 
-/** What a note record names: the offer and its line. */
+/** What a note record names: the offer, its line and the ids that line offers. */
 export interface NotedOffer {
   offerId: string;
   line: string;
+  ids?: string[];
 }
 
 /**
  * THE OFFER RECORD, one per native call a hook redirected, keyed by its
- * `tool_use_id`: when it was made, the offer's id, its `label` when the
+ * `tool_use_id`, and one per prompt the prompt hook made an offer on, keyed by
+ * {@link promptOfferKey}: when it was made, the offer's id, its `label` when the
  * decision carried one, and its price in atomic USDC. Part of the state
  * contract between this CLI and the plugin's mod (`mod-state.ts`), which reads
  * it to draw the redirected row and to find the `request` call that takes the
@@ -272,6 +276,11 @@ export async function markOffered(
   );
 }
 
+/** The offer record's key for an offer the prompt hook made on `prompt`. */
+export function promptOfferKey(prompt: string): string {
+  return `prompt:${prompt}`;
+}
+
 export async function wasOffered(
   dataDir: string,
   sessionId: string,
@@ -298,7 +307,13 @@ export async function markNoted(
   now = Date.now(),
 ): Promise<boolean> {
   if (!OFFER_ID_RE.test(note.offerId) || !note.line.includes(note.offerId)) return false;
-  const saved: SavedNote = { version: 1, at: now, offerId: note.offerId, line: note.line };
+  const saved: SavedNote = {
+    version: 1,
+    at: now,
+    offerId: note.offerId,
+    line: note.line,
+    ...(note.ids !== undefined ? { ids: note.ids } : {}),
+  };
   if (Buffer.byteLength(JSON.stringify(saved), 'utf8') > MAX_RECORD_BYTES) return false;
   return write(notePath(dataDir, sessionId, toolUseId), saved);
 }
@@ -317,12 +332,16 @@ export async function noteOf(
   const row = await readJson(notePath(dataDir, sessionId, toolUseId));
   const stamp = stampOf(row);
   if (row === null || stamp === null || now - stamp.at > EXPIRY_MS) return null;
-  const { offerId, line } = row;
+  const { offerId, line, ids } = row;
   if (typeof offerId !== 'string' || !OFFER_ID_RE.test(offerId)) return null;
   if (typeof line !== 'string' || /[\p{Cc}\p{Cf}]/u.test(line) || !line.includes(offerId)) {
     return null;
   }
-  return { offerId, line };
+  const offered =
+    Array.isArray(ids) && ids.every((id) => typeof id === 'string' && OFFER_ID_RE.test(id))
+      ? (ids as string[])
+      : undefined;
+  return { offerId, line, ...(offered !== undefined ? { ids: offered } : {}) };
 }
 
 function notePath(dataDir: string, sessionId: string, toolUseId: string): string {

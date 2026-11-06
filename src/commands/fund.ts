@@ -143,8 +143,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   emitWriteNotice(
     ctx.io,
     hosted
-      ? 'The link is single-use, expires in ~5 minutes, and only works in a browser on this machine (it is bound to this network). A Coinbase account is required.'
-      : 'The link expires in ~10 minutes. In the US, pay with Apple Pay or Google Pay, no Coinbase account needed.',
+      ? 'The link is single-use, expires in ~5 minutes, and only works in a browser on this machine (it is bound to this network).'
+      : 'The link expires in ~10 minutes.',
   );
 
   let opened = false;
