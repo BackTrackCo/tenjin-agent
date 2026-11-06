@@ -74,8 +74,8 @@ import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
 /**
- * `tenjin install` for the router product: the wallet, the spend limits, and
- * the Claude Code plugin `tenjin`, registered with no step left to the person.
+ * `tenjin install` prepares the wallet, spending limits and Claude Code plugin.
+ * Registration does not establish activation in an already open session.
  *
  * What it writes: the wallet and the spend defaults under the data dir. With
  * the default data dir, this build is copied into Tenjin's own runtime,
@@ -92,13 +92,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * tool to the model, so this command writes nothing into `settings.json` or
  * `~/.claude.json` itself.
  *
- * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
- * the spend question comes back for the agent to ask there, the funding question
- * with the install its answer picks, the `claude`
- * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
- * plugin command falls back to the folder, and the one step after it is
- * reloading plugins in a fresh terminal install's conversation. Desktop Code
- * and settings-based upgrades need a new session to load the MCP server.
+ * An agent relays pending spending and funding choices; a terminal asks them
+ * directly. Funding is optional. Activation follows the host-specific step.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -202,8 +197,6 @@ export interface RouterInstallDeps extends WalletDeps, FundingDeps {
   promptAmount?: (message: string, placeholder: string) => Promise<string | null>;
   /** The router reachability probe's transport; tests inject it. */
   fetchImpl?: typeof fetch;
-  /** The wallet's USDC balance in atomic units; production reads Base. */
-  walletBalance?: (address: string, rpcUrl: string) => Promise<bigint>;
   /** Sets up Tenjin's runtime for this build; tests inject it, production runs `setupRuntime`. */
   runtime?: (o: Parameters<typeof setupRuntime>[0]) => Promise<RuntimeSetup>;
 }
@@ -1287,10 +1280,8 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
  * wallet's fix and the passphrase line take the agent's wording: ask the
  * person, never ask for the passphrase.
  *
- * A ✓ only for a wallet every Claude Code can unlock: a durable store, a
- * legacy entry, or a variable a served router has already signed with. A
- * wallet that signs only through a variable in this shell is a yellow `!`,
- * as is one that cannot be unlocked, or could not be checked.
+ * A ready wallet needs no first-use diagnostic. A wallet that only this
+ * shell can unlock, a blocked signer or an unknown check retains its warning.
  */
 export function walletLines(
   ctx: CommandContext,
