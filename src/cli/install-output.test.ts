@@ -17,7 +17,6 @@ vi.mock('../router/doctor', () => ({ runRouterDoctor: stubs.doctor }));
 vi.mock('../router/hosts', async (original) => ({
   ...(await original<typeof import('../router/hosts')>()),
   installHosts: async () => ['claude', ...(process.env.TEST_BOTH_HOSTS ? ['codex'] : [])],
-  otherHostNote: async () => 'Codex is also installed.',
   recordInstalledHost: vi.fn(),
   recordedHosts: async () => ['claude'],
 }));
@@ -138,7 +137,7 @@ describe('the default agent install handoff', () => {
     expect(data.next).toContain('verify its tools');
     expect(out.stdout).not.toContain('starts with the next session');
     expect(data.spend).toEqual(full().spend);
-    expect(data.notices).toEqual(['Codex is also installed.']);
+    expect(data).not.toHaveProperty('notices');
     expect(data.fundingWarning).toBe(full().fundingWarning);
     expect(data.wallet).not.toHaveProperty('address');
     expect(data.wallet).not.toHaveProperty('passphrase');
@@ -163,7 +162,7 @@ describe('the default agent install handoff', () => {
     const piped = await run(['install']);
     expect(JSON.parse(piped.stdout).data).toMatchObject(full());
     vi.stubEnv('CLAUDECODE', '1');
-    expect((await run(['install'], true)).stdout).toBe('Installed.\nCodex is also installed.\n');
+    expect((await run(['install'], true)).stdout).toBe('Installed.\n');
   });
 
   it('keeps each host pending question and all warnings in the multi-host result', async () => {
@@ -176,7 +175,7 @@ describe('the default agent install handoff', () => {
       expect(data[host].fundingWarning).toBe(full().fundingWarning);
       expect(data[host].wallet).not.toHaveProperty('address');
     }
-    expect(data.notices).toEqual(['Codex is also installed.']);
+    expect(data).not.toHaveProperty('notices');
   });
 
   it('preserves a failed registration and wallet recovery instead of hiding them', async () => {

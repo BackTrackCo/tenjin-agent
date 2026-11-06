@@ -72,8 +72,6 @@ function deps(over: Record<string, unknown> = {}) {
     observedSigning: async () => false,
     listMcpProcesses: async () => [],
     walletBalance: async () => 0n,
-    // Help improve routing at a terminal: No, unless a test answers it.
-    promptImprove: async () => false,
     ...over,
   };
 }
@@ -227,19 +225,19 @@ describe('tenjin install', () => {
     await expect(readFile(settingsPath(), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('prints a short summary: set up, the new wallet, the limits, the next step', async () => {
-    const result = await runRouterInstall({}, ctx(), deps());
-    expect(result.humanLines).toEqual([
-      '✓ Tenjin is set up for Claude Code (plugin tenjin@skills-dir)',
-      `✓ Wallet created: ${ADDRESS}`,
-      ...ASK_LINES,
-      `  Plugin tenjin@skills-dir written to ${folder()} (no claude binary on PATH or in CLAUDE_CODE_EXECPATH)`,
-      '',
-      `Next: fund the wallet with \`tenjin wallet fund 5\`, then ${RELOAD}`,
-    ]);
-    // The data-handling detail is not dropped, it moves to --json and the docs.
+  it('leads with setup, sharing, limits and activation while keeping diagnostics available', async () => {
+    const result = await runRouterInstall({}, humanCtx(), deps({ isInteractive: false }));
+    expect(result.humanLines?.[0]).toContain('Tenjin is set up for Claude Code');
+    const text = result.humanLines!.join('\n');
+    expect(text).toContain('Relevant task context');
+    expect(text).toContain('daily budget $5 shared across chats');
+    expect(text).toContain('open a new Claude Code session');
+    expect(text).not.toContain('this conversation');
+    expect(text).not.toContain(ADDRESS);
+    expect(text).not.toContain(folder());
     expect(result.data).toMatchObject({
       disclosure: expect.any(Array),
+      wallet: { address: ADDRESS },
       router: { status: 'ok' },
     });
   });
@@ -279,9 +277,10 @@ describe('tenjin install', () => {
   });
 
   it('keeps the conversation for a fresh install and requires a new session for a settings upgrade', () => {
-    expect(loadStep(false)).toBe(RELOAD_STEP);
-    expect(loadStep(false)).toContain('/reload-plugins');
-    expect(loadStep(true)).toBe(NEW_SESSION_STEP);
+    expect(loadStep(false, HARNESS_ENV)).toBe(RELOAD_STEP);
+    expect(loadStep(false, HARNESS_ENV)).toContain('/reload-plugins');
+    expect(loadStep(false)).not.toContain('this conversation');
+    expect(loadStep(true, HARNESS_ENV)).toBe(NEW_SESSION_STEP);
     for (const text of [NEW_SESSION_STEP, RECONNECT_FIX, NEW_SESSION_FIX]) {
       expect(text).not.toContain('/reload-plugins');
     }
@@ -309,10 +308,7 @@ describe('tenjin install', () => {
       expect(next).toContain('`tenjin doctor`');
       expect(next).not.toContain('/reload-plugins');
       expect(next).not.toMatch(/quit|reinstall|new wallet|<[^>]+>/i);
-      // The one question left is Help improve routing, asked once.
-      expect((result.data as { nextSteps: { id: string }[] }).nextSteps.map((q) => q.id)).toEqual([
-        'improve',
-      ]);
+      expect((result.data as { nextSteps: { id: string }[] }).nextSteps).toEqual([]);
       expect(result.humanLines?.at(-1)).toBe(`Next: ${next}`);
     },
   );
@@ -324,8 +320,8 @@ describe('tenjin install', () => {
     { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop-future' },
     { CLAUDE_CODE_DESKTOP_APP_VERSION: '3.6556.2' },
   ])('keeps terminal reload for unverified Desktop detection %j', (env) => {
-    expect(loadStep(false, env)).toBe(RELOAD_STEP);
-    expect(loadStep(true, env)).toBe(NEW_SESSION_STEP);
+    expect(loadStep(false, { ...HARNESS_ENV, ...env })).toBe(RELOAD_STEP);
+    expect(loadStep(true, { ...HARNESS_ENV, ...env })).toBe(NEW_SESSION_STEP);
   });
 
   it('a refresh brings the plugin up to this build and changes no config', async () => {
@@ -355,8 +351,11 @@ describe('tenjin install', () => {
     );
     expect(createWallet).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({ wallet: { status: 'existing', address: ADDRESS } });
-    expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
-    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
+    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
+    expect(result.data).toMatchObject({
+      wallet: { address: ADDRESS, signing: { status: 'ready' } },
+    });
+    expect(result.humanLines!.at(-1)).toContain('open a new Claude Code session');
   });
 
   it('creates no wallet with --no-wallet', async () => {
@@ -516,8 +515,7 @@ describe('install asks a person the spend question once', () => {
     const promptLimits = vi.fn(async () => 'approve' as const);
     await runRouterInstall({}, humanCtx(), deps({ isInteractive: true, promptLimits }));
     expect(promptLimits).not.toHaveBeenCalled();
-    // The limits stand; the one write is Help improve routing's No, recorded.
-    expect(await loadRawConfig(data)).toEqual({ ...file, install: { improveAsked: true } });
+    expect(await loadRawConfig(data)).toEqual(file);
   });
 
   it.each([
@@ -1163,7 +1161,7 @@ describe('install run by an agent asks each question where its answer is needed'
     expect(next).not.toContain('wallet fund');
   });
 
-  it('the completed install asks the funding question, with the address and the command for each answer', async () => {
+  it('the completed install asks funding once without exposing storage or minting checkout', async () => {
     // No link is minted: nothing reaches the fund route, and no wallet unlock is needed.
     const routes: string[] = [];
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
@@ -1178,7 +1176,7 @@ describe('install run by an agent asks each question where its answer is needed'
     }
     expect(routes.filter((r) => r.includes('/api/fund/'))).toEqual([]);
     const steps = stepsOf(result);
-    expect(steps.map((q) => q.id)).toEqual(['fund', 'improve']);
+    expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
     const show =
       'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
@@ -1188,7 +1186,6 @@ describe('install run by an agent asks each question where its answer is needed'
         { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5' },
         { id: 'later', label: 'Not now', command: null },
       ],
-      address: ADDRESS,
       show,
     });
     expect(fund).not.toHaveProperty('url');
@@ -1198,15 +1195,9 @@ describe('install run by an agent asks each question where its answer is needed'
       'When the selected option includes a command, run it yourself; never ask the person to run it.',
     );
     expect(fund.next).toContain('Do not offer funding again unless requested.');
-    expect(result.humanLines).toEqual(
-      expect.arrayContaining([
-        '  Ask the person: Add $5 to Tenjin now?',
-        '  Add $5: tenjin wallet fund 5',
-        `  Not now: run nothing, show them: ${show}`,
-      ]),
-    );
+    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
     expect(result.humanLines!.at(-1)).toBe(
-      `Next: ask the person each question in nextSteps, one at a time, then run what each answer names, then ${RELOAD}`,
+      `Next: ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
     );
     expect((result.data as { next: string }).next).not.toContain('wallet fund');
   });
@@ -1217,7 +1208,7 @@ describe('install run by an agent asks each question where its answer is needed'
       ctx(),
       deps({ env: HARNESS_ENV }),
     );
-    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund', 'improve']);
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
   });
 
   it('asks only the funding question when the limits were answered earlier', async () => {
@@ -1226,7 +1217,7 @@ describe('install run by an agent asks each question where its answer is needed'
       JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
     );
     const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV }));
-    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund', 'improve']);
+    expect(stepsOf(result).map((q) => q.id)).toEqual(['fund']);
   });
 
   it('asks nothing about funds for a wallet that already holds USDC', async () => {
@@ -1239,10 +1230,8 @@ describe('install run by an agent asks each question where its answer is needed'
         walletBalance: async () => 1_000_000n,
       }),
     );
-    expect(stepsOf(result).map((q) => q.id)).toEqual(['improve']);
-    expect(result.humanLines!.at(-1)).toBe(
-      `Next: ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
-    );
+    expect(stepsOf(result).map((q) => q.id)).toEqual([]);
+    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
   });
 
   it('does not suggest adding money when an existing balance cannot be checked', async () => {
@@ -1257,31 +1246,28 @@ describe('install run by an agent asks each question where its answer is needed'
         },
       }),
     );
-    expect(stepsOf(result).map((q) => q.id)).toEqual(['improve']);
+    expect(stepsOf(result).map((q) => q.id)).toEqual([]);
     expect(result.data).toMatchObject({
       fundingWarning: expect.stringContaining('Could not check your Tenjin funds'),
     });
-    expect(result.humanLines!.join(' ')).toContain('Your usual tools keep working');
+    expect(result.humanLines!.join(' ')).toContain('does not mean you need to add money again');
     expect(result.humanLines!.join(' ')).not.toContain('Add $5');
-    expect(result.humanLines!.at(-1)).toBe(
-      `Next: ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
-    );
+    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
   });
 
-  it('a person at a terminal gets what it always got: no questions handed over', async () => {
+  it('a terminal installer offers funding without making activation depend on it', async () => {
     const result = await runRouterInstall(
       {},
       humanCtx(),
       deps({
-        env: HARNESS_ENV,
+        env: {},
         isInteractive: true,
         promptLimits: async () => 'approve' as const,
       }),
     );
-    expect(stepsOf(result)).toEqual([]);
-    expect(result.humanLines!.at(-1)).toBe(
-      `Next: fund the wallet with \`tenjin wallet fund 5\`, then ${RELOAD}`,
-    );
+    expect(stepsOf(result).map((step) => step.id)).toEqual(['fund']);
+    expect(result.humanLines!.at(-1)).toContain('open a new Claude Code session');
+    expect((result.data as { next: string }).next).not.toContain('fund');
   });
 
   it('a script outside any harness gets the spend question and no funding question', async () => {
@@ -1290,84 +1276,20 @@ describe('install run by an agent asks each question where its answer is needed'
   });
 });
 
-/**
- * "HELP IMPROVE ROUTING" IS ASKED ONCE PER MACHINE, off until a yes. At a
- * terminal it is a yes/no question, default No; an agent's install hands it
- * over with the one command a yes runs, after the spend answer. Either way it
- * is recorded as asked, so no later install or update asks again.
- */
-describe('install asks Help improve routing once', () => {
-  const KEPT =
-    "Help improve routing? Tenjin keeps the secret-masked text of turns the router sees, including anything pasted into them, to check and improve its offers. It's kept until you turn this off, which deletes it.";
-  /** At a terminal the person runs the command; through an agent they ask for it. */
-  const IMPROVE = `${KEPT} Turn it off any time with \`tenjin config set router.improve false\`. Details: https://tenjin.sh/privacy`;
-  const IMPROVE_AGENT = `${KEPT} You can ask your agent to turn it off any time. Details: https://tenjin.sh/privacy`;
-  type Step = { id: string; question: string; options: { command: string | null }[] };
-  const improveOf = (result: { data: unknown }) =>
-    (result.data as { nextSteps: Step[] }).nextSteps.find((q) => q.id === 'improve');
-
-  it('asks a person at a terminal, default No, turns it on for a yes, and never again', async () => {
-    const promptImprove = vi.fn(async () => true);
-    const tty = { isInteractive: true, promptLimits: async () => 'approve' as const };
-    await runRouterInstall({}, humanCtx(), deps({ ...tty, promptImprove }));
-    expect(promptImprove).toHaveBeenCalledWith(IMPROVE);
-    expect(await loadRawConfig(data)).toMatchObject({
-      router: { improve: true },
-      install: { improveAsked: true },
-    });
-    const again = vi.fn(async () => false);
-    await runRouterInstall({}, humanCtx(), deps({ ...tty, promptImprove: again }));
-    await runRouterInstall({ refresh: true }, humanCtx(), deps({ ...tty, promptImprove: again }));
-    expect(again).not.toHaveBeenCalled();
-    expect((await loadRawConfig(data)).router).toEqual({ improve: true });
-  });
-
-  it('leaves it off and records the question for a No, and asks nothing under --yes', async () => {
-    const tty = { isInteractive: true, promptLimits: async () => 'approve' as const };
-    const yes = vi.fn(async () => true);
-    await runRouterInstall({ yes: true }, humanCtx(), deps({ ...tty, promptImprove: yes }));
-    expect(yes).not.toHaveBeenCalled();
-    expect((await loadRawConfig(data)).install).toBeUndefined();
-    await runRouterInstall({}, humanCtx(), deps(tty));
-    const config = await loadRawConfig(data);
-    expect(config.router).toBeUndefined();
-    expect(config.install).toMatchObject({ improveAsked: true });
-  });
-
-  it('hands an agent the question after the spend answer, once, with the yes command', async () => {
-    const first = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV }));
-    expect(improveOf(first)).toBeUndefined();
-    const answered = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
-    expect(improveOf(answered)).toMatchObject({
-      question: IMPROVE_AGENT,
-      options: [{ command: 'tenjin config set router.improve true' }, { command: null }],
-    });
-    expect(answered.humanLines).toEqual(
-      expect.arrayContaining([
-        `  Ask the person: ${IMPROVE_AGENT}`,
-        '  Yes: tenjin config set router.improve true',
-        '  No: run nothing; it stays off',
-      ]),
-    );
-    // Asked, and still off: only the agent's run of the yes command turns it on.
-    const config = await loadRawConfig(data);
-    expect(config.router?.improve).toBeUndefined();
-    expect(config.install).toMatchObject({ improveAsked: true });
-    const later = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
-    expect(improveOf(later)).toBeUndefined();
-  });
-
-  it('asks nobody on a machine whose file already names router.improve', async () => {
-    await writeFile(join(data, 'config.json'), JSON.stringify({ router: { improve: false } }));
+describe('optional settings stay out of installation', () => {
+  it('leaves collection off without adding a retention question', async () => {
     const result = await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
-    expect(improveOf(result)).toBeUndefined();
-    const promptImprove = vi.fn(async () => true);
-    await runRouterInstall(
-      {},
-      humanCtx(),
-      deps({ isInteractive: true, promptLimits: async () => 'approve' as const, promptImprove }),
-    );
-    expect(promptImprove).not.toHaveBeenCalled();
+    expect((result.data as { nextSteps: { id: string }[] }).nextSteps.map((q) => q.id)).toEqual([
+      'fund',
+    ]);
+    expect((await loadRawConfig(data)).router?.improve).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('Help improve routing');
+  });
+
+  it('preserves an explicit collection choice', async () => {
+    await writeFile(join(data, 'config.json'), JSON.stringify({ router: { improve: true } }));
+    await runRouterInstall({ yes: true }, ctx(), deps({ env: HARNESS_ENV }));
+    expect((await loadRawConfig(data)).router?.improve).toBe(true);
   });
 });
 
@@ -1463,7 +1385,10 @@ describe('the wallet line: can Claude Code unlock it', () => {
         observedSigning: async () => true,
       }),
     );
-    expect(result.humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
+    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
+    expect(result.data).toMatchObject({
+      wallet: { address: ADDRESS, signing: { status: 'ready' } },
+    });
     expect((result.data as { wallet: { shellOnly?: string } }).wallet.shellOnly).toBeUndefined();
   });
 
@@ -1489,7 +1414,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
     );
   });
 
-  it('a created wallet whose passphrase went to the file prints the ✓ and create’s one line', async () => {
+  it('keeps successful file-store details in structured diagnostics', async () => {
     const note = `No keyring reachable from this session; passphrase saved to ${join(data, 'passphrase.x.plain')} (readable only by you).`;
     const result = await runRouterInstall(
       {},
@@ -1506,7 +1431,8 @@ describe('the wallet line: can Claude Code unlock it', () => {
         }),
       }),
     );
-    expect(result.humanLines!.slice(1, 3)).toEqual([`✓ Wallet created: ${ADDRESS}`, `  ${note}`]);
+    expect(result.humanLines!.join('\n')).not.toContain(note);
+    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
     expect(result.data).toMatchObject({
       wallet: { status: 'created', signing: { status: 'ready', source: 'file' } },
     });
@@ -1540,14 +1466,13 @@ describe('the wallet line: can Claude Code unlock it', () => {
     );
     const data_ = result.data as { next: string; nextSteps: { id: string; question: string }[] };
     expect(data_.next).toBe(
-      `ask the person each question in nextSteps, one at a time, then run what each answer names, then ${RELOAD}`,
+      `ask the person the question in nextSteps, then run what the answer names, then ${RELOAD}`,
     );
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',
         question: 'Add $5 to Tenjin now?',
       }),
-      expect.objectContaining({ id: 'improve' }),
     ]);
   });
 
@@ -1670,7 +1595,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
     await writeObservation(data, observation(false));
     expect((await run()).humanLines!.join('\n')).not.toContain('✓ Wallet');
     await writeObservation(data, observation(true));
-    expect((await run()).humanLines).toContain(`✓ Wallet: ${ADDRESS}`);
+    expect((await run()).data).toMatchObject({ wallet: { signing: { status: 'ready' } } });
   });
 });
 
@@ -1698,7 +1623,7 @@ describe('the default wallet steps, on a fake keychain', () => {
         walletPassphrase: { platform: 'darwin', isTTY: false, exec },
       }),
     );
-    expect(result.humanLines).toContain(`✓ Wallet: ${record.address}`);
+    expect(result.humanLines!.join('\n')).not.toContain(record.address);
     expect(result.data).toMatchObject({
       wallet: { status: 'existing', signing: { status: 'ready', source: 'keychain' } },
     });
@@ -1729,7 +1654,7 @@ describe('the default wallet steps, on a fake keychain', () => {
     expect(wallet.status).toBe('created');
     expect(wallet.passphrase.store).toBe('file');
     expect(wallet.passphrase.note).toBe(NO_KEYRING_LINE(wallet.passphrase.location));
-    expect(result.humanLines).toContain(`  ${wallet.passphrase.note}`);
+    expect(result.humanLines!.join('\n')).not.toContain(wallet.passphrase.note);
   });
 
   it.each([

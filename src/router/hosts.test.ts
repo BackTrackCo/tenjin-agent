@@ -14,7 +14,6 @@ import {
   readInstalledHosts,
   recordedHosts,
   recordInstalledHost,
-  otherHostNote,
   runEach,
   uninstallEach,
   withNote,
@@ -203,27 +202,7 @@ describe('uninstallEach', () => {
   });
 });
 
-describe('otherHostNote', () => {
-  it('names Codex under a Claude Code agent, and Claude Code under a Codex one', async () => {
-    expect(await otherHostNote({}, { env: { CLAUDECODE: '1' }, detect: both })).toBe(
-      'Codex is also installed on this machine. Ask the person: "Should I also set up Tenjin for Codex?" On yes, run `tenjin install --harness codex`.',
-    );
-    expect(await otherHostNote({}, { env: { CODEX_SESSION_ID: 'a' }, detect: both })).toBe(
-      'Claude Code is also installed on this machine. Ask the person: "Should I also set up Tenjin for Claude Code?" On yes, run `tenjin install --harness claude`.',
-    );
-  });
-
-  it('says nothing with one host found, in a terminal, or under an override', async () => {
-    const claudeOnly = async (): Promise<Harness[]> => ['claude'];
-    expect(await otherHostNote({}, { env: { CLAUDECODE: '1' }, detect: claudeOnly })).toBe(
-      undefined,
-    );
-    expect(await otherHostNote({}, { env: {}, detect: both })).toBeUndefined();
-    expect(
-      await otherHostNote({ harness: 'claude' }, { env: { CLAUDECODE: '1' }, detect: both }),
-    ).toBeUndefined();
-  });
-
+describe('withNote', () => {
   it('rides in notices and as the last line, and leaves a result without it alone', () => {
     const out = { data: { plugin: 'x', nextSteps: [] }, humanLines: ['done'] };
     expect(withNote(out, 'Codex is also installed.')).toEqual({

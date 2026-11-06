@@ -348,9 +348,13 @@ async function pollForFunds(
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const interval = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
   const deadline = Date.now() + (opts.pollTimeoutMs ?? POLL_TIMEOUT_MS);
-  emitNotice(ctx.io, 'Waiting for the USDC to arrive (Ctrl-C is safe; the purchase is not).', {
-    json: ctx.flags.json,
-  });
+  emitNotice(
+    ctx.io,
+    'Waiting for funds. Ctrl-C stops this check; it does not cancel browser checkout.',
+    {
+      json: ctx.flags.json,
+    },
+  );
   while (Date.now() < deadline) {
     await sleep(interval);
     const balance = await balanceOrUndefined(desc, rpcUrl);

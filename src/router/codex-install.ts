@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
-import { persistImproveAnswer, persistRouterDefaults } from '../commands/config';
+import { persistRouterDefaults } from '../commands/config';
 import { versionFreeEntry } from '../commands/update';
 import type { WalletDeps, WalletOutcome } from '../commands/install-wallet';
 import { autoUpdateLine } from '../lib/auto-update';
@@ -40,6 +40,8 @@ import {
   NOTHING_TO_REFRESH,
   runtimeData,
   runtimeLines,
+  walletLines,
+  DISCLOSURE,
   spendStepFor,
   type QuestionStep,
   type RouterInstallDeps,
@@ -48,8 +50,9 @@ import { EVENT_LABEL, rowsOf, trustCodexHooks, type ListedHook } from '../lib/co
 import { readInstalledHosts, withNote } from './hosts';
 import { CODEX_MCP_HOOKS_VERSION, renderCodexHooks } from './plugin-files';
 import { shownLimits } from './spend-question';
-import { askImprove, improveLines, improveStep, type ImproveDeps } from './improve-question';
+import { fundStep, type FundingDeps } from './install-funding';
 import { underAgentHarness } from '../lib/session';
+import { SUGGESTED_FUND_USD } from './fee';
 
 /**
  * `tenjin install|uninstall|doctor` for Codex. Codex's own commands do
@@ -78,7 +81,7 @@ export interface CodexRun {
 }
 
 export interface CodexSetupDeps
-  extends WalletDeps, ImproveDeps, Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'> {
+  extends WalletDeps, FundingDeps, Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'> {
   /** One `codex` command, recorded in tests. */
   run?: (args: string[]) => Promise<CodexRun>;
   /** Codex's merged config (`config/read`), or null when it could not be read. */
@@ -369,13 +372,6 @@ export async function runCodexInstall(
         : canPrompt && unasked
           ? await approveLimits(deps)
           : {};
-  // "Help improve routing", asked once per machine, as the Claude install asks it.
-  const improve = await askImprove(
-    config,
-    { canPrompt, yes: args.yes === true, refresh: false },
-    deps,
-  );
-
   const rt = await (deps.runtime ?? defaultRuntime)({
     dataDir: ctx.dataDir,
     home,
@@ -385,7 +381,7 @@ export async function runCodexInstall(
     refresh: false,
   });
   requireRuntime(rt);
-  const { resolveWallet, walletValue } = await import('../commands/install-wallet');
+  const { resolveWallet } = await import('../commands/install-wallet');
   const wallet: WalletOutcome = await resolveWallet(
     ctx,
     deps,
@@ -393,7 +389,6 @@ export async function runCodexInstall(
     false,
   );
   const spend = await persistRouterDefaults(ctx.dataDir, false, limits, named.keys);
-  if (improve !== undefined) await persistImproveAnswer(ctx.dataDir, improve);
   const fromRuntime = runtimeHosts(rt);
   const hosts =
     rt.state === 'skipped'
@@ -419,7 +414,8 @@ export async function runCodexInstall(
   }
 
   // Read back after the write, as the Claude install does.
-  const { policy } = await resolveContextSettings(ctx);
+  const settings = await resolveContextSettings(ctx);
+  const { policy } = settings;
   const effective = effectiveLimits(policy);
   // Run again by the agent in Codex, a bare install finds Codex itself.
   const install = [
@@ -428,12 +424,22 @@ export async function runCodexInstall(
   ].join(' ');
   const spendAsk: QuestionStep | undefined =
     !canPrompt && !answered && unasked ? spendStepFor(install) : undefined;
-  // Read again: a Claude install earlier in this run may have handed it over.
-  const improveAsk = await improveStep(ctx.dataDir, await loadRawConfig(ctx.dataDir), {
-    asksAgent: !canPrompt && underAgentHarness(deps.env ?? process.env),
-    spendPending: spendAsk !== undefined,
-    command: continuationCommand(rt),
-  });
+  const asksAgent = !canPrompt && underAgentHarness(deps.env ?? process.env);
+  const funding =
+    !tooOld && (asksAgent || canPrompt) && spendAsk === undefined
+      ? await (deps.funding ?? fundStep)(
+          wallet,
+          settings.rpcUrl,
+          deps,
+          `${continuationCommand(rt)} wallet fund ${SUGGESTED_FUND_USD}`,
+        )
+      : undefined;
+  const nextSteps = [
+    ...(spendAsk !== undefined ? [spendAsk] : []),
+    ...(funding?.step !== undefined ? [funding.step] : []),
+  ];
+  if (asksAgent && nextSteps.length > 0)
+    next = `Ask the person each question in nextSteps once, then ${next}`;
   const daily =
     policy.sessionBudgetAtomic === null
       ? effective.sessionBudget
@@ -444,19 +450,20 @@ export async function runCodexInstall(
       wallet,
       spend: { ...spend, effective },
       runtime: runtimeData(rt),
-      nextSteps: [
-        ...(spendAsk !== undefined ? [spendAsk] : []),
-        ...(improveAsk !== undefined ? [improveAsk] : []),
-      ],
+      nextSteps,
+      disclosure: DISCLOSURE,
+      ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
       next,
     },
     humanLines: [
-      `Wallet: ${walletValue(wallet)}`,
       tooOld
-        ? `Codex plugin: left as it was (Codex ${version})`
-        : `Codex plugin: ${CODEX_PLUGIN} added from ${fromRuntime !== null ? tilde(fromRuntime, home) : 'the package'}`,
-      ...runtimeLines(ctx, rt, home),
+        ? `Tenjin keeps its earlier Codex setup until Codex is updated (${version}).`
+        : 'Tenjin is installed for Codex.',
+      ...DISCLOSURE,
       `Automatic router: up to $${effective.maxAutoSpend} per call; ${daily}`,
+      ...runtimeLines(ctx, rt, home, true),
+      ...walletLines(ctx, '✓', wallet, 'Codex'),
+      ...(funding?.warning !== undefined ? [funding.warning] : []),
       ...(spendAsk !== undefined
         ? [
             `  Ask the person in this session: ${spendAsk.question}`,
@@ -465,9 +472,7 @@ export async function runCodexInstall(
             ),
           ]
         : []),
-      ...(improveAsk !== undefined ? improveLines(improveAsk) : []),
-      'Request tool: its plugin hook allows it, under your wallet spend limits. Turn that hook off in /hooks to be asked first.',
-      next,
+      `Next: ${next}`,
     ],
   };
 }

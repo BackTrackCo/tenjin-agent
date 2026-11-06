@@ -880,9 +880,6 @@ export interface PromptHookOutcome {
  * when the paid call would auto-execute, the same rule the pre-call deny
  * follows. A discovered line is shown anyway, with a sentence saying it needs
  * approval or funds ({@link vetOffer}): it may be the only service for the step.
- *
- * Once per machine, on a machine nobody has asked, it also hands the agent the
- * "Help improve routing" question ({@link improveAsk}), offer or not.
  */
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = eventOf(raw, deps);
@@ -916,8 +913,6 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
-  // Beside the routing decision, never ahead of it.
-  const asking = hookEventName === 'UserPromptSubmit' ? improveAsk(router, deps) : undefined;
   await sweepUntaken(deps, router);
 
   const sealed = await sealHere(
@@ -929,18 +924,17 @@ async function offerOnUserText(
   const footer = await openFooter(deps, event.sessionId, 'prompt', {});
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
-  const improve = await asking;
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
-      ...injection(hookEventName, improve),
+      ...injection(hookEventName),
       ...(outcome !== null ? { action: outcome.action } : {}),
     };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
-    return { ...injection(hookEventName, improve), action: outcome.action, withheld: true };
+    return { ...injection(hookEventName), action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
   if (hookEventName === 'UserPromptSubmit') {
@@ -956,27 +950,8 @@ async function offerOnUserText(
   return {
     action: outcome.action,
     id: outcome.id,
-    ...injection(hookEventName, attributed(vetted.offer.hint, hostOf(deps)), improve),
+    ...injection(hookEventName, attributed(vetted.offer.hint, hostOf(deps))),
   };
-}
-
-/**
- * "HELP IMPROVE ROUTING" FOR A MACHINE NOBODY HAS ASKED: one installed before
- * the question existed, which no install will ask, since its updates never
- * run one. The first prompt the router sees there hands the question to the
- * agent, once per machine (`improve-question.ts`). Never while the router is
- * off, which keeps nothing. Loaded lazily, as it brings the config writer the
- * hook chunk does not load. A failure costs only the question, never this
- * turn's offer.
- */
-async function improveAsk(router: RouterHere, deps: HookDeps): Promise<string | undefined> {
-  try {
-    const { improveSessionAsk } = await import('./improve-question');
-    const ask = await improveSessionAsk(deps.dataDir, router.config);
-    return ask === undefined ? undefined : `${HINT_SOURCE}: ${ask}`;
-  } catch {
-    return undefined;
-  }
 }
 
 /** The lines this leg adds to the agent's context, or no answer when there are none. */

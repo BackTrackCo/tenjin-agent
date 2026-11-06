@@ -44,7 +44,7 @@ Paste this into Claude Code:
 Install Tenjin from tenjin.sh
 ```
 
-Your install request gives the agent permission to handle setup. It briefly explains task-context sharing, asks about spending limits and adding funds, then gives the activation step. Follow that step to continue your original task. Wallet addresses appear only when requested or needed for recovery; storage and PATH details appear only for recovery.
+Your install request gives the agent permission to handle setup. It briefly explains task-context sharing, asks about spending limits and offers “Add $5” or “Not now,” then gives the activation step. Declining funding still completes installation. Optional improvement-data collection stays off unless you explicitly enable it. Follow that step to continue your original task. Wallet addresses appear only when requested or needed for recovery; storage and PATH details appear only for recovery.
 
 Or from a terminal (Node and npm are not required):
 

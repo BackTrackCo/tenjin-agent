@@ -51,8 +51,7 @@ Learn more:
         if (harness === 'codex' && o.refresh === true) {
           throw new CliError('USAGE', 'The Codex plugin has no refresh; omit --refresh.');
         }
-        const { installHosts, otherHostNote, recordInstalledHost, runEach, withNote } =
-          await import('../router/hosts');
+        const { installHosts, recordInstalledHost, runEach } = await import('../router/hosts');
         const hostArgs = {
           ...(harness !== undefined ? { harness } : {}),
           ...(o.project === true ? { project: true } : {}),
@@ -60,7 +59,9 @@ Learn more:
           ...(o.yes === true ? { yes: true } : {}),
         };
         const hosts = await installHosts(hostArgs, ctx);
-        const note = otherHostNote(hostArgs).catch(() => undefined);
+        const { fundingOncePerRun, finishTerminalFunding } =
+          await import('../router/install-funding');
+        const funding = fundingOncePerRun();
         // Both hosts run from the same runtime: it is set up, and said, once.
         const runtime = (await import('../router/install')).runtimeOncePerRun();
         const installAll = () =>
@@ -69,7 +70,7 @@ Learn more:
               host === 'codex'
                 ? await (
                     await import('../router/codex-install')
-                  ).runCodexInstall(codexArgs(o), ctx, { runtime })
+                  ).runCodexInstall(codexArgs(o), ctx, { runtime, funding })
                 : await (
                     await import('../router/install')
                   ).runRouterInstall(
@@ -86,13 +87,18 @@ Learn more:
                         : {}),
                     },
                     ctx,
-                    { runtime },
+                    { runtime, funding },
                   );
             if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
             return one;
           });
         if (o.refresh !== true || harness !== undefined) {
-          return installOutput(withNote(await installAll(), await note), ctx, o.refresh === true);
+          const result = await installAll();
+          const finished =
+            o.refresh === true
+              ? result
+              : await finishTerminalFunding(result, ctx, { yes: o.yes === true });
+          return installOutput(finished, ctx, o.refresh === true);
         }
         // `tenjin update` runs this refresh in the new build: a Codex that
         // already has the plugin gets the new hooks too, whatever Claude Code's
