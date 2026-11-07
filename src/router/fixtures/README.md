@@ -29,14 +29,14 @@ any model call. The free route `POST /api/x402-router` answers the routing forms
 and `{query, id?}` with `native` and `fee_required` first, with or without `spec` (The paid path,
 below). The outcome report is the one form that carries no `accepts`.
 
-| call    | request                                                             | answer                                                                                                                      |
-| ------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
-| tool    | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
-| browse  | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
-| by id   | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
-| forget  | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
+| call    | request                                                                        | answer                                                                                                                      |
+| ------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| hook    | `{schemaVersion, packet, budgetMs?, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
+| tool    | `{schemaVersion, query, id?, accepts, improve?}`                               | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
+| browse  | `{schemaVersion, browse, accepts}`                                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
+| by id   | `{schemaVersion, tool, accepts}`                                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
+| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`                 | an empty 204                                                                                                                |
+| forget  | `{schemaVersion, forget: "samples"}`                                           | an empty 204                                                                                                                |
 
 `improve: true` rides the hook and tool forms only while the person has turned
 on "Help improve routing" (`router.improve`, off by default, enabled explicitly
@@ -45,6 +45,11 @@ sealed packet beside its decision row, with no expiry. The `forget` form, on the
 the person turns it off: the server deletes every packet it kept for the
 request's `tenjin-install-id` header, and with no install id deletes nothing.
 Neither carries `accepts`.
+
+`budgetMs` gives the server the hook's remaining decision wait when it sends
+the request, capped at 5000 ms. The MCP payer shares the 3500 ms decision
+window with the 402, wallet and paid request; a hook without that payer has
+4500 ms. The tool form keeps its existing body.
 
 An outcome's `status` is `ignored` for an offer the host was shown and never
 took, with `reason` `expired` (its 15 minutes ran out with no `request` call
