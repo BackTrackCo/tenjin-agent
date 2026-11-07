@@ -210,8 +210,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
             ...(pollStatus === 'unavailable'
               ? ['Could not read the balance to wait on it; the link is unaffected.']
               : []),
-            'Finish checkout, then return to your agent to confirm funds and continue your task.',
-            'Funds not confirmed. Ask your agent to confirm your funds before adding money again.',
+            'Funds not confirmed. Finish checkout, then check with `tenjin wallet balance` or ask your agent before adding money again.',
           ],
   };
 }

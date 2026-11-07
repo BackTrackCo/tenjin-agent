@@ -607,8 +607,8 @@ describe('runFund', () => {
       expect(sleep).toHaveBeenCalledTimes(3);
       expect(mockedBalance).toHaveBeenCalledTimes(4); // one baseline + three polls
       expect(res.data).toMatchObject({ funded: false, pollStatus: 'timed-out' });
-      expect(res.humanLines?.join(' ')).toContain('Ask your agent to confirm your funds');
-      expect(res.humanLines?.join(' ')).not.toContain('`tenjin');
+      expect(res.humanLines?.join(' ')).toContain('`tenjin wallet balance`');
+      expect(res.humanLines?.join(' ')).toContain('before adding money again');
     } finally {
       vi.useRealTimers();
     }
