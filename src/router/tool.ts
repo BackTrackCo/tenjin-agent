@@ -153,7 +153,7 @@ import {
  */
 
 export interface RequestToolArgs {
-  /** Optional only beside `input`. */
+  /** The task to route, or the query for an explicitly selected free tool. */
   query?: string;
   /** The turn id from the hook's line. It names the service that line offered;
    *  it grants nothing locally, every cap still applies. */
@@ -169,8 +169,8 @@ export interface RequestToolArgs {
   /** A free browse of the tool list: the need in a few words, or `""` for
    *  every tool by kind. Sent alone; nothing is paid. */
   browse?: string;
-  /** A browse row's id: that tool's spec, kept under a fresh offer id for
-   *  `{id, input}` to run. Sent alone; nothing is paid. */
+  /** A browse row's id: alone, its spec for `{id, input}`; with a query,
+   *  an explicitly selected free lookup, without paid routing. */
   tool?: string;
   /** Several takes of one media call, 2 to 5, each its own payment, where the
    *  spec allows them. The whole set meets the spend policy before any is
@@ -458,7 +458,16 @@ async function requestTool(
   // user marked private: nothing is sent and nothing is paid.
   const here = await routerHere(deps);
   if ('off' in here) return fail('needs_input', here.off, { nextStep: ROUTER_OFF_NEXT_STEP });
-  if (args.browse !== undefined || args.tool !== undefined) return readToolList(args, deps);
+  if (args.browse !== undefined || (args.tool !== undefined && args.query === undefined))
+    return readToolList(args, deps);
+  if (args.tool !== undefined) {
+    if (args.tool.trim().length === 0 || args.tool.trim().length > 200)
+      return fail('needs_input', '`tool` takes a row id from request({browse}).');
+    if ((['id', 'input', 'choice', 'count', 'job'] as const).some((key) => args[key] !== undefined))
+      return fail('needs_input', 'A selected free lookup takes only its tool id and query.');
+    if (mask(args.tool) !== args.tool)
+      return fail('native', 'the tool id carries a credential-shaped value, so nothing was sent');
+  }
   // A JOB AN EARLIER CALL LEFT RUNNING, by the id its result named: polled from
   // its record, with nothing built and nothing paid.
   if (args.job !== undefined && args.job.length > 0) {
@@ -529,6 +538,8 @@ async function requestTool(
   }
   const query = (args.query ?? '').trim().slice(0, 8_000);
   if (query.length === 0 && input === undefined) {
+    if (args.tool !== undefined)
+      return fail('needs_input', 'Include what to look up in request({tool, query}).');
     return fail(
       'needs_input',
       id !== undefined
@@ -571,7 +582,10 @@ async function requestTool(
       return fail(
         'needs_input',
         'The spec for that offer is no longer kept on this machine (it expired or was pruned), so nothing was sent or paid.',
-        { nextStep: 'Call request({query}) with the task for a fresh offer, then fill its line.' },
+        {
+          nextStep:
+            'Inspect the selected tool again with request({tool}) (browse for its tool id if needed), then retry with the fresh id and input. Use request({query}) only to choose a tool again.',
+        },
       );
     }
   }
@@ -588,11 +602,12 @@ async function requestTool(
   // chain, BESIDE the lookup and never in front of it: a slow or rate-limited
   // RPC costs this call nothing, and a record it could not answer for waits
   // `RECHECK_MS` before it is asked about again. Its own errors are its own.
-  void reconcilePayments(deps.ctx.dataDir, {
-    rpcUrl: settings.rpcUrl,
-    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-  }).catch(() => undefined);
+  if (args.tool === undefined)
+    void reconcilePayments(deps.ctx.dataDir, {
+      rpcUrl: settings.rpcUrl,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    }).catch(() => undefined);
   const decisionDeps = {
     ctx: deps.ctx,
     baseUrl: settings.baseUrl,
@@ -628,12 +643,14 @@ async function requestTool(
   // ON THE PAID ROUTE the payer pays the routing fee with the stock x402
   // client. A call it cannot pay is answered here at once: nothing was
   // routed, and the agent uses its own tools.
-  const route = deps.route?.(settings.baseUrl);
-  const fresh = await requestDecision(
-    'tool',
-    { query, ...(id !== undefined ? { id } : {}) },
-    { ...decisionDeps, ...(route !== undefined ? { route } : {}) },
-  );
+  const fresh =
+    args.tool !== undefined
+      ? await requestToolSpec(args.tool.trim(), decisionDeps, query)
+      : await requestDecision(
+          'tool',
+          { query, ...(id !== undefined ? { id } : {}) },
+          { ...decisionDeps, route: deps.route?.(settings.baseUrl) },
+        );
   if (fresh.status === 'skipped') {
     await footer.done('native');
     // A reason that lasts (money, the wallet, a limit, the fee's price) is
@@ -659,6 +676,26 @@ async function requestTool(
     });
   }
   const { decision, note } = fresh.decision;
+
+  if (args.tool !== undefined) {
+    if (
+      decision.action !== 'native' &&
+      decision.action !== 'needs_input' &&
+      (decision.action !== 'execute' ||
+        decision.capabilityId !== args.tool.trim() ||
+        BigInt(decision.providerPriceAtomic) !== 0n)
+    ) {
+      await footer.done('failed');
+      return fail(
+        'failed',
+        'The answer is not a runnable free lookup for the selected tool. Nothing was sent to a provider or paid.',
+        {
+          nextStep: 'Use your own tools for this lookup.',
+          ...(note !== undefined ? { note } : {}),
+        },
+      );
+    }
+  }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
   // shown with the skeleton of the next call, `request({id, input})`. Nothing
@@ -765,8 +802,8 @@ async function requestTool(
  * and keeps it under the fresh offer id the server minted, so `{id, input}`
  * runs it exactly as it runs a hook's offer. Neither is a lookup: no gate call,
  * no routing fee, nothing paid, and the hooks' per-lookup routing is unchanged.
- * Each form is sent alone, and the credential rule every other call follows
- * applies to its words.
+ * This handles list and spec reads; selected `{tool, query}` runs above.
+ * The credential rule every other call follows applies to its words.
  */
 async function readToolList(
   args: RequestToolArgs,
@@ -778,7 +815,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      "`browse` and `tool` are each sent alone: browse the list, then call request({tool}) with one row's id.",
+      'Browse with request({browse}), inspect with request({tool}), or run a free tool with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
@@ -838,8 +875,8 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
  *  price and the call that fetches its spec. */
 function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
-    'Call request({tool: "<id>"}) for a tool\'s spec and the call that runs it, free. ' +
-    'A free row with no spec runs from request({query}).';
+    'Inspect a tool for free with request({tool: "<id>"}). ' +
+    'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
   if (rows.length === 0) {
     return {
       isError: false,

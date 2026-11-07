@@ -1054,7 +1054,7 @@ describe('a discovered service', () => {
     expect(auth.authorize).toHaveBeenCalledOnce();
   });
 
-  it('answers an input whose spec is no longer kept with a fresh query, sending nothing', async () => {
+  it('recovers a missing selected spec through inspection before optional reselection, sending nothing', async () => {
     const auth = authorizer();
     const { fetchImpl, calls } = net([]);
     const result = await runRequestTool(
@@ -1063,7 +1063,7 @@ describe('a discovered service', () => {
     );
     expect(result.envelope).toMatchObject({
       status: 'needs_input',
-      nextStep: expect.stringContaining('request({query})') as string,
+      nextStep: expect.stringContaining('request({tool})') as string,
     });
     expect(calls).toHaveLength(0);
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -2511,6 +2511,203 @@ describe('the tool list, read for free', () => {
     throw new Error('the paid routing path was asked');
   });
 
+  it('refuses a selected free query mixed with a kept paid spec before any network or payment', async () => {
+    const selected = BY_ID.decision as { id: string; spec: Omit<OfferSpec, 'id'> };
+    await storeSpecs(dir, [{ ...selected.spec, id: selected.id }]);
+    const { fetchImpl, calls } = net([]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      {
+        tool: 'context7-docs',
+        query: 'Zod v4 email validation',
+        id: selected.id,
+        input: { symbol: 'BTC' },
+      },
+      { ...deps(fetchImpl, auth), route },
+    );
+    expect(result.envelope.status).toBe('needs_input');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it('never sends a selected tool id carrying a credential', async () => {
+    const { fetchImpl, calls } = net([]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { tool: 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789', query: 'Zod' },
+      { ...deps(fetchImpl, auth), route },
+    );
+    expect(result.envelope.status).toBe('native');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it('runs a selected free docs query without a wallet, routing deposit or payment approval', async () => {
+    const query = 'Zod v4 email & URL validation';
+    const docsUrl = `${ROUTER}/api/docs-lookup?query=Zod+v4+email+%26+URL+validation`;
+    const answer = decision({
+      capabilityId: 'context7-docs',
+      provider: 'Context7',
+      providerPriceAtomic: '0',
+      contract: { arguments: { query }, request: { method: 'GET', url: docsUrl, headers: {} } },
+    });
+    const { fetchImpl, calls } = net([
+      { url: ROUTER, status: 200, body: answer },
+      {
+        url: docsUrl,
+        status: 200,
+        body: null,
+        raw: 'Context7 matched: /colinhacks/zod.\n\nUse z.email().',
+        headers: { 'content-type': 'text/plain' },
+      },
+    ]);
+    const auth = authorizer();
+    const base = deps(fetchImpl, auth);
+    const signer = vi.fn(async () => {
+      throw new Error('a free lookup must not unlock a wallet');
+    });
+    const result = await runRequestTool(
+      { tool: 'context7-docs', query },
+      {
+        ...base,
+        route,
+        provider: { ...testWalletProvider(), getSigner: signer },
+        payDeps: {
+          ...base.payDeps,
+          provider: { ...testWalletProvider(), getSigner: signer },
+          readBalance: async () => 0n,
+        },
+      },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', cost: ['provider price 0 USD'] });
+    expect(result.envelope.result).toContain('Use z.email()');
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({
+      tool: 'context7-docs',
+      query,
+      accepts: expect.arrayContaining(['free-query']),
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => !call.paid)).toBe(true);
+    expect(route).not.toHaveBeenCalled();
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(signer).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a paid call', { capabilityId: 'context7-docs', providerPriceAtomic: '10000' }],
+    ['a different service', { capabilityId: 'exa-search', providerPriceAtomic: '0' }],
+    ['a spec', BY_ID.decision as Record<string, unknown>],
+  ])(
+    'refuses %s in a selected free-tool answer before calling the provider',
+    async (_label, picked) => {
+      const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: decision(picked) }]);
+      const result = await runRequestTool(
+        { tool: 'context7-docs', query: 'Zod v4 email validation' },
+        { ...deps(fetchImpl), route },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.envelope.status).toBe('failed');
+      expect(calls).toHaveLength(1);
+      expect(route).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['0', '100000'])(
+    'refuses a selected free docs 402 of %s without wallet access or paid routing',
+    async (amount) => {
+      const docsUrl = `${ROUTER}/api/docs-lookup?query=Zod`;
+      const { fetchImpl, calls } = net([
+        {
+          url: ROUTER,
+          status: 200,
+          body: decision({
+            capabilityId: 'context7-docs',
+            providerPriceAtomic: '0',
+            contract: { request: { method: 'GET', url: docsUrl, headers: {} } },
+          }),
+        },
+        {
+          url: docsUrl,
+          status: 402,
+          body: {},
+          headers: { 'PAYMENT-REQUIRED': challenge({ amount }) },
+        },
+      ]);
+      const auth = authorizer();
+      const base = deps(fetchImpl, auth);
+      const getSigner = vi.fn(async () => {
+        throw new Error('a free lookup must not open a wallet');
+      });
+      const result = await runRequestTool(
+        { tool: 'context7-docs', query: 'Zod' },
+        {
+          ...base,
+          route,
+          payDeps: { ...base.payDeps, provider: { ...testWalletProvider(), getSigner } },
+        },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.envelope).toMatchObject({ status: 'failed', providerStatus: 402 });
+      expect(result.envelope.reason).toContain('Nothing was signed or paid.');
+      expect(calls).toHaveLength(2);
+      expect(calls.every((call) => !call.paid)).toBe(true);
+      expect(getSigner).not.toHaveBeenCalled();
+      expect(auth.authorize).not.toHaveBeenCalled();
+      expect(route).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['', '  '])('keeps a missing selected-free query on the free form: %j', async (query) => {
+    const { fetchImpl, calls } = net([]);
+    const result = await runRequestTool(
+      { tool: 'context7-docs', query },
+      { ...deps(fetchImpl), route },
+    );
+    expect(result.envelope.status).toBe('needs_input');
+    expect(result.summary).toContain('request({tool, query})');
+    expect(calls).toHaveLength(0);
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it.each(['exa-search', 'unknown-tool'])(
+    'passes on the refusal of selected tool %s without paid routing',
+    async (tool) => {
+      const { fetchImpl, calls } = net([
+        {
+          url: ROUTER,
+          status: 200,
+          body: {
+            schemaVersion: 1,
+            routerVersion: 'test',
+            decision: {
+              action: 'needs_input',
+              reason: 'A selected query runs only a known free tool.',
+              diagnostics: {
+                reasonCode: 'capability_unresolved',
+                stage: 'capability',
+                missing: [],
+                nextAction: 'Browse again.',
+              },
+            },
+          },
+        },
+      ]);
+      const result = await runRequestTool(
+        { tool, query: 'Zod v4 email validation' },
+        { ...deps(fetchImpl), route },
+      );
+      expect(result.envelope).toMatchObject({
+        status: 'needs_input',
+        reasonCode: 'capability_unresolved',
+      });
+      expect(calls).toHaveLength(1);
+      expect(route).not.toHaveBeenCalled();
+    },
+  );
+
   it('lists the rows for a need, sends only the browse, and pays nothing', async () => {
     const { fetchImpl, calls } = net([{ url: ROUTER, status: 200, body: BROWSE }]);
     const auth = authorizer();
@@ -2589,7 +2786,7 @@ describe('the tool list, read for free', () => {
 
   it.each([
     ['an id', { browse: 'prices', id: 'k3f9-abcd' }],
-    ['a query', { tool: 'cmc-quotes', query: 'prices' }],
+    ['an input', { tool: 'cmc-quotes', input: { symbol: 'BTC' } }],
     ['both forms', { browse: 'prices', tool: 'cmc-quotes' }],
   ])('refuses a read of the list sent with %s, and sends nothing', async (_label, args) => {
     const { fetchImpl, calls } = net([]);
@@ -2619,48 +2816,70 @@ describe('the tool list, read for free', () => {
     });
   });
 
-  it("keeps a row's spec under the server's id, then runs it from {id, input}", async () => {
-    await noteSession(dir, 'sess-1');
-    const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
-    const served = {
-      ...BY_ID,
-      decision: {
-        ...decision,
-        spec: {
-          ...decision.spec,
-          payTo: '0x1111111111111111111111111111111111111111',
-          request: { ...(decision.spec.request as object), url: PROVIDER },
+  it.each(['claude', 'codex'] as const)(
+    'lets %s browse, inspect and run its selected tool without paid routing',
+    async (harness) => {
+      await noteSession(dir, 'sess-1');
+      const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
+      const served = {
+        ...BY_ID,
+        decision: {
+          ...decision,
+          spec: {
+            ...decision.spec,
+            payTo: '0x1111111111111111111111111111111111111111',
+            request: { ...(decision.spec.request as object), url: PROVIDER },
+          },
         },
-      },
-    };
-    const first = net([{ url: ROUTER, status: 200, body: served }]);
-    const shown = await runRequestTool({ tool: 'cmc-quotes' }, { ...deps(first.fetchImpl), route });
-    expect(shown.envelope).toMatchObject({ status: 'spec', id: decision.id });
-    expect(shown.summary).toContain(`request({id: "${decision.id}"`);
-    expect(JSON.parse(first.calls[0]!.body!)).toEqual({
-      schemaVersion: 1,
-      tool: 'cmc-quotes',
-      accepts: ACCEPTS,
-      harness: 'claude',
-    });
-    expect(route).not.toHaveBeenCalled();
+      };
+      const listed = net([{ url: ROUTER, status: 200, body: BROWSE }]);
+      const browsed = await runRequestTool(
+        { browse: 'crypto prices' },
+        { ...deps(listed.fetchImpl), route, harness },
+      );
+      expect(browsed.envelope.status).toBe('browse');
+      expect(JSON.parse(listed.calls[0]!.body!)).toMatchObject({
+        browse: 'crypto prices',
+        harness,
+      });
+      const first = net([{ url: ROUTER, status: 200, body: served }]);
+      const shown = await runRequestTool(
+        { tool: 'cmc-quotes' },
+        { ...deps(first.fetchImpl), route, harness },
+      );
+      expect(shown.envelope).toMatchObject({ status: 'spec', id: decision.id });
+      expect(shown.summary).toContain(`request({id: "${decision.id}"`);
+      expect(JSON.parse(first.calls[0]!.body!)).toEqual({
+        schemaVersion: 1,
+        tool: 'cmc-quotes',
+        accepts: [...ACCEPTS, 'free-query'],
+        harness,
+      });
+      expect(route).not.toHaveBeenCalled();
 
-    const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
-    const ran = await runRequestTool(
-      { id: decision.id, input: { symbol: 'BTC,ETH', convert: 'USD' } },
-      deps(second.fetchImpl),
-    );
-    expect(ran.envelope).toMatchObject({ status: 'fulfilled', cost: ['provider price 0.01 USD'] });
-    // The footer names the service by its label, and the ledger keeps it.
-    expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
-    );
-    const ledger = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
-    expect(JSON.parse(ledger.at(-1)!)).toMatchObject({
-      capabilityId: 'cmc-quotes',
-      label: 'CoinMarketCap quotes',
-    });
-  });
+      const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
+      const ran = await runRequestTool(
+        { id: decision.id, input: { symbol: 'BTC,ETH', convert: 'USD' } },
+        { ...deps(second.fetchImpl), route, harness },
+      );
+      expect(route).not.toHaveBeenCalled();
+      expect(second.calls.filter((call) => call.paid)).toHaveLength(1);
+      expect(second.calls.some((call) => call.url.endsWith(ROUTE_PAID_PATH))).toBe(false);
+      expect(ran.envelope).toMatchObject({
+        status: 'fulfilled',
+        cost: ['provider price 0.01 USD'],
+      });
+      // The footer names the service by its label, and the ledger keeps it.
+      expect(await renderProgress(dir, 'sess-1')).toBe(
+        'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
+      );
+      const ledger = (await readFile(join(dir, 'paid', 'ledger.jsonl'), 'utf8')).trim().split('\n');
+      expect(JSON.parse(ledger.at(-1)!)).toMatchObject({
+        capabilityId: 'cmc-quotes',
+        label: 'CoinMarketCap quotes',
+      });
+    },
+  );
 
   it('skips a spec that needs a feature this build lacks, by name, and keeps nothing', async () => {
     const decision = BY_ID.decision as { id: string; spec: Record<string, unknown> };
