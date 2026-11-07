@@ -7,6 +7,7 @@ import { CliError } from '../lib/errors';
 import { createLocalProvider } from '../lib/wallet/local';
 import { REPAIR_CLAUSE, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import {
   doctorLines,
@@ -23,6 +24,7 @@ import {
 import { canPayRouting, canSign, type SignVerdict, type Verdict } from './eligibility';
 import { CHANNEL_DEPOSIT_ATOMIC } from './fee';
 import { checkEligibility, type Eligibility } from './eligibility-check';
+import { installSandbox, probe400 } from './install-test-utils';
 import { LAUNCHER_MARKER, renderHostFiles } from './plugin-files';
 import type { RouterCheck } from './reachability';
 import type { RouterObservation } from './router-observation';
@@ -534,6 +536,10 @@ describe('doctorLines', () => {
       },
     ]);
     expect(lines).toEqual([
+      'Setup: not checked.',
+      'Paid routing: unavailable.',
+      'Claude Code session: not verified.',
+      '',
       'ok    node: v24',
       'warn  routing fee: the wallet is low',
       '      fix: Fund it.',
@@ -542,12 +548,56 @@ describe('doctorLines', () => {
     ]);
   });
 
+  it('reports a checked session with a locked wallet as needing attention', () => {
+    const lines = doctorLines([
+      {
+        name: 'claude session',
+        status: 'warn',
+        required: false,
+        detail: 'The running session cannot unlock the wallet.',
+        fix: 'Repair the wallet locally.',
+      },
+    ]);
+    expect(lines).toContain('Claude Code session: needs attention.');
+    expect(lines).toContain('      fix: Repair the wallet locally.');
+  });
+
   it('says all pass only when every row is ok', () => {
     const ok: RouterCheck = { name: 'node', status: 'ok', required: true, detail: 'v24' };
     expect(doctorLines([ok, ok]).at(-1)).toBe('2 checks, all pass.');
     expect(doctorLines([ok, { ...ok, status: 'warn', checked: false }]).at(-1)).toBe(
       '2 checks, 0 to act on, 1 not checked.',
     );
+  });
+
+  it('does not present a funded shell as proof of a working session', () => {
+    const checks: RouterCheck[] = [
+      { name: 'plugin', status: 'ok', required: true, detail: 'registered' },
+      { name: 'routing', status: 'ok', required: false, detail: 'on' },
+      { name: 'routing fee', status: 'ok', required: false, detail: 'funded' },
+      { name: 'router', status: 'ok', required: true, detail: 'reachable' },
+      {
+        name: 'claude session',
+        status: 'warn',
+        required: false,
+        checked: false,
+        detail: NO_SESSION_CHECKED,
+      },
+    ];
+    expect(doctorLines(checks).slice(0, 3)).toEqual([
+      'Setup: ready.',
+      'Paid routing: ready on this machine.',
+      'Claude Code session: not verified.',
+    ]);
+    checks[2] = {
+      ...checks[2]!,
+      status: 'warn',
+      checked: false,
+      detail: 'balance could not be checked',
+    };
+    expect(doctorLines(checks)[1]).toBe('Paid routing: not checked.');
+    checks[1] = { ...checks[1]!, status: 'warn', detail: 'off' };
+    expect(doctorLines(checks)[1]).toBe('Paid routing: unavailable.');
   });
 });
 
@@ -558,20 +608,8 @@ describe('runRouterDoctor, with its seams injected', () => {
   let work: string;
   let fake: FakeClaude;
 
-  const probe400 = (async () =>
-    new Response('{}', {
-      status: 400,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
-
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), 'router-doctor-'));
-    home = join(root, 'home');
-    data = join(root, 'data');
-    work = join(root, 'work');
-    await mkdir(join(work, '.git'), { recursive: true });
-    await mkdir(home, { recursive: true });
-    await mkdir(data, { recursive: true });
+    ({ root, home, data, work } = await installSandbox('router-doctor-'));
     fake = await fakeClaude(root);
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     vi.stubGlobal('fetch', probe400);
@@ -582,12 +620,7 @@ describe('runRouterDoctor, with its seams injected', () => {
   });
 
   function ctx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir: data,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return testCtx(data);
   }
 
   function deps(over: Partial<RouterDoctorDeps> = {}): RouterDoctorDeps {
@@ -619,6 +652,11 @@ describe('runRouterDoctor, with its seams injected', () => {
       eligibility: async () => eligibility({ canPayRouting: low, balanceAtomic: 0n }),
     });
     expect(out).not.toBeInstanceOf(CliError);
+    expect((out as { humanLines: string[] }).humanLines.slice(0, 3)).toEqual([
+      'Setup: ready.',
+      'Paid routing: unavailable.',
+      'Claude Code session: not verified.',
+    ]);
     const act = checks.filter((c) => c.status !== 'ok' && c.checked !== false);
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({
@@ -795,18 +833,9 @@ describe('the runtime rows', () => {
   const CLI = '0.1.0-alpha.32';
   const NODE = '24.14.0';
 
-  const probe400 = (async () =>
-    new Response('{}', {
-      status: 400,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
-
   beforeEach(async () => {
-    root = await realpath(await mkdtemp(join(tmpdir(), 'router-doctor-runtime-')));
-    home = join(root, 'home');
+    ({ root, home } = await installSandbox('router-doctor-runtime-', { dataInHome: true }));
     runtime = join(home, '.tenjin', 'runtime');
-    await mkdir(join(root, 'work', '.git'), { recursive: true });
-    await mkdir(home, { recursive: true });
     fake = await fakeClaude(root);
     await fake.respond('list', listed('tenjin@tenjin', pkg.version));
     vi.stubGlobal('fetch', probe400);
@@ -846,12 +875,7 @@ describe('the runtime rows', () => {
   });
 
   function ctx(dataDir = join(home, '.tenjin')): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return testCtx(dataDir);
   }
 
   async function run(over: Partial<RouterDoctorDeps> = {}, dataDir?: string) {
@@ -965,12 +989,21 @@ describe('the runtime rows', () => {
     );
   });
 
-  it('says not checked when the version run times out', async () => {
+  it('does not claim readiness when the runtime location or startup could not be checked', async () => {
     await setUp();
-    const { by } = await run({
-      runVersion: async () => ({ code: null, stdout: '', stderr: '', timedOut: true }),
-    });
-    expect(by['runtime']).toMatchObject({ status: 'warn', required: false, checked: false });
+    for (const over of [
+      { readLaunch: async () => null },
+      { runVersion: async () => ({ code: null, stdout: '', stderr: '', timedOut: true }) },
+    ] satisfies Partial<RouterDoctorDeps>[]) {
+      const { out, by } = await run(over);
+      expect(out).not.toBeInstanceOf(CliError);
+      expect(by['runtime']).toMatchObject({ status: 'warn', required: false, checked: false });
+      expect((out as { humanLines: string[] }).humanLines.slice(0, 3)).toEqual([
+        'Setup: not verified.',
+        'Paid routing: not checked.',
+        'Claude Code session: not verified.',
+      ]);
+    }
   });
 
   it('warns when an older build moved the marketplace out of the runtime', async () => {

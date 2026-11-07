@@ -131,9 +131,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   // A Tenjin /fund link carries a token in its fragment, and it prints whole on
   // every path: a user who copies it into another browser needs the token. It is
   // not worth hiding, since it can only fund this wallet and expires in ~10 minutes.
-  // An agent's shell has no terminal, but an agent runs this only on the
-  // person's yes to "open the funding page" (`tenjin install` hands it that
-  // question), so under a harness the page opens too.
+  // An explicitly requested funding command can open under an agent harness
+  // even without a terminal. Install's link-preparation command uses --no-open.
   const willOpen =
     opts.open !== false && (ctx.io.isTTY || underAgentHarness(opts.env ?? process.env));
   const hosted = new URL(url).host === COINBASE_CHECKOUT_HOST;
@@ -209,8 +208,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
             ...(pollStatus === 'unavailable'
               ? ['Could not read the balance to wait on it; the link is unaffected.']
               : []),
-            'Finish checkout, then return to your agent to confirm funds and continue your task.',
-            'Funds not confirmed. Check with `tenjin wallet balance` before adding funds again.',
+            'Funds not confirmed. Finish checkout, then check with `tenjin wallet balance` or ask your agent before adding money again.',
           ],
   };
 }
@@ -346,9 +344,13 @@ async function pollForFunds(
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const interval = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
   const deadline = Date.now() + (opts.pollTimeoutMs ?? POLL_TIMEOUT_MS);
-  emitNotice(ctx.io, 'Waiting for the USDC to arrive (Ctrl-C is safe; the purchase is not).', {
-    json: ctx.flags.json,
-  });
+  emitNotice(
+    ctx.io,
+    'Waiting for funds. Ctrl-C stops this check; it does not cancel browser checkout.',
+    {
+      json: ctx.flags.json,
+    },
+  );
   while (Date.now() < deadline) {
     await sleep(interval);
     const balance = await balanceOrUndefined(desc, rpcUrl);

@@ -11,10 +11,9 @@
  * protection work: a vendor prefix fires on format alone, the generic
  * assignment rule needs a secret-named word plus `=` or `:`, and entropy is
  * never a trigger. Paths, hosts, IPs, commit SHAs, env names and prose are
- * never touched (owner policy, tenjin-agent#197 and the 2026-09-04 decision in
- * tenjin-notes/loop-redesign/06-pr-a-redact.md: search availability over
- * scrubbing; measured, the old scrub altered 16% of real prompts to stop two
- * vendor tokens).
+ * never touched: search availability over scrubbing (tenjin-notes
+ * `deprecated/loop-redesign/06-pr-a-redact.md`), since a broader scrub
+ * altered 16% of real prompts to stop two vendor tokens.
  *
  * Two invariants, pinned by redact.fixtures.test.ts and redact.test.ts:
  *
@@ -373,11 +372,11 @@ function isExamplePassword(password: string): boolean {
 // 'raw-private-key' (continuing the BlockRun-credited wallet-key scanner): that
 // is the floor.
 //
-// The label window is what a replay over 389 published posts (tenjin#723)
-// forced open: every key-shaped hit in the live catalog was a public hex
-// constant, and each missed the old rule differently — `hash was 0x…` (a word
-// between label and value), `source_id = 0x…` (an id-class label), and the
-// ERC-20 Transfer topic0 (no label at all). Hence the wider label set, up to TWO
+// The label window is wide because, in a replay over 389 published posts,
+// every key-shaped hit was a public hex constant needing its own allowance:
+// `hash was 0x…` (a word between label and value), `source_id = 0x…` (an
+// id-class label), and the ERC-20 Transfer topic0 (no label at all). Hence the
+// wider label set, up to TWO
 // short intervening tokens, and the constants set. Two is the bound that keeps
 // the window honest: "the hash of the private key is 0x…" is four tokens out and
 // still masks. The replay's last survivor was markdown: the catalog writes
@@ -557,7 +556,7 @@ function isMnemonic(words: string[]): boolean {
  * quote characters. The rule is what keeps prose out: BIP-39 words are common
  * English, but twelve of them in a row with no punctuation is a phrase, not a
  * sentence. A quote is a separator so the `.env` form counts:
- * `MNEMONIC="abandon … about"` (tenjin-agent#296). Tokens are walked rather
+ * `MNEMONIC="abandon … about"`. Tokens are walked rather
  * than matched by one regex so the span is exact and the pass stays linear on
  * a transcript-length line.
  */

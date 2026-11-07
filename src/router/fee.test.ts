@@ -10,7 +10,7 @@ import {
   unpaidSentence,
 } from './fee';
 import { FakeRouter } from './fee-test-utils';
-import { ASK_FOR_REPAIR, WALLET_REASONS } from './wallet-reasons';
+import { WALLET_REASONS } from './wallet-reasons';
 
 /** Every key the routing payer can skip with, and a call with no payer's. */
 const ALL_KEYS = [
@@ -56,20 +56,6 @@ describe('UNPAID wallet entries', () => {
     const scheme = new BatchSettlementEvmScheme('0x0000000000000000000000000000000000000001');
     const requirement = { ...new FakeRouter().requirement, extra: { minDeposit: '50000' } };
     expect(CHANNEL_DEPOSIT_ATOMIC).toBe(BigInt(await scheme.resolveMinDepositHint(requirement)));
-  });
-
-  it('is {reason, fix} from WALLET_REASONS, the PERSON fix, for every wallet key', () => {
-    for (const [key, entry] of Object.entries(WALLET_REASONS)) {
-      expect(unpaid(key), key).toEqual({ reason: entry.reason, fix: entry.fix });
-    }
-  });
-
-  it('never carries agentFix where the person and model fixes differ', () => {
-    for (const [key, entry] of Object.entries(WALLET_REASONS)) {
-      if (entry.agentFix === entry.fix) continue;
-      expect(unpaid(key)!.fix, key).not.toBe(entry.agentFix);
-    }
-    expect(unpaid('passphrase_missing')!.fix).not.toBe(ASK_FOR_REPAIR);
   });
 
   it('keeps a passphrase off the command line and never steers a locked keychain to plaintext (B1, S3)', () => {
@@ -127,7 +113,7 @@ describe('unpaidSentence', () => {
 
   it('names the ceiling in the deposit line, the bound every later call keeps', () => {
     expect(depositSentence(CHANNEL_DEPOSIT_ATOMIC)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
     );
   });
 

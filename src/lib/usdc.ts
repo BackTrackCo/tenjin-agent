@@ -13,7 +13,6 @@ import type { TenjinSigner } from './wallet/provider';
 
 /** Lives in `usdc-balance.ts`, which the viem-free hooks can load. */
 export const USDC_ADDRESS: Address = USDC;
-export const USDC_DECIMALS = 6;
 
 export async function getUsdcBalance(address: Address, rpcUrl: string): Promise<bigint> {
   const client = createPublicClient({

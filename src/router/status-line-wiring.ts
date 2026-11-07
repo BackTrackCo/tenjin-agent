@@ -1,10 +1,9 @@
 /**
- * The `statusLine` key in Claude Code's settings file, as releases up to
- * alpha.26 wrote it. `install` no longer sets it (a plugin cannot), so the
- * router reads this module only to recognise a status line an earlier release
- * wrote and take it back (`legacy-install.ts`).
+ * The `statusLine` key in Claude Code's settings file, as the settings install
+ * wrote it. A plugin cannot set it, so this module only recognises a status
+ * line an earlier release wrote and takes it back (`legacy-install.ts`).
  *
- * OWNERSHIP IS ONE MARKER, the command naming `tenjin status-line`, so a status
+ * Ownership is one marker, the command naming `tenjin status-line`, so a status
  * line that is not Tenjin's is never touched.
  */
 

@@ -24,15 +24,13 @@ import {
 import { UNKNOWN_DETAIL } from './wallet-reasons';
 
 /**
- * THE WHOLE ELIGIBILITY PICTURE FOR ONE SHELL, for `tenjin doctor`: gather the
- * facts with real I/O (the wallet files, a no-prompt verify, the spend ledger,
- * the routing channel, the chain balance), then decide with the pure rules in
- * `eligibility.ts`, so doctor's verdict is the payer's and the hooks' verdict
- * on the same facts.
+ * The whole eligibility picture for one shell, for `tenjin doctor`: gather the
+ * facts with real I/O (wallet files, a no-prompt verify, the spend ledger, the
+ * routing channel, the chain balance), then decide with the pure rules in
+ * `eligibility.ts`, so doctor agrees with the payer and the hooks.
  *
- * NOT hook-safe: it loads the wallet layer and the x402 channel storage. No
- * hook imports it, and nothing but doctor needs it (install checks signing
- * with `verify` alone and leaves funding as it is; S6).
+ * Not hook-safe: it loads the wallet layer and the x402 channel storage, so
+ * only doctor imports it.
  */
 export interface EligibilityInput {
   dataDir: string;
@@ -44,8 +42,8 @@ export interface EligibilityInput {
   timeoutMs: number;
   /** null when there is no wallet file and no TENJIN_WALLET_KEY. */
   provider: WalletProvider | null;
-  /** S7: verify with TENJIN_WALLET_PASSPHRASE removed from the env (a provider built from that env). Called first,
-   *  only when the variable is set and TENJIN_WALLET_KEY is not valid. Doctor supplies it; absent = today's single verify. */
+  /** Verify with TENJIN_WALLET_PASSPHRASE removed from the env. Called first, only when the variable is set
+   *  and TENJIN_WALLET_KEY is not valid. Doctor supplies it; absent means a single verify. */
   verifySaved?: () => Promise<WalletVerification | undefined>;
   fetchImpl?: typeof fetch;
   readBalance?: (
@@ -63,12 +61,12 @@ export interface Eligibility {
   warning?: string;
   canSign: SignVerdict;
   canPayRouting: Verdict;
-  /** S7: the verdict with TENJIN_WALLET_PASSPHRASE removed (verifySaved). null when it was not run. */
+  /** The verdict with TENJIN_WALLET_PASSPHRASE removed (verifySaved). null when it was not run. */
   savedSign: SignVerdict | null;
   balanceAtomic: bigint | null;
   creditAtomic: bigint | null;
-  /** S11: what describeWallet(provider) rejected with (a corrupt wallet.json, an invalid key). Doctor keeps today's
-   *  required fail for it, so exit codes do not change. null when describe succeeded or there is no provider. */
+  /** What describeWallet(provider) rejected with (a corrupt wallet.json, an invalid key), which doctor fails as
+   *  required. null when describe succeeded or there is no provider. */
   describeError: unknown | null;
 }
 
@@ -118,7 +116,7 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
     try {
       address = (await describeWallet(provider)).address;
     } catch (err) {
-      // S11: kept for doctor, which fails it as required exactly as today.
+      // Kept for doctor, which fails it as required.
       describeError = err;
     }
   }
@@ -178,11 +176,11 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
 }
 
 /**
- * The sign verdict, and S7's saved-passphrase verdict beside it.
+ * The sign verdict, and the saved-passphrase verdict beside it.
  *
- * SAVED PASSPHRASE FIRST (S7, decision 19). With TENJIN_WALLET_PASSPHRASE set,
- * `verifySaved` asks whether the keychain or file opens the wallet WITHOUT the
- * variable, so a passphrase both hold is reported as that store, not as
+ * Saved passphrase first: with TENJIN_WALLET_PASSPHRASE set, `verifySaved`
+ * asks whether the keychain or file opens the wallet without the variable, so
+ * a passphrase both hold is reported as that store, not as
  * `passphrase-env`, and doctor can say whether a Claude Code started without
  * the variable could sign. The full verify still runs after it, because only
  * the full env can see that the variable is wrong (ready with a warning).
@@ -240,7 +238,7 @@ async function signing(
     full.status === 'blocked' &&
     full.reason === 'passphrase_missing'
   ) {
-    // S13: a set variable is a passphrase source, so "none reachable" is not definite.
+    // A set variable is a passphrase source, so "none reachable" is not definite.
     sign = unknownSign('not_checked');
   }
   return { sign, savedSign };

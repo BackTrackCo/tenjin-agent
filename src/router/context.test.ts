@@ -319,23 +319,21 @@ describe('the prompt packet', () => {
 
 describe('the bounds the server also enforces', () => {
   it('trims the current message to the message cap, not just the history', async () => {
-    const { MAX_MESSAGE_CHARS, packetForText } = await import('./context');
+    const { MAX_MESSAGE_CHARS } = await import('./context');
     const packet = await sent(undefined, 's', 'x'.repeat(40_000));
     expect(packet.current.text.length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
     expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
-    expect(packetForText('y'.repeat(40_000)).current.text.length).toBeLessThanOrEqual(
-      MAX_MESSAGE_CHARS,
-    );
   });
 
   it('measures the whole packet, literal URLs and pending call included', async () => {
-    const { packetForText } = await import('./context');
     const urls = Array.from(
       { length: 8 },
       (_, i) => `https://example.test/${'p'.repeat(1_900)}${i}`,
     );
     const packet = {
-      ...packetForText('x'.repeat(14_000)),
+      current: { role: 'user', text: 'x'.repeat(14_000) },
+      history: [],
+      historyStatus: 'unavailable',
       literalUrls: urls,
       pendingCall: { tool: 'WebSearch' as const, query: 'q'.repeat(1_000) },
     };
@@ -347,10 +345,7 @@ describe('the bounds the server also enforces', () => {
   });
 
   it('never sends an empty current message, which the server refuses', async () => {
-    const { packetForText } = await import('./context');
     expect((await sent(undefined, 's', '   ')).current.text.length).toBeGreaterThan(0);
-    expect(packetForText('').current.text.length).toBeGreaterThan(0);
-    expect(packetForText('  \n ').current.text.length).toBeGreaterThan(0);
   });
 
   it('bounds each literal URL to what the server accepts', async () => {

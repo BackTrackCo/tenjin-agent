@@ -9,16 +9,21 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/tenjin-cli"><img src="https://img.shields.io/npm/v/tenjin-cli?color=C85A3B&label=npm" alt="npm version"></a>
+  <a href="https://github.com/BackTrackCo/tenjin-agent/actions/workflows/ci.yml"><img src="https://github.com/BackTrackCo/tenjin-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/works%20with-Claude%20Code-1C1A17" alt="Works with Claude Code">
-  <img src="https://img.shields.io/badge/payments-x402-8C9A7E" alt="Payments via x402">
+  <img src="https://img.shields.io/badge/Codex-experimental-1C1A17" alt="Codex experimental">
+  <a href="https://www.x402.org"><img src="https://img.shields.io/badge/payments-x402-8C9A7E" alt="Payments via x402"></a>
 </p>
 
+Tenjin suggests tools when they can help your agent, and one local wallet pays per call. Your agent can also browse the catalog and choose a tool directly. This repository contains the CLI and Claude Code/Codex integrations. For the product overview and getting started, visit [tenjin.sh](https://tenjin.sh).
+
 <p align="center">
+  <a href="#why">Why</a> ·
   <a href="#install">Install</a> ·
   <a href="#try-it">Try it</a> ·
   <a href="#what-your-agent-can-do">Tools</a> ·
-  <a href="#wallet-and-limits">Wallet and limits</a> ·
-  <a href="#request-a-tool">Request a tool</a>
+  <a href="#wallet-and-limits">Wallet</a> ·
+  <a href="#development">Development</a>
 </p>
 
 <p align="center">
@@ -34,132 +39,115 @@ Giving your coding agent good tools is a chore:
 - **Your agent forgets anyway.** It reaches for plain web search, so you write rules, and it still slips.
 - **Some tools you need once.** A one-off lookup isn't worth the setup.
 
-With Tenjin, you install once and keep working. The router suggests the right tool when it helps, and your wallet pays per call. No keys, no extra servers, no rules.
+With Tenjin, install once and keep working. The router suggests tools when they help; the agent can also look for a tool itself. One wallet replaces separate provider accounts and keys for the tools in the catalog.
 
 ## Install
 
-Paste this into Claude Code:
+### Ask your agent
+
+Paste this into Claude Code or Codex:
 
 ```text
 Install Tenjin from tenjin.sh
 ```
 
-Your install request gives the agent permission to handle setup. It briefly explains task-context sharing, asks about spending limits and adding funds, then gives the activation step. Follow that step to continue your original task. Wallet addresses appear only when requested or needed for recovery; storage and PATH details appear only for recovery.
+### Install it yourself
 
-Or from a terminal (Node and npm are not required):
+**macOS / Linux** — no Node.js or npm required:
 
 ```sh
-(
-  tenjin_install_dir="$(mktemp -d ./.tenjin-install.XXXXXXXX)" || exit
-  trap 'rm -f "$tenjin_install_dir/install.sh"; rmdir "$tenjin_install_dir"' EXIT
-  curl -fsSL https://tenjin.sh/install.sh -o "$tenjin_install_dir/install.sh" &&
-    sh "$tenjin_install_dir/install.sh"
-)
+curl -fsSL https://tenjin.sh/install.sh | sh
 ```
 
-On Windows, in PowerShell:
+**Windows** — run in PowerShell:
 
 ```powershell
 irm https://tenjin.sh/install.ps1 | iex
 ```
 
-The installer downloads a pinned Node and Tenjin, verifies both, and sets up
-the plugin. Supports macOS 13.5+, Windows and glibc Linux 2.28+ on x64/arm64.
-Musl/Alpine and other platforms are unsupported. Needs Claude Code 2.1.287+.
-Tenjin runs from `~/.tenjin/runtime`; changing or removing your system's Node
-later does not stop it. Add `--project` to `tenjin install` for one project.
-Plugin installation uses the default data directory; run without
-`TENJIN_DATA_DIR`. Other CLI commands can still use a custom data directory.
+**npm** — on any platform:
 
-Already use npm? Run `npm i -g tenjin-cli`, then `tenjin install`. It sets up
-the same private runtime. An installation failure keeps your existing plugin
-registration. Check the reported cause, then retry the install.
+```sh
+npm install -g tenjin-cli
+tenjin install
+```
 
-Agent-run installs return a compact handoff. `tenjin install --json` installs
-with the full structured result for scripts or troubleshooting.
+Setup asks about spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link. If it expires, ask for a new one. In a terminal, choose **Add $5** to open checkout or **Not now** to skip it. Follow the activation step; paid tools need funds before they can run.
 
-**Codex (experimental):** run `tenjin install` in Codex or a terminal, and it sets up Codex too. [How it hooks in →](./docs/agent-permissions.md#codex)
+Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 
 ## Try it
 
-Work as usual. Ask for something your agent can't do on its own:
+Once funded and activated, choose one prompt to try:
+
+**Look up a company**
 
 ```text
-> Generate a 10-second voiceover that says "Welcome to Tenjin"
-> Make a whoosh sound effect for a page transition
-> Make a hero image of plum blossoms in ukiyo-e style
-> Make a 5-second video of a paper crane unfolding
-> Summarize the risk factors in Nvidia's latest 10-K
-> What are people on Reddit saying about Bun vs Node lately?
+Use Tenjin to find the company profile for stripe.com.
 ```
 
-The router names the tool and its price, and your agent calls it.
+**Generate an image**
+
+```text
+Use Tenjin to generate a hero image of plum blossoms in ukiyo-e style.
+```
+
+**Make a voiceover**
+
+```text
+Use Tenjin to make a 10-second welcome voiceover for my app.
+```
 
 ## What your agent can do
 
-| Your agent needs                       | With                            | Provider price |
+| Your agent needs                       | Provider examples               | Provider price |
 | -------------------------------------- | ------------------------------- | -------------- |
 | Library docs                           | Context7                        | free           |
 | Web search and page reads              | Exa, Firecrawl                  | 0.1¢ to 1.5¢   |
 | Math and live crypto prices            | Wolfram Alpha, CoinMarketCap    | 1¢ to 2¢       |
-| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 15¢    |
+| People, companies and emails           | Apollo, Hunter, CompanyEnrich   | 0.8¢ to 5¢     |
 | X and Reddit                           | glim                            | 0.1¢ to 1¢     |
-| Images                                 | GPT Image, Nano Banana, Recraft | 0.1¢ to 14.4¢  |
+| Images                                 | GPT Image, Nano Banana, Recraft | 3.5¢ to 14.4¢  |
 | Voiceovers, sound effects, music       | ElevenLabs, Google Lyria        | 1¢ to 12¢      |
 | Video clips                            | MiniMax Hailuo, Google Veo      | 15.5¢ to 45¢   |
 | Papers and SEC filings                 | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢     |
 | Instagram, TikTok and Google Maps      | Scrape Creators, Google Maps    | 2¢             |
 | PDFs, OCR, screenshots, hosting, email | Cloudflare and others           | 0.2¢ to 50¢    |
 
-Provider prices above exclude Tenjin's routing fee, quoted per call and never more than $0.003. We review every tool by hand. [Every tool and its current price →](https://tenjin.sh/tools)
-
-## How it works
-
-1. The router watches the moments a tool could help: your prompt, each web search or page fetch, each task handed to a subagent, and each question your agent asks you.
-2. Jev, a decision model from [TypeSafe](https://typesafe.ai), picks one tool from the catalog, or none. Your agent sees one line naming the tool and its price.
-3. Your agent calls it through the plugin's `request` tool, and your wallet pays the provider. When nothing fits, your agent carries on with its own tools.
-
-The router sees your prompt and up to six earlier messages, with secrets masked, and never sees tool results. [What the hooks send →](./docs/agent-permissions.md#what-the-hooks-send)
+Example provider prices vary by tool and inputs and exclude Tenjin's routing fee. The quote for your call applies; [the full catalog has every tool and its current price →](https://tenjin.sh/tools)
 
 ## Wallet and limits
 
-`tenjin install` creates a wallet on your machine that holds USDC on Base. Its key never leaves your machine, and Tenjin never holds your funds. Payments run over [x402](https://www.x402.org) ([whitepaper](https://www.x402.org/x402-whitepaper.pdf), [Coinbase docs](https://docs.cdp.coinbase.com/x402/welcome)).
+| Automatic spending               | Default |
+| -------------------------------- | ------- |
+| Daily budget shared across chats | $5      |
+| Per-call limit                   | $0.25   |
 
-| Limit        | Default | Change it                             |
-| ------------ | ------- | ------------------------------------- |
-| Daily budget | $5      | `tenjin config set sessionBudget 2`   |
-| Per call     | $0.25   | `tenjin config set maxAutoSpend 0.50` |
-
-The daily budget is shared across chats. Its spending counter resets 24 hours after the window starts; opening a new chat does not reset it.
-
-- A call over a limit pays nothing until you say yes. The per-call limit can't go below $0.25.
-- Each routing call costs a fee the router quotes, never more than $0.003, even when no tool is suggested, separate from provider charges. Tenjin sets aside funds for these fees, the router's suggested amount at a time ($0.03 today, $0.05 once the router's update ships): less when your per-call limit is smaller, but never less than ten fees ($0.03) or more than $0.25, so the rest stays available for paid tools. Tenjin reads no balance first, and stops routing when the wallet cannot cover that amount; unused funds remain yours, and deposits count toward your spending limits once. Browsing tools and their specs is free.
-- Add funds with `tenjin wallet fund 5`, or send USDC on Base to the address `tenjin wallet address` prints.
-
-[How the limits and the fee work →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. When the routing channel needs funds, Tenjin deposits the smaller of the server's current hint and your per-call limit, with a floor of ten quoted fees and a $0.25 ceiling. The deposit counts toward automatic spending once; fees drawn from it do not count again, and unused funds remain yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 
-```bash
-tenjin status                          # your balance, spending and limits
-tenjin wallet balance                  # what's left
-tenjin payments                        # paid lookups from this machine
-tenjin doctor                          # check that a lookup can run
-tenjin update                          # newest version now (it also updates itself daily; `tenjin config set update.mode off` stops that)
-tenjin config set router.enabled false # pause the router
-tenjin uninstall                       # your wallet stays; npm installs: then `npm uninstall -g tenjin-cli`
-```
+| Command                 | What it does                                  |
+| ----------------------- | --------------------------------------------- |
+| `tenjin wallet fund 5`  | Open checkout to add $5                       |
+| `tenjin wallet balance` | Check available funds                         |
+| `tenjin status`         | Show spending and limits                      |
+| `tenjin doctor`         | Check setup, activation and payment readiness |
+| `tenjin update`         | Update Tenjin                                 |
+| `tenjin uninstall`      | Remove the integration; keep your wallet      |
 
-## Request a tool
+## Privacy and help
 
-Tenjin is in alpha, and the catalog grows with what people ask for.
+Routing sends relevant task context to Tenjin, with known secrets masked. Tool-result bodies are excluded. The wallet key stays local. [What is sent and retained →](./docs/agent-permissions.md#what-the-hooks-send)
 
-- **[Request a tool →](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement)**
-- **[Report a bug →](https://github.com/BackTrackCo/tenjin-agent/issues/new?labels=bug)**
+- [Setup and permissions](./docs/agent-permissions.md): installation, activation, spending and sharing.
+- [Troubleshooting](./docs/troubleshooting.md): a failed install, locked wallet or missing tool.
+- [CLI/MCP reference](./docs/router-reference.md): request forms, payments and host details.
+- [Safety model](./docs/safety-model.md): trust boundaries and remaining limitations.
+- [Request a tool](https://github.com/BackTrackCo/tenjin-agent/issues/new?title=Tool%20request%3A%20&labels=enhancement) or [report a bug](https://github.com/BackTrackCo/tenjin-agent/issues).
 
-## Learn more
+## Development
 
-- [Permissions, hooks, and what install writes](./docs/agent-permissions.md)
-- [Safety model](./docs/safety-model.md)
-- [Troubleshooting](./docs/troubleshooting.md)
-- [Contributing](./CONTRIBUTING.md)
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the local build and targeted tests. [RELEASING.md](./RELEASING.md) covers exact-package checks, release acceptance and recurring QA.
+
+Integrating another agent host? Start with the [request tool and host contracts](./docs/router-reference.md), then the server's [API reference](https://tenjin.sh/llms-full.txt).

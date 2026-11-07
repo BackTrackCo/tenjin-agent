@@ -87,8 +87,19 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '22.0.0'
+      # Claude Code itself, so the smoke runs `claude plugin validate` and the
+      # mod's own tests (`claude plugin test` on hosts/claude/tenjin/tests),
+      # which vitest never collects. No bot bumps a version pinned in `run:`, so
+      # raise it by hand when a Claude Code release changes `claude plugin`.
+      # Installed under the floor Node so it is on PATH for the smoke, which
+      # then fails without it.
+      - name: Install Claude Code
+        if: matrix.node == '22'
+        run: npm install -g @anthropic-ai/claude-code@2.1.317 --no-audit --no-fund
       - name: Packed-artifact smoke
         if: matrix.node == '22'
+        env:
+          PACK_SMOKE_REQUIRE_CLAUDE: '1'
         run: bash scripts/pack-smoke.sh
 
   # Claude Code runs a plugin's exec-form hooks and its stdio server with no

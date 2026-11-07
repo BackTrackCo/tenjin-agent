@@ -24,9 +24,9 @@ export const REQUEST_TOOL = `${TOOL_PREFIX}__request`;
 export const PLUGIN_HOOK_TOOL = `${TOOL_PREFIX}__hook`;
 
 /**
- * THE SETTINGS-BASED INSTALL'S NAMES, for its migration and nothing else.
- * Releases up to alpha.26 registered the server as `x402` through `claude mcp
- * add` and wrote seven hook entries and two permission rules into settings.json.
+ * The settings-based install's names, for its migration and nothing else.
+ * Older releases registered the server as `x402` through `claude mcp add` and
+ * wrote seven hook entries and two permission rules into settings.json.
  *
  * SHIM: remove on or after 2026-12-01, the first release cut 30 or more days
  * after the plugin PR 2 ships. Doctor keeps naming an unmigrated machine after.

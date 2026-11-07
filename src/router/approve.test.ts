@@ -1,12 +1,12 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
 import { readQuote } from '../lib/spend-quotes';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { storeChoices, storeSpecs } from './specs';
 import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
@@ -69,31 +69,11 @@ const policy = (config: Record<string, string>) =>
   writeFile(join(dir, 'config.json'), JSON.stringify(config));
 
 function ctx(isTTY = false): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: ROUTER },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY },
-  };
+  return testCtx(dir, { baseUrl: ROUTER, isTTY });
 }
 
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: req.mode === 'manual' ? 'confirm' : 'allow',
-      reason: req.mode === 'manual' ? 'confirm_always' : 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
-}
+/** A manual payment asks first; an automatic one is within policy. */
+const authorizer = () => testAuthorizer((req) => (req.mode === 'manual' ? 'confirm' : 'allow'));
 
 /** The seller: a 402 at the spec's price, then the bytes; every call kept. */
 function seller(price = SPEC.priceAtomic) {

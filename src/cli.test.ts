@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { main } from './cli';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
-import type { Io } from './lib/output';
+import { captureIo } from './context-test-utils';
 
 // The dispatcher runs the update check and the skills self-heal after every
 // command, and the cases below would otherwise let one reach the npm registry and
@@ -35,25 +35,6 @@ afterAll(async () => {
   }
   await rm(sandbox, { recursive: true, force: true });
 });
-
-function captureIo(isTTY = false, stdin?: { stream: NodeJS.ReadableStream; isTTY: boolean }) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const mk = (sink: string[]) =>
-    ({
-      write: (chunk: string | Uint8Array) => {
-        sink.push(chunk.toString());
-        return true;
-      },
-    }) as unknown as NodeJS.WritableStream;
-  const io: Io = {
-    ...(stdin !== undefined ? { stdin } : {}),
-    stdout: mk(out),
-    stderr: mk(err),
-    isTTY,
-  };
-  return { io, stdout: () => out.join(''), stderr: () => err.join('') };
-}
 
 // This file covers the DISPATCHER only — argument routing, the one-JSON-object
 // contract, global-flag handling, and exit-code classes. It never invokes a

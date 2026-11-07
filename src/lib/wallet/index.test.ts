@@ -1,16 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { CliError } from '../errors';
 import type { CommandContext } from '../../context';
+import { testCtx } from '../../context-test-utils';
 import { describeWallet, resolveWalletProvider } from './index';
 import type { WalletProvider } from './provider';
 
 function makeCtx(dataDir: string): CommandContext {
-  const sink = { write: () => true } as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 10000 },
-    dataDir,
-    io: { stdout: sink, stderr: sink, isTTY: false },
-  };
+  return testCtx(dataDir, { timeout: 10000 });
 }
 
 const stubProvider = (describe: WalletProvider['describe']): WalletProvider => ({

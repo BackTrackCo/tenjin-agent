@@ -1,4 +1,5 @@
 import { withAppServer } from './codex-app-server';
+import { isRecord } from './guards';
 
 /**
  * The one write that makes the hook handlers this CLI registered run: `install`
@@ -14,7 +15,7 @@ import { withAppServer } from './codex-app-server';
  * keys through `config/batchWrite`, then list again and require them back
  * trusted. That is the same call the `/hooks` browser makes, and it matches
  * Claude Code's contract that installing a hook activates it, rather than
- * reporting success over a loop that cannot run (tenjin-agent#342/#343).
+ * reporting success over a loop that cannot run.
  *
  * WHAT STAYS FORBIDDEN, and the distinction is the whole of the boundary:
  *
@@ -57,10 +58,6 @@ export interface ListedHook {
   sourcePath?: unknown;
   currentHash?: unknown;
   command?: unknown;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 export interface TrustProbeOptions {

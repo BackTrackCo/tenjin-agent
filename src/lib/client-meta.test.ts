@@ -59,10 +59,11 @@ describe('TENJIN_USER_AGENT', () => {
 });
 
 /**
- * The caller handoff (spec: user-agent-telemetry-and-client-attribution.md,
- * "Composition contract"). An empty env object is passed everywhere the handoff
- * is meant to be absent, so a real `TENJIN_CALLER_USER_AGENT` on the developer's
- * machine cannot decide whether these pass.
+ * The caller handoff (spec: tenjin-notes
+ * `deprecated/plans/user-agent-telemetry-and-client-attribution.md`,
+ * "Composition contract"). An empty env object is passed everywhere the
+ * handoff is meant to be absent, so a real `TENJIN_CALLER_USER_AGENT` on the
+ * developer's machine cannot decide whether these pass.
  */
 describe('composeUserAgent', () => {
   const NO_ENV: NodeJS.ProcessEnv = {};

@@ -13,7 +13,6 @@ import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 // The only chain touch is the balance read; mock it so the suite is offline.
 vi.mock('../lib/usdc', () => ({
   USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  USDC_DECIMALS: 6,
   getUsdcBalance: vi.fn(),
 }));
 
@@ -404,7 +403,7 @@ describe('runFund', () => {
     });
 
     it('opens the page for an agent under a harness, whose shell has no terminal', async () => {
-      // An agent runs this only on the person's yes to install's funding question.
+      // An explicitly requested wallet fund command still opens the browser.
       const { provider } = fakeProvider();
       const openUrl = vi.fn(async () => true);
       const res = await runFund(makeCtx({ isTTY: false }), {
@@ -417,6 +416,31 @@ describe('runFund', () => {
       // Still no poll: the envelope carrying the link must not wait on it.
       expect(res.data).toMatchObject({ opened: true, pollStatus: 'skipped' });
     });
+
+    it.each([{ CLAUDECODE: '1' }, { CODEX_SESSION_ID: 'session' }])(
+      'returns an unopened checkout link with --no-open under an agent harness %j',
+      async (env) => {
+        const { provider } = fakeProvider();
+        const openUrl = vi.fn(async () => true);
+        const res = await runFund(makeCtx({ isTTY: false }), {
+          provider,
+          fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
+          open: false,
+          wait: false,
+          amountUsd: '5',
+          openUrl,
+          env,
+        });
+        expect(openUrl).not.toHaveBeenCalled();
+        expect(res.data).toMatchObject({
+          checkoutUrl: PAGE,
+          opened: false,
+          funded: false,
+          pollStatus: 'skipped',
+        });
+        expect(stderr.join('')).toContain(PAGE);
+      },
+    );
 
     it('prints the whole link when the browser could not be opened', async () => {
       const { provider } = fakeProvider();
@@ -576,7 +600,8 @@ describe('runFund', () => {
       expect(sleep).toHaveBeenCalledTimes(3);
       expect(mockedBalance).toHaveBeenCalledTimes(4); // one baseline + three polls
       expect(res.data).toMatchObject({ funded: false, pollStatus: 'timed-out' });
-      expect(res.humanLines?.join(' ')).toContain('tenjin wallet balance');
+      expect(res.humanLines?.join(' ')).toContain('`tenjin wallet balance`');
+      expect(res.humanLines?.join(' ')).toContain('before adding money again');
     } finally {
       vi.useRealTimers();
     }
