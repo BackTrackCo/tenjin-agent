@@ -305,8 +305,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "A row's id from `browse`: alone, its spec for `{id, input}`; with `query`, " +
-              'an explicitly selected free docs lookup. No routing fee.',
+            "A row's id from `browse`. Alone: its spec for `{id, input}`, or how to run a free tool. " +
+              'With `query`: runs that free tool without a wallet or payment.',
           ),
         count: z
           .number()

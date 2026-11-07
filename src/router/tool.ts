@@ -815,7 +815,7 @@ async function readToolList(
   if ((args.browse !== undefined && args.tool !== undefined) || others.length > 0) {
     return fail(
       'needs_input',
-      'Browse with request({browse}), inspect with request({tool}), or run free docs with request({tool, query}).',
+      'Browse with request({browse}), inspect with request({tool}), or run a free tool with request({tool, query}).',
     );
   }
   const words = (args.browse ?? args.tool ?? '').trim().slice(0, 8_000);
@@ -875,8 +875,8 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
  *  price and the call that fetches its spec. */
 function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
-    'Call request({tool: "<id>"}) for a tool\'s spec and the call that runs it, free. ' +
-    'Free docs run from request({tool: "<id>", query: "<what to look up>"}) without a routing fee.';
+    'Inspect a tool for free with request({tool: "<id>"}). ' +
+    'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
   if (rows.length === 0) {
     return {
       isError: false,
