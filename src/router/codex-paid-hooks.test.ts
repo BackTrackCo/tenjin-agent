@@ -158,7 +158,6 @@ async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) 
       getSigner: async () => testSigner(wallet),
       fetchImpl,
       readContract: fake.readContract as never,
-      walletBalance: async () => 10_000_000n,
       warn: () => undefined,
       ...payer,
     },
@@ -235,14 +234,19 @@ describe('Codex automatic hooks', () => {
   it('show the real reason when the fee cannot be paid, and record it as unpaid', async () => {
     const fake = new FakeRouter();
     fake.body = await offer();
-    const server = await connect(fake, { walletBalance: async () => 20_000n });
+    // No balance is read first: the facilitator refuses the deposit.
+    fake.walletAtomic = 20_000n;
+    const server = await connect(fake);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
       expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
-      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route paid',
+      ]);
+      expect(fake.deposits).toBe(0);
       expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin wallet fund');
-      expect(fake.paidRequests()).toBe(0);
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
         'prompt: fee unpaid: wallet_low',
       );

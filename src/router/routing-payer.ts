@@ -73,20 +73,23 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
- *   ({@link routingDepositAtomic}: the smallest of the 402's `extra.minDeposit`,
- *   the wallet and the per-call limit, never below ten quoted fees) and
- *   reserves it through the local spend authorizer, so it counts against
- *   the per-call limit, the rolling daily budget and the creator allowlist
- *   like any other; it counts from the moment it is sent, and only an
- *   answered 4xx or 5xx gives it back. The deposit is the spend: each fee
+ *   ({@link routingDepositAtomic}: the smaller of the 402's `extra.minDeposit`
+ *   and the per-call limit, never below ten quoted fees) and reserves it
+ *   through the local spend authorizer, so it counts against the per-call
+ *   limit, the rolling daily budget and the creator allowlist like any other;
+ *   it counts from the moment it is sent, and only an answered 4xx or 5xx
+ *   gives it back. The deposit is the spend: each fee
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
+ * - THE FACILITATOR IS THE BALANCE CHECK. Nothing reads the wallet before a
+ *   deposit. A 402 whose reason code ends in `insufficient_balance` skips the
+ *   call as `wallet_low`, with no retry.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
- *   caller's, and the SDK's chain reads and the wallet read are each cut at
- *   what is left of it, so a leg returns inside the hook's 5 s. A call that
- *   carries a deposit gets {@link DEPOSIT_GATE_TIMEOUT_MS} in place of the
- *   gate's 3.5 s. A payment already sent when the time runs out is not cut:
- *   the call returns, and the request finishes in the background
+ *   caller's, and the SDK's chain reads are each cut at what is left of it,
+ *   so a leg returns inside the hook's 5 s. A call that carries a deposit
+ *   gets {@link DEPOSIT_GATE_TIMEOUT_MS} in place of the gate's 3.5 s. A
+ *   payment already sent when the time runs out is not cut: the call
+ *   returns, and the request finishes in the background
  *   ({@link DETACHED_CEILING_MS} at most) so the SDK's channel records it; a
  *   deposit in it was counted in the spend ledger when it was sent.
  * - A CALL THIS CANNOT PAY (a refusal above, a failed or refused payment, a
@@ -152,12 +155,9 @@ export const SIGNER_RECHECK_MS = 60_000;
  * leaves no time to sign and send the payment and read its answer.
  */
 export const PAID_CALL_RESERVE_MS = 1_000;
-/** The wallet balance read before a deposit, inside the caller's budget.
- *  Base's public RPC answered `balanceOf` in 0.16 to 0.26 s. */
-export const BALANCE_TIMEOUT_MS = 1_000;
 /**
  * THE SDK'S CHAIN READS: `recoverChannel` on a process's first call and the
- * recovery after a corrective 402. Bounded like the wallet read, with no
+ * recovery after a corrective 402. Persisted channels skip recovery. With no
  * retries and never past the call's own budget, so a slow RPC costs the call
  * its routing rather than holding the prompt.
  */
@@ -189,8 +189,6 @@ export interface RoutingPayerDeps {
   policy: () => Promise<SpendPolicy>;
   /** The local spend authorizer over that policy (`createLocalSpendAuthorizer`). */
   authorizer: (policy: SpendPolicy) => SpendAuthorizer;
-  /** The wallet's USDC balance, or null when it cannot be read. */
-  walletBalance: (address: string, timeoutMs: number) => Promise<bigint | null>;
   /** Chain reads for the SDK's channel recovery. */
   readContract?: ChainRead;
   fetchImpl?: typeof fetch;
@@ -682,13 +680,17 @@ export class RoutingPayer {
       const late = call.detached === true || (call.paid && response.kind === 'timeout');
       throw new RouteSkipped(late ? DEADLINE_AFTER_PAYMENT_SENT : PAYMENT_FAILED, answered);
     }
-    // Another session's call was in flight on the channel: nothing was
-    // charged, and this call is skipped.
+    // Another session's call was in flight on the channel (nothing was
+    // charged), or the facilitator found the wallet below the deposit: the
+    // call is skipped. Any other refusal is a failed payment.
     if (response.status === 402) {
+      const error = call.channel === undefined ? undefined : paymentError(call.channel, response);
       throw new RouteSkipped(
-        call.channel !== undefined && paymentError(call.channel, response) === CHANNEL_BUSY_ERROR
+        error === CHANNEL_BUSY_ERROR
           ? CHANNEL_BUSY
-          : PAYMENT_FAILED,
+          : isShortOfFunds(error)
+            ? 'wallet_low'
+            : PAYMENT_FAILED,
         answered,
       );
     }
@@ -740,29 +742,27 @@ export class RoutingPayer {
    * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
    * size and the refusals.
    *
-   * THE SIZE is {@link routingDepositAtomic}: the smallest of the 402's
-   * `extra.minDeposit` ({@link CHANNEL_DEPOSIT_ATOMIC} when it has none), the
-   * wallet and the per-call limit, never below ten quoted fees, and inside the
-   * SDK's ceiling (cap × multiplier). A wallet below it is `wallet_low`; a
-   * spend the authorizer denies (the per-call limit, the daily budget, the
-   * creator allowlist) refuses it too, and the call is not paid.
+   * THE SIZE is {@link routingDepositAtomic}: the smaller of the 402's
+   * `extra.minDeposit` ({@link CHANNEL_DEPOSIT_ATOMIC} when it has none) and
+   * the per-call limit, never below ten quoted fees, and inside the SDK's
+   * ceiling (cap × multiplier). Nothing reads the wallet first: the
+   * facilitator refuses a deposit the wallet cannot cover, and
+   * {@link RoutingPayer.pay} skips that call as `wallet_low`. A spend the
+   * authorizer denies (the per-call limit, the daily budget, the creator
+   * allowlist) refuses it here, and the call is not paid.
    */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
     const quote = BigInt(ctx.requestAmount);
-    const left = call.until - this.now();
-    if (left <= 0) this.refuse('busy');
-    const payer = this.channel!.payer;
-    const wallet = await this.deps.walletBalance(payer, Math.min(BALANCE_TIMEOUT_MS, left));
+    if (call.until - this.now() <= 0) this.refuse('busy');
     const sdkMax = ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit);
     const amount = routingDepositAtomic({
       hintAtomic:
         parseAnnouncedMinDeposit(ctx.paymentRequirements.extra?.['minDeposit'], quote) ??
         CHANNEL_DEPOSIT_ATOMIC,
       quoteAtomic: quote,
-      walletAtomic: wallet,
       perCallAtomic: policy.maxAutoSpendAtomic,
       maxAtomic:
         sdkMax !== null && sdkMax < MAX_CHANNEL_DEPOSIT_ATOMIC
@@ -770,7 +770,6 @@ export class RoutingPayer {
           : MAX_CHANNEL_DEPOSIT_ATOMIC,
       neededAtomic: BigInt(ctx.minimumDepositAmount),
     });
-    if (wallet !== null && wallet < amount) this.refuse('wallet_low');
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',
@@ -1063,14 +1062,37 @@ function signObservation(v: SignVerdict): RouterObservation['sign'] {
   return { status: 'unknown', reason: v.reason, detail: v.detail };
 }
 
-/** The `error` a 402's payment-required header carries, if any. */
+/**
+ * The facilitator's refusal of a deposit the wallet cannot cover. The SDK names
+ * it `invalid_batch_settlement_evm_insufficient_balance`; the code's suffix is
+ * matched, since a facilitator may prefix it differently.
+ */
+function isShortOfFunds(code: string | undefined): boolean {
+  return code?.endsWith('insufficient_balance') === true;
+}
+
+/**
+ * THE REASON CODE of a 402's `error`, without its detail. The SDK's server
+ * answers a refused payment as `<code>: <detail>` (for example
+ * `invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less
+ * than deposit amount 30000`), and the detail is free text that could name
+ * any code, so only the part before the first `:` is compared.
+ */
+export function reasonCode(error: string | undefined): string | undefined {
+  if (error === undefined) return undefined;
+  const colon = error.indexOf(':');
+  return (colon === -1 ? error : error.slice(0, colon)).trim();
+}
+
+/** The reason code ({@link reasonCode}) a 402's payment-required header carries, if any. */
 function paymentError(
   channel: Channel,
   response: Extract<HttpResult, { ok: true }>,
 ): string | undefined {
   try {
-    return channel.http.getPaymentRequiredResponse((name) => response.header(name), response.json)
-      .error;
+    return reasonCode(
+      channel.http.getPaymentRequiredResponse((name) => response.header(name), response.json).error,
+    );
   } catch {
     return undefined;
   }

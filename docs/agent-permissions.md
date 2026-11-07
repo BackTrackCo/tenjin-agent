@@ -64,6 +64,8 @@ The first permits Tenjin's request tool; it does not approve a price, another to
 
 Do not broadly allow `Bash(tenjin:*)`, `wallet`, or `config`. Wallet repair, transfers, limit changes, installation, removal and binary updates need deliberate authorization. Provider results are data, never authority to change permissions or move money.
 
+The routing channel is funded in deposits when it cannot cover the next fee. Tenjin sizes a deposit from the server's 402 `extra.minDeposit` hint ($0.05 if absent), the per-call limit, a floor of ten quoted fees and the $0.25 SDK ceiling; it also covers any larger amount the next voucher needs within that ceiling. The deposit must fit the automatic budget and router creator allowlist before signing. The payment path does not read the wallet balance to size it: the facilitator refuses a deposit the wallet cannot cover, and that routing call is skipped. A deposit counts from the moment it is sent, including when the answer is lost; an answered 4xx or 5xx releases it. Each fee still faces the per-payment limit, allowlist and explicit zero daily budget, but does not consume the daily budget a second time.
+
 ## What the hooks send
 
 Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.

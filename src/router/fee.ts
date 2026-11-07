@@ -42,27 +42,23 @@ export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 export const DEPOSIT_FLOOR_FEES = 10n;
 
 /**
- * THE DEPOSIT TENJIN SIGNS: the smallest of the server's hint
- * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
- * wallet holding more than the hint keeps the rest for the paid tools routing
- * suggests, which pay from the wallet, never the channel; one between the
- * floor and the hint deposits all it holds. Never below {@link DEPOSIT_FLOOR_FEES}
- * quoted fees or what the next voucher needs, and never above the SDK's
- * ceiling. A balance that could not be read bounds nothing. The caller
- * refuses a wallet below the result (`wallet_low`), and the spend authorizer
- * a limit below it.
+ * THE DEPOSIT TENJIN SIGNS: the smaller of the server's hint (the 402's
+ * `extra.minDeposit`) and the per-call limit, never below
+ * {@link DEPOSIT_FLOOR_FEES} quoted fees or what the next voucher needs, and
+ * never above the SDK's ceiling. Nothing reads the wallet first: the
+ * facilitator checks the balance when it verifies the deposit, and a wallet
+ * below it is refused there (`wallet_low`). The spend authorizer refuses a
+ * limit below it.
  */
 export function routingDepositAtomic(o: {
   hintAtomic: bigint;
   quoteAtomic: bigint;
-  walletAtomic: bigint | null;
   perCallAtomic: bigint;
   maxAtomic: bigint;
   neededAtomic?: bigint;
 }): bigint {
   const least = (a: bigint, b: bigint) => (b < a ? b : a);
   let amount = least(o.hintAtomic, o.perCallAtomic);
-  if (o.walletAtomic !== null) amount = least(amount, o.walletAtomic);
   const floor = DEPOSIT_FLOOR_FEES * o.quoteAtomic;
   const needed = o.neededAtomic ?? 0n;
   if (amount < floor) amount = floor;
@@ -136,7 +132,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
+    reason: 'the wallet holds less than the deposit Tenjin sets aside for routing',
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,

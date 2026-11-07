@@ -6,11 +6,11 @@ import { quoteClosed, readQuote, useQuote, type Quote, type QuoteRefusal } from 
  * ONE SPEND RULE FOR EVERY ROUTER CALL. A call that pays first lists the
  * payments it will make at their quoted amounts: its plan. The plan's total
  * meets the automatic limits once, before anything is signed: `maxAutoSpend`
- * for the whole call, the rolling day's `sessionBudget`, and the wallet's
- * balance. Under them it runs. Over them nothing is paid; on a host that asks
+ * for the whole call and the rolling day's `sessionBudget`. Under them it
+ * runs. Over them nothing is paid; on a host that asks
  * the user, the router keeps the plan as a quote for their yes
- * (`spend-quotes.ts`), and a quote they approved may pass both limits, never
- * the balance.
+ * (`spend-quotes.ts`), and a quote they approved may pass both limits. Funds
+ * are verified at settlement; a multi-payment plan can settle partially.
  *
  * A ROUTER PAYMENT IS SIGNED ONLY AGAINST A PLAN. Admitting a plan here, or
  * using up an approved quote, is the only way to get the slots `runPay`
@@ -71,22 +71,14 @@ export type PlanAdmission =
   | { admitted: PlanSlot[] }
   | { over: PlanOver }
   /** A payee outside `allowlistCreators`: no one's yes clears that. */
-  | { refused: { message: string } }
-  | { short: { balanceAtomic: bigint; totalAtomic: bigint } };
+  | { refused: { message: string } };
 
-/**
- * ADMIT A CALL'S PLAN AUTOMATICALLY, or say what stops it. The balance is read
- * for a plan of several payments, which each read only their own amount, and
- * for one over the limits, so a quote is never offered for money the wallet
- * does not hold; a read that fails leaves each payment to its own. A plan of
- * one under the limits is left to its payment's own read.
- */
+/** Admit a plan against local spend policy, without a balance preflight. */
 export async function admitPlan(
   payments: readonly PlannedPayment[],
   opts: {
     dataDir: string;
     policy: SpendPolicy;
-    balance: () => Promise<bigint | null>;
     now?: () => number;
   },
 ): Promise<PlanAdmission> {
@@ -98,12 +90,6 @@ export async function admitPlan(
   const evaluation = evaluatePlan(opts.policy, payments, spentAtomic);
   if (evaluation.reason === 'not_allowlisted') return { refused: { message: evaluation.message } };
   const over = evaluation.decision !== 'allow';
-  if ((payments.length > 1 || over) && totalAtomic > 0n) {
-    const balanceAtomic = await opts.balance();
-    if (balanceAtomic !== null && balanceAtomic < totalAtomic) {
-      return { short: { balanceAtomic, totalAtomic } };
-    }
-  }
   if (over) {
     const budget = opts.policy.sessionBudgetAtomic;
     return {
@@ -126,31 +112,19 @@ export async function admitPlan(
  * minted approved, and the quote used up so it pays once. The caller is the
  * `approve` call, which reaches this process only after the host's own
  * prompt put it to a person; nothing on disk says anyone approved anything.
- * The wallet must still hold the total: a short wallet leaves the quote open,
- * for the user to fund and approve again. The caller opens the wallet first,
- * so a wallet that will not open leaves the quote open, as a short one does.
+ * The caller opens the wallet first, so a wallet that will not open leaves
+ * the quote open. Once used, a quote stays consumed even if settlement fails.
  */
 export async function admitQuote(
   dataDir: string,
   id: string,
-  opts: { balance: () => Promise<bigint | null>; now?: () => number },
-): Promise<
-  | { admitted: PlanSlot[]; quote: Quote }
-  | { refused: QuoteRefusal }
-  | { short: { balanceAtomic: bigint; totalAtomic: bigint } }
-> {
+  opts: { now?: () => number } = {},
+): Promise<{ admitted: PlanSlot[]; quote: Quote } | { refused: QuoteRefusal }> {
   const now = opts.now ?? Date.now;
   const kept = await readQuote(dataDir, id);
   if (kept === null) return { refused: 'missing' };
   const closed = quoteClosed(kept, now());
   if (closed !== null) return { refused: closed };
-  const totalAtomic = BigInt(kept.totalAtomic);
-  if (totalAtomic > 0n) {
-    const balanceAtomic = await opts.balance();
-    if (balanceAtomic !== null && balanceAtomic < totalAtomic) {
-      return { short: { balanceAtomic, totalAtomic } };
-    }
-  }
   const used = await useQuote(dataDir, id, now);
   if ('refused' in used) return used;
   return {

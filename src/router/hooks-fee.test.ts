@@ -228,11 +228,6 @@ describe('the hook legs and the routing fee', () => {
 
   it.each([
     [
-      'the wallet holds less than the deposit',
-      { walletBalance: async () => 20_000n },
-      'Your usual tools still work.',
-    ],
-    [
       'the wallet cannot be unlocked',
       {
         getSigner: async () => {
@@ -563,15 +558,33 @@ describe('wallet notices', () => {
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
+  it('says nothing about funding before the facilitator answers', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(answer)).not.toContain('wallet fund');
+    expect(fake.paidRequests()).toBeGreaterThan(0);
+  });
+
+  it('skips as wallet_low, with no retry, when the facilitator refuses the deposit', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 20_000n;
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    // One deposit, refused at verify: no balance read and no second deposit.
+    expect(fake.paidRequests()).toBe(1);
+    expect(fake.deposits).toBe(0);
+    expect(systemMessageOf(answer)).toContain('could not pay');
+    expect(systemMessageOf(answer)).toContain('Your usual tools still work.');
+    expect(systemMessageOf(answer)).not.toContain('tenjin wallet fund');
+  });
+
   it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
     const fake = new FakeRouter();
-    let balance = 20_000n;
-    const p = payer(fake, { walletBalance: async () => balance });
+    fake.walletAtomic = 20_000n;
+    const p = payer(fake);
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(low)).toContain('could not pay');
-    expect(systemMessageOf(low)).toContain('Your usual tools still work.');
-    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
-    balance = 10_000_000n;
+    fake.walletAtomic = 10_000_000n;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
   });

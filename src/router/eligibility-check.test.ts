@@ -81,6 +81,9 @@ describe('checkEligibility', () => {
     // A big wallet signs the hint too, not the $0.25 ceiling.
     ['$0.50 wallet, room for its $0.05', 500_000n, 50_000n, 'ready'],
     ['$0.50 wallet, room one unit short', 500_000n, 49_999n, 'blocked'],
+    // The payer signs the same deposit with no balance read, so a $0.10
+    // budget routes a $0.25 wallet.
+    ['$0.25 wallet, $0.10 of room', 250_000n, 100_000n, 'ready'],
   ])(
     'evaluates the deposit the wallet signs against the daily room: %s',
     async (_label, balance, room, status) => {
@@ -97,6 +100,17 @@ describe('checkEligibility', () => {
       if (status === 'blocked') expect(e.canPayRouting).toMatchObject({ reason: 'budget_reached' });
     },
   );
+
+  it('a wallet below the deposit is wallet_low, as the facilitator would refuse it', async () => {
+    await writeWallet();
+    const e = await checkEligibility(
+      input({
+        provider: fakeProvider({ verify: async () => verified('keychain') }),
+        readBalance: async () => CHANNEL_DEPOSIT_ATOMIC - 1n,
+      }),
+    );
+    expect(e.canPayRouting).toMatchObject({ status: 'blocked', reason: 'wallet_low' });
+  });
 
   it('a verify that throws gives unknown and never rejects', async () => {
     await writeWallet();

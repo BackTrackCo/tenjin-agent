@@ -2,7 +2,7 @@ import type { PolicyReason } from '../lib/policy';
 import type { WalletFacts } from '../lib/wallet-facts';
 import type { WalletVerification } from '../lib/wallet/provider';
 import { DEFINITE_UNLOCK, type SigningSource, type UnlockReason } from '../lib/wallet-unlock';
-import { DEPOSIT_FLOOR_FEES, ROUTING_FEE_CEILING_ATOMIC, unpaid } from './fee';
+import { ROUTING_FEE_CEILING_ATOMIC, unpaid } from './fee';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 /**
@@ -52,6 +52,8 @@ export interface RoutingFacts {
   sign: SignVerdict;
   creditAtomic: bigint | null;
   depositRefusal: string | null;
+  /** The deposit the payer would sign (`routingDepositAtomic`). */
+  depositAtomic: bigint;
   balanceAtomic: bigint | null;
 }
 
@@ -144,9 +146,9 @@ export function canSign(f: SignFacts): SignVerdict {
  *
  * Definite money facts come AHEAD of an unknown signer (decision 11): a
  * command-mode hook cannot unlock, so its signer is always unknown, and a
- * balance below the smallest deposit must still withhold there as it does
- * today. That is the payer's floor, ten fees at the ceiling: a wallet under
- * the hint but over the floor deposits all it holds and routes. A
+ * balance below the deposit must still withhold there as it does today. The
+ * payer reads no balance: the facilitator refuses a deposit the wallet cannot
+ * cover, so a balance read here predicts that refusal. A
  * channel that already holds the fee needs no deposit, so neither the deposit
  * policy nor the balance matters to it (checklist item 8: $0 with credit).
  */
@@ -155,10 +157,7 @@ export function canPayRouting(r: RoutingFacts): Verdict {
   if (r.sign.status === 'blocked') return r.sign;
   if ((r.creditAtomic ?? 0n) >= ROUTING_FEE_CEILING_ATOMIC) return r.sign;
   if (r.depositRefusal !== null) return moneyBlocked(r.depositRefusal);
-  if (
-    r.balanceAtomic !== null &&
-    r.balanceAtomic < DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC
-  ) {
+  if (r.balanceAtomic !== null && r.balanceAtomic < r.depositAtomic) {
     return moneyBlocked('wallet_low');
   }
   if (r.sign.status === 'unknown') return r.sign;

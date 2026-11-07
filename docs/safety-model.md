@@ -19,6 +19,8 @@ Automatic routing, an explicitly approved over-limit quote, direct `tenjin pay` 
 
 A signed authorization can be charged after a process exits or reports an error. Tenjin counts transmitted automatic authorizations conservatively; only eligible chain-proven expiry releases their exposure. A result file, HTTP success or provider's claim of failure is not settlement proof. Check payment records before retrying an uncertain purchase.
 
+A routing decision can cost the server's quoted fee, at most $0.003, even when it suggests no tool. When the channel needs a deposit, the payment path takes the smaller of the server's 402 `extra.minDeposit` hint ($0.05 if absent) and `maxAutoSpend`, raises it to at least ten quoted fees and any larger amount needed by the next voucher, then caps it at the SDK's $0.25 ceiling. The deposit must pass the automatic spend policy before signing. It counts against the per-call limit and daily budget once when sent; fees drawn from it do not consume that budget again, though each still faces the per-payment limit, creator allowlist and an explicit zero daily budget. The payment path does not read the balance to size the deposit; the facilitator refuses one the wallet cannot cover. For a routing deposit, a sent payment with no answer remains counted, while an answered 4xx or 5xx releases its exposure because the server settles nothing on those responses. Unused channel funds remain available for later routing fees.
+
 ## Destination and result limits
 
 For a spec-backed call, the live challenge must match the spec's recipient, network, asset and price ceiling. An older lookup without a spec checks the quote's price and does **not** provide complete endpoint/payee binding.

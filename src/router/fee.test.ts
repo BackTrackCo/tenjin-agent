@@ -25,31 +25,20 @@ const ALL_KEYS = [
 ];
 
 describe('routingDepositAtomic', () => {
-  /** The deposit: the smallest of the hint, the wallet and the per-call
-   *  limit, never below ten quoted fees, never above the SDK's ceiling. */
-  const size = (o: {
-    hint?: bigint;
-    quote?: bigint;
-    wallet?: bigint | null;
-    perCall?: bigint;
-    needed?: bigint;
-  }) =>
+  /** The deposit: the smaller of the hint and the per-call limit, never
+   *  below ten quoted fees, never above the SDK's ceiling. No balance. */
+  const size = (o: { hint?: bigint; quote?: bigint; perCall?: bigint; needed?: bigint }) =>
     routingDepositAtomic({
       hintAtomic: o.hint ?? CHANNEL_DEPOSIT_ATOMIC,
       quoteAtomic: o.quote ?? 3_000n,
-      walletAtomic: o.wallet === undefined ? 10_000_000n : o.wallet,
       perCallAtomic: o.perCall ?? 250_000n,
       maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
       ...(o.needed !== undefined ? { neededAtomic: o.needed } : {}),
     });
 
   it.each<[string, Parameters<typeof size>[0], bigint]>([
-    ['the hint, from a big wallet', {}, CHANNEL_DEPOSIT_ATOMIC],
-    ['the hint, from a $0.50 wallet', { wallet: 500_000n }, CHANNEL_DEPOSIT_ATOMIC],
-    ['the hint, with the balance unread', { wallet: null }, CHANNEL_DEPOSIT_ATOMIC],
-    ['a wallet below the hint, all of it', { quote: 1_000n, wallet: 20_000n }, 20_000n],
+    ['the hint', {}, CHANNEL_DEPOSIT_ATOMIC],
     ['a per-call limit below the hint', { quote: 1_000n, perCall: 15_000n }, 15_000n],
-    ['ten quoted fees, over a smaller wallet', { quote: 1_000n, wallet: 4_000n }, 10_000n],
     ['ten quoted fees, over a smaller limit', { perCall: 2_000n }, 30_000n],
     ['what the next voucher needs, over the floor', { needed: 60_000n }, 60_000n],
     [
@@ -90,7 +79,7 @@ describe('unpaidSentence', () => {
   it('explains automatic unfunded routing without reopening checkout, while doctor retains its fix', () => {
     expect(unpaidSentence('wallet_low', 'agent')).toContain('could not pay the routing fee');
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
-      /wallet fund|send USDC|add funds|checkout/i,
+      /wallet fund|send USDC|add funds|checkout|USDC|RPC|channel|facilitator/i,
     );
     expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
     expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
@@ -101,7 +90,7 @@ describe('unpaidSentence', () => {
     no_wallet:
       'Tenjin could not pay the routing fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin could not pay the routing fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Tenjin could not pay the routing fee (the wallet holds less than the deposit Tenjin sets aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
     no_payer:
       'Tenjin could not pay the routing fee (the router charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
