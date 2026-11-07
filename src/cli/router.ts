@@ -1,4 +1,7 @@
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Option, type Command } from 'commander';
+import { markLive } from '../lib/runtime-layout';
 import { HARNESSES, type Harness } from '../router/names';
 import { INTEGRATION, SETUP, type Registration } from './registration';
 
@@ -79,6 +82,10 @@ export function registerRouter(reg: Registration): void {
       "Run the local stdio MCP server that carries the `request` tool: one routing decision per lookup, paid with a small routing fee, then the provider call, built here from the offer's spec and your assistant's input where it has one, under your local spend policy. It speaks on stdin and stdout and runs until the client disconnects, so it prints no envelope of its own.",
     )
     .action(async function (this: Command) {
+      // A server running from Tenjin's runtime marks its version in use before
+      // anything else runs, so an update's cleanup (`collect`) never removes
+      // the build an open session still runs. A no-op outside the runtime.
+      const unmark = markLive(dirname(fileURLToPath(import.meta.url)));
       const ctx = buildContext(this);
       const harness = this.opts().harness as Harness;
       // Codex has no SessionStart hook to start the daily background update
@@ -97,6 +104,7 @@ export function registerRouter(reg: Registration): void {
         flags: ctx.flags,
         harness,
       });
+      unmark();
     });
 
   leaf(INTEGRATION, 'status-line', "the live footer, for Claude Code's status line")

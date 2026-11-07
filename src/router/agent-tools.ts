@@ -15,8 +15,7 @@ import { LEGACY_MCP_SERVER_NAME, LEGACY_REQUEST_TOOL, requestToolName } from './
  * built-in in {@link MCP_INHERITING_BUILTINS}. Every other built-in, and any
  * type with no definition this can find or read, is `unknown`, and `unknown`
  * gets no router call: `claude-code-guide` ships with Bash, Read, WebFetch and
- * WebSearch and no MCP tools, and denying its WebFetch would strand it exactly
- * as #377 reported.
+ * WebSearch and no MCP tools, and denying its WebFetch would strand it.
  *
  * WHERE A DEFINITION LIVES, in the harness's own precedence: the project's
  * `.claude/agents` (from `cwd` up to the filesystem root, nearest first), then

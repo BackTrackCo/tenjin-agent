@@ -100,7 +100,8 @@ const INSTRUCTIONS =
   'that operation: it can find a pay-per-call service. ' +
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Routing costs a fee the router ` +
+  'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs a fee the router ` +
   `quotes, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call; a wallet on THIS ` +
   'machine pays it and the provider under the local spend ' +
   'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
@@ -311,8 +312,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .string()
           .optional()
           .describe(
-            "Sent alone: a row's id from `browse`. Returns that tool's spec under a fresh id, " +
-              'which `{id, input}` then runs. Free.',
+            "A row's id from `browse`. Alone: its spec for `{id, input}`, or how to run a free tool. " +
+              'With `query`: runs that free tool without a wallet or payment.',
           ),
         count: z
           .number()

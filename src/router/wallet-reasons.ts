@@ -22,7 +22,7 @@ export const ASK_FOR_REPAIR =
  * strings, importing only `../lib/wallet-unlock`, so `alive` and the hooks can
  * carry them without pulling anything else into their chunks.
  *
- * Each reason has TWO fixes, because two different readers see them (B1):
+ * Each reason has two fixes, because two different readers see them:
  * - `fix` is for the PERSON: doctor, install at a terminal, repair, wallet
  *   errors, SessionStart's `systemMessage`, and hook notices (the harness shows
  *   those in `systemMessage` too). Any `fix` that names `tenjin wallet repair`
@@ -34,8 +34,8 @@ export const ASK_FOR_REPAIR =
  *   helpful agent never solicits a secret into the transcript.
  *
  * `reason` is a fragment that slots into a sentence ("... (reason), so ...").
- * `no_wallet` keeps fee.ts's `UNPAID.no_wallet` wording byte for byte, and
- * `wallet_low` is not here at all: funding copy is out of scope (S5, S6).
+ * fee.ts's `UNPAID` takes its wallet rows from this table, and `wallet_low`
+ * is not here at all: funding copy lives in fee.ts.
  */
 export const WALLET_REASONS: Record<
   Exclude<UnlockReason, 'unlock_timeout'> | 'wallet_locked',
@@ -162,7 +162,7 @@ export function stillLockedSentence(reason: UnlockReason | 'wallet_locked'): str
 
 /**
  * `WALLET_REASONS[reason].agentFix` for a wallet reason; `fallback` otherwise.
- * For model-facing text only (B1). Pass it a reason from `details.unlock`
+ * For model-facing text only. Pass it a reason from `details.unlock`
  * (`unlockReasonOf`) or from a verdict, never from `classifyUnlockError`'s
  * `wallet_locked` fallback for an undetailed error, which would swap a
  * non-wallet error's own fix for wallet advice.
@@ -174,7 +174,7 @@ export function agentFixFor(reason: string, fallback: string): string {
 }
 
 /**
- * An error's fix, as the MODEL reads it in the `request` tool's text (B1). An
+ * An error's fix, as the model reads it in the `request` tool's text. An
  * error carrying `details.unlock` gets its reason's `agentFix`, which asks the
  * person to act and never asks for the passphrase or key; every other error
  * keeps its own fix byte for byte. Gated on `unlockReasonOf`, never on

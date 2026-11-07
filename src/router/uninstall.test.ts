@@ -1,15 +1,16 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { persistRouterProject } from '../commands/config';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { CliError } from '../lib/errors';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { describeStoreLocation } from '../lib/wallet/passphrase';
 import type { ClaudeRun } from './claude-cli';
 import { runCodexUninstall } from './codex-install';
 import { recordInstalledHost, uninstallEach, type SharedParts } from './hosts';
+import { installSandbox } from './install-test-utils';
 import { LAUNCHER_MARKER, renderPluginFiles } from './plugin-files';
 import { pluginFolderPath, writePluginFolder } from './plugin-folder';
 import { folderFor } from './plugin-registration';
@@ -50,13 +51,10 @@ let marketplaceRemoveFails: boolean;
 let marketplaceListFails: boolean;
 
 beforeEach(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), 'router-uninstall-')));
-  home = join(root, 'home');
-  data = join(root, 'data');
-  cfg = join(root, 'cfg');
+  ({ root, home, data, cfg } = await installSandbox('router-uninstall-'));
   other = join(root, 'other');
   elsewhere = join(root, 'elsewhere');
-  for (const dir of [home, data, other, elsewhere, join(cfg, 'plugins')]) {
+  for (const dir of [other, elsewhere, join(cfg, 'plugins')]) {
     await mkdir(dir, { recursive: true });
   }
   calls = [];
@@ -70,12 +68,7 @@ afterEach(async () => {
 });
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(data);
 }
 
 const recordsFile = () => join(cfg, 'plugins', 'installed_plugins.json');

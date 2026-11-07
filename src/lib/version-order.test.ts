@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import pkg from '../../package.json';
 import { isNewer as reexported } from './update-check';
-import { isNewer, parseVersion } from './version-order';
+import { atLeast, isNewer, parseVersion } from './version-order';
 
 describe('parseVersion', () => {
   it('reads a release and an alpha, and nothing else this package never published', () => {
@@ -55,6 +55,18 @@ describe('isNewer', () => {
  * grammar has reached users.
  */
 const SHIPPED_IN_FIELD = /^(\d+)\.(\d+)\.(\d+)(?:-alpha\.(\d+))?$/;
+
+describe('atLeast', () => {
+  it('compares by number, a suffix ignored', () => {
+    expect(atLeast('2.1.287', '2.1.287')).toBe(true);
+    expect(atLeast('2.1.286', '2.1.287')).toBe(false);
+    expect(atLeast('2.2.0', '2.1.287')).toBe(true);
+    expect(atLeast('2.0.999', '2.1.287')).toBe(false);
+    expect(atLeast('0.149.0-alpha.2', '0.149.0')).toBe(true);
+    expect(atLeast('0.148.9', '0.149.0')).toBe(false);
+    expect(atLeast('x.1.0', '0.1.0')).toBe(false);
+  });
+});
 
 describe('the version this repo publishes', () => {
   it('is one every installed runtime can read', () => {

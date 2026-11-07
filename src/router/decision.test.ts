@@ -1,12 +1,21 @@
-import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandContext } from '../context';
-import { packetForText } from './context';
+import { testCtx } from '../context-test-utils';
+import type { Packet } from './context';
 import { parseForTests, requestDecision, ROUTE_PAID_PATH } from './decision';
+import { NATIVE } from './fee-test-utils';
+import { fixture } from './fixture-test-utils';
+
+/** A packet holding just `text` as the current message. */
+const packetForText = (text: string): Packet => ({
+  current: { role: 'user', text },
+  history: [],
+  literalUrls: [],
+  historyStatus: 'unavailable',
+});
 
 /**
  * THE DECISION, WITH NO PAYER. These calls go to the paid route unpaid, as a
@@ -28,12 +37,7 @@ afterEach(async () => {
 const BASE = 'https://tenjin.sh';
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: BASE },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(dir, { baseUrl: BASE });
 }
 
 interface Call {
@@ -57,21 +61,6 @@ function net(body: unknown, status = 200): { fetchImpl: typeof fetch; calls: Cal
   }) as typeof fetch;
   return { fetchImpl, calls };
 }
-
-const NATIVE = {
-  schemaVersion: 1,
-  routerVersion: '2026-09-23.1',
-  decision: {
-    action: 'native',
-    reason: 'The host assistant and its own tools are enough.',
-    diagnostics: {
-      reasonCode: 'native_sufficient',
-      stage: 'capability',
-      missing: [],
-      nextAction: 'Answer with your own tools.',
-    },
-  },
-};
 
 const HOOK_EXECUTE = {
   schemaVersion: 1,
@@ -298,12 +287,7 @@ describe('one decision, on the paid route', () => {
  * call nobody offered. Each is a parse failure, like any unreadable answer.
  */
 describe('a choice set', () => {
-  const CHOICES = JSON.parse(
-    readFileSync(
-      fileURLToPath(new URL('./fixtures/wire-hook-discovered-choices.json', import.meta.url)),
-      'utf8',
-    ),
-  ) as {
+  const CHOICES = fixture('wire-hook-discovered-choices.json') as {
     decision: {
       id: string;
       specs: { id: string }[];

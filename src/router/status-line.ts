@@ -1,3 +1,4 @@
+import { readCappedStdin, sessionIdOf } from './harness-event';
 import { renderProgress } from './progress';
 import { routerSettings } from './settings';
 import type { Io } from '../lib/output';
@@ -46,7 +47,9 @@ export async function statusLineMain(): Promise<void> {
 export async function runStatusLine(io: Io, deps: StatusLineDeps): Promise<void> {
   let rendered: string;
   try {
-    const raw = await (deps.readEvent ?? readStdin)();
+    const raw = await (
+      deps.readEvent ?? (() => readCappedStdin(MAX_EVENT_BYTES, STDIN_TIMEOUT_MS))
+    )();
     const event: unknown = JSON.parse(raw);
     const sessionId = sessionIdOf(event);
     if (sessionId === null) return;
@@ -67,45 +70,8 @@ export async function runStatusLine(io: Io, deps: StatusLineDeps): Promise<void>
   if (rendered.length > 0) io.stdout.write(`${rendered}\n`);
 }
 
-/**
- * The session identity, and nothing else off the event. A footer that showed
- * the wrong session's lookups would be a leak between two terminals, so an
- * event without a plain, bounded `session_id` renders nothing at all.
- */
-function sessionIdOf(event: unknown): string | null {
-  if (event === null || typeof event !== 'object' || Array.isArray(event)) return null;
-  const value = (event as { session_id?: unknown }).session_id;
-  if (typeof value !== 'string' || value.length === 0 || value.length > 200) return null;
-  return value;
-}
-
 /** The session's working directory, which `router.*` resolves from. */
 function cwdOf(event: unknown): string | null {
   const value = (event as { cwd?: unknown }).cwd;
   return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-async function readStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const timer = setTimeout(() => reject(new Error('no harness event')), STDIN_TIMEOUT_MS);
-    process.stdin.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_EVENT_BYTES) {
-        clearTimeout(timer);
-        reject(new Error('harness event too large'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    process.stdin.once('end', () => {
-      clearTimeout(timer);
-      resolve(Buffer.concat(chunks).toString('utf8'));
-    });
-    process.stdin.once('error', () => {
-      clearTimeout(timer);
-      reject(new Error('harness event unreadable'));
-    });
-  });
 }

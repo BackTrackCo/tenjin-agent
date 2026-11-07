@@ -65,4 +65,10 @@ node="$stage/node/bin/node"
 fetch "https://registry.npmjs.org/tenjin-cli/-/tenjin-cli-$CLI_VERSION.tgz" "$stage/cli.tgz"
 [ "$(digest 512 "$stage/cli.tgz")" = "$CLI_SHA512" ] || fail 'The Tenjin download did not match its checksum.'
 tar -xzf "$stage/cli.tgz" -C "$stage/cli" --strip-components=1 || fail 'Could not unpack Tenjin.'
-TENJIN_BOOTSTRAP_NODE_ARCHIVE="$stage/node.tar.gz" "$node" "$stage/cli/dist/index.js" install "$@"
+# curl | sh owns stdin. Give only the CLI terminal input when a person is
+# present; leave pipes, headless installs and the CLI's own prompt guards alone.
+if [ ! -t 0 ] && [ -t 1 ] && [ -t 2 ] && ( : </dev/tty ) 2>/dev/null; then
+  TENJIN_BOOTSTRAP_NODE_ARCHIVE="$stage/node.tar.gz" "$node" "$stage/cli/dist/index.js" install "$@" </dev/tty
+else
+  TENJIN_BOOTSTRAP_NODE_ARCHIVE="$stage/node.tar.gz" "$node" "$stage/cli/dist/index.js" install "$@"
+fi

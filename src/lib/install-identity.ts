@@ -6,6 +6,7 @@ import { hasCode } from './errno';
 import { setTenjinIdentity, type TenjinIdentity } from './http';
 import { installIdPath } from './paths';
 import { knownDeploymentOrigins } from './production-origin';
+import { UUID_RE } from './ids';
 
 /**
  * The install id the transport attaches to Tenjin-bound requests (see
@@ -15,8 +16,6 @@ import { knownDeploymentOrigins } from './production-origin';
  * header. There is no opt-out for alpha; the id is random, anonymous, and not a
  * credential.
  */
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseInstallId(raw: string): string | undefined {
   const id = raw.trim();

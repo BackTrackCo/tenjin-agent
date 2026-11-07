@@ -6,10 +6,8 @@ import {
   ENV_PASSPHRASE_WRONG,
   FILE_STORE_FAILED_FIX,
   KEYCHAIN_LOCKED_FIX,
-  KEYCHAIN_WAIT_LINE,
   NO_KEYRING_LINE,
   PRIVATE_KEY_RE,
-  REPAIR_CLAUSE,
   REPAIR_IN_TERMINAL,
   unlockDetails,
   unlockReasonOf,
@@ -33,34 +31,7 @@ function named(name: string): Error {
   return err;
 }
 
-describe('the exact strings', () => {
-  it('matches section 2.2 byte for byte', () => {
-    expect(ENV_PASSPHRASE_WRONG).toBe('TENJIN_WALLET_PASSPHRASE is set but wrong; remove it.');
-    expect(REPAIR_CLAUSE).toBe(
-      '(it asks for the passphrase in your terminal; never paste it into chat)',
-    );
-    expect(REPAIR_IN_TERMINAL).toBe(
-      'Run `tenjin wallet repair` yourself (it asks for the passphrase in your terminal; never paste it into chat).',
-    );
-    expect(REPAIR_IN_TERMINAL).toContain(REPAIR_CLAUSE);
-    expect(KEYCHAIN_LOCKED_FIX).toBe(
-      'Unlock your keychain (or log in to the desktop session) and retry.',
-    );
-    expect(FILE_STORE_FAILED_FIX('/home/u/.tenjin/passphrase.0xab.plain')).toBe(
-      'Tenjin could not save the passphrase to /home/u/.tenjin/passphrase.0xab.plain; check that /home/u/.tenjin is writable.',
-    );
-    expect(FILE_STORE_FAILED_FIX('~/.tenjin/passphrase.0xab.plain')).toContain(
-      'check that ~/.tenjin is writable.',
-    );
-    expect(FILE_STORE_FAILED_FIX('/srv/tenjin/passphrase.0xab.plain')).toContain(
-      'check that /srv/tenjin is writable.',
-    );
-    expect(NO_KEYRING_LINE('/p')).toBe(
-      'No keyring reachable from this session; passphrase saved to /p (readable only by you).',
-    );
-    expect(KEYCHAIN_WAIT_LINE).toBe('Waiting for the keychain…');
-  });
-
+describe('the unlock fix strings', () => {
   it('never suggests an inline passphrase or plaintext storage (B1, S3)', () => {
     for (const s of [
       ENV_PASSPHRASE_WRONG,

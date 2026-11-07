@@ -1,15 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '../../package.json';
 import { loadRawConfig } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { activate, type LauncherResult, type RuntimeSetup } from '../lib/runtime';
+import type { RuntimeSetup } from '../lib/runtime';
+import { activate } from '../lib/runtime-activate';
+import type { LauncherResult } from '../lib/runtime-launchers';
 import { nodeBinPath, readRuntimeState, versionDir, versionEntry } from '../lib/runtime-layout';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { fakeClaude, listed, type FakeClaude } from './claude-test-utils';
 import { runCodexInstall } from './codex-install';
 import { hookToolInput } from './hook-tool';
@@ -19,6 +21,7 @@ import {
   runtimeOncePerRun,
   type RouterInstallDeps,
 } from './install';
+import { installSandbox, probe400 } from './install-test-utils';
 import { renderLauncherSh, renderPluginFiles, shQuote } from './plugin-files';
 
 /**
@@ -41,22 +44,12 @@ let fake: FakeClaude;
 
 const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 const NODE_V = '24.15.0';
-const probe400 = (async () =>
-  new Response('{}', {
-    status: 400,
-    headers: { 'content-type': 'application/json' },
-  })) as typeof fetch;
-
 beforeEach(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-install-')));
-  home = join(root, 'home');
-  data = join(home, '.tenjin');
-  cfg = join(root, 'cfg');
-  work = join(root, 'work');
+  ({ root, home, data, cfg, work } = await installSandbox('runtime-install-', {
+    dataInHome: true,
+  }));
   hosts = join(root, 'pkg', 'dist', 'hosts', 'claude');
   runtimeRoot = join(data, 'runtime');
-  await mkdir(join(work, '.git'), { recursive: true });
-  await mkdir(data, { recursive: true });
   fake = await fakeClaude(root);
   vi.stubGlobal('fetch', probe400);
 });
@@ -66,12 +59,7 @@ afterEach(async () => {
 });
 
 function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(data);
 }
 
 const launcherOk: LauncherResult = {
@@ -139,7 +127,7 @@ async function routerProjects(): Promise<string[]> {
 }
 
 describe('install registers the plugin from Tenjin’s runtime', () => {
-  it('active: adds the runtime’s folder, says where it runs from once, and passes this build to setupRuntime', async () => {
+  it('registers the active runtime and keeps successful runtime details in diagnostics', async () => {
     const runtime = vi.fn(async () => setup());
     const result = await runRouterInstall({}, ctx(), deps(runtime));
     expect(await fake.calls()).toContain(
@@ -156,9 +144,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
       path: join(runtimeRoot, 'claude'),
       version: pkg.version,
     });
-    expect(runsLines(result.humanLines!)).toEqual([
-      `  Runs from ~/.tenjin/runtime on its own Node ${NODE_V}, so a Node upgrade or \`npm rm -g tenjin-cli\` no longer stops it.`,
-    ]);
+    expect(runsLines(result.humanLines!)).toEqual([]);
     expect(runtime).toHaveBeenCalledWith(
       expect.objectContaining({ dataDir: data, home, version: pkg.version, refresh: false }),
     );
@@ -166,7 +152,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
 
   it.each([
     [{}, ['install', '--yes'], false],
-    [{ yes: true }, ['wallet', 'fund', '5'], false],
+    [{ yes: true }, ['wallet', 'fund', '5', '--no-open', '--no-wait'], false],
     [{}, ['install', '--yes'], true],
   ] as const)(
     'executes a continuation with a minimal or shadowed PATH: %j %j %j',
@@ -207,7 +193,7 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
     },
   );
 
-  it('executes terminal funding and project-check instructions with a minimal PATH', async () => {
+  it('executes funding-link and project-check instructions with a minimal PATH', async () => {
     const entry = join(root, 'terminal-entry.mjs');
     const receipt = join(root, 'continued.json');
     const launcher = join(home, '.local', 'bin', 'tenjin');
@@ -231,14 +217,19 @@ describe('install registers the plugin from Tenjin’s runtime', () => {
       context,
       deps(runtime, { isInteractive: true, walletExists: async () => false }),
     );
-    const funding = (result.data as { next: string }).next.match(
-      /fund the wallet with `([^`]+)`/,
-    )?.[1];
-    const project = result
-      .humanLines!.find((line) => line.startsWith('  For this project only; check it with: '))
-      ?.split('check it with: ')[1];
+    const data = result.data as {
+      next: string;
+      nextSteps: { id: string; options: { id: string; command: string | null }[] }[];
+      doctor: string;
+    };
+    const funding = data.nextSteps
+      .find((step) => step.id === 'fund')
+      ?.options.find((option) => option.id === 'fund')?.command;
+    const project = data.doctor;
+    expect(data.next).not.toContain('fund the wallet');
+    expect(result.humanLines).toContain(`  For this project only; check it with: ${project}`);
     for (const [command, expected] of [
-      [funding, ['wallet', 'fund', '5']],
+      [funding, ['wallet', 'fund', '5', '--no-open', '--no-wait']],
       [project, ['doctor', '--project']],
     ] as const) {
       expect(command).toBeDefined();

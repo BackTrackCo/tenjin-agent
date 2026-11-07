@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { hookToolInput } from './hook-tool';
 import { PLUGIN_HOOK_TOOL, PLUGIN_SERVER, REQUEST_TOOL } from './names';
-import { commandForm, handlersIn, shellDependence } from './hook-form';
+import { handlersIn } from './hook-form';
+import { commandForm, shellDependence } from './hook-form-test-utils';
 import {
   ALIVE_ARGS,
   ALLOW_HOOK,

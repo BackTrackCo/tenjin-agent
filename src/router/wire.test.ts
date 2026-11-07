@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   buildBrowseBody,
+  buildForgetBody,
   buildHookBody,
   buildOutcomeBody,
   buildToolBody,
@@ -18,13 +19,14 @@ import {
   unmetRequires,
   withoutUnmet,
   type HookDecision,
+  type IgnoredOutcome,
   type SpecOutcome,
   type ToolDecision,
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
-import { MAX_PACKET_BYTES, type Packet } from './context';
+import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
 import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
 import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
@@ -289,6 +291,17 @@ describe('the request bodies', () => {
     expect(unmetRequires(read.decision.spec.requires)).toEqual([]);
   });
 
+  it('keeps the selected free tool beside its query, byte for byte', () => {
+    const canonical = fixture('wire-tool-request-free-query.json');
+    expect(
+      buildToolSpecBody({
+        tool: canonical.tool as string,
+        query: canonical.query as string,
+        accepts: canonical.accepts as string[],
+      }),
+    ).toEqual(canonical);
+  });
+
   it('reports a call run from a spec by its id and how it ended, byte for byte, with no text', () => {
     const canonical = fixture('wire-outcome-request.json');
     expect(buildOutcomeBody(canonical as unknown as SpecOutcome)).toEqual(canonical);
@@ -315,6 +328,73 @@ describe('the request bodies', () => {
       'httpStatus',
       'ms',
     ]);
+  });
+
+  /**
+   * "HELP IMPROVE ROUTING" IS ONE FLAG BESIDE THE PACKET, sent only while the
+   * person turned it on; off, the body is today's, byte for byte.
+   */
+  it('builds the hook request with improve, byte for byte, and without it when off', () => {
+    const canonical = fixture('wire-hook-request-improve.json');
+    const packet = canonical.packet as Packet;
+    expect(JSON.stringify(buildHookBody(packet, { improve: true }), null, 2)).toBe(
+      readFileSync(join(dir, 'wire-hook-request-improve.json'), 'utf8').trimEnd(),
+    );
+    expect(buildHookBody(packet, { improve: false })).toEqual(
+      fixture('wire-hook-request-prompt.json'),
+    );
+    expect(buildToolBody({ query: 'btc price', improve: true })).toEqual({
+      schemaVersion: 1,
+      query: 'btc price',
+      improve: true,
+    });
+    expect(buildToolBody({ query: 'btc price', improve: false })).not.toHaveProperty('improve');
+  });
+
+  /** The pasted block rides apart from the user's words, and their own link
+   *  is named, through the same seal every hook packet passes. */
+  it('seals a pasted block and the user own link into the quoted fixture', () => {
+    const canonical = fixture('wire-hook-request-quoted.json');
+    const packet = canonical.packet as Packet;
+    const raw: Packet = {
+      current: packet.current,
+      history: [],
+      literalUrls: packet.literalUrls,
+      historyStatus: 'ok',
+    };
+    const own = { ownHosts: ['github.com', 'claude.ai'] };
+    expect(buildHookBody(seal(raw, own).packet)).toEqual(canonical);
+    // Another host's link is not the user's own, and with no own hosts none is.
+    const more = { ...raw, literalUrls: [...raw.literalUrls, 'https://example.test/elsewhere'] };
+    expect(seal(more, own).packet.ownUrls).toEqual(packet.ownUrls);
+    expect(seal(raw).packet).not.toHaveProperty('ownUrls');
+  });
+
+  it('builds the forget form, byte for byte, naming nothing but the request', () => {
+    expect(JSON.stringify(buildForgetBody(), null, 2)).toBe(
+      readFileSync(join(dir, 'wire-forget-request.json'), 'utf8').trimEnd(),
+    );
+  });
+
+  it('reports an ignored offer by its id and why, byte for byte, with no text', () => {
+    const canonical = fixture('wire-outcome-ignored.json');
+    expect(JSON.stringify(buildOutcomeBody(canonical as unknown as IgnoredOutcome), null, 2)).toBe(
+      readFileSync(join(dir, 'wire-outcome-ignored.json'), 'utf8').trimEnd(),
+    );
+    expect(
+      buildOutcomeBody(
+        { id: canonical.id as string, status: 'ignored', reason: 'native_after_offer' },
+        'codex',
+      ),
+    ).toEqual({ ...canonical, harness: 'codex', reason: 'native_after_offer' });
+  });
+
+  /** THE CLIENT NEVER SAYS WHETHER A CALL HELPED: a paid call that ran is not
+   *  one that was useful, and the server reads `result` from custom setups only. */
+  it('never sends result, even handed one', () => {
+    const verdict = fixture('wire-outcome-result.json');
+    expect(verdict.result).toBe('useful');
+    expect(buildOutcomeBody(verdict as unknown as SpecOutcome)).not.toHaveProperty('result');
   });
 
   /** A CODEX CLIENT NAMES ITS HOST, the server's own fixture copied across. */
@@ -344,6 +424,7 @@ describe('the request bodies', () => {
         ...(canonical.sessionId !== undefined ? { sessionId: canonical.sessionId as string } : {}),
         ...(canonical.accepts !== undefined ? { accepts: canonical.accepts as string[] } : {}),
         harness: 'claude',
+        improve: canonical.improve === true,
       });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
@@ -353,7 +434,12 @@ describe('the request bodies', () => {
       // A browse row's id is its own form; every other tool request is a query.
       const body =
         typeof canonical.tool === 'string'
-          ? buildToolSpecBody({ tool: canonical.tool, accepts, harness: 'claude' })
+          ? buildToolSpecBody({
+              tool: canonical.tool,
+              ...(typeof canonical.query === 'string' ? { query: canonical.query } : {}),
+              accepts,
+              harness: 'claude',
+            })
           : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
@@ -365,7 +451,11 @@ describe('the request bodies', () => {
         harness: 'claude',
       }),
     ).toEqual({ ...browse, harness: 'claude' });
-    for (const name of ['wire-outcome-request.json', 'wire-outcome-unpaid.json']) {
+    for (const name of [
+      'wire-outcome-request.json',
+      'wire-outcome-unpaid.json',
+      'wire-outcome-ignored.json',
+    ]) {
       const canonical = fixture(name);
       const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
@@ -387,6 +477,9 @@ describe('the request bodies', () => {
       'wire-tool-request-by-id.json',
       'wire-hook-request-harness.json',
       'wire-tool-request-by-id-tolerant.json',
+      'wire-hook-request-improve.json',
+      'wire-hook-request-quoted.json',
+      'wire-forget-request.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }

@@ -13,6 +13,8 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * - A LOOKUP THAT REPLACED A NATIVE CALL draws where that call stood:
  *   `⏺ ~~Web Search~~("q") · Tenjin offered Exa search` while held, then in
  *   place `⏺ Exa search("q") · $0.007`, the dot carrying the state.
+ * - AN OFFER MADE ON THE PROMPT is one dim line under the prompt row,
+ *   `⎿  Tenjin offered Exa search`, the engine's own row drawn above it.
  *
  * An over-limit answer draws nothing, and the `approve` call that runs its
  * quote draws as the lookup's own row. A free lookup the CLI named draws the
@@ -44,6 +46,10 @@ const NATIVE_NAMES: Readonly<Record<string, string>> = {
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
+const PROMPTS = { plugin: 'tenjin', key: 'prompts' } as const;
+const LAST_TURN_START = { plugin: 'tenjin', key: 'lastTurnStart' } as const;
+/** Names a surface gives a lookup with no label of its own; never an offer's. */
+const FALLBACK_LABELS = new Set(['Tenjin', 'Tenjin lookup']);
 /**
  * Calls of a run the ENGINE expanded (ctrl+o, --verbose), where our rows step
  * aside for the engine's own. The module's own memory, not `$.state`: a drawing may
@@ -149,6 +155,49 @@ export const register: Register = (on) => {
     }
     $.ui.invalidate('ui.render');
     return ran;
+  });
+
+  // The CLI's prompt hook keeps the record before this existing turn surface.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const now = await $.clock.now();
+      const previous = (await $.state.get(LAST_TURN_START)).value;
+      if (e.text.length > 0) {
+        const record = await offerFile($, `prompt:${e.text}`);
+        const label = labelOf(record?.label);
+        const hash = await sha256Hex(e.text);
+        const offered =
+          label !== undefined &&
+          !FALLBACK_LABELS.has(label) &&
+          record?.priceAtomic !== '0' &&
+          typeof record?.at === 'number' &&
+          (typeof previous !== 'number' || record.at > previous) &&
+          record.at <= now;
+        const ref = { ...PROMPTS, id: hash };
+        if (offered || (await $.state.get(ref)).value) {
+          await $.state.set(ref, offered ? label : '');
+          $.ui.invalidate('ui.render');
+        }
+      }
+      await $.state.set(LAST_TURN_START, now);
+    }
+    return next(e);
+  });
+
+  // The prompt row as the engine draws it, the offer one dim line beneath.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const { text, task, from } = e.props;
+    if (task !== undefined || from !== undefined) return next(e);
+    const { value: label } = await $.state.get({ ...PROMPTS, id: await sha256Hex(text) });
+    if (label === undefined || label === '') return next(e);
+    const own = await next(e);
+    const { Box, Text } = $.ui.resolve(e);
+    return (
+      <Box flexDirection="column">
+        {own}
+        <Text dimColor wrap="truncate-end">{`${GUTTER}Tenjin offered ${label}`}</Text>
+      </Box>
+    );
   });
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
@@ -356,13 +405,26 @@ async function rowOf(
 ): Promise<TenjinRow | null> {
   const stored = await row($, id);
   // A JOB POLL repeats the result and the cost of the call that started it.
-  if (isJobPoll(asRecord(call.input))) return null;
+  const input = asRecord(call.input);
+  if (isJobPoll(input)) return null;
   const envelope = envelopeOf(textOf(call.output));
   const ended =
     envelope !== undefined ? endOf(envelope) : call.isInterrupted ? { status: 'interrupted' } : {};
   const label = stored?.label ?? ended.label;
   if (label === undefined) return null;
-  const drawn: TenjinRow = { ...stored, ...ended, label };
+  // A selected free call has no kept offer to supply its price before it runs.
+  const selectedFree =
+    typeof input?.tool === 'string' &&
+    typeof input.query === 'string' &&
+    envelope?.status === 'fulfilled' &&
+    labelOf(envelope.label) !== undefined &&
+    costAtomicOf(envelope.cost) === 0n;
+  const drawn: TenjinRow = {
+    ...stored,
+    ...ended,
+    ...(selectedFree ? priceOf(0n, false) : {}),
+    label,
+  };
   if (drawn.status !== undefined && HIDDEN.has(drawn.status)) return null;
   if (
     drawn.status !== undefined &&
@@ -466,16 +528,24 @@ async function offerRecord(
   id: string,
   key: string | undefined,
 ): Promise<TenjinHeld | null> {
+  const record = await offerFile($, id);
+  if (record === null) return null;
+  const label = labelOf(record.label);
+  return {
+    offerId: record.offerId as string,
+    key: key ?? '',
+    ...(label !== undefined ? { label } : {}),
+  };
+}
+
+/** The CLI's offer record under `id`, of a version this mod reads; else null. */
+async function offerFile($: Dollar, id: string): Promise<Json | null> {
   const dataDir = await tenjinDataDir($);
   if (dataDir === null) return null;
   const session = await sha256Hex(await $.session.id());
-  const record = await readJson(
-    $,
-    `${dataDir}/progress/${session}/offer-${await sha256Hex(id)}.json`,
-  );
-  if (record?.version !== 1 || typeof record.offerId !== 'string') return null;
-  const label = labelOf(record.label);
-  return { offerId: record.offerId, key: key ?? '', ...(label !== undefined ? { label } : {}) };
+  const path = `${dataDir}/progress/${session}/offer-${await sha256Hex(id)}.json`;
+  const record = await readJson($, path);
+  return record?.version === 1 && typeof record.offerId === 'string' ? record : null;
 }
 
 const row = async ($: Dollar, id: string) => (await $.state.get({ ...ROWS, id })).value;
@@ -555,11 +625,15 @@ async function unnamedCharge($: Dollar, id: string, output: unknown): Promise<bo
 
 /** What the envelope's `cost` (`provider price 0.04 USD`) says left the wallet. */
 function paidOf(cost: unknown): string | undefined {
+  const atomic = costAtomicOf(cost);
+  return atomic === undefined || atomic === 0n ? undefined : `$${usd(atomic)}`;
+}
+
+function costAtomicOf(cost: unknown): bigint | undefined {
   const paid = Array.isArray(cost)
     ? /^provider price (\d+\.?\d*) USD$/.exec(String(cost[0]))
     : null;
-  const atomic = paid === null ? 0n : BigInt(Math.round(Number(paid[1]) * 1e6));
-  return atomic === 0n ? undefined : `$${usd(atomic)}`;
+  return paid === null ? undefined : BigInt(Math.round(Number(paid[1]) * 1e6));
 }
 
 /** The request tool's envelope: the JSON block whose `status` comes first. */

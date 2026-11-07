@@ -26,3 +26,19 @@ pnpm run githooks   # once, to use the repo's git hooks
 pnpm run build
 pnpm run test
 ```
+
+### What earns a test
+
+- **A new test names the failure it catches:** a bug, an issue, or a contract. If you
+  can't say what breaks when it goes red, don't write it.
+- **Pin copy only when the string is a contract:** a wire field, an exit code, a hook
+  output field a harness reads, a command a skill tells the agent to run. A test that
+  re-types help text or doc wording fails only when both sides change together.
+- **No test asserts a mock echoes its setup,** re-derives the implementation, or pins a
+  constant or table to its own literal. Drive real code and check a real outcome.
+- **A test is deleted with the code it covers.** Code only tests import is dead: delete
+  it and its tests in one change.
+- **Never wait on a real clock.** Drive a timeout, a deadline or a backoff with
+  `vi.useFakeTimers()` and `vi.advanceTimersByTimeAsync`, or an injected clock, and wait
+  for work by an event, not a sleep. Never add a `retry`: it turns a flaky test into a
+  silent green.

@@ -2,9 +2,10 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
+import type { SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { ROUTER_PATH, type Job, type OfferSpec } from './decision';
 import { pollTarget, pollUntil, type PollRequest, type PollTransport } from './jobs';
 import { readTake, takePath, writeTake, type JobTake } from './job-store';
@@ -134,30 +135,7 @@ afterEach(async () => {
 });
 
 function ctx(timeout = 5000): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout, baseUrl: ROUTER },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
-
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: 'allow',
-      reason: 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
+  return testCtx(dir, { timeout, baseUrl: ROUTER });
 }
 
 /** The payment header a request carried, whatever case it was spelled in. */
@@ -265,7 +243,7 @@ function deps(
   pollTransport: PollTransport,
   over: { auth?: SpendAuthorizer; timeout?: number; sleep?: (ms: number) => Promise<void> } = {},
 ) {
-  const auth = over.auth ?? authorizer();
+  const auth = over.auth ?? testAuthorizer();
   return {
     ctx: ctx(over.timeout),
     cwd: dir,
@@ -438,7 +416,7 @@ describe('a 202 naming the URL to poll', () => {
 
   it('polls with no payment header and reserves nothing new', async () => {
     await storeSpecs(dir, [BLOCKRUN]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = submit(BLOCKRUN, accepted);
     const { transport, seen } = polls([
       { status: 202, body: { status: 'processing' } },
@@ -490,7 +468,7 @@ describe('a 202 naming the URL to poll', () => {
     expect(String(result.envelope.note)).toContain('failed to download');
     expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
 
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const resumed = await runRequestTool(
       { job: ID },
       deps(fetchImpl, polls([done]).transport, { auth }),
@@ -506,7 +484,7 @@ describe('a 202 naming the URL to poll', () => {
    *  payment. */
   it('fails a take whose poll asks for another payment, and signs nothing for it', async () => {
     await storeSpecs(dir, [BLOCKRUN]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const { fetchImpl, calls } = submit(BLOCKRUN, accepted);
     const challenge = buildPaymentRequired({ amount: '64000', payTo: PAY_TO }).header;
     const { transport, seen } = polls([
@@ -609,7 +587,7 @@ describe('a 202 naming the URL to poll', () => {
     expect(mode).toBe(0o600);
 
     // A RETRY OF THE SAME CALL PAYS NOTHING, and points at the job.
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const retry = await runRequestTool(
       { id: ID, input: INPUT },
       deps(fetchImpl, polls([]).transport, { auth }),
@@ -701,7 +679,7 @@ describe('a 202 naming the URL to poll', () => {
         body: { status: 'completed', data: [{ url: 'https://cdn.blockrun.ai/out/img_1.png' }] },
       },
     ]);
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, later.transport, { auth }));
     expect(resumed.envelope).toMatchObject({ status: 'fulfilled' });
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -768,7 +746,7 @@ describe('several takes, each its own job', () => {
     await vi.waitFor(() => expect(reports(calls)).toHaveLength(1));
     expect(reports(calls)[0]).toMatchObject({ id: ID, status: 'running' });
 
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const later = byUrl({ img_2: [done('img_2')] });
     const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, later.transport, { auth }));
     expect(later.seen).toEqual(['https://blockrun.ai/api/v1/images/generations/img_2']);
@@ -834,7 +812,7 @@ describe('several takes, each its own job', () => {
     expect(String(capped.note)).toContain('its cap');
 
     // A resume has its own allowance, and pays nothing.
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, transport, { auth }));
     expect(resumed.envelope).toMatchObject({ status: 'fulfilled' });
     expect(await readdir(join(dir, 'downloads'))).toHaveLength(2);
@@ -919,7 +897,7 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
 
     await rm(join(dir, 'downloads'));
-    const auth = authorizer();
+    const auth = testAuthorizer();
     const again = polls([
       { status: 200, bytes: MP4 },
       { status: 200, body: { success: true } },

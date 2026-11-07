@@ -6,14 +6,14 @@ import { writeFileAtomicExclusive } from '../atomic-json';
 import { hasCode } from '../errno';
 import { walletPath } from '../paths';
 import { unlockDetails } from '../wallet-unlock';
+import { ADDRESS_RE } from '../ids';
 
 /**
  * A 0x-prefixed 32-byte hex private key (case-insensitive). Defined once, in the
  * hook-safe `wallet-unlock.ts`, so the hooks' wallet facts and `loadCredential`
- * test exactly the same thing (S12); re-exported here for the wallet layer.
+ * test exactly the same thing; re-exported here for the wallet layer.
  */
 export { PRIVATE_KEY_RE } from '../wallet-unlock';
-const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 /**
  * The at-rest shape of a Keystore v3 document (Web3 Secret Storage). Validated
@@ -71,7 +71,7 @@ export async function walletFileMode(dir: string): Promise<number | null> {
   try {
     return (await stat(walletPath(dir))).mode & 0o777;
   } catch (err) {
-    if (isNotFound(err)) return null;
+    if (hasCode(err, 'ENOENT')) return null;
     throw err;
   }
 }
@@ -83,7 +83,7 @@ export async function readWalletRecord(dir: string): Promise<WalletRecord | null
   try {
     raw = await readFile(path, 'utf8');
   } catch (err) {
-    if (isNotFound(err)) return null;
+    if (hasCode(err, 'ENOENT')) return null;
     throw new CliError('WALLET_INVALID_KEY', `Could not read the wallet file at ${path}.`, {
       fix: `Check file permissions on ${path}.`,
       cause: err,
@@ -189,8 +189,4 @@ function isPreEncryptionRecord(json: unknown): boolean {
   if (typeof json !== 'object' || json === null) return false;
   const rec = json as Record<string, unknown>;
   return rec.schemaVersion === 1 || 'privateKey' in rec;
-}
-
-function isNotFound(err: unknown): boolean {
-  return hasCode(err, 'ENOENT');
 }

@@ -20,7 +20,7 @@ import type { SigningSource } from '../lib/wallet-unlock';
  * key, an env VALUE or a store's stdout: only whether a variable is set, the
  * address, the cwd and verdicts.
  *
- * A HEALTH-CHECK ROUTER IS NOT A SESSION (B2). `claude mcp get` and `claude mcp
+ * A health-check router is not a session: `claude mcp get` and `claude mcp
  * list` start a `tenjin mcp` that serves no hook. Its observation says
  * `servedSession: false` until it serves a hook call carrying a valid
  * session_id, and every reader that means "the running Claude session" keeps
@@ -43,7 +43,7 @@ export interface RouterObservation {
   launchedByPlugin: boolean;
   cwd: string;
   address: string | null;
-  /** B2: false until this router has served a hook call carrying a valid session_id. Readers that mean
+  /** False until this router has served a hook call carrying a valid session_id. Readers that mean
    *  "the running Claude session" ignore false. */
   servedSession: boolean;
   env: { passphraseSet: boolean; keySet: boolean };
@@ -195,8 +195,8 @@ export async function pruneDeadObservations(
  * Every well-formed observation on disk, shape-checked, with no liveness
  * filter (see {@link liveObservations}). Dropped: a file not named
  * `<digits>.json`, one whose `pid` is not its name, any version but 1, a
- * malformed shape, and one without a boolean `servedSession` (B2: an
- * observation that cannot say whether it served a session is not one).
+ * malformed shape, and one without a boolean `servedSession` (an observation
+ * that cannot say whether it served a session is not one).
  */
 export async function readObservations(dataDir: string): Promise<RouterObservation[]> {
   const dir = liveDir(dataDir);
@@ -219,7 +219,7 @@ export async function readObservations(dataDir: string): Promise<RouterObservati
   return out;
 }
 
-/** The observations that count as a running Claude session: harness 'claude' and servedSession true (B2). */
+/** The observations that count as a running Claude session: harness 'claude' and servedSession true. */
 export function servedObservations(obs: RouterObservation[]): RouterObservation[] {
   return obs.filter((o) => o.harness === 'claude' && o.servedSession === true);
 }
@@ -306,7 +306,7 @@ export async function writeUnlockRecord(dataDir: string, rec: UnlockRecord): Pro
 
 /**
  * After `tenjin wallet repair`: the next served router's verdict for this
- * address decides whether "Tenjin wallet unlocked." is said (decision 14).
+ * address decides whether "Tenjin wallet unlocked." is said.
  */
 export async function markUnlockPending(
   dataDir: string,

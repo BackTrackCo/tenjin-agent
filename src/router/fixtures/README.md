@@ -7,31 +7,59 @@ is a contract only one side keeps. Four divergences so far (`pendingCall`, the
 grouped arguments, the nested `diagnostics`, and three files copied by hand
 that drifted by 2026-10-28) each cost a round trip; read these files rather
 than hand-writing an equivalent. A fixture change here is a contract change.
-Until the server's CI reads them from this repo's `main`, `tenjin` keeps a
-copy, refreshed from this one.
+`tenjin`'s CI reads them from here; it keeps no copy.
 
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
 `2026-10-29.2`.
 
+The service ids these fixtures name (`capabilityId`, a browse row's `id`,
+`tool`, a `discovered:tenjin:` id) resolve against `tenjin`'s test catalog,
+`lib/x402-router/fixtures/test-catalog/`, never its live one, so a service can
+leave the live catalog with no change here. A fixture that needs a service or
+a shape the test catalog lacks adds that entry there in the same change.
+
 ## The calls
 
-A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
+A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, selected `{tool, query}` free lookups, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
 each capability needs a client that runs its spec, so a client without it is
 answered `native` with the `client_outdated` diagnostic, on every form, before
 any model call. The free route `POST /api/x402-router` answers the routing forms `{packet}`
 and `{query, id?}` with `native` and `fee_required` first, with or without `spec` (The paid path,
-below). The outcome report is the one form that carries no `accepts`.
+below). Selected `{tool, query}` bypasses that fee gate and makes no model decision. The outcome report is the one form that carries no `accepts`.
 
-| call    | request                                                        | answer                                                                                                                      |
-| ------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts}`      | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
-| tool    | `{schemaVersion, query, id?, accepts}`                         | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
-| browse  | `{schemaVersion, browse, accepts}`                             | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
-| by id   | `{schemaVersion, tool, accepts}`                               | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}` | an empty 204                                                                                                                |
-| warm    | `{schemaVersion, warm: true, accepts, harness?}`               | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
+| call      | request                                                             | answer                                                                                                                      |
+| --------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| hook      | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
+| tool      | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
+| browse    | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
+| by id     | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
+| free tool | `{schemaVersion, tool, query, accepts}`                             | `execute` for the selected free service, or `needs_input`; no routing decision or payment                                   |
+| outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
+| forget    | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
+| warm      | `{schemaVersion, warm: true, accepts, harness?}`                    | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
+
+`improve: true` rides the hook and tool forms only while the person has turned
+on "Help improve routing" (`router.improve`, off by default, enabled explicitly
+with `tenjin config set router.improve true`): the server then keeps that call's
+sealed packet beside its decision row, with no expiry. The `forget` form, on the free route, is sent once when
+the person turns it off: the server deletes every packet it kept for the
+request's `tenjin-install-id` header, and with no install id deletes nothing.
+Neither carries `accepts`.
+
+An outcome's `status` is `ignored` for an offer the host was shown and never
+took, with `reason` `expired` (its 15 minutes ran out with no `request` call
+naming it) or `native_after_offer` (the same agent in the same session made a
+native WebSearch or WebFetch call while it was untaken). The client never
+sends `result`; the server keeps reading it from custom setups.
+
+`packet.current.quoted` holds blocks the harness marked as pasted, moved out of
+`current.text` so the text is the user's own words; a message that would be
+left empty is sent unchanged, with no `quoted`. `packet.ownUrls` holds the
+entries of `literalUrls` the host can open with its own tools: links on the
+host of the current repository's git remote, and the harness's own links
+(`claude.ai` for Claude Code).
 
 Both `execute` answers name the capability: `capabilityId`, `category` (a
 catalog task id, such as `web research`, at most 64 characters),
@@ -70,6 +98,7 @@ lowest token it needs (`minContract`, `spec` for all of them today), and the
 gate is offered only the tasks whose capabilities a client runs.
 
 - `spec`: tool specs, the floor every capability needs.
+- `free-query`: inspection of a free docs row asks for `{tool, query}`. That form binds the selected free service without a routing fee; paid and unknown ids are refused.
 - `catalog`: a former Tenjin list service comes as a `discovered` offer under
   its catalog id, each spec with the `fields` below (a list service's `output`
   is `media`), and with `choices` when its service belongs to a compare group.
@@ -144,13 +173,11 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
 ## The harness
 
 Every form, the outcome report included, takes an optional `harness`: the
-agent host the client runs in, `claude` or `codex`. It changes which services
-the router offers, never payment, limits or the fee. A service the host's own
-tools already cover is left out on every form: the hook and tool offers, a
-page's routed reader, browse rows, `tool`, and an open-Bazaar listing at the
-same endpoint. Codex gets no `glim-reddit-get`,
-because its hosted web tool reads a Reddit thread from its URL, so that page
-is answered `native`. No `harness` means `claude`, and an unknown token gets
+agent host the client runs in, `claude` or `codex`. Native-tool preferences
+narrow automatic hook offers only, never explicit queries, browse rows or
+`tool` inspection. Compatible tools such as `glim-reddit-get` remain available
+when selected in Codex. Harness compatibility still applies to every call;
+payment, limits and the fee are unchanged. No `harness` means `claude`, and an unknown token gets
 the `claude` answer. The server logs the mapped value (`claude`, `codex` or
 `other`) and never the raw token.
 
@@ -159,8 +186,9 @@ A browse (`browse`, any words, or empty for everything) answers rows of
 runs, former list services included, best match first, or grouped by kind
 when empty. `price` is as a person reads it (`1¢`, `free`). No
 gate, no Jev, no row stored. A row's id sent as `tool` answers its spec under
-a fresh offer id, stored as a query's pick is; the free docs row has no spec
-and answers `needs_input` (`spec_missing`), pointing at `request({query})`.
+a fresh offer id, stored as a query's pick is. The free docs row has no spec:
+clients sending `free-query` get `needs_input` with the `{tool, query}` call;
+clients without it get `spec_missing`, pointing at `request({query})`.
 
 ## The paid path
 
@@ -429,6 +457,10 @@ Two pairs pin a request and the answer it gets:
 | `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
 | `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
 | `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
+| `wire-hook-request-improve.json`           | the hook from an install that turned on "Help improve routing": `improve`                 |
+| `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`     |
+| `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                    |
+| `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                              |
 | `wire-warm-request.json`                   | the paid route's `warm` call; its payment is a deposit when one is due, else a voucher    |
 | `wire-warm.json`                           | the `warm` answer: no decision                                                            |
 | `wire-tool-request-by-id-tolerant.json`    | a browse row's id from a `tolerant` client (and `jobs`, `label`, `fields`)                |
@@ -459,6 +491,9 @@ Take these from here; do not re-derive them.
 | `packet.history`                | 6 messages                                                                                                                                                                                                  |
 | message `text`                  | 16000 characters                                                                                                                                                                                            |
 | `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                             |
+| `packet.ownUrls`                | optional; 8 entries, each 2000 characters, each one of `literalUrls`                                                                                                                                        |
+| `packet.current.quoted`         | optional; 1 to 8 blocks, each 1 to 16000 characters, inside the packet's 16384 bytes                                                                                                                        |
+| `improve`                       | optional; `true` only, on the hook and tool forms                                                                                                                                                           |
 | `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                          |
 | `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                |
 | `accepts`                       | up to 16 strings, each 1-32 characters; `spec` is required; the server also reads `catalog`, `label`, `fields`, `jobs`, `discovered` (the list), `bazaar` (the open Bazaar) and `choices` (compare options) |
@@ -483,6 +518,8 @@ Take these from here; do not re-derive them.
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first; a discovery run's search text (built from the user's words) is cleared at the same expiry.
 
-The enumerated values live in code: the task ids in `fixtures/catalog/tasks.json`,
-`DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in `diagnostics.ts`.
+The enumerated values live in `tenjin`'s code: the live task ids in
+`fixtures/catalog/tasks.json` (a fixture's task ids are checked against the
+test catalog's own `tasks.json`), `DIAGNOSTIC_CODES` and `DIAGNOSTIC_STAGES` in
+`diagnostics.ts`.
 `docs/ENVIRONMENTS.md` covers the kill switch and the rate limits.

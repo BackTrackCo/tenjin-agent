@@ -19,8 +19,8 @@ import {
   resolveTarget,
 } from '../lib/update-check';
 import { loadRawConfig } from '../lib/config';
-import { defaultDataDir, runtimeDir } from '../lib/paths';
-import type { ensureNode, placeVersion, stageTarball } from '../lib/runtime';
+import { defaultDataDir, isDefaultDataDir, runtimeDir, tilde } from '../lib/paths';
+import type { ensureNode, placeVersion, stageTarball } from '../lib/runtime-place';
 import type { CommandContext, CommandResult } from '../context';
 import { persistRouterProject } from './config';
 import { projectInstallAt } from '../router/install';
@@ -49,7 +49,7 @@ import { RUNTIME_MISSING_FIX } from '../router/plugin-files';
  *   the check and the install cannot disagree about what ships, and the version
  *   string is certified parseable by the same `isNewer` gate the nudge trusts
  *   before it goes anywhere near an argv.
- * - That version passes the runtime branch's provenance check (lib/runtime's
+ * - That version passes the runtime branch's provenance check (lib/runtime-provenance's
  *   `checkReleaseProvenance`) before the manager is spawned: what npm installs
  *   here can become the first runtime on its refresh.
  * - The owner performs the install. npm, pnpm and bun are each driven with their
@@ -80,7 +80,7 @@ const NODE_TIMEOUT_MS = 300_000;
  * HOW OLD A RELEASE MUST BE BEFORE THE BACKGROUND RUN TAKES IT: a day since
  * the registry published it. The window lets maintainers move `latest` back
  * (`npm dist-tag add tenjin-cli@<good> latest`) before any auto-updater runs
- * a bad or malicious release, which the provenance check (lib/runtime's
+ * a bad or malicious release, which the provenance check (lib/runtime-provenance's
  * `RELEASE_WORKFLOW`) cannot catch when the release workflow itself was
  * compromised. Publish times are set by the registry and cannot be backdated.
  * A manual `tenjin update` is the person choosing the release now, and does
@@ -352,7 +352,7 @@ async function update(
   // was matched to, which a published version can never change, so it
   // installs the attested bytes. A manager configured to fetch from another
   // registry (a mirror) gets them from there, which this check does not see.
-  const { checkReleaseProvenance } = await import('../lib/runtime');
+  const { checkReleaseProvenance } = await import('../lib/runtime-provenance');
   await checkReleaseProvenance(latest, {
     timeoutMs: ctx.flags.timeout,
     fetchImpl: deps.fetchImpl,
@@ -475,7 +475,7 @@ async function runtimeHere(
   deps: UpdateDeps,
   moduleDir: string,
 ): Promise<RuntimeHere | null> {
-  if (resolve(ctx.dataDir) !== resolve(defaultDataDir(deps.homeDir ?? homedir()))) return null;
+  if (!isDefaultDataDir(ctx.dataDir, deps.homeDir ?? homedir())) return null;
   const { readRuntimeState, runtimeBuild } = await import('../lib/runtime-layout');
   const root = deps.runtimeRoot ?? runtimeDir(ctx.dataDir);
   const state = readRuntimeState(root);
@@ -556,7 +556,7 @@ async function runtimeUpdate(
 ): Promise<CommandResult> {
   const { root, base, latest } = o;
   const [rt, layout] = await Promise.all([
-    import('../lib/runtime'),
+    import('../lib/runtime-place'),
     import('../lib/runtime-layout'),
   ]);
   const stays = `so ${base} stays`;
@@ -659,11 +659,6 @@ function runtimeReason(data: Record<string, unknown> | null): string | undefined
   return text.length > 0 ? text.slice(0, REASON_LIMIT) : undefined;
 }
 
-/** `path` with the home folder written as `~`. */
-function tilde(path: string, home: string): string {
-  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
-}
-
 /** How long one `install --refresh` child gets. Local file writes only, no
  *  registry: a minute is already generous, and `update` must not hang a turn. */
 const REFRESH_TIMEOUT_MS = 60_000;
@@ -710,13 +705,9 @@ export interface RefreshOutcome {
 }
 
 /**
- * Re-materialize what the swap left stale, on the NEW binary.
- *
- * `update` replaces the package and nothing else, but `install` bakes this
- * build's identity into files: the generated hook scripts carry a version, and
- * the wired skills carry this release's instructions. Until something rewrites
- * them the highest-volume request path keeps reporting the previous version and
- * agents keep reading the previous release's guidance (tenjin-agent#171).
+ * Re-materialize what the swap left stale, on the NEW binary: the plugin
+ * files and skills carry this build's identity and instructions, and until
+ * something rewrites them agents keep reading the previous release's.
  *
  * SPAWNED, NOT CALLED. This process is the OLD build; it cannot render the new
  * version's copies, and re-exec is the only way to reach code that can. The
@@ -724,29 +715,14 @@ export interface RefreshOutcome {
  * runtime's new version, on the Node it pins), and what it runs is
  * `install --refresh` — a mode that converges existing surfaces and creates
  * none but the runtime and its launcher, which is the only kind of write an
- * unattended upgrade may make.
- *
- * ONCE PER HOOK-OWNER PROFILE. `install` bakes its data dir into the scripts it
- * generates, so a machine whose hooks were installed under `TENJIN_DATA_DIR`
- * has hooks belonging to THAT profile while a bare `tenjin update` resolves the
- * default one. Refreshing only the invoking profile there would leave the
- * registered scripts — the ones the harness actually fires — stale forever,
- * short of a manual re-install for each profile. So the detector
- * reads the harness settings and each profile it names is refreshed with
- * `TENJIN_DATA_DIR` set to it. A machine with no registered hooks has no other
- * profile to find, and gets one refresh for the invoking one.
+ * unattended upgrade may make. It refreshes the invoking profile only: nothing
+ * installed is baked per profile.
  *
  * NEVER FAILS THE UPDATE. The swap already happened and is the thing the
  * operator asked for. A refusal, a run with nothing to converge, a crash, a
  * timeout, or an older-binary "unknown option --refresh" all land here as a warn
- * naming the manual command.
- *
- * EACH FAILURE CARRIES ITS OWN REASON AND ITS OWN FIX. The four ways a profile
- * misses are not interchangeable — a dir that is not a directory, a settings
- * file that changed underneath, a machine that never ran `install`, and a
- * timeout each want a different next move — so the child's output is collected
- * and its `error.message` reported per profile rather than collapsed into one
- * parent line.
+ * naming the manual command, each with its own reason and fix: the child's
+ * output is collected and its `error.message` reported.
  */
 async function refreshProfiles(
   ctx: CommandContext,
@@ -754,47 +730,32 @@ async function refreshProfiles(
   launch: ChildLaunch | null,
 ): Promise<{ refresh: RefreshOutcome; homeTail: string }> {
   const home = deps.homeDir ?? homedir();
-  // THE INVOKING PROFILE, AND ONLY IT. The pre-daemon installer baked its data
-  // dir into eight generated scripts, so an upgrade had to find every profile
-  // registered in settings.json and refresh each one's bodies. Nothing is baked
-  // any more: the two bundles are the same bytes for every profile, and a
-  // profile's daemon picks up the new build the next time its own `tenjin`
-  // command runs. So there is nothing left to hunt for, and a detector reading
-  // paths out of somebody's settings file is not worth keeping to say so.
-  const candidates = [ctx.dataDir];
-  const fixFor = (dataDir: string): string => manualFix(dataDir, home, ctx.dataDir);
+  const dataDir = ctx.dataDir;
+  const fix = manualFix(dataDir, home, dataDir);
+  const nothing = (reason: string) => ({
+    refresh: {
+      profiles: [],
+      failed: [{ dataDir, reason, fix }],
+      notices: [],
+      settingsInstallPending: false,
+      projects: [],
+      projectsFailed: [],
+    },
+    homeTail: '',
+  });
 
+  // Nothing safe to re-exec (see npmLaunch): report the profile as
+  // unrefreshed rather than guessing, since a refresh that ran the OLD build
+  // would report success while writing the bytes the update just left.
+  if (launch === null)
+    return nothing('This build has no entry the update could safely re-execute.');
   // The child would CREATE a data dir that is not there: `install --refresh`
   // converges surfaces rather than materializing them, but the process around it
-  // mkdirs the tree for the update cache on its way out. So a path that is not
-  // already a directory is reported unrefreshed instead of visited.
-  const profiles: string[] = [];
-  const unrun: RefreshFailure[] = [];
-  for (const dataDir of candidates) {
-    if (isExistingDir(dataDir)) profiles.push(dataDir);
-    else unrun.push({ dataDir, reason: 'It is not a directory.', fix: fixFor(dataDir) });
-  }
+  // mkdirs the tree for the update cache on its way out.
+  if (!isExistingDir(dataDir)) return nothing('It is not a directory.');
 
-  // Nothing safe to re-exec (see npmLaunch): report the profiles as
-  // unrefreshed rather than guessing, since guessing is how a hook script gets
-  // rewritten by the wrong binary — and a refresh that ran the OLD build would
-  // report success while writing the bytes the update just left.
-  if (launch === null) {
-    const reason = 'This build has no entry the update could safely re-execute.';
-    return {
-      refresh: {
-        profiles: [],
-        failed: candidates.map((d) => ({ dataDir: d, reason, fix: fixFor(d) })),
-        notices: [],
-        settingsInstallPending: false,
-        projects: [],
-        projectsFailed: [],
-      },
-      homeTail: '',
-    };
-  }
-
-  const failed = [...unrun];
+  const profiles = [dataDir];
+  const failed: RefreshFailure[] = [];
   const notices: string[] = [];
   let settingsInstallPending = false;
   const heard = (reported: Record<string, unknown> | null): void => {
@@ -804,19 +765,15 @@ async function refreshProfiles(
       settingsInstallPending = true;
     }
   };
-  let homeTail = '';
-  for (const dataDir of profiles) {
-    const { outcome, tail } = await refreshChild(launch, homedir(), dataDir, deps);
-    homeTail = tail;
-    // The child's exit code IS the verdict: `install --refresh` exits non-zero
-    // when it refused or found nothing to converge, so a machine that never ran
-    // `install` warns here instead of being told its hooks were refreshed. The
-    // envelope on the pipe is what turns that verdict into a reason.
-    if (outcome.kind !== 'exit' || outcome.code !== 0) {
-      failed.push({ dataDir, reason: refreshReason(outcome, tail), fix: fixFor(dataDir) });
-      continue;
-    }
-    heard(envelopeData(tail));
+  const { outcome, tail: homeTail } = await refreshChild(launch, homedir(), dataDir, deps);
+  // The child's exit code IS the verdict: `install --refresh` exits non-zero
+  // when it refused or found nothing to converge, so a machine that never ran
+  // `install` warns here instead of being told it was refreshed. The envelope
+  // on the pipe is what turns that verdict into a reason.
+  if (outcome.kind !== 'exit' || outcome.code !== 0) {
+    failed.push({ dataDir, reason: refreshReason(outcome, homeTail), fix });
+  } else {
+    heard(envelopeData(homeTail));
   }
 
   // PROJECT INSTALLS, EACH FROM ITS OWN DIRECTORY. The child above runs from
@@ -827,16 +784,14 @@ async function refreshProfiles(
   // forgotten.
   const projects: string[] = [];
   const projectsFailed: RefreshOutcome['projectsFailed'] = [];
-  const recorded = profiles.includes(ctx.dataDir)
-    ? ((await loadRawConfig(ctx.dataDir).catch(() => null))?.install?.routerProjects ?? [])
-    : [];
+  const recorded = (await loadRawConfig(dataDir).catch(() => null))?.install?.routerProjects ?? [];
   for (const project of recorded) {
-    const forget = () => persistRouterProject(ctx.dataDir, project, false).catch(() => undefined);
+    const forget = () => persistRouterProject(dataDir, project, false).catch(() => undefined);
     if (!isExistingDir(project) || !(await projectInstallAt(project, home, process.env))) {
       await forget();
       continue;
     }
-    const { outcome, tail } = await refreshChild(launch, project, ctx.dataDir, deps, ['--project']);
+    const { outcome, tail } = await refreshChild(launch, project, dataDir, deps, ['--project']);
     if (outcome.kind !== 'exit' || outcome.code !== 0) {
       projectsFailed.push({
         project,
@@ -1014,8 +969,7 @@ function isExistingDir(path: string): boolean {
  * right unconditionally.
  */
 function manualFix(dataDir: string, home: string, invoking: string): string {
-  const bare =
-    resolve(dataDir) === resolve(defaultDataDir(home)) && resolve(dataDir) === resolve(invoking);
+  const bare = isDefaultDataDir(dataDir, home) && resolve(dataDir) === resolve(invoking);
   const command = bare ? 'tenjin install' : `TENJIN_DATA_DIR=${dataDir} tenjin install`;
   return `Run \`${command}\` to bring the Claude Code plugin up to this version.`;
 }

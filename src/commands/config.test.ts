@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { chmod, mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runConfigList, runConfigGet, runConfigSet } from './config';
@@ -8,6 +8,7 @@ import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
+import { testCtx } from '../context-test-utils';
 
 let dir: string;
 let prevCwd: string;
@@ -27,12 +28,7 @@ afterEach(async () => {
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 10000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return testCtx(dir, { json: false, timeout: 10000, ...flags });
 }
 
 const configFile = () => join(dir, 'config.json');
@@ -88,17 +84,12 @@ describe('runConfigList', () => {
     expect(d['update.mode']).toEqual({ value: 'auto', source: 'default' });
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
+    expect(d['router.improve']).toEqual({ value: false, source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
-    // The shelf's keys are gone from both halves.
-    for (const gone of ['publicShelfUrl', 'shelfBypassSecret', 'evalCohort', 'publish.mode']) {
-      expect(d[gone]).toBeUndefined();
-    }
-    // The human listing: 6 scalar keys + update.mode + 2 router.* +
+    // The human listing: 6 scalar keys + update.mode + 3 router.* +
     // experimental.bazaar. allowlistCreators stays in `data` only.
-    expect(humanLines).toHaveLength(10);
-    expect((humanLines ?? []).join('\n')).not.toMatch(
-      /publish\.|hooks\.|loop\.|team\.|Shelf|allowlistCreators|evalCohort/,
-    );
+    expect(humanLines).toHaveLength(11);
+    expect((humanLines ?? []).join('\n')).not.toMatch(/allowlistCreators/);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -393,14 +384,25 @@ describe('forward compatibility', () => {
     const raw = (await readRawFile()) as { update: Record<string, unknown> };
     expect(raw.update).toEqual({ channel: 'next', mode: 'off' });
   });
+});
 
-  it('refuses a key the shelf took and this build does not', async () => {
-    for (const key of ['publish.mode', 'hooks.primer', 'loop.port', 'shelfBypassSecret']) {
-      const err = await caught(() => runConfigSet({ key, value: 'on' }, makeCtx()));
-      expect(err.code).toBe('USAGE');
-      expect(err.message).toContain('Unknown config key');
-    }
+describe('config set rpcUrl file mode', () => {
+  // rpcUrl can carry an RPC provider's key, so config.json gets 0600 even in a
+  // data dir that already exists at 0755 (recursive mkdir never chmods it).
+  const KEYED = 'https://base.example/v2/rpc-key-abc123';
+  it.skipIf(process.platform === 'win32')('writes config.json at 0600', async () => {
+    await runConfigSet({ key: 'rpcUrl', value: KEYED }, makeCtx());
+    expect((await stat(configFile())).mode & 0o777).toBe(0o600);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'still lands at 0600 inside a data dir that already exists at 0755',
+    async () => {
+      await chmod(dir, 0o755);
+      await runConfigSet({ key: 'rpcUrl', value: KEYED }, makeCtx());
+      expect((await stat(configFile())).mode & 0o777).toBe(0o600);
+    },
+  );
 });
 
 describe('update.mode', () => {
@@ -562,6 +564,88 @@ describe('config set router.* at each scope', () => {
     );
     expect(local.code).toBe('USAGE');
     expect(existsSync(configFile())).toBe(false);
+  });
+});
+
+/**
+ * "HELP IMPROVE ROUTING" IS THE PERSON'S OWN CONSENT. It lives in the global
+ * file only, and turning it off asks the server to delete what it kept: once
+ * per off, never failing the command, retried by running the same command.
+ */
+describe('config set router.improve', () => {
+  const forgetBody = JSON.parse(
+    readFileSync(
+      join(import.meta.dirname, '..', 'router', 'fixtures', 'wire-forget-request.json'),
+      'utf8',
+    ),
+  ) as unknown;
+  const ctx = () => makeCtx({ baseUrl: 'https://router.test' });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  const stubFetch = (status: number) => {
+    const fetch = vi.fn(async () => new Response(null, { status }));
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  };
+  const sent = (fetch: ReturnType<typeof stubFetch>) =>
+    fetch.mock.calls.map((call) => {
+      const [url, init] = call as unknown as [string, RequestInit];
+      return { url, body: JSON.parse(String(init.body)) as unknown };
+    });
+
+  it('writes the global file only, says what it keeps, and refuses --project', async () => {
+    const fetch = stubFetch(204);
+    const on = await runConfigSet({ key: 'router.improve', value: 'true' }, ctx());
+    expect((await readRawFile()) as Record<string, unknown>).toMatchObject({
+      router: { improve: true },
+    });
+    expect((on.humanLines ?? []).join('\n')).toContain('secret-masked text');
+    expect((on.humanLines ?? []).join('\n')).toContain('tenjin config set router.improve false');
+    const project = await caught(() =>
+      runConfigSet({ key: 'router.improve', value: 'true', project: true }, ctx()),
+    );
+    expect(project.code).toBe('USAGE');
+    expect(existsSync(join(process.cwd(), '.tenjin'))).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('asks the server to forget once when it turns off, and never when it was never on', async () => {
+    const fetch = stubFetch(204);
+    await runConfigSet({ key: 'router.improve', value: 'false' }, ctx());
+    expect(fetch).not.toHaveBeenCalled();
+    await runConfigSet({ key: 'router.improve', value: 'true' }, ctx());
+    const off = await runConfigSet({ key: 'router.improve', value: 'false' }, ctx());
+    expect(sent(fetch)).toEqual([{ url: 'https://router.test/api/x402-router', body: forgetBody }]);
+    expect(off.data).toMatchObject({ key: 'router.improve', value: false, forget: 'sent' });
+    expect((await readRawFile()) as Record<string, unknown>).toMatchObject({
+      router: { improve: false },
+    });
+  });
+
+  it('keeps it off and says so when the server cannot be asked, and a repeat retries', async () => {
+    await runConfigSet({ key: 'router.improve', value: 'true' }, ctx());
+    stubFetch(503);
+    const off = await runConfigSet({ key: 'router.improve', value: 'false' }, ctx());
+    expect(off.data).toMatchObject({ value: false, forget: 'failed' });
+    expect((off.humanLines ?? []).join('\n')).toContain('again to retry');
+    expect((await readRawFile()) as Record<string, unknown>).toMatchObject({
+      router: { improve: false },
+    });
+    const fetch = stubFetch(204);
+    const again = await runConfigSet({ key: 'router.improve', value: 'false' }, ctx());
+    expect(again.data).toMatchObject({ forget: 'sent' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('is never read from a project file, which cannot opt anyone in', async () => {
+    await mkdir(join(process.cwd(), '.tenjin'));
+    await writeFile(
+      join(process.cwd(), '.tenjin', 'config.json'),
+      JSON.stringify({ router: { improve: true } }),
+    );
+    const got = await runConfigGet({ key: 'router.improve' }, ctx());
+    expect(got.data).toMatchObject({ value: false, source: 'default' });
   });
 });
 

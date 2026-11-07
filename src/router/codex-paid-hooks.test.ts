@@ -6,11 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { testSigner } from '../lib/read-test-utils';
 import { readSpendSummary } from '../lib/wallet/spend';
-import { FakeRouter, testSigner } from './fee-test-utils';
+import { FakeRouter } from './fee-test-utils';
+import { fixture } from './fixture-test-utils';
 import { runHookCommand, STALE_HOOK_LINE } from './hook-command';
 import { createRouterMcpServer } from './mcp';
 import { renderProgress } from './progress';
+import { createRouterObserver } from './router-observer';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -26,7 +29,6 @@ import type { RoutingPayerDeps } from './routing-payer';
 const BASE = 'https://router.test';
 const SESSION = '01a1658a-1223-73f1-91f9-62ecb164c700';
 const HOOKS = fileURLToPath(new URL('../../hosts/codex/tenjin/hooks/hooks.json', import.meta.url));
-const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const wallet = privateKeyToAccount(generatePrivateKey());
 
 let dir: string;
@@ -35,9 +37,14 @@ let transcript: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'router-codex-paid-'));
   await mkdir(join(dir, '.git'));
+  // Installed, and asked Help improve routing, so a prompt carries only its offer.
   await writeFile(
     join(dir, 'config.json'),
-    JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
+    JSON.stringify({
+      maxAutoSpend: '250000',
+      sessionBudget: '5000000',
+      install: { improveAsked: true },
+    }),
   );
   homeDir = join(dir, 'home');
   const day = join(homeDir, '.codex', 'sessions', '2026', '10', '22');
@@ -123,14 +130,30 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
       };
 }
 
-/** The production server with only the network and the signer faked. */
+/**
+ * The production server with only the network and the signer faked. The
+ * observer is the one the factory would build, made here so `close` can wait
+ * for the observation writes it queues in the background: the data directory
+ * is deleted next, and a write landing mid-delete fails it (ENOTEMPTY).
+ */
 async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
   const fetchImpl = fake.fetch;
+  const observer = createRouterObserver({
+    dataDir: dir,
+    pid: process.pid,
+    startedAt: Date.now(),
+    cliVersion: 'test',
+    harness: 'codex',
+    launchedByPlugin: false,
+    cwd: dir,
+    env: {},
+  });
   const server = await createRouterMcpServer({
     dataDir: dir,
     harness: 'codex',
     homeDir,
     flags: { baseUrl: BASE },
+    observer,
     payerDeps: {
       getSigner: async () => testSigner(wallet),
       fetchImpl,
@@ -163,12 +186,13 @@ async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) 
     close: async () => {
       await client.close();
       await server.close();
+      await observer.dispose();
     },
   };
 }
 
 async function offer(): Promise<unknown> {
-  return JSON.parse(await readFile(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'));
+  return fixture('wire-hook-execute-spec.json');
 }
 
 describe('Codex automatic hooks', () => {
@@ -189,9 +213,9 @@ describe('Codex automatic hooks', () => {
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Every call went to the paid route, and no leg carried the deposit:
-      // the background top-up did, then each leg paid a voucher.
-      expect(fake.log).toEqual([
+      // Every routing call went to the paid route, and no leg carried the
+      // deposit: the background top-up did, then each leg paid a voucher.
+      expect(fake.log.filter((line) => line.includes('/route'))).toEqual([
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route warm unpaid',
         'POST /api/x402-router/route warm paid',
@@ -199,6 +223,10 @@ describe('Codex automatic hooks', () => {
         'POST /api/x402-router/route paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
+      ]);
+      // The web call ran with the prompt's offer untaken: one free outcome report.
+      expect(fake.log.filter((line) => !line.includes('/route'))).toEqual([
+        'POST /api/x402-router unpaid',
       ]);
       expect(fake.depositedOn).toEqual(['warm']);
       // The deposit counts against the daily budget, as an MCP lookup's does.
@@ -249,6 +277,8 @@ describe('Codex automatic hooks', () => {
   });
 
   it('route on the leg alone when Codex records no transcript', async () => {
+    // A null path must work even when there is no session file to fall back to.
+    await rm(transcript);
     const fake = new FakeRouter();
     fake.body = await offer();
     const server = await connect(fake);

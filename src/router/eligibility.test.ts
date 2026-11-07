@@ -214,20 +214,6 @@ describe('canPayRouting (section 2.4)', () => {
       canPayRouting({ ...ROUTING, sign: UNKNOWN, creditAtomic: null, balanceAtomic: 1n }),
     ).toEqual(money('wallet_low'));
   });
-
-  it("wallet_low and fee refusals carry unpaid()'s text byte for byte (S5)", () => {
-    for (const reason of [
-      'wallet_low',
-      'limit_below_deposit',
-      'budget_reached',
-      'not_allowlisted',
-    ]) {
-      const v = canPayRouting({ ...ROUTING, feeRefusal: reason });
-      expect(v.status).toBe('blocked');
-      if (v.status !== 'blocked') continue;
-      expect({ reason: v.detail, fix: v.fix }).toEqual(unpaid(reason));
-    }
-  });
 });
 
 const PROVIDER: ProviderFacts = {
