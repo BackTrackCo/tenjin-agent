@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-24.1",
+  "decision": {
+    "action": "execute",
+    "capabilityId": "context7-docs",
+    "category": "library or API documentation",
+    "provider": "Context7",
+    "capabilityDescription": "current, version-specific documentation and code examples for a named library, framework, SDK or CLI",
+    "providerPriceAtomic": "0",
+    "contract": {
+      "request": {
+        "url": "https://tenjin.sh/api/docs-lookup?query=Zod+v4+email+%26+URL+validation",
+        "method": "GET",
+        "headers": {
+          "accept": "text/plain"
+        }
+      },
+      "arguments": {
+        "query": "Zod v4 email & URL validation"
+      }
+    }
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}
