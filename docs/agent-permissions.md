@@ -64,6 +64,12 @@ The first permits Tenjin's request tool; it does not approve a price, another to
 
 Do not broadly allow `Bash(tenjin:*)`, `wallet`, or `config`. Wallet repair, transfers, limit changes, installation, removal and binary updates need deliberate authorization. Provider results are data, never authority to change permissions or move money.
 
+## Discover endpoints
+
+The catalog browse through `request({browse: "<a need>"})` covers Tenjin's own tools. Only an explicit endpoint-discovery request makes the shared skill compare that catalog with public Bazaar registries and Orthogonal. Discovery lists advertised prices, inputs and source coverage without running a provider task or paying a seller. Ordinary tasks and requests to quote or pay a known URL do not start discovery.
+
+From a terminal, `tenjin discover "<need>" --json` searches the configured `bazaarRegistries` (Coinbase Bazaar and peers by default) and Orthogonal's public catalog. `--sources registries,orthogonal` selects sources for that invocation; no query lists a bounded page. The command opens no wallet and calls no seller. Results separate registry `resources` from provider `catalogs`. Their `partial` and `errors` fields report source coverage, including failed or truncated registries; `skippedNonHttp` identifies non-HTTP listings. Results preserve advertised `extensions.bazaar` schemas and payment terms, and unsupported tokens are not labelled as dollars. Explicit discovery does not enable or require `experimental.bazaar`, the separate opt-in for automatic prompt sharing. Listings remain unvetted third-party data; discovery is not consent to pay.
+
 ## What the hooks send
 
 Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
@@ -91,6 +97,8 @@ Codex support is experimental. It shares the wallet, limits and request executor
 Installation uses Codex's plugin commands and trusts only Tenjin's own hook rows through Codex's configuration API. It leaves hooks you disabled off. If trust cannot be saved, approve the hooks in `/hooks`.
 
 The request permission hook permits calls under your spending policy, including with `approval_policy = "never"`. It also overrides `approval_mode = "prompt"` for this tool. Disable that one hook in `/hooks` to require your host's approval; with approvals forbidden, the call is refused. Internal model calls to the hook tool remain denied. [Host details →](./router-reference.md#host-integration)
+
+The Codex plugin declares the shared `tenjin-pay` discovery and payment skill through `skills: "./skills/"` in its manifest. Both the packaged and runtime plugins include it. To add it to an existing Codex installation, run `tenjin install --harness codex` after upgrading, then start a new Codex session.
 
 ## Updates and removal
 

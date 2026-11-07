@@ -116,6 +116,8 @@ Use Tenjin to make a 10-second welcome voiceover for my app.
 
 Example provider prices vary by tool and inputs and exclude Tenjin's routing fee. The quote for your call applies; [the full catalog has every tool and its current price →](https://tenjin.sh/tools)
 
+Ask your agent: "Find x402 endpoints I can use for speech synthesis, video generation and web search." When explicitly asked to discover endpoints, the shared skill checks Tenjin's catalog, public Bazaar registries and Orthogonal, then compares advertised prices, inputs and coverage. Discovery runs no provider task and pays nothing. From a terminal, `tenjin discover "speech synthesis" --json` runs the manual public-source search directly. Ordinary tasks and requests to quote or pay a known URL do not start endpoint discovery. [Discovery details →](./docs/agent-permissions.md#discover-endpoints)
+
 ## Wallet and limits
 
 | Automatic spending               | Default |
