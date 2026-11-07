@@ -22,21 +22,22 @@ a shape the test catalog lacks adds that entry there in the same change.
 
 ## The calls
 
-A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
+A lookup is calls to the paid `POST /api/x402-router/route`. The free `POST /api/x402-router` serves only the outcome report, `browse`, the `{tool}` spec read by browse id, selected `{tool, query}` free lookups, and `{id, input}` (answered `needs_input`). Every form requires `accepts` to list `spec`:
 each capability needs a client that runs its spec, so a client without it is
 answered `native` with the `client_outdated` diagnostic, on every form, before
 any model call. The free route `POST /api/x402-router` answers the routing forms `{packet}`
 and `{query, id?}` with `native` and `fee_required` first, with or without `spec` (The paid path,
-below). The outcome report is the one form that carries no `accepts`.
+below). Selected `{tool, query}` bypasses that fee gate and makes no model decision. The outcome report is the one form that carries no `accepts`.
 
-| call    | request                                                             | answer                                                                                                                      |
-| ------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| hook    | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
-| tool    | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
-| browse  | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
-| by id   | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
-| outcome | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
-| forget  | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
+| call      | request                                                             | answer                                                                                                                      |
+| --------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| hook      | `{schemaVersion, packet, gateHint?, sessionId?, accepts, improve?}` | `execute` with the id, the capability, its `specs` and a `hint`, `discovered`, or `native` / `needs_input` with diagnostics |
+| tool      | `{schemaVersion, query, id?, accepts, improve?}`                    | `spec` for a query with no id, `execute` for the free docs lookup's id, `discovered`, or `native` / `needs_input`           |
+| browse    | `{schemaVersion, browse, accepts}`                                  | `{schemaVersion, routerVersion, rows}`: the tool list, free, with no gate call                                              |
+| by id     | `{schemaVersion, tool, accepts}`                                    | `spec` for a browse row's id under a fresh offer id, or `needs_input`                                                       |
+| free tool | `{schemaVersion, tool, query, accepts}`                             | `execute` for the selected free service, or `needs_input`; no routing decision or payment                                   |
+| outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
+| forget    | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
 
 `improve: true` rides the hook and tool forms only while the person has turned
 on "Help improve routing" (`router.improve`, off by default, enabled explicitly
@@ -96,6 +97,7 @@ lowest token it needs (`minContract`, `spec` for all of them today), and the
 gate is offered only the tasks whose capabilities a client runs.
 
 - `spec`: tool specs, the floor every capability needs.
+- `free-query`: inspection of a free docs row asks for `{tool, query}`. That form binds the selected free service without a routing fee; paid and unknown ids are refused.
 - `catalog`: a former Tenjin list service comes as a `discovered` offer under
   its catalog id, each spec with the `fields` below (a list service's `output`
   is `media`), and with `choices` when its service belongs to a compare group.
@@ -170,13 +172,11 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
 ## The harness
 
 Every form, the outcome report included, takes an optional `harness`: the
-agent host the client runs in, `claude` or `codex`. It changes which services
-the router offers, never payment, limits or the fee. A service the host's own
-tools already cover is left out on every form: the hook and tool offers, a
-page's routed reader, browse rows, `tool`, and an open-Bazaar listing at the
-same endpoint. Codex gets no `glim-reddit-get`,
-because its hosted web tool reads a Reddit thread from its URL, so that page
-is answered `native`. No `harness` means `claude`, and an unknown token gets
+agent host the client runs in, `claude` or `codex`. Native-tool preferences
+narrow automatic hook offers only, never explicit queries, browse rows or
+`tool` inspection. Compatible tools such as `glim-reddit-get` remain available
+when selected in Codex. Harness compatibility still applies to every call;
+payment, limits and the fee are unchanged. No `harness` means `claude`, and an unknown token gets
 the `claude` answer. The server logs the mapped value (`claude`, `codex` or
 `other`) and never the raw token.
 
@@ -185,8 +185,9 @@ A browse (`browse`, any words, or empty for everything) answers rows of
 runs, former list services included, best match first, or grouped by kind
 when empty. `price` is as a person reads it (`1¢`, `free`). No
 gate, no Jev, no row stored. A row's id sent as `tool` answers its spec under
-a fresh offer id, stored as a query's pick is; the free docs row has no spec
-and answers `needs_input` (`spec_missing`), pointing at `request({query})`.
+a fresh offer id, stored as a query's pick is. The free docs row has no spec:
+clients sending `free-query` get `needs_input` with the `{tool, query}` call;
+clients without it get `spec_missing`, pointing at `request({query})`.
 
 ## The paid path
 
