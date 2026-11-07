@@ -29,7 +29,7 @@ describe('the spend question', () => {
 
   it('asks the defaults or your own limits, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. Paid routing currently costs $0.001 per call (maximum $0.003). Tool charges are separate. Tenjin may set aside up to $0.25 for routing; this counts toward your limits once. Either answer also approves the routing fee.',
+      'Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. Paid routing currently costs $0.001 per call. Tool charges are separate. Tenjin may set aside up to $0.25 for routing; this counts toward your limits once. Either answer also approves the routing fee.',
     );
   });
 
