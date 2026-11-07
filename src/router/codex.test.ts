@@ -2,8 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { CliError } from '../lib/errors';
 import type { RuntimeSetup } from '../lib/runtime';
@@ -13,7 +12,6 @@ import { at, CODEX_PLUGIN, codexHookRows } from './codex-host';
 import {
   alongsideCodexRefresh,
   CODEX_REFRESH_LINES,
-  codexAtLeast,
   ownCodexRow,
   refreshCodexPlugin,
   runCodexDoctor,
@@ -22,6 +20,7 @@ import {
   type CodexRun,
   type CodexSetupDeps,
 } from './codex-install';
+import { fixture } from './fixture-test-utils';
 import { runHookKind } from './hook-command';
 import { CODEX_ALLOW_HOOK_COMMAND, renderCodexHooks } from './plugin-files';
 import { trustCodexHooks } from '../lib/codex-trust';
@@ -55,10 +54,7 @@ const native = {
   tool_use_id: 'call-1',
   tool_input: { search_query: [{ q: 'example search' }] },
 };
-const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
-const paidOffer = JSON.parse(
-  readFileSync(join(fixtures, 'wire-hook-execute-spec.json'), 'utf8'),
-) as { decision: { id: string } };
+const paidOffer = fixture('wire-hook-execute-spec.json') as { decision: { id: string } };
 const nativeAnswer = {
   schemaVersion: 1,
   routerVersion: 'v',
@@ -102,15 +98,21 @@ afterEach(async () => {
  */
 function router(answer: unknown) {
   const bodies: Record<string, unknown>[] = [];
+  /** Outcome reports (an ignored offer's), apart from the decisions. */
+  const reports: Record<string, unknown>[] = [];
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     if (body.jsonrpc !== undefined) {
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0xf4240' }));
     }
+    if (body.status !== undefined) {
+      reports.push(body);
+      return new Response(null, { status: 204 });
+    }
     bodies.push(body);
     return new Response(JSON.stringify(answer));
   }) as typeof fetch;
-  return { bodies, fetchImpl };
+  return { bodies, reports, fetchImpl };
 }
 
 const codexDeps = (fetchImpl: typeof fetch) => ({
@@ -417,9 +419,7 @@ describe('Codex routing through the router', () => {
   });
 
   /** The free docs lookup before a search, from the shared fixture. */
-  const freeNote = JSON.parse(
-    readFileSync(join(fixtures, 'wire-hook-execute-note.json'), 'utf8'),
-  ) as { decision: { id: string } };
+  const freeNote = fixture('wire-hook-execute-note.json') as { decision: { id: string } };
 
   it('notes a free lookup on a web.run search, and shows it after the search ran', async () => {
     const pre = router(freeNote);
@@ -461,7 +461,7 @@ describe('Codex routing through the router', () => {
   };
 
   it('denies a batch once, naming the rest as exact JSON, and lets the re-run through', async () => {
-    const { bodies, fetchImpl } = router(paidOffer);
+    const { bodies, reports, fetchImpl } = router(paidOffer);
     const event = { ...native, tool_input: batch, cwd: dir, transcript_path: transcript };
     const out = await runNativeHook(event, codexDeps(fetchImpl));
     expect(at(out.response, 'hookSpecificOutput', 'permissionDecision')).toBe('deny');
@@ -486,6 +486,15 @@ describe('Codex routing through the router', () => {
       expect(again.response).toBeNull();
     }
     expect(bodies.length).toBe(routerCalls);
+    // Running the rest natively, with the offer untaken, ignored it: said once.
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    expect(reports[0]).toEqual({
+      schemaVersion: 1,
+      id: at(paidOffer, 'decision', 'id'),
+      harness: 'codex',
+      status: 'ignored',
+      reason: 'native_after_offer',
+    });
   });
 
   it('routes a lone URL open as WebFetch, and runs a batch untouched on a free or no offer', async () => {
@@ -572,6 +581,8 @@ function host(config: unknown = {}, rt: Partial<RuntimeSetup> = {}) {
   const steps: string[] = [];
   const deps: CodexSetupDeps = {
     homeDir: join(dir, 'home'),
+    // No harness: the suite may itself run inside one.
+    env: {},
     runtime: async () => ({
       state: 'skipped',
       root: join(dir, 'runtime'),
@@ -636,6 +647,9 @@ describe('Codex install, uninstall and doctor', () => {
   it('keeps the defaults with no answer and hands the spend question back', async () => {
     await writeFile(join(dir, 'config.json'), '{}');
     const { deps } = host();
+    deps.env = { CODEX_SESSION_ID: 'session' };
+    const funding = vi.fn(async () => undefined);
+    deps.funding = funding;
     const out = await runCodexInstall({}, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
     expect(config).not.toHaveProperty('maxAutoSpend');
@@ -651,12 +665,51 @@ describe('Codex install, uninstall and doctor', () => {
       'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
     ]);
     expect(out.data).not.toHaveProperty('approval');
+    expect(funding).not.toHaveBeenCalled();
+  });
+
+  it('offers funding after an interactive Codex installation', async () => {
+    const { deps } = host();
+    deps.isInteractive = true;
+    deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
+    const terminal = ctx();
+    terminal.flags.json = false;
+    terminal.io.isTTY = true;
+    const out = await runCodexInstall({}, terminal, deps);
+    expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
+    expect(out.humanLines?.join(' ')).toContain('/hooks and trust the five Tenjin hooks');
+    expect(out.humanLines?.join(' ')).toContain('then start a new session');
   });
 
   it('asks nothing again once the file names a limit', async () => {
     const { deps } = host();
     const out = await runCodexInstall({}, ctx(), deps);
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
+  });
+
+  it('gives Codex a link-preparation command and sharing disclosure, without extra setup questions', async () => {
+    const { deps } = host();
+    deps.env = { CODEX_SESSION_ID: 'session' };
+    deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
+    const out = await runCodexInstall({ yes: true }, ctx(), deps);
+    expect(out.data).toMatchObject({
+      nextSteps: [
+        {
+          id: 'fund',
+          options: [{ command: 'tenjin wallet fund 5 --no-open --no-wait' }, { command: null }],
+          next: expect.stringContaining('show checkoutUrl as a clickable link'),
+        },
+      ],
+      disclosure: [
+        expect.stringContaining(
+          'task context and your wallet address are sent to Tenjin for routing',
+        ),
+        expect.stringContaining('https://tenjin.sh/privacy'),
+      ],
+    });
+    expect((out.data as { next: string }).next).toContain('Follow the instructions in nextSteps');
+    expect(JSON.stringify(out)).not.toContain('Help improve routing');
+    expect(out.humanLines?.join('\n')).not.toContain('0x111111');
   });
 
   it('writes the limits the two flags name, and asks nothing', async () => {
@@ -925,6 +978,7 @@ describe('Codex install, uninstall and doctor', () => {
       hooks: async () => listed(...stale),
     });
     expect(warned.data).toMatchObject({ routing: 'free', ok: true });
+    expect(warned.humanLines?.[0]).toBe('Setup: needs attention.');
     expect(warned.humanLines?.join('\n')).toContain('! Routing: its routing hooks are commands');
     await expect(
       runCodexDoctor({}, ctx(), {
@@ -940,14 +994,6 @@ describe('Codex install, uninstall and doctor', () => {
     expect(steps).toEqual([]);
   });
 
-  it('compares Codex builds by number, a suffix ignored', () => {
-    expect(codexAtLeast('0.157.1', '0.148.0')).toBe(true);
-    expect(codexAtLeast('0.149.0', '0.149.0')).toBe(true);
-    expect(codexAtLeast('0.149.0-alpha.2', '0.149.0')).toBe(true);
-    expect(codexAtLeast('0.148.9', '0.149.0')).toBe(false);
-    expect(codexAtLeast('1.0.0', '0.148.0')).toBe(true);
-  });
-
   it('reads one hooks/list, runs no codex command, and never calls the build a gate', async () => {
     const { steps, deps } = host({ approval_policy: 'never' });
     const ready = await runCodexDoctor({}, ctx(), {
@@ -961,6 +1007,11 @@ describe('Codex install, uninstall and doctor', () => {
       version: '0.157.1',
     });
     expect(ready.data).not.toHaveProperty('elicitation');
+    expect(ready.humanLines?.slice(0, 3)).toEqual([
+      'Setup: ready for Codex.',
+      'Current Codex session: not verified by this check.',
+      'Paid routing: wallet and funds not checked.',
+    ]);
     expect(ready.humanLines?.join('\n')).toContain('information only');
     expect(ready.humanLines?.join('\n')).not.toContain('Pay once');
   });
@@ -1101,14 +1152,18 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       [null, true],
     ] as const) {
       const { steps, deps } = host();
+      const funding = vi.fn(async () => undefined);
       const out = await runCodexInstall({ yes: true }, ctx(), {
         ...deps,
+        env: { CODEX_SESSION_ID: 'session' },
+        funding,
         version: async () => version,
       });
       expect(
         steps.some((s) => s.startsWith('codex plugin add')),
         String(version),
       ).toBe(adds);
+      expect(funding).toHaveBeenCalledTimes(adds ? 1 : 0);
       if (!adds) {
         expect(out.data).toMatchObject({ next: CODEX_REFRESH_LINES.old });
         expect(CODEX_REFRESH_LINES.old).toContain('0.149.0');

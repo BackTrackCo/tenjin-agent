@@ -40,6 +40,7 @@ import {
   bindDecision,
   claimRedirect,
   markOffered,
+  promptOfferKey,
   type OfferedTerms,
   newCallId,
   claimNote,
@@ -54,6 +55,8 @@ import {
   writeProgress,
 } from './progress';
 import { routerSettings, type RouterSettings } from './settings';
+import { claimIgnored, noteShown, offerScope, reportIgnored } from './untaken';
+import { ownHostsFor } from './own-urls';
 
 /**
  * The six hook handlers. Between them they do exactly three things: build and
@@ -61,8 +64,9 @@ import { routerSettings, type RouterSettings } from './settings';
  * harness. Before an `execute` is shown where nobody can approve it, they also
  * read what the wallet's files say (`readWalletFacts`) and its USDC balance
  * from the RPC (`spendShortfall`). A free offer on a search keeps its line on
- * disk for after the search (`markNoted`); that is the only other thing they
- * touch.
+ * disk for after the search (`markNoted`), and every shown offer is kept until
+ * it is taken, so one that is ignored is reported once (`untaken.ts`); those
+ * are the only other things they touch.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
@@ -909,33 +913,40 @@ async function offerOnUserText(
   if (skipped !== null) return { response: null, skipped };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
+  await sweepUntaken(deps, router);
 
-  const sealed = seal(
-    scoped(
-      await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
-      router.settings,
-    ),
-  );
-  const footer = await openFooter(deps, event.sessionId, 'prompt');
-  const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
+  const sealed = await sealHere(
+    await buildPromptPacket(event.transcriptPath, event.sessionId, text, hostOf(deps)),
+    router,
+    event.cwd,
     deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
   );
+  const footer = await openFooter(deps, event.sessionId, 'prompt', {});
+  const deadline = gateDeadline(deps);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
-    return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
+    return {
+      ...injection(hookEventName),
+      ...(outcome !== null ? { action: outcome.action } : {}),
+    };
   }
   const vetted = await vetOffer(outcome, deps, deadline, true);
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
-    return { response: null, action: outcome.action, withheld: true };
+    return { ...injection(hookEventName), action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
+  if (hookEventName === 'UserPromptSubmit') {
+    // The mod draws `Tenjin offered <label>` under this prompt from this record.
+    await markOffered(
+      deps.dataDir,
+      localSession(event.sessionId, deps),
+      promptOfferKey(text),
+      offeredTerms(vetted.offer),
+      deps.now?.(),
+    );
+  }
   return {
     action: outcome.action,
     id: outcome.id,
@@ -943,11 +954,16 @@ async function offerOnUserText(
   };
 }
 
+/** The lines this leg adds to the agent's context, or no answer when there are none. */
 function injection(
   hookEventName: 'UserPromptSubmit' | 'PostToolUse',
-  line: string,
+  ...lines: (string | undefined)[]
 ): { response: unknown } {
-  return { response: { hookSpecificOutput: { hookEventName, additionalContext: line } } };
+  const said = lines.filter((line) => line !== undefined);
+  if (said.length === 0) return { response: null };
+  return {
+    response: { hookSpecificOutput: { hookEventName, additionalContext: said.join('\n\n') } },
+  };
 }
 
 /** What either native arm reports about itself; `response` is all the harness sees. */
@@ -1028,8 +1044,8 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
  * arm would only withhold costs no decision and writes no offer row.
  * `passFree` is the pre-call arm's too: a free offer comes back marked `free`
  * before the spend policy, the wallet or `repeated` is asked, since it is
- * never a redirect, and the arm closes its footer: shown when it kept the
- * offer's line, withheld when it did not.
+ * never a redirect, and the arm closes its footer: noted when it kept the
+ * offer's line for the after-call arm, withheld when it did not.
  */
 async function routeNativeCall(
   event: Omit<NativeCall, 'tool' | 'pending'>,
@@ -1044,10 +1060,13 @@ async function routeNativeCall(
     /** False where a discovered offer must be affordable as it stands: the
      *  call it would replace is the one way to reach the user. */
     canAskUser?: boolean;
+    /** The pre-call arm's: this is a native call, so an offer this agent was
+     *  shown and has not taken was ignored for it. */
+    native?: boolean;
   } = {},
 ): Promise<
   | { offer: OfferDecision; free?: undefined }
-  | { offer: ExecuteDecision; free: true; close: (shown: boolean) => Promise<void> }
+  | { offer: ExecuteDecision; free: true; close: (noted: boolean) => Promise<void> }
   | { offer: null; outcome: NativeHookOutcome }
 > {
   const { nativeOutcome, repeated } = opts;
@@ -1055,6 +1074,13 @@ async function routeNativeCall(
   // agent lookup and the transcript, for both native arms.
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { offer: null, outcome: { response: null } };
+  await sweepUntaken(
+    deps,
+    router,
+    opts.native === true
+      ? offerScope(localSession(event.sessionId, deps), event.agentId)
+      : undefined,
+  );
   // A SUBAGENT IS ROUTED ONLY WHEN IT IS KNOWN TO HAVE THE TOOL: redirecting
   // or offering to one that cannot make the call strands it (#377). Decided
   // before the router is asked, so an unknown one costs nothing.
@@ -1069,7 +1095,7 @@ async function routeNativeCall(
   // 45% of an active session's rows. The claim after the decision still
   // settles two parallel copies of one call.
   if (opts.redirected !== undefined && (await opts.redirected())) {
-    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
     await footer.close(null, { withheld: 'already redirected once' });
     return { offer: null, outcome: { response: null, alreadyRedirected: true } };
   }
@@ -1077,15 +1103,15 @@ async function routeNativeCall(
   // made the search string the whole conversation, so "native tools only, no
   // paid services" never reached this gate. Inside a subagent, its own task
   // comes first: see `buildNativePacket`.
-  const sealed = seal(
-    scoped(
-      await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
-        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
-        ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
-        harness: hostOf(deps),
-      }),
-      router.settings,
-    ),
+  const sealed = await sealHere(
+    await buildNativePacket(event.transcriptPath, event.sessionId, pending, {
+      ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      ...(nativeOutcome !== undefined ? { nativeOutcome } : {}),
+      harness: hostOf(deps),
+    }),
+    router,
+    event.cwd,
+    deps,
   );
   const { packet } = sealed;
   // A LOCAL TARGET ONLY EVER HAS A NATIVE ANSWER, so asking costs a round trip
@@ -1109,16 +1135,9 @@ async function routeNativeCall(
     );
     return { offer: null, outcome: { response: null } };
   }
-  const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search');
+  const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1127,8 +1146,8 @@ async function routeNativeCall(
     };
   }
   if (opts.passFree === true && isFree(outcome)) {
-    const close = (shown: boolean) =>
-      footer.close(outcome, shown ? undefined : { withheld: 'free lookup, call runs' });
+    const close = (noted: boolean) =>
+      footer.close(outcome, noted ? { noted: true } : { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, close };
   }
   const vetted = await vetOffer(
@@ -1184,8 +1203,9 @@ async function routeNativeCall(
  * `delivery: "note"` the server's line is kept, once per query per agent in
  * five minutes, and the after-call arm shows it once the search has run; its
  * footer closes as a shown offer, so the lookup the agent may call resolves to
- * this session. Any other free offer, and any WebFetch, just runs: the server
- * owns which offer is a note.
+ * this session, but its untaken record waits for the after-call arm to show
+ * it. Any other free offer, and any WebFetch, just runs: the server owns which
+ * offer is a note.
  */
 export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = eventOf(raw, deps);
@@ -1198,6 +1218,7 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
   const claim = (t: string) => claimRedirect(deps.dataDir, session, event.agentId, t, deps.now?.());
   const routed = await routeNativeCall(event, event.pending, deps, {
     passFree: true,
+    native: true,
     repeated: async () => {
       if (!(await claim(target))) return true;
       await Promise.all(targets.filter((t) => t !== target).map(claim));
@@ -1223,7 +1244,13 @@ export async function runNativeHook(raw: unknown, deps: HookDeps): Promise<Nativ
       routed.offer.delivery === 'note' &&
       toolUseId !== undefined &&
       (await claimNote(deps.dataDir, session, event.agentId, pending.query, now)) &&
-      (await markNoted(deps.dataDir, session, toolUseId, { offerId: id, line: hint }, now));
+      (await markNoted(
+        deps.dataDir,
+        session,
+        toolUseId,
+        { offerId: id, line: hint, ids: offeredIds(routed.offer) },
+        now,
+      ));
     await routed.close(noted);
     return {
       response: null,
@@ -1352,7 +1379,8 @@ export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHo
  * A SEARCH THE PRE-CALL ARM NOTED A FREE LOOKUP ON gets that line now, read
  * from disk, framed as the option it is, under this event's own name, and the
  * router is not asked: the note already names the service it picked for this
- * search, so a call shows one line at most. An interrupted call gets nothing,
+ * search, so a call shows one line at most, and its untaken record is kept
+ * here, where it is shown (`untaken.ts`). An interrupted call gets nothing,
  * since the agent never read a result for it to follow.
  *
  * A server that does not know `nativeOutcome` yet refuses the packet; that is
@@ -1375,6 +1403,16 @@ export async function runShortfallHook(
         );
   if (note !== null) {
     if (event.interrupted === true) return { response: null };
+    await noteShown(
+      deps.dataDir,
+      {
+        id: note.offerId,
+        ids: note.ids ?? [],
+        harness: hostOf(deps),
+        scope: offerScope(localSession(event.sessionId, deps), event.agentId),
+      },
+      deps.now?.(),
+    );
     return {
       response: {
         hookSpecificOutput: {
@@ -1480,14 +1518,20 @@ export async function runDelegationHook(
   if (task === null || task.trim().length === 0) return { response: null };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
+  await sweepUntaken(deps, router);
   // The subagent this task goes to is the one that would have to make the
   // call, so the same rule: only a type known to have the tool is offered. With
   // no type the harness runs its general-purpose agent, which inherits it.
   if ((await requestToolAccess(event.subagentType, agentLookup(event.cwd, deps))) !== 'allowed') {
     return { response: null, noRequestTool: true };
   }
-  const sealed = seal(
-    scoped(await buildPromptPacket(event.transcriptPath, event.sessionId, task), router.settings),
+  const sealed = await sealHere(
+    await buildPromptPacket(event.transcriptPath, event.sessionId, task, hostOf(deps), {
+      delegated: true,
+    }),
+    router,
+    event.cwd,
+    deps,
   );
   // The native hook's two rules, with the task as the subject: a task the mask
   // would change is not sent, since the offer is written back into it, and a
@@ -1502,16 +1546,10 @@ export async function runDelegationHook(
   // The native hook's rule, for the same reason: a delegation routed without
   // the user's words could offer what they just ruled out.
   if (sealed.packet.historyStatus !== 'ok') return { response: null };
-  const footer = await openFooter(deps, event.sessionId, 'delegate');
+  // Only the subagent could take this offer, so no native call here ignores it.
+  const footer = await openFooter(deps, event.sessionId, 'delegate', null);
   const deadline = gateDeadline(deps);
-  const outcome = await decide(
-    sealed,
-    deps,
-    router.config,
-    event.sessionId,
-    deadline,
-    footer.unpaid,
-  );
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1550,17 +1588,26 @@ export async function runDelegationHook(
  *
  * Display only. Every write inside swallows its own failure, and a shown offer
  * also leaves the id-to-session binding the tool resolves its progress through,
- * and the request specs the line names, which the tool reads by id.
+ * the request specs the line names, which the tool reads by id, and its
+ * untaken record (`untaken.ts`), scoped to `shownTo`: the agent whose native
+ * call would ignore it, or null for a delegated task's. A noted line is not
+ * shown yet, so it gets no untaken record here: the after-call arm keeps one
+ * when it shows the line.
  */
 async function openFooter(
   deps: HookDeps,
   sessionId: string,
   operation: 'prompt' | 'search' | 'delegate',
+  shownTo: { agentId?: string } | null,
 ): Promise<{
   /** Why this call's routing fee was not paid, when it was not. */
   unpaid: (why: string) => void;
-  /** `withheld` is why an `execute` was not shown, in the footer's words. */
-  close: (decision: HookDecision | null, opts?: { withheld?: string }) => Promise<void>;
+  /** `withheld` is why an `execute` was not shown, in the footer's words;
+   *  `noted` is a free line the after-call arm shows once the search has run. */
+  close: (
+    decision: HookDecision | null,
+    opts?: { withheld?: string; noted?: true },
+  ) => Promise<void>;
 }> {
   sessionId = localSession(sessionId, deps);
   const now = (): number => deps.now?.() ?? Date.now();
@@ -1597,6 +1644,18 @@ async function openFooter(
       );
       if (withheld === undefined && isOffer(decision)) {
         await bindDecision(deps.dataDir, sessionId, decision.id, now());
+        if (opts?.noted !== true) {
+          await noteShown(
+            deps.dataDir,
+            {
+              id: decision.id,
+              ids: offeredIds(decision),
+              harness: hostOf(deps),
+              ...(shownTo !== null ? { scope: offerScope(sessionId, shownTo.agentId) } : {}),
+            },
+            now(),
+          );
+        }
         // The line is shown, so the specs of the services it names are what
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.
@@ -1614,6 +1673,39 @@ async function openFooter(
       }
     },
   };
+}
+
+/** Every id an offer's line names: its own, each spec's and each choice's. */
+function offeredIds(offer: OfferDecision): string[] {
+  return [
+    offer.id,
+    ...(offer.specs ?? []).map((spec) => spec.id),
+    ...(offer.action === 'discovered' ? (offer.choices?.options ?? []).map((o) => o.id) : []),
+  ];
+}
+
+/**
+ * ONE ROUTED LEG REPORTS WHAT WAS IGNORED SINCE THE LAST ONE: every offer
+ * past its 15 minutes and, with `nativeScope` (a native call about to run),
+ * every offer that same agent still holds. The claim is a few local file
+ * operations, made before this leg can show an offer of its own; the reports
+ * go without being waited on, so a slow router never holds the turn.
+ */
+async function sweepUntaken(
+  deps: HookDeps,
+  router: RouterHere,
+  nativeScope?: string,
+): Promise<void> {
+  const claimed = await claimIgnored(deps.dataDir, {
+    now: deps.now?.() ?? Date.now(),
+    ...(nativeScope !== undefined ? { nativeScope } : {}),
+  });
+  if (claimed.length === 0) return;
+  void reportIgnored(claimed, {
+    ctx: hookContext(deps),
+    baseUrl: resolveBaseUrl(deps, router.config),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
 }
 
 /** What the gate decided, in the footer's own words. A silent backend is not a
@@ -1648,11 +1740,12 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
 async function decide(
   { packet }: Sealed,
   deps: HookDeps,
-  config: PartialConfig,
+  router: RouterHere,
   sessionId: string,
   deadline: number,
   unpaid?: (why: string) => void,
 ): Promise<HookDecision | null> {
+  const { config } = router;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1671,6 +1764,7 @@ async function decide(
       baseUrl,
       acceptsBazaar: resolveExperimentalBazaar(config).value === 'on',
       harness: hostOf(deps),
+      improve: router.settings.improve.value,
       timeoutMs: Math.max(0, deadline - now),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== undefined ? { route } : {}),
@@ -1775,6 +1869,12 @@ function pendingCallOf(
   return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
 }
 
+/** `router.*` for one event's directory, and the global config it read. */
+interface RouterHere {
+  settings: RouterSettings;
+  config: PartialConfig;
+}
+
 /**
  * `router.*` for the event's directory with the global config it came from,
  * which is read ONCE per event and also names the base URL; null when the
@@ -1783,10 +1883,7 @@ function pendingCallOf(
  * machine. A config that cannot be read is off too, since a switch the user
  * set must not fail open.
  */
-async function routerFor(
-  cwd: string | undefined,
-  deps: HookDeps,
-): Promise<{ settings: RouterSettings; config: PartialConfig } | null> {
+async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<RouterHere | null> {
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   try {
     const config = await loadRawConfig(deps.dataDir);
@@ -1799,6 +1896,22 @@ async function routerFor(
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;
   }
+}
+
+/**
+ * The packet as it leaves: scoped to `router.context`, then sealed, with the
+ * links on the user's own hosts named (`own-urls.ts`), read only when it has
+ * a link at all.
+ */
+async function sealHere(
+  packet: Packet,
+  router: RouterHere,
+  cwd: string | undefined,
+  deps: HookDeps,
+): Promise<Sealed> {
+  const inScope = scoped(packet, router.settings);
+  const ownHosts = await ownHostsFor(inScope, cwd ?? process.cwd(), hostOf(deps), deps.homeDir);
+  return seal(inScope, ownHosts.length > 0 ? { ownHosts } : {});
 }
 
 /**

@@ -3,9 +3,8 @@ import { BlockList, isIP } from 'node:net';
 import { CliError } from './errors';
 
 /**
- * Where this CLI is willing to send a paid request. Ported from the draft
- * auto-mode experiment (PR #369 `execution.ts`) into a shared path, so the
- * router's provider call and `tenjin pay` answer the question the same way.
+ * Where this CLI is willing to send a paid request. Shared, so the router's
+ * provider call and `tenjin pay` answer the question the same way.
  *
  * TWO CHECKS, BOTH NEEDED. The lexical one refuses a URL shape that cannot be a
  * public endpoint (a scheme, credentials, a fragment, a literal private

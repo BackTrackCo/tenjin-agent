@@ -1,10 +1,14 @@
 # Troubleshooting
 
+Start with `tenjin doctor`. Read setup, current-session and paid-routing results separately: an unchecked result needs a real check, and a registered plugin can still need a new session. Follow the command it prints for the current host or project. Doctor does not buy a tool call.
+
+If checkout opened but funds are not confirmed, run `tenjin wallet balance` before paying again. An unreadable balance is not evidence that the first payment failed.
+
 ## Tenjin cannot unlock the wallet
 
 Claude Code's message line, the session's first message or `tenjin doctor` says Tenjin cannot use its wallet, and names one of these reasons. Until it is fixed, Tenjin does not route lookups and paid lookups do not run; your assistant's own tools keep working.
 
-- **`no saved wallet passphrase can be reached`.** The passphrase was never saved where Claude Code can read it, or the file Tenjin saved it in is gone. Before 0.1.0-alpha.31, a passphrase given in `TENJIN_WALLET_PASSPHRASE` when the wallet was created was never saved, and one typed at the create prompt was not saved either (create prompted only when no keychain answered). Run `tenjin wallet repair` (below).
+- **`no saved wallet passphrase can be reached`.** The passphrase was never saved where Claude Code can read it, or the file Tenjin saved it in is gone. Run `tenjin wallet repair` (below).
 - **`the saved wallet passphrase does not open the wallet`.** The keychain or the passphrase file holds a passphrase, but not this wallet's. Run `tenjin wallet repair` (below).
 - **`TENJIN_WALLET_PASSPHRASE is set but does not open the wallet`.** The variable in the environment Claude Code starts from is wrong, and no saved passphrase opens the wallet either, so removing the variable alone does not unlock it. Run `tenjin wallet repair` (below) first, then remove the variable (below).
 - **`the keychain holding the wallet passphrase is locked or did not answer`.** The passphrase is saved, but the keychain did not hand it over. Unlock your keychain (or log in to the desktop session) and retry. Nothing needs repairing, and Tenjin never switches to another passphrase on its own.
@@ -37,7 +41,7 @@ If nobody has the passphrase any more, nothing can open the wallet, and USDC sen
 
 The router fails to start in Claude Code or shows `cache-miss`, a terminal says `tenjin: command not found`, or `tenjin doctor` cannot run at all.
 
-Before this release, Tenjin ran from npm's global folder, which belongs to one Node version. mise, nvm, fnm, asdf and Volta keep one such folder per version, so removing that Node, or running `npm rm -g tenjin-cli`, deleted the files the plugin ran.
+An older installation may point into npm's global folder for a removed Node version. Tenjin's current installer gives the plugin its own runtime.
 
 Ask your agent to reinstall it:
 
@@ -45,7 +49,7 @@ Ask your agent to reinstall it:
 Install Tenjin from tenjin.sh
 ```
 
-Or follow the [official installation instructions](https://tenjin.sh/agents); the installer includes Node and needs no npm or working `tenjin` command. For a project-only installation, pass `--project` to the installer from that project folder. Follow the installer's activation instruction. From this release on, Tenjin runs from `~/.tenjin/runtime` on its own Node, so a Node upgrade or `npm rm -g tenjin-cli` no longer stops it. Your wallet, spend ledger and settings stay where they were.
+Or follow the [official installation instructions](https://tenjin.sh/agents); the installer includes Node and needs no npm or working `tenjin` command. For a project-only installation, pass `--project` to the installer from that project folder. Follow the installer's activation instruction. Tenjin runs from `~/.tenjin/runtime` on its own Node, so a Node upgrade or `npm rm -g tenjin-cli` no longer stops it. Your wallet, spend ledger and settings stay where they were.
 
 ### The launcher says the runtime is missing
 
@@ -71,9 +75,9 @@ Then open a new terminal. Inside Claude Code, the plugin's own `tenjin` is at th
 
 Run `tenjin uninstall --all` to remove the plugin, runtime and launcher; your wallet stays. If you installed with npm, run `npm uninstall -g tenjin-cli` afterward. If you already removed the npm copy, `~/.local/bin/tenjin uninstall --all` still works.
 
-## Claude Code asks about a new project MCP server named `x402`
+## Unexpected project MCP server named `x402`
 
-Updating to `0.1.0-alpha.18` could accidentally register the server in `~/.mcp.json` while refreshing a user install. After upgrading to a release with the fix, check that file. If its `x402` entry runs `tenjin mcp` and you didn't install at project scope in your home directory on purpose, remove just that registration:
+An older user installation may have left a project registration in `~/.mcp.json`. Check that file. If its `x402` entry runs `tenjin mcp` and you didn't install at project scope in your home directory on purpose, remove just that registration:
 
 ```bash
 (cd ~ && claude mcp remove x402 -s project)

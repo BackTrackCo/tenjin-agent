@@ -66,7 +66,7 @@ try {
   );
   writeFileSync(
     join(packageDir, 'dist', 'index.js'),
-    `import {writeFileSync} from 'node:fs'; if (process.env.TENJIN_SMOKE_EXIT) process.exit(Number(process.env.TENJIN_SMOKE_EXIT)); writeFileSync(process.env.TENJIN_SMOKE_RECEIPT, JSON.stringify({args:process.argv.slice(2), archive:process.env.TENJIN_BOOTSTRAP_NODE_ARCHIVE, proxy:process.env.HTTPS_PROXY}));\n`,
+    `import {writeFileSync} from 'node:fs'; if (process.env.TENJIN_SMOKE_EXIT) process.exit(Number(process.env.TENJIN_SMOKE_EXIT)); writeFileSync(process.env.TENJIN_SMOKE_RECEIPT, JSON.stringify({args:process.argv.slice(2), archive:process.env.TENJIN_BOOTSTRAP_NODE_ARCHIVE, proxy:process.env.HTTPS_PROXY, stdinTTY:process.stdin.isTTY === true, stdoutTTY:process.stdout.isTTY === true}));\n`,
   );
   const cliArchive = join(fixture, 'cli.tgz');
   execFileSync('tar', ['-czf', cliArchive, '-C', fixture, 'package']);
@@ -87,6 +87,7 @@ try {
     TENJIN_SMOKE_SCOPE_RECEIPT: scopeReceipt,
     TENJIN_SMOKE_NODE: nodeArchive,
     TENJIN_SMOKE_CLI: cliArchive,
+    TENJIN_SMOKE_INSTALLER: join(output, 'install.sh'),
     HTTPS_PROXY: 'http://fixture.invalid:8080',
   };
   // Node inherits the runner's PowerShell 7 module path; the child tests Windows PowerShell 5.1.
@@ -129,7 +130,7 @@ try {
     const curl = join(bin, 'curl');
     writeFileSync(
       curl,
-      `#!/bin/sh\nif [ -n "$TENJIN_SMOKE_INTERRUPT" ]; then exit 56; fi\nfor arg do case "$arg" in https://*) url=$arg ;; esac; done\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then shift; dest=$1; fi; shift; done\ncase "$url" in *nodejs.org*) src=$TENJIN_SMOKE_NODE ;; *) src=$TENJIN_SMOKE_CLI ;; esac\ncp "$src" "$dest"\ncase "$url" in *"$TENJIN_SMOKE_CORRUPT"*) if [ -n "$TENJIN_SMOKE_CORRUPT" ]; then printf corrupt >> "$dest"; fi ;; esac\n`,
+      `#!/bin/sh\nif [ -n "$TENJIN_SMOKE_INTERRUPT" ]; then exit 56; fi\nfor arg do case "$arg" in https://*) url=$arg ;; esac; done\ncase "$url" in https://tenjin.sh/install.sh) cat "$TENJIN_SMOKE_INSTALLER"; exit ;; esac\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then shift; dest=$1; fi; shift; done\ncase "$url" in *nodejs.org*) src=$TENJIN_SMOKE_NODE ;; *) src=$TENJIN_SMOKE_CLI ;; esac\ncp "$src" "$dest"\ncase "$url" in *"$TENJIN_SMOKE_CORRUPT"*) if [ -n "$TENJIN_SMOKE_CORRUPT" ]; then printf corrupt >> "$dest"; fi ;; esac\n`,
     );
     chmodSync(curl, 0o755);
     env.PATH = `${bin}:${process.env.PATH}`;
@@ -188,6 +189,54 @@ try {
       throw new Error(`Corrupt ${target} reached CLI`);
   }
   if (!windows) {
+    // A real shell pipeline leaves the installer's stdin attached to curl.
+    // script gives it a controlling terminal just as a person's shell does;
+    // its BSD and GNU command-line forms differ.
+    const pipeline = (tty, installArgs = [], extra = {}) => {
+      rmSync(receipt, { force: true });
+      const line = `curl -fsSL https://tenjin.sh/install.sh | sh -s -- ${installArgs.map(quote).join(' ')}`;
+      return spawnSync(
+        tty ? 'script' : 'sh',
+        tty
+          ? process.platform === 'darwin'
+            ? ['-q', '/dev/null', 'sh', '-c', line]
+            : ['-q', '-e', '-c', line, '/dev/null']
+          : ['-c', line],
+        {
+          env: { ...env, ...extra },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          encoding: 'utf8',
+          timeout: 60000,
+        },
+      );
+    };
+    for (const [tty, installArgs] of [
+      [false, []],
+      [true, []],
+      [true, ['--yes', '--harness', 'codex']],
+      [true, ['--json']],
+    ]) {
+      const piped = pipeline(tty, installArgs);
+      if (piped.status !== 0)
+        throw new Error(`Piped installer failed: ${piped.error ?? piped.stderr + piped.stdout}`);
+      const result = JSON.parse(readFileSync(receipt, 'utf8'));
+      if (result.stdinTTY !== tty || result.stdoutTTY !== tty)
+        throw new Error(`Piped installer lost terminal input: ${JSON.stringify(result)}`);
+      if (JSON.stringify(result.args) !== JSON.stringify(['install', ...installArgs]))
+        throw new Error(`Piped installer lost arguments: ${JSON.stringify(result.args)}`);
+      if (existsSync(result.archive)) throw new Error('Piped installer left its archive behind');
+      console.log(
+        `installer-smoke: curl | sh ${tty ? 'terminal' : 'headless'} ${installArgs.join(' ')}: stdinTTY=${result.stdinTTY}, stdoutTTY=${result.stdoutTTY}`,
+      );
+    }
+    for (const tty of [false, true]) {
+      const failed = pipeline(tty, [], { TENJIN_SMOKE_EXIT: '7' });
+      if (failed.status !== 7 || existsSync(receipt))
+        throw new Error(`Piped installer lost CLI failure status: ${failed.status}`);
+    }
+    const corrupt = pipeline(true, [], { TENJIN_SMOKE_CORRUPT: 'nodejs.org' });
+    if (corrupt.status === 0 || existsSync(receipt))
+      throw new Error('Piped installer let a corrupt Node download reach the CLI');
     for (const libc of ['musl', 'glibc 2.17']) {
       const failed = run({ TENJIN_SMOKE_OS: 'Linux', TENJIN_SMOKE_LIBC: libc });
       if (failed.status === 0 || existsSync(receipt))

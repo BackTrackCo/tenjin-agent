@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeUpdate, readUpdateSignal, resolveTarget } from './update-check';
 import { updateCheckPath } from './paths';
-import type { Io } from './output';
+import { captureIo } from '../context-test-utils';
 
 let dir: string;
 beforeEach(async () => {
@@ -14,20 +14,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
-
-function captureIo(isTTY: boolean) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const mk = (sink: string[]) =>
-    ({
-      write: (chunk: string | Uint8Array) => {
-        sink.push(chunk.toString());
-        return true;
-      },
-    }) as unknown as NodeJS.WritableStream;
-  const io: Io = { stdout: mk(out), stderr: mk(err), isTTY };
-  return { io, stdout: () => out.join(''), stderr: () => err.join('') };
-}
 
 /** A registry stub that counts calls, so "did not fetch" is assertable. */
 function registry(tags: Record<string, string>) {

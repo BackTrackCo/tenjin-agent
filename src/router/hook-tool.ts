@@ -42,10 +42,6 @@ export function hookToolInput(kind: HookKind): Record<string, string> {
 /** Every field any leg sends, for the tool's input schema. */
 export const HOOK_TOOL_FIELDS: readonly string[] = [...new Set(Object.values(FIELDS).flat())];
 
-export function isHookKind(value: unknown): value is HookKind {
-  return typeof value === 'string' && (HOOK_KINDS as readonly string[]).includes(value);
-}
-
 /**
  * The harness event from the tool's arguments: empty fields dropped (the
  * event did not carry them), the JSON ones parsed back. A JSON field that does

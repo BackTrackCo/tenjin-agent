@@ -4,21 +4,7 @@ import { emitFailure, emitNotice, emitSuccess, normalizeError } from './output';
 import { colorCapable, sanitizeForTerminal } from './output';
 import { CliError } from './errors';
 import { SCHEMA_VERSION } from '../schemas';
-import type { Io } from './output';
-
-function captureIo(isTTY: boolean) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const mk = (sink: string[]) =>
-    ({
-      write: (chunk: string | Uint8Array) => {
-        sink.push(chunk.toString());
-        return true;
-      },
-    }) as unknown as NodeJS.WritableStream;
-  const io: Io = { stdout: mk(out), stderr: mk(err), isTTY };
-  return { io, stdout: () => out.join(''), stderr: () => err.join('') };
-}
+import { captureIo } from '../context-test-utils';
 
 describe('emitSuccess', () => {
   it('writes exactly one JSON success envelope with schemaVersion', () => {

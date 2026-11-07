@@ -6,11 +6,11 @@ import { CliError } from './errors';
 import { proxyVariable } from './env-proxy';
 
 /**
- * WHAT THE RUNTIME DOWNLOADS, AND HOW: Node's own release archive and the npm
- * tarball of a tenjin-cli version, over https only, streamed to disk while
- * hashed, capped in size and time, and unpacked by the system's `tar` in exec
- * form. The checksums themselves are the caller's: the pin in `package.json`
- * for Node, the registry's `dist.integrity` for a tarball.
+ * What the runtime downloads, and how: Node's release archive and a tenjin-cli
+ * npm tarball, over https only, hashed while streamed to disk, capped in size
+ * and time, and unpacked by the system's `tar` in exec form. The checksums are
+ * the caller's: the pin in `package.json` for Node, `dist.integrity` for a
+ * tarball.
  */
 
 /** The oldest glibc Node 24's prebuilt Linux binaries run on. */
@@ -306,11 +306,10 @@ const spawnTar: ExtractSpawn = (command, args, o) =>
  * (Git's GNU tar, earlier on many PATHs, does not). `member` limits it to one
  * file, `strip` drops leading folders. A non-zero exit throws with what tar said.
  *
- * TAR RUNS IN THE ARCHIVE'S FOLDER and is given names relative to it. bsdtar
- * reads its argv in the ANSI code page, so a user folder named outside it
- * (Cyrillic on cp1252, an emoji) would reach it as `?`; the working directory
- * goes to Windows as a wide string, and the names it is given are the
- * runtime's own ASCII ones.
+ * Tar runs in the archive's folder with names relative to it: bsdtar reads argv
+ * in the ANSI code page, so a user folder outside it (Cyrillic on cp1252, an
+ * emoji) would arrive as `?`, while the working directory goes to Windows as a
+ * wide string.
  */
 export async function extract(
   archive: string,

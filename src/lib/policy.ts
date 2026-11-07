@@ -1,7 +1,7 @@
 /**
  * Spend-policy evaluation, pure and provider-agnostic. The wallet provider layer
- * (lib/wallet/spend.ts) owns the ledger and calls this; a future hosted provider
- * (Privy, B5) reuses the same decision rules, so the knobs live in exactly one
+ * (lib/wallet/spend.ts) owns the ledger and calls this; a hosted provider
+ * would reuse the same decision rules, so the knobs live in exactly one
  * place. Nothing here does IO, the caller supplies the already-spent total and
  * decides how to satisfy a `confirm` decision (a `--yes`, a TTY prompt, or a
  * non-interactive refusal).

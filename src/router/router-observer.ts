@@ -26,7 +26,7 @@ import { stillLockedSentence, WALLET_UNLOCKED } from './wallet-reasons';
  *   unlocked." after a repair or an earlier block, a still-locked line when a
  *   repair did not take, and the payer provider's wrong-variable warning.
  *
- * A HEALTH-CHECK ROUTER IS NOT A SESSION (B2). `claude mcp get` and `claude mcp
+ * A health-check router is not a session: `claude mcp get` and `claude mcp
  * list` start a `tenjin mcp` that answers `tools/list` and exits. It prewarms
  * like any other, and its observation says what the prewarm saw, but it stays
  * `servedSession: false` and NEVER reads or writes unlock-state: otherwise a

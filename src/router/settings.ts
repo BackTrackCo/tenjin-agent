@@ -21,8 +21,8 @@ import {
 } from '../lib/settings';
 
 /**
- * THE ONE READER OF THE ROUTER'S OWN KEYS, `router.enabled` and
- * `router.context`. Both hooks, the `request` tool, doctor, the status line and
+ * THE ONE READER OF THE ROUTER'S OWN KEYS, `router.enabled`,
+ * `router.context` and `router.improve`. Both hooks, the `request` tool, doctor, the status line and
  * `tenjin config` call {@link routerSettings} first, and nothing reads a router
  * key any other way.
  *
@@ -42,6 +42,11 @@ import {
  *
  * ONE PARSER. The global block is the one `loadRawConfig` already validated,
  * and a project file goes through `parseRouterLayer` from the same schema.
+ *
+ * `improve` IS THE GLOBAL FILE'S ALONE. It is the person's own consent for the
+ * router to keep the masked text of the turns it sees, so no project layer is
+ * read for it: a repository cannot opt anyone in, and turning it off is the
+ * one switch in `~/.tenjin/config.json`.
  */
 
 /** The committed project file and the personal one beside it. */
@@ -60,6 +65,8 @@ export interface RouterSetting<T> {
 export interface RouterSettings {
   enabled: RouterSetting<boolean>;
   context: RouterSetting<RouterContext>;
+  /** "Help improve routing": the global file's, or the default, off. */
+  improve: RouterSetting<boolean>;
 }
 
 export interface RouterSettingsInput {
@@ -91,6 +98,10 @@ export async function routerSettings(
   if (global?.context !== undefined) {
     context = { value: global.context, source: 'file', path: globalPath };
   }
+  const improve: RouterSetting<boolean> =
+    global?.improve !== undefined
+      ? { value: global.improve, source: 'file', path: globalPath }
+      : { value: CONFIG_DEFAULTS.router.improve, source: 'default' };
 
   for (const { source, path, layer } of await projectLayers(input, deps)) {
     // Every layer is a floor: a value looser than the one so far is not read.
@@ -101,7 +112,7 @@ export async function routerSettings(
       context = { value: layer.context, source, path };
     }
   }
-  return { enabled, context };
+  return { enabled, context, improve };
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];
