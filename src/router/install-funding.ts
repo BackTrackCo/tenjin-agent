@@ -143,12 +143,18 @@ export async function finishTerminalFunding(
     };
   try {
     const run = opts.fund ?? (await import('../commands/fund')).runFund;
-    const funded = await run(ctx, {
+    await run(ctx, {
       amountUsd: String(SUGGESTED_FUND_USD),
       wait: false,
       qr: false,
     });
-    return { ...result, humanLines: funded.humanLines };
+    return {
+      ...result,
+      humanLines: [
+        'Checkout link issued (printed above).',
+        'Funds not confirmed. Finish checkout, then ask your agent to check your balance before adding money again.',
+      ],
+    };
   } catch (error) {
     return {
       ...result,

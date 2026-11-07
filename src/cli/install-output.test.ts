@@ -173,7 +173,11 @@ describe('terminal installation funding through the CLI', () => {
         qr: false,
       },
     );
-    expect(out.stdout.indexOf('Installed.')).toBeLessThan(out.stdout.indexOf('Complete checkout'));
+    expect(out.stdout.indexOf('Installed.')).toBeLessThan(
+      out.stdout.indexOf('Funds not confirmed'),
+    );
+    expect(out.stdout).toContain('ask your agent to check your balance');
+    expect(out.stdout).not.toContain('`tenjin');
   });
 
   it('does not treat install --yes as consent to open checkout', async () => {

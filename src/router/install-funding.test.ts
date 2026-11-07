@@ -65,7 +65,7 @@ describe('installation funding', () => {
       }),
     );
     expect(fund).toHaveBeenCalledWith(ctx, { amountUsd: '5', wait: false, qr: false });
-    expect(out.humanLines).toEqual(['Complete checkout in your browser.']);
+    expect(out.humanLines?.join(' ')).toContain('Funds not confirmed');
     expect(result.data).toMatchObject({
       nextSteps: [
         {
@@ -131,7 +131,10 @@ describe('installation funding', () => {
     const { ctx, result, stdout } = await setup();
     const fund = vi.fn(async () => {
       expect(stdout()).toContain('Tenjin is installed.');
-      return { data: { funded: false }, humanLines: ['Complete checkout in your browser.'] };
+      return {
+        data: { funded: false },
+        humanLines: ['Check with `tenjin wallet balance` or ask your agent.'],
+      };
     });
     const out = await finishTerminalFunding(result, ctx, {
       isInteractive: true,
@@ -139,7 +142,9 @@ describe('installation funding', () => {
       fund,
     });
     expect(fund).toHaveBeenCalledWith(ctx, { amountUsd: '5', wait: false, qr: false });
-    expect(out.humanLines).toEqual(['Complete checkout in your browser.']);
+    expect(out.humanLines?.join(' ')).toContain('ask your agent to check your balance');
+    expect(out.humanLines?.join(' ')).toContain('before adding money again');
+    expect(out.humanLines?.join(' ')).not.toContain('`tenjin');
   });
 
   it('does not turn --yes into checkout consent', async () => {
