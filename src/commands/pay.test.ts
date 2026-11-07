@@ -13,6 +13,7 @@ import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
 import { createQuote } from '../lib/spend-quotes';
 import { saveSweepListings } from '../lib/bazaar';
 import { CliError } from '../lib/errors';
+import lowFundsFixtures from '../lib/fixtures/low-funds.json';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
@@ -1230,25 +1231,29 @@ describe('runPay, bazaar lane', () => {
   async function rejectedWith(
     settle: Record<string, unknown> | string | undefined,
     header = 'PAYMENT-RESPONSE',
+    response?: Response,
   ): Promise<CliError> {
     await writeConfig();
     stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
     const fixture = buildPaymentRequired();
-    const { fetch } = scriptedFetch([
+    const { fetch, calls } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
-      json(
-        402,
-        {},
-        typeof settle === 'string'
-          ? { [header]: settle }
-          : settle !== undefined
-            ? { [header]: Buffer.from(JSON.stringify(settle)).toString('base64') }
-            : {},
-      ),
+      response ??
+        json(
+          402,
+          {},
+          typeof settle === 'string'
+            ? { [header]: settle }
+            : settle !== undefined
+              ? { [header]: Buffer.from(JSON.stringify(settle)).toString('base64') }
+              : {},
+        ),
     ]);
     const authorizer = fakeAuthorizer('allow');
+    const readBalance = vi.fn(async () => 0n);
     const err = await runPay({ url: FOREIGN_URL }, makeCtx(), {
       ...PUBLIC_DNS,
+      readBalance,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer,
@@ -1258,10 +1263,35 @@ describe('runPay, bazaar lane', () => {
     );
     expect(err).toBeInstanceOf(CliError);
     // Whatever the seller says, the signed authorization left: counted.
+    expect(calls).toHaveLength(2);
+    expect(readBalance).not.toHaveBeenCalled();
     expect(authorizer.commit).toHaveBeenCalledOnce();
+    expect(authorizer.commit).toHaveBeenCalledWith(RESERVATION, 100000n, {
+      mode: 'manual',
+      nonce: expect.stringMatching(/^0x[0-9a-f]{64}$/),
+    });
     expect(authorizer.release).not.toHaveBeenCalled();
     return err as CliError;
   }
+
+  it.each(lowFundsFixtures)('asks for funds for the live fixture: $name', async (fixture) => {
+    const headers: Record<string, string> =
+      fixture.error === undefined
+        ? {}
+        : {
+            'PAYMENT-REQUIRED': Buffer.from(JSON.stringify({ error: fixture.error })).toString(
+              'base64',
+            ),
+          };
+    const err = await rejectedWith(undefined, 'PAYMENT-RESPONSE', json(402, fixture.body, headers));
+    expect(err.code).toBe('PAYMENT_FAILED');
+    expect(err.message).toBe('The wallet does not hold enough USDC for this payment.');
+    expect(err.fix).toContain('Ask the person to add funds with `tenjin wallet fund`');
+    expect(err.fix).toContain('stays counted until it expires');
+    expect(err.fix).toContain('Do not simply retry');
+    expect(err.fix).not.toContain('different service');
+    expect(err.details).toMatchObject({ amountAtomic: '100000', settlement: 'unknown' });
+  });
 
   // A seller whose facilitator refused the settle: a 402 with an empty `{}`
   // body, and the reason only in the payment-response header.

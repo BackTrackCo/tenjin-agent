@@ -215,6 +215,12 @@ describe('RoutingPayer', () => {
   it.each([
     'invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less than deposit amount 50000',
     'invalid_batch_settlement_evm_insufficient_balance',
+    'insufficient_funds',
+    'invalid_exact_evm_insufficient_balance',
+    'invalid_exact_evm_insufficient_funds',
+    'permit2_insufficient_balance',
+    'facilitator_prefixed_insufficient_balance',
+    'Facilitator verify failed (400): {"invalidReason":"insufficient_funds","isValid":false}',
   ])('skips as wallet_low on the facilitator reason %j', async (error) => {
     const router = new FakeRouter();
     router.insufficientError = error;
@@ -239,6 +245,11 @@ describe('RoutingPayer', () => {
   it.each([
     'invalid_batch_settlement_evm_invalid_signature',
     'invalid_signature: not insufficient_balance',
+    'invalid_exact_evm_failed_to_get_balance',
+    'erc20_approval_insufficient_eth_for_gas',
+    'invalid_exact_solana_payload_amount_insufficient',
+    'batch_settlement_refund_amount_exceeds_balance',
+    'A message quoting insufficient_funds',
   ])('skips a deposit refused for %j as payment_failed, with no retry', async (error) => {
     const router = new FakeRouter();
     router.depositError = error;

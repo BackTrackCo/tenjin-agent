@@ -5,6 +5,7 @@ import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaa
 import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
+import { paymentShortOfFunds } from '../lib/payment-failure';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
 import type { FetchJsonFailure, HttpResponse } from '../lib/http';
@@ -628,16 +629,20 @@ async function executePay(
   // from the payment-response header: its body can be an empty `{}`. The
   // authorization stays valid until it expires, so settlement is still unknown.
   const refusal = settlementRefusal(paid);
+  const lowFunds = paymentShortOfFunds(paid);
   throw new CliError(
     'PAYMENT_FAILED',
-    refusal !== undefined
-      ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
-      : paid.status === 402
-        ? 'Payment was not accepted by the endpoint.'
-        : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
+    lowFunds
+      ? 'The wallet does not hold enough USDC for this payment.'
+      : refusal !== undefined
+        ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
+        : paid.status === 402
+          ? 'Payment was not accepted by the endpoint.'
+          : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix:
-        refusal !== undefined
+      fix: lowFunds
+        ? 'Ask the person to add funds with `tenjin wallet fund`. The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.'
+        : refusal !== undefined
           ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
           : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk

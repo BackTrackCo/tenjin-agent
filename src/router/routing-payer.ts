@@ -11,6 +11,7 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
 import type { SpendPolicy } from '../lib/policy';
+import { paymentShortOfFunds, reasonCode } from '../lib/payment-failure';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
@@ -39,6 +40,8 @@ import {
 import type { RouterObservation } from './router-observation';
 import { quoteOf, routingOffers } from './routing-quote';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
+
+export { reasonCode } from '../lib/payment-failure';
 
 /**
  * THE ROUTING FEE, PAID THE WAY THE SDK'S OWN CLIENT PAYS. It runs inside
@@ -688,7 +691,7 @@ export class RoutingPayer {
       throw new RouteSkipped(
         error === CHANNEL_BUSY_ERROR
           ? CHANNEL_BUSY
-          : isShortOfFunds(error)
+          : paymentShortOfFunds(response)
             ? 'wallet_low'
             : PAYMENT_FAILED,
         answered,
@@ -1060,28 +1063,6 @@ function signObservation(v: SignVerdict): RouterObservation['sign'] {
     return { status: 'blocked', reason: v.reason, detail: v.detail, fix: v.fix };
   }
   return { status: 'unknown', reason: v.reason, detail: v.detail };
-}
-
-/**
- * The facilitator's refusal of a deposit the wallet cannot cover. The SDK names
- * it `invalid_batch_settlement_evm_insufficient_balance`; the code's suffix is
- * matched, since a facilitator may prefix it differently.
- */
-function isShortOfFunds(code: string | undefined): boolean {
-  return code?.endsWith('insufficient_balance') === true;
-}
-
-/**
- * THE REASON CODE of a 402's `error`, without its detail. The SDK's server
- * answers a refused payment as `<code>: <detail>` (for example
- * `invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less
- * than deposit amount 30000`), and the detail is free text that could name
- * any code, so only the part before the first `:` is compared.
- */
-export function reasonCode(error: string | undefined): string | undefined {
-  if (error === undefined) return undefined;
-  const colon = error.indexOf(':');
-  return (colon === -1 ? error : error.slice(0, colon)).trim();
 }
 
 /** The reason code ({@link reasonCode}) a 402's payment-required header carries, if any. */
