@@ -8,7 +8,7 @@
 
 import { readFile, rm } from 'node:fs/promises';
 import { writeFileAtomic } from './atomic-json';
-import { balanceCachePath } from './paths';
+import { balanceCachePath, lowBalancePath } from './paths';
 
 // Values mirror the app's lib/chain.ts Base mainnet entry (chain 8453).
 export const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -116,9 +116,68 @@ function sameUrl(a: string, b: string): boolean {
  */
 export const LAST_KNOWN_BALANCE_MS = 60_000;
 
-/** An explicit balance check or observed funding makes a hook's cached balance obsolete. */
+/**
+ * An explicit balance check or observed funding makes a hook's cached balance
+ * obsolete, and a wallet remembered as too low to route ({@link rememberLowBalance}).
+ */
 export async function forgetRememberedBalance(dataDir: string): Promise<void> {
   await rm(balanceCachePath(dataDir), { force: true }).catch(() => undefined);
+  await forgetLowBalance(dataDir);
+}
+
+/**
+ * A WALLET KNOWN TOO LOW TO ROUTE. The routing payer writes it when it reads
+ * this address's balance below the deposit the router's 402 asked it to set
+ * aside (`wallet_low`). While it stands, a hook leg sends nothing, where it
+ * would send the call, wait for the 402, read the balance and be refused again
+ * (`routing-payer.ts`). It holds for the wallet and the router host it was
+ * read for, and only stops calls: nothing pays from it.
+ */
+export async function rememberLowBalance(
+  dataDir: string,
+  key: { address: string; router: string },
+  at: number,
+): Promise<void> {
+  const record = { version: 1, address: key.address.toLowerCase(), router: key.router, at };
+  try {
+    await writeFileAtomic(lowBalancePath(dataDir), JSON.stringify(record), {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+  } catch {
+    // A record that cannot be written costs the next call its round trip.
+  }
+}
+
+/** Whether {@link rememberLowBalance} wrote this wallet and router under
+ *  `maxAgeMs` before `now`. An unreadable record reads as absent. Never throws. */
+export async function recallLowBalance(
+  dataDir: string,
+  key: { address: string; router: string },
+  now: number,
+  maxAgeMs: number,
+): Promise<boolean> {
+  try {
+    const row = JSON.parse(await readFile(lowBalancePath(dataDir), 'utf8')) as Record<
+      string,
+      unknown
+    > | null;
+    return (
+      row?.version === 1 &&
+      row.address === key.address.toLowerCase() &&
+      row.router === key.router &&
+      typeof row.at === 'number' &&
+      now - row.at >= 0 &&
+      now - row.at < maxAgeMs
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Ends {@link rememberLowBalance}'s record. Never throws. */
+export async function forgetLowBalance(dataDir: string): Promise<void> {
+  await rm(lowBalancePath(dataDir), { force: true }).catch(() => undefined);
 }
 
 /**

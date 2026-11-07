@@ -16,7 +16,11 @@ import { readPassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { readUnlockRecord } from '../router/router-observation';
 import { payerDir } from '../router/fee';
-import { rememberingBalanceReader } from '../lib/usdc-balance';
+import {
+  recallLowBalance,
+  rememberLowBalance,
+  rememberingBalanceReader,
+} from '../lib/usdc-balance';
 
 // Balance is the only path that hits the chain; mock the RPC read so the whole
 // suite stays offline and deterministic. viem's key derivation stays real.
@@ -1151,11 +1155,17 @@ describe('runWalletBalance', () => {
     const read = rememberingBalanceReader(dataDir, { read: async () => onChain });
     const check = () => read(address, 'https://rpc.example', { timeoutMs: 100 });
     expect(await check()).toBe(0n);
+    // The routing payer found the wallet too low, so the hook legs send nothing.
+    const low = { address, router: 'tenjin.sh' };
+    const now = 1_800_000_000_000;
+    await rememberLowBalance(dataDir, low, now);
+    expect(await recallLowBalance(dataDir, low, now, 60_000)).toBe(true);
     onChain = 5_000_000n;
     expect(await check()).toBe(0n);
     mockedBalance.mockResolvedValue(onChain);
     await runWalletBalance(makeCtx(), { provider });
     expect(await check()).toBe(onChain);
+    expect(await recallLowBalance(dataDir, low, now, 60_000)).toBe(false);
   });
 
   it('returns dual-form money from the on-chain read', async () => {

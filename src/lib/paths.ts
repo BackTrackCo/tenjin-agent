@@ -101,6 +101,14 @@ export function balanceCachePath(dir: string = dataDir()): string {
 }
 
 /**
+ * A wallet the routing payer found too low for the routing deposit
+ * (lib/usdc-balance `rememberLowBalance`). Forgotten with the balance cache.
+ */
+export function lowBalancePath(dir: string = dataDir()): string {
+  return join(dir, 'balance-low.json');
+}
+
+/**
  * Where the once-a-day "a newer tenjin-cli exists" check caches the registry
  * answer. A pure cache: nothing here is authoritative, so an unreadable file is
  * simply re-fetched.

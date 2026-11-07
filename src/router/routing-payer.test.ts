@@ -8,6 +8,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliError } from '../lib/errors';
 import type { SpendPolicy } from '../lib/policy';
+import { forgetRememberedBalance } from '../lib/usdc-balance';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
@@ -29,6 +30,7 @@ import { WALLET_REASONS } from './wallet-reasons';
 import {
   chainReader,
   DEPOSIT_MULTIPLIER,
+  KNOWN_LOW_RECHECK_MS,
   PAID_CALL_RESERVE_MS,
   RoutingPayer,
   RPC_TIMEOUT_MS,
@@ -119,20 +121,27 @@ const ctx = (): CommandContext => ({
   },
 });
 
-/** One routing call the way the hook and the tool make it. */
-async function routeOnce(p: RoutingPayer, router: FakeRouter) {
+/** One routing call the way the hook and the tool make it; `HOOK_LEG` takes
+ *  the hook legs' route, as `tenjin mcp` wires it. */
+async function routeOnce(
+  p: RoutingPayer,
+  router: FakeRouter,
+  opts: { trustKnownLow?: boolean; baseUrl?: string } = {},
+) {
+  const baseUrl = opts.baseUrl ?? BASE;
   return requestDecision(
     'tool',
     { query: 'q' },
     {
       ctx: ctx(),
-      baseUrl: BASE,
+      baseUrl,
       fetchImpl: router.fetch,
       timeoutMs: 3_500,
-      route: p.routeFor(BASE),
+      route: p.routeFor(baseUrl, { trustKnownLow: opts.trustKnownLow === true }),
     },
   );
 }
+const HOOK_LEG = { trustKnownLow: true };
 
 /** Why the payer did not pay a call, or undefined for a call it answered. */
 function unpaidWhy(outcome: Awaited<ReturnType<typeof routeOnce>>): string | undefined {
@@ -1325,5 +1334,90 @@ describe('RoutingPayer and the wallet verdict', () => {
     const offSeen: PayerObservation[] = [];
     await routeOnce(payer(off, { observe: (u) => offSeen.push(u) }), off);
     expect(offSeen).toEqual([]);
+  });
+});
+
+describe('RoutingPayer and a wallet known too low for the deposit', () => {
+  const sent = (router: FakeRouter) =>
+    router.log.filter((l) => l.startsWith('POST /api/x402-router/route')).length;
+
+  it('sends nothing from a hook leg while the wallet is known too low, and asks again once the window ends', async () => {
+    const router = new FakeRouter();
+    let reads = 0;
+    const p = payer(router, { walletBalance: async () => ((reads += 1), 20_000n) });
+    expect(skippedWhy(await routeOnce(p, router, HOOK_LEG), router)).toBe('wallet_low');
+    expect(sent(router)).toBe(1);
+    expect(reads).toBe(1);
+    // Every prompt and search after it: no 402 to wait for, no balance read.
+    clock += KNOWN_LOW_RECHECK_MS - 1;
+    expect(skippedWhy(await routeOnce(p, router, HOOK_LEG), router)).toBe('wallet_low');
+    expect(sent(router)).toBe(1);
+    expect(reads).toBe(1);
+    clock += 1;
+    expect(skippedWhy(await routeOnce(p, router, HOOK_LEG), router)).toBe('wallet_low');
+    expect(sent(router)).toBe(2);
+    expect(reads).toBe(2);
+  });
+
+  it('routes the next hook leg once `tenjin wallet balance` or an arrival `tenjin wallet fund` saw forgets it', async () => {
+    const router = new FakeRouter();
+    let balance = 20_000n;
+    const p = payer(router, { walletBalance: async () => balance });
+    expect(skippedWhy(await routeOnce(p, router, HOOK_LEG), router)).toBe('wallet_low');
+    balance = 10_000_000n;
+    await forgetRememberedBalance(dir);
+    expect((await routeOnce(p, router, HOOK_LEG)).status).toBe('decided');
+    expect(router.deposits).toBe(1);
+  });
+
+  it('still asks for the request tool, and a lookup it pays ends the record for the hook legs', async () => {
+    const router = new FakeRouter();
+    let balance = 20_000n;
+    const p = payer(router, { walletBalance: async () => balance });
+    expect(skippedWhy(await routeOnce(p, router, HOOK_LEG), router)).toBe('wallet_low');
+    // USDC sent straight to the address, with no command run.
+    balance = 10_000_000n;
+    expect(skippedWhy(await routeOnce(p, router, HOOK_LEG), router)).toBe('wallet_low');
+    expect(sent(router)).toBe(1);
+    // An explicit lookup sees the wallet as it is now.
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(router.deposits).toBe(1);
+    expect((await routeOnce(p, router, HOOK_LEG)).status).toBe('decided');
+    expect(router.settledFees).toBe(2);
+  });
+
+  it('holds for every tenjin mcp on the machine, for the wallet and router it was read for only', async () => {
+    const router = new FakeRouter();
+    await routeOnce(payer(router, { walletAtomic: 20_000n }), router, HOOK_LEG);
+    expect(sent(router)).toBe(1);
+    // Another session's server, its prewarm settled on the same wallet.
+    const same = payer(router, { walletAtomic: 20_000n });
+    await same.prewarm();
+    expect(skippedWhy(await routeOnce(same, router, HOOK_LEG), router)).toBe('wallet_low');
+    expect(sent(router)).toBe(1);
+    // Another router, and another wallet, are asked as before.
+    await routeOnce(same, router, { ...HOOK_LEG, baseUrl: 'https://other-router.test' });
+    expect(sent(router)).toBe(2);
+    const other = new RoutingPayer(
+      payerDeps(router, dir, privateKeyToAccount(generatePrivateKey()), {
+        walletBalance: async () => 20_000n,
+        now: () => clock,
+      }),
+    );
+    await other.prewarm();
+    await routeOnce(other, router, HOOK_LEG);
+    expect(sent(router)).toBe(3);
+  });
+
+  it('asks again at once when the wallet files change, since a replaced wallet is not the one read', async () => {
+    const router = new FakeRouter();
+    let stamp = '1:1';
+    const p = payer(router, { walletAtomic: 20_000n, unlockStamp: async () => stamp });
+    await routeOnce(p, router, HOOK_LEG);
+    await routeOnce(p, router, HOOK_LEG);
+    expect(sent(router)).toBe(1);
+    stamp = '2:1';
+    await routeOnce(p, router, HOOK_LEG);
+    expect(sent(router)).toBe(2);
   });
 });

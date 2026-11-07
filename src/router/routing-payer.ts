@@ -11,6 +11,7 @@ import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { httpRequest, type HttpRequestOptions, type HttpResult } from '../lib/http';
 import type { SpendPolicy } from '../lib/policy';
+import { forgetLowBalance, recallLowBalance, rememberLowBalance } from '../lib/usdc-balance';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
@@ -103,6 +104,12 @@ import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
  *   passphrase costs no scrypt on every prompt; once this process has seen
  *   the server ask for the fee, the call is not even sent. An unknown answer
  *   is never remembered as a block: the next call tries again.
+ * - A WALLET TOO LOW FOR THE DEPOSIT is remembered too, on disk, so every
+ *   `tenjin mcp` on the machine reads it ({@link KNOWN_LOW_RECHECK_MS}). A
+ *   hook leg then sends nothing: it would only wait for the 402 and a balance
+ *   read to be refused again, and an empty wallet paid that on every prompt
+ *   and every search. The `request` tool asks as before, so an explicit
+ *   lookup always sees the wallet as it is now.
  * - THE UNLOCK IS ONE FLIGHT, BOUNDED IN ITS WAIT, NEVER IN ITS READ. Every
  *   caller (and the prewarm) awaits the same unlock, each only up to its own
  *   call's budget less the paid call's reserve (`unlock_timeout`). Nothing
@@ -146,6 +153,14 @@ const FEE_SEEN_TTL_MS = 60 * 60_000;
  * `tenjin wallet repair` is picked up at once, anything else within a minute.
  */
 export const SIGNER_RECHECK_MS = 60_000;
+/**
+ * HOW LONG A HOOK LEG BELIEVES A WALLET TOO LOW FOR THE ROUTING DEPOSIT
+ * (`wallet_low`) without asking again. `tenjin wallet balance`, and funds
+ * `tenjin wallet fund` sees arrive, end it at once (`forgetRememberedBalance`),
+ * as does any paid call that goes through; USDC sent to the wallet any other
+ * way is seen within this window.
+ */
+export const KNOWN_LOW_RECHECK_MS = 10 * 60_000;
 /**
  * THE PAID CALL'S SHARE OF ITS BUDGET: a call waiting on an unlock stops
  * waiting this long before its budget ends, since an unlock that lands later
@@ -367,10 +382,14 @@ export class RoutingPayer {
    * THAT ROUTE IS PAID: a URL on any other origin or path is refused before
    * anything is sent, so the routing fee's ceiling and channel never meet a
    * provider's 402.
+   *
+   * `trustKnownLow`: the hook legs' route, which sends nothing for a wallet
+   * known too low for the deposit ({@link KNOWN_LOW_RECHECK_MS}).
    */
-  routeFor(baseUrl: string): DecisionRoute {
+  routeFor(baseUrl: string, opts: { trustKnownLow?: boolean } = {}): DecisionRoute {
     const calls: Call[] = [];
     const route = new URL(ROUTE_PAID_PATH, baseUrl);
+    const trustKnownLow = opts.trustKnownLow === true;
     return {
       send: (url, options) => {
         const target = new URL(url);
@@ -381,7 +400,7 @@ export class RoutingPayer {
         const sent = this.now();
         const until = sent + options.timeoutMs;
         return this.turn(
-          () => this.noted(sent, () => this.pay(url, options, until, calls)),
+          () => this.noted(sent, () => this.pay(url, options, until, calls, trustKnownLow)),
           until,
           sent,
         );
@@ -567,6 +586,7 @@ export class RoutingPayer {
     options: HttpRequestOptions,
     until: number,
     calls: Call[],
+    trustKnownLow: boolean,
   ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
@@ -589,6 +609,15 @@ export class RoutingPayer {
         call.skipped = blocked.reason;
         throw new RouteSkipped(blocked.reason);
       }
+    }
+    // A WALLET KNOWN TOO LOW FOR THE DEPOSIT: the 402, the balance read and
+    // the refusal are certain, so a hook leg sends nothing. The record was
+    // written right after this router asked for the fee, so it also says the
+    // router charges.
+    if (trustKnownLow && (await this.knownLow(call.host))) {
+      this.last = call;
+      call.skipped = 'wallet_low';
+      throw new RouteSkipped('wallet_low');
     }
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const askFirst: typeof fetch = async (input, init) => {
@@ -693,9 +722,12 @@ export class RoutingPayer {
       );
     }
     if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED, answered);
-    // A fee paid and answered: routing works, whatever was said before.
-    if (call.paid && response.status < 400)
+    // A fee paid and answered: routing works, whatever was said before, and
+    // the wallet is no longer known too low.
+    if (call.paid && response.status < 400) {
       this.report({ routing: { status: 'ready', at: this.now() } });
+      await forgetLowBalance(this.deps.dataDir);
+    }
     return response;
   }
 
@@ -770,7 +802,14 @@ export class RoutingPayer {
           : MAX_CHANNEL_DEPOSIT_ATOMIC,
       neededAtomic: BigInt(ctx.minimumDepositAmount),
     });
-    if (wallet !== null && wallet < amount) this.refuse('wallet_low');
+    if (wallet !== null && wallet < amount) {
+      await rememberLowBalance(
+        this.deps.dataDir,
+        { address: payer, router: call.host },
+        this.now(),
+      );
+      this.refuse('wallet_low');
+    }
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',
@@ -923,6 +962,24 @@ export class RoutingPayer {
     const memo = this.memo;
     if (memo === null || !isDefiniteBlock(memo.verdict)) return null;
     return (await this.freshMemo(memo)) ? memo.verdict : null;
+  }
+
+  /**
+   * Whether the wallet the last unlock opened is known too low for the
+   * deposit on `router`, read within {@link KNOWN_LOW_RECHECK_MS}. Only while
+   * its files are unchanged since that unlock: a replaced wallet is not the
+   * one that was read, and before any unlock nothing is known.
+   */
+  private async knownLow(router: string): Promise<boolean> {
+    const memo = this.memo;
+    if (memo?.verdict.status !== 'ready' || memo.address === undefined) return false;
+    if ((await this.stamp()) !== memo.stamp) return false;
+    return recallLowBalance(
+      this.deps.dataDir,
+      { address: memo.address, router },
+      this.now(),
+      KNOWN_LOW_RECHECK_MS,
+    );
   }
 
   /** Whether the memo is a fresh ready, so a handed-off signer is still this wallet's. */

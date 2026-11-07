@@ -13,6 +13,7 @@ import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
 import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
+import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import {
   ASK_FOR_REPAIR,
@@ -114,7 +115,8 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
     // A key the hooks' file facts call valid, so an offer is gated on the fee
     // alone here; the signer's own gating is `hooks.test.ts`'s.
     env: { TENJIN_WALLET_KEY: KEY },
-    ...(p !== undefined ? { route: p.routeFor.bind(p) } : {}),
+    // The hook legs' route, as `tenjin mcp` wires it.
+    ...(p !== undefined ? { route: (b: string) => p.routeFor(b, { trustKnownLow: true }) } : {}),
   };
 }
 
@@ -563,7 +565,7 @@ describe('wallet notices', () => {
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
-  it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
+  it('says the wallet is funded once, on the first prompt after `tenjin wallet balance` sees the funds', async () => {
     const fake = new FakeRouter();
     let balance = 20_000n;
     const p = payer(fake, { walletBalance: async () => balance });
@@ -572,8 +574,23 @@ describe('wallet notices', () => {
     expect(systemMessageOf(low)).toContain('Your usual tools still work.');
     expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
     balance = 10_000_000n;
+    // What `tenjin wallet balance` does, and `tenjin wallet fund` once the funds arrive.
+    await forgetRememberedBalance(dir);
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
+  });
+
+  it('sends nothing more for a wallet known too low, and still tells each new session once', async () => {
+    const fake = new FakeRouter();
+    fake.body = OFFER;
+    const p = payer(fake, { walletBalance: async () => 20_000n });
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(first)).toContain('could not pay');
+    expect(await runHookKind('prompt', prompt(), deps(fake.fetch, p))).toBeNull();
+    const other = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
+    expect(systemMessageOf(other)).toContain('could not pay');
+    expect(contextOf(other)).toBeUndefined();
+    expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
   });
 
   it('says nothing for an unlock that ran out of time', async () => {
