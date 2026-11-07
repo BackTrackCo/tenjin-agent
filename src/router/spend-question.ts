@@ -42,7 +42,7 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 }
 
 /** Setup states the current price; payment checks enforce the ceiling in fee.ts. */
-export const ROUTING_FEE_TERMS = `Paid routing currently costs $0.001 per call. Tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} for routing; this counts toward your limits once.`;
+export const ROUTING_FEE_TERMS = `Paid routing currently costs $0.001 per call. Tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for routing; each deposit counts toward your limits once.`;
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either answer also approves the routing fee.';
