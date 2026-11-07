@@ -4,7 +4,7 @@ Tenjin suggests tools for your task and runs chosen tools through a local `route
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a link to open when ready. A terminal offers **Add $5**, which opens checkout, or **Not now** to skip funding. Paid tools need funds before they can run. `--yes` accepts spending defaults; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link. If it expires, ask for a new one. A terminal offers **Add $5**, which opens checkout, or **Not now** to skip funding. Paid tools need funds before they can run. `--yes` accepts spending defaults; it never consents to checkout.
 
 Use the activation step the installer returns:
 

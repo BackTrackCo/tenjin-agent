@@ -229,7 +229,7 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({}, humanCtx(), deps({ isInteractive: false }));
     expect(result.humanLines?.[0]).toContain('Tenjin is set up for Claude Code');
     const text = result.humanLines!.join('\n');
-    expect(text).toContain('Tenjin sends relevant task context');
+    expect(text).toContain('task context and your wallet address are sent to Tenjin for routing');
     expect(text).toContain('https://tenjin.sh/privacy');
     expect(text).toContain('https://tenjin.sh/terms');
     expect(text).toContain('daily budget $5 shared across chats');
@@ -1187,6 +1187,7 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(fund).not.toHaveProperty('url');
     expect(fund.next).toContain('without opening a browser or asking another funding question');
     expect(fund.next).toContain('show checkoutUrl as a clickable link');
+    expect(fund.next).toContain('on request, rerun the same command for a new link');
     expect(fund.next).toContain('the person decides whether to click and confirms payment');
     expect(fund.next).toContain("option's command yourself once");
     expect(fund.next).toContain('Do not wait for payment.');

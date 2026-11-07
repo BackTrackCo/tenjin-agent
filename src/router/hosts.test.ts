@@ -308,6 +308,7 @@ describe('otherHostNote', () => {
     'names another detected host without a question or installation command: %j',
     async (env, other) => {
       const note = await otherHostNote({}, dir, { env, detect: both });
+      expect(note).toMatch(/^Tell the person:/);
       expect(note).toContain(`${other} is also installed.`);
       expect(note).toContain(`ask ${other} to install it.`);
       expect(note).not.toMatch(/\?|Should I|tenjin install/);

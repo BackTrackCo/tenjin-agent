@@ -178,7 +178,7 @@ export async function otherHostNote(
   const other: Harness = agent === 'claude' ? 'codex' : 'claude';
   if ((await readInstalledHosts(dataDir))?.includes(other)) return undefined;
   if (!(await (deps.detect ?? detectHosts)(env)).includes(other)) return undefined;
-  return `${LABEL[other]} is also installed. To add Tenjin there${other === 'codex' ? ' (experimental support)' : ''}, ask ${LABEL[other]} to install it.`;
+  return `Tell the person: ${LABEL[other]} is also installed. To add Tenjin there${other === 'codex' ? ' (experimental support)' : ''}, ask ${LABEL[other]} to install it.`;
 }
 
 /** The install result with `note` in its `notices` and as its last line. */

@@ -546,6 +546,20 @@ describe('doctorLines', () => {
     ]);
   });
 
+  it('reports a checked session with a locked wallet as needing attention', () => {
+    const lines = doctorLines([
+      {
+        name: 'claude session',
+        status: 'warn',
+        required: false,
+        detail: 'The running session cannot unlock the wallet.',
+        fix: 'Repair the wallet locally.',
+      },
+    ]);
+    expect(lines).toContain('Claude Code session: needs attention.');
+    expect(lines).toContain('      fix: Repair the wallet locally.');
+  });
+
   it('says all pass only when every row is ok', () => {
     const ok: RouterCheck = { name: 'node', status: 'ok', required: true, detail: 'v24' };
     expect(doctorLines([ok, ok]).at(-1)).toBe('2 checks, all pass.');

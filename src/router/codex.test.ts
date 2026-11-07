@@ -701,7 +701,9 @@ describe('Codex install, uninstall and doctor', () => {
         },
       ],
       disclosure: [
-        expect.stringContaining('Tenjin sends relevant task context'),
+        expect.stringContaining(
+          'task context and your wallet address are sent to Tenjin for routing',
+        ),
         expect.stringContaining('https://tenjin.sh/privacy'),
       ],
     });
