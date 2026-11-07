@@ -83,8 +83,8 @@ export const DEFINITE_UNLOCK: ReadonlySet<UnlockReason> = new Set<UnlockReason>(
 export const ENV_PASSPHRASE_WRONG = 'TENJIN_WALLET_PASSPHRASE is set but wrong; remove it.';
 
 /**
- * Carried by every person-facing string that names `tenjin wallet repair` (B1,
- * decision 15). A passphrase never goes on a command line or into chat: repair
+ * Carried by every person-facing string that names `tenjin wallet repair`. A
+ * passphrase never goes on a command line or into chat: repair
  * asks for it at a hidden prompt, and this clause tells the person so before an
  * agent can suggest otherwise.
  */
@@ -96,7 +96,7 @@ export const REPAIR_IN_TERMINAL =
   `Run \`tenjin wallet repair\` yourself ${REPAIR_CLAUSE}.` as const;
 
 /**
- * The only fix for a keychain that exists but did not answer (S3). It never
+ * The only fix for a keychain that exists but did not answer. It never
  * points at the plaintext file or at another passphrase: a locked keychain is
  * unlocked, not routed around.
  */
@@ -104,7 +104,7 @@ export const KEYCHAIN_LOCKED_FIX =
   'Unlock your keychain (or log in to the desktop session) and retry.';
 
 /**
- * A failed FILE-store write at create or repair (decision 6). Never used for an
+ * A failed file-store write at create or repair. Never used for an
  * OS store: there is no keychain to unlock when the file could not be written.
  */
 export function FILE_STORE_FAILED_FIX(path: string): string {
@@ -116,16 +116,16 @@ export function FILE_STORE_FAILED_FIX(path: string): string {
 /** Shown once when create or repair has waited on the keychain for a second at a terminal. */
 export const KEYCHAIN_WAIT_LINE = 'Waiting for the keychain…';
 
-/** Why a passphrase went to the 0600 file: no OS store answered the probe as present (S4). */
+/** Why a passphrase went to the 0600 file: no OS store answered the probe as present. */
 export function NO_KEYRING_LINE(path: string): string {
   return `No keyring reachable from this session; passphrase saved to ${path} (readable only by you).`;
 }
 
 /**
- * THE one TENJIN_WALLET_KEY expression (S12): a 0x-prefixed 32-byte hex private
- * key, case-insensitive. Moved here from `src/lib/wallet/store.ts` unchanged, and
- * store.ts re-exports it, so the wallet layer's `loadCredential` and the
- * hook-safe `wallet-facts.ts` test exactly the same thing. Do not tighten it in
+ * The one TENJIN_WALLET_KEY expression: a 0x-prefixed 32-byte hex private key,
+ * case-insensitive. `src/lib/wallet/store.ts` re-exports it, so the wallet
+ * layer's `loadCredential` and the hook-safe `wallet-facts.ts` test exactly
+ * the same thing. Do not tighten it in
  * one place only: a key one accepts and the other rejects is a wallet doctor
  * calls fine and the hooks call broken.
  */
@@ -194,7 +194,7 @@ export function classifyUnlockError(err: unknown): {
  * `details.unlock`; null for anything else (an undetailed WALLET_MISSING, an
  * AbortError, any other CliError or value).
  *
- * THE ONLY GATE for swapping a fix to its model-facing `agentFix` (B1). Not
+ * The only gate for swapping a fix to its model-facing `agentFix`. Not
  * {@link classifyUnlockError}: its `wallet_locked` fallback covers EVERY
  * undetailed error, a `REGISTRY_MISMATCH` or an HTTP failure included, and
  * swapping on it would replace those errors' own fixes with wallet advice.

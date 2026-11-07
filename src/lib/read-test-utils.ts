@@ -1,19 +1,25 @@
-import { privateKeyToAccount } from 'viem/accounts';
+import { vi } from 'vitest';
+import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { declareBuilderCodeExtension } from '@x402/extensions/builder-code';
 import type { PaymentRequired } from '@x402/core/types';
+import type { PolicyReason, SpendDecision } from './policy';
 import type { TenjinSigner, WalletProvider } from './wallet/provider';
+import type { SpendAuthorization, SpendAuthorizer, SpendRequest } from './wallet/spend';
 
-/** Shared B2 test fixtures: a real (offline) viem signer, a fake wallet provider
- *  around it, and a header-aware mock of the read route. Not bundled into dist
- *  (nothing in the entry graph imports it), same pattern as wallet/test-support. */
+/** Shared payment test fixtures: a real (offline) viem signer, a fake wallet
+ *  provider around it, a spend authorizer double and 402 challenges. Not bundled
+ *  into dist (nothing in the entry graph imports it), same pattern as
+ *  wallet/test-support. */
 
 // A well-known Anvil/hardhat test key; deterministic, holds no real funds.
 export const TEST_PRIVATE_KEY =
   '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
 
-export function testSigner(): TenjinSigner {
-  const account = privateKeyToAccount(TEST_PRIVATE_KEY);
+/** A wallet signer over `account`, the fixed test key unless a test passes its own. */
+export function testSigner(
+  account: PrivateKeyAccount = privateKeyToAccount(TEST_PRIVATE_KEY),
+): TenjinSigner {
   return {
     address: account.address,
     signMessage: (args) => account.signMessage({ message: args.message }),
@@ -33,6 +39,38 @@ export function testWalletProvider(signer: TenjinSigner = testSigner()): WalletP
     }),
     getSigner: async () => signer,
     diagnostics: async () => ({ warnings: [] }),
+  };
+}
+
+/** The reservation a {@link testAuthorizer} holds for every spend it does not deny. */
+export const TEST_RESERVATION = 'rsv';
+
+/**
+ * A spend authorizer that answers every request with `decision`, or with what
+ * the function picks for that request, and spies on commit and release. The
+ * reason defaults to the one policy gives that decision.
+ */
+export function testAuthorizer(
+  decision: SpendDecision | ((req: SpendRequest) => SpendDecision) = 'allow',
+  reason?: PolicyReason,
+): SpendAuthorizer {
+  return {
+    policyEnforcement: 'client-only',
+    authorize: vi.fn(async (req: SpendRequest): Promise<SpendAuthorization> => {
+      const decided = typeof decision === 'function' ? decision(req) : decision;
+      return {
+        decision: decided,
+        reason: reason ?? (decided === 'allow' ? 'within_policy' : 'confirm_always'),
+        message: 'test',
+        amountAtomic: req.amountAtomic,
+        sessionSpentAtomic: 0n,
+        sessionBudgetAtomic: 0n,
+        policyEnforcement: 'client-only',
+        ...(decided === 'deny' ? {} : { reservationId: TEST_RESERVATION }),
+      };
+    }),
+    commit: vi.fn(async () => undefined),
+    release: vi.fn(async () => undefined),
   };
 }
 
@@ -85,161 +123,4 @@ export function withBuilderCode(
       ? declared
       : { ...declared, info: { ...declared.info, s: sellerServiceCodes } };
   return { extensions: { 'builder-code': entry } };
-}
-
-export interface ReadBodyFixture {
-  id: string;
-  slug: string;
-  title: string;
-  bodyMd: string;
-  price: string;
-  creator: { handle: string; walletAddress: string };
-}
-
-export function readBody(over: Partial<ReadBodyFixture> = {}): ReadBodyFixture {
-  return {
-    id: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-    slug: 'slug',
-    title: 'The Answer',
-    bodyMd: '# The Answer\n\nfull body\n',
-    price: '100000',
-    creator: { handle: 'iris', walletAddress: '0x2222222222222222222222222222222222222222' },
-    ...over,
-  };
-}
-
-/** The public answer card the 402 body carries when the piece has one. Every
- *  field is present (nullable ones as null), the way the server projects it. */
-export function previewCard(over: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    artifactType: 'document',
-    temporalMode: 'snapshot',
-    asOf: '2026-07-01T00:00:00.000Z',
-    validUntil: '2026-08-01T00:00:00.000Z',
-    questionsAnswered: ['What does a Base transaction cost?'],
-    tasksSupported: ['estimate gas spend'],
-    appliesTo: { products: ['Base'] },
-    scope: 'L2 execution fees only',
-    exclusions: 'No L1 data costs',
-    provenanceSummary: 'Measured against mainnet over one week',
-    methodologySummary: 'Sampled every block for seven days',
-    maintenanceCadence: 'monthly',
-    ...over,
-  };
-}
-
-function jsonResponse(
-  status: number,
-  body: unknown,
-  headers: Record<string, string> = {},
-): Response {
-  return new Response(body === undefined ? '' : JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json', ...headers },
-  });
-}
-
-export const reply = {
-  entitled: (body: ReadBodyFixture, settlementHeader?: string): Response =>
-    jsonResponse(
-      200,
-      body,
-      settlementHeader !== undefined ? { 'PAYMENT-RESPONSE': settlementHeader } : {},
-    ),
-  paymentRequired: (
-    fixture: PaymentRequiredFixture,
-    preview: unknown = { title: 'The Answer', price: '100000', creator: { handle: 'iris' } },
-  ): Response => jsonResponse(402, preview, { 'PAYMENT-REQUIRED': fixture.header }),
-  alreadyPurchased: (): Response =>
-    jsonResponse(409, { code: 'already_purchased', message: 'Already purchased.' }),
-  /** A 401 rejecting the presented delegation (expired, revoked, unbound). */
-  sessionRejected: (code = 'session_expired'): Response =>
-    jsonResponse(401, { code, message: 'The session delegation is not valid.' }),
-};
-
-export type ReadPhase = 'plain' | 'siwx' | 'session' | 'payment';
-
-export interface RecordedCall {
-  url: string;
-  phase: ReadPhase;
-  headers: Record<string, string>;
-}
-
-/**
- * A read-route mock that classifies each request by its headers: a
- * PAYMENT-SIGNATURE is a `payment` attempt, a SIGN-IN-WITH-X is a `siwx`
- * re-check, a Tenjin-Session-Delegation is a `session` presentation, otherwise a
- * plain GET — and returns the configured Response for that phase. Records every
- * call so a test can assert the exact ORDER of attempts and that (e.g.) a payment
- * was never attempted.
- *
- * An unconfigured phase THROWS rather than falling back, which is what makes an
- * absent phase a real assertion: a test that pins `['plain']` would otherwise
- * pass just as well against a mock that quietly served the second request.
- */
-export function makeReadServer(config: {
-  plain: () => Response;
-  siwx?: () => Response;
-  session?: () => Response;
-  payment?: () => Response;
-}): { fetch: typeof fetch; calls: RecordedCall[] } {
-  const calls: RecordedCall[] = [];
-  const fn = (async (url: string | URL | Request, init?: RequestInit) => {
-    const headers = normalizeHeaders(init?.headers);
-    const phase: ReadPhase =
-      headers['payment-signature'] !== undefined
-        ? 'payment'
-        : headers['sign-in-with-x'] !== undefined
-          ? 'siwx'
-          : headers['tenjin-session-delegation'] !== undefined
-            ? 'session'
-            : 'plain';
-    calls.push({ url: String(url), phase, headers });
-    const handler =
-      phase === 'payment'
-        ? config.payment
-        : phase === 'siwx'
-          ? config.siwx
-          : phase === 'session'
-            ? config.session
-            : config.plain;
-    if (handler === undefined) throw new Error(`no mock configured for phase ${phase}`);
-    return handler();
-  }) as unknown as typeof fetch;
-  return { fetch: fn, calls };
-}
-
-/**
- * Wrap a read-route mock in the trailing-slash canonicalization the real route
- * performs: a request whose path ends in `/` gets a 308 to the no-slash form and
- * is NEVER answered with content. Requests already in canonical form pass through
- * to `inner` untouched, so the wrapped mock records only the calls that were
- * actually served.
- *
- * This is what makes the trailing-slash tests able to fail. `fetchRead` pins
- * `blockRedirects`, so a caller that sends the slashed spelling gets a hard
- * CONTRACT_MISMATCH at the first probe instead of the piece.
- */
-export function withTrailingSlashRedirect(inner: typeof fetch): typeof fetch {
-  return (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(typeof input === 'object' && 'url' in input ? input.url : input);
-    const path = url.split(/[?#]/)[0] ?? url;
-    if (path.endsWith('/')) {
-      return new Response('', { status: 308, headers: { location: path.slice(0, -1) } });
-    }
-    return await inner(input as Parameters<typeof fetch>[0], init);
-  }) as unknown as typeof fetch;
-}
-
-function normalizeHeaders(headers: RequestInit['headers']): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (headers === undefined) return out;
-  if (headers instanceof Headers) {
-    headers.forEach((v, k) => (out[k.toLowerCase()] = v));
-  } else if (Array.isArray(headers)) {
-    for (const [k, v] of headers) if (k !== undefined && v !== undefined) out[k.toLowerCase()] = v;
-  } else {
-    for (const [k, v] of Object.entries(headers)) out[k.toLowerCase()] = String(v);
-  }
-  return out;
 }

@@ -8,8 +8,7 @@ import { mask } from './redact';
 /**
  * JSON Schema validation for anything a remote party asks this CLI to send or
  * accepts back: the router's decision arguments, and a result body a caller
- * declared a success condition for. Ported from the draft auto-mode experiment
- * (PR #369 `contracts.ts`) into a shared path so `tenjin pay` gets it too.
+ * declared a success condition for. Shared by the router and `tenjin pay`.
  *
  * SCHEMAS ARE UNTRUSTED INPUT. Ajv compiles keywords, never merchant code, but a
  * schema still reaches a compiler, so the checks below run BEFORE compilation:
@@ -135,27 +134,9 @@ function compile(
   return compiled;
 }
 
-export interface SchemaCheck {
+interface SchemaCheck {
   valid: boolean;
   errors: string[];
-}
-
-/**
- * Check a value against its own schema. Both are untrusted: the value is
- * round-tripped through JSON first so an exotic JS object can never reach the
- * validator, and its size is bounded before anything is compiled.
- */
-export function validateAgainstSchema(schema: unknown, value: unknown): SchemaCheck {
-  try {
-    const json = JSON.stringify(value);
-    if (json === undefined || Buffer.byteLength(json) > MAX_VALUE_BYTES) {
-      throw new Error('The value is not JSON, or exceeds its size limit.');
-    }
-    walk(value, false);
-  } catch (err) {
-    return { valid: false, errors: [err instanceof Error ? err.message : String(err)] };
-  }
-  return checkValue(schema, value);
 }
 
 /** The schema check alone, on a value whose size and shape were bounded. */

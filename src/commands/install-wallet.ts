@@ -158,19 +158,10 @@ function walletFix(reason: WalletSkipReason, path?: string): string {
   }
 }
 
-export function walletValue(w: WalletOutcome): string {
-  const locked = w.signing?.status === 'blocked' ? ` - cannot unlock: ${w.signing.detail}` : '';
-  if (w.status === 'existing') return `${w.address} (existing)${locked}`;
-  if (w.status === 'created') return `${w.address}, $0 - fund with: tenjin wallet fund${locked}`;
-  if (w.status === 'skipped') return `none (${w.reason}) - ${w.fix}`;
-  return 'none - create with: tenjin wallet create';
-}
-
 /**
- * The wallet decision. A wallet is now created BY DEFAULT on both paths, because
- * the loop this command exists to set up does not close without one: `buy` needs
- * a funded key and publish-on-MISS needs a key to sign the write, so a walletless
- * install is a setup that stops at the first useful thing the agent tries.
+ * The wallet decision. A wallet is created BY DEFAULT on both paths, because
+ * the router pays every call from it, so a walletless install is a setup that
+ * stops at the first useful thing the agent tries.
  *
  * The headless path creates without asking. Create never prompts for the new
  * secret (Q1): it uses TENJIN_WALLET_PASSPHRASE when set, else a strong

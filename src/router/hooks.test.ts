@@ -343,58 +343,19 @@ describe('the prompt hook', () => {
     expect((calls[0] as { body: Record<string, unknown> }).body.improve).toBe(true);
   });
 
-  /**
-   * A MACHINE INSTALLED BEFORE HELP IMPROVE ROUTING EXISTED never runs the
-   * install that asks it, so its first routed prompt hands the agent the
-   * question, with no shell command for the person: recorded as asked, still
-   * off, and never asked again.
-   */
-  it('hands the agent Help improve routing once on a machine nobody asked, then never again', async () => {
+  it('does not interrupt a first task with an optional retention question', async () => {
     const fs = await import('node:fs/promises');
-    await fs.writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
-    );
-    const { fetchImpl } = router(NATIVE);
-    const prompt = () =>
-      runPromptHook(promptEvent('what is the weather'), { dataDir: dir, baseUrl: BASE, fetchImpl });
-    const first = await prompt();
-    const line = (first.response as { hookSpecificOutput: { additionalContext: string } })
-      .hookSpecificOutput.additionalContext;
-    expect(line).toContain('"Help improve routing? ');
-    expect(line).toContain('You can ask your agent to turn it off any time.');
-    expect(line).toContain('On yes, run `tenjin config set router.improve true` yourself');
-    expect(line).not.toContain('Turn it off any time with');
-    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
-      install?: unknown;
-      router?: unknown;
-    };
-    expect(config.install).toEqual({ improveAsked: true });
-    expect(config.router).toBeUndefined();
-    expect((await prompt()).response).toBeNull();
-  });
-
-  it('never holds a prompt on a held config lock: the question waits, the answer does not', async () => {
-    const fs = await import('node:fs/promises');
-    await fs.writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ maxAutoSpend: '250000', sessionBudget: '5000000' }),
-    );
-    // A leftover lock from a crashed writer; the file lock never steals one.
-    await fs.mkdir(join(dir, 'config.json.lock'));
-    const { fetchImpl } = router(NATIVE);
-    const started = Date.now();
+    const config = { maxAutoSpend: '250000', sessionBudget: '5000000' };
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify(config));
+    const { fetchImpl, calls } = router(NATIVE);
     const out = await runPromptHook(promptEvent('what is the weather'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(Date.now() - started).toBeLessThan(1_000);
     expect(out.response).toBeNull();
-    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as {
-      install?: unknown;
-    };
-    expect(config.install).toBeUndefined();
+    expect((calls[0] as { body: Record<string, unknown> }).body.improve).toBeUndefined();
+    expect(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'))).toEqual(config);
   });
 
   /**

@@ -3,6 +3,7 @@ import { hasCode } from './errno';
 import { readPassphraseRecord } from './passphrase-record';
 import { passphraseFilePathFor, passphraseRecordPath, walletPath } from './paths';
 import { PRIVATE_KEY_RE, type DurableStore } from './wallet-unlock';
+import { ADDRESS_RE } from './ids';
 
 /**
  * WHAT THE FILES SAY ABOUT THE WALLET, without unlocking it. The hooks, `alive`
@@ -17,7 +18,7 @@ import { PRIVATE_KEY_RE, type DurableStore } from './wallet-unlock';
  * what that means is `src/router/eligibility.ts`'s job.
  */
 export interface WalletFacts {
-  /** TENJIN_WALLET_KEY trimmed vs PRIVATE_KEY_RE (S12); whitespace-only = absent. */
+  /** TENJIN_WALLET_KEY trimmed vs PRIVATE_KEY_RE; whitespace-only = absent. */
   envKey: 'absent' | 'valid' | 'malformed';
   /** unparsable = unreadable, bad JSON, or no valid address. */
   walletFile: 'present' | 'absent' | 'unparsable';
@@ -33,7 +34,6 @@ export interface WalletFacts {
 }
 
 /** The same address test `hooks.ts` applies to wallet.json's cleartext field. */
-const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 /**
  * Read {@link WalletFacts} for `dataDir` under `env`. Never rejects.

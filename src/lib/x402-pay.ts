@@ -9,6 +9,8 @@ import { getAddress } from 'viem';
 import { CliError } from './errors';
 import { USDC_ADDRESS } from './usdc';
 import type { TenjinSigner } from './wallet/provider';
+import { isRecord } from './guards';
+import { ADDRESS_RE } from './ids';
 
 /**
  * x402 exact-scheme payment construction (spec 10 sanctioned deps: @x402/* +
@@ -35,7 +37,7 @@ function authorizationOf(payload: unknown): BuiltPayment['authorization'] {
   const auth = inner?.authorization;
   if (auth === null || typeof auth !== 'object') return undefined;
   const { from, nonce, validBefore } = auth as Record<string, unknown>;
-  if (typeof from !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(from)) return undefined;
+  if (typeof from !== 'string' || !ADDRESS_RE.test(from)) return undefined;
   if (typeof nonce !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) return undefined;
   const before = typeof validBefore === 'number' ? String(validBefore) : validBefore;
   if (typeof before !== 'string' || !/^\d+$/.test(before)) return undefined;
@@ -95,14 +97,10 @@ function withoutSellerServiceCodes(
   key: string,
 ): PaymentRequired['extensions'] {
   const entry = extensions?.[key];
-  if (!isPlainObject(entry) || !isPlainObject(entry.info)) return extensions;
+  if (!isRecord(entry) || !isRecord(entry.info)) return extensions;
   const info = { ...entry.info };
   delete info.s;
   return { ...extensions, [key]: { ...entry, info } };
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

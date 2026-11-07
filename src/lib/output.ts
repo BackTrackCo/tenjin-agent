@@ -6,11 +6,9 @@ import type { UpdateAvailable } from '../schemas';
 import type { FailureEnvelope, OutputError, SuccessEnvelope } from '../schemas';
 
 /**
- * Injected streams + TTY facts. Every command receives one via CommandContext,
- * so tests drive the CLI in-process with memory buffers and no child process.
- * `isTTY` describes stdout; the separate `--json` flag (passed to the emit
- * functions) is what suppresses human rendering — the two are ANDed, never
- * conflated, so `--json` on a TTY still yields pure machine output.
+ * Injected streams and TTY facts, so tests drive the CLI in-process with memory
+ * buffers. `isTTY` describes stdout; `--json` is a separate flag, so `--json`
+ * on a TTY still yields pure machine output.
  */
 export interface Io {
   stdout: NodeJS.WritableStream;
@@ -33,17 +31,14 @@ export interface EmitOptions {
   compactJson?: boolean;
   /**
    * "A newer tenjin-cli exists", from the daily check's cache. Rides the
-   * envelope so the AGENT running the command learns it; the human at a TTY
-   * gets the dim stderr line instead, and neither path fetches anything.
+   * envelope so an agent learns it; a human at a TTY gets a stderr line.
    */
   updateAvailable?: UpdateAvailable | null;
 }
 
 /**
- * The two pure envelope builders, shared by the CLI's emit functions and the MCP
- * adapter so both surfaces produce the identical wire object by construction. They
- * hold no I/O and no --json branching: they turn a (command, data) or a normalized
- * CliError into the exact object that goes to stdout / structuredContent.
+ * The pure envelope builders, shared by the CLI's emit functions and the MCP
+ * adapter so both surfaces produce the same wire object.
  */
 export function buildSuccessEnvelope(
   command: string,
@@ -100,11 +95,9 @@ export function emitSuccess(
 }
 
 /**
- * The failure half of the same contract: at a TTY without `--json`, a red error
- * line plus a `fix` line to stdout and no envelope; otherwise exactly one failure
- * envelope to stdout. Accepts a CliError or any thrown value (non-CliError
- * normalizes to INTERNAL). Returns the normalized CliError so the caller reads its
- * `exitCode`.
+ * The failure half of the same contract: a red error line and a `fix` line in
+ * human mode, otherwise one failure envelope. Returns the normalized CliError so
+ * the caller reads its `exitCode`.
  */
 export function emitFailure(
   io: Io,
@@ -129,11 +122,9 @@ export function emitFailure(
 }
 
 /**
- * One dim advisory line on stderr, human mode only. This is for facts that belong
- * to NO command's result — an unreadable spend ledger, a newer release on npm —
- * so they can never join the envelope on stdout or reach a machine consumer at
- * all. Sanitized here rather than by each caller: what these lines quote (a
- * registry version string, a parse error) is not the command's own prose.
+ * One dim advisory line on stderr, human mode only, for facts that belong to no
+ * command's result (an unreadable spend ledger, a newer release). Sanitized
+ * here because what these lines quote is not the command's own prose.
  */
 export function emitNotice(io: Io, text: string, opts: EmitOptions = {}): void {
   if (!humanMode(io, opts)) return;
@@ -141,46 +132,36 @@ export function emitNotice(io: Io, text: string, opts: EmitOptions = {}): void {
 }
 
 /**
- * The same dim stderr line, delivered whatever the surface is: no TTY gate and no
- * `--json` gate. Only for an advisory a piped or agent-driven run must not miss,
- * which today is two things: a WRITE to the operator's own files, and `fund`'s
- * checkout link, which expires long before the stdout envelope that also carries
- * it is written. Anything a piped run can simply do without belongs in
- * {@link emitNotice} instead. stdout is untouched either way, so the exactly-one
- * JSON object contract is unaffected.
+ * The same dim stderr line on every surface, with no TTY or `--json` gate. Only
+ * for what a piped run must not miss: a write to the operator's own files, or
+ * `fund`'s checkout link, which expires before the stdout envelope is written.
+ * Everything else belongs in {@link emitNotice}. stdout is untouched.
  */
 export function emitWriteNotice(io: Io, text: string): void {
   io.stderr.write(`${paint(io, 'dim', sanitizeForTerminal(text))}\n`);
 }
 
 /**
- * Every escape sequence a terminal writes: CSI (colour, cursor), OSC — which
- * covers the OSC-8 hyperlinks pnpm wraps package names in, terminated by BEL
- * or ST — charset selection, and a stray ESC with a single final byte.
+ * Every escape sequence a terminal writes: CSI (colour, cursor), OSC (including
+ * the OSC-8 hyperlinks pnpm wraps package names in, ended by BEL or ST),
+ * charset selection, and a stray ESC with a single final byte.
  *
- * Safe to reuse despite the `g` flag: {@link sanitizeForTerminal} uses it
- * through `String.replace`, which starts at 0 and resets `lastIndex`. Do not
- * `test()` or `exec()` it.
+ * Safe to reuse despite the `g` flag only through `String.replace`, which
+ * resets `lastIndex`. Do not `test()` or `exec()` it.
  */
 export const ANSI_ESCAPE_RE =
   // eslint-disable-next-line no-control-regex
   /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 
 /**
- * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
- * formatting, and invisible tag/BOM characters from a string headed for a
- * terminal. Commands apply this to every SERVER-sourced string (titles,
- * handles) they put into human lines or the buy confirm prompt; without it a
- * malicious deployment could use cursor-movement escapes to overwrite the very
- * price a human is being asked to confirm, a right-to-left override to reorder
- * that same line on screen into one that reads as a different price, or tag
- * characters to carry a payload that draws as nothing at all. It is not
- * applied to whole human lines here because trusted callers (doctor) paint
- * their own ANSI colors. JSON stdout is untouched: JSON.stringify escapes C0
- * controls itself, but the bidi and tag/BOM sets ride through it raw, and that
- * is deliberate rather than covered — the envelope is machine-read data whose
- * bytes must be what the server said, and a consumer reading codepoints is not
- * deceived by rendering order the way a human reading a drawn line is.
+ * Strip ANSI escapes, C0/C1 controls, Unicode bidi formatting, and invisible
+ * tag/BOM characters from a string headed for a terminal. Commands apply it to
+ * every server-sourced string in human lines or the pay confirm prompt, since a
+ * hostile server could otherwise overwrite or reorder the price a human is
+ * confirming, or hide a payload in characters that draw as nothing. Not applied
+ * to whole lines because trusted callers (doctor) paint their own colors.
+ * JSON stdout keeps the server's bytes on purpose: a machine reading
+ * codepoints is not fooled by rendering order the way a human is.
  */
 export function sanitizeForTerminal(text: string): string {
   return (
@@ -192,26 +173,15 @@ export function sanitizeForTerminal(text: string): string {
       .replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, '')
       // The UAX#9 directional formatting set: the marks (LRM/RLM/ALM), the
       // embeddings and overrides (U+202A-U+202E), and the isolates
-      // (U+2066-U+2069). Removed, not escaped, so what a human reads is the
-      // order the bytes are in. Deliberately this set and NOT all of category
-      // Cf: U+200D (ZWJ) joins legitimate emoji sequences, and dropping it
-      // would corrupt honest titles to defend against dishonest ones.
+      // (U+2066-U+2069), so a human reads the bytes in order. Not all of Cf:
+      // U+200D (ZWJ) joins legitimate emoji sequences.
       .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
-      // The Unicode tag block (U+E0000-U+E007F) and the BOM/ZWNBSP, neither of
-      // which has a legitimate mid-title use. Tag characters render as nothing
-      // at all, so a payload spelled in them is invisible in the line a human
-      // is reading and in the line they would paste back to report it.
-      //
-      // The three RGI subdivision flags are the exception and survive
-      // byte-identical: they are ordinary title content. The whitelist is those
-      // three sequences and NOT "any well-formed tag sequence", because a
-      // non-RGI sequence draws as a bare black flag with the payload hidden
-      // behind it, which is the exact channel this closes.
-      //
-      // Kept for the same reason as ZWJ above: U+200B (ZWSP) hints line breaks
-      // in CJK and U+200C (ZWNJ) is orthographically required in Persian, so
-      // stripping them would corrupt honest titles to defend against dishonest
-      // ones.
+      // The Unicode tag block (U+E0000-U+E007F) and the BOM/ZWNBSP: tag
+      // characters render as nothing, so a payload in them is invisible.
+      // The three RGI subdivision flags survive byte-identical; any other tag
+      // sequence draws as a bare black flag with the payload hidden behind it.
+      // U+200B (ZWSP, CJK line breaks) and U+200C (ZWNJ, required in Persian)
+      // stay, like ZWJ above.
       .replace(
         /(\u{1F3F4}\u{E0067}\u{E0062}(?:\u{E0065}\u{E006E}\u{E0067}|\u{E0073}\u{E0063}\u{E0074}|\u{E0077}\u{E006C}\u{E0073})\u{E007F})|[\u{E0000}-\u{E007F}\u{FEFF}]/gu,
         (_match, rgiFlag: string | undefined) => rgiFlag ?? '',

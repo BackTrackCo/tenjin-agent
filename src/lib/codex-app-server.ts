@@ -1,10 +1,7 @@
 import { spawn } from 'node:child_process';
 import { resolveCodex } from './codex-bin';
 import { codexHome } from './codex-home';
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
+import { isRecord } from './guards';
 export async function withAppServer<T>(
   home: string,
   env: NodeJS.ProcessEnv,

@@ -9,7 +9,7 @@ export interface PromptYesNoOptions {
 }
 
 /**
- * The one y/n reader every confirm gate shares (buy, send, install). "y"/"yes"
+ * The one y/n reader every confirm gate shares (pay, send, install). "y"/"yes"
  * (any case) is true, an empty answer follows `defaultYes` (explicit at each
  * call site), anything else is false, and stdin closing mid-prompt resolves
  * false rather than hanging. The prompt writes to stderr so stdout stays a

@@ -3,13 +3,9 @@ import type { Io } from '../lib/output';
 import type { CommandContext, CommandRun } from '../context';
 
 /**
- * The seam the product registration modules share.
- *
- * ONE PROGRAM, SEVERAL PRODUCTS. `cli.ts` owns the root command, the global
- * flags and the one output choke point; a product module owns nothing but its
- * own verbs, and is registered or not registered by a single call. That is what
- * makes "this release ships core plus router" a line of code rather than a
- * comb through a thousand-line file.
+ * The seam the command registration modules share. `cli.ts` owns the root
+ * command, the global flags and the one output choke point; a registration
+ * module owns nothing but its own verbs.
  */
 
 /** The headings `tenjin --help` files its commands under. */

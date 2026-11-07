@@ -8,6 +8,7 @@ import * as Keystore from 'ox/Keystore';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 import { StoreExecError, describeStoreLocation, type ExecFn } from '../lib/wallet/passphrase';
 import { passphraseFilePathFor, passphraseRecordPath } from '../lib/paths';
@@ -21,7 +22,6 @@ import { rememberingBalanceReader } from '../lib/usdc-balance';
 // suite stays offline and deterministic. viem's key derivation stays real.
 vi.mock('../lib/usdc', () => ({
   USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  USDC_DECIMALS: 6,
   getUsdcBalance: vi.fn(),
 }));
 
@@ -90,12 +90,7 @@ afterEach(async () => {
 });
 
 function makeCtx(): CommandContext {
-  const sink = { write: () => true } as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 10000 },
-    dataDir,
-    io: { stdout: sink, stderr: sink, isTTY: false },
-  };
+  return testCtx(dataDir, { timeout: 10000 });
 }
 
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {

@@ -5,7 +5,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runHookKind } from './hook-command';
 import type { HookDeps } from './hooks';
-import { FakeRouter, payerDeps } from './fee-test-utils';
+import { FakeRouter, NATIVE, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
 import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
 import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
@@ -18,14 +18,6 @@ import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
  */
 
 const BASE = 'https://router.test';
-const NATIVE = {
-  schemaVersion: 1,
-  routerVersion: 'v',
-  decision: {
-    action: 'native',
-    diagnostics: { reasonCode: 'native', stage: 'gate', missing: [], nextAction: 'native' },
-  },
-};
 const wallet = privateKeyToAccount(generatePrivateKey());
 
 let dir: string;

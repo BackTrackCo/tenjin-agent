@@ -1,11 +1,8 @@
 /**
- * WHAT THE CLAUDE CODE MOD READS, AND NOTHING IT WRITES. The mod
- * (`hosts/claude/tenjin/hooks/register.tsx`) draws from four files the CLI
- * already keeps under its data dir, through `$.fs.read`, and from the request
- * tool's own result envelope in the transcript. Each file is a contract
- * between the two, versioned by one field, and the mod reads a file whose
- * version it does not know as absent: a row then says less, never something it
- * did not read.
+ * The files the Claude Code mod (`hosts/claude/tenjin/hooks/register.tsx`)
+ * reads through `$.fs.read`; it writes none. Each is a contract versioned by
+ * one field, and the mod treats an unknown version as absent, so a row says
+ * less rather than something it did not read.
  *
  * | File | Writer | Version field | What the mod reads |
  * | --- | --- | --- | --- |
@@ -15,9 +12,9 @@
  * | `progress/<sha256(session)>/offer-<sha256(tool_use_id)>.json` | `progress.ts` `markOffered` | `version: 1` | `offerId`, `label` |
  * | `progress/<sha256(session)>/offer-<sha256("prompt:" + prompt)>.json` | `progress.ts` `markOffered` | `version: 1` | `offerId`, `label`, `at`, `priceAtomic` |
  *
- * From the envelope (`tool.ts`): `status`, `label`, `cost`, `reason`, and,
- * for the expanded row, `savedFiles` and `result` where `fullResultPath` says
- * the CLI cut it to the spec's fields. `mod-state.test.ts` writes each file
- * through its CLI writer and pins the fields.
+ * It also reads the request tool's result envelope (`tool.ts`) in the
+ * transcript: `status`, `label`, `cost`, `reason`, and, for the expanded row,
+ * `savedFiles` and `result` where `fullResultPath` says the CLI cut it to the
+ * spec's fields. `mod-state.test.ts` pins the fields through each writer.
  */
 export const MOD_STATE_FILES = ['spec', 'choices', 'label', 'offer'] as const;
