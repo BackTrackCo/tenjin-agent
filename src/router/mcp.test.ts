@@ -1108,9 +1108,11 @@ describe('what the tool tells the model to send', () => {
       // WHAT THE AGENT DOES, and no catalog or list of kinds here: the client is
       // not a second source of what services exist, a list reads as all there
       // is, and the hook line names the one that fits the turn.
-      expect(request.description?.includes('whether you chose them or a hook suggested them')).toBe(
-        true,
-      );
+      expect(
+        request.description?.startsWith(
+          "When a hook line names a service from Tenjin's router, call it as the line says.",
+        ),
+      ).toBe(true);
       expect(request.description).not.toContain('Paid lookups');
       for (const name of ['Exa', 'Firecrawl', 'CoinMarketCap', 'Wolfram', 'Hunter', 'Minerva']) {
         expect(request.description).not.toContain(name);

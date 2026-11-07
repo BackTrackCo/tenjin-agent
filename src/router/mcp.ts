@@ -77,8 +77,7 @@ export const SCOPE_RULE =
  * that, per turn, from the server that actually knows.
  */
 const INSTRUCTIONS =
-  'Use Tenjin tools when they help your task, whether you chose them or a hook suggested them. ' +
-  'When a hook line names a service, call it as the line says. ' +
+  "When a hook line names a service from Tenjin's router, call it as the line says. " +
   'A line comes at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
   'a search or a call that comes back short, or in a delegated task. ' +
   'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
