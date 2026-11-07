@@ -4,16 +4,46 @@
 
 ```bash
 pnpm install
-pnpm check        # build + test
+pnpm build
+pnpm exec vitest run path/to/changed.test.ts --maxWorkers=1
 pnpm lint && pnpm typecheck && pnpm format:check
-pnpm pack-smoke   # exercises the packed npm artifact
 ```
+
+Run only affected test files locally; CI runs the full suite and packed-artifact checks. Replace the example test path with the files the change affects.
 
 Add a changeset in the same PR as any shippable change:
 
 ```sh
 pnpm changeset   # pick the bump type, write a summary; commit the .md
 ```
+
+## Release acceptance and weekly QA
+
+The release owner is the person dispatching the publish workflow. Name that person in the release PR; they own the weekly alpha walkthrough until a handoff is recorded. CI validates mechanics. The owner validates the complete user journey and what the public surfaces promise.
+
+Before publishing, add one short receipt to the release PR:
+
+```text
+Source commit; package version; tarball SHA-512:
+Server commit; deployment/promotion URL and identity:
+Installer hash; observation time; OS and agent versions:
+Entry instruction; spending/funding choices and readback:
+Installed / active in this session / useful result:
+Routing ready / provider payment / funds arrived:
+Evidence links; failures; explicitly untested cases:
+```
+
+Mark each outcome passed, failed or untested. A connected MCP server is not a useful result; native fallback is not Tenjin execution. An open checkout is not payment, and a balance is not proof the current host can sign. Keep private keys, passphrases, account tokens and signed checkout URLs out of receipts.
+
+For every release, exercise the exact packed candidate with a cold Claude Code session and a cold Codex session: follow the public install instructions, preserve default/custom choices and a funding decline, activate in the real host, then complete a supported useful task. Record native terminal, headless and Desktop evidence separately. A changed host flow requires its native walkthrough; a fixture or renderer test cannot establish it. An unfunded task is required only when the released server/client pair promises that task can run free.
+
+Setup, wallet or payment changes also cover their affected failure path and an upgrade from the previous published package. Verify the wallet address/funds survive update or reinstall, and that recovery does not silently restart onboarding. Payment changes need appropriate provider-sandbox evidence and a separately authorized bounded funded run before claiming production settlement.
+
+Publish only with the required current-head CI and review evidence. Deploy required server support first. After publication/promotion, repeat a short smoke against actual npm `latest`, served installers, setup/privacy/pricing pages and one real tool result. Candidate evidence does not prove that production serves it. Use the existing pause/fix-forward procedure below when public behavior disagrees.
+
+During alpha, the named QA owner runs a weekly cold install to useful result, follows the setup links, checks funding entry/return and rotates one failure state: empty wallet, locked wallet, unreadable balance, expired link, pending checkout or offline routing. Review the visible transcript for repeated questions and unclear next actions. Monthly, rotate the supported OS/native-host matrix and update/uninstall/reinstall. New failures need action; unchanged checks need no notification. This is a team checklist, not an installed scheduler.
+
+For each docs or agent-instruction change, the author names the behavior/source proving the claim and the old sentence replaced or deleted. Reviewer follows the reading path without implementation knowledge. Remove resolved recovery history and duplicated summaries. Existing `skills-text` tests check local links/anchors and safety facts; packed smoke compares all shipped docs with those tested bytes. Existing generated-plugin tests continue checking the installed skills. Prose growth is a review signal, not a reason to drop privacy/payment facts or add another bot.
 
 ## Release
 

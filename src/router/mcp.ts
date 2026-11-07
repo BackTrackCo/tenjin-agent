@@ -94,7 +94,6 @@ const INSTRUCTIONS =
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
   'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
-  'Free docs run with `{tool, query}`, without a wallet, routing fee or provider payment. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs a fee the router ` +
   `quotes, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call; a wallet on THIS ` +
   'machine pays it and the provider under the local spend ' +

@@ -383,7 +383,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
     );
     deposited = 0n;
     const next = await runRequestTool(
@@ -2511,6 +2511,39 @@ describe('the tool list, read for free', () => {
     throw new Error('the paid routing path was asked');
   });
 
+  it('refuses a selected free query mixed with a kept paid spec before any network or payment', async () => {
+    const selected = BY_ID.decision as { id: string; spec: Omit<OfferSpec, 'id'> };
+    await storeSpecs(dir, [{ ...selected.spec, id: selected.id }]);
+    const { fetchImpl, calls } = net([]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      {
+        tool: 'context7-docs',
+        query: 'Zod v4 email validation',
+        id: selected.id,
+        input: { symbol: 'BTC' },
+      },
+      { ...deps(fetchImpl, auth), route },
+    );
+    expect(result.envelope.status).toBe('needs_input');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it('never sends a selected tool id carrying a credential', async () => {
+    const { fetchImpl, calls } = net([]);
+    const auth = authorizer();
+    const result = await runRequestTool(
+      { tool: 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789', query: 'Zod' },
+      { ...deps(fetchImpl, auth), route },
+    );
+    expect(result.envelope.status).toBe('native');
+    expect(calls).toEqual([]);
+    expect(auth.authorize).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+  });
+
   it('runs a selected free docs query without a wallet, routing deposit or payment approval', async () => {
     const query = 'Zod v4 email & URL validation';
     const docsUrl = `${ROUTER}/api/docs-lookup?query=Zod+v4+email+%26+URL+validation`;
@@ -2566,6 +2599,7 @@ describe('the tool list, read for free', () => {
   it.each([
     ['a paid call', { capabilityId: 'context7-docs', providerPriceAtomic: '10000' }],
     ['a different service', { capabilityId: 'exa-search', providerPriceAtomic: '0' }],
+    ['a spec', BY_ID.decision as Record<string, unknown>],
   ])(
     'refuses %s in a selected free-tool answer before calling the provider',
     async (_label, picked) => {
@@ -2625,32 +2659,6 @@ describe('the tool list, read for free', () => {
       expect(route).not.toHaveBeenCalled();
     },
   );
-
-  it('does not turn an unsupported selected-free response into a funding or routing retry', async () => {
-    const { fetchImpl, calls } = net([
-      {
-        url: ROUTER,
-        status: 200,
-        body: {
-          ...NATIVE,
-          decision: {
-            ...NATIVE.decision,
-            diagnostics: { ...NATIVE.decision.diagnostics, reasonCode: 'fee_required' },
-          },
-        },
-      },
-    ]);
-    const result = await runRequestTool(
-      { tool: 'context7-docs', query: 'Zod' },
-      { ...deps(fetchImpl), route },
-    );
-    expect(result.envelope).toMatchObject({
-      status: 'needs_input',
-      nextStep: 'Use your own tools for this lookup. Nothing was paid.',
-    });
-    expect(calls).toHaveLength(1);
-    expect(route).not.toHaveBeenCalled();
-  });
 
   it.each(['', '  '])('keeps a missing selected-free query on the free form: %j', async (query) => {
     const { fetchImpl, calls } = net([]);

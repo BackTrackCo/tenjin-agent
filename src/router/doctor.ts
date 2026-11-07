@@ -70,24 +70,7 @@ import {
   WALLET_REASONS,
 } from './wallet-reasons';
 
-/**
- * `tenjin doctor` for the router product: the things that decide whether a
- * lookup can happen at all, read and never written.
- *
- * THE PLUGIN IS ASKED ABOUT THROUGH CLAUDE CODE ITSELF: `claude --version`
- * against the floor, `claude plugin list --json` for the plugin and its
- * version, and `claude mcp get` for its `router` server. With no binary, the
- * plugin folder and the `alive` stamp stand in. A settings install of an
- * earlier release is reported with its migration state; doctor never migrates.
- *
- * THE RUNTIME CLAUDE CODE STARTS is read from the plugin it loads (the
- * marketplace `claude plugin marketplace list` names, and its `.mcp.json`),
- * run once with `--version`, and checked with the launcher a terminal needs.
- * Plugin installation uses the default data directory only.
- *
- * EVERY FIX IS A STEP THE AGENT TAKES IN THE SESSION: a command it runs, or a
- * slash command the person types there. None sends anyone out of Claude Code.
- */
+/** Collect Claude Code setup, payment eligibility and session evidence without a paid task. */
 
 export type { RouterCheck };
 
@@ -467,17 +450,35 @@ async function shellEligibility(
   }
 }
 
-/**
- * The human report: one line a check, and under each row to look at, its fix,
- * as `--json` carries it. The summary counts what the person can act on apart
- * from what could not be checked: a check that could not answer
- * (`checked: false`) is shown as a warning but is nothing to fix.
- */
+/** Installation, payment readiness and session evidence are separate claims. */
 export function doctorLines(checks: RouterCheck[]): string[] {
   const act = checks.filter((c) => c.status !== 'ok' && c.checked !== false).length;
   const unchecked = checks.filter((c) => c.checked === false).length;
   const allPass = checks.every((c) => c.status === 'ok');
+  const plugin = checks.find((c) => c.name === 'plugin');
+  const runtimeUnchecked = checks.some((c) => c.name === 'runtime' && c.checked === false);
+  const setup =
+    plugin === undefined
+      ? 'not checked'
+      : plugin.status !== 'ok' || checks.some((c) => c.required && c.status !== 'ok')
+        ? 'needs attention'
+        : runtimeUnchecked
+          ? 'not verified'
+          : 'ready';
+  const payment = checks.filter((c) => ['routing', 'routing fee', 'router'].includes(c.name));
+  const paid =
+    checks.some((c) => c.required && c.status !== 'ok' && c.checked !== false) ||
+    payment.some((c) => c.status !== 'ok' && c.checked !== false)
+      ? 'unavailable'
+      : !runtimeUnchecked && payment.length === 3 && payment.every((c) => c.status === 'ok')
+        ? 'ready on this machine'
+        : 'not checked';
+  const session = checks.find((c) => c.name === 'claude session');
   return [
+    `Setup: ${setup}.`,
+    `Paid routing: ${paid}.`,
+    `Claude Code session: ${session?.status === 'ok' ? 'Tenjin observed; wallet unlocked' : session !== undefined && session.checked !== false ? 'needs attention' : 'not verified'}.`,
+    '',
     ...checks.flatMap((c) => [
       `${c.status === 'ok' ? 'ok  ' : c.status === 'warn' ? 'warn' : 'fail'}  ${c.name}: ${c.detail}`,
       ...(c.status !== 'ok' && c.fix !== undefined ? [`      fix: ${c.fix}`] : []),

@@ -647,6 +647,9 @@ describe('Codex install, uninstall and doctor', () => {
   it('keeps the defaults with no answer and hands the spend question back', async () => {
     await writeFile(join(dir, 'config.json'), '{}');
     const { deps } = host();
+    deps.env = { CODEX_SESSION_ID: 'session' };
+    const funding = vi.fn(async () => undefined);
+    deps.funding = funding;
     const out = await runCodexInstall({}, ctx(), deps);
     const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as object;
     expect(config).not.toHaveProperty('maxAutoSpend');
@@ -662,6 +665,20 @@ describe('Codex install, uninstall and doctor', () => {
       'tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
     ]);
     expect(out.data).not.toHaveProperty('approval');
+    expect(funding).not.toHaveBeenCalled();
+  });
+
+  it('offers funding after an interactive Codex installation', async () => {
+    const { deps } = host();
+    deps.isInteractive = true;
+    deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
+    const terminal = ctx();
+    terminal.flags.json = false;
+    terminal.io.isTTY = true;
+    const out = await runCodexInstall({}, terminal, deps);
+    expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
+    expect(out.humanLines?.join(' ')).toContain('/hooks and trust the five Tenjin hooks');
+    expect(out.humanLines?.join(' ')).toContain('then start a new session');
   });
 
   it('asks nothing again once the file names a limit', async () => {
@@ -670,22 +687,29 @@ describe('Codex install, uninstall and doctor', () => {
     expect((out.data as { nextSteps: unknown[] }).nextSteps).toEqual([]);
   });
 
-  /** The Claude install's Help improve routing question, once per machine. */
-  it('hands an agent in Codex the Help improve routing question once, after the spend answer', async () => {
-    await writeFile(join(dir, 'config.json'), '{}');
+  it('gives Codex a link-preparation command and sharing disclosure, without extra setup questions', async () => {
     const { deps } = host();
-    const env = { CODEX_SESSION_ID: 'thread-1' };
-    const steps = async (args: Parameters<typeof runCodexInstall>[0]) =>
-      (
-        (await runCodexInstall(args, ctx(), { ...deps, env })).data as {
-          nextSteps: { id: string; options: { command: string | null }[] }[];
-        }
-      ).nextSteps;
-    expect((await steps({})).map((q) => q.id)).toEqual(['spend']);
-    const answered = await steps({ yes: true });
-    expect(answered.map((q) => q.id)).toEqual(['improve']);
-    expect(answered[0]!.options[0]!.command).toBe('tenjin config set router.improve true');
-    expect(await steps({ yes: true })).toEqual([]);
+    deps.env = { CODEX_SESSION_ID: 'session' };
+    deps.walletSigning = async () => ({ signing: { status: 'ready', source: 'file' } });
+    const out = await runCodexInstall({ yes: true }, ctx(), deps);
+    expect(out.data).toMatchObject({
+      nextSteps: [
+        {
+          id: 'fund',
+          options: [{ command: 'tenjin wallet fund 5 --no-open --no-wait' }, { command: null }],
+          next: expect.stringContaining('show checkoutUrl as a clickable link'),
+        },
+      ],
+      disclosure: [
+        expect.stringContaining(
+          'task context and your wallet address are sent to Tenjin for routing',
+        ),
+        expect.stringContaining('https://tenjin.sh/privacy'),
+      ],
+    });
+    expect((out.data as { next: string }).next).toContain('Follow the instructions in nextSteps');
+    expect(JSON.stringify(out)).not.toContain('Help improve routing');
+    expect(out.humanLines?.join('\n')).not.toContain('0x111111');
   });
 
   it('writes the limits the two flags name, and asks nothing', async () => {
@@ -954,6 +978,7 @@ describe('Codex install, uninstall and doctor', () => {
       hooks: async () => listed(...stale),
     });
     expect(warned.data).toMatchObject({ routing: 'free', ok: true });
+    expect(warned.humanLines?.[0]).toBe('Setup: needs attention.');
     expect(warned.humanLines?.join('\n')).toContain('! Routing: its routing hooks are commands');
     await expect(
       runCodexDoctor({}, ctx(), {
@@ -982,6 +1007,11 @@ describe('Codex install, uninstall and doctor', () => {
       version: '0.157.1',
     });
     expect(ready.data).not.toHaveProperty('elicitation');
+    expect(ready.humanLines?.slice(0, 3)).toEqual([
+      'Setup: ready for Codex.',
+      'Current Codex session: not verified by this check.',
+      'Paid routing: wallet and funds not checked.',
+    ]);
     expect(ready.humanLines?.join('\n')).toContain('information only');
     expect(ready.humanLines?.join('\n')).not.toContain('Pay once');
   });
@@ -1122,14 +1152,18 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       [null, true],
     ] as const) {
       const { steps, deps } = host();
+      const funding = vi.fn(async () => undefined);
       const out = await runCodexInstall({ yes: true }, ctx(), {
         ...deps,
+        env: { CODEX_SESSION_ID: 'session' },
+        funding,
         version: async () => version,
       });
       expect(
         steps.some((s) => s.startsWith('codex plugin add')),
         String(version),
       ).toBe(adds);
+      expect(funding).toHaveBeenCalledTimes(adds ? 1 : 0);
       if (!adds) {
         expect(out.data).toMatchObject({ next: CODEX_REFRESH_LINES.old });
         expect(CODEX_REFRESH_LINES.old).toContain('0.149.0');

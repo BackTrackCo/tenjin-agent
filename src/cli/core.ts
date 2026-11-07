@@ -14,9 +14,9 @@ import { installOutput } from '../router/install-output';
 export function registerCore(reg: Registration): void {
   const { runCommand, leaf, addGlobalFlags } = reg;
 
-  leaf(SETUP, 'install', 'set up Tenjin for your agent and create a wallet')
+  leaf(SETUP, 'install', 'set up Tenjin for Claude Code or Codex')
     .description(
-      "Set up Tenjin for your agent: a wallet if this machine has none, spend limits for each lookup, and the Tenjin plugin (its routing hooks and its `router` MCP server), registered through the agent's own plugin commands. Run by an agent, it sets up the agent it runs in. In a terminal, it sets up Claude Code or Codex, whichever this machine has, and asks which when it has both. For Claude Code, a settings-based install from an earlier release is removed once the plugin has loaded. Codex is user scope only.",
+      'Install the Tenjin plugin, create a local wallet if needed, and choose spending limits. Your agent sets itself up; a terminal detects Claude Code and Codex and lets you choose when both are present. Funding is optional. Codex supports user scope only.',
     )
     .addOption(hostOverride())
     .option('--project', 'register the plugin for this project only')
@@ -35,7 +35,7 @@ Examples:
 
 The daily budget is shared across chats. Its spending counter resets 24 hours after its window starts;
 opening a new chat does not reset it. The per-call limit bounds each call, and the wallet balance is
-the hard stop. To turn the router off instead:
+the hard stop. To disable Tenjin requests and automatic routing here:
   $ tenjin config set router.enabled false
 
 Learn more:
@@ -60,7 +60,9 @@ Learn more:
           ...(o.yes === true ? { yes: true } : {}),
         };
         const hosts = await installHosts(hostArgs, ctx);
-        const note = otherHostNote(hostArgs).catch(() => undefined);
+        const { fundingOncePerRun, finishTerminalFunding } =
+          await import('../router/install-funding');
+        const funding = fundingOncePerRun();
         // Both hosts run from the same runtime: it is set up, and said, once.
         const runtime = (await import('../router/install')).runtimeOncePerRun();
         const installAll = () =>
@@ -69,7 +71,7 @@ Learn more:
               host === 'codex'
                 ? await (
                     await import('../router/codex-install')
-                  ).runCodexInstall(codexArgs(o), ctx, { runtime })
+                  ).runCodexInstall(codexArgs(o), ctx, { runtime, funding })
                 : await (
                     await import('../router/install')
                   ).runRouterInstall(
@@ -86,13 +88,19 @@ Learn more:
                         : {}),
                     },
                     ctx,
-                    { runtime },
+                    { runtime, funding },
                   );
             if (o.refresh !== true) await recordInstalledHost(ctx.dataDir, host);
             return one;
           });
         if (o.refresh !== true || harness !== undefined) {
-          return installOutput(withNote(await installAll(), await note), ctx, o.refresh === true);
+          const result = await installAll();
+          const finished =
+            o.refresh === true
+              ? result
+              : await finishTerminalFunding(result, ctx, { yes: o.yes === true });
+          const note = await otherHostNote(hostArgs, ctx.dataDir);
+          return installOutput(withNote(finished, note), ctx, o.refresh === true);
         }
         // `tenjin update` runs this refresh in the new build: a Codex that
         // already has the plugin gets the new hooks too, whatever Claude Code's
@@ -105,7 +113,7 @@ Learn more:
 
   leaf(SETUP, 'uninstall', 'remove what install wrote; the wallet is kept')
     .description(
-      "Remove Tenjin's install for where you are: the project install of the folder you are in (from any subfolder), or else your user install. The tenjin marketplace, Tenjin's runtime and its launcher go once no install is left anywhere. Either all of it goes or nothing does, and it says what it keeps: your wallet, spend ledger and config. If installed through npm, run this before `npm uninstall -g tenjin-cli`.",
+      'Remove Tenjin from this project, or from your agent when there is no project install. Keep your wallet, funds, spending history and config. Shared runtime files stay while another Tenjin install needs them. Run this before `npm uninstall -g tenjin-cli`.',
     )
     .addOption(hostOverride())
     .option(
@@ -161,9 +169,9 @@ Learn more:
       });
     });
 
-  leaf(SETUP, 'doctor', 'check this machine can run a lookup')
+  leaf(SETUP, 'doctor', 'show setup status and routing readiness')
     .description(
-      "Check everything a lookup needs, for each agent `tenjin install` set up. For Claude Code: the Node floor, Claude Code's version, the Tenjin plugin, the runtime and launcher Claude Code starts, its router server, any settings install an earlier release left, the spend limits, whether the wallet can sign without a prompt, as the router Claude Code is running sees it when one is live, and the router endpoint answering its 402. For Codex: Codex's hook list for the plugin and its hook trust. It prints one line per check with a fix for each failure, writes nothing, and exits nonzero if a required one fails; a check it cannot answer is a warning, never ok.",
+      'Check the agents Tenjin installed, without making a paid call. Show setup status, session evidence and routing readiness, followed by diagnostics and fixes. Codex checks plugin hooks only; it does not verify the current chat, wallet or funds. A required failure shows its error and fix instead of the summary, and exits nonzero. An unknown check remains a warning. Use --json for structured results.',
     )
     .addOption(hostOverride())
     .option('--project', 'check the project-only install, as --project registered it')
@@ -300,9 +308,9 @@ Examples:
       });
     });
   addGlobalFlags(wallet.command('repair'))
-    .summary('save the wallet passphrase so Claude Code can unlock it')
+    .summary('save the wallet passphrase so your agent can unlock it')
     .description(
-      'For a wallet Claude Code cannot unlock. Asks for the passphrase at the terminal (or uses TENJIN_WALLET_PASSPHRASE when that opens the wallet), checks it opens this wallet (the address does not change), saves it in the OS keychain, or in a file only you can read where there is none, and names a TENJIN_WALLET_PASSPHRASE in this shell that conflicts with it. Start a new Claude Code session afterwards: it confirms the unlock.',
+      'Check the passphrase locally and save it in the OS keychain, or a file only you can read where no keychain is available. The wallet address stays the same. Enter the passphrase in the terminal prompt, never in chat. Start a new agent session afterwards and check it with doctor.',
     )
     .option(
       '--insecure-storage',
@@ -341,19 +349,11 @@ Examples:
       });
     });
 
-  // Funds-IN via Coinbase Onramp, grouped under `wallet` with show/balance
-  // because it operates on the wallet and nothing else. Unlike `send`, this IS
-  // also an MCP tool
-  // (tenjin_fund): minting moves no money and the human gate is Coinbase's own
-  // checkout page. The browser open and balance poll below are CLI-only. The
-  // poll is off unless stdout is a TTY: the link dies in ~5 minutes, so a piped
-  // run takes it off stderr immediately rather than off a poll that outlives it.
-  // The open also runs under an agent harness, where the agent runs this on the
-  // person's yes to install's funding question.
+  // A checkout link moves no money; the person completes payment in the browser.
   addGlobalFlags(wallet.command('fund [amountUsd]'))
-    .summary('fund this wallet through a checkout link for your region')
+    .summary('add funds to this wallet in your browser')
     .description(
-      'Get a checkout link for THIS wallet, open it in the browser, and wait for the USDC to land on Base. The link moves no money: a human completes the payment.',
+      'Open a checkout link for this wallet. Choose an available payment method and confirm its amount and fees in the browser. The command can wait for USDC to arrive on Base; a link alone does not mean funds arrived.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
     .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')

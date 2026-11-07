@@ -40,9 +40,9 @@ below). Selected `{tool, query}` bypasses that fee gate and makes no model decis
 | forget    | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
 
 `improve: true` rides the hook and tool forms only while the person has turned
-on "Help improve routing" (`router.improve`, off by default, asked once per
-machine): the server then keeps that call's sealed packet beside its decision
-row, with no expiry. The `forget` form, on the free route, is sent once when
+on "Help improve routing" (`router.improve`, off by default, enabled explicitly
+with `tenjin config set router.improve true`): the server then keeps that call's
+sealed packet beside its decision row, with no expiry. The `forget` form, on the free route, is sent once when
 the person turns it off: the server deletes every packet it kept for the
 request's `tenjin-install-id` header, and with no install id deletes nothing.
 Neither carries `accepts`.
@@ -172,13 +172,11 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
 ## The harness
 
 Every form, the outcome report included, takes an optional `harness`: the
-agent host the client runs in, `claude` or `codex`. It changes which services
-the router offers, never payment, limits or the fee. A service the host's own
-tools already cover is left out on every form: the hook and tool offers, a
-page's routed reader, browse rows, `tool`, and an open-Bazaar listing at the
-same endpoint. Codex gets no `glim-reddit-get`,
-because its hosted web tool reads a Reddit thread from its URL, so that page
-is answered `native`. No `harness` means `claude`, and an unknown token gets
+agent host the client runs in, `claude` or `codex`. Native-tool preferences
+narrow automatic hook offers only, never explicit queries, browse rows or
+`tool` inspection. Compatible tools such as `glim-reddit-get` remain available
+when selected in Codex. Harness compatibility still applies to every call;
+payment, limits and the fee are unchanged. No `harness` means `claude`, and an unknown token gets
 the `claude` answer. The server logs the mapped value (`claude`, `codex` or
 `other`) and never the raw token.
 
@@ -187,8 +185,9 @@ A browse (`browse`, any words, or empty for everything) answers rows of
 runs, former list services included, best match first, or grouped by kind
 when empty. `price` is as a person reads it (`1¢`, `free`). No
 gate, no Jev, no row stored. A row's id sent as `tool` answers its spec under
-a fresh offer id, stored as a query's pick is; the free docs row has no spec
-and answers `needs_input` (`spec_missing`), pointing at `request({query})`.
+a fresh offer id, stored as a query's pick is. The free docs row has no spec:
+clients sending `free-query` get `needs_input` with the `{tool, query}` call;
+clients without it get `spec_missing`, pointing at `request({query})`.
 
 ## The paid path
 

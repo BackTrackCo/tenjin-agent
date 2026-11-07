@@ -678,12 +678,6 @@ async function requestTool(
   const { decision, note } = fresh.decision;
 
   if (args.tool !== undefined) {
-    if (decision.action === 'native' && decision.diagnostics.reasonCode === 'fee_required') {
-      await footer.done('needs_input');
-      return fail('needs_input', 'This router does not support the selected free lookup.', {
-        nextStep: 'Use your own tools for this lookup. Nothing was paid.',
-      });
-    }
     if (
       decision.action !== 'native' &&
       decision.action !== 'needs_input' &&

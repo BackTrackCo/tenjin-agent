@@ -124,7 +124,7 @@ describe('unpaidSentence', () => {
 
   it('names the ceiling in the deposit line, the bound every later call keeps', () => {
     expect(depositSentence(CHANNEL_DEPOSIT_ATOMIC)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds remain yours.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
     );
   });
 

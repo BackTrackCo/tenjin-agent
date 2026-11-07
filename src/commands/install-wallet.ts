@@ -158,14 +158,6 @@ function walletFix(reason: WalletSkipReason, path?: string): string {
   }
 }
 
-export function walletValue(w: WalletOutcome): string {
-  const locked = w.signing?.status === 'blocked' ? ` - cannot unlock: ${w.signing.detail}` : '';
-  if (w.status === 'existing') return `${w.address} (existing)${locked}`;
-  if (w.status === 'created') return `${w.address}, $0 - fund with: tenjin wallet fund${locked}`;
-  if (w.status === 'skipped') return `none (${w.reason}) - ${w.fix}`;
-  return 'none - create with: tenjin wallet create';
-}
-
 /**
  * The wallet decision. A wallet is created BY DEFAULT on both paths, because
  * the router pays every call from it, so a walletless install is a setup that
