@@ -60,12 +60,16 @@ BIN="./node_modules/.bin/tenjin"
   exit 1
 }
 
-# The README links docs/agent-permissions.md package-locally, so dropping `docs`
-# from the files array must fail here, not leave a dead link while CI stays green.
-[ -f "./node_modules/tenjin-cli/docs/agent-permissions.md" ] || {
-  echo "pack-smoke: FAIL — docs/agent-permissions.md missing from the installed package" >&2
-  exit 1
-}
+# Source tests validate the documentation links/anchors and safety facts. Every
+# tested doc must ship unchanged, including references linked from the short guide.
+while IFS= read -r -d '' doc; do
+  relative="${doc#"$PKG_DIR/"}"
+  cmp -s "$doc" "./node_modules/tenjin-cli/$relative" || {
+    echo "pack-smoke: FAIL — $relative missing from the installed package, or not the tested source" >&2
+    exit 1
+  }
+done < <(find "$PKG_DIR/docs" -type f -name '*.md' -print0)
+echo "pack-smoke: tested documentation ships unchanged (ok)"
 
 # tenjin.sh builds install.sh and install.ps1 from the templates in npm's
 # `latest` tarball, and answers 503 for a release that carries none. So both

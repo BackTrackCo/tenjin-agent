@@ -164,23 +164,21 @@ export async function installHosts(
   return HARNESSES.filter((h) => picked.includes(h));
 }
 
-/**
- * Under an agent, the line naming the other host when its `--version` runs
- * too: a yes/no question the agent asks the person, and what a yes runs.
- */
+/** Point to another available host without adding a setup question. */
 export async function otherHostNote(
   args: InstallHostArgs,
+  dataDir: string,
   deps: HostDeps = {},
 ): Promise<string | undefined> {
-  if (args.harness !== undefined || args.refresh === true || args.project === true) {
+  if (args.harness !== undefined || args.refresh === true || args.project === true)
     return undefined;
-  }
   const env = deps.env ?? process.env;
   const agent = agentHost(env);
   if (agent === undefined) return undefined;
   const other: Harness = agent === 'claude' ? 'codex' : 'claude';
+  if ((await readInstalledHosts(dataDir))?.includes(other)) return undefined;
   if (!(await (deps.detect ?? detectHosts)(env)).includes(other)) return undefined;
-  return `${LABEL[other]} is also installed on this machine. Ask the person: "Should I also set up Tenjin for ${LABEL[other]}?" On yes, run \`tenjin install --harness ${other}\`.`;
+  return `Tell the person: ${LABEL[other]} is also installed. To add Tenjin there${other === 'codex' ? ' (experimental support)' : ''}, ask ${LABEL[other]} to install it.`;
 }
 
 /** The install result with `note` in its `notices` and as its last line. */

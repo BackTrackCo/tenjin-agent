@@ -3,12 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
-import {
-  persistImproveAnswer,
-  persistRouterDefaults,
-  persistRouterProject,
-  type RouterLimits,
-} from '../commands/config';
+import { persistRouterDefaults, persistRouterProject, type RouterLimits } from '../commands/config';
 import { askText, selectOne } from '../lib/clack';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -74,13 +69,13 @@ import {
   FEE_APPROVAL,
 } from './spend-question';
 import { shQuote } from './plugin-files';
-import { askImprove, improveLines, improveStep, type ImproveDeps } from './improve-question';
+import { fundStep, type FundingDeps } from './install-funding';
 import { underAgentHarness } from '../lib/session';
 import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 
 /**
- * `tenjin install` for the router product: the wallet, the spend limits, and
- * the Claude Code plugin `tenjin`, registered with no step left to the person.
+ * `tenjin install` prepares the wallet, spending limits and Claude Code plugin.
+ * Registration does not establish activation in an already open session.
  *
  * What it writes: the wallet and the spend defaults under the data dir. With
  * the default data dir, this build is copied into Tenjin's own runtime,
@@ -97,13 +92,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * tool to the model, so this command writes nothing into `settings.json` or
  * `~/.claude.json` itself.
  *
- * NO STEP IS LEFT TO THE PERSON. An agent runs this in the person's session:
- * the spend question comes back for the agent to ask there, the funding question
- * with the install its answer picks, the `claude`
- * binary is found through `CLAUDE_CODE_EXECPATH` where PATH lacks it, a failed
- * plugin command falls back to the folder, and the one step after it is
- * reloading plugins in a fresh terminal install's conversation. Desktop Code
- * and settings-based upgrades need a new session to load the MCP server.
+ * An agent relays the spending choice and prepares a funding link; a terminal
+ * asks both choices directly. Funding is optional. Activation follows the host-specific step.
  *
  * THE SETTINGS INSTALL OF EARLIER RELEASES is left working until the plugin
  * has proven to load on this machine (see {@link migrateSettingsInstall}).
@@ -112,9 +102,8 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  "What leaves this machine: the bounded text of each prompt, each native search query or URL (and, when one came back short, its status, size or error), each task handed to a subagent, and each question your assistant asks you with your answers, sent to Tenjin for the routing gate, beside this session's id and your wallet address. A free library docs lookup sends its query to Tenjin, which asks Context7.",
-  'What is kept when a lookup is paid: the capability chosen, a hash of the contract, a hash of the arguments, and your wallet address. No prompt text, no arguments, no hint text.',
-  'What never leaves: your private key. It is decrypted in this CLI to sign, and never sent anywhere.',
+  'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
+  'Privacy: https://tenjin.sh/privacy · Terms: https://tenjin.sh/terms',
 ];
 
 /**
@@ -142,6 +131,8 @@ export function loadStep(
       `carry over the person's funding and spending choices, and have the next session check Tenjin with \`${command} doctor\`${process.platform === 'win32' ? ' in PowerShell' : ''} before continuing`
     );
   }
+  if (!underAgentHarness(env))
+    return 'open a new Claude Code session so Tenjin loads, then continue your task';
   return settingsInstallPresent ? NEW_SESSION_STEP : RELOAD_STEP;
 }
 
@@ -182,7 +173,7 @@ export interface RouterInstallArgs {
   sessionBudget?: string;
 }
 
-export interface RouterInstallDeps extends WalletDeps, ImproveDeps {
+export interface RouterInstallDeps extends WalletDeps, FundingDeps {
   /** This user's running routers and Claude Code processes; tests inject them. */
   listProcesses?: ListProcesses;
   /** This user's running `tenjin mcp` processes; tests inject them. */
@@ -207,8 +198,6 @@ export interface RouterInstallDeps extends WalletDeps, ImproveDeps {
   promptAmount?: (message: string, placeholder: string) => Promise<string | null>;
   /** The router reachability probe's transport; tests inject it. */
   fetchImpl?: typeof fetch;
-  /** The wallet's USDC balance in atomic units; production reads Base. */
-  walletBalance?: (address: string, rpcUrl: string) => Promise<bigint>;
   /** Sets up Tenjin's runtime for this build; tests inject it, production runs `setupRuntime`. */
   runtime?: (o: Parameters<typeof setupRuntime>[0]) => Promise<RuntimeSetup>;
 }
@@ -422,12 +411,6 @@ export async function runRouterInstall(
           : canPrompt && unasked
             ? await approveLimits(deps)
             : {};
-  // "Help improve routing", asked once per machine, right after the limits.
-  const improve = await askImprove(
-    config,
-    { canPrompt, yes: args.yes === true, refresh: args.refresh === true },
-    deps,
-  );
   // BELOW THE FLOOR, THE SETTINGS INSTALL WINS. The plugin's routing legs
   // need Claude Code 2.1.287, but its `alive` leg is a command that runs on
   // any version and would silence the settings install in every session,
@@ -447,7 +430,6 @@ export async function runRouterInstall(
   }
 
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
-  if (improve !== undefined) await persistImproveAnswer(ctx.dataDir, improve);
   const removedKeysLines =
     spend.removed.length > 0
       ? [
@@ -569,21 +551,23 @@ export async function runRouterInstall(
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     // The spend question comes first, because its answer picks the install
-    // command. The funding question rides on the install that follows it.
-    asksAgent && spendAsk === undefined
-      ? fundStep(wallet, effective.rpcUrl, deps, `${command} wallet fund ${SUGGESTED_FUND_USD}`)
+    // command. Funding instructions ride on the install that follows it.
+    (asksAgent || canPrompt) &&
+    spendAsk === undefined &&
+    plugin.state !== 'failed' &&
+    plugin.state !== 'deferred'
+      ? (deps.funding ?? fundStep)(
+          wallet,
+          effective.rpcUrl,
+          deps,
+          `${command} wallet fund ${SUGGESTED_FUND_USD}`,
+        )
       : Promise.resolve(undefined),
   ]);
   const fund = funding?.step;
-  const improveAsk = await improveStep(ctx.dataDir, config, {
-    asksAgent,
-    spendPending: spendAsk !== undefined,
-    command,
-  });
   const nextSteps: QuestionStep[] = [
     ...(spendAsk !== undefined ? [spendAsk] : []),
     ...(fund !== undefined ? [fund] : []),
-    ...(improveAsk !== undefined ? [improveAsk] : []),
   ];
 
   const data = {
@@ -626,8 +610,6 @@ export async function runRouterInstall(
         claude,
         migration,
         wallet,
-        ...(fund !== undefined ? { fund } : {}),
-        ...(improveAsk !== undefined ? { improveAsk } : {}),
         ...(funding?.warning !== undefined ? { fundingWarning: funding.warning } : {}),
         asks: asksAgent ? nextSteps.length : 0,
         policy: effective.policy,
@@ -914,12 +896,20 @@ function launcherSentence(launcher: LauncherResult | null, home: string): string
 }
 
 /** The runtime's lines under install's summary: where it runs from, or what needs the person. */
-export function runtimeLines(ctx: CommandContext, rt: RuntimeSetup | null, home: string): string[] {
+export function runtimeLines(
+  ctx: CommandContext,
+  rt: RuntimeSetup | null,
+  home: string,
+  concise = false,
+): string[] {
   if (rt === null || sharedResults.has(rt)) return [];
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
   const runs = runtimeSentence(rt, home);
   const launcher = launcherSentence(rt.launcher, home);
-  return [...(runs !== null ? [`  ${runs}`] : []), ...(launcher !== null ? [warn(launcher)] : [])];
+  return [
+    ...(!concise && runs !== null ? [`  ${runs}`] : []),
+    ...(launcher !== null ? [warn(launcher)] : []),
+  ];
 }
 
 function claudeCodeData(claude: ClaudeCodeState): Record<string, unknown> {
@@ -972,20 +962,20 @@ function repairStep(tty: boolean): string {
 /**
  * The one step after the install, for the agent to relay in the session. A
  * wallet whose saved passphrase is gone or wrong is repaired first; otherwise
- * the usual steps (no funding step for an existing wallet).
+ * the usual steps include funding instructions for an empty usable wallet.
  */
 function nextStep(
   plugin: PluginRegistration,
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  questions: number,
+  pendingSteps: number,
   tty: boolean,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string {
   if (plugin.state === 'failed') return registrationFix(plugin);
-  const steps = todaysSteps(plugin, claude, wallet, migration, questions, command, env);
+  const steps = todaysSteps(plugin, claude, wallet, migration, pendingSteps, command, env);
   const signing = wallet.signing;
   if (signing?.status === 'blocked' && REPAIRABLE.has(signing.reason)) {
     steps.unshift(repairStep(tty));
@@ -998,20 +988,12 @@ function todaysSteps(
   claude: ClaudeCodeState,
   wallet: WalletOutcome,
   migration: Migration,
-  questions: number,
+  pendingSteps: number,
   command: string,
   env: NodeJS.ProcessEnv,
 ): string[] {
   const steps: string[] = [];
-  if (questions > 1) {
-    steps.push(
-      'ask the person each question in nextSteps, one at a time, then run what each answer names',
-    );
-  } else if (questions === 1) {
-    steps.push('ask the person the question in nextSteps, then run what the answer names');
-  } else if (wallet.status === 'created') {
-    steps.push(`fund the wallet with \`${command} wallet fund ${SUGGESTED_FUND_USD}\``);
-  }
+  if (pendingSteps > 0) steps.push('follow the instructions in nextSteps');
   if (plugin.state === 'deferred') {
     steps.unshift('run `claude update`');
     steps.push(
@@ -1161,15 +1143,10 @@ export function namedLimits(
   return { limits, keys };
 }
 
-/** The funding question an agent's completed install hands over: the checkout's $5 minimum. */
-export const FUND_QUESTION = `Add $${SUGGESTED_FUND_USD} to Tenjin now?`;
-/** Its yes: the agent runs this alone, in the turn the person answered. */
-export const FUND_COMMAND = `tenjin wallet fund ${SUGGESTED_FUND_USD}`;
-
-/** One question install hands to the agent that ran it, with what each answer runs. */
+/** A pending install step, handled according to its next instructions. */
 export interface QuestionStep {
-  id: 'spend' | 'fund' | 'improve';
-  /** For the agent to put to the person as written, with `options`. */
+  id: 'spend' | 'fund';
+  /** Prompt text for the terminal choice or agent explanation; follow `next`. */
   question: string;
   options: {
     id: string;
@@ -1177,88 +1154,11 @@ export interface QuestionStep {
     recommended: boolean;
     /** What to ask the person after they pick this option, before running `command`. */
     ask?: string[];
-    /** The one command the agent runs alone for this answer, or null: run nothing. */
+    /** The command for this option; `next` says whether the agent asks first. */
     command: string | null;
   }[];
-  /** What the agent does with each answer. */
+  /** How the agent handles this step. */
   next: string;
-}
-
-/** The funding question, keeping a transfer address available without making it the normal path. */
-export interface FundStep extends QuestionStep {
-  id: 'fund';
-  address: string;
-  /** What to tell the person when they choose to add funds later. */
-  show: string;
-}
-
-/**
- * THE QUESTION BEFORE THE ACTION. Under an agent harness, install opens no
- * browser and pays nothing: once the spend answer has picked the install, the
- * install hands the agent the funding question, so the page opens only after
- * an answer the person gave in the session. It mints no link: a later yes
- * runs `tenjin wallet fund`. A wallet that
- * already holds USDC gets no question.
- */
-async function fundStep(
-  wallet: WalletOutcome,
-  rpcUrl: string,
-  deps: RouterInstallDeps,
-  command: string,
-): Promise<{ step?: FundStep; warning?: string } | undefined> {
-  const address = wallet.address;
-  if (address === undefined || (wallet.status !== 'created' && wallet.status !== 'existing')) {
-    return undefined;
-  }
-  const funded =
-    wallet.status === 'created'
-      ? false
-      : await (deps.walletBalance ?? defaultBalance)(address, rpcUrl).then(
-          (atomic) => atomic > 0n,
-          () => null,
-        );
-  if (funded === true) return undefined;
-  if (funded === null) {
-    return {
-      warning:
-        'Could not check your Tenjin funds. Your usual tools keep working. Ask your agent to check your funds later; this check failing does not mean you need to add money again.',
-    };
-  }
-  const show =
-    'Paid tools need funds; your usual tools keep working. Continue the original task with available tools.';
-  return {
-    step: {
-      id: 'fund',
-      question: FUND_QUESTION,
-      options: [
-        {
-          id: 'fund',
-          label: `Add $${SUGGESTED_FUND_USD}`,
-          recommended: false,
-          command,
-        },
-        { id: 'later', label: 'Not now', recommended: false, command: null },
-      ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this question once. On "Add $${SUGGESTED_FUND_USD}", run that option's command alone, then follow its nextStep. Run it only after their yes. On "Not now", run nothing: ${show} Do not offer funding again unless requested. ${SHOW_NOT_RUN}`,
-      address,
-      show,
-    },
-  };
-}
-
-/** Loaded lazily: the status line shares this module's chunk and must not load viem. */
-async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> {
-  const { getUsdcBalance } = await import('../lib/usdc');
-  return getUsdcBalance(address as `0x${string}`, rpcUrl);
-}
-
-/** The funding question, as the summary prints it. */
-function fundLines(fund: FundStep): string[] {
-  return [
-    `  Ask the person: ${fund.question}`,
-    `  Add $${SUGGESTED_FUND_USD}: ${fund.options[0]?.command ?? FUND_COMMAND}`,
-    `  Not now: run nothing, show them: ${fund.show}`,
-  ];
 }
 
 /**
@@ -1375,12 +1275,10 @@ export function effectiveLimits(policy: SpendPolicy): EffectiveLimits {
  * wallet's fix and the passphrase line take the agent's wording: ask the
  * person, never ask for the passphrase.
  *
- * A ✓ only for a wallet every Claude Code can unlock: a durable store, a
- * legacy entry, or a variable a served router has already signed with. A
- * wallet that signs only through a variable in this shell is a yellow `!`,
- * as is one that cannot be unlocked, or could not be checked.
+ * A ready wallet needs no first-use diagnostic. A wallet that only this
+ * shell can unlock, a blocked signer or an unknown check retains its warning.
  */
-function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[] {
+export function walletLines(ctx: CommandContext, w: WalletOutcome, host = 'Claude Code'): string[] {
   const warn = (text: string) => paint(ctx.io, 'yellow', text);
   if (w.status === 'created' || w.status === 'existing') {
     const a = w.address ?? '';
@@ -1391,7 +1289,7 @@ function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[
         ? WALLET_REASONS[signing.reason as keyof typeof WALLET_REASONS]
         : undefined;
       return [
-        warn(`! Wallet ${a} cannot be unlocked by Claude Code: ${signing.detail}.`),
+        warn(`! Wallet ${a} cannot be unlocked by ${host}: ${signing.detail}.`),
         `  ${tty ? (wallet?.fix ?? signing.fix) : agentFixFor(signing.reason, signing.fix)}`,
       ];
     }
@@ -1404,7 +1302,7 @@ function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[
     if (w.shellOnly === 'key') {
       return [
         warn(
-          `! Wallet: ${a} signs here only through TENJIN_WALLET_KEY in this shell; Claude Code must have the same variable.`,
+          `! Wallet: ${a} signs here only through TENJIN_WALLET_KEY in this shell; ${host} must have the same variable.`,
         ),
       ];
     }
@@ -1412,18 +1310,12 @@ function walletLines(ctx: CommandContext, ok: string, w: WalletOutcome): string[
       return [
         warn(
           tty
-            ? `! Wallet: ${a} unlocks here only through TENJIN_WALLET_PASSPHRASE in this shell; Claude Code must have the same variable, or run \`tenjin wallet repair\` yourself to store the passphrase ${REPAIR_CLAUSE}.`
-            : `! Wallet: ${a} unlocks here only through TENJIN_WALLET_PASSPHRASE in this shell; Claude Code must have the same variable, or ask the person to run \`tenjin wallet repair\` in their own terminal to store the passphrase. Never ask for the passphrase.`,
+            ? `! Wallet: ${a} unlocks here only through TENJIN_WALLET_PASSPHRASE in this shell; ${host} must have the same variable, or run \`tenjin wallet repair\` yourself to store the passphrase ${REPAIR_CLAUSE}.`
+            : `! Wallet: ${a} unlocks here only through TENJIN_WALLET_PASSPHRASE in this shell; ${host} must have the same variable, or ask the person to run \`tenjin wallet repair\` in their own terminal to store the passphrase. Never ask for the passphrase.`,
         ),
       ];
     }
-    if (w.status === 'created') {
-      return [
-        `${ok} Wallet created: ${a}`,
-        ...(w.passphrase !== undefined ? [`  ${w.passphrase.note}`] : []),
-      ];
-    }
-    return [`${ok} Wallet: ${a}`];
+    return [];
   }
   if (w.reason === 'flag') return ['  No wallet yet. Create one with: tenjin wallet create'];
   return [
@@ -1438,11 +1330,6 @@ function pluginLines(ctx: CommandContext, plugin: PluginRegistration): string[] 
   if (plugin.state === 'deferred') return [warn(`${plugin.reason ?? ''}`)];
   if (plugin.state === 'failed') {
     return [warn(`The Tenjin plugin was not registered: ${plugin.reason ?? 'unknown reason'}`)];
-  }
-  if (plugin.method === 'skills-dir') {
-    return [
-      `  Plugin ${plugin.id ?? ''} written to ${plugin.path ?? ''} (${plugin.fallbackReason ?? ''})`,
-    ];
   }
   return [];
 }
@@ -1482,10 +1369,9 @@ function claudeLines(ctx: CommandContext, claude: ClaudeCodeState): string[] {
 }
 
 /**
- * A few lines a first-time user can read at a glance: it worked, here is your
- * wallet, here is the one thing to do next. Paths, steps and data-handling
- * detail stay in `--json` and the docs; the terminal only grows a line when
- * something needs the user.
+ * The first-use receipt: installed state, disclosure, limits and activation.
+ * Successful storage/runtime details stay in diagnostics; failures and a
+ * launcher action remain visible.
  */
 function lines(
   ctx: CommandContext,
@@ -1494,10 +1380,8 @@ function lines(
     claude: ClaudeCodeState;
     migration: Migration;
     wallet: WalletOutcome;
-    fund?: FundStep;
-    improveAsk?: QuestionStep;
     fundingWarning?: string;
-    /** How many questions the agent is handed. */
+    /** How many pending steps the agent is handed. */
     asks: number;
     policy: SpendPolicy;
     spendAsk?: QuestionStep;
@@ -1546,11 +1430,10 @@ function lines(
     ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
       ? [`  For this project only; check it with: ${continuationCommand(s.rt)} doctor --project`]
       : []),
-    ...runtimeLines(ctx, s.rt, s.home),
-    ...walletLines(ctx, ok, s.wallet),
+    ...DISCLOSURE,
     ...spend,
-    ...(s.fund !== undefined ? fundLines(s.fund) : []),
-    ...(s.improveAsk !== undefined ? improveLines(s.improveAsk) : []),
+    ...runtimeLines(ctx, s.rt, s.home, true),
+    ...walletLines(ctx, s.wallet),
     ...(s.fundingWarning !== undefined ? [warn(s.fundingWarning)] : []),
     ...pluginLines(ctx, s.plugin),
     ...claudeLines(ctx, s.claude),

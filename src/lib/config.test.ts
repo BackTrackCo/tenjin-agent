@@ -55,7 +55,11 @@ describe('loadConfig', () => {
       hooks: { prompt: false, 'web-search': true, primer: false },
       loop: { human_wait_ms: 2500, tool_wait_ms: 4000, idle_exit_min: 30, port: null },
       team: { publicFallback: 'off' },
-      install: { harness: ['shared'], grantDeclined: ['Bash(tenjin search:*)'] },
+      install: {
+        harness: ['shared'],
+        grantDeclined: ['Bash(tenjin search:*)'],
+        improveAsked: true,
+      },
       router: { enabled: false },
     };
     await writeFile(configFile(), JSON.stringify(legacy));
@@ -65,7 +69,7 @@ describe('loadConfig', () => {
     const cfg = await loadConfig(dir);
     expect(cfg.maxAutoSpend).toBe('500000');
     expect(cfg.router).toEqual({ enabled: false, context: 'session', improve: false });
-    expect(cfg.install).toEqual({ routerProjects: [], improveAsked: false });
+    expect(cfg.install).toEqual({ routerProjects: [] });
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
     expect(s.maxAutoSpend).toEqual({ value: '500000', source: 'file' });
@@ -148,8 +152,8 @@ describe('resolveSettings — precedence and provenance', () => {
 
 describe('install block', () => {
   it('defaults to no wired project', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [], improveAsked: false });
-    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [], improveAsked: false });
+    expect(CONFIG_DEFAULTS.install).toEqual({ routerProjects: [] });
+    expect((await loadConfig(dir)).install).toEqual({ routerProjects: [] });
   });
 
   it('reads back the wired projects', async () => {
