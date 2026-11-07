@@ -187,7 +187,7 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
  * ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing call costs at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}. Unused funds remain yours.`;
+  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing call costs at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}. Unused funds cover later routing fees.`;
 }
 
 /**
