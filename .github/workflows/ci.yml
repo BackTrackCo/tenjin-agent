@@ -43,6 +43,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
+      - name: Check generated workspace guidance integrity
+        run: node scripts/check-workspace-adapters.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
         if: matrix.node == '22'

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local mirror of the CI Prettier gate. Wired by the package.json "githooks"
-# script (`pnpm githooks` sets git config core.hooksPath .githooks).
+# Local mirror of two CI gates: the generated-guidance integrity check and the
+# Prettier check. Wired by the package.json "githooks" script (`pnpm githooks`
+# sets git config core.hooksPath .githooks).
+echo "tenjin-agent pre-commit: generated workspace guidance"
+node scripts/check-workspace-adapters.mjs
+
 echo "tenjin-agent pre-commit: prettier format check"
 if ! pnpm format:check; then
   echo
