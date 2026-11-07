@@ -383,7 +383,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds cover later routing fees.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
     );
     deposited = 0n;
     const next = await runRequestTool(

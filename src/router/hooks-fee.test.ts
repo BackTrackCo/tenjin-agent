@@ -205,7 +205,7 @@ describe('the hook legs and the routing fee', () => {
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003. Unused funds cover later routing fees.',
+      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));

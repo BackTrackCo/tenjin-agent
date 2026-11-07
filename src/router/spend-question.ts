@@ -42,14 +42,11 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 }
 
 /**
- * The routing fee's terms, as the selector names them. THE CEILING IS WHAT IS
- * APPROVED, like EIP-1559's max fee: the router quotes the fee, and this CLI
- * pays no quote above {@link ROUTING_FEE_CEILING_ATOMIC}, a constant in this CLI, so
- * the amount named cannot go stale when the router's price changes. It says
- * each routing call names the wallet's address (its payment does), which the
- * router sees with each routed turn.
+ * The current Tenjin price and the ceiling the person approves are separate.
+ * The CLI refuses quotes above ROUTING_FEE_CEILING_ATOMIC; a routing deposit
+ * counts toward spending limits once, rather than once again for every fee.
  */
-export const ROUTING_FEE_TERMS = `Each routing call pays a quoted fee, at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}, from funds set aside (the router's suggested amount, up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time) and names your wallet address. Unused funds cover later routing fees; each deposit counts against these limits once.`;
+export const ROUTING_FEE_TERMS = `Paid routing currently costs $0.001 per call (maximum $${usd(ROUTING_FEE_CEILING_ATOMIC)}). Tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} for routing; this counts toward your limits once.`;
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either answer also approves the routing fee.';
