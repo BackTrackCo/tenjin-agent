@@ -281,6 +281,20 @@ describe('the shell and search leg', () => {
     expect(out.rule).toBe('squawk-drizzle-generate');
   });
 
+  it('notes nothing on a platform pair the rule does not list, and runs no fallback', async () => {
+    const elsewhere: Rules = {
+      ...RULES,
+      rules: RULES.rules.map((r) => ({ ...r, platforms: ['plan9-mips'] })),
+    };
+    const memory = await memoryWith(elsewhere);
+    expect(
+      (await runLocalHook(bash('pnpm drizzle-kit generate'), deps(memory))).response,
+    ).toBeNull();
+    expect(
+      (await runLocalHook(grep({ pattern: 'x', multiline: true }), deps(memory))).response,
+    ).toBeNull();
+  });
+
   it('gives a multiline Grep the ast-grep line', async () => {
     const out = await runLocalHook(
       grep({ pattern: 'a.*\\n.*b', multiline: true }),
