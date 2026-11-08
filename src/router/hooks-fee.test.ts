@@ -118,6 +118,50 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
   };
 }
 
+it.each([
+  { channel: 'funded', paidBudgetMs: GATE_TIMEOUT_MS - 1_500, paidRequests: 2 },
+  { channel: 'new', paidBudgetMs: DEPOSIT_GATE_TIMEOUT_MS - 1_500, paidRequests: 1 },
+])(
+  'sends the paid hook the budget left after a delayed challenge on a $channel channel',
+  async ({ channel, paidBudgetMs, paidRequests }) => {
+    const fake = new FakeRouter();
+    const budgets: { paid: boolean; budgetMs: number }[] = [];
+    const bodies: Record<string, unknown>[] = [];
+    let challengeArmed!: () => void;
+    const armed = new Promise<void>((resolve) => (challengeArmed = resolve));
+    const p = payer(fake);
+    if (channel === 'funded') {
+      await runPromptHook(prompt(), deps(fake.fetch, p));
+      expect(fake.paidRequests()).toBe(1);
+    }
+    holdTime();
+    const observe = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      const body = (await request.clone().json()) as Record<string, unknown> & { budgetMs: number };
+      const paid = request.headers.has('payment-signature');
+      budgets.push({ paid, budgetMs: body.budgetMs });
+      bodies.push(body);
+      if (!paid) {
+        const delayed = new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+        challengeArmed();
+        await delayed;
+      }
+      return fake.fetch(request);
+    }) as typeof fetch;
+    const roundTrip = runPromptHook(prompt(), deps(observe, p));
+    await armed;
+    await vi.advanceTimersByTimeAsync(1_500);
+    await roundTrip;
+    expect(fake.paidRequests()).toBe(paidRequests);
+    expect(fake.settledFees).toBe(paidRequests);
+    expect(budgets).toEqual([
+      { paid: false, budgetMs: GATE_TIMEOUT_MS },
+      { paid: true, budgetMs: paidBudgetMs },
+    ]);
+    expect({ ...bodies[0], budgetMs: 0 }).toEqual({ ...bodies[1], budgetMs: 0 });
+  },
+);
+
 /**
  * Holds the timers and the clock still; file I/O and microtasks keep running.
  * The budget tests advance it by exactly the wait they model instead of
