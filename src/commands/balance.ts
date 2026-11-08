@@ -1,7 +1,7 @@
 import { CliError } from '../lib/errors';
 import { liveLine, type LiveLine } from '../lib/live-line';
 import { toMoney } from '../lib/money';
-import { style } from '../lib/output';
+import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import { getUsdcBalance } from '../lib/usdc';
 import { forgetRememberedBalance } from '../lib/usdc-balance';
@@ -13,6 +13,7 @@ import {
 import type { SpendPolicy } from '../lib/policy';
 import { channelCredit } from '../router/channel-credit';
 import { FUND_COMMAND_LINE, ROUTING_FEE_CEILING_ATOMIC } from '../router/fee';
+import { limitsLine } from '../router/spend-question';
 import { dollars, forgetLink, recallLink, watchFunding } from './fund-watch';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -85,7 +86,7 @@ export async function runBalance(
       low,
     },
     humanLines: [
-      `${label('Balance')}${style('bold', dollars(atomic))}${low ? `  ${style('yellow', 'low')}` : ''}`,
+      `${label('Balance')}${paint(ctx.io, 'bold', dollars(atomic))}${low ? `  ${paint(ctx.io, 'yellow', 'low')}` : ''}`,
       `${label('Limits')}${limitsLine(policy)}`,
       ...(creditAtomic > 0n
         ? [`${label('Set aside')}about ${dollars(creditAtomic)} for routing`]
@@ -95,16 +96,6 @@ export async function runBalance(
         : []),
     ],
   };
-}
-
-/** `$0.25 a call · $5.00 a day`, from the effective policy. */
-export function limitsLine(policy: SpendPolicy): string {
-  const perCall = `${dollars(policy.maxAutoSpendAtomic)} a call`;
-  const daily =
-    policy.sessionBudgetAtomic === null
-      ? 'no daily limit'
-      : `${dollars(policy.sessionBudgetAtomic)} a day`;
-  return `${perCall} · ${daily}`;
 }
 
 function limitsData(policy: SpendPolicy): { maxAutoSpend: string; sessionBudget: string } {

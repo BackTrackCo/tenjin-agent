@@ -161,7 +161,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, {
+      const human = [...(result.humanLines ?? []), ...(result.humanTail ?? [])];
+      emitSuccess(ctx.io, command, result.data, human, {
         json: ctx.flags.json,
         compactJson: result.compactJson,
         updateAvailable,

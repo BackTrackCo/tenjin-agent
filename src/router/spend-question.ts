@@ -3,8 +3,8 @@ import { toMoney } from '../lib/money';
 import { MAX_CHANNEL_DEPOSIT_ATOMIC, usd } from './fee';
 
 /**
- * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: the defaults, or
- * your own limits. The selector in a terminal and the question an install
+ * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: how much the
+ * agent may spend, the defaults or your own limits. The selector in a terminal and the question an install
  * that could not ask hands to its agent show the same words, so the agent puts
  * to the person exactly what the selector would have. The defaults hold
  * whether or not anyone answers.
@@ -33,6 +33,18 @@ export function shownLimits(config: {
   };
 }
 
+/** `$0.25 a call · $5.00 a day`: the limits a policy holds, as a person reads them. */
+export function limitsLine(policy: {
+  maxAutoSpendAtomic: bigint;
+  sessionBudgetAtomic: bigint | null;
+}): string {
+  const daily =
+    policy.sessionBudgetAtomic === null
+      ? 'no daily limit'
+      : `$${usd(policy.sessionBudgetAtomic)} a day`;
+  return `$${usd(policy.maxAutoSpendAtomic)} a call · ${daily}`;
+}
+
 /** The limits in USD. */
 export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; sessionBudget: string } {
   return {
@@ -41,16 +53,23 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
   };
 }
 
-/** Setup states the current price; payment checks enforce the ceiling in fee.ts. */
-export const ROUTING_FEE_TERMS = `Paid routing currently costs $0.001 per call. Tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for routing; each deposit counts toward your limits once.`;
+/**
+ * Setup states the current price; payment checks enforce the ceiling in fee.ts.
+ * One line with every fee fact: the price per call, the set-aside and its
+ * ceiling, and that it is counted inside the limits the question sets.
+ */
+export const ROUTING_FEE_TERMS = `Routing costs $0.001 a call. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for it, counted in these limits.`;
 
 /** The selector's own line: either answer approves the fee. */
-export const FEE_APPROVAL = 'Either answer also approves the routing fee.';
+export const FEE_APPROVAL = 'Either choice approves this.';
 
 const DEFAULTS_USD = limitsUsd(ROUTER_DEFAULTS);
 
 /** The question, for the agent to put to the person as written. */
-export const SPEND_QUESTION = `Use the defaults ($${DEFAULTS_USD.sessionBudget} daily budget shared across chats, $${DEFAULTS_USD.maxAutoSpend} a call) or set your own limits.`;
+export const SPEND_QUESTION = 'How much can your agent spend from its balance?';
+
+/** The recommended answer: the defaults, as amounts. */
+export const DEFAULTS_LABEL = `Up to $${DEFAULTS_USD.maxAutoSpend} a call and $${DEFAULTS_USD.sessionBudget} a day`;
 
 /** The question with the fee terms either answer approves. */
 export function spendChoiceQuestion(): string {
@@ -75,7 +94,7 @@ export interface SpendOption {
  */
 export function spendOptions(install: string): SpendOption[] {
   return [
-    { id: 'default', label: 'Use the defaults', recommended: true, command: `${install} --yes` },
+    { id: 'default', label: DEFAULTS_LABEL, recommended: true, command: `${install} --yes` },
     {
       id: 'custom',
       label: 'Set my own limits',

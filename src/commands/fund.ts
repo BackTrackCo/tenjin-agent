@@ -14,7 +14,7 @@ import {
 import { getUsdcBalance } from '../lib/usdc';
 import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { toMoney } from '../lib/money';
-import { emitWriteNotice, style } from '../lib/output';
+import { emitWriteNotice, paint, style } from '../lib/output';
 import { addressQrLines, textQrLines } from '../lib/qr';
 import { openInBrowser } from '../lib/open-url';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
@@ -186,7 +186,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
 
   if (human && opts.header !== false) {
     say();
-    say(`  ${style('bold', 'Add funds to Tenjin')}`);
+    say(`  ${style('bold', 'Add funds to Tenjin', err)}`);
     say();
     if (startBalance !== undefined) say(`  Balance   ${dollars(startBalance)}`);
   }
@@ -386,12 +386,13 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       ...(balanceAtomic !== undefined ? { balance: toMoney(balanceAtomic.toString()) } : {}),
       ...(arrived !== undefined ? { added: toMoney(arrived.added.toString()) } : {}),
     },
-    humanLines: humanEnding(pollStatus, end, arrived?.balance),
+    humanLines: humanEnding(ctx.io, pollStatus, end, arrived?.balance),
   };
 }
 
 /** What a person reads last: the balance and what follows. */
 function humanEnding(
+  io: CommandContext['io'],
   pollStatus: FundPollStatus,
   end: WatchEnd | undefined,
   balance: bigint | undefined,
@@ -399,7 +400,7 @@ function humanEnding(
   if (pollStatus === 'arrived' && balance !== undefined) {
     return [
       '',
-      `  Balance   ${style('bold', dollars(balance))}`,
+      `  Balance   ${paint(io, 'bold', dollars(balance))}`,
       '  You can close the browser tab.',
     ];
   }
@@ -473,7 +474,7 @@ async function fundByCrypto(
   if (human) {
     const err = ctx.io.stderr;
     say();
-    say(`  ${style('bold', 'Send USDC to add funds')}`);
+    say(`  ${style('bold', 'Send USDC to add funds', ctx.io.stderr)}`);
     say();
     say(`  ${style('yellow', warning, err)}`);
     say();
@@ -530,7 +531,7 @@ async function fundByCrypto(
     },
     humanLines:
       arrived !== undefined
-        ? ['', `  Balance   ${style('bold', dollars(arrived.balance))}`]
+        ? ['', `  Balance   ${paint(ctx.io, 'bold', dollars(arrived.balance))}`]
         : pollStatus === 'skipped'
           ? ['  `tenjin balance --wait` says when it arrives.']
           : ['', '  Nothing has arrived yet. `tenjin balance --wait` keeps watching.'],
