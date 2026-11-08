@@ -28,12 +28,63 @@ describe('the pinned local tools', () => {
       attw: 'npx --yes --before=2026-10-24 --ignore-scripts -p @arethetypeswrong/cli@0.18.5 attw --pack --format json',
       'attw-npm':
         'npx --yes --before=2026-10-24 --ignore-scripts -p @arethetypeswrong/cli@0.18.5 attw --format json --from-npm',
+      secretlint:
+        'npx --yes --before=2026-10-24 --ignore-scripts -p @secretlint/quick-start@13.0.7 quick-start --format compact --no-color',
+      v8r: 'npx --yes --before=2026-10-24 --ignore-scripts -p v8r@6.1.0 v8r --output-format json',
+      'oxlint-a11y': [
+        'npx --yes --before=2026-10-24 --ignore-scripts --legacy-peer-deps -p oxlint@1.87.0 oxlint',
+        '--jsx-a11y-plugin --disable-nested-config -A all',
+        '-W jsx-a11y/alt-text',
+        '-W jsx-a11y/anchor-has-content',
+        '-W jsx-a11y/anchor-is-valid',
+        '-W jsx-a11y/aria-activedescendant-has-tabindex',
+        '-W jsx-a11y/aria-props',
+        '-W jsx-a11y/aria-proptypes',
+        '-W jsx-a11y/aria-role',
+        '-W jsx-a11y/aria-unsupported-elements',
+        '-W jsx-a11y/autocomplete-valid',
+        '-W jsx-a11y/click-events-have-key-events',
+        '-W jsx-a11y/control-has-associated-label',
+        '-W jsx-a11y/heading-has-content',
+        '-W jsx-a11y/html-has-lang',
+        '-W jsx-a11y/iframe-has-title',
+        '-W jsx-a11y/img-redundant-alt',
+        '-W jsx-a11y/interactive-supports-focus',
+        '-W jsx-a11y/label-has-associated-control',
+        '-W jsx-a11y/lang',
+        '-W jsx-a11y/media-has-caption',
+        '-W jsx-a11y/mouse-events-have-key-events',
+        '-W jsx-a11y/no-access-key',
+        '-W jsx-a11y/no-aria-hidden-on-focusable',
+        '-W jsx-a11y/no-autofocus',
+        '-W jsx-a11y/no-distracting-elements',
+        '-W jsx-a11y/no-interactive-element-to-noninteractive-role',
+        '-W jsx-a11y/no-noninteractive-element-interactions',
+        '-W jsx-a11y/no-noninteractive-element-to-interactive-role',
+        '-W jsx-a11y/no-noninteractive-tabindex',
+        '-W jsx-a11y/no-redundant-roles',
+        '-W jsx-a11y/no-static-element-interactions',
+        '-W jsx-a11y/prefer-tag-over-role',
+        '-W jsx-a11y/role-has-required-aria-props',
+        '-W jsx-a11y/role-supports-aria-props',
+        '-W jsx-a11y/scope',
+        '-W jsx-a11y/tabindex-no-positive',
+        '--format json',
+      ].join(' '),
+      'type-coverage':
+        'npx --yes --before=2026-10-24 --ignore-scripts -p type-coverage@2.30.3 -p typescript@5.9.3 type-coverage --detail --strict --json-output',
     });
   });
 
   it('keeps install scripts off on every tool but ast-grep', () => {
     for (const key of Object.keys(LOCAL_TOOLS)) {
       expect(localCommand(key).includes('--ignore-scripts'), key).toBe(key !== 'ast-grep');
+    }
+  });
+
+  it("skips npm's peer resolution only for oxlint, whose optional peers it never installs", () => {
+    for (const key of Object.keys(LOCAL_TOOLS)) {
+      expect(localCommand(key).includes('--legacy-peer-deps'), key).toBe(key === 'oxlint-a11y');
     }
   });
 

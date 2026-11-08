@@ -12,6 +12,8 @@ import { delimiter, dirname, join, resolve } from 'node:path';
  * `--before` is the day the rows were reviewed: a fresh npm resolution then
  * picks only versions that existed that day. `--ignore-scripts` is on every row
  * but ast-grep, whose own postinstall only picks its platform binary.
+ * `--legacy-peer-deps` is on a row whose optional peers npm would otherwise
+ * resolve on a first run, though it installs none of them.
  */
 export const LOCAL_REVIEW_DATE = '2026-10-24';
 
@@ -29,6 +31,9 @@ export interface LocalTool {
   flags: readonly string[];
   /** Whether npm may run the packages' install scripts. */
   scripts: boolean;
+  /** False where npm would fetch the metadata of optional peers it never
+   *  installs: oxlint's `vite-plus` peer costs about 90 MB and 4 s on a first run. */
+  peers?: false;
   /** The flag that tells this row's run from another row of the same package. */
   marker?: string;
 }
@@ -76,6 +81,122 @@ export const LOCAL_TOOLS: Readonly<Record<string, LocalTool>> = {
     scripts: false,
     marker: '--from-npm',
   },
+  /**
+   * Secrets in files, with the preset of provider rules and no config. Its
+   * JSON form carries each file's whole text, secret included, so the row
+   * prints the compact form, which masks every secret it finds.
+   */
+  secretlint: {
+    packages: [{ name: '@secretlint/quick-start', version: '13.0.7', published: '2026-10-03' }],
+    bin: 'quick-start',
+    flags: ['--format', 'compact', '--no-color'],
+    scripts: false,
+  },
+  /** Config files against their SchemaStore schema: it downloads the catalog and the schema, and sends no file. */
+  v8r: {
+    packages: [{ name: 'v8r', version: '6.1.0', published: '2026-05-17' }],
+    bin: 'v8r',
+    flags: ['--output-format', 'json'],
+    scripts: false,
+  },
+  /**
+   * The jsx-a11y rules alone: every other rule is allowed off, then the 35
+   * this version turns on with the plugin are named, so a project config's
+   * top-level rules and plugins and a nested config change nothing.
+   */
+  'oxlint-a11y': {
+    packages: [{ name: 'oxlint', version: '1.87.0', published: '2026-10-05' }],
+    bin: 'oxlint',
+    flags: [
+      '--jsx-a11y-plugin',
+      '--disable-nested-config',
+      '-A',
+      'all',
+      '-W',
+      'jsx-a11y/alt-text',
+      '-W',
+      'jsx-a11y/anchor-has-content',
+      '-W',
+      'jsx-a11y/anchor-is-valid',
+      '-W',
+      'jsx-a11y/aria-activedescendant-has-tabindex',
+      '-W',
+      'jsx-a11y/aria-props',
+      '-W',
+      'jsx-a11y/aria-proptypes',
+      '-W',
+      'jsx-a11y/aria-role',
+      '-W',
+      'jsx-a11y/aria-unsupported-elements',
+      '-W',
+      'jsx-a11y/autocomplete-valid',
+      '-W',
+      'jsx-a11y/click-events-have-key-events',
+      '-W',
+      'jsx-a11y/control-has-associated-label',
+      '-W',
+      'jsx-a11y/heading-has-content',
+      '-W',
+      'jsx-a11y/html-has-lang',
+      '-W',
+      'jsx-a11y/iframe-has-title',
+      '-W',
+      'jsx-a11y/img-redundant-alt',
+      '-W',
+      'jsx-a11y/interactive-supports-focus',
+      '-W',
+      'jsx-a11y/label-has-associated-control',
+      '-W',
+      'jsx-a11y/lang',
+      '-W',
+      'jsx-a11y/media-has-caption',
+      '-W',
+      'jsx-a11y/mouse-events-have-key-events',
+      '-W',
+      'jsx-a11y/no-access-key',
+      '-W',
+      'jsx-a11y/no-aria-hidden-on-focusable',
+      '-W',
+      'jsx-a11y/no-autofocus',
+      '-W',
+      'jsx-a11y/no-distracting-elements',
+      '-W',
+      'jsx-a11y/no-interactive-element-to-noninteractive-role',
+      '-W',
+      'jsx-a11y/no-noninteractive-element-interactions',
+      '-W',
+      'jsx-a11y/no-noninteractive-element-to-interactive-role',
+      '-W',
+      'jsx-a11y/no-noninteractive-tabindex',
+      '-W',
+      'jsx-a11y/no-redundant-roles',
+      '-W',
+      'jsx-a11y/no-static-element-interactions',
+      '-W',
+      'jsx-a11y/prefer-tag-over-role',
+      '-W',
+      'jsx-a11y/role-has-required-aria-props',
+      '-W',
+      'jsx-a11y/role-supports-aria-props',
+      '-W',
+      'jsx-a11y/scope',
+      '-W',
+      'jsx-a11y/tabindex-no-positive',
+      '--format',
+      'json',
+    ],
+    scripts: false,
+    peers: false,
+  },
+  'type-coverage': {
+    packages: [
+      { name: 'type-coverage', version: '2.30.3', published: '2026-10-03' },
+      { name: 'typescript', version: '5.9.3', published: '2025-09-30' },
+    ],
+    bin: 'type-coverage',
+    flags: ['--detail', '--strict', '--json-output'],
+    scripts: false,
+  },
 };
 
 export function isLocalTool(key: string): boolean {
@@ -90,6 +211,7 @@ export function localCommand(key: string): string {
     '--yes',
     `--before=${LOCAL_REVIEW_DATE}`,
     ...(tool.scripts ? [] : ['--ignore-scripts']),
+    ...(tool.peers === false ? ['--legacy-peer-deps'] : []),
     ...tool.packages.flatMap((p) => ['-p', `${p.name}@${p.version}`]),
     tool.bin,
     ...tool.flags,
