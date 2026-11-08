@@ -124,10 +124,11 @@ function stubFetch(status: number, json: unknown): { fetchImpl: typeof fetch; ca
 
 /**
  * runFund with this machine kept out of it: no harness variables from the
- * shell running the suite, and no `scutil` for the device name.
+ * shell running the suite, no `scutil` for the device name, and a desktop
+ * with a browser (a Linux CI runner has no display).
  */
 function fund(ctx: CommandContext, opts: FundOptions = {}) {
-  return runFund(ctx, { env: {}, deviceName: async () => 'Test Mac', ...opts });
+  return runFund(ctx, { env: {}, platform: 'darwin', deviceName: async () => 'Test Mac', ...opts });
 }
 
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {
