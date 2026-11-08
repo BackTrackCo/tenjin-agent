@@ -200,9 +200,12 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       : undefined;
 
   const source: FundSource = opts.source ?? (underAgentHarness(env) ? 'agent' : 'terminal');
-  const signer = onItsWay === undefined ? await provider.getSigner() : undefined;
+  // Unlocked only to mint: waiting on a payment already on its way needs no
+  // key, and a fresh link after it expires unlocks then.
+  let signer: TenjinSigner | undefined;
   const mint = async (): Promise<Issued> => {
-    const url = await mintLink(ctx, signer!, address, {
+    signer ??= await provider.getSigner();
+    const url = await mintLink(ctx, signer, address, {
       ...(preset !== undefined ? { presetAmount: preset } : {}),
       ...(need !== undefined ? { need } : {}),
       source,
