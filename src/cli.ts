@@ -49,9 +49,16 @@ const GLOBAL_FLAGS: readonly (readonly [string, string, string?])[] = [
  * The per-command copies, hidden from that command's help: a global flag belongs
  * on `tenjin --help` once, and re-listing the same three under every command
  * buries the flags the command actually has.
+ *
+ * `except` names a long flag the command declares itself, in place of the
+ * global copy: `balance --wait --timeout 15m` reads its own duration there,
+ * parsed to the milliseconds the global flag carries.
  */
-function addGlobalFlags(cmd: Command): Command {
-  for (const [flags, help] of GLOBAL_FLAGS) cmd.addOption(new Option(flags, help).hideHelp());
+function addGlobalFlags(cmd: Command, except: readonly string[] = []): Command {
+  for (const [flags, help] of GLOBAL_FLAGS) {
+    if (except.includes(flags.split(' ')[0]!)) continue;
+    cmd.addOption(new Option(flags, help).hideHelp());
+  }
   return cmd;
 }
 
@@ -64,7 +71,13 @@ function addGlobalFlags(cmd: Command): Command {
  * INSIDE a group (`tenjin wallet help show` is a third spelling of one thing);
  * the root keeps it, see {@link rootHelpCommand}.
  */
-function leaf(program: Command, group: string, nameAndArgs: string, summary: string): Command {
+function leaf(
+  program: Command,
+  group: string,
+  nameAndArgs: string,
+  summary: string,
+  except: readonly string[] = [],
+): Command {
   return addGlobalFlags(
     program
       .command(nameAndArgs)
@@ -75,6 +88,7 @@ function leaf(program: Command, group: string, nameAndArgs: string, summary: str
       // instance with every descendant, and the root's sits in the Global
       // options block, which would leave each command a block holding `-h` alone.
       .helpOption('-h, --help', 'show this help'),
+    except,
   );
 }
 
@@ -210,7 +224,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     program,
     io,
     runCommand,
-    leaf: (group, nameAndArgs, summary) => leaf(program, group, nameAndArgs, summary),
+    leaf: (group, nameAndArgs, summary, except) =>
+      leaf(program, group, nameAndArgs, summary, except),
     addGlobalFlags,
     buildContext: (cmd) => buildContext(cmd, io),
   };
@@ -225,7 +240,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     `
 Examples:
   $ tenjin install
-  $ tenjin wallet fund
+  $ tenjin fund
   $ tenjin status
 
 Learn more:

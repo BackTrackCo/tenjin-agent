@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { Option, type Command } from 'commander';
+import { InvalidArgumentError, Option, type Command } from 'commander';
 import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
@@ -276,6 +276,19 @@ Examples:
       });
     });
 
+  // The two everyday money commands, by their plain names. `tenjin wallet
+  // fund` and `tenjin wallet balance` stay, the same commands under the group.
+  fundCommand(
+    leaf(WALLET, 'fund [amountUsd]', 'add funds in your browser, and watch them land'),
+    'fund',
+    runCommand,
+  );
+  balanceCommand(
+    leaf(WALLET, 'balance', 'show your balance and spending limits', ['--timeout']),
+    'balance',
+    runCommand,
+  );
+
   // Group-level flags so `tenjin wallet --json show` parses like the config group.
   const wallet = leaf(
     WALLET,
@@ -337,42 +350,20 @@ Examples:
         return runWalletShow(ctx, o.qr === false ? { qr: false } : {});
       });
     });
-  addGlobalFlags(wallet.command('balance'))
-    .summary('show the wallet USDC balance on Base')
-    .description(
-      'Read the wallet USDC balance on Base. It is a chain read: no key is unlocked and nothing is spent.',
-    )
-    .action(async function (this: Command) {
-      await runCommand('wallet.balance', this, async (ctx) => {
-        const { runWalletBalance } = await import('../commands/wallet');
-        return runWalletBalance(ctx);
-      });
-    });
-
-  // A checkout link moves no money; the person completes payment in the browser.
-  addGlobalFlags(wallet.command('fund [amountUsd]'))
-    .summary('add funds to this wallet in your browser')
-    .description(
-      'Open a checkout link for this wallet. Choose an available payment method and confirm its amount and fees in the browser. The command can wait for USDC to arrive on Base; a link alone does not mean funds arrived.',
-    )
-    .option('--no-open', 'print the checkout link without opening a browser')
-    .option('--no-qr', 'skip the QR code of the address for sending USDC from a phone')
-    .option(
-      '--no-wait',
-      'return once the link is issued instead of polling the balance (already the default when not at a TTY)',
-    )
-    .action(async function (this: Command, amountUsd: string | undefined) {
-      await runCommand('wallet.fund', this, async (ctx) => {
-        const o = this.opts();
-        const { runFund } = await import('../commands/fund');
-        return runFund(ctx, {
-          ...(amountUsd !== undefined ? { amountUsd } : {}),
-          ...(o.open === false ? { open: false } : {}),
-          ...(o.qr === false ? { qr: false } : {}),
-          ...(o.wait === false ? { wait: false } : {}),
-        });
-      });
-    });
+  balanceCommand(
+    addGlobalFlags(wallet.command('balance'), ['--timeout']).summary(
+      'show your balance and spending limits (same as `tenjin balance`)',
+    ),
+    'wallet.balance',
+    runCommand,
+  );
+  fundCommand(
+    addGlobalFlags(wallet.command('fund [amountUsd]')).summary(
+      'add funds in your browser (same as `tenjin fund`)',
+    ),
+    'wallet.fund',
+    runCommand,
+  );
 
   // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
   // router's MCP tools (src/router/mcp.ts) and the plugin's skill; no
@@ -461,6 +452,109 @@ Examples:
         );
       });
     });
+}
+
+/**
+ * `tenjin fund` and `tenjin wallet fund`. A checkout link moves no money; the
+ * person completes payment in the browser, and the command watches for it.
+ */
+function fundCommand(cmd: Command, name: string, runCommand: Registration['runCommand']): void {
+  cmd
+    .description(
+      'Open checkout in your browser to add funds, then watch the payment land: the page opening, the payment, and the new balance. Confirm the amount and any fee in the browser. Ctrl-C stops watching; it does not cancel checkout. With --crypto, show the address to send USDC to instead.',
+    )
+    .option('--no-open', 'print the checkout link without opening a browser')
+    .option('--no-qr', 'no QR code, even when no browser can open the link')
+    .option(
+      '--no-wait',
+      'return once the link is issued instead of watching for the payment (already the default when not at a terminal)',
+    )
+    .option('--crypto', 'send USDC from a crypto wallet instead: shows the address and its QR code')
+    .option('--for <label>', 'what the money is for, shown on the checkout page (with --price)')
+    .option('--price <usd>', 'the price of that call in USD (with --for)')
+    .addOption(
+      new Option('--source <where>', 'where the link was asked for')
+        .choices(['install', 'agent', 'terminal'])
+        .hideHelp(),
+    )
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin fund
+  $ tenjin fund 10
+  $ tenjin fund 5 --for "X post read" --price 0.006
+  $ tenjin fund --crypto
+`,
+    )
+    .action(async function (this: Command, amountUsd: string | undefined) {
+      await runCommand(name, this, async (ctx) => {
+        const o = this.opts();
+        const { runFund } = await import('../commands/fund');
+        return runFund(ctx, {
+          ...(amountUsd !== undefined ? { amountUsd } : {}),
+          ...(o.open === false ? { open: false } : {}),
+          ...(o.qr === false ? { qr: false } : {}),
+          ...(o.wait === false ? { wait: false } : {}),
+          ...(o.crypto === true ? { crypto: true } : {}),
+          ...(typeof o.for === 'string' ? { forLabel: o.for } : {}),
+          ...(typeof o.price === 'string' ? { priceUsd: o.price } : {}),
+          ...(typeof o.source === 'string'
+            ? { source: o.source as import('../commands/fund').FundSource }
+            : {}),
+        });
+      });
+    });
+}
+
+/**
+ * `tenjin balance` and `tenjin wallet balance`. Its `--timeout` is the wait's,
+ * as a duration, in place of the global request timeout.
+ */
+function balanceCommand(cmd: Command, name: string, runCommand: Registration['runCommand']): void {
+  cmd
+    .description(
+      'Show your Tenjin balance and the spending limits your agent works within. It is a read: no key is unlocked and nothing is spent. With --wait, watch until funds arrive, then print what was added: what your agent runs in the background after opening checkout.',
+    )
+    .option('--wait', 'wait until the balance rises, then print what arrived')
+    .option(
+      '--timeout <duration>',
+      'with --wait, how long to wait, like 15m or 90s (default 15m)',
+      parseDurationArg,
+    )
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin balance
+  $ tenjin balance --wait
+  $ tenjin balance --wait --timeout 30m
+`,
+    )
+    .action(async function (this: Command) {
+      await runCommand(name, this, async (ctx) => {
+        const o = this.opts();
+        const { runBalance } = await import('../commands/balance');
+        return runBalance(ctx, {
+          ...(o.wait === true ? { wait: true } : {}),
+          ...(typeof o.timeout === 'number' && this.getOptionValueSource('timeout') === 'cli'
+            ? { waitMs: o.timeout }
+            : {}),
+        });
+      });
+    });
+}
+
+/** `15m`, `90s`, `1h`, `500ms`, or a bare number of milliseconds. */
+function parseDurationArg(raw: string): number {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(raw);
+  const unit = (m?.[2] ?? 'ms').toLowerCase();
+  const scale = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1;
+  const ms = m === null ? NaN : Math.round(Number(m[1]) * scale);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new InvalidArgumentError('Pass a duration like 15m, 90s or 1h.');
+  }
+  return ms;
 }
 
 /** `--harness`: one agent host, overriding the hosts these commands find or recorded. */

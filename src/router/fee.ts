@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { formatUsdDisplay } from '../lib/money';
+import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
+import { atomicToUsd, formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import { NO_PAYER, type DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
@@ -71,15 +72,63 @@ export function routingDepositAtomic(o: {
 }
 
 /**
- * The top-up every "fund the wallet" hint names, in USD: the checkout's Apple
+ * The top-up every "add funds" hint names, in USD: the checkout's Apple
  * Pay and Google Pay minimum, which covers the routing deposit and a few
- * hundred lookups. `tenjin wallet fund` sends it to the checkout as a preset.
+ * hundred lookups. `tenjin fund` sends it to the checkout as a preset.
  */
 export const SUGGESTED_FUND_USD = '5';
 /** The funding line a new wallet is told, after `tenjin wallet create`. */
-export const FUNDING_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`, or send USDC on Base.`;
-/** The funding line under a wallet at exactly $0, in `tenjin wallet balance` and `tenjin status`: the command alone. */
-export const FUND_COMMAND_LINE = `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`;
+export const FUNDING_LINE = `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`, or send USDC from a crypto wallet with \`tenjin fund --crypto\`.`;
+/** The funding line under a balance of exactly $0, in `tenjin balance` and `tenjin status`. */
+export const FUND_COMMAND_LINE = 'Add funds with `tenjin fund`, or ask your agent.';
+
+/** The most a fund link's `need` may name as its price (the link route's bound). */
+const NEED_PRICE_MAX_ATOMIC = 100_000_000n;
+/** A `--for` label: the link route takes 1 to 60 characters. */
+const NEED_LABEL_MAX = 60;
+
+/**
+ * THE COMMAND THAT OPENS CHECKOUT FOR ONE WAITING CALL: `tenjin fund 5 --for
+ * "X post read" --price 0.006`, so the checkout page says what the money is
+ * for. The amount is the suggested top-up, or the whole dollars short when
+ * that is more. The label keeps only characters that are inert inside double
+ * quotes in any shell.
+ */
+export function fundForCommand(label: string, priceAtomic: bigint, balanceAtomic = 0n): string {
+  const short = priceAtomic > balanceAtomic ? priceAtomic - balanceAtomic : 0n;
+  const wholeShort = (short + 999_999n) / 1_000_000n;
+  const amount =
+    wholeShort > BigInt(SUGGESTED_FUND_USD) ? wholeShort.toString() : SUGGESTED_FUND_USD;
+  const safe = [
+    ...label
+      .replace(/[^\p{L}\p{N} .,:'()/+&-]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  ]
+    .slice(0, NEED_LABEL_MAX)
+    .join('')
+    .trim();
+  const named =
+    safe.length > 0 && priceAtomic > 0n && priceAtomic <= NEED_PRICE_MAX_ATOMIC
+      ? ` --for "${safe}" --price ${atomicToUsd(priceAtomic.toString())}`
+      : '';
+  return `tenjin fund ${amount}${named}`;
+}
+
+/**
+ * A PAID CALL THE BALANCE CANNOT COVER, in plain dollars: "This X post read
+ * costs $0.006 and your Tenjin balance is $0.00. Add funds with `tenjin fund 5
+ * --for "X post read" --price 0.006`." The agent runs that command, which
+ * opens checkout with the call named on the page.
+ */
+export function shortOfFunds(label: string, priceAtomic: bigint, balanceAtomic: bigint): string {
+  return `This ${label} costs $${usd(priceAtomic)} and your Tenjin balance is $${usd(balanceAtomic)}. ${fundsFix(label, priceAtomic, balanceAtomic)}`;
+}
+
+/** The "Add funds with …" sentence alone, for a reason that already said what it costs. */
+export function fundsFix(label: string, priceAtomic: bigint, balanceAtomic: bigint): string {
+  return `Add funds with \`${fundForCommand(label, priceAtomic, balanceAtomic)}\`.`;
+}
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 
@@ -137,16 +186,19 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
     reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
-    fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
+    fix: `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
+  // A SPEND LIMIT IS NEVER A FUNDING PROBLEM: adding money cannot help, so
+  // these never point at checkout. They say the balance is not the cause and
+  // name the setting that is.
   limit_below_deposit: {
     reason: 'the per-call spend limit cannot cover the routing fee or its deposit',
-    fix: 'Run `tenjin doctor`.',
+    fix: `Your balance is fine; this is the per-call limit. Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
   },
   budget_reached: {
-    reason: 'the daily budget has no room left for the routing fee or its deposit',
-    fix: 'Run `tenjin doctor`.',
+    reason: "today's spend limit is used up",
+    fix: 'Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or raise it with `tenjin config set sessionBudget <usd>`.',
   },
   not_allowlisted: {
     reason: 'allowlistCreators does not include the router',
