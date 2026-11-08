@@ -23,8 +23,24 @@ import type { CommandContext, CommandRun, GlobalFlags } from './context';
 const GlobalOptsSchema = z.object({
   json: z.boolean().default(false),
   baseUrl: z.url().optional(),
-  timeout: z.coerce.number().int().positive().default(10000),
+  timeout: z
+    .preprocess((v) => (typeof v === 'string' ? durationMs(v) : v), z.number().int().positive())
+    .default(10000),
 });
+
+/**
+ * `--timeout` in milliseconds, or as a duration (`90s`, `15m`, `1h`): the
+ * root takes the flag wherever it is placed, and `balance --wait --timeout
+ * 15m` reads it as how long to wait. NaN for anything else, which the
+ * schema refuses as USAGE.
+ */
+function durationMs(raw: string): number {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(raw);
+  if (m === null) return NaN;
+  const unit = (m[2] ?? 'ms').toLowerCase();
+  const scale = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1;
+  return Math.round(Number(m[1]) * scale);
+}
 
 /**
  * The three global flags: flags, description, and the root's default. Each is

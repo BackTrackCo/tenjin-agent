@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { InvalidArgumentError, Option, type Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
@@ -517,11 +517,9 @@ function balanceCommand(cmd: Command, name: string, runCommand: Registration['ru
       'Show your Tenjin balance and the spending limits your agent works within. It is a read: no key is unlocked and nothing is spent. With --wait, watch until funds arrive, then print what was added: what your agent runs in the background after opening checkout.',
     )
     .option('--wait', 'wait until the balance rises, then print what arrived')
-    .option(
-      '--timeout <duration>',
-      'with --wait, how long to wait, like 15m or 90s (default 15m)',
-      parseDurationArg,
-    )
+    // Shown here for its meaning with --wait; the root's --timeout takes the
+    // value wherever it is placed, and parses the duration (cli.ts).
+    .option('--timeout <duration>', 'with --wait, how long to wait, like 15m or 90s (default 15m)')
     .addHelpText(
       'after',
       `
@@ -535,26 +533,14 @@ Examples:
       await runCommand(name, this, async (ctx) => {
         const o = this.opts();
         const { runBalance } = await import('../commands/balance');
+        // A --timeout someone typed bounds the wait; the request default does not.
+        const typed = this.getOptionValueSourceWithGlobals('timeout') === 'cli';
         return runBalance(ctx, {
           ...(o.wait === true ? { wait: true } : {}),
-          ...(typeof o.timeout === 'number' && this.getOptionValueSource('timeout') === 'cli'
-            ? { waitMs: o.timeout }
-            : {}),
+          ...(o.wait === true && typed ? { waitMs: ctx.flags.timeout } : {}),
         });
       });
     });
-}
-
-/** `15m`, `90s`, `1h`, `500ms`, or a bare number of milliseconds. */
-function parseDurationArg(raw: string): number {
-  const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(raw);
-  const unit = (m?.[2] ?? 'ms').toLowerCase();
-  const scale = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1;
-  const ms = m === null ? NaN : Math.round(Number(m[1]) * scale);
-  if (!Number.isFinite(ms) || ms <= 0) {
-    throw new InvalidArgumentError('Pass a duration like 15m, 90s or 1h.');
-  }
-  return ms;
 }
 
 /** `--harness`: one agent host, overriding the hosts these commands find or recorded. */

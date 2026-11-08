@@ -411,7 +411,7 @@ function humanEnding(
     ];
   }
   if (pollStatus === 'skipped') {
-    return ['  Finish checkout in your browser; `tenjin balance --wait` says when it lands.'];
+    return ['  `tenjin balance --wait` tells you when the payment lands.'];
   }
   if (end?.kind === 'expired') {
     return ['', '  Run `tenjin fund` for a fresh link when you are ready.'];
