@@ -1,6 +1,13 @@
 import { evaluatePlan, type SpendPolicy } from './policy';
 import { readSpendSummary, spentOf } from './spend-ledger';
-import { quoteClosed, readQuote, useQuote, type Quote, type QuoteRefusal } from './spend-quotes';
+import {
+  quoteClosed,
+  readQuote,
+  reopenQuote,
+  useQuote,
+  type Quote,
+  type QuoteRefusal,
+} from './spend-quotes';
 
 /**
  * ONE SPEND RULE FOR EVERY ROUTER CALL. A call that pays first lists the
@@ -9,8 +16,9 @@ import { quoteClosed, readQuote, useQuote, type Quote, type QuoteRefusal } from 
  * for the whole call and the rolling day's `sessionBudget`. Under them it
  * runs. Over them nothing is paid; on a host that asks
  * the user, the router keeps the plan as a quote for their yes
- * (`spend-quotes.ts`), and a quote they approved may pass both limits. Funds
- * are verified at settlement; a multi-payment plan can settle partially.
+ * (`spend-quotes.ts`), and a quote they approved may pass both limits. No
+ * balance is read: the facilitator verifies funds when each payment settles,
+ * on its own, so a plan of several payments can settle some and not others.
  *
  * A ROUTER PAYMENT IS SIGNED ONLY AGAINST A PLAN. Admitting a plan here, or
  * using up an approved quote, is the only way to get the slots `runPay`
@@ -35,6 +43,7 @@ export interface PlanSlot {
 
 const minted = new WeakSet<PlanSlot>();
 const spent = new WeakSet<PlanSlot>();
+const shortOfFunds = new WeakSet<PlanSlot>();
 
 function mint(amountAtomic: bigint, approved: boolean): PlanSlot {
   const slot: PlanSlot = Object.freeze({ amountAtomic, approved });
@@ -56,6 +65,12 @@ export function spendSlot(slot: unknown, amountAtomic: bigint): SlotRefusal | nu
   if (amountAtomic > held.amountAtomic) return 'above_plan';
   spent.add(held);
   return null;
+}
+
+/** The payment signed on this spent slot was refused as short of funds
+ *  (`paymentShortOfFunds`). Anything else is ignored. */
+export function markShortOfFunds(slot: PlanSlot | undefined): void {
+  if (slot !== undefined && minted.has(slot) && spent.has(slot)) shortOfFunds.add(slot);
 }
 
 /** A plan over the automatic limits: what a person is asked about. */
@@ -113,7 +128,8 @@ export async function admitPlan(
  * `approve` call, which reaches this process only after the host's own
  * prompt put it to a person; nothing on disk says anyone approved anything.
  * The caller opens the wallet first, so a wallet that will not open leaves
- * the quote open. Once used, a quote stays consumed even if settlement fails.
+ * the quote open. Once used, a quote stays consumed when a payment fails,
+ * except a short wallet's: see {@link reopenShortQuote}.
  */
 export async function admitQuote(
   dataDir: string,
@@ -131,4 +147,26 @@ export async function admitQuote(
     quote: used.quote,
     admitted: used.quote.payments.map((payment) => mint(BigInt(payment.amountAtomic), true)),
   };
+}
+
+/**
+ * A SHORT WALLET LEAVES AN APPROVED QUOTE OPEN, for the person to fund the
+ * wallet and say yes to the same quote again: reopened when every payment its
+ * run signed was refused as short of funds, and at least one was signed. A
+ * payment that delivered, or failed any other way, keeps the quote used, so a
+ * plan is never run twice over a payment that may have settled. Each refused
+ * authorization stays counted until reconcile proves it unused. A seller that
+ * claims low funds falsely gains nothing a person did not agree to: the
+ * quote's next run is another `approve` call, which the host puts to them.
+ * True when it reopened.
+ */
+export async function reopenShortQuote(
+  dataDir: string,
+  id: string,
+  slots: readonly PlanSlot[],
+  opts: { now?: () => number } = {},
+): Promise<boolean> {
+  const signed = slots.filter((slot) => spent.has(slot));
+  if (signed.length === 0 || !signed.every((slot) => shortOfFunds.has(slot))) return false;
+  return 'quote' in (await reopenQuote(dataDir, id, opts.now ?? Date.now));
 }

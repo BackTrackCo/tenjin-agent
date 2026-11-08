@@ -24,6 +24,9 @@ import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import { buildSpecRequest } from '../router/spec-call';
 import type { ToolSpec } from '../router/decision';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
+import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
+import { readSpendSummary } from '../lib/spend-ledger';
+import { readPaidRecords, reconcilePayments } from '../router/paid';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -2602,5 +2605,121 @@ describe('payment hard gates with acknowledged warnings', () => {
       }),
     ).rejects.toThrow('private or unsupported network address');
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A REFUSED DIRECT PAY GOES BACK THE WAY A REFUSED `request` DOES. It wrote no
+ * paid record, so reconcile never saw it and its amount stayed in the day's
+ * total until the window reset. Now the record is there: nothing comes back
+ * before the chain passes `validBefore`, and only an unused authorization
+ * comes back after it.
+ */
+describe('a direct pay the seller refused', () => {
+  const RPC_URL = 'https://rpc.test';
+
+  /** The chain at `nowMs`, answering `authorizationState` with `used`. */
+  function chainAt(nowMs: number, used: boolean): { fetch: typeof fetch; asked: () => number } {
+    let asked = 0;
+    const impl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const { method } = JSON.parse(String(init?.body)) as { method: string };
+      if (method === 'eth_getBlockByNumber') {
+        const timestamp = `0x${Math.floor(nowMs / 1000).toString(16)}`;
+        return json(200, { jsonrpc: '2.0', id: 1, result: { number: '0x2a', timestamp } });
+      }
+      asked += 1;
+      return json(200, {
+        jsonrpc: '2.0',
+        id: 1,
+        result: `0x${(used ? 1 : 0).toString(16).padStart(64, '0')}`,
+      });
+    }) as typeof fetch;
+    return { fetch: impl, asked: () => asked };
+  }
+
+  it.each([
+    { used: false, committed: '0', settlement: 'not_charged' },
+    { used: true, committed: '100000', settlement: 'settled' },
+  ])(
+    'is released by reconcile only past validBefore, and only unused (used: $used)',
+    async ({ used, committed, settlement }) => {
+      await writeConfig();
+      stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+      const fixture = buildPaymentRequired();
+      const { fetch } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+        json(402, { error: 'insufficient_funds' }, { 'PAYMENT-REQUIRED': fixture.header }),
+      ]);
+      const authorizer = createLocalSpendAuthorizer({
+        dir,
+        policy: {
+          maxAutoSpendAtomic: 10n ** 12n,
+          sessionBudgetAtomic: null,
+          allowlistCreators: [],
+        },
+      });
+      await expect(
+        runPay({ url: FOREIGN_URL, yes: true }, makeCtx(), {
+          ...PUBLIC_DNS,
+          fetchImpl: fetch,
+          provider: testWalletProvider(),
+          authorizer,
+        }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
+      const [record, ...rest] = await readPaidRecords(dir);
+      expect(rest).toEqual([]);
+      expect(record).toMatchObject({
+        provider: 'seller.example',
+        url: FOREIGN_URL,
+        amountAtomic: '100000',
+        settlement: 'unknown',
+      });
+      expect((await readSpendSummary(dir))!.committedAtomic).toBe('100000');
+      const expiry = Number(record!.authorization!.validBefore) * 1000;
+
+      const early = chainAt(expiry - 60_000, used);
+      await reconcilePayments(dir, {
+        rpcUrl: RPC_URL,
+        fetchImpl: early.fetch,
+        now: () => expiry + 1_000,
+      });
+      expect(early.asked()).toBe(0);
+      expect((await readSpendSummary(dir))!.committedAtomic).toBe('100000');
+
+      const late = chainAt(expiry + 1_000, used);
+      await reconcilePayments(dir, {
+        rpcUrl: RPC_URL,
+        fetchImpl: late.fetch,
+        now: () => expiry + 1_000,
+        recheckMs: 0,
+      });
+      expect(late.asked()).toBe(1);
+      expect((await readSpendSummary(dir))!.committedAtomic).toBe(committed);
+      expect((await readPaidRecords(dir))[0]!.settlement).toBe(settlement);
+    },
+  );
+
+  it('leaves a router leg for `request` to record', async () => {
+    const LEG_TERMS = {
+      network: 'eip155:8453',
+      asset: LIVE_ACCEPT.asset,
+      maxAmountAtomic: '100000',
+    };
+    await writeConfig();
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(402, { error: 'insufficient_funds' }, { 'PAYMENT-REQUIRED': fixture.header }),
+    ]);
+    const slot = await planned(100_000n);
+    await expect(
+      runPay({ url: FOREIGN_URL, terms: LEG_TERMS, admit: async () => slot }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
+    expect(await readPaidRecords(dir)).toEqual([]);
   });
 });

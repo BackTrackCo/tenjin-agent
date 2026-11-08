@@ -15,8 +15,8 @@ import {
   projectBody,
   validateResultBody,
 } from '../lib/request-schema';
-import { resolveContextSettings } from '../lib/settings';
-import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
+import { admitPlan, admitQuote, reopenShortQuote, type PlanSlot } from '../lib/spend-plan';
 import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -299,7 +299,8 @@ export interface ApproveToolArgs {
  * arguments, so the total and what it buys must be there and must be the
  * quote's. A yes runs the quote once, past `maxAutoSpend` and the day's
  * budget, which a person just agreed to, and answers
- * as `request` would have.
+ * as `request` would have. A run whose every payment was refused as short of
+ * funds leaves the quote open for the next yes (`reopenShortQuote`).
  */
 export async function runApproveTool(
   args: ApproveToolArgs,
@@ -396,6 +397,36 @@ export async function runApproveTool(
   };
   const footer = await openLookupFooter(dataDir, call.kind !== 'call' ? { id: call.id } : {});
   await footer.routing();
+  const result = await runQuoted(call, slots, call_, footer, reportDeps, settings);
+  // A SHORT WALLET'S QUOTE STAYS OPEN: funded, the same quote runs on the
+  // person's next yes, with no new quote to ask for. Its offers' claims go
+  // with it, or the rerun would find each one paid.
+  if (!(await reopenShortQuote(dataDir, quote.id, slots, { now }))) return result;
+  for (const slot of slots) {
+    const claim = claimOfSlot.get(slot);
+    if (claim !== undefined) {
+      await settleSpecPayment(dataDir, claim, { amountAtomic: 0n, signed: false });
+    }
+  }
+  return {
+    ...result,
+    envelope: {
+      ...result.envelope,
+      quote: quoteView(quote),
+      nextStep: `Ask the person to add funds with \`tenjin wallet fund\`. The quote stays open for its ten minutes: once the funds arrive, call ${approveCall(quote)} again.`,
+    },
+  };
+}
+
+/** Run an approved quote's call on its slots. */
+async function runQuoted(
+  call: QuotedCall,
+  slots: PlanSlot[],
+  call_: RequestToolDeps,
+  footer: LookupFooter,
+  reportDeps: ReportDeps,
+  settings: ResolvedSettings,
+): Promise<RequestToolResult> {
   switch (call.kind) {
     case 'spec':
       return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
@@ -1120,8 +1151,10 @@ export async function paySpec(
   );
   const { outcome, left } = paid;
   // The claim survives anything that may have signed: only a call that
-  // signed nothing frees the id for a fixed input.
+  // signed nothing frees the id for a fixed input, or a short wallet's
+  // reopened quote (`runApproveTool`), which finds the claim by its slot.
   await settleSpecPayment(deps.ctx.dataDir, take?.claim ?? id, left);
+  if ('slot' in admission) claimOfSlot.set(admission.slot, take?.claim ?? id);
   // A refusal before payment (the spend policy, the spec's terms, the
   // provider's own 4xx) arrives as `unpaid` or `needs_approval`, neither of
   // which the server counts as the offer taken; a call that ran, or may have
@@ -1132,6 +1165,9 @@ export async function paySpec(
   }
   return paid;
 }
+
+/** The spec claim an approved quote's slot paid under. */
+const claimOfSlot = new WeakMap<PlanSlot, string>();
 
 /** The deal a spec's call is held to: its price ceiling, payee, chain and token. */
 export function specTerms(spec: OfferSpec): AdvertisedTerms {

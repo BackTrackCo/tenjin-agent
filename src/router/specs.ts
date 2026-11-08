@@ -269,11 +269,12 @@ export async function claimSpecPayment(
 
 /**
  * How the claimed call ended. Money that left is recorded against the id. The
- * claim is dropped ONLY when nothing was signed, so a fixed input can still
- * run: a signed payment whose amount the call never learned (it failed after
- * the authorization left) stays claimed as possibly paid, and the id never
- * signs again. A record that cannot be written leaves the claim standing,
- * which refuses too.
+ * claim is dropped when nothing was signed, so a fixed input can still run,
+ * and when a short wallet reopens the approved quote that paid it
+ * (`runApproveTool`). Otherwise a signed payment whose amount the call never
+ * learned (it failed after the authorization left) stays claimed as possibly
+ * paid, and the id never signs again. A record that cannot be written leaves
+ * the claim standing, which refuses too.
  */
 export async function settleSpecPayment(
   dataDir: string,

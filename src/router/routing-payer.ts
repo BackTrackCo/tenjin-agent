@@ -85,8 +85,10 @@ export { reasonCode } from '../lib/payment-failure';
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
  * - THE FACILITATOR IS THE BALANCE CHECK. Nothing reads the wallet before a
- *   deposit. A 402 whose reason code ends in `insufficient_balance` skips the
- *   call as `wallet_low`, with no retry.
+ *   deposit. A 402 that `paymentShortOfFunds` reads as low funds (a reason
+ *   code of `insufficient_funds`, `invalid_exact_evm_insufficient_funds`, or
+ *   one ending in `insufficient_balance`) skips the call as `wallet_low`,
+ *   with no retry.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads are each cut at what is left of it,
  *   so a leg returns inside the hook's 5 s. A call that carries a deposit

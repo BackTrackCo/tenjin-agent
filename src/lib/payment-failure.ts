@@ -54,8 +54,9 @@ function headerObject(
 }
 
 /**
- * Seller-reported low funds, for failure messaging only. Never evidence to
- * release an authorization, resize a deposit, or retry a payment.
+ * Seller-reported low funds: for failure messaging, and to keep an approved
+ * quote open for the person's next yes (`spend-plan.ts`). Never evidence to
+ * release an authorization, resize a deposit, or retry a payment unasked.
  */
 export function paymentShortOfFunds(
   res: Pick<HttpResponse, 'status' | 'header' | 'json'>,

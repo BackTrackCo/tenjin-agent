@@ -304,6 +304,84 @@ describe("approve, called through the host's own prompt", () => {
     expect(signed).toBe(1);
   });
 
+  /** The seller's facilitator, refusing each signed payment as short of
+   *  funds until `funded()` says the wallet was topped up. */
+  function shortUntilFunded(normal: ReturnType<typeof seller>, deliver = 0) {
+    let funded = false;
+    let refused = 0;
+    let delivered = 0;
+    const fetchImpl = (async (...args: Parameters<typeof fetch>) => {
+      if (new Headers(args[1]?.headers).has('payment-signature') && !funded) {
+        if (delivered < deliver) {
+          delivered += 1;
+          return normal.fetchImpl(...args);
+        }
+        refused += 1;
+        return new Response(
+          JSON.stringify({ error: 'payment_failed', reason: 'insufficient_funds' }),
+          {
+            status: 402,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+      return normal.fetchImpl(...args);
+    }) as typeof fetch;
+    return { fetchImpl, refused: () => refused, fund: () => (funded = true) };
+  }
+
+  /** A SHORT WALLET KEEPS THE PERSON'S YES: the quote stays open, and once
+   *  the wallet is funded the same quote runs without a new one. */
+  it('leaves an approved quote open when its payment is refused as short of funds', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(short.fetchImpl), approves: true };
+    const refused = await runApproveTool(args, d);
+    expect(refused.envelope).toMatchObject({ status: 'failed', quote: { id: quote.id } });
+    expect(String(refused.envelope.nextStep)).toContain('tenjin wallet fund');
+    expect(String(refused.envelope.nextStep)).toContain(`approve({quote: "${quote.id}"`);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('fulfilled');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
+  it('reruns every take of a reopened count once the wallet is funded', async () => {
+    await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT, count: 2 }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(short.fetchImpl), approves: true };
+    expect((await runApproveTool(args, d)).envelope).toMatchObject({ quote: { id: quote.id } });
+    expect(short.refused()).toBe(2);
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope).toMatchObject({
+      status: 'fulfilled',
+      count: 2,
+    });
+    expect(normal.paidCalls()).toHaveLength(2);
+  });
+
+  /** A plan that paid one payment and was short for the next is never run
+   *  again: a second run would pay the first again. */
+  it('keeps a quote used when one payment delivered and the next was short', async () => {
+    await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT, count: 2 }, normal.fetchImpl);
+    const short = shortUntilFunded(normal, 1);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const result = await runApproveTool(args, { ...deps(short.fetchImpl), approves: true });
+    expect(result.envelope).not.toHaveProperty('quote');
+    expect(short.refused()).toBe(1);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+  });
+
   /** THE WALLET OPENS BEFORE THE QUOTE IS USED UP: a saved passphrase that
    *  is gone stops the yes with nothing paid, and the same quote runs once the
    *  person has repaired it. */

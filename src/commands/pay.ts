@@ -16,7 +16,7 @@ import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
-import { spendSlot, type PlanSlot } from '../lib/spend-plan';
+import { markShortOfFunds, spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -34,6 +34,7 @@ import {
 } from '../lib/x402-pay';
 import type { x402Client } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
+import { appendPaidRecord, recordedSent } from '../router/paid';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -552,6 +553,25 @@ async function executePay(
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
   });
+  // A DIRECT PAY THAT MAY NOT HAVE SETTLED goes in the paid ledger as a
+  // `request` call does (a router leg is recorded by `request` itself), so the
+  // same reconcile pass gives its amount back to the daily budget once the
+  // chain is past its `validBefore` and shows the authorization unused.
+  const recordUnsettled = async (): Promise<void> => {
+    if (router) return;
+    await appendPaidRecord(ctx.dataDir, {
+      version: 1,
+      ts: new Date().toISOString(),
+      capabilityId: 'pay',
+      provider: host,
+      url,
+      sent: recordedSent(args.data ?? args.dataRaw ?? ''),
+      amountAtomic: payment.amountAtomic.toString(),
+      settlement: 'unknown',
+      savedFiles: [],
+      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+    });
+  };
   if (paid.ok || paid.header !== undefined) {
     args.onPaidLeg?.({
       ...(paid.status !== undefined ? { status: paid.status } : {}),
@@ -568,6 +588,7 @@ async function executePay(
     // working, so the agent is pointed there rather than told it failed.
     // Settlement is just as unknown as on any other timeout.
     const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
+    await recordUnsettled();
     if (statusUrl !== null) {
       throw new CliError(
         'NETWORK_ERROR',
@@ -630,6 +651,8 @@ async function executePay(
   // authorization stays valid until it expires, so settlement is still unknown.
   const refusal = settlementRefusal(paid);
   const lowFunds = paymentShortOfFunds(paid);
+  if (lowFunds) markShortOfFunds(slot);
+  await recordUnsettled();
   throw new CliError(
     'PAYMENT_FAILED',
     lowFunds

@@ -18,7 +18,9 @@ import { quotesDir } from './paths';
  * NOTHING IN THE FILE IS AN APPROVAL. The user's yes is the host's own
  * permission prompt on the `approve` call; a quote only says what that call
  * runs. A QUOTE RUNS ONCE: `useQuote` marks it used under its lock before
- * anything is signed, so two calls racing on one quote pay once between them.
+ * anything is signed, so two calls racing on one quote pay once between them;
+ * only a run whose every payment was refused as short of funds reopens it
+ * (`spend-plan.ts`).
  * One past its ten minutes is refused, and pruned. What it runs (`call`) is
  * the router's to read; this file keeps the money.
  */
@@ -152,7 +154,7 @@ async function changeQuote(
 }
 
 /** USE A QUOTE UP: marked used before anything is signed, so it pays once
- *  whatever happens next. */
+ *  whatever happens next, unless {@link reopenQuote} reopens it. */
 export function useQuote(
   dataDir: string,
   id: string,
@@ -161,6 +163,21 @@ export function useQuote(
   return changeQuote(dataDir, id, (quote) => {
     const at = now();
     return quoteClosed(quote, at) ?? { ...quote, usedAt: new Date(at).toISOString() };
+  });
+}
+
+/** REOPEN A USED QUOTE that has not expired: what its run paid was refused
+ *  as short of funds, so it waits out its ten minutes for the next yes. */
+export function reopenQuote(
+  dataDir: string,
+  id: string,
+  now: () => number = Date.now,
+): Promise<{ quote: Quote } | { refused: QuoteRefusal }> {
+  return changeQuote(dataDir, id, (quote) => {
+    if (Date.parse(quote.expiresAt) <= now()) return 'expired';
+    const open: Quote = { ...quote };
+    delete open.usedAt;
+    return open;
   });
 }
 
