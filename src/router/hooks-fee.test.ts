@@ -260,7 +260,8 @@ describe('the hook legs and the routing fee', () => {
           allowlistCreators: [],
         }),
       },
-      '`tenjin doctor`',
+      // A spend limit, never checkout: the balance is not the cause.
+      '`tenjin config set sessionBudget <usd>`',
     ],
   ])(
     'skips the call in one request when %s, and tells the user once per session',
@@ -273,7 +274,7 @@ describe('the hook legs and the routing fee', () => {
       expect(contextOf(first)).toBeUndefined();
       expect(systemMessageOf(first)).toContain('could not pay');
       expect(systemMessageOf(first)).toContain(fix);
-      expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
+      expect(systemMessageOf(first)).not.toContain('tenjin fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
       expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
       // Not again in this session.
@@ -343,7 +344,8 @@ describe('the hook legs and the routing fee', () => {
     expect(notice).toContain(
       'the per-call spend limit cannot cover the routing fee or its deposit',
     );
-    expect(notice).toContain('Run `tenjin doctor`.');
+    expect(notice).toContain('Raise it with `tenjin config set maxAutoSpend 0.25`.');
+    expect(notice).not.toContain('tenjin fund');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
     expect(fake.paidRequests()).toBe(0);
@@ -570,7 +572,7 @@ describe('wallet notices', () => {
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(low)).toContain('could not pay');
     expect(systemMessageOf(low)).toContain('Your usual tools still work.');
-    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
+    expect(systemMessageOf(low)).not.toContain('tenjin fund');
     balance = 10_000_000n;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);

@@ -92,9 +92,23 @@ describe('unpaidSentence', () => {
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
       /wallet fund|send USDC|add funds|checkout/i,
     );
-    expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
-    expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
+    expect(unpaidSentence('wallet_low')).not.toContain('tenjin fund');
+    expect(unpaid('wallet_low')?.fix).toContain('tenjin fund 5');
   });
+
+  // A spend limit is never a funding problem: money cannot help, so neither
+  // reader is pointed at checkout, and both are told the setting that is.
+  it.each(['budget_reached', 'limit_below_deposit'])(
+    '%s says the balance is fine and names the limit to raise, never checkout',
+    (why) => {
+      for (const reader of ['person', 'agent'] as const) {
+        const sentence = unpaidSentence(why, reader) ?? '';
+        expect(sentence).not.toMatch(/tenjin fund|wallet fund|checkout/i);
+        expect(sentence).toContain('Your balance is fine');
+        expect(sentence).toContain('`tenjin config set ');
+      }
+    },
+  );
   // User-visible notices name the reason and its recovery action, and no fee
   // amount: only a quote above the ceiling is named, with the price the payer read.
   const EXPECTED: Record<string, string> = {
@@ -107,9 +121,9 @@ describe('unpaidSentence', () => {
     payment_failed:
       'Tenjin could not pay the routing fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     limit_below_deposit:
-      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Your balance is fine; this is the per-call limit. Raise it with `tenjin config set maxAutoSpend 0.25`.',
     budget_reached:
-      'Tenjin could not pay the routing fee (the daily budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      "Tenjin could not pay the routing fee (today's spend limit is used up), so Tenjin is not routing calls until that is fixed. Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or raise it with `tenjin config set sessionBudget <usd>`.",
     not_allowlisted:
       'Tenjin could not pay the routing fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     fee_above_ceiling:

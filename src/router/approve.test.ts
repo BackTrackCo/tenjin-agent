@@ -282,7 +282,7 @@ describe("approve, called through the host's own prompt", () => {
     );
     // The wallet emptied after the quote: the fund command, nothing paid.
     expect(short.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
-    expect(String(short.envelope.reason)).toContain('`tenjin wallet fund`');
+    expect(String(short.envelope.reason)).toContain('`tenjin fund 5');
     expect(paidCalls()).toEqual([]);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
   });

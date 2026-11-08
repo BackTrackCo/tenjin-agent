@@ -755,7 +755,7 @@ function checkoutUrlFrom(status: number, json: unknown): string {
   // window is clock-relative, and the domain is always the pinned production origin.
   if (status === 401) {
     throw new CliError('REFUSED', "Your computer's clock is off, so Tenjin could not sign in.", {
-      fix: 'Fix the time in your system settings, then run `tenjin fund` again.',
+      fix: "Set your computer's clock right in its system settings, then run `tenjin fund` again.",
     });
   }
   if (status === 429) {
