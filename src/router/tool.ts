@@ -67,7 +67,7 @@ import {
   type PlanStop,
   type QuotedCall,
 } from './plan';
-import { depositSentence, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, fundsFix, unpaidSentence, usd, type RouteFor } from './fee';
 import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -394,8 +394,11 @@ export async function runApproveTool(
     const { balanceAtomic, totalAtomic } = admitted.short;
     return fail(
       'failed',
-      `${quote.sentence} The wallet holds $${toMoney(balanceAtomic.toString()).usd}, $${toMoney((totalAtomic - balanceAtomic).toString()).usd} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
-      { nextStep: 'Tell the user. The quote waits for its ten minutes; nothing was paid.' },
+      `${quote.sentence} Your Tenjin balance is $${usd(balanceAtomic)}, so nothing was paid. ${fundsFix(quote.what, totalAtomic, balanceAtomic)}`,
+      {
+        nextStep:
+          'Open checkout with the `tenjin fund` command in the reason and follow its nextStep; nothing was paid. The quote waits ten minutes, so call approve again once the funds arrive.',
+      },
     );
   }
   const slots = admitted.admitted;

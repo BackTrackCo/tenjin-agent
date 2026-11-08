@@ -119,10 +119,17 @@ export function fundForCommand(label: string, priceAtomic: bigint, balanceAtomic
  * A PAID CALL THE BALANCE CANNOT COVER, in plain dollars: "This X post read
  * costs $0.006 and your Tenjin balance is $0.00. Add funds with `tenjin fund 5
  * --for "X post read" --price 0.006`." The agent runs that command, which
- * opens checkout with the call named on the page.
+ * opens checkout with the call named on the page. A service with no display
+ * label is named by its provider ("A call to BlockRun costs …").
  */
-export function shortOfFunds(label: string, priceAtomic: bigint, balanceAtomic: bigint): string {
-  return `This ${label} costs $${usd(priceAtomic)} and your Tenjin balance is $${usd(balanceAtomic)}. ${fundsFix(label, priceAtomic, balanceAtomic)}`;
+export function shortOfFunds(o: {
+  label?: string | undefined;
+  provider: string;
+  priceAtomic: bigint;
+  balanceAtomic: bigint;
+}): string {
+  const subject = o.label !== undefined ? `This ${o.label}` : `A call to ${o.provider}`;
+  return `${subject} costs $${usd(o.priceAtomic)} and your Tenjin balance is $${usd(o.balanceAtomic)}. ${fundsFix(o.label ?? o.provider, o.priceAtomic, o.balanceAtomic)}`;
 }
 
 /** The "Add funds with …" sentence alone, for a reason that already said what it costs. */

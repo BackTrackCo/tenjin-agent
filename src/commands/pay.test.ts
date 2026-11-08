@@ -2462,7 +2462,7 @@ describe('direct registry warning acknowledgement and balance enforcement', () =
         ...(balance === 99_999n
           ? {
               message: expect.stringContaining(
-                'It holds 0.099999 USD and this costs 0.1 USD: 0.000001 USD short.',
+                'This costs $0.10 and your Tenjin balance is $0.099999, so no payment was signed.',
               ),
             }
           : {}),

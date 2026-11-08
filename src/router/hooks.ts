@@ -22,7 +22,7 @@ import {
 import { storeChoices, storeLabel, storeSpecs } from './specs';
 import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
-import { depositSentence, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, shortOfFunds, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
@@ -663,7 +663,7 @@ function gateDeadline(deps: HookDeps): number {
  * ({@link vetOffer} withholds it), so they read it here.
  */
 export async function spendShortfall(
-  decision: { providerPriceAtomic: string; endpoint: string },
+  decision: { providerPriceAtomic: string; endpoint: string; label?: string; provider?: string },
   deps: HookDeps,
   deadline: number,
 ): Promise<Shortfall | null> {
@@ -731,10 +731,14 @@ export async function spendShortfall(
   if (v.status !== 'blocked' || v.reason === 'needs_approval') return null;
   if (v.reason === 'wallet_short') {
     if (balance === null) return null;
-    const short = BigInt(decision.providerPriceAtomic) - balance;
     return {
-      withheld: 'wallet needs USDC',
-      note: `Note: the wallet holds $${toMoney(balance.toString()).usd}, $${toMoney(short.toString()).usd} short of its ${price}; fund it with \`tenjin wallet fund\`.`,
+      withheld: 'balance too low',
+      note: `Note: ${shortOfFunds({
+        label: decision.label,
+        provider: decision.provider ?? new URL(decision.endpoint).host,
+        priceAtomic: BigInt(decision.providerPriceAtomic),
+        balanceAtomic: balance,
+      })}`,
     };
   }
   return cannotSign(v);
@@ -1016,6 +1020,7 @@ function isOffer(decision: HookDecision | null): decision is OfferDecision {
 /** What the spend check and the footer read, for either kind of offer. */
 function termsOf(offer: OfferDecision): {
   provider: string;
+  label?: string;
   providerPriceAtomic: string;
   endpoint: string;
 } {

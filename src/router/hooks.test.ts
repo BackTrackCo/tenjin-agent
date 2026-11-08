@@ -1262,7 +1262,7 @@ describe('a wallet that cannot cover the lookup', () => {
     const out = await runNativeHook(event, deps);
     expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · search: native tools (wallet needs USDC)',
+      'x402 · search: native tools (balance too low)',
     );
     expect(await runPromptHook(promptEvent('read https://x.com/a'), deps)).toEqual({
       response: null,
@@ -3397,7 +3397,7 @@ describe('a discovered service', () => {
       (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
         .additionalContext,
     ).toBe(
-      `${SEEN_LINE} Note: the wallet holds $0.01, $0.043501 short of its $0.053501; fund it with \`tenjin wallet fund\`.`,
+      `${SEEN_LINE} Note: A call to BlockRun costs $0.053501 and your Tenjin balance is $0.01. Add funds with \`tenjin fund 5 --for "BlockRun" --price 0.053501\`.`,
     );
   });
 

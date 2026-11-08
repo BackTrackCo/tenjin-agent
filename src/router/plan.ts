@@ -6,6 +6,7 @@ import { createQuote, type Quote } from '../lib/spend-quotes';
 import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
+import { fundsFix } from './fee';
 import { KeptChoicesSchema, type KeptChoices } from './specs';
 import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './tool';
 
@@ -180,8 +181,9 @@ export interface PlanStop {
  * WHY A PLAN DID NOT RUN, AND WHAT FOLLOWS. Over the automatic limits it is
  * kept as a quote, and the answer is the sentence and the approve call. A
  * payee outside `allowlistCreators` is the user's own hard rule, which no
- * approval clears. A wallet short of the total is the fund command, as for
- * any payment. `alternative` is the smaller call the agent may make instead.
+ * approval clears. A balance short of the total names the fund command for
+ * this call, as for any payment. `alternative` is the smaller call the agent
+ * may make instead.
  * A host that does not offer `approve` keeps no quote: nobody could run it.
  */
 export async function planStop(
@@ -203,8 +205,10 @@ export async function planStop(
     const { balanceAtomic, totalAtomic } = admission.short;
     return {
       status: 'failed',
-      reason: `${plan.sentence} The wallet holds ${usd(balanceAtomic)}, ${usd(totalAtomic - balanceAtomic)} short. The wallet has insufficient USDC; no payment was signed. Fund this wallet on Base with \`tenjin wallet fund\` before paying.`,
-      extras: { nextStep: `Tell the user${or}; nothing was paid.` },
+      reason: `${plan.sentence} Your Tenjin balance is ${usd(balanceAtomic)}, so nothing was paid. ${fundsFix(plan.what, totalAtomic, balanceAtomic)}`,
+      extras: {
+        nextStep: `Open checkout with the \`tenjin fund\` command in the reason and follow its nextStep${or}; nothing was paid.`,
+      },
       outcome: { status: 'unpaid', reason: 'wallet' },
     };
   }

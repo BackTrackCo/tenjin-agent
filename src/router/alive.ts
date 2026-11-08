@@ -38,6 +38,8 @@ import { sessionStartMessage } from './wallet-reasons';
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAMP = 'plugin-loaded.json';
+/** When the balance notice was last said ({@link walletNotice}). */
+const BALANCE_NOTICE_FILE = 'balance-notice.json';
 /** A session id names a file only through its hash, so any string is safe. */
 const MAX_SESSION_ID = 200;
 
@@ -169,13 +171,14 @@ export async function readAliveStamp(dataDir: string): Promise<AliveStamp | null
   }
 }
 
-/** `uninstall`: the markers and the stamp, and nothing else under the data dir. */
+/** `uninstall`: the markers, the stamp and the notice record, and nothing else under the data dir. */
 export async function removeAliveState(dataDir: string): Promise<boolean> {
   const dir = aliveDir(dataDir);
   const existed = (await stat(dir).catch(() => null)) !== null;
   if (!existed) return false;
   for (const name of await readdir(dir).catch(() => [] as string[])) {
-    if (name === STAMP || /^[0-9a-f]{32}$/.test(name)) await rm(join(dir, name), { force: true });
+    if (name === STAMP || name === BALANCE_NOTICE_FILE || /^[0-9a-f]{32}$/.test(name))
+      await rm(join(dir, name), { force: true });
   }
   // Only when empty: a file somebody else put there keeps the folder.
   await rmdir(dir).catch(() => undefined);
@@ -185,17 +188,26 @@ export async function removeAliveState(dataDir: string): Promise<boolean> {
 /** How long the leg waits on a balance read before it says nothing. */
 export const WALLET_READ_MS = 2_000;
 
+/** The balance notice is said at most once in this long, across sessions. */
+export const BALANCE_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
+
 /**
- * THE WALLET, SAID TO THE PERSON AT THE START OF A SESSION while it cannot
- * pay: the leg's `systemMessage`, which Claude Code shows the user and never
- * the model, on every surface and without the mod. Null when there is no
- * wallet, the balance could not be read in time, or the wallet holds at least
- * the per-call limit.
+ * THE BALANCE, SAID TO THE PERSON AT THE START OF A SESSION while it is under
+ * the per-call limit: the leg's `systemMessage`, which Claude Code shows the
+ * user and never the model, on every surface and without the mod. At most
+ * once a day (`balance-notice.json`): a reminder at every session start gets
+ * Tenjin uninstalled. Null when there is no wallet, the balance could not be
+ * read in time, it holds at least the per-call limit, or the notice was said
+ * in the last day.
  */
 export async function walletNotice(
   dataDir: string,
-  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number } = {},
+  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number; now?: () => number } = {},
 ): Promise<string | null> {
+  const now = (opts.now ?? Date.now)();
+  const noticePath = join(aliveDir(dataDir), BALANCE_NOTICE_FILE);
+  const last = (await readJson(noticePath))?.at;
+  if (typeof last === 'number' && now >= last && now - last < BALANCE_NOTICE_EVERY_MS) return null;
   const wallet = await readJson(walletPath(dataDir));
   const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
   if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
@@ -214,8 +226,16 @@ export async function walletNotice(
       : DEFAULT_MAX_AUTO_SPEND,
   );
   if (balance > 0n && balance >= cap) return null;
-  // Only the person reads it, inside the session: they ask, the agent runs it.
-  return `Tenjin balance: $${dollars(balance)}. Ask your agent to add funds to Tenjin.`;
+  // A notice that cannot record itself is not said: unrecorded, it would
+  // come back at every session start.
+  try {
+    await mkdir(aliveDir(dataDir), { recursive: true, mode: 0o700 });
+    await writeFile(noticePath, JSON.stringify({ at: now }), { mode: 0o600 });
+  } catch {
+    return null;
+  }
+  // Only the person reads it, inside the session: they say so, the agent runs it.
+  return `Tenjin balance $${dollars(balance)} · low. Say "add funds" when you're ready.`;
 }
 
 /** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */

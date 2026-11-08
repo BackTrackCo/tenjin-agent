@@ -391,9 +391,13 @@ describe('running every choice', () => {
       { ...short, payDeps: { ...short.payDeps, readBalance: async () => 60_000n } },
     );
     expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
-    expect(String(result.envelope.reason)).toContain('insufficient USDC; no payment was signed');
+    expect(String(result.envelope.reason)).toContain(
+      'Your Tenjin balance is $0.06, so nothing was paid.',
+    );
     expect(String(result.envelope.reason)).toContain('$0.085');
-    expect(String(result.envelope.reason)).toContain('$0.025 short');
+    // The fund command names the call and its price, for the checkout page.
+    expect(String(result.envelope.reason)).toContain('`tenjin fund 5 --for "');
+    expect(String(result.envelope.reason)).toContain('--price 0.085`');
     await stoppedSet(calls, { status: 'unpaid', reason: 'wallet' });
     expect(auth.authorize).not.toHaveBeenCalled();
     expect(await claims()).toEqual([]);

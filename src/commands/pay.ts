@@ -9,7 +9,7 @@ import { CliError } from '../lib/errors';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
 import type { FetchJsonFailure, HttpResponse } from '../lib/http';
-import { parseUsdToAtomic, toMoney } from '../lib/money';
+import { formatUsdDisplay, parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import { mask } from '../lib/redact';
 import { isSameDeployment } from '../lib/production-origin';
@@ -725,9 +725,9 @@ async function assertBalanceCovers(
     const short = toMoney((amountAtomic - balance).toString()).usd;
     throw new CliError(
       'REFUSED',
-      `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
+      `This costs $${formatUsdDisplay(amountAtomic.toString())} and your Tenjin balance is $${formatUsdDisplay(balance.toString())}, so no payment was signed.`,
       {
-        fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
+        fix: `Add funds with \`tenjin fund\` (at least $${short} more) before paying.`,
         details: {
           reason: 'insufficient_funds',
           address,
