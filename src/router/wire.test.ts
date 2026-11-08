@@ -1056,12 +1056,16 @@ describe('the hook time budget', () => {
     const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
     expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThanOrEqual(5);
     expect(budget - GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
-    expect(UNPAID_GATE_TIMEOUT_MS).toBeGreaterThan(GATE_TIMEOUT_MS);
+    expect(UNPAID_GATE_TIMEOUT_MS).toBe(GATE_TIMEOUT_MS);
     expect(budget - UNPAID_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
     expect(DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
     // The chain read and the wallet read leave the requests time of their own.
     expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
+  });
+
+  it('keeps the no-payer decision wait at most 3.5 seconds', () => {
+    expect(UNPAID_GATE_TIMEOUT_MS).toBeLessThanOrEqual(3_500);
   });
 
   /** The after-call leg waits for nothing of its own: a noted search reads

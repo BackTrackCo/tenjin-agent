@@ -27,10 +27,9 @@
  */
 export const GATE_TIMEOUT_MS = 3_500;
 
-/** A hook without the MCP payer spends no time on the 402 or wallet route.
- *  It can wait until the leg's 500 ms reply reserve begins. The server gets
- *  only the time left when the decision request is sent. */
-export const UNPAID_GATE_TIMEOUT_MS = 4_500;
+/** A hook without the MCP payer keeps the same 3.5 s decision wait.
+ *  The server gets only the time left when the decision request is sent. */
+export const UNPAID_GATE_TIMEOUT_MS = 3_500;
 
 /**
  * A CALL THAT CARRIES A DEPOSIT gets the rest of the hook leg instead: the

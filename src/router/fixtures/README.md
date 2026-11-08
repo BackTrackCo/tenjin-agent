@@ -50,7 +50,7 @@ Neither carries `accepts`.
 `budgetMs` gives the server the hook's remaining decision wait when it sends
 the request, capped at 5000 ms. The MCP payer shares the 3500 ms decision
 window with the 402, wallet and paid request; a hook without that payer has
-4500 ms. The tool form keeps its existing body.
+3500 ms. The tool form keeps its existing body.
 
 An outcome's `status` is `ignored` for an offer the host was shown and never
 took, with `reason` `expired` (its 15 minutes ran out with no `request` call
