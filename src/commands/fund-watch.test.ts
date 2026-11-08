@@ -206,6 +206,32 @@ describe('watching a link until the money lands', () => {
     expect(clock).toBeGreaterThan(expiresAt);
   });
 
+  // An earlier "opened" is no evidence about the minutes since: a payment can
+  // start while the reads fail or back off, so the expiry may not say that
+  // nothing was charged.
+  it.each([
+    ['fail', [500, {}]],
+    ['are backed off after a 429', [429, {}]],
+  ] as const)(
+    'claims no outcome at expiry when the recent status reads %s',
+    async (_label, failing) => {
+      const expiresAt = clock + 6_000;
+      const { fetchImpl } = statusServer([[200, { state: 'opened', updatedAt: 'x' }], failing]);
+      const end = await watchFunding({
+        startBalance: 0n,
+        readBalance: async () => 0n,
+        token: token(expiresAt),
+        expiresAt,
+        deadline: expiresAt + STATUS_GRACE_MS,
+        view: 'checkout',
+        fetchImpl,
+        now,
+        sleep,
+      });
+      expect(end).toMatchObject({ kind: 'expired', statusKnown: false });
+    },
+  );
+
   it('times out at the deadline without a status to say', async () => {
     const end = await watchFunding({
       startBalance: 0n,

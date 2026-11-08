@@ -224,7 +224,11 @@ function timeLeft(ms: number): string {
 
 export type WatchEnd =
   | { kind: 'arrived'; balance: bigint; added: bigint; status?: LinkStatus }
-  /** The link expired with no payment on it (or with no status to say). */
+  /**
+   * The link expired with no payment on it (or with no status to say).
+   * `statusKnown` only when the status read in the expiring round answered:
+   * the one case where "nothing was charged" is said.
+   */
   | { kind: 'expired'; status?: LinkStatus; statusKnown: boolean }
   | { kind: 'timed-out'; status?: LinkStatus };
 
@@ -263,6 +267,12 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   let status: LinkStatus | undefined;
   let statusOn = o.token !== undefined && o.view !== 'crypto';
   let statusKnown = false;
+  /**
+   * Did THIS round's status read answer? An earlier answer still draws the
+   * line, but only a fresh one is evidence that nothing was charged: a read
+   * that failed or was skipped for a 429 may have missed a payment starting.
+   */
+  let fresh = false;
   let backoff = 0;
   let saidOpen = false;
   let saidPaid = false;
@@ -302,6 +312,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   };
 
   for (let round = 0; ; round++) {
+    fresh = false;
     if (statusOn && backoff === 0) {
       const read = await readLinkStatus(o.token!, {
         ...(o.fetchImpl !== undefined ? { fetchImpl: o.fetchImpl } : {}),
@@ -309,6 +320,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
       if ('status' in read) {
         status = read.status;
         statusKnown = true;
+        fresh = true;
       } else if (read.unavailable === 'gone') {
         statusOn = false;
         statusKnown = false;
@@ -345,13 +357,19 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
     }
     const t = now();
     render(t);
+    // A payment the page last reported keeps the wait going, however old the
+    // report; "nothing was charged" needs this round's answer.
     if (
       o.expiresAt !== undefined &&
       t >= o.expiresAt &&
       !inFlight(statusKnown ? status : undefined)
     ) {
       live?.stop();
-      return { kind: 'expired', statusKnown, ...(status !== undefined ? { status } : {}) };
+      return {
+        kind: 'expired',
+        statusKnown: statusKnown && fresh,
+        ...(status !== undefined ? { status } : {}),
+      };
     }
     if (t >= o.deadline) {
       live?.stop();
