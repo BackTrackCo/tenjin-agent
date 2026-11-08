@@ -140,7 +140,12 @@ export interface RememberedLink {
   /** Lowercase wallet address the link funds. */
   address: string;
   url: string;
-  token: string;
+  /**
+   * The Tenjin /fund link's token, for its payment status. A Coinbase-hosted
+   * link has none: it is remembered for its starting balance alone, so a
+   * payment that lands before `tenjin balance --wait` starts still counts.
+   */
+  token?: string;
   issuedAt: number;
   expiresAt: number;
   /** The balance just before the link was issued, atomic, when it could be read. */
@@ -181,7 +186,7 @@ export async function recallLink(
       typeof row.address !== 'string' ||
       row.address !== address.toLowerCase() ||
       typeof row.url !== 'string' ||
-      typeof row.token !== 'string' ||
+      (row.token !== undefined && typeof row.token !== 'string') ||
       typeof row.issuedAt !== 'number' ||
       typeof row.expiresAt !== 'number' ||
       now < row.issuedAt ||

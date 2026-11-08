@@ -218,17 +218,18 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     const expiresAt =
       (token !== undefined ? tokenExpiry(token) : undefined) ??
       issuedAt + (hosted ? HOSTED_LIFETIME_MS : LINK_LIFETIME_MS);
-    if (token !== undefined) {
-      await rememberLink(ctx.dataDir, {
-        version: 1,
-        address: address.toLowerCase(),
-        url,
-        token,
-        issuedAt,
-        expiresAt,
-        ...(startBalance !== undefined ? { startBalanceAtomic: startBalance.toString() } : {}),
-      });
-    }
+    // Every link is remembered, a hosted one too: its starting balance is what
+    // a later `tenjin balance --wait` measures an arrival from. Only a Tenjin
+    // link has a token, so only it has a status to follow.
+    await rememberLink(ctx.dataDir, {
+      version: 1,
+      address: address.toLowerCase(),
+      url,
+      ...(token !== undefined ? { token } : {}),
+      issuedAt,
+      expiresAt,
+      ...(startBalance !== undefined ? { startBalanceAtomic: startBalance.toString() } : {}),
+    });
     return { url, ...(token !== undefined ? { token } : {}), expiresAt, hosted };
   };
 
@@ -236,7 +237,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
     onItsWay !== undefined
       ? {
           url: prior!.url,
-          token: prior!.token,
+          ...(prior!.token !== undefined ? { token: prior!.token } : {}),
           expiresAt: prior!.expiresAt,
           hosted: false,
         }
@@ -544,13 +545,15 @@ async function fundByCrypto(
 /**
  * The prior link's payment status when it shows money on its way: `paying`,
  * or `paid` with the balance not yet above where it was when that link was
- * issued. Undefined otherwise, or when the status cannot be read.
+ * issued. Undefined otherwise, when the status cannot be read, or for a hosted
+ * link, which has no status to read.
  */
 async function paymentOnItsWay(
   prior: RememberedLink,
   balance: bigint | undefined,
   fetchImpl: typeof fetch | undefined,
 ): Promise<LinkStatus | undefined> {
+  if (prior.token === undefined) return undefined;
   const read = await readLinkStatus(prior.token, {
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
   });

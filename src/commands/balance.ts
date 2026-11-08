@@ -131,8 +131,9 @@ async function waitForFunds(
     start = await soft();
   }
 
-  // The link `tenjin fund` issued, followed by its status. Money that landed
-  // after that link was issued and before this wait began is an arrival too.
+  // The link `tenjin fund` issued, followed by its status when it has one (a
+  // hosted link does not). Money that landed after that link was issued and
+  // before this wait began is an arrival too.
   const link = await recallLink(ctx.dataDir, address, now());
   const linkStart =
     link?.startBalanceAtomic !== undefined ? BigInt(link.startBalanceAtomic) : undefined;
@@ -144,7 +145,7 @@ async function waitForFunds(
       : await watchFunding({
           startBalance: from,
           readBalance: soft,
-          ...(link !== null ? { token: link.token } : {}),
+          ...(link?.token !== undefined ? { token: link.token } : {}),
           deadline,
           view: 'funds',
           ...(human ? { live } : {}),

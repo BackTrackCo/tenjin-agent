@@ -19,6 +19,7 @@ vi.mock('../lib/usdc', () => ({
 
 import { getUsdcBalance } from '../lib/usdc';
 import { runFund, type FundOptions } from './fund';
+import { runBalance } from './balance';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
@@ -836,5 +837,33 @@ describe('runFund: the link, its context and its status', () => {
     expect(out).toContain(`starts ${address.slice(0, 6)} · ends ${address.slice(-4)}`);
     expect(out).toContain('USDC on Base (eip155:8453)');
     expect(res.data).toMatchObject({ crypto: true, funded: true, added: { usd: '5' } });
+  });
+});
+
+describe('a hosted checkout, which has no payment status', () => {
+  // A Coinbase-hosted link carries no token, so nothing can report its
+  // payment; the balance it was issued at is what an arrival is measured from.
+  it('counts a payment that lands before `tenjin balance --wait` starts', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const server = fundServer([CHECKOUT]);
+    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, wait: false, open: false });
+
+    // Paid in the browser before the agent's background wait began.
+    mockedBalance.mockResolvedValue(5_000_000n);
+    let clock = Date.now();
+    const res = await runBalance(makeCtx(), {
+      provider,
+      wait: true,
+      waitMs: 10_000,
+      fetchImpl: server.fetchImpl,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    });
+    expect(res.data).toMatchObject({ arrived: true, added: { usd: '5' } });
+    // No status route is asked for a link without a token.
+    expect(server.statusCalls()).toBe(0);
   });
 });
