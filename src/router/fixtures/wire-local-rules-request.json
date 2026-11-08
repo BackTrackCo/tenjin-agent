@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "localRules": {},
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "local"],
+  "harness": "claude",
+  "counts": [
+    { "rule": "squawk-drizzle-generate", "shown": 2, "ran": 1 },
+    { "rule": "ast-grep-edits", "shown": 1, "ran": 0 }
+  ]
+}

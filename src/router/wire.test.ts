@@ -1,4 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -23,6 +25,13 @@ import {
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
+import {
+  buildLocalRulesBody,
+  readLocalRules,
+  writeLocalRules,
+  type LocalCount,
+  type LocalRules,
+} from './local-rules';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
@@ -178,6 +187,7 @@ describe('the request bodies', () => {
       'headers',
       'note',
       'tolerant',
+      'local',
     ]);
     expect(acceptsFor(false)).toEqual([
       ...(fixture('wire-tool-request-catalog.json').accepts as string[]),
@@ -187,6 +197,7 @@ describe('the request bodies', () => {
       'headers',
       'note',
       'tolerant',
+      'local',
     ]);
     expect(acceptsFor(true)).toEqual([
       'catalog',
@@ -197,6 +208,7 @@ describe('the request bodies', () => {
       'headers',
       'note',
       'tolerant',
+      'local',
       'bazaar',
     ]);
     const read = [
@@ -208,6 +220,7 @@ describe('the request bodies', () => {
       'headers',
       'note',
       'tolerant',
+      'local',
       'discovered',
       'bazaar',
       'choices',
@@ -1053,5 +1066,59 @@ describe('the hook time budget', () => {
   it('fits the slowest paid call inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
+  });
+});
+
+/**
+ * THE FREE LOCAL TOOLS. A `local` answer names a tool by its key and leaves
+ * `{command}` for this build to fill; the rule list is the free form the
+ * after-call legs match. Both are read with the schemas production reads.
+ */
+describe('the local tools on the wire', () => {
+  it('parses the local arm on both calls, and refuses a line this build cannot fill', () => {
+    const hook = fixture('wire-hook-local.json');
+    const lookup = fixture('wire-lookup-local.json');
+    expect(parseForTests('hook', hook).success).toBe(true);
+    expect(parseForTests('tool', lookup).success).toBe(true);
+    expect(parseForTests('tool', hook).success).toBe(true);
+    const decision = hook.decision as Record<string, unknown>;
+    const broken = (over: Record<string, unknown>) =>
+      parseForTests('hook', { ...hook, decision: { ...decision, ...over } }).success;
+    expect(broken({ tool: 'rm' })).toBe(false);
+    expect(broken({ hint: 'Run it in your shell.' })).toBe(false);
+    expect(broken({ hint: 'Run `{command}` or `{command}`.' })).toBe(false);
+    expect(broken({ hint: 'Run `{command}`.\nThen this.' })).toBe(false);
+    expect(broken({ providerPriceAtomic: '1' })).toBe(false);
+    // `files` names project files; `requires` stays the must-understand tokens.
+    expect(broken({ requires: ['package.json'] })).toBe(false);
+  });
+
+  it('builds the rule list request, byte for byte, with the counts', () => {
+    const canonical = fixture('wire-local-rules-request.json');
+    expect(
+      buildLocalRulesBody({
+        accepts: canonical.accepts as string[],
+        harness: 'claude',
+        counts: canonical.counts as LocalCount[],
+      }),
+    ).toEqual(canonical);
+    // No counts, no field: the server reads an absent list as none.
+    expect(buildLocalRulesBody({ accepts: ['local'] })).not.toHaveProperty('counts');
+  });
+
+  it('reads every rule of the served list, in every match form', async () => {
+    const answer = fixture('wire-local-rules.json');
+    const dir = await mkdtemp(join(tmpdir(), 'wire-local-'));
+    try {
+      expect(await writeLocalRules(dir, answer.localRules as LocalRules, 1)).toBe(true);
+      const cached = await readLocalRules(dir);
+      const rules = (answer.localRules as { rules: unknown[] }).rules;
+      expect(cached?.localRules.rules).toHaveLength(rules.length);
+      expect(new Set(cached?.localRules.rules.map((r) => r.match.kind))).toEqual(
+        new Set(['words', 'path', 'multiline', 'edits', 'output']),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

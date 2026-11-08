@@ -102,7 +102,7 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
 export { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './plugin-files';
 
 export const DISCLOSURE: readonly string[] = [
-  'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
+  "Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine. Your assistant's shell commands, their output, searches and edits stay on this machine: a daily fetch of the local tool rules sends only how often each rule's line was shown and its tool run. The v8r config check downloads each file's schema from SchemaStore and sends none of the file, and attw's installed-dependency check fetches that package from the npm registry.",
   'Privacy: https://tenjin.sh/privacy · Terms: https://tenjin.sh/terms',
 ];
 

@@ -1,0 +1,244 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-08.1",
+  "honored": ["local"],
+  "localRules": {
+    "version": "2026-11-08.1",
+    "rules": [
+      {
+        "rule": "squawk-drizzle-generate",
+        "service": "local-squawk",
+        "tool": "squawk",
+        "identity": {
+          "service": "local-squawk",
+          "source": "tenjin",
+          "providers": ["squawk"],
+          "seller": "squawk",
+          "task": "migration safety check",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["drizzle-kit", "generate"]
+        },
+        "line": "This step generated a Postgres migration. Use squawk, free, before you apply it: lints Postgres migration SQL for locks and table rewrites that block a production table. Run `{command}` in your shell with the new .sql file, and read its JSON."
+      },
+      {
+        "rule": "squawk-prisma-migrate-dev",
+        "service": "local-squawk",
+        "tool": "squawk",
+        "identity": {
+          "service": "local-squawk",
+          "source": "tenjin",
+          "providers": ["squawk"],
+          "seller": "squawk",
+          "task": "migration safety check",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["prisma", "migrate", "dev"]
+        },
+        "line": "This step generated a Postgres migration. Use squawk, free, before you apply it: lints Postgres migration SQL for locks and table rewrites that block a production table. Run `{command}` in your shell with the new .sql file, and read its JSON."
+      },
+      {
+        "rule": "squawk-prisma-migrate-diff",
+        "service": "local-squawk",
+        "tool": "squawk",
+        "identity": {
+          "service": "local-squawk",
+          "source": "tenjin",
+          "providers": ["squawk"],
+          "seller": "squawk",
+          "task": "migration safety check",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["prisma", "migrate", "diff"]
+        },
+        "line": "This step generated a Postgres migration. Use squawk, free, before you apply it: lints Postgres migration SQL for locks and table rewrites that block a production table. Run `{command}` in your shell with the new .sql file, and read its JSON."
+      },
+      {
+        "rule": "squawk-migration-path",
+        "service": "local-squawk",
+        "tool": "squawk",
+        "identity": {
+          "service": "local-squawk",
+          "source": "tenjin",
+          "providers": ["squawk"],
+          "seller": "squawk",
+          "task": "migration safety check",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "path",
+          "paths": ["**/migrations/**/*.sql", "drizzle/**/*.sql"]
+        },
+        "line": "This step edited a migration .sql file. Use squawk, free, before you apply it: lints Postgres migration SQL for locks and table rewrites that block a production table. Run `{command}` in your shell with the new .sql file, and read its JSON."
+      },
+      {
+        "rule": "ast-grep-rg-multiline",
+        "service": "local-ast-grep",
+        "tool": "ast-grep",
+        "identity": {
+          "service": "local-ast-grep",
+          "source": "tenjin",
+          "providers": ["ast-grep"],
+          "seller": "ast-grep",
+          "task": "code-shape search",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["rg"],
+          "flags": ["-U", "--multiline"]
+        },
+        "line": "This step searched for a code shape that spans lines. Use ast-grep, free, before more text searches or hand edits: matches and rewrites code by syntax tree, so strings and comments are ignored and a match can span lines. Run `{command}` in your shell with `--pattern '<pattern>'` and the paths, and read its JSON."
+      },
+      {
+        "rule": "ast-grep-grep-multiline",
+        "service": "local-ast-grep",
+        "tool": "ast-grep",
+        "identity": {
+          "service": "local-ast-grep",
+          "source": "tenjin",
+          "providers": ["ast-grep"],
+          "seller": "ast-grep",
+          "task": "code-shape search",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "multiline"
+        },
+        "line": "This step searched for a code shape that spans lines. Use ast-grep, free, before more text searches or hand edits: matches and rewrites code by syntax tree, so strings and comments are ignored and a match can span lines. Run `{command}` in your shell with `--pattern '<pattern>'` and the paths, and read its JSON."
+      },
+      {
+        "rule": "ast-grep-edits",
+        "service": "local-ast-grep",
+        "tool": "ast-grep",
+        "identity": {
+          "service": "local-ast-grep",
+          "source": "tenjin",
+          "providers": ["ast-grep"],
+          "seller": "ast-grep",
+          "task": "code-shape search",
+          "categories": ["developer tools"]
+        },
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "edits",
+          "edits": 3
+        },
+        "line": "This step made the same kind of change in a third file. Use ast-grep, free, before more text searches or hand edits: matches and rewrites code by syntax tree, so strings and comments are ignored and a match can span lines. Run `{command}` in your shell with `--pattern '<pattern>'` and the paths, and read its JSON."
+      },
+      {
+        "rule": "knip-superseded",
+        "service": "local-knip",
+        "tool": "knip",
+        "identity": {
+          "service": "local-knip",
+          "source": "tenjin",
+          "providers": ["knip"],
+          "seller": "knip",
+          "task": "dead code search",
+          "categories": ["developer tools"]
+        },
+        "requires": ["package.json"],
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["ts-prune"]
+        },
+        "line": "This step ran a dead-code tool that is no longer maintained. Use knip, free, instead: finds unused files, exports and dependencies through the whole module graph. Run `{command}` in your shell from the project root, and read its JSON."
+      },
+      {
+        "rule": "dependency-cruiser-before-initialization",
+        "service": "local-dependency-cruiser",
+        "tool": "dependency-cruiser",
+        "identity": {
+          "service": "local-dependency-cruiser",
+          "source": "tenjin",
+          "providers": ["dependency-cruiser"],
+          "seller": "dependency-cruiser",
+          "task": "import cycle check",
+          "categories": ["developer tools"]
+        },
+        "requires": ["package.json"],
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "output",
+          "output": ["before initialization"]
+        },
+        "line": "This step failed with an access before initialization, which an import cycle can cause. Use dependency-cruiser, free, before tracing imports by hand: finds import cycles and what depends on a module. Run `{command}` in your shell with the source folder and `--ts-pre-compilation-deps`, and read its JSON."
+      },
+      {
+        "rule": "attw-npm-pack",
+        "service": "local-attw",
+        "tool": "attw",
+        "identity": {
+          "service": "local-attw",
+          "source": "tenjin",
+          "providers": ["attw"],
+          "seller": "attw",
+          "task": "package types check",
+          "categories": ["developer tools"]
+        },
+        "requires": ["package.json"],
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["npm", "pack"],
+          "bare": true
+        },
+        "line": "This step packed a package. Use attw, free, before you publish: checks that the package's types resolve under node10, node16 and bundlers, for ESM and CJS. Run `{command}` in your shell from the package folder after it is built, and read its JSON."
+      },
+      {
+        "rule": "attw-npm-publish",
+        "service": "local-attw",
+        "tool": "attw",
+        "identity": {
+          "service": "local-attw",
+          "source": "tenjin",
+          "providers": ["attw"],
+          "seller": "attw",
+          "task": "package types check",
+          "categories": ["developer tools"]
+        },
+        "requires": ["package.json"],
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "words",
+          "words": ["npm", "publish"]
+        },
+        "line": "This step published a package. Use attw, free, before you publish: checks that the package's types resolve under node10, node16 and bundlers, for ESM and CJS. Run `{command}` in your shell from the package folder after it is built, and read its JSON."
+      },
+      {
+        "rule": "attw-package-path-not-exported",
+        "service": "local-attw",
+        "tool": "attw-npm",
+        "identity": {
+          "service": "local-attw",
+          "source": "tenjin",
+          "providers": ["attw"],
+          "seller": "attw",
+          "task": "package types check",
+          "categories": ["developer tools"]
+        },
+        "requires": ["package.json"],
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "output",
+          "output": ["ERR_PACKAGE_PATH_NOT_EXPORTED"]
+        },
+        "line": "This step failed on a path a package does not export. Use attw, free, before guessing at the package's exports: checks that a package's types resolve under node10, node16 and bundlers, for ESM and CJS. Run `{command}` in your shell followed by the installed `<name>@<version>` from the lockfile or `node_modules/<name>/package.json`, not the latest, and read its JSON."
+      }
+    ]
+  }
+}

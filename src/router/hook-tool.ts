@@ -8,8 +8,19 @@
  * event the handlers already read, and spells the `input` `install` writes.
  */
 
-/** The routing legs, one per hook entry `install` writes. */
-export const HOOK_KINDS = ['prompt', 'native', 'shortfall', 'agent', 'ask', 'answer'] as const;
+/** The legs, one per hook entry `install` writes: six routing ones, and the
+ *  two local ones (`local` after a shell command or a search, `edit` after an
+ *  edit), which ask the router nothing and have no `tenjin hook` command. */
+export const HOOK_KINDS = [
+  'prompt',
+  'native',
+  'shortfall',
+  'agent',
+  'ask',
+  'answer',
+  'local',
+  'edit',
+] as const;
 export type HookKind = (typeof HOOK_KINDS)[number];
 
 /** The tool `tenjin mcp` registers for the hook entries. */
@@ -19,6 +30,10 @@ export const HOOK_TOOL = 'hook';
 const COMMON = ['hook_event_name', 'session_id', 'transcript_path', 'cwd'] as const;
 const CALL = ['tool_name', 'tool_input', 'tool_use_id', 'agent_id', 'agent_type'] as const;
 
+/** The local legs read no transcript, so they are not sent its path; an edit
+ *  carries no response back, since its leg reads only the file path. */
+const LOCAL = ['hook_event_name', 'session_id', 'cwd', ...CALL] as const;
+
 const FIELDS: Record<HookKind, readonly string[]> = {
   prompt: [...COMMON, 'prompt'],
   native: [...COMMON, ...CALL],
@@ -26,6 +41,8 @@ const FIELDS: Record<HookKind, readonly string[]> = {
   ask: [...COMMON, ...CALL],
   answer: [...COMMON, ...CALL, 'tool_response'],
   shortfall: [...COMMON, ...CALL, 'tool_response', 'error', 'is_interrupt'],
+  local: [...LOCAL, 'tool_response', 'error', 'is_interrupt'],
+  edit: LOCAL,
 };
 
 /** Fields whose value is an object or a boolean, sent as JSON text. */
@@ -75,7 +92,7 @@ export function eventFromToolInput(args: Record<string, unknown>): Record<string
  * optional `agent_id` is never one of them: the call's `threadId` metadata
  * tells a subagent's leg apart instead (`admitCodexHookEvent`).
  */
-export const CODEX_HOOK_KINDS = ['prompt', 'native', 'shortfall'] as const;
+export const CODEX_HOOK_KINDS = ['prompt', 'native', 'shortfall', 'local'] as const;
 export type CodexHookKind = (typeof CODEX_HOOK_KINDS)[number];
 
 const CODEX_COMMON = [
@@ -91,6 +108,7 @@ const CODEX_FIELDS: Record<CodexHookKind, readonly string[]> = {
   prompt: [...CODEX_COMMON, 'prompt'],
   native: [...CODEX_COMMON, ...CODEX_CALL],
   shortfall: [...CODEX_COMMON, ...CODEX_CALL, 'tool_response'],
+  local: ['hook_event_name', 'session_id', 'cwd', ...CODEX_CALL, 'tool_response'],
 };
 
 /** The `input` of one Codex leg's `mcp_tool` entry. */

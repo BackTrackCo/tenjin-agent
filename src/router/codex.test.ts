@@ -626,7 +626,7 @@ const listed = (...rows: unknown[]) => ({
 /** A routing leg as Codex 0.157 lists it: an `mcp_tool` hook into the plugin's server. */
 const legRow = (key: string, over: Record<string, unknown> = {}) =>
   row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
-const allRows = () => [legRow('a'), legRow('b'), legRow('c'), row('deny'), allowRow()];
+const allRows = () => [legRow('a'), legRow('b'), legRow('c'), legRow('d'), row('deny'), allowRow()];
 
 describe('Codex install, uninstall and doctor', () => {
   it('writes the wallet, the spend limits and the plugin, and no Codex config', async () => {
@@ -641,7 +641,7 @@ describe('Codex install, uninstall and doctor', () => {
     ]);
     expect(out.data).not.toHaveProperty('grant');
     expect(out.data).not.toHaveProperty('approval');
-    expect(out.humanLines?.join('\n')).toContain('five Tenjin hooks');
+    expect(out.humanLines?.join('\n')).toContain('six Tenjin hooks');
   });
 
   it('keeps the defaults with no answer and hands the spend question back', async () => {
@@ -677,7 +677,7 @@ describe('Codex install, uninstall and doctor', () => {
     terminal.io.isTTY = true;
     const out = await runCodexInstall({}, terminal, deps);
     expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
-    expect(out.humanLines?.join(' ')).toContain('/hooks and trust the five Tenjin hooks');
+    expect(out.humanLines?.join(' ')).toContain('/hooks and trust the six Tenjin hooks');
     expect(out.humanLines?.join(' ')).toContain('then start a new session');
   });
 
@@ -947,6 +947,7 @@ describe('Codex install, uninstall and doctor', () => {
           legRow('a'),
           legRow('b'),
           legRow('c'),
+          legRow('e'),
           row('d'),
           allowRow({ enabled: false, trustStatus: 'untrusted' }),
         ),
@@ -1036,7 +1037,14 @@ describe('Codex install, uninstall and doctor', () => {
 
   it('fails when the allow hook is off under approval_policy never, which refuses the tool', async () => {
     const off = () =>
-      listed(legRow('a'), legRow('b'), legRow('c'), row('d'), allowRow({ enabled: false }));
+      listed(
+        legRow('a'),
+        legRow('b'),
+        legRow('c'),
+        legRow('e'),
+        row('d'),
+        allowRow({ enabled: false }),
+      );
     const prompt = await runCodexDoctor({}, ctx(), { ...host().deps, hooks: async () => off() });
     expect(prompt.humanLines?.join('\n')).toContain('asks before each call');
     await expect(
@@ -1102,12 +1110,14 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
 
   it("trusts exactly the plugin's own legs, deny and allow, and no foreign row", async () => {
     const rows = [...ownRows(), foreign];
-    expect(rows.filter(ownCodexRow)).toHaveLength(5);
+    expect(rows.filter(ownCodexRow)).toHaveLength(6);
     expect(ownCodexRow(foreign)).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, pluginId: 'other@x' })).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, server: 'elsewhere' })).toBe(false);
     const server = appServer(rows);
     const keys = rows.filter(ownCodexRow).map((r) => r.key);
+    // The shell leg after a command, beside the web call's.
+    expect(keys).toContain(`${source}:post_tool_use:1:0`);
     const result = await trustCodexHooks('/h', keys, ownCodexRow, { connect: server.connect });
     expect(result.ok).toBe(true);
     const written = Object.keys(
@@ -1192,7 +1202,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       'codex plugin marketplace add /package/dist/hosts/codex',
       'codex plugin add tenjin@tenjin',
     ]);
-    expect(trustedKeys).toHaveLength(5);
+    expect(trustedKeys).toHaveLength(6);
     expect(line).toBe(CODEX_REFRESH_LINES.done);
   });
 

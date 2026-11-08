@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "find unused exports in this repo"
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  },
+  "sessionId": "8d0f5c1e-2b7a-4c3d-9e8f-1a2b3c4d5e6f",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "local"]
+}

@@ -1027,7 +1027,17 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'local',
+      ],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -2051,7 +2061,17 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'local',
+      ],
       harness: 'claude',
     });
     // The next call runs from the kept spec: no second decision.
@@ -2138,7 +2158,17 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'local',
+      ],
       harness: 'claude',
     });
   });
@@ -2505,7 +2535,17 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'];
+  const ACCEPTS = [
+    'catalog',
+    'spec',
+    'label',
+    'fields',
+    'jobs',
+    'headers',
+    'note',
+    'tolerant',
+    'local',
+  ];
   /** A paid routing path that must never be asked. */
   const route = vi.fn((): never => {
     throw new Error('the paid routing path was asked');

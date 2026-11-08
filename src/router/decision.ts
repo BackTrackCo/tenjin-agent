@@ -4,6 +4,7 @@ import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/ht
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 import type { Harness } from './names';
+import { isLocalTool } from './local-tools';
 
 /**
  * ONE ROUTING PATH, ONE DECISION PER LOOKUP. Every routing call, the hook's
@@ -431,6 +432,65 @@ const DiscoveredSchema = z
   .superRefine(checkHint)
   .superRefine(checkChoices);
 
+/**
+ * A LOCAL LINE IS ONE PLAIN LINE WITH ONE PLACE FOR THE COMMAND. The server
+ * writes the words and names the tool by its key; this client writes the
+ * command into `{command}` from its own table (`local-tools.ts`), so a line
+ * for a tool this build does not ship, or with no slot or two, shows nothing.
+ */
+export function checkLocalLine(line: string, tool: string): boolean {
+  return (
+    line.length <= 2_000 &&
+    !/[\p{Cc}\p{Cf}]/u.test(line) &&
+    line.split('{command}').length === 2 &&
+    isLocalTool(tool)
+  );
+}
+
+/** A file a local tool needs in the project, such as `package.json`. */
+export const FileNameSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]{1,128}$/)
+  .refine((name) => name !== '.' && name !== '..');
+
+/** A `process.platform`-`process.arch` pair a local tool is qualified on. */
+export const PlatformSchema = z.string().regex(/^[a-z0-9]{1,16}-[a-z0-9]{1,16}$/);
+
+/**
+ * A FREE TOOL THAT RUNS ON THIS MACHINE, sent because this build lists
+ * `local`, on both calls: the hook's offer and a query's or a tool id's
+ * answer. Its line names no request call and no id: the agent runs the
+ * command in its own shell, under the host's own permission prompt, and the
+ * request tool never runs it. `files` are what the project must hold for the
+ * tool to work; `platforms` the pairs it is qualified on.
+ */
+const LocalSchema = z
+  .object({
+    action: z.literal('local'),
+    id: IdSchema,
+    capabilityId: CapabilityFields.capabilityId,
+    category: CapabilityFields.category,
+    provider: CapabilityFields.provider,
+    label: CapabilityFields.label,
+    capabilityDescription: CapabilityFields.capabilityDescription,
+    providerPriceAtomic: z.literal('0'),
+    requires: RequiresSchema,
+    tool: z.string().min(1).max(64),
+    files: z.array(FileNameSchema).max(8).optional(),
+    platforms: z.array(PlatformSchema).min(1).max(16),
+    hint: z.string().min(1).max(2_000),
+  })
+  .superRefine((decision, ctx) => {
+    if (!checkLocalLine(decision.hint, decision.tool)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['hint'],
+        message: 'a local line is one plain line with one {command}, for a tool this build ships',
+      });
+    }
+  });
+export type LocalDecision = z.infer<typeof LocalSchema>;
+
 const HookDecisionSchema = z.discriminatedUnion('action', [
   z
     .object({
@@ -464,6 +524,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
     })
     .superRefine(checkHint),
   DiscoveredSchema,
+  LocalSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
@@ -490,6 +551,7 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
     })
     .superRefine(checkHint),
   DiscoveredSchema,
+  LocalSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
@@ -646,7 +708,9 @@ export type CallKind = 'hook' | 'tool' | 'browse';
  * every answer as a tolerant reader and honors `requires` ({@link withoutUnmet}).
  * Once the server reads it (tenjin R2), it sends a new field, `requires`
  * included, only to a client that lists it, and today's shape to one that
- * does not, which is every release from before it and reads strictly. `bazaar` widens discovery to the open
+ * does not, which is every release from before it and reads strictly. `local` takes the
+ * `local` answer, a free tool this build runs a pinned command for, and the
+ * rule list the after-call legs match (`local-rules.ts`). `bazaar` widens discovery to the open
  * Bazaar and is sent only while `experimental.bazaar` is on.
  */
 export const CLIENT_ACCEPTS: readonly string[] = [
@@ -658,6 +722,7 @@ export const CLIENT_ACCEPTS: readonly string[] = [
   'headers',
   'note',
   'tolerant',
+  'local',
 ];
 export const BAZAAR_ACCEPT = 'bazaar';
 export const FREE_QUERY_ACCEPT = 'free-query';

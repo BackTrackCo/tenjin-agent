@@ -53,8 +53,11 @@ import {
   type DecisionDiagnostics,
   type DecisionRoute,
   type Job,
+  type LocalDecision,
   type OfferSpec,
 } from './decision';
+import { fillLocalLine, localCommand } from './local-tools';
+import { localReady, type LocalMemory, type LocalOffer } from './local-rules';
 import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './choices';
 import {
   approveCall,
@@ -231,6 +234,8 @@ export interface RequestToolDeps {
   waitsForJobs?: boolean;
   /** The host that launched this server; absent is Claude Code. */
   harness?: Harness;
+  /** The local offers this process showed, by id (`local-rules.ts`). */
+  local?: LocalMemory;
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -479,6 +484,10 @@ async function requestTool(
     return resumeJob(args.job, deps);
   }
   const offered = args.id !== undefined && args.id.length > 0 ? args.id : undefined;
+  // A LOCAL OFFER'S ID is answered with its line, from memory: the tool runs
+  // in the agent's own shell, never here, so nothing is sent or paid.
+  const local = offered !== undefined ? deps.local?.offer(offered) : undefined;
+  if (local !== undefined) return localLine(offered!, local);
   // A call naming an offer's id takes it, whatever it asks: that offer was not
   // ignored, so nothing reports it so (`untaken.ts`).
   if (offered !== undefined) await markTaken(deps.ctx.dataDir, offered);
@@ -681,6 +690,7 @@ async function requestTool(
     if (
       decision.action !== 'native' &&
       decision.action !== 'needs_input' &&
+      !(decision.action === 'local' && decision.capabilityId === args.tool.trim()) &&
       (decision.action !== 'execute' ||
         decision.capabilityId !== args.tool.trim() ||
         BigInt(decision.providerPriceAtomic) !== 0n)
@@ -695,6 +705,11 @@ async function requestTool(
         },
       );
     }
+  }
+
+  if (decision.action === 'local') {
+    await footer.done('service found');
+    return localAnswer(decision, deps);
   }
 
   // THE PICKED SERVICE'S SPEC, for a query with no id, kept like a hook's and
@@ -846,6 +861,7 @@ async function readToolList(
     await storeSpecs(deps.ctx.dataDir, [picked]);
     return showSpec(picked.id, picked, [], decision.hint);
   }
+  if (decision.action === 'local') return localAnswer(decision, deps);
   if (decision.action === 'native' || decision.action === 'needs_input') {
     return fail(decision.action, decision.reason ?? 'That tool has no spec to show.', {
       diagnostics: decision.diagnostics,
@@ -856,6 +872,54 @@ async function readToolList(
     'The router answered that tool id with no spec, so nothing was kept or paid.',
     { nextStep: 'Call request({query}) with the task instead.' },
   );
+}
+
+/**
+ * A FREE TOOL THAT RUNS ON THIS MACHINE, for a query or a tool id: its line,
+ * with this build's command, when the tool can run here, kept under its id.
+ */
+async function localAnswer(
+  decision: LocalDecision,
+  deps: RequestToolDeps,
+): Promise<RequestToolResult> {
+  const ready = await localReady(deps.local, {
+    platforms: decision.platforms,
+    files: decision.files,
+    cwd: deps.cwd ?? process.cwd(),
+  });
+  const name = decision.label ?? decision.provider;
+  if (!ready) {
+    return fail(
+      'native',
+      `${name} cannot run here (its platform, npx or project files), so nothing was offered.`,
+      {
+        nextStep: 'Use your own tools for this one.',
+      },
+    );
+  }
+  const offer: LocalOffer = {
+    tool: decision.tool,
+    line: fillLocalLine(decision.hint, decision.tool),
+  };
+  deps.local?.remember(decision.id, offer);
+  return localLine(decision.id, offer);
+}
+
+/** A local offer's line: the command to run in the agent's shell, free. */
+function localLine(id: string, offer: LocalOffer): RequestToolResult {
+  return {
+    isError: false,
+    summary: offer.line,
+    envelope: {
+      status: 'local',
+      id,
+      tool: offer.tool,
+      command: localCommand(offer.tool),
+      nextStep:
+        'Run the command in your shell as the line says, with the arguments it asks for. It is free and runs on this machine; this tool does not run it.',
+      cost: costLines(0n),
+    },
+  };
 }
 
 /** A read of the list that got no answer. Nothing was paid on either form. */

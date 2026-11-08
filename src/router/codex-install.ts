@@ -205,7 +205,7 @@ async function addPlugin(
 }
 
 const TRUST_STEP =
-  'Open Codex, run /hooks and trust the five Tenjin hooks, then start a new session.';
+  'Open Codex, run /hooks and trust the six Tenjin hooks, then start a new session.';
 /** What a person reads when this Codex cannot run the plugin's routing hooks. */
 const CODEX_TOO_OLD = `Routing in Codex needs Codex ${CODEX_MCP_HOOKS_VERSION} or later, so Tenjin left its Codex plugin as it was. Ask your agent to update Codex.`;
 /** What a person reads when an install or update turned the hooks on itself. */

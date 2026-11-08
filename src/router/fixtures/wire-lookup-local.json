@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-08.1",
+  "honored": ["spec", "local"],
+  "decision": {
+    "action": "local",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d25",
+    "capabilityId": "local-squawk",
+    "category": "migration safety check",
+    "provider": "Squawk",
+    "label": "squawk",
+    "capabilityDescription": "lints Postgres migration SQL for locks and table rewrites that block a production table",
+    "providerPriceAtomic": "0",
+    "tool": "squawk",
+    "platforms": ["darwin-arm64"],
+    "hint": "This request is a safety check of a Postgres migration. Use squawk, free, before you apply it: lints Postgres migration SQL for locks and table rewrites that block a production table. Run `{command}` in your shell with the migration .sql file, and read its JSON."
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  }
+}

@@ -79,6 +79,27 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "Bash|exec_command",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "router",
+            "tool": "hook",
+            "input": {
+              "kind": "local",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}",
+              "tool_response": "${tool_response}"
+            },
+            "timeout": 15
+          }
+        ]
       }
     ],
     "PermissionRequest": [

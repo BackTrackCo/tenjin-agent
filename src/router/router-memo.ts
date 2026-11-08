@@ -13,13 +13,15 @@ import { writePrivate } from './store-files';
  *   {@link UNREACHABLE_BACKOFF_MS} every leg skips the router and the native
  *   tool runs at once, instead of each prompt and search waiting out the gate.
  *   Doctor's probe ends it early when it reaches the router.
+ * - `local-rules`: the daily fetch of the local tool rules failed (an older
+ *   router answers 400), so no process asks again for its window.
  *
  * A memo is a file written atomically and read with the clock: one older than
  * its window, or dated in the future, reads as absent, so nothing cleans up
  * after it. An unreadable file reads as absent too: the cost of a lost memo is
  * one more call to the router.
  */
-export type RouterMemoKind = 'unreachable';
+export type RouterMemoKind = 'unreachable' | 'local-rules';
 
 export interface RouterMemo {
   /** When it was written, in epoch ms. */

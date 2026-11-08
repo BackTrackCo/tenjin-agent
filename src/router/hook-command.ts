@@ -2,6 +2,7 @@ import {
   runAnswerHook,
   runAskHook,
   runDelegationHook,
+  runLocalHook,
   runNativeHook,
   runPromptHook,
   runShortfallHook,
@@ -108,6 +109,8 @@ export async function runHookKind(
   event: unknown,
   hookDeps: HookDeps,
 ): Promise<unknown | null> {
+  // The local legs read no wallet and say nothing to the user.
+  if (kind === 'local' || kind === 'edit') return (await runLocalHook(event, hookDeps)).response;
   const notices = new Set<string>();
   const deps: HookDeps = { ...hookDeps, notice: (line) => notices.add(line) };
   const sessionId = sessionIdOf(event);

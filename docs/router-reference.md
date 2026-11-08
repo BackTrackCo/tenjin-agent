@@ -106,6 +106,8 @@ Ordinary calls wait up to the client budget; Claude Code 2.1.212+ can background
 | `paid/ledger.jsonl`              | Masked sent parameters, provider, amount, settlement information and saved files. |
 | `spend.json`                     | Exposure, reservations and duplicate-payment accounting.                          |
 | `progress/`                      | Kept specs, shown offers and redirection state; short-lived.                      |
+| `router-memo/local-rules.json`   | The local tool rules, fetched daily; unused after a week.                         |
+| `router-memo/local-counts`       | How often each rule's line was shown and its tool run, until the next fetch.      |
 | `downloads/`                     | Delivered media and files.                                                        |
 | `results/`                       | Complete provider responses when the inline result is projected; kept for a day.  |
 | `jobs/`                          | Private job state used for unpaid polling/resume.                                 |
@@ -120,17 +122,17 @@ The guide's [sharing section](./agent-permissions.md#what-the-hooks-send) descri
 - Hooks read only a validated transcript belonging to this session or a permitted subagent. A first prompt can route on its own text before its transcript exists. Other unreadable/untrusted transcript paths send and pay nothing.
 - A delegated task is its own current message with bounded prior context. Subagents share the same wallet, reservations and limits; they are not separate daily budgets. A host known to lack the request tool is not redirected into it.
 - Session and install IDs correlate offers and outcomes. An execution report contains the offer ID, outcome, HTTP status, duration and refusal side, not its input or result. An ignored-offer report contains its ID and expiry/native-use reason, not task text or a claim that it helped.
-- `accepts` advertises supported contract features, including `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note` and `tolerant`. Required unknown features are refused without paying. Unknown optional fields do not disable known-field validation.
+- `accepts` advertises supported contract features, including `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`, `tolerant` and `local`. `local` brings the free local tools: a line naming a pinned command that this CLI writes into it, and the rule list the after-call legs match. Required unknown features are refused without paying. Unknown optional fields do not disable known-field validation.
 
 ## Host integration
 
-Claude Code's plugin registers the `router` MCP server and exec-form hooks against Tenjin's verified runtime. Native searches/fetches, prompts, delegated tasks and questions can trigger suggestions. A redirect applies at most once per same native call per agent in its retry window, so retrying with native tools is possible. Free docs notes do not block a native search. Session startup records plugin presence; a real prompt/tool call establishes activity in the chat.
+Claude Code's plugin registers the `router` MCP server and exec-form hooks against Tenjin's verified runtime. Native searches/fetches, prompts, delegated tasks and questions can trigger suggestions. A redirect applies at most once per same native call per agent in its retry window, so retrying with native tools is possible. Free docs notes do not block a native search. After a shell command, a search or an edit, three local legs match the call on this machine against the local tool rules and can add one optional line naming a free pinned `npx` command; they ask the router nothing, read no transcript and have no `tenjin hook` command form. The command runs in the agent's own shell under the host's permission prompt. Session startup records plugin presence; a real prompt/tool call establishes activity in the chat.
 
 The plugin permits its request tool and denies model use of its internal hook tool. It does not authorize other shell commands. Its optional visual mod reads existing state/results to draw tool rows; it does not grant permissions or change prompts/config. Expanded output remains the host's detailed tool record.
 
 Without a runnable Claude binary, a source-compatible folder installation can register the same plugin. Existing settings-based installations remain until the plugin has actually loaded; removing only Tenjin's exact owned entries preserves unrelated hooks and settings. This migration requires a new session, rather than loading old and new servers together.
 
-Codex uses its own plugin and trust APIs. Three MCP hook legs route the prompt and before/after web calls. Other hooks deny model use of the internal tool and permit the request tool under local spend controls. Trust is read back from Codex; Tenjin neither invents trust hashes nor enables unrelated hooks. User-disabled hooks remain disabled. An old host incapable of MCP hook calls keeps its earlier plugin and receives an upgrade instruction.
+Codex uses its own plugin and trust APIs. Four MCP hook legs route the prompt and before/after web calls, and match a shell command after it runs, on this machine. Other hooks deny model use of the internal tool and permit the request tool under local spend controls. Trust is read back from Codex; Tenjin neither invents trust hashes nor enables unrelated hooks. User-disabled hooks remain disabled. An old host incapable of MCP hook calls keeps its earlier plugin and receives an upgrade instruction.
 
 The request executor is shared, but host facilities differ: Codex currently lacks the special over-limit approval tool. Turning off its request-allow hook restores the host's approval behavior and can cause refusal under `approval_policy = "never"`. A denied web search can be retried natively. Plugin checks, current-session observations and payment readiness are separate diagnostics.
 

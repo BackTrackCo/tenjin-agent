@@ -26,6 +26,7 @@ import {
   renderPluginHooks,
   renderPluginManifest,
   renderPluginMcp,
+  routerHookPlan,
   type ExecLaunch,
   CODEX_ALLOW_HOOK_COMMAND,
   CODEX_ALLOW_HOOK_COMMAND_WINDOWS,
@@ -142,7 +143,7 @@ describe('the mod', () => {
 });
 
 describe("the plugin's hooks", () => {
-  it('carry the seven routing legs as mcp_tool calls on the plugin server, with the same inputs and timeouts', () => {
+  it('carry the ten legs as mcp_tool calls on the plugin server, with the same inputs and timeouts', () => {
     const { hooks } = renderPluginHooks();
     expect(hooks.UserPromptSubmit).toEqual([{ hooks: leg('prompt') }]);
     expect(hooks.PreToolUse).toEqual([
@@ -155,10 +156,19 @@ describe("the plugin's hooks", () => {
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
       { matcher: 'AskUserQuestion', hooks: leg('answer') },
+      { matcher: 'Bash|Grep', hooks: leg('local', 15) },
+      { matcher: 'Edit|Write|MultiEdit', hooks: leg('edit', 15) },
     ]);
     expect(hooks.PostToolUseFailure).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
+      { matcher: 'Bash|Grep', hooks: leg('local', 15) },
     ]);
+    expect(routerHookPlan()).toHaveLength(10);
+    // The local legs read no transcript; the edit leg carries no response back.
+    expect(hookToolInput('local')).not.toHaveProperty('transcript_path');
+    expect(Object.keys(hookToolInput('edit'))).not.toEqual(
+      expect.arrayContaining(['transcript_path', 'tool_response', 'error', 'is_interrupt']),
+    );
     expect(PLUGIN_SERVER).toBe('plugin:tenjin:router');
   });
 
@@ -416,7 +426,7 @@ describe('the checked-in hosts/codex templates', () => {
     }
   });
 
-  it('carry the prompt leg, one web search before and after, the hook deny and the request allow', () => {
+  it('carry the prompt leg, one web search before and after, one shell command after, the hook deny and the request allow', () => {
     const { hooks } = renderCodexHooks();
     const common = {
       hook_event_name: '${hook_event_name}',
@@ -447,6 +457,22 @@ describe('the checked-in hosts/codex templates', () => {
         {
           matcher: 'webrun',
           hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
+        },
+        {
+          matcher: 'Bash|exec_command',
+          hooks: leg(
+            {
+              kind: 'local',
+              hook_event_name: '${hook_event_name}',
+              session_id: '${session_id}',
+              cwd: '${cwd}',
+              tool_name: '${tool_name}',
+              tool_input: '${tool_input}',
+              tool_use_id: '${tool_use_id}',
+              tool_response: '${tool_response}',
+            },
+            15,
+          ),
         },
       ],
       PermissionRequest: [
