@@ -7,7 +7,7 @@ import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib
 import { readQuote } from '../lib/spend-quotes';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
-import { storeChoices, storeSpecs } from './specs';
+import { claimSpecPayment, settleSpecPayment, storeChoices, storeSpecs } from './specs';
 import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
 import { runApproveTool, runRequestTool } from './tool';
@@ -366,6 +366,67 @@ describe("approve, called through the host's own prompt", () => {
       count: 2,
     });
     expect(normal.paidCalls()).toHaveLength(2);
+  });
+
+  /** A REOPEN FREES ONLY THE CLAIMS ITS OWN SHORT PAYMENTS WROTE. One option
+   *  fails before signing and drops its claim; another session claims and
+   *  pays that offer while the other option waits on its low-funds refusal.
+   *  The reopen leaves that newer claim alone, so the offer cannot pay twice. */
+  it("keeps another session's newer claim when a short choice set reopens", async () => {
+    const other: OfferSpec = {
+      ...SPEC,
+      id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42',
+      capabilityId: 'aispace-other-video',
+      provider: 'AiSpace (Other)',
+      request: { ...SPEC.request, url: 'https://x402.aispace.bot/api/v1/video/other' },
+    };
+    const choices: Choices = {
+      group: 'video',
+      default: 'hailuo',
+      input: ['prompt'],
+      options: [
+        { key: 'hailuo', label: 'Hailuo 3 Max', strength: 'Cinematic.', id: SPEC.id },
+        { key: 'other', label: 'Other', strength: 'Cheap.', id: other.id },
+      ],
+      all: { totalAtomic: '310000' },
+    };
+    await storeSpecs(dir, [SPEC, other]);
+    await storeChoices(dir, SPEC.id, { choices, hint: 'Pick one, or all.' });
+    const normal = seller();
+    const quote = await quoted({ id: SPEC.id, choice: 'all', input: INPUT }, normal.fetchImpl);
+    let newer = false;
+    const racing = (async (...args: Parameters<typeof fetch>) => {
+      const url = String(args[0]);
+      const signed = new Headers(args[1]?.headers).has('payment-signature');
+      if (url === other.request.url) return new Response('down', { status: 500 });
+      if (signed) {
+        // Another session takes the offer the moment its claim is free.
+        for (let tries = 0; tries < 1_000 && !newer; tries += 1) {
+          if ((await claimSpecPayment(dir, other.id)) === null) {
+            await settleSpecPayment(dir, other.id, { amountAtomic: 155_000n, signed: true });
+            newer = true;
+          } else {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        }
+        return new Response(
+          JSON.stringify({ error: 'payment_failed', reason: 'insufficient_funds' }),
+          {
+            status: 402,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+      return normal.fetchImpl(...args);
+    }) as typeof fetch;
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const result = await runApproveTool(args, { ...deps(racing), approves: true });
+    expect(newer).toBe(true);
+    expect(result.envelope).toMatchObject({ quote: { id: quote.id } });
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    expect(await claimSpecPayment(dir, other.id)).toMatchObject({ state: 'paid' });
+    // This run's own short payment is freed for the rerun.
+    expect(await claimSpecPayment(dir, SPEC.id)).toBeNull();
   });
 
   /** A plan that paid one payment and was short for the next is never run

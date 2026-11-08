@@ -31,6 +31,7 @@ import {
 import {
   claimSpecPayment,
   readSpec,
+  releaseSpecClaim,
   settleSpecPayment,
   storeChoices,
   storeFullResult,
@@ -403,10 +404,8 @@ export async function runApproveTool(
   // with it, or the rerun would find each one paid.
   if (!(await reopenShortQuote(dataDir, quote.id, slots, { now }))) return result;
   for (const slot of slots) {
-    const claim = claimOfSlot.get(slot);
-    if (claim !== undefined) {
-      await settleSpecPayment(dataDir, claim, { amountAtomic: 0n, signed: false });
-    }
+    const held = claimOfSlot.get(slot);
+    if (held !== undefined) await releaseSpecClaim(dataDir, held.claim, held.owner);
   }
   return {
     ...result,
@@ -1152,9 +1151,11 @@ export async function paySpec(
   const { outcome, left } = paid;
   // The claim survives anything that may have signed: only a call that
   // signed nothing frees the id for a fixed input, or a short wallet's
-  // reopened quote (`runApproveTool`), which finds the claim by its slot.
-  await settleSpecPayment(deps.ctx.dataDir, take?.claim ?? id, left);
-  if ('slot' in admission) claimOfSlot.set(admission.slot, take?.claim ?? id);
+  // reopened quote (`runApproveTool`), which drops the record this payment
+  // wrote and no other.
+  const claim = take?.claim ?? id;
+  const owner = await settleSpecPayment(deps.ctx.dataDir, claim, left);
+  if ('slot' in admission && owner !== undefined) claimOfSlot.set(admission.slot, { claim, owner });
   // A refusal before payment (the spend policy, the spec's terms, the
   // provider's own 4xx) arrives as `unpaid` or `needs_approval`, neither of
   // which the server counts as the offer taken; a call that ran, or may have
@@ -1166,8 +1167,9 @@ export async function paySpec(
   return paid;
 }
 
-/** The spec claim an approved quote's slot paid under. */
-const claimOfSlot = new WeakMap<PlanSlot, string>();
+/** The spec claim an approved quote's slot paid under, and the owner token
+ *  of the record its payment wrote. */
+const claimOfSlot = new WeakMap<PlanSlot, { claim: string; owner: string }>();
 
 /** The deal a spec's call is held to: its price ceiling, payee, chain and token. */
 export function specTerms(spec: OfferSpec): AdvertisedTerms {

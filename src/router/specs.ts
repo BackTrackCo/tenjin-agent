@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -223,8 +223,13 @@ const PaymentSchema = z.discriminatedUnion('state', [
     at: z.string().max(40),
     amountAtomic: z.string().regex(/^\d+$/),
     txHash: z.string().max(100).optional(),
+    owner: z.string().max(64).optional(),
   }),
-  z.strictObject({ state: z.literal('possibly_paid'), at: z.string().max(40) }),
+  z.strictObject({
+    state: z.literal('possibly_paid'),
+    at: z.string().max(40),
+    owner: z.string().max(64).optional(),
+  }),
   z.strictObject({ state: z.literal('running'), at: z.string().max(40) }),
 ]);
 
@@ -269,25 +274,27 @@ export async function claimSpecPayment(
 
 /**
  * How the claimed call ended. Money that left is recorded against the id. The
- * claim is dropped when nothing was signed, so a fixed input can still run,
- * and when a short wallet reopens the approved quote that paid it
- * (`runApproveTool`). Otherwise a signed payment whose amount the call never
- * learned (it failed after the authorization left) stays claimed as possibly
- * paid, and the id never signs again. A record that cannot be written leaves
- * the claim standing, which refuses too.
+ * claim is dropped when nothing was signed, so a fixed input can still run.
+ * Otherwise a signed payment whose amount the call never learned (it failed
+ * after the authorization left) stays claimed as possibly paid, and the id
+ * never signs again. A record that cannot be written leaves the claim
+ * standing, which refuses too. Returns the owner token the record was
+ * written under, for {@link releaseSpecClaim}; undefined when no record was
+ * written.
  */
 export async function settleSpecPayment(
   dataDir: string,
   id: string,
   left: { amountAtomic: bigint; txHash?: string; signed: boolean },
   now: number = Date.now(),
-): Promise<void> {
+): Promise<string | undefined> {
   const path = paymentPath(dataDir, id);
   if (!left.signed && left.amountAtomic === 0n) {
     await rm(path, { force: true }).catch(() => undefined);
-    return;
+    return undefined;
   }
   const at = new Date(now).toISOString();
+  const owner = randomUUID();
   const record =
     left.amountAtomic > 0n
       ? {
@@ -295,11 +302,36 @@ export async function settleSpecPayment(
           at,
           amountAtomic: left.amountAtomic.toString(),
           ...(left.txHash !== undefined ? { txHash: left.txHash } : {}),
+          owner,
         }
-      : { state: 'possibly_paid', at };
-  await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).catch(
+      : { state: 'possibly_paid', at, owner };
+  return writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).then(
+    () => owner,
     () => undefined,
   );
+}
+
+/**
+ * DROP A CLAIM ONLY WHILE IT IS STILL THE ONE THIS RUN WROTE: a short
+ * wallet's reopened quote (`runApproveTool`) frees its offers for the rerun.
+ * A claim another session or a later run created carries another owner, or
+ * none, and stays. Only the claim's holder ever rewrites its file, and no one
+ * can create one while it exists, so a matching owner is this run's record.
+ */
+export async function releaseSpecClaim(dataDir: string, id: string, owner: string): Promise<void> {
+  const path = paymentPath(dataDir, id);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  if (file === undefined) return;
+  let mine: boolean;
+  try {
+    const parsed = PaymentSchema.safeParse(JSON.parse(await file.readFile('utf8')));
+    mine = parsed.success && 'owner' in parsed.data && parsed.data.owner === owner;
+  } catch {
+    mine = false;
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+  if (mine) await rm(path, { force: true }).catch(() => undefined);
 }
 
 /**
