@@ -26,6 +26,8 @@ describe('the pinned local tools', () => {
       squawk:
         'npx --yes --before=2026-10-24 --ignore-scripts -p squawk-cli@2.68.0 squawk --reporter json',
       attw: 'npx --yes --before=2026-10-24 --ignore-scripts -p @arethetypeswrong/cli@0.18.5 attw --pack --format json',
+      'attw-npm':
+        'npx --yes --before=2026-10-24 --ignore-scripts -p @arethetypeswrong/cli@0.18.5 attw --format json --from-npm',
     });
   });
 

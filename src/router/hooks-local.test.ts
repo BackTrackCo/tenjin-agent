@@ -367,6 +367,30 @@ describe('the shell and search leg', () => {
     ).toBeNull();
   });
 
+  it("notes a package's missing export with the installed-version attw command, apart from the --pack one", async () => {
+    const failed = (memory: Memory) =>
+      runLocalHook(
+        bash('node scripts/build.mjs', {
+          hook_event_name: 'PostToolUseFailure',
+          tool_response: undefined,
+          error:
+            'Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath ./x is not defined by "exports"',
+        }),
+        deps(memory),
+      );
+    const packed = await memoryWith();
+    // Running the --pack form says nothing about an installed dependency.
+    await runLocalHook(bash(localCommand('attw')), deps(packed));
+    const out = await failed(packed);
+    expect(out.rule).toBe('attw-package-path-not-exported');
+    expect(said(out)).toContain(
+      `\`${localCommand('attw-npm')}\` in your shell followed by the installed`,
+    );
+    const read = await memoryWith();
+    await runLocalHook(bash(`${localCommand('attw-npm')} zod@3.23.8`), deps(read));
+    expect((await failed(read)).response).toBeNull();
+  });
+
   it("reports a prompt offer's run once, fulfilled or failed, and counts a note's run", async () => {
     const memory = await memoryWith();
     const { fetchImpl, calls } = net(knipOffer());

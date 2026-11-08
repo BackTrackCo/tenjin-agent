@@ -1863,6 +1863,8 @@ async function noteRuns(
 ): Promise<void> {
   const memory = deps.local!;
   for (const [key, tool] of Object.entries(LOCAL_TOOLS)) {
+    const marked = tool.marker === undefined || holdsSpec(commands, tool.marker);
+    if (!marked) continue;
     const pinned = holdsSpec(commands, pinnedSpec(key));
     if (!pinned && !runsBin(commands, tool.bin)) continue;
     memory.ran(scope, key);

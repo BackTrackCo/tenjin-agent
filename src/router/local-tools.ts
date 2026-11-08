@@ -29,6 +29,8 @@ export interface LocalTool {
   flags: readonly string[];
   /** Whether npm may run the packages' install scripts. */
   scripts: boolean;
+  /** The flag that tells this row's run from another row of the same package. */
+  marker?: string;
 }
 
 export const LOCAL_TOOLS: Readonly<Record<string, LocalTool>> = {
@@ -64,6 +66,15 @@ export const LOCAL_TOOLS: Readonly<Record<string, LocalTool>> = {
     bin: 'attw',
     flags: ['--pack', '--format', 'json'],
     scripts: false,
+    marker: '--pack',
+  },
+  /** One installed dependency, read from the registry: the agent appends its `<name>@<version>`. */
+  'attw-npm': {
+    packages: [{ name: '@arethetypeswrong/cli', version: '0.18.5', published: '2026-07-09' }],
+    bin: 'attw',
+    flags: ['--format', 'json', '--from-npm'],
+    scripts: false,
+    marker: '--from-npm',
   },
 };
 

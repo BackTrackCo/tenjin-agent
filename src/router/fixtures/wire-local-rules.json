@@ -218,6 +218,26 @@
           "words": ["npm", "publish"]
         },
         "line": "This step published a package. Use attw, free, before you publish: checks that the package's types resolve under node10, node16 and bundlers, for ESM and CJS. Run `{command}` in your shell from the package folder after it is built, and read its JSON."
+      },
+      {
+        "rule": "attw-package-path-not-exported",
+        "service": "local-attw",
+        "tool": "attw-npm",
+        "identity": {
+          "service": "local-attw",
+          "source": "tenjin",
+          "providers": ["attw"],
+          "seller": "attw",
+          "task": "package types check",
+          "categories": ["developer tools"]
+        },
+        "requires": ["package.json"],
+        "platforms": ["darwin-arm64"],
+        "match": {
+          "kind": "output",
+          "output": ["ERR_PACKAGE_PATH_NOT_EXPORTED"]
+        },
+        "line": "This step failed on a path a package does not export. Use attw, free, before guessing at the package's exports: checks that a package's types resolve under node10, node16 and bundlers, for ESM and CJS. Run `{command}` in your shell followed by the installed `<name>@<version>` from the lockfile or `node_modules/<name>/package.json`, not the latest, and read its JSON."
       }
     ]
   }
