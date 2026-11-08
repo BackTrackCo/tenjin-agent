@@ -55,10 +55,11 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 
 /**
  * Setup states the current price; payment checks enforce the ceiling in fee.ts.
- * One line with every fee fact: the price per call, the set-aside and its
- * ceiling, and that it is counted inside the limits the question sets.
+ * One line with every fee fact: the price per call, that tool charges are
+ * separate, the set-aside and its ceiling, and that it is counted inside the
+ * limits the question sets.
  */
-export const ROUTING_FEE_TERMS = `Routing costs $0.001 a call. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for it, counted in these limits.`;
+export const ROUTING_FEE_TERMS = `Routing costs $0.001 a call; tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for it, counted in these limits.`;
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either choice approves this.';
