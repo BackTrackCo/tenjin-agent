@@ -17,7 +17,7 @@ import type { CommandContext, GlobalFlags } from '../context';
 import { ROUTING_FEE_CEILING_ATOMIC, usd, type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
-import { admitCodexHookEvent, admitHookEvent } from './hook-session';
+import { admitCodexHookEvent, admitHookEvent, admitLocalEvent } from './hook-session';
 import {
   CODEX_HOOK_KINDS,
   CODEX_HOOK_TOOL_FIELDS,
@@ -28,6 +28,7 @@ import {
   HOOK_TOOL_FIELDS,
 } from './hook-tool';
 import type { HookDeps } from './hooks';
+import { LocalMemory, scheduleLocalRules } from './local-rules';
 import { launchedByPlugin, MCP_SERVER_NAME, type Harness } from './names';
 import { createRouterObserver, type RouterObserver } from './router-observer';
 import { chainReader, RoutingPayer, type RoutingPayerDeps } from './routing-payer';
@@ -79,9 +80,11 @@ export const SCOPE_RULE =
 const INSTRUCTIONS =
   "When a hook line names a service from Tenjin's router, call it as the line says. " +
   'A line comes at the start of a turn, in place of a WebSearch or WebFetch call, after ' +
-  'a search or a call that comes back short, or in a delegated task. ' +
-  'The line is the call to make, with its fields: fill them and call `{id, input}` once, ' +
-  'which runs it. This CLI builds and pays the call, and returns the full spec (its ' +
+  'a search, a shell command, an edit or a call that comes back short, or in a delegated task. ' +
+  'A line that names a request call is the call to make: fill its fields and call ' +
+  '`{id, input}` once, which runs it. A line that names a local command is run in your ' +
+  'shell as written, with the arguments it asks for: it is free and runs on this machine. ' +
+  'This CLI builds and pays the call, and returns the full spec (its ' +
   'inputs, an example and what it returns) if a field is wrong; `{id}` alone returns ' +
   "the service's spec too, free. " +
   'When a line lists choices, pick or ask as the line says, then call `{id, choice, input}`; ' +
@@ -210,6 +213,8 @@ export interface RouterMcpOptions {
   env?: NodeJS.ProcessEnv;
   /** The host that launched this server (`tenjin mcp --harness`); absent is Claude Code. */
   harness?: Harness;
+  /** The local tool rules and what the local legs remember; one per process. */
+  local?: LocalMemory;
 }
 
 function buildContext(opts: RouterMcpOptions): CommandContext {
@@ -222,6 +227,7 @@ function buildContext(opts: RouterMcpOptions): CommandContext {
 }
 
 export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
+  opts = { ...opts, local: opts.local ?? new LocalMemory(opts.env ?? process.env) };
   const ctx = buildContext(opts);
   const provider = opts.handlerDeps?.provider ?? resolveWalletProvider(ctx);
   // THE PREWARM, and nothing else. It runs the scrypt derivation while the
@@ -370,6 +376,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(opts.handlerDeps?.payDeps !== undefined ? { payDeps: opts.handlerDeps.payDeps } : {}),
           ...(opts.handlerDeps?.cwd !== undefined ? { cwd: opts.handlerDeps.cwd } : {}),
           harness: opts.harness ?? 'claude',
+          ...(opts.local !== undefined ? { local: opts.local } : {}),
         },
       );
       return toolResult(result);
@@ -457,6 +464,23 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       let response: unknown;
       try {
         const raw = eventFromToolInput(args);
+        // THE LOCAL LEGS run on every shell command, search and edit, so they
+        // read no file to admit the call: they read no transcript.
+        if (args.kind === 'local' || args.kind === 'edit') {
+          const event = admitLocalEvent(raw);
+          response =
+            event === null
+              ? null
+              : await runHookKind(args.kind, event, {
+                  dataDir: ctx.dataDir,
+                  ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
+                  ...(opts.local !== undefined ? { local: opts.local } : {}),
+                  ...opts.hookDeps,
+                });
+          return {
+            content: [{ type: 'text', text: response === null ? '' : JSON.stringify(response) }],
+          };
+        }
         // A SESSION THE PLUGIN SERVES gets its legs from the plugin alone. The
         // plugin's server marks it; a server a settings install launched stays
         // silent there, so a machine carrying both never offers twice.
@@ -482,6 +506,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           ...(opts.observer !== undefined
             ? { walletNews: opts.observer.takeNews.bind(opts.observer) }
             : {}),
+          ...(opts.local !== undefined ? { local: opts.local } : {}),
           ...opts.hookDeps,
         });
       } catch {
@@ -548,6 +573,7 @@ function registerCodexHookTool(
               ...(opts.observer !== undefined
                 ? { walletNews: opts.observer.takeNews.bind(opts.observer) }
                 : {}),
+              ...(opts.local !== undefined ? { local: opts.local } : {}),
               ...opts.hookDeps,
             }),
           );
@@ -586,13 +612,24 @@ function toolResult(result: RequestToolResult): CallToolResult {
  * process also watches stdin itself; without it the process would linger.
  */
 export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<void> {
-  const server = await createRouterMcpServer(opts);
+  // THE LOCAL TOOL RULES: read at start, and fetched in the background when a
+  // day old, never on a hook leg.
+  const local = opts.local ?? new LocalMemory(opts.env ?? process.env);
+  const ctx = buildContext(opts);
+  const stopRules = scheduleLocalRules(local, {
+    dataDir: ctx.dataDir,
+    baseUrl: async () => (await resolveContextSettings(ctx)).baseUrl,
+    acceptsBazaar: async () => (await resolveContextSettings(ctx)).experimentalBazaar,
+    harness: opts.harness ?? 'claude',
+  });
+  const server = await createRouterMcpServer({ ...opts, local });
   await server.connect(new StdioServerTransport());
   await new Promise<void>((resolve) => {
     server.server.onclose = () => resolve();
     process.stdin.once('end', resolve);
     process.stdin.once('close', resolve);
   });
+  stopRules();
 }
 
 /**

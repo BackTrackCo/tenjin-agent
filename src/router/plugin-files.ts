@@ -64,6 +64,10 @@ export const DELEGATION_MATCHER = 'Agent|Task';
 export const NATIVE_MATCHER = 'WebSearch|WebFetch';
 /** The host's question to the user, watched before it is asked and after. */
 export const ASK_MATCHER = 'AskUserQuestion';
+/** The shell and the search tool, which the local leg matches after they run. */
+export const LOCAL_MATCHER = 'Bash|Grep';
+/** The edit tools, whose edited path the edit leg matches. */
+export const EDIT_MATCHER = 'Edit|Write|MultiEdit';
 
 /**
  * EVERY COMMAND RUNS NODE IN EXEC FORM, with no shell (see `hook-form.ts`).
@@ -189,14 +193,16 @@ function command(launch: ExecLaunch): unknown[] {
 }
 
 /**
- * The seven routing legs. The native tools are routed twice over one lookup:
+ * The ten legs. The native tools are routed twice over one lookup:
  * BEFORE the call, with a line pointing to a paid lookup when one fits; and
  * AFTER it, only when it came back short and nothing was said before, or to
  * add the free docs the pre-call arm fetched to a search's results. A failed
  * call fires PostToolUseFailure rather than PostToolUse, so the second takes
  * both. The host's question to the user is routed the same two ways: before it
  * is asked, when a service could stand in for what it asks for, and after,
- * with the user's answers read as their own words.
+ * with the user's answers read as their own words. The last three are the
+ * local legs, after a shell command or a search (and its failure) and after an
+ * edit: they ask the router nothing and match the call on this machine.
  */
 export function routerHookPlan(): { event: string; matcher?: string; hooks: unknown[] }[] {
   const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
@@ -208,6 +214,17 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
     { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
+    {
+      event: 'PostToolUse',
+      matcher: LOCAL_MATCHER,
+      hooks: leg('local', AFTER_CALL_TIMEOUT_SECONDS),
+    },
+    {
+      event: 'PostToolUseFailure',
+      matcher: LOCAL_MATCHER,
+      hooks: leg('local', AFTER_CALL_TIMEOUT_SECONDS),
+    },
+    { event: 'PostToolUse', matcher: EDIT_MATCHER, hooks: leg('edit', AFTER_CALL_TIMEOUT_SECONDS) },
   ];
 }
 
@@ -215,7 +232,7 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
 export const MOD_MODULE = './register.tsx';
 
 /**
- * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
+ * `hooks/hooks.json`: the `alive` leg, the ten legs and the two
  * permission answers, and the mod's module when `o.mod` carries it. `o.node`
  * runs all three commands, the answers included, so the runtime render names
  * no `node` from PATH at all.
@@ -513,8 +530,9 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  * checked-in `hosts/codex/` by the same test. Its legs are `mcp_tool` hooks
  * into the plugin's own `router` server, as Claude Code's are, so each leg
  * runs in the process that holds the wallet and pays the routing fee: the
- * prompt, and one web call before it runs and after (Codex has no
- * PostToolUseFailure). Codex runs `mcp_tool` hooks from 0.149.0: 0.148 parses
+ * prompt, one web call before it runs and after (Codex has no
+ * PostToolUseFailure), and one shell command after it runs, which asks the
+ * router nothing. Codex runs `mcp_tool` hooks from 0.149.0: 0.148 parses
  * them but skips them, and an older Codex rejects the file, so install and
  * update leave an older Codex's copy as it is and doctor names the build.
  * The server's `env_vars` passes `CODEX_HOME` through Codex's cleared MCP
@@ -528,6 +546,8 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  * launcher on each switch.
  */
 export const CODEX_WEB_MATCHER = 'webrun';
+/** A shell command, under the name Codex reports it by and unified exec's. */
+export const CODEX_SHELL_MATCHER = 'Bash|exec_command';
 export const CODEX_LEGS = CODEX_HOOK_KINDS;
 /**
  * The first Codex that runs `mcp_tool` hooks: rust-v0.149.0 adds
@@ -610,7 +630,7 @@ export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
  */
 export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
 
-/** Every hook the Codex plugin carries: the three legs, the deny and the allow answer. */
+/** Every hook the Codex plugin carries: the four legs, the deny and the allow answer. */
 export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 2;
 
 /** `hooks/hooks.json`: the same for the package and the runtime render. */
@@ -630,6 +650,7 @@ export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
           matcher: CODEX_WEB_MATCHER,
           hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS),
         },
+        { matcher: CODEX_SHELL_MATCHER, hooks: codexLeg('local', AFTER_CALL_TIMEOUT_SECONDS) },
       ],
       PermissionRequest: [
         {

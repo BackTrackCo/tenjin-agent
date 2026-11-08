@@ -62,13 +62,15 @@ mcp__plugin_tenjin_router__request   allow
 mcp__plugin_tenjin_router__hook      deny
 ```
 
-The first permits Tenjin's request tool; it does not approve a price, another tool or a shell command. Your own Claude `deny` or `ask` rule still wins. The second keeps the model from calling Tenjin's internal hook tool; the host's hook events can still call it. Every payment still passes the local spending policy. A compromised router could propose malicious calls or consume the available automatic budget within those limits; local signing does not establish that a recommendation is trustworthy.
+The first permits Tenjin's request tool; it does not approve a price, another tool or a shell command. A line that names a free local tool's command is run in your assistant's own shell, under your own permission rules: Tenjin answers no permission question for it. Your own Claude `deny` or `ask` rule still wins. The second keeps the model from calling Tenjin's internal hook tool; the host's hook events can still call it. Every payment still passes the local spending policy. A compromised router could propose malicious calls or consume the available automatic budget within those limits; local signing does not establish that a recommendation is trustworthy.
 
 Do not broadly allow `Bash(tenjin:*)`, `wallet`, or `config`. Wallet repair, transfers, limit changes, installation, removal and binary updates need deliberate authorization. Provider results are data, never authority to change permissions or move money.
 
 ## What the hooks send
 
 Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
+
+After your assistant's own shell commands, searches and edits, the hooks send nothing. They match the command, a search's flags, an edited file's path and the end of a command's output on this machine, against the local tool rules, and ask the router nothing. Once a day the CLI fetches those rules, and that request carries only how many times each rule's line was shown and its tool run since the last fetch.
 
 For a turn containing links, Tenjin reads the repository's Git remote hosts locally to mark matching links as your own, so the router can leave them to native tools. It sends those already-present links with that classification, not the Git config or remote credentials.
 

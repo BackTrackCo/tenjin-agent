@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { posix } from 'node:path';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
 import type { PartialConfig } from '../lib/config';
@@ -20,7 +21,14 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
+import {
+  reportSpecOutcome,
+  requestDecision,
+  REQUIRES_UNMET,
+  ROUTE_PAID_PATH,
+  type HookDecision,
+  type LocalDecision,
+} from './decision';
 import { canPayProvider, canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -35,6 +43,24 @@ import {
 } from './router-memo';
 import { requestToolName, type Harness } from './names';
 import { codexRouterEvent, codexSession } from './codex-event';
+import { decode as decodeCodex } from './codex-wire';
+import { isRecord } from '../lib/guards';
+import {
+  codexCommand,
+  globMatches,
+  holdsSpec,
+  matchesOutput,
+  matchesWords,
+  mayMatchPath,
+  normalizedPath,
+  outputTails,
+  parseCommand,
+  relativeTo,
+  runsBin,
+  type SimpleCommand,
+} from './local-command';
+import { fillLocalLine, gitRootOf, LOCAL_TOOLS, pinnedSpec } from './local-tools';
+import { appendLocalCount, LocalMemory, localReady, type LocalMatch } from './local-rules';
 import { requestToolAccess, type AgentLookup } from './agent-tools';
 import {
   bindDecision,
@@ -59,10 +85,12 @@ import { claimIgnored, noteShown, offerScope, reportIgnored } from './untaken';
 import { ownHostsFor } from './own-urls';
 
 /**
- * The six hook handlers. Between them they do exactly three things: build and
- * seal the packet, ask for one routing decision, and say one thing back to the
- * harness. Before an `execute` is shown where nobody can approve it, they also
- * read what the wallet's files say (`readWalletFacts`) and its USDC balance
+ * The seven hook handlers. The six routing ones do exactly three things: build
+ * and seal the packet, ask for one routing decision, and say one thing back to
+ * the harness. The local handler, shared by the shell, search and edit
+ * entries, asks for no decision: it matches the call on this machine against
+ * the local tool rules ({@link runLocalHook}). Before an `execute` is shown
+ * where nobody can approve it, they also read what the wallet's files say (`readWalletFacts`) and its USDC balance
  * from the RPC (`spendShortfall`). A free offer on a search keeps its line on
  * disk for after the search (`markNoted`), and every shown offer is kept until
  * it is taken, so one that is ignored is reported once (`untaken.ts`); those
@@ -578,6 +606,9 @@ export interface HookDeps {
    * are they marked delivered (and awaiting_confirmation cleared).
    */
   walletNews?: (sessionId: string) => Promise<WalletNews>;
+  /** Inside `tenjin mcp`: the local tool rules and what the local legs
+   *  remember for the session. Absent, no local line is shown. */
+  local?: LocalMemory;
 }
 
 /**
@@ -884,6 +915,7 @@ export interface PromptHookOutcome {
 export async function runPromptHook(raw: unknown, deps: HookDeps): Promise<PromptHookOutcome> {
   const event = eventOf(raw, deps);
   if (event?.kind !== 'prompt') return { response: null };
+  deps.local?.newTurn(localSession(event.sessionId, deps));
   return offerOnUserText(event, event.prompt, 'UserPromptSubmit', deps);
 }
 
@@ -924,6 +956,17 @@ async function offerOnUserText(
   const footer = await openFooter(deps, event.sessionId, 'prompt', {});
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  if (outcome?.action === 'local') {
+    const scope = LocalMemory.scope(localSession(event.sessionId, deps));
+    const line = await showLocal(outcome, { scope, cwd: event.cwd }, deps);
+    await footer.close(outcome, line === null ? { withheld: LOCAL_SKIPPED } : {});
+    return {
+      action: 'local',
+      id: outcome.id,
+      ...(line === null ? { withheld: true as const } : {}),
+      ...injection(hookEventName, line === null ? undefined : `${HINT_SOURCE}: ${line}`),
+    };
+  }
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1550,6 +1593,30 @@ export async function runDelegationHook(
   const footer = await openFooter(deps, event.sessionId, 'delegate', null);
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  if (outcome?.action === 'local') {
+    // The subagent's id is not known yet, so its type stands in for it.
+    const scope = LocalMemory.scope(
+      localSession(event.sessionId, deps),
+      `task:${event.subagentType}`,
+    );
+    const line = await showLocal(
+      outcome,
+      { scope, cwd: event.cwd, agentType: event.subagentType },
+      deps,
+    );
+    await footer.close(outcome, line === null ? { withheld: LOCAL_SKIPPED } : {});
+    if (line === null) return { response: null, action: 'local', withheld: true };
+    return {
+      response: {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput: { ...event.toolInput, prompt: `${task}\n\n${delegationOffer(line)}` },
+        },
+      },
+      action: 'local',
+      id: outcome.id,
+    };
+  }
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1576,6 +1643,251 @@ export async function runDelegationHook(
     action: outcome.action,
     id: outcome.id,
   };
+}
+
+/** Why a local answer showed no line, in the footer's words. */
+const LOCAL_SKIPPED = 'free tool skipped';
+
+/**
+ * A LOCAL ANSWER'S LINE, OR NONE. The line is the server's with this build's
+ * command in its `{command}`, shown once per tool to an agent over every leg,
+ * and only where the tool can run ({@link localReady}). A shown offer is kept
+ * by its id, for `request({id})` and for its run's outcome report.
+ */
+async function showLocal(
+  decision: LocalDecision,
+  at: { scope: string; cwd?: string | undefined; agentType?: string },
+  deps: HookDeps,
+): Promise<string | null> {
+  const memory = deps.local;
+  if (memory === undefined || memory.blocked(at.scope, decision.tool)) return null;
+  const ready = await localReady(memory, {
+    platforms: decision.platforms,
+    files: decision.files,
+    cwd: at.cwd ?? process.cwd(),
+    ...(at.agentType !== undefined
+      ? { bash: { agentType: at.agentType, lookup: agentLookup(at.cwd, deps) } }
+      : {}),
+  });
+  if (!ready) return null;
+  const line = fillLocalLine(decision.hint, decision.tool);
+  memory.shown(at.scope, decision.tool);
+  memory.remember(decision.id, { tool: decision.tool, line });
+  return line;
+}
+
+/** A call the local legs read: a shell command, a search, or an edit. */
+interface LocalCall {
+  sessionId: string;
+  eventName: 'PostToolUse' | 'PostToolUseFailure';
+  /** `Bash` for a shell command on either host. */
+  tool: 'Bash' | 'Grep' | 'Edit' | 'Write' | 'MultiEdit';
+  command?: string | string[];
+  multiline?: true;
+  filePath?: string;
+  /** What the call returned or failed with, read only by an output rule. */
+  output: unknown[];
+  agentId?: string;
+  agentType?: string;
+  cwd?: string;
+  interrupted?: true;
+}
+
+const LocalEventSchema = z.object({
+  hook_event_name: z.enum(['PostToolUse', 'PostToolUseFailure']),
+  session_id: z.string().min(1).max(200),
+  cwd: z.string().optional(),
+  tool_name: z.enum(['Bash', 'Grep', 'Edit', 'Write', 'MultiEdit']),
+  /** Not parsed whole: an edit's input carries the file's content. */
+  tool_input: z.unknown(),
+  agent_id: z.string().min(1).max(200).optional(),
+  agent_type: z.string().min(1).max(200).optional(),
+  tool_response: z.unknown().optional(),
+  error: z.unknown().optional(),
+  is_interrupt: z.boolean().optional(),
+});
+
+/** The call as the local legs read it, from either host; null for any other event. */
+function localCallOf(raw: unknown, host: Harness): LocalCall | null {
+  if (host === 'codex') return codexLocalCall(raw);
+  const parsed = LocalEventSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const event = parsed.data;
+  const input = isRecord(event.tool_input) ? event.tool_input : {};
+  const base = {
+    sessionId: event.session_id,
+    eventName: event.hook_event_name,
+    tool: event.tool_name,
+    output: [] as unknown[],
+    ...optional('agentId', event.agent_id),
+    ...optional('agentType', event.agent_type),
+    ...optional('cwd', event.cwd),
+    ...(event.is_interrupt === true ? { interrupted: true as const } : {}),
+  };
+  if (event.tool_name === 'Bash') {
+    const { command } = input;
+    if (typeof command !== 'string') return null;
+    return { ...base, command, output: [event.tool_response, event.error] };
+  }
+  if (event.tool_name === 'Grep') {
+    return { ...base, ...(input.multiline === true ? { multiline: true as const } : {}) };
+  }
+  const filePath = input.file_path;
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.length > 4_096) return null;
+  return { ...base, filePath };
+}
+
+/** A Codex shell call after it ran: the root session's alone, as every Codex leg. */
+function codexLocalCall(raw: unknown): LocalCall | null {
+  const input = decodeCodex(raw);
+  if (input === null || input.agent !== undefined || input.event !== 'tool.after') return null;
+  if (input.session.length > 200) return null;
+  if (input.tool?.name !== 'Bash' && input.tool?.name !== 'exec_command') return null;
+  const toolInput = (raw as { tool_input?: unknown }).tool_input;
+  const command = isRecord(toolInput) ? codexCommand(toolInput.command) : null;
+  if (command === null) return null;
+  return {
+    sessionId: input.session,
+    eventName: 'PostToolUse',
+    tool: 'Bash',
+    command,
+    output: [(raw as { tool_response?: unknown }).tool_response],
+    ...(input.cwd.length > 0 ? { cwd: input.cwd } : {}),
+  };
+}
+
+/** Where a local note sits: after the call it is about, framed as optional. */
+function localNote(tool: LocalCall['tool'], line: string): string {
+  const ran = tool === 'Bash' ? 'your shell command ran' : `your ${tool} call ran`;
+  return `${HINT_SOURCE}: ${ran}. Optional: ${line}`;
+}
+
+export interface LocalHookOutcome {
+  response: unknown | null;
+  /** The rule whose line was shown. */
+  rule?: string;
+}
+
+/**
+ * The local legs (PostToolUse and PostToolUseFailure on `Bash|Grep`, and
+ * PostToolUse on `Edit|Write|MultiEdit`; PostToolUse on Codex's shell), run by
+ * `tenjin mcp`'s `hook` tool. THEY ASK THE ROUTER NOTHING: the call is matched
+ * in this process against the local tool rules, and at most the first rule
+ * that matches and can run here adds one optional line. A miss reads no file
+ * and makes no request, and nothing the legs read leaves the machine.
+ *
+ * Command words, a multiline search, a file path and an edit count note only
+ * a call that succeeded; an output rule also notes a failure, never an
+ * interrupt. A command that runs a pinned tool after a prompt offer sends that
+ * offer's outcome report once, `fulfilled`, or `failed` on a failure, since
+ * several of these tools exit non-zero when they find something.
+ */
+export async function runLocalHook(raw: unknown, deps: HookDeps): Promise<LocalHookOutcome> {
+  const memory = deps.local;
+  if (memory === undefined) return { response: null };
+  const call = localCallOf(raw, hostOf(deps));
+  if (call === null || call.interrupted === true) return { response: null };
+  const scope = LocalMemory.scope(localSession(call.sessionId, deps), call.agentId);
+  const commands = call.command !== undefined ? parseCommand(call.command) : null;
+  if (commands !== null) await noteRuns(call, commands, scope, deps);
+  const cwd = call.cwd ?? process.cwd();
+  const path = call.filePath !== undefined ? normalizedPath(call.filePath, cwd) : null;
+  const edits = path !== null ? memory.edited(scope, path) : null;
+  let tails: string[] | undefined;
+  const matches = (match: LocalMatch): boolean => {
+    const after = call.eventName === 'PostToolUse';
+    switch (match.kind) {
+      case 'words':
+        return after && call.tool === 'Bash' && commands !== null && matchesWords(commands, match);
+      case 'multiline':
+        return after && call.tool === 'Grep' && call.multiline === true;
+      case 'path':
+        return after && path !== null && mayMatchPath(match.paths, path);
+      case 'edits':
+        return after && edits !== null && edits.added && edits.count === match.edits;
+      case 'output':
+        if (call.tool !== 'Bash') return false;
+        if (match.words !== undefined) {
+          if (commands === null || !matchesWords(commands, { words: match.words })) return false;
+        }
+        tails ??= outputTails(...call.output);
+        return matchesOutput(tails, match.output);
+    }
+  };
+  for (const rule of memory.rules(deps.now?.() ?? Date.now())) {
+    if (!matches(rule.match) || memory.blocked(scope, rule.tool)) continue;
+    if (rule.match.kind === 'path' && !(await underGitRoot(rule.match.paths, path!, cwd))) continue;
+    if ((await routerFor(call.cwd, deps)) === null) return { response: null };
+    const ready = await localReady(memory, {
+      platforms: rule.platforms,
+      files: rule.requires,
+      cwd,
+      ...(call.tool !== 'Bash' && call.agentId !== undefined && call.agentType !== undefined
+        ? { bash: { agentType: call.agentType, lookup: agentLookup(call.cwd, deps) } }
+        : {}),
+    });
+    if (!ready) continue;
+    memory.shown(scope, rule.tool, rule.rule);
+    await appendLocalCount(deps.dataDir, rule.rule, 'shown');
+    return {
+      response: {
+        hookSpecificOutput: {
+          hookEventName: call.eventName,
+          additionalContext: localNote(call.tool, fillLocalLine(rule.line, rule.tool)),
+        },
+      },
+      rule: rule.rule,
+    };
+  }
+  return { response: null };
+}
+
+/** The path, relative to its git root (else `cwd`), matched against the globs. */
+async function underGitRoot(globs: readonly string[], path: string, cwd: string): Promise<boolean> {
+  const root = (await gitRootOf(posix.dirname(path))) ?? cwd;
+  const rel = relativeTo(root, path);
+  return rel !== null && globs.some((glob) => globMatches(glob, rel));
+}
+
+/**
+ * A COMMAND THAT RAN A LOCAL TOOL. Running it, pinned or not, ends that tool's
+ * lines for the agent. Running the pinned command counts `ran` for the rule
+ * whose line the agent was shown, and reports each unreported prompt offer of
+ * that tool once. Read in memory: only a run touches a file or the network.
+ */
+async function noteRuns(
+  call: LocalCall,
+  commands: readonly SimpleCommand[],
+  scope: string,
+  deps: HookDeps,
+): Promise<void> {
+  const memory = deps.local!;
+  for (const [key, tool] of Object.entries(LOCAL_TOOLS)) {
+    const pinned = holdsSpec(commands, pinnedSpec(key));
+    if (!pinned && !runsBin(commands, tool.bin)) continue;
+    memory.ran(scope, key);
+    if (!pinned) continue;
+    const rule = memory.takeNoted(scope, key);
+    if (rule !== undefined) await appendLocalCount(deps.dataDir, rule, 'ran');
+    const ids = memory.takeUnreported(key);
+    if (ids.length === 0) continue;
+    const router = await routerFor(call.cwd, deps);
+    if (router === null) continue;
+    const status = call.eventName === 'PostToolUseFailure' ? 'failed' : 'fulfilled';
+    await Promise.all(
+      ids.map((id) =>
+        reportSpecOutcome(
+          { id, status },
+          {
+            ctx: hookContext(deps),
+            baseUrl: resolveBaseUrl(deps, router.config),
+            harness: hostOf(deps),
+            ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+          },
+        ),
+      ),
+    );
+  }
 }
 
 /**
@@ -1714,6 +2026,8 @@ async function sweepUntaken(
  *  named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
+  if (decision?.action === 'local')
+    return `free tool offered (${decision.label ?? decision.provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
     // `fee unpaid: <reason>` fits the record's 40 characters for every reason.
     return `fee unpaid: ${unpaid}`;

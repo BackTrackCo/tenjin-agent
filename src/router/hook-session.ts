@@ -69,6 +69,20 @@ export async function admitHookEvent(
   return { ...event, transcript_path: real };
 }
 
+/**
+ * A LOCAL LEG READS NO TRANSCRIPT, so only its ids are checked, with no file
+ * read, and a path it carried anyway is dropped.
+ */
+export function admitLocalEvent(event: Record<string, unknown>): Record<string, unknown> | null {
+  const sessionId = event['session_id'];
+  const agentId = event['agent_id'];
+  if (typeof sessionId !== 'string' || !SEGMENT_RE.test(sessionId)) return null;
+  if (typeof agentId === 'string' && agentId.length > 0 && !SEGMENT_RE.test(agentId)) return null;
+  const admitted = { ...event };
+  delete admitted['transcript_path'];
+  return admitted;
+}
+
 export interface CodexAdmitOptions extends AdmitOptions {
   /** The `threadId` Codex puts in the call's `_meta`: the thread whose hook this is. */
   threadId?: unknown;

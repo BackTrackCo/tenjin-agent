@@ -139,6 +139,7 @@ describe('one decision, on the paid route', () => {
       'headers',
       'note',
       'tolerant',
+      'local',
     ]);
   });
 
@@ -164,6 +165,7 @@ describe('one decision, on the paid route', () => {
         'headers',
         'note',
         'tolerant',
+        'local',
         'bazaar',
       ]);
     }

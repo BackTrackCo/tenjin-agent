@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-08.1",
+  "honored": ["spec", "local"],
+  "decision": {
+    "action": "local",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d24",
+    "capabilityId": "local-knip",
+    "category": "dead code search",
+    "provider": "Knip",
+    "label": "knip",
+    "capabilityDescription": "finds unused files, exports and dependencies through the whole module graph",
+    "providerPriceAtomic": "0",
+    "tool": "knip",
+    "files": ["package.json"],
+    "platforms": ["darwin-arm64"],
+    "hint": "This request is a dead-code search in a JS or TS project. Use knip, free, before grepping for each export: finds unused files, exports and dependencies through the whole module graph. Run `{command}` in your shell from the project root, and read its JSON."
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 230
+  }
+}

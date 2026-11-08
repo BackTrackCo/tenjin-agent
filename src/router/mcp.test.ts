@@ -1134,7 +1134,7 @@ describe('what the tool tells the model to send', () => {
       expect(schema.required ?? []).toEqual([]);
       expect(schema.properties.id?.description).toContain('names the service');
       expect(schema.properties.id?.description).toContain("returns that service's spec");
-      expect(request.description).toContain('fill them and call `{id, input}` once');
+      expect(request.description).toContain('fill its fields and call `{id, input}` once');
       expect(request.description).toContain('returns the full spec');
       expect(request.description).toContain("`{id}` alone returns the service's spec");
       // A projected result says where the rest of the response went.

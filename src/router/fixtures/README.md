@@ -38,6 +38,7 @@ below). Selected `{tool, query}` bypasses that fee gate and makes no model decis
 | free tool | `{schemaVersion, tool, query, accepts}`                             | `execute` for the selected free service, or `needs_input`; no routing decision or payment                                   |
 | outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`      | an empty 204                                                                                                                |
 | forget    | `{schemaVersion, forget: "samples"}`                                | an empty 204                                                                                                                |
+| rules     | `{schemaVersion, localRules: {}, accepts, counts?}`                 | `{schemaVersion, routerVersion, localRules: {version, rules}}`: the local tool rules, free, with no gate call               |
 
 `improve: true` rides the hook and tool forms only while the person has turned
 on "Help improve routing" (`router.improve`, off by default, enabled explicitly
@@ -132,6 +133,10 @@ gate is offered only the tasks whose capabilities a client runs.
 - `headers` (client side only, until tenjin#988 lands): a spec carries
   `request.headers`, fixed headers the catalog sets on a service's call (a
   provider's beta opt-in), and the pins those headers unlock.
+- `local`: free tools that run on the client's machine. The hook and tool
+  answers can be `action: "local"` (Local tools, below), and the `rules` form
+  answers the list the client's after-call legs match. A client without it
+  gets neither, and every other answer is unchanged.
 - `tolerant` (client side only, until the server reads it): the client reads
   answers as below (Reading an answer): it drops a field it does not know and
   honors `requires`. Every field added after it, `requires` included, goes
@@ -165,7 +170,7 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
   `requires_unmet` and the missing tokens in `missing`. A spec it cannot run
   that the line does not name is only dropped. This
   client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`,
-  `tolerant` and `bazaar`. Send `requires` for a field whose absence changes what the
+  `tolerant`, `local` and `bazaar`. Send `requires` for a field whose absence changes what the
   call is (a header it must send, a new kind of payment or streaming); a
   field a client may ignore needs none.
 
@@ -325,6 +330,37 @@ query no capability serves, can still come back `discovered`, both with
 `specs`; a pick with no spec (the free docs lookup) is bound and answered
 `execute` as its id would be.
 
+## Local tools
+
+A `local` client can be answered `{action: "local", id, capabilityId,
+category, provider, label?, capabilityDescription, providerPriceAtomic: "0",
+tool, files?, platforms, hint}` on the hook (never beside a `pendingCall`) and
+on a query or a tool id. `tool` is a key of the client's own pinned table
+(`local-tools.ts`): the client, not the server, owns every package, version,
+bin and flag. `hint` is one plain line of at most 2,000 characters with
+exactly one `{command}`, which the client replaces with its own command for
+`tool`; an unknown `tool`, no slot or two, or a control character is a line
+the client does not show. `files` are file names the project must hold (from
+the working folder up to the git root), such as `package.json`; it is not
+`requires`, which stays the must-understand token list. `platforms` lists the
+`<process.platform>-<process.arch>` pairs the tool is qualified on; on any
+other pair the client shows nothing.
+
+The `rules` form takes `counts`, at most 64 `{rule, shown, ran}` of whole
+numbers 0 or more (a bad one is a 400), and answers `localRules`: a `version`
+and at most 64 rules `{rule, service, tool, identity, requires?, platforms,
+match, line}`. `identity` is the route identity the settings rules read
+(`source: "tenjin"`, the tool's project as provider and seller, category
+`developer tools`). `match` is one of `{kind: "words", words, bare?, flags?}`
+(a parsed shell command's leading words), `{kind: "multiline"}` (a Grep with
+`multiline: true`), `{kind: "path", paths}` (`*` and `**` globs against the
+edited file relative to the git root), `{kind: "edits", edits}` (the Nth
+distinct file one agent edits in a turn) and `{kind: "output", output,
+words?}` (literal strings in the last 16 KiB of a command's output). Every
+string is a literal: none is run as a regular expression. `line` follows the
+hint's rules. The client prefixes it with where it came from and the call
+that ran. A rule the client cannot read is dropped alone.
+
 ## Job specs
 
 A `jobs` client's spec carries `job` for a service whose seller can answer a
@@ -424,6 +460,11 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`     |
 | `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                    |
 | `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                              |
+| `wire-hook-request-local.json`             | the hook from a client that sends `local`                                                 |
+| `wire-hook-local.json`                     | hook answer: a free local tool, its `files`, `platforms` and the `{command}` line         |
+| `wire-lookup-local.json`                   | tool answer: the same `local` arm under a fresh id                                        |
+| `wire-local-rules-request.json`            | the `rules` form, with the counts since the last fetch                                    |
+| `wire-local-rules.json`                    | its answer: the rule list in every `match` form                                           |
 
 Two rules the fixtures exist to hold:
 
@@ -469,6 +510,11 @@ Take these from here; do not re-derive them.
 | `job`                           | integers `everyS` 1 to 30, `maxWaitS` 1 to 600, `keepH` 1 to 48; a field name 1 to 64 of `[A-Za-z0-9_]`, no leading digit; a header 1 to 64 of `[A-Za-z0-9-]`; `httpStatus` and `values` 1 to 8 entries     |
 | `takes.max`                     | 2 to 5                                                                                                                                                                                                      |
 | `requires`                      | up to 16 tokens, each matching `^[a-z][a-z0-9_-]{0,31}$`                                                                                                                                                    |
+| local `files`, rule `requires`  | up to 8 file names, each 1 to 128 of `[A-Za-z0-9._-]`                                                                                                                                                       |
+| local `platforms`               | 1 to 16 pairs, each `^[a-z0-9]{1,16}-[a-z0-9]{1,16}$`                                                                                                                                                       |
+| local `hint`, rule `line`       | 1 to 2000 characters, one plain line, exactly one `{command}`                                                                                                                                               |
+| `localRules.rules`              | up to 64; each `words`, `flags`, `paths` and `output` up to 8 items of 1 to 128 characters; `edits` 2 to 64                                                                                                 |
+| `counts`                        | up to 64 `{rule, shown, ran}`, whole numbers 0 or more                                                                                                                                                      |
 | `timeoutS`                      | an integer, 1 to 120                                                                                                                                                                                        |
 | `maxBytes`                      | an integer, 1 to 209715200                                                                                                                                                                                  |
 | `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                  |
