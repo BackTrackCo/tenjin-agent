@@ -267,12 +267,6 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   let status: LinkStatus | undefined;
   let statusOn = o.token !== undefined && o.view !== 'crypto';
   let statusKnown = false;
-  /**
-   * Did THIS round's status read answer? An earlier answer still draws the
-   * line, but only a fresh one is evidence that nothing was charged: a read
-   * that failed or was skipped for a 429 may have missed a payment starting.
-   */
-  let fresh = false;
   let backoff = 0;
   let saidOpen = false;
   let saidPaid = false;
@@ -312,7 +306,10 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   };
 
   for (let round = 0; ; round++) {
-    fresh = false;
+    // Did THIS round's status read answer? An earlier answer still draws the
+    // line, but only a fresh one is evidence that nothing was charged: a read
+    // that failed or was skipped for a 429 may have missed a payment starting.
+    let fresh = false;
     if (statusOn && backoff === 0) {
       const read = await readLinkStatus(o.token!, {
         ...(o.fetchImpl !== undefined ? { fetchImpl: o.fetchImpl } : {}),
