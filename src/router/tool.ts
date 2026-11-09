@@ -703,7 +703,7 @@ async function requestTool(
       'native',
       fresh.why === DEADLINE_AFTER_PAYMENT_SENT
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
-        : `${lasting ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, or the wallet was still unlocking); the next call usually routes.'} Nothing was routed and no provider was paid.`,
+        : `${lasting ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, the wallet was still unlocking, or its balance could not be read); the next call usually routes.'} Nothing was routed and no provider was paid.`,
       {
         nextStep:
           lasting !== null
