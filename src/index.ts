@@ -97,7 +97,12 @@ const { main } = await import('./cli');
 const { enableCliIdentity } = await import('./lib/install-identity');
 const { dataDir } = await import('./lib/paths');
 enableCliIdentity(dataDir(process.env));
-process.exit(await main(process.argv.slice(2)));
+const exitCode = await main(process.argv.slice(2));
+// What was printed reaches the reader first: on a pipe, an exit before stdout
+// drains cuts a large body off (lib/flush-stdio).
+const { flushStdio } = await import('./lib/flush-stdio');
+await flushStdio();
+process.exit(exitCode);
 
 // Marks this file a module so top-level await is legal; emits nothing.
 export {};
