@@ -1532,6 +1532,7 @@ async function payAndDeliver(
         header: cutHeader,
         providerAtomic: leftAtomic,
         ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+        ...(detail.settlement === 'settled' ? { settled: true } : {}),
       });
       return { ...job, left: { amountAtomic: leftAtomic, signed: true } };
     }
@@ -1849,6 +1850,9 @@ interface SubmitSeen {
   providerAtomic: bigint;
   /** The submit's settlement, when its payment-response header named it. */
   txHash?: string;
+  /** The chain already showed the submit's authorization used (`runPay`
+   *  read it when the paid leg was cut off). */
+  settled?: boolean;
   authorization?: SignedAuthorization;
 }
 
@@ -1885,6 +1889,7 @@ async function startJob(
       paidRecord(call, built.url, call.sent, providerAtomic, {
         ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
         ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
+        ...(submit.settled === true ? { settled: true } : {}),
         savedFiles: [],
         now,
       }),
@@ -1978,7 +1983,7 @@ async function startJob(
   const answer = await pollUntil(
     take,
     { deadline, firstWaitMs: job.spec.everyS * 1000 },
-    pollDeps(deps),
+    pollDeps(deps, take),
   );
   return finishTake(take, answer, deps, footer, { kept, parameters: call.parameters });
 }
@@ -2004,9 +2009,11 @@ function failedNextStep(txHash: string | undefined): string {
 }
 
 /** The poll's seams, who is told of each poll, and the wallet a seller's
- *  sign-in challenge is answered with: the one the provider leg pays with. */
-function pollDeps(deps: RequestToolDeps): PollDeps {
+ *  sign-in challenge is answered with: the one the provider leg pays with,
+ *  and only when it is the one that signed this take's submit. */
+function pollDeps(deps: RequestToolDeps, take?: JobTake): PollDeps {
   const provider = deps.provider ?? deps.payDeps?.provider;
+  const from = take?.authorization?.from;
   return {
     ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
@@ -2017,6 +2024,9 @@ function pollDeps(deps: RequestToolDeps): PollDeps {
       signInForPoll(challenge, url, deps.ctx, {
         ...(provider !== undefined ? { provider } : {}),
         ...(deps.now !== undefined ? { now: deps.now } : {}),
+        ...(take !== undefined && from !== undefined
+          ? { paidBy: { from, url: take.call.url } }
+          : {}),
       }),
   };
 }
@@ -2333,7 +2343,7 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
           : waited,
         Date.parse(take.expiresAt),
       );
-      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps));
+      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps, take));
       const done = await finishTake(take, answer, deps, SILENT_FOOTER, { kept: true });
       return { take, result: done.result, outcome: done.outcome };
     }),

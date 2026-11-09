@@ -146,10 +146,14 @@ export async function answerSignInChallenge(
     paymentRequired: challenge,
     requestUrl: url,
   });
+  // The stock hook answers nothing, rather than throwing, both for a challenge
+  // with no chain this wallet signs for and for one it could not sign (a
+  // field a sign-in message cannot carry, a signer that failed).
   if (answered === undefined || Object.keys(answered.headers).length === 0) {
     return {
       refused: 'unsigned',
-      reason: 'it names no chain this wallet signs for',
+      reason:
+        'its challenge could not be signed: it names no eip191 chain, or its fields are not a valid sign-in message',
     };
   }
   return { headers: answered.headers };

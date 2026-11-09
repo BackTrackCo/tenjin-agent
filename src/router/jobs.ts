@@ -220,13 +220,16 @@ export type PollAnswer =
 /**
  * Answers a seller's sign-in challenge on a poll: handed the 402's
  * PAYMENT-REQUIRED header and the poll URL, it returns the headers that
- * answer it, why it was not signed, or undefined when the 402 is not a
- * sign-in challenge. It never pays.
+ * answer it, why it was not signed (`refused`, which ends the take), why the
+ * wallet could not sign this time (`error`, a poll error the take survives),
+ * or undefined when the 402 is not a sign-in challenge. It never pays.
  */
 export type PollSignIn = (
   paymentRequiredHeader: string,
   url: string,
-) => Promise<{ headers: Record<string, string> } | { refused: string } | undefined>;
+) => Promise<
+  { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
+>;
 
 export interface PollDeps {
   transport?: PollTransport;
@@ -251,9 +254,10 @@ export interface PolledTake {
  * `firstWaitMs` (the job's interval after a submit, none on a resume), each
  * later one half as long again as the last, up to {@link MAX_POLL_INTERVAL_MS}.
  * A 402 with a sign-in challenge and no way to pay is answered with a
- * sign-in, once per poll; any other 402, or one after a sign-in, is a seller
- * asking to be paid again for a result already paid for: no payment is
- * signed, and the take fails. A 404 or 410 is a job the seller no
+ * sign-in, once per poll, and a wallet that could not sign counts as a poll
+ * error; any other 402, or one after a sign-in, is a seller asking to be paid
+ * again for a result already paid for: no payment is signed, and the take
+ * fails. A 404 or 410 is a job the seller no
  * longer has. Any other 4xx ends the job failed, in the seller's words: AiSpace
  * answers a refused prompt's retrieve with a 422, and every later one the
  * same. {@link MAX_POLL_ERRORS} 5xx, 429 or transport failures in a row stop
@@ -433,15 +437,25 @@ type Attempt =
  * ONE POLL, SIGNED IN WHEN THE SELLER ASKS: a 402 that carries a sign-in
  * challenge and no way to pay is answered once, at once, with the challenge
  * signed. Its own answer stands, a second 402 included; any other 402 is
- * handed back as it came.
+ * handed back as it came. A wallet that could not sign this time (locked, a
+ * keychain that did not answer) is a poll error, never an ending: the seller
+ * still holds a result already paid for.
  */
 async function pollSignedIn(take: PolledTake, deps: PollDeps): Promise<Attempt> {
   const first = await pollOnce(take, deps);
   if (first.kind !== 'answer' || first.status !== 402 || deps.signIn === undefined) return first;
   const challenge = first.header('PAYMENT-REQUIRED');
   if (challenge === undefined) return first;
-  const answer = await deps.signIn(challenge, take.poll.url).catch(() => undefined);
+  const answer = await deps
+    .signIn(challenge, take.poll.url)
+    .catch((err: unknown) => ({ error: `the sign-in failed (${errorText(err)})` }));
   if (answer === undefined) return first;
+  if ('error' in answer) {
+    return {
+      kind: 'error',
+      reason: `the seller asks the wallet that paid it to sign in, and ${sellerLine(answer.error)}`,
+    };
+  }
   if ('refused' in answer) {
     return { ...first, signIn: 'refused', signInRefusal: sellerLine(answer.refused) };
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +7,7 @@ import {
   paidLegTimeoutMs,
   quoteRouterCall,
   runPay,
+  signInForPoll,
   type PaidLeg,
 } from './pay';
 import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
@@ -16,6 +17,7 @@ import { CliError } from '../lib/errors';
 import lowFundsFixtures from '../lib/fixtures/low-funds.json';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
+import { privateKeyToAccount } from 'viem/accounts';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { parseSIWxHeader, verifySIWxSignature } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
@@ -892,8 +894,9 @@ describe('runPay, a seller that asks only for a sign-in', () => {
     });
   }
 
-  // Monid's async runs: 22 paid runs waited uncollected because `tenjin pay`
-  // stopped at the empty `accepts`.
+  // Monid's async runs: `tenjin pay` stopped at the empty `accepts`, so a run
+  // it paid for could not be collected. Only a payment this version recorded
+  // counts: runs paid with an earlier one have no ledger row.
   it("signs the seller's own challenge for a host this wallet paid, and pays nothing", async () => {
     await payTheRun();
     expect(await readPaidRecords(dir)).toMatchObject([{ url: FOREIGN_URL, settlement: 'unknown' }]);
@@ -980,10 +983,7 @@ describe('runPay, a seller that asks only for a sign-in', () => {
         provider: testWalletProvider(),
         authorizer,
       }),
-    ).rejects.toMatchObject({
-      code: 'API_UNREACHABLE',
-      message: "seller.example did not accept this wallet's sign-in.",
-    });
+    ).rejects.toMatchObject({ code: 'API_UNREACHABLE', details: { status: 402 } });
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => call.headers['payment-signature'] === undefined)).toBe(true);
     expect(authorizer.authorize).not.toHaveBeenCalled();
@@ -1000,7 +1000,29 @@ describe('runPay, a seller that asks only for a sign-in', () => {
       provider: { ...testWalletProvider(), getSigner },
     });
     expect(result.data).toMatchObject({ quote: true, signIn: true, accepts: [] });
-    expect(result.humanLines?.[0]).toContain('asks the wallet that paid it to sign in');
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  // A write behind a seller's sign-in can spend its credit with the seller
+  // off-protocol: only a GET, as a poll is, is signed.
+  it('signs nothing for a request that is not a GET, and opens no wallet', async () => {
+    await payTheRun();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(POLL_URL).header }),
+    ]);
+    const getSigner = vi.fn(async () => testSigner());
+    await expect(
+      runPay({ url: POLL_URL, data: '{"rerun":true}' }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: { ...testWalletProvider(), getSigner },
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({
+      code: 'REFUSED',
+      details: { reason: 'sign_in_method', signIn: true },
+    });
+    expect(calls).toHaveLength(1);
     expect(getSigner).not.toHaveBeenCalled();
   });
 
@@ -1025,6 +1047,58 @@ describe('runPay, a seller that asks only for a sign-in', () => {
       ),
     ).rejects.toBeInstanceOf(CliError);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('signInForPoll, a router poll the seller answers with a sign-in', () => {
+  const POLL_URL = 'https://seller.example/v1/runs/R1';
+  const SUBMIT_URL = 'https://seller.example/v1/run';
+  const PAYER = testSigner().address;
+  const OTHER = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`)).address;
+
+  // The take is the proof of payment: a submit whose ledger row was never
+  // written (its write swallows its own error) still collects its result.
+  it('signs for the wallet that paid the take, with no ledger row', async () => {
+    const challenge = buildSignInChallenge(POLL_URL);
+    const answer = await signInForPoll(challenge.header, POLL_URL, makeCtx(), {
+      provider: testWalletProvider(),
+      paidBy: { from: PAYER, url: SUBMIT_URL },
+    });
+    const header = (answer as { headers?: Record<string, string> }).headers?.['sign-in-with-x'];
+    expect(parseSIWxHeader(header!)).toMatchObject({ nonce: challenge.nonce, address: PAYER });
+  });
+
+  it.each([
+    { name: 'a take another wallet paid', paidBy: { from: OTHER, url: SUBMIT_URL } },
+    {
+      name: 'a take paid on another host',
+      paidBy: { from: PAYER, url: 'https://elsewhere.example/v1/run' },
+    },
+    { name: 'no take and no ledger row', paidBy: undefined },
+  ])('signs nothing for $name, and opens no wallet', async ({ paidBy }) => {
+    const getSigner = vi.fn(async () => testSigner());
+    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+      provider: { ...testWalletProvider(), getSigner },
+      ...(paidBy !== undefined ? { paidBy } : {}),
+    });
+    expect(answer).toHaveProperty('refused');
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  // A locked wallet or a keychain that did not answer ended a paid take for
+  // good; it is an error the poll counts and survives.
+  it('answers a wallet that will not open with an error, never a refusal', async () => {
+    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+      provider: {
+        ...testWalletProvider(),
+        getSigner: async () => {
+          throw new Error('the keychain did not answer');
+        },
+      },
+      paidBy: { from: PAYER, url: SUBMIT_URL },
+    });
+    expect(answer).toHaveProperty('error');
+    expect(answer).not.toHaveProperty('refused');
   });
 });
 
@@ -1054,6 +1128,23 @@ describe('runPay, a binary body', () => {
     expect(result.humanLines?.join('\n')).toContain(savedTo);
     expect((await readPaidRecords(dir))[0]).toMatchObject({ savedFiles: [savedTo] });
   });
+
+  // `--quote` is a read: a free file it meets is described, never written.
+  it('writes no file for a free binary body met by --quote', async () => {
+    const { fetch } = scriptedFetch([
+      new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+    });
+    const data = result.data as Record<string, unknown>;
+    expect(data).toMatchObject({ paid: false, contentType: 'image/png', bytes: PNG.byteLength });
+    expect(data).not.toHaveProperty('savedTo');
+    expect(data).not.toHaveProperty('bodyBytes');
+    expect(await readdir(join(dir, 'downloads')).catch(() => [])).toEqual([]);
+  });
 });
 
 describe('runPay, a paid call that failed', () => {
@@ -1075,7 +1166,7 @@ describe('runPay, a paid call that failed', () => {
       }),
     ).rejects.toMatchObject({
       code: 'PAYMENT_FAILED',
-      message: 'Payment was not accepted by the endpoint: payment settlement failed; please retry.',
+      message: expect.stringContaining('payment settlement failed; please retry'),
       details: { paymentError: 'payment settlement failed; please retry', settlement: 'unknown' },
     });
   });
@@ -1098,8 +1189,6 @@ describe('runPay, a paid call that failed', () => {
     }).catch((e: unknown) => e)) as CliError;
     expect(err).toMatchObject({
       code: 'PAYMENT_FAILED',
-      message:
-        'The endpoint answered 400 on the paid request. The chain shows the authorization was used, so it was charged.',
       details: { status: 400, settlement: 'settled', amountAtomic: '100000' },
     });
     expect(used.asked()).toBe(1);

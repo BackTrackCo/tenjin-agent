@@ -320,9 +320,10 @@ async function executePay(
   }
   // A BINARY BODY ON A DIRECT PAY IS A FILE: written under the downloads
   // directory, and its path is what comes back. The router's provider leg
-  // keeps the bytes for its own tool to save.
+  // keeps the bytes for its own tool to save. A quote writes nothing: a free
+  // file it met is described, and a run without `--quote` saves it.
   const keep = async (res: HttpResponse): Promise<SavedBody | undefined> =>
-    router ? undefined : keepBody(ctx.dataDir, url, res);
+    router ? undefined : args.quote === true ? describeBody(res) : keepBody(ctx.dataDir, url, res);
   if (probe.status >= 200 && probe.status < 300) {
     const caveat = assertUsableResult(args.resultSchema, probe.text, probe.status, 'free');
     args.onPaidLeg?.({ status: probe.status, header: probe.header });
@@ -380,12 +381,24 @@ async function executePay(
   }
   // A SELLER THAT ASKS ONLY FOR A SIGN-IN: a 402 offering no payment, with
   // its own sign-in-with-x challenge, as Monid answers a poll of a run it was
-  // paid for. It is signed only for the URL that sent it and a host this
-  // wallet paid recently, and nothing is paid on this path. The router's
-  // provider leg never takes it: its job polls answer the same challenge in
+  // paid for. It is signed only for a GET, as a poll is, for the URL that
+  // sent it and a host this wallet paid recently, and nothing is paid on this
+  // path. A write behind a sign-in could spend the wallet's credit with the
+  // seller off-protocol, so it is refused unsigned. The router's provider leg
+  // never takes it: its job polls answer the same challenge in
   // `router/jobs.ts`, through {@link signInForPoll}.
   const signIn = router ? undefined : signInOnlyChallenge(paymentRequired);
   if (signIn !== undefined) {
+    if (method !== 'GET') {
+      throw new CliError(
+        'REFUSED',
+        `${new URL(url).host} asks the wallet that paid it to sign in, and nothing was signed: a sign-in answers only a GET, and this is a ${method}.`,
+        {
+          fix: 'Nothing was signed or paid. Fetch the result with a plain GET (no -X, no body).',
+          details: { status: 402, reason: 'sign_in_method', signIn: true },
+        },
+      );
+    }
     const provider = resolveWalletProvider(
       ctx,
       deps.provider !== undefined ? { provider: deps.provider } : {},
@@ -686,14 +699,22 @@ async function executePay(
   // A PAID CALL THAT FAILED MAY STILL HAVE BEEN CHARGED: a seller can settle
   // and then answer an error (AiSpace's voiceover queue did). The chain is
   // read once, as reconcile reads it, and a used authorization is reported as
-  // charged. An unused one stays unknown: it can still be settled until its
+  // charged. A seller's own word that it settled is not that proof on a
+  // failure. An unused one stays unknown: it can still be settled until its
   // `validBefore`.
-  const onChain = (): Promise<'settled' | 'unknown'> =>
-    chargedOnChain(payment.authorization, settings.rpcUrl, {
+  const failedSettlement = async (): Promise<{
+    settlement: 'settled' | 'unknown';
+    charged?: string;
+  }> => {
+    const settlement = await chargedOnChain(payment.authorization, settings.rpcUrl, {
       ...((deps.chainFetch ?? deps.fetchImpl) !== undefined
         ? { fetchImpl: deps.chainFetch ?? deps.fetchImpl }
         : {}),
     });
+    return settlement === 'settled'
+      ? { settlement, charged: 'The chain shows the authorization was used, so it was charged.' }
+      : { settlement };
+  };
   if (paid.ok || paid.header !== undefined) {
     args.onPaidLeg?.({
       ...(paid.status !== undefined ? { status: paid.status } : {}),
@@ -711,8 +732,7 @@ async function executePay(
     // Settlement is just as unknown as on any other timeout, unless the chain
     // already shows it.
     const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
-    const settlement = await onChain();
-    const charged = settlement === 'settled';
+    const { settlement, charged } = await failedSettlement();
     await recordDirect({ settlement });
     if (statusUrl !== null) {
       throw new CliError(
@@ -720,8 +740,8 @@ async function executePay(
         `The seller is still working on this: no result within ${Math.round(paidTimeoutMs / 1000)} s, and it named a status URL to check: ${statusUrl}`,
         {
           fix:
-            (charged
-              ? 'The chain shows this payment was already taken, so it was charged. '
+            (charged !== undefined
+              ? `${charged} `
               : 'The authorization was transmitted and settlement is unknown until the job ends; it is recorded as transmitted exposure. ') +
             'Do not pay again: check the status URL for the result.',
           details: {
@@ -737,8 +757,8 @@ async function executePay(
     }
     throw fetchFailureToCliError(paid, {
       fix:
-        (charged
-          ? 'The authorization was transmitted and the chain shows it was used, so this call was charged. '
+        (charged !== undefined
+          ? `The authorization was transmitted. ${charged} `
           : 'The authorization was transmitted and settlement is unknown; it is recorded as transmitted exposure. ') +
         `Do not simply retry: each attempt signs a fresh authorization. ${legFix(paid)}`,
       details: {
@@ -792,8 +812,7 @@ async function executePay(
   const lowFunds = paymentShortOfFunds(paid);
   const paymentError = paymentRequiredError(paid);
   if (lowFunds) markShortOfFunds(slot);
-  const settlement = await onChain();
-  const charged = settlement === 'settled';
+  const { settlement, charged } = await failedSettlement();
   await recordDirect({ settlement });
   const said = lowFunds
     ? 'The wallet does not hold enough USDC for this payment.'
@@ -801,34 +820,31 @@ async function executePay(
       ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
       : paid.status === 402
         ? `Payment was not accepted by the endpoint${paymentError !== undefined ? `: ${paymentError.replace(/\.+$/, '')}` : ''}.`
-        : charged
+        : charged !== undefined
           ? `The endpoint answered ${paid.status} on the paid request.`
           : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`;
-  throw new CliError(
-    'PAYMENT_FAILED',
-    charged ? `${said} The chain shows the authorization was used, so it was charged.` : said,
-    {
-      fix: charged
+  throw new CliError('PAYMENT_FAILED', charged !== undefined ? `${said} ${charged}` : said, {
+    fix:
+      charged !== undefined
         ? "The payment was charged and is recorded as settled. Do not simply retry: each attempt pays again. Read the seller's error, fix the request, and quote again."
         : lowFunds
           ? 'Ask the person to add funds with `tenjin wallet fund`. The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.'
           : refusal !== undefined
             ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
             : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
-      // The amount rides on the failure so a caller can report what is at risk
-      // rather than a zero.
-      details: {
-        status: paid.status,
-        body: paid.json,
-        ...providerError(paid.text),
-        ...(paymentError !== undefined ? { paymentError } : {}),
-        ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
-        amountAtomic: payment.amountAtomic.toString(),
-        settlement,
-        ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
-      },
+    // The amount rides on the failure so a caller can report what is at risk
+    // rather than a zero.
+    details: {
+      status: paid.status,
+      body: paid.json,
+      ...providerError(paid.text),
+      ...(paymentError !== undefined ? { paymentError } : {}),
+      ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
+      amountAtomic: payment.amountAtomic.toString(),
+      settlement,
+      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
     },
-  );
+  });
 }
 
 /**
@@ -1565,12 +1581,24 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
   };
 }
 
-/** A binary body a direct pay wrote to a file, or tried to. */
+/** A binary body a direct pay wrote to a file, tried to, or (on a quote)
+ *  left unwritten. */
 interface SavedBody {
   savedTo?: string;
   saveError?: string;
+  notSaved?: string;
   contentType: string;
   bytes: number;
+}
+
+/** A quote's binary body, described and never written. */
+function describeBody(res: Pick<HttpResponse, 'bytes' | 'header'>): SavedBody | undefined {
+  if (res.bytes === undefined) return undefined;
+  return {
+    notSaved: '--quote writes no file; run it without --quote to save it',
+    contentType: res.header('content-type') ?? '',
+    bytes: res.bytes.byteLength,
+  };
 }
 
 /**
@@ -1612,7 +1640,9 @@ function savedLine(saved: SavedBody): string {
   const what = `${saved.bytes}-byte ${sanitizeForTerminal(saved.contentType) || 'binary'} body`;
   return saved.savedTo !== undefined
     ? `saved the ${what} to ${saved.savedTo}`
-    : `the ${what} could not be saved: ${sanitizeForTerminal(saved.saveError ?? 'unknown error')}`;
+    : saved.notSaved !== undefined
+      ? `the ${what} was not saved: ${saved.notSaved}`
+      : `the ${what} could not be saved: ${sanitizeForTerminal(saved.saveError ?? 'unknown error')}`;
 }
 
 /**
@@ -1731,17 +1761,28 @@ function paymentRequiredError(res: Pick<HttpResponse, 'header' | 'json'>): strin
 /**
  * THE ROUTER'S JOB POLLS, SIGNED IN AS A DIRECT PAY IS (tenjin#977): a poll
  * the seller answered 402 with a sign-in challenge and no way to pay gets the
- * headers that answer it, signed under the same two rules (the URL that sent
- * it, a host this wallet paid recently). Undefined for any other 402, which
- * the poll treats as a seller asking to be paid again. Never pays: the
- * challenge offers no payment, and none is built.
+ * headers that answer it, signed for the URL that sent it, by the wallet that
+ * paid. The take is that proof: `paidBy` names the wallet that signed its
+ * submit and the submit's URL, and the wallet signs only when it is that
+ * address and the poll is on that host. A take with no authorization falls
+ * back to the paid ledger (a host this wallet paid recently). Undefined for
+ * any other 402, which the poll treats as a seller asking to be paid again.
+ * A wallet that could not be opened is an `error`, which the poll counts and
+ * survives, never a refusal that ends a paid take. Never pays: the challenge
+ * offers no payment, and none is built.
  */
 export async function signInForPoll(
   paymentRequiredHeader: string,
   url: string,
   ctx: CommandContext,
-  deps: { provider?: WalletProvider; now?: () => number } = {},
-): Promise<{ headers: Record<string, string> } | { refused: string } | undefined> {
+  deps: {
+    provider?: WalletProvider;
+    now?: () => number;
+    paidBy?: { from: string; url: string };
+  } = {},
+): Promise<
+  { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
+> {
   if (paymentRequiredHeader.length > MAX_CHALLENGE_CHARS) return undefined;
   let challenge: PaymentRequired;
   try {
@@ -1751,6 +1792,7 @@ export async function signInForPoll(
   }
   const extension = signInOnlyChallenge(challenge);
   if (extension === undefined) return undefined;
+  const { paidBy } = deps;
   try {
     const provider = resolveWalletProvider(
       ctx,
@@ -1758,20 +1800,30 @@ export async function signInForPoll(
     );
     const answer = await answerSignInChallenge(challenge, extension, url, {
       address: async () => (await describeOpenable(provider)).address,
-      paidHost: (host, address) =>
-        paidHostRecently(
-          ctx.dataDir,
-          host,
-          address,
-          deps.now !== undefined ? { now: deps.now } : {},
-        ),
+      paidHost: async (host, address) =>
+        paidBy !== undefined
+          ? hostOf(paidBy.url) === host && paidBy.from.toLowerCase() === address.toLowerCase()
+          : paidHostRecently(
+              ctx.dataDir,
+              host,
+              address,
+              deps.now !== undefined ? { now: deps.now } : {},
+            ),
       signer: () => openWallet(provider),
     });
     return 'refused' in answer ? { refused: answer.reason } : answer;
   } catch (err) {
     return {
-      refused: `the wallet could not be opened (${sellerLine(err instanceof Error ? err.message : String(err)) || 'no reason given'})`,
+      error: `the wallet could not be opened (${sellerLine(err instanceof Error ? err.message : String(err)) || 'no reason given'})`,
     };
+  }
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
   }
 }
 

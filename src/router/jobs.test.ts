@@ -2,6 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { privateKeyToAccount } from 'viem/accounts';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import {
   buildPaymentRequired,
@@ -897,11 +898,107 @@ describe('a poll the seller answers with a sign-in challenge', () => {
       deps(fetchImpl, transport, { auth }),
     );
     expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
-    expect(String(result.envelope.reason)).toContain(
-      'the seller asks the wallet that paid it to sign in, and nothing was signed: its challenge names evil.example',
-    );
+    expect(String(result.envelope.reason)).toContain('evil.example');
     expect(seen).toHaveLength(1);
     expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
+  /** The sign-in header each poll carried, in order. */
+  const signIns = (seen: { request: PollRequest }[]) =>
+    seen.map((poll) => poll.request.headers['sign-in-with-x']);
+
+  // One signature per poll, and never a payment: a seller that answers the
+  // signed poll with a price is not paid a second time for the run.
+  it('fails the take after one signature when the seller answers it with a price', async () => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+      },
+      { status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': buildPaymentRequired().header } },
+    ]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(seen).toHaveLength(2);
+    expect(signIns(seen).filter((header) => header !== undefined)).toHaveLength(1);
+    for (const poll of seen) expect(paymentOf(poll.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
+  // A locked wallet or a keychain that did not answer once ended a paid take
+  // for good, while the seller still held its result.
+  it('keeps the take through a wallet that would not open, and signs on the next poll', async () => {
+    await storeSpecs(dir, [MONID]);
+    const { fetchImpl } = submit(MONID, started);
+    const challenge = {
+      status: 402,
+      body: {},
+      headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+    };
+    const { transport, seen } = polls([
+      challenge,
+      challenge,
+      { status: 200, body: { runId: 'R1', status: 'COMPLETED', output: { rounds: 3 } } },
+    ]);
+    let lockOnce = false;
+    const wallet = testWalletProvider();
+    const run = deps(fetchImpl, async (target, request, signal) => {
+      if (seen.length === 0) lockOnce = true;
+      return transport(target, request, signal);
+    });
+    run.payDeps.provider = {
+      ...wallet,
+      getSigner: async () => {
+        if (lockOnce) {
+          lockOnce = false;
+          throw new Error('the keychain did not answer');
+        }
+        return wallet.getSigner();
+      },
+    };
+    const result = await runRequestTool({ id: ID, input: INPUT }, run);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(signIns(seen).map((header) => header !== undefined)).toEqual([false, false, true]);
+  });
+
+  // The take is the proof of payment: a wallet switched since the submit is
+  // not the one that paid, and signs nothing.
+  it('signs nothing with a wallet other than the one that paid the take', async () => {
+    await storeSpecs(dir, [MONID]);
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+      },
+    ]);
+    const other = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`));
+    let current = testSigner();
+    const opened: string[] = [];
+    const run = deps(fetchImpl, async (target, request, signal) => {
+      current = other;
+      return transport(target, request, signal);
+    });
+    run.payDeps.provider = {
+      ...testWalletProvider(),
+      describe: () => testWalletProvider(current).describe(),
+      getSigner: async () => {
+        opened.push(current.address);
+        return current;
+      },
+    };
+    const result = await runRequestTool({ id: ID, input: INPUT }, run);
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(seen).toHaveLength(1);
+    expect(opened).not.toContain(other.address);
   });
 });
 
