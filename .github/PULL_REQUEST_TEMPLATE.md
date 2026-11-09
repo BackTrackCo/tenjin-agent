@@ -17,9 +17,18 @@
 
 ## User and agent changes
 
-<!-- Show what a user or agent sees or does before and after. Quote short messages.
+<!-- Show what a user or agent sees or does in Tenjin before and after. Quote short messages.
      Link a screenshot or transcript if it helps. -->
 
 | Who | Where and when | Before | After |
 | --- | -------------- | ------ | ----- |
 |     |                |        |       |
+
+## Documentation changes
+
+<!-- Link the page or guide. Show what readers see before and after.
+     Quote the text if the wording matters. -->
+
+| Page or guide | Before | After |
+| ------------- | ------ | ----- |
+|               |        |       |

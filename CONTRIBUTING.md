@@ -27,7 +27,7 @@ docs-change paragraph in the [QA guide](./RELEASING.md#release-acceptance-and-we
 - Add `documentation` for changes to the README or public docs for Tenjin users, agents, or developers.
   This includes linked guides, contributor docs, and shipped skills.
 
-Before you approve, check the before/after table and labels against the latest diff.
+Before you approve, check the before/after tables and labels against the latest diff.
 
 ## Development
 
