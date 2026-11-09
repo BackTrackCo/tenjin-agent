@@ -6,7 +6,7 @@ import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
-import { channelCredit } from './channel-credit';
+import { channelCredit, routingSpent } from './channel-credit';
 import { FUND_COMMAND_LINE, LEGACY_ROUTING_QUOTE_ATOMIC, ROUTING_DEPOSIT_KEY } from './fee';
 
 /**
@@ -20,8 +20,9 @@ import { FUND_COMMAND_LINE, LEGACY_ROUTING_QUOTE_ATOMIC, ROUTING_DEPOSIT_KEY } f
  *
  * A ROUTING DEPOSIT IS NOT A LOOKUP. It sets funds aside that the routing fee
  * draws from, so it is shown apart from what lookups cost, with what the
- * channel still holds. It still counts toward the daily limit, like any
- * automatic payment.
+ * channel still holds and what routing has cost so far (the deposits sent
+ * less that credit), since offers show no fee. It still counts toward the
+ * daily limit, like any automatic payment.
  *
  * THE WALLET'S BALANCE LEADS, read from the chain with the same fallback a
  * lookup uses, because a wallet at $0 is why nothing pays. A read that does
@@ -33,6 +34,8 @@ export interface StatusDeps {
   now?: () => number;
   /** Seam for funds set aside for routing; production reads local channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
+  /** Seam for what routing has cost; production reads local channel files. */
+  routingSpent?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
    *  null with no wallet. Production reads the chain. */
   wallet?: (
@@ -70,6 +73,16 @@ async function walletRoutingCredit(ctx: CommandContext): Promise<bigint> {
   }
 }
 
+/** What routing has cost this wallet here; 0n as {@link walletRoutingCredit} is. */
+async function walletRoutingSpent(ctx: CommandContext): Promise<bigint> {
+  try {
+    const { address } = await describeWallet(resolveWalletProvider(ctx));
+    return await routingSpent(ctx.dataDir, address);
+  } catch {
+    return 0n;
+  }
+}
+
 export async function runRouterStatus(
   ctx: CommandContext,
   deps: StatusDeps = {},
@@ -94,8 +107,9 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const [creditAtomic, wallet] = await Promise.all([
+  const [creditAtomic, spentAtomic, wallet] = await Promise.all([
     (deps.routingCredit ?? walletRoutingCredit)(ctx),
+    (deps.routingSpent ?? walletRoutingSpent)(ctx),
     (deps.wallet ?? walletOnChain)(ctx, settings.rpcUrl).catch(() => null),
   ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
@@ -121,6 +135,7 @@ export async function runRouterStatus(
     // In dollars, not calls left: each answer is quoted its own fee.
     routingCredit: {
       remaining: toMoney(creditAtomic.toString()),
+      spent: toMoney(spentAtomic.toString()),
     },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
@@ -145,6 +160,11 @@ export async function runRouterStatus(
     ...(depositedAtomic > 0n || creditAtomic > 0n
       ? [
           `set aside for routing: approximately ${data.routingCredit.remaining.usd} USD (local estimate)`,
+        ]
+      : []),
+    ...(spentAtomic > 0n
+      ? [
+          `spent on routing: approximately ${data.routingCredit.spent.usd} USD (deposits sent less what is set aside; local estimate)`,
         ]
       : []),
   ];

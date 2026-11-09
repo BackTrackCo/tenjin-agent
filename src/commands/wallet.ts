@@ -11,7 +11,7 @@ import { getUsdcBalance } from '../lib/usdc';
 import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
-import { channelCredit } from '../router/channel-credit';
+import { channelCredit, routingSpent } from '../router/channel-credit';
 import { FUND_COMMAND_LINE, FUNDING_LINE, LEGACY_ROUTING_QUOTE_ATOMIC } from '../router/fee';
 import { markUnlockPending } from '../router/router-observation';
 import {
@@ -648,12 +648,17 @@ export async function runWalletBalance(
   const credit = toMoney(
     (await channelCredit(ctx.dataDir, desc.address).catch(() => 0n)).toString(),
   );
+  // What routing has cost: the deposits sent less that credit, also local.
+  const spent = toMoney((await routingSpent(ctx.dataDir, desc.address).catch(() => 0n)).toString());
   return {
-    data: { address: desc.address, balance, routingCredit: credit },
+    data: { address: desc.address, balance, routingCredit: credit, routingSpent: spent },
     humanLines: [
       `Balance: ${balance.usd} USDC on Base`,
       ...(credit.atomic !== '0'
         ? [`Set aside for routing: approximately $${credit.usd} (local estimate).`]
+        : []),
+      ...(spent.atomic !== '0'
+        ? [`Spent on routing: approximately $${spent.usd} (local estimate).`]
         : []),
       ...(atomic === 0n && BigInt(credit.atomic) < LEGACY_ROUTING_QUOTE_ATOMIC
         ? [FUND_COMMAND_LINE]

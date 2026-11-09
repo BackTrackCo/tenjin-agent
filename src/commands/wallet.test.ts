@@ -1140,6 +1140,7 @@ describe('runWalletBalance', () => {
     expect(res.humanLines).toEqual([
       'Balance: 0 USDC on Base',
       'Set aside for routing: approximately $0.018 (local estimate).',
+      'Spent on routing: approximately $0.012 (local estimate).',
     ]);
   });
 
@@ -1163,7 +1164,37 @@ describe('runWalletBalance', () => {
     expect(res.humanLines).toEqual([
       'Balance: 1.7 USDC on Base',
       'Set aside for routing: approximately $0.241 (local estimate).',
+      'Spent on routing: approximately $0.009 (local estimate).',
     ]);
+  });
+
+  // Offers show no routing fee, so the routing total is where a person finds it:
+  // the deposits sent less the credit left, over every channel file, no RPC read.
+  it('totals what routing cost over every channel file, and says nothing with none', async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address;
+    const { provider } = fakeRemoteProvider(address);
+    mockedBalance.mockResolvedValue(1_000_000n);
+    const none = await runWalletBalance(makeCtx(), { provider });
+    expect(none.data).toMatchObject({ routingSpent: { atomic: '0' } });
+    expect(none.humanLines).toEqual(['Balance: 1 USDC on Base']);
+    const storage = new FileClientChannelStorage({ directory: payerDir(dataDir, address) });
+    await storage.set(`0x${'ab'.repeat(32)}`, {
+      balance: '50000',
+      chargedCumulativeAmount: '50000',
+    });
+    await storage.set(`0x${'cd'.repeat(32)}`, {
+      balance: '30000',
+      chargedCumulativeAmount: '12000',
+    });
+    const several = await runWalletBalance(makeCtx(), { provider });
+    expect(several.data).toMatchObject({
+      routingCredit: { atomic: '18000' },
+      routingSpent: { atomic: '62000', usd: '0.062' },
+    });
+    expect(several.humanLines).toContain(
+      'Spent on routing: approximately $0.062 (local estimate).',
+    );
+    expect(mockedBalance).toHaveBeenCalledTimes(2);
   });
 
   it('maps an RPC failure to RPC_ERROR with a config fix', async () => {

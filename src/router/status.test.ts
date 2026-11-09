@@ -47,6 +47,28 @@ describe('status, the wallet line', () => {
     expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
   });
 
+  // Offers show no routing fee: the routing total, beside the set-aside line, is where it shows.
+  it('shows what routing has cost beside what is set aside, and no line before it cost anything', async () => {
+    const spent = await runRouterStatus(ctx(), {
+      routingCredit: async () => 18_000n,
+      routingSpent: async () => 62_000n,
+      wallet: async () => ({ address: ADDRESS, atomic: 1_000_000n }),
+    });
+    const lines = spent.humanLines ?? [];
+    const aside = lines.indexOf('set aside for routing: approximately 0.018 USD (local estimate)');
+    expect(aside).toBeGreaterThan(-1);
+    expect(lines[aside + 1]).toBe(
+      'spent on routing: approximately 0.062 USD (deposits sent less what is set aside; local estimate)',
+    );
+    expect(spent.data).toMatchObject({ routingCredit: { spent: { atomic: '62000' } } });
+    const none = await runRouterStatus(ctx(), {
+      routingCredit: async () => 0n,
+      routingSpent: async () => 0n,
+      wallet: async () => ({ address: ADDRESS, atomic: 1_000_000n }),
+    });
+    expect(none.humanLines?.join('\n')).not.toContain('spent on routing');
+  });
+
   it('says how to fund a wallet at exactly $0', async () => {
     const result = await status(0n);
     expect(result.humanLines?.slice(0, 3)).toEqual([
