@@ -9,6 +9,7 @@ import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind, STALE_HOOK_LINE } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
 import { LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
+import { recordTermsTold, TERMS_CHANGED_SENTENCE } from './terms-notice';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
 import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
@@ -65,6 +66,8 @@ beforeEach(async () => {
       install: { improveAsked: true },
     }),
   );
+  // An install whose person approved limits on today's routing terms.
+  await recordTermsTold(dir);
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -241,8 +244,8 @@ describe('the hook legs and the routing fee', () => {
   });
 
   it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
-    // A quote below the ceiling: the line names the ceiling, which later calls
-    // keep. The fake announces the router's $0.05 hint, and that is the deposit.
+    // The line names the deposit and no fee. The fake announces the router's
+    // $0.05 hint, and that is the deposit.
     const fake = new FakeRouter({ amount: '1000' });
     fake.body = OFFER;
     const p = payer(fake);
@@ -255,6 +258,19 @@ describe('the hook legs and the routing fee', () => {
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
+  });
+
+  it('tells an install that approved the old fee its new routing terms once, never asking', async () => {
+    // An install from before per-answer quotes: nothing records the new terms told.
+    await rm(join(dir, 'router', 'terms'), { recursive: true, force: true });
+    const fake = new FakeRouter({ amount: '1000' });
+    fake.body = OFFER;
+    const p = payer(fake);
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(first)).toContain(TERMS_CHANGED_SENTENCE);
+    // Once per machine, a new session included.
+    const later = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
+    expect(systemMessageOf(later)).toBeUndefined();
   });
 
   it("skips, and says nothing, when another session's call holds the channel", async () => {

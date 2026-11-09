@@ -579,6 +579,19 @@ describe('install asks a person the spend question once', () => {
     expect(spendStepOf(result)).toBeUndefined();
   });
 
+  // Limits approved now were approved on today's routing terms; a refresh, as
+  // `tenjin update` runs, leaves the old install to be told them once.
+  it('records the routing terms as told only when limits are approved in the run', async () => {
+    const { termsNotice } = await import('./terms-notice');
+    // An agent's install hands the question over; the refresh asks nothing.
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(await termsNotice(data)).not.toBeNull();
+    await rm(join(data, 'router', 'terms'), { recursive: true, force: true });
+    await runRouterInstall({ yes: true }, ctx(), deps());
+    expect(await termsNotice(data)).toBeNull();
+  });
+
   it('--yes keeps a 0 the file names', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
     await runRouterInstall({ yes: true }, ctx(), deps());

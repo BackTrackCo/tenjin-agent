@@ -68,6 +68,7 @@ import {
   spendOptions,
   FEE_APPROVAL,
 } from './spend-question';
+import { recordTermsTold } from './terms-notice';
 import { shQuote } from './plugin-files';
 import { fundStep, type FundingDeps } from './install-funding';
 import { underAgentHarness } from '../lib/session';
@@ -430,6 +431,11 @@ export async function runRouterInstall(
   }
 
   const spend = await persistRouterDefaults(ctx.dataDir, args.refresh === true, limits, named.keys);
+  // Limits approved in this run were approved on today's routing terms, so
+  // the first routing call does not tell them again (`terms-notice.ts`).
+  if (args.refresh !== true && (answered || (canPrompt && unasked))) {
+    await recordTermsTold(ctx.dataDir);
+  }
   const removedKeysLines =
     spend.removed.length > 0
       ? [

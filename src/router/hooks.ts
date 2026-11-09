@@ -22,6 +22,7 @@ import { storeChoices, storeLabel, storeSpecs } from './specs';
 import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
+import { termsNotice } from './terms-notice';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
@@ -1721,6 +1722,11 @@ async function decide(
     warn(
       `tenjin hook: offer ${id} needs ${missing.join(', ')}, which this build lacks, so it was skipped`,
     );
+  }
+  // New routing terms are told once, on the first paid-path call after an update.
+  if (route !== undefined && deps.notice !== undefined) {
+    const terms = await termsNotice(deps.dataDir);
+    if (terms !== null) deps.notice(terms);
   }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   const deposited = route?.deposited?.() ?? 0n;
