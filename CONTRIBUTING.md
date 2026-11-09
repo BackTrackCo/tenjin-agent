@@ -18,6 +18,16 @@ The agreement follows the short form used by
 [n8n](https://github.com/n8n-io/n8n/blob/master/CONTRIBUTOR_LICENSE_AGREEMENT.md),
 based on [Indie Open Source's Tiny CLA](https://indieopensource.com/forms/cla).
 
+## Pull requests
+
+Use the [PR template](./.github/PULL_REQUEST_TEMPLATE.md). For docs, skills, prompts, or copy, follow the
+docs-change paragraph in the [QA guide](./RELEASING.md#release-acceptance-and-weekly-qa).
+
+- Add `experience-change` for changes to user steps, prompts to act, defaults, charges, permissions, or expected agent actions.
+- Add `documentation` if a guide, reference, or skill needs its own review.
+
+Before you approve, check the before/after table and labels against the latest diff.
+
 ## Development
 
 See [the development commands](./RELEASING.md#contributing) for setup, checks and changesets.

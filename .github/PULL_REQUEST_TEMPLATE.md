@@ -1,31 +1,25 @@
-<!-- Give the PR a plain-language title with a prefix such as fix: or docs:.
-     Use headings where they help. -->
+<!-- Give the PR a clear title. Use the active voice, simple words, and short
+     sentences (ASD-STE100). Use the same term for the same thing.
+     Remove sections that do not apply. -->
 
 ## Summary
 
-<!-- Open with what changes for users, the before and after, and why it matters.
-     For internal work, explain who benefits. Include real downsides or risks. -->
+<!-- Say what this PR does and what changes for users. Use one or two sentences. -->
 
-## Checks
+## Pros and cons
 
-<!-- Say what you checked and what you found.
-     For docs, skills, prompts or CLI copy, use the docs-change guidance in
-     RELEASING.md and say how you checked what readers see.
-     Add documentation for a guide, reference or skill that needs its own review.
-     Routine release notes and incidental updates don't need the label. -->
+<!-- Give the benefits, costs, and risks that matter to the decision. -->
+
+## What I checked
+
+<!-- Say what you tried and what you saw. Name the setup if it matters.
+     Leave CI results in GitHub's Checks tab. -->
 
 ## User and agent changes
 
-<!-- Keep this section when a Tenjin user or agent sees or does something different.
-     Use User or Agent for Audience. Include added, changed or removed messages
-     and changes in behavior or timing. Quote short messages as shown.
-     For longer flows, link a preview, screenshot or transcript.
-     Add experience-change only if a step, when someone is asked to act,
-     a default, a charge, a permission or an expected agent action changes.
-     Routine copy, visual and catalog edits that leave those alone only need a row.
-     Before approving, check the rows and label against the latest diff.
-     Remove this section for internal changes. -->
+<!-- Show what a user or agent sees or does before and after. Quote short messages.
+     Link a screenshot or transcript if it helps. -->
 
-| Audience | Where and when | Before | After |
-| -------- | -------------- | ------ | ----- |
-|          |                |        |       |
+| Who | Where and when | Before | After |
+| --- | -------------- | ------ | ----- |
+|     |                |        |       |
