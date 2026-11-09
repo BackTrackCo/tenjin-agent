@@ -187,7 +187,10 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: 'the wallet holds less than the deposit Tenjin sets aside for routing',
+    // The least a wallet routes with ({@link routingDepositAtomic}): the
+    // reserve kept for provider payments plus a deposit of one fee at the
+    // ceiling, $0.013.
+    reason: `the wallet holds less than the $${usd(ROUTING_WALLET_RESERVE_ATOMIC + ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
     fix: `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
