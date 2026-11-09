@@ -97,16 +97,19 @@ describe('unpaidSentence', () => {
   });
 
   // A spend limit is never a funding problem: money cannot help, so neither
-  // reader is pointed at checkout, and both are told the setting that is.
+  // reader is pointed at checkout. The agent gets the setting to raise; the
+  // person, who reads it in chat, is told to ask their agent.
   it.each(['budget_reached', 'limit_below_deposit'])(
-    '%s says the balance is fine and names the limit to raise, never checkout',
+    '%s says the balance is fine and how to raise the limit, never checkout',
     (why) => {
       for (const reader of ['person', 'agent'] as const) {
         const sentence = unpaidSentence(why, reader) ?? '';
         expect(sentence).not.toMatch(/tenjin fund|wallet fund|checkout/i);
         expect(sentence).toContain('Your balance is fine');
-        expect(sentence).toContain('`tenjin config set ');
       }
+      expect(unpaidSentence(why, 'agent')).toContain('`tenjin config set ');
+      expect(unpaidSentence(why, 'person')).toMatch(/ask your agent to raise it/i);
+      expect(unpaidSentence(why, 'person')).not.toContain('tenjin config');
     },
   );
   // User-visible notices name the reason and its recovery action, and no fee
@@ -121,9 +124,9 @@ describe('unpaidSentence', () => {
     payment_failed:
       'Tenjin could not pay the routing fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     limit_below_deposit:
-      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Your balance is fine; this is the per-call limit. Raise it with `tenjin config set maxAutoSpend 0.25`.',
+      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Your balance is fine; this is the per-call limit. Ask your agent to raise it.',
     budget_reached:
-      "Tenjin could not pay the routing fee (today's spend limit is used up), so Tenjin is not routing calls until that is fixed. Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or raise it with `tenjin config set sessionBudget <usd>`.",
+      "Tenjin could not pay the routing fee (today's spend limit is used up), so Tenjin is not routing calls until that is fixed. Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or ask your agent to raise it.",
     not_allowlisted:
       'Tenjin could not pay the routing fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     fee_above_ceiling:

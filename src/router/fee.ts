@@ -118,8 +118,8 @@ export function fundForCommand(label: string, priceAtomic: bigint, balanceAtomic
 /**
  * A PAID CALL THE BALANCE CANNOT COVER, in plain dollars: "This X post read
  * costs $0.006 and your Tenjin balance is $0.00. Add funds with `tenjin fund 5
- * --for "X post read" --price 0.006`." The agent runs that command, which
- * opens checkout with the call named on the page. A service with no display
+ * --for "X post read" --price 0.006`." On the person's yes, the agent runs
+ * that command, which opens checkout with the call named on the page. A service with no display
  * label is named by its provider ("A call to BlockRun costs …").
  */
 export function shortOfFunds(o: {
@@ -256,6 +256,17 @@ export function depositSentence(amountAtomic: bigint): string {
  * the person to act and never for the passphrase, and any other reason's own.
  * A quote above the ceiling names the price quoted, when the payer read one.
  */
+/**
+ * A spend limit, as the person reads it in chat: their agent raises it, so they
+ * never get a command they did not type. The agent reader keeps the command.
+ */
+const PERSON_FIX: Partial<Record<string, string>> = {
+  limit_below_deposit:
+    'Your balance is fine; this is the per-call limit. Ask your agent to raise it.',
+  budget_reached:
+    'Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or ask your agent to raise it.',
+};
+
 export function unpaidSentence(
   why: string,
   reader: 'person' | 'agent' = 'person',
@@ -270,7 +281,7 @@ export function unpaidSentence(
       ? 'Your usual tools still work.'
       : reader === 'agent'
         ? agentFixFor(why, u.fix)
-        : u.fix;
+        : (PERSON_FIX[why] ?? u.fix);
   const reason =
     why === FEE_ABOVE_CEILING && quotedAtomic !== undefined
       ? `the router quoted $${usd(quotedAtomic)} a call, more than this install agreed to pay`

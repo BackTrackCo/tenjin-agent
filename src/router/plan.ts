@@ -207,7 +207,7 @@ export async function planStop(
       status: 'failed',
       reason: `${plan.sentence} Your Tenjin balance is ${usd(balanceAtomic)}, so nothing was paid. ${fundsFix(plan.what, totalAtomic, balanceAtomic)}`,
       extras: {
-        nextStep: `Open checkout with the \`tenjin fund\` command in the reason and follow its nextStep${or}; nothing was paid.`,
+        nextStep: `Ask the person once whether to add funds, saying what this call is for and what it costs; on a yes, run the \`tenjin fund\` command in the reason and follow its nextStep${or}; nothing was paid.`,
       },
       outcome: { status: 'unpaid', reason: 'wallet' },
     };

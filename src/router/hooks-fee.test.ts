@@ -261,7 +261,7 @@ describe('the hook legs and the routing fee', () => {
         }),
       },
       // A spend limit, never checkout: the balance is not the cause.
-      '`tenjin config set sessionBudget <usd>`',
+      'or ask your agent to raise it.',
     ],
   ])(
     'skips the call in one request when %s, and tells the user once per session',
@@ -344,7 +344,8 @@ describe('the hook legs and the routing fee', () => {
     expect(notice).toContain(
       'the per-call spend limit cannot cover the routing fee or its deposit',
     );
-    expect(notice).toContain('Raise it with `tenjin config set maxAutoSpend 0.25`.');
+    expect(notice).toContain('Ask your agent to raise it.');
+    expect(notice).not.toContain('tenjin config');
     expect(notice).not.toContain('tenjin fund');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');

@@ -397,7 +397,7 @@ export async function runApproveTool(
       `${quote.sentence} Your Tenjin balance is $${usd(balanceAtomic)}, so nothing was paid. ${fundsFix(quote.what, totalAtomic, balanceAtomic)}`,
       {
         nextStep:
-          'Open checkout with the `tenjin fund` command in the reason and follow its nextStep; nothing was paid. The quote waits ten minutes, so call approve again once the funds arrive.',
+          'Ask the person once whether to add funds, saying what this call is for and what it costs; on a yes, run the `tenjin fund` command in the reason and follow its nextStep. Nothing was paid. The quote waits ten minutes, so call approve again once the funds arrive.',
       },
     );
   }
