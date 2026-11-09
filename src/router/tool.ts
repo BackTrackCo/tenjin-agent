@@ -402,11 +402,16 @@ export async function runApproveTool(
   // A SHORT WALLET'S QUOTE STAYS OPEN: funded, the same quote runs on the
   // person's next yes, with no new quote to ask for. Its offers' claims go
   // with it, or the rerun would find each one paid.
-  if (!(await reopenShortQuote(dataDir, quote.id, slots, { now }))) return result;
-  for (const slot of slots) {
-    const held = claimOfSlot.get(slot);
-    if (held !== undefined) await releaseSpecClaim(dataDir, held.claim, held.owner);
-  }
+  const reopened = await reopenShortQuote(dataDir, quote.id, slots, {
+    now,
+    releaseClaims: async () => {
+      for (const slot of slots) {
+        const held = claimOfSlot.get(slot);
+        if (held !== undefined) await releaseSpecClaim(dataDir, held.claim, held.owner);
+      }
+    },
+  });
+  if (!reopened) return result;
   return {
     ...result,
     envelope: {

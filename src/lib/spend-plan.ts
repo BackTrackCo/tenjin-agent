@@ -158,15 +158,16 @@ export async function admitQuote(
  * authorization stays counted until reconcile proves it unused. A seller that
  * claims low funds falsely gains nothing a person did not agree to: the
  * quote's next run is another `approve` call, which the host puts to them.
+ * The quote stays used until its claims are released under the quote lock.
  * True when it reopened.
  */
 export async function reopenShortQuote(
   dataDir: string,
   id: string,
   slots: readonly PlanSlot[],
-  opts: { now?: () => number } = {},
+  opts: { now?: () => number; releaseClaims: () => Promise<void> },
 ): Promise<boolean> {
   const signed = slots.filter((slot) => spent.has(slot));
   if (signed.length === 0 || !signed.every((slot) => shortOfFunds.has(slot))) return false;
-  return 'quote' in (await reopenQuote(dataDir, id, opts.now ?? Date.now));
+  return 'quote' in (await reopenQuote(dataDir, id, opts.releaseClaims, opts.now ?? Date.now));
 }

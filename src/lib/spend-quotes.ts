@@ -136,7 +136,7 @@ export function quoteClosed(quote: Quote, now: number): Exclude<QuoteRefusal, 'm
 async function changeQuote(
   dataDir: string,
   id: string,
-  change: (quote: Quote) => Quote | QuoteRefusal,
+  change: (quote: Quote) => Quote | QuoteRefusal | Promise<Quote | QuoteRefusal>,
 ): Promise<{ quote: Quote } | { refused: QuoteRefusal }> {
   if (!isQuoteId(id)) return { refused: 'missing' };
   return withFileLock(
@@ -144,7 +144,7 @@ async function changeQuote(
     async () => {
       const current = await readQuote(dataDir, id);
       if (current === null) return { refused: 'missing' as const };
-      const next = change(current);
+      const next = await change(current);
       if (typeof next === 'string') return { refused: next };
       await writeQuote(dataDir, next);
       return { quote: next };
@@ -166,15 +166,17 @@ export function useQuote(
   });
 }
 
-/** REOPEN A USED QUOTE that has not expired: what its run paid was refused
- *  as short of funds, so it waits out its ten minutes for the next yes. */
+/** Reopen after its short run's claims are released, under the quote lock.
+ * Another approval cannot use the quote while cleanup is still in flight. */
 export function reopenQuote(
   dataDir: string,
   id: string,
+  releaseClaims: () => Promise<void>,
   now: () => number = Date.now,
 ): Promise<{ quote: Quote } | { refused: QuoteRefusal }> {
-  return changeQuote(dataDir, id, (quote) => {
+  return changeQuote(dataDir, id, async (quote) => {
     if (Date.parse(quote.expiresAt) <= now()) return 'expired';
+    await releaseClaims();
     const open: Quote = { ...quote };
     delete open.usedAt;
     return open;

@@ -5,9 +5,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
 import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
 import { readQuote } from '../lib/spend-quotes';
+import { admitQuote, markShortOfFunds, reopenShortQuote, spendSlot } from '../lib/spend-plan';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
-import { claimSpecPayment, settleSpecPayment, storeChoices, storeSpecs } from './specs';
+import {
+  claimSpecPayment,
+  releaseSpecClaim,
+  settleSpecPayment,
+  storeChoices,
+  storeSpecs,
+} from './specs';
 import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
 import { runApproveTool, runRequestTool } from './tool';
@@ -366,6 +373,56 @@ describe("approve, called through the host's own prompt", () => {
       count: 2,
     });
     expect(normal.paidCalls()).toHaveLength(2);
+  });
+
+  it('keeps a short quote closed through claim cleanup, then admits only one overlapping retry', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const admitted = await admitQuote(dir, quote.id, { now: () => clock });
+    if (!('admitted' in admitted)) throw new Error('quote must admit its first run');
+    const slot = admitted.admitted[0]!;
+    expect(spendSlot(slot, BigInt(SPEC.priceAtomic))).toBeNull();
+    markShortOfFunds(slot);
+    expect(await claimSpecPayment(dir, ID)).toBeNull();
+    const owner = await settleSpecPayment(dir, ID, { amountAtomic: 0n, signed: true });
+    expect(owner).toBeDefined();
+
+    let startCleanup!: () => void;
+    const cleaning = new Promise<void>((resolve) => {
+      startCleanup = resolve;
+    });
+    let finishCleanup!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const opts = {
+      now: () => clock,
+      releaseClaims: async () => {
+        startCleanup();
+        await blocked;
+        await releaseSpecClaim(dir, ID, owner!);
+      },
+    };
+    const reopening = reopenShortQuote(dir, quote.id, admitted.admitted, opts);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(normal.fetchImpl), approves: true };
+    try {
+      await Promise.race([cleaning, reopening]);
+      expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+      expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+      expect(normal.paidCalls()).toHaveLength(0);
+    } finally {
+      finishCleanup();
+      await reopening;
+    }
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    const retries = await Promise.all([runApproveTool(args, d), runApproveTool(args, d)]);
+    expect(retries.map((result) => result.envelope.status).sort()).toEqual([
+      'fulfilled',
+      'needs_input',
+    ]);
+    expect(normal.paidCalls()).toHaveLength(1);
   });
 
   /** A REOPEN FREES ONLY THE CLAIMS ITS OWN SHORT PAYMENTS WROTE. One option
