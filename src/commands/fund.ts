@@ -126,6 +126,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   source?: FundSource;
   /** The "Add funds to Tenjin" title and balance; install has its own heading. */
   header?: boolean;
+  /** Printed after "Stopped watching" on Ctrl-C: install's limits, next step and disclosure. */
+  onStopLines?: readonly string[];
   fetchImpl?: typeof fetch;
   openUrl?: typeof openInBrowser;
   deviceName?: () => Promise<string | undefined>;
@@ -313,7 +315,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   let end: WatchEnd | undefined;
   if (shouldWait && startBalance === undefined) pollStatus = 'unavailable';
   if (shouldWait && startBalance !== undefined) {
-    const stopInterrupt = human ? onInterrupt(live, say) : () => undefined;
+    const stopInterrupt = human ? onInterrupt(live, say, opts.onStopLines) : () => undefined;
     try {
       for (;;) {
         end = await watchFunding({
@@ -499,7 +501,7 @@ async function fundByCrypto(
   let pollStatus: FundPollStatus = c.shouldWait ? 'unavailable' : 'skipped';
   if (c.shouldWait && startBalance !== undefined) {
     const now = opts.now ?? Date.now;
-    const stopInterrupt = human ? onInterrupt(c.live, say) : () => undefined;
+    const stopInterrupt = human ? onInterrupt(c.live, say, opts.onStopLines) : () => undefined;
     try {
       end = await watchFunding({
         startBalance,
@@ -621,14 +623,20 @@ export function browserAvailable(env: NodeJS.ProcessEnv, platform: NodeJS.Platfo
 
 /**
  * Ctrl-C while watching: clear the status line, say that checkout carries on,
- * then let the signal end the process as it always did. Returns the remover.
+ * print what the caller still owes the person (install's next step), then let
+ * the signal end the process as it always did. Returns the remover.
  */
-function onInterrupt(live: LiveLine, say: (line?: string) => void): () => void {
+function onInterrupt(
+  live: LiveLine,
+  say: (line?: string) => void,
+  after: readonly string[] = [],
+): () => void {
   const handler = () => {
     live.stop();
     say();
     say("  Stopped watching. This doesn't cancel checkout: `tenjin balance` shows the");
     say('  payment once it lands.');
+    for (const line of after) say(line);
     process.removeListener('SIGINT', handler);
     process.kill(process.pid, 'SIGINT');
   };

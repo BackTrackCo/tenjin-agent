@@ -66,8 +66,14 @@ describe('installation funding', () => {
         ]),
       }),
     );
-    // Install's own checkout: it watches the payment land, under install's heading.
-    expect(fund).toHaveBeenCalledWith(ctx, { amountUsd: '5', source: 'install', header: false });
+    // Install's own checkout: it watches the payment land, under install's heading,
+    // and a Ctrl-C there, which ends the process, still prints the rest of the receipt.
+    expect(fund).toHaveBeenCalledWith(ctx, {
+      amountUsd: '5',
+      source: 'install',
+      header: false,
+      onStopLines: result.humanTail,
+    });
     expect(out.humanLines).toEqual(['', 'Balance   $5.00']);
     // The limits, the next step and the disclosure still close the output.
     expect(out.humanTail).toEqual(result.humanTail);

@@ -153,6 +153,8 @@ export async function finishTerminalFunding(
       amountUsd: String(SUGGESTED_FUND_USD),
       source: 'install',
       header: false,
+      // Ctrl-C ends the process inside the watch: the rest of the receipt prints there.
+      onStopLines: result.humanTail ?? [],
     });
     const data = funded.data as {
       funded?: boolean;
