@@ -20,12 +20,8 @@ based on [Indie Open Source's Tiny CLA](https://indieopensource.com/forms/cla).
 
 ## Development
 
-```bash
-pnpm install
-pnpm run githooks   # once, to use the repo's git hooks
-pnpm run build
-pnpm run test
-```
+See [the development commands](./RELEASING.md#contributing) for setup, checks and changesets.
+Run `pnpm run githooks` once after installing dependencies to enable the repo's Git hooks.
 
 ### What earns a test
 
