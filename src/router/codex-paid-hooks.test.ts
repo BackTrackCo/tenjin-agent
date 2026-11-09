@@ -2,11 +2,12 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { testSigner } from '../lib/read-test-utils';
+import { DEFAULT_RPC_URL, FALLBACK_RPC_URLS } from '../lib/usdc-balance';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { FakeRouter } from './fee-test-utils';
 import { fixture } from './fixture-test-utils';
@@ -136,7 +137,11 @@ function codexEvent(kind: 'prompt' | 'native', over: Record<string, unknown> = {
  * for the observation writes it queues in the background: the data directory
  * is deleted next, and a write landing mid-delete fails it (ENOTEMPTY).
  */
-async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) {
+async function connect(
+  fake: FakeRouter,
+  payer: Partial<RoutingPayerDeps> = {},
+  balance: 'fake' | 'rpc' = 'fake',
+) {
   const fetchImpl = fake.fetch;
   const observer = createRouterObserver({
     dataDir: dir,
@@ -158,7 +163,9 @@ async function connect(fake: FakeRouter, payer: Partial<RoutingPayerDeps> = {}) 
       getSigner: async () => testSigner(wallet),
       fetchImpl,
       readContract: fake.readContract as never,
-      walletBalance: async () => fake.walletAtomic ?? 10_000_000n,
+      ...(balance === 'fake'
+        ? { walletBalance: async () => fake.walletAtomic ?? 10_000_000n }
+        : {}),
       warn: () => undefined,
       ...payer,
     },
@@ -196,6 +203,63 @@ async function offer(): Promise<unknown> {
 }
 
 describe('Codex automatic hooks', () => {
+  it.each([
+    { rpcUrl: DEFAULT_RPC_URL, routes: true },
+    { rpcUrl: 'https://private-rpc.example.test', routes: false },
+  ])(
+    'handles a rate-limited deposit RPC at $rpcUrl through the production payer',
+    async ({ rpcUrl, routes }) => {
+      const configPath = join(dir, 'config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+      await writeFile(configPath, JSON.stringify({ ...config, rpcUrl }));
+      const rpcCalls: string[] = [];
+      const rpc = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        rpcCalls.push(url);
+        return url === FALLBACK_RPC_URLS[0]
+          ? Response.json({
+              jsonrpc: '2.0',
+              id: 1,
+              result: `0x${1_000_000n.toString(16).padStart(64, '0')}`,
+            })
+          : Response.json({
+              jsonrpc: '2.0',
+              id: 1,
+              error: { code: -32016, message: 'over rate limit' },
+            });
+      });
+      let server: Awaited<ReturnType<typeof connect>> | undefined;
+      try {
+        const fake = new FakeRouter();
+        fake.body = await offer();
+        server = await connect(fake, {}, 'rpc');
+        const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
+        expect(fake.deposits).toBe(routes ? 1 : 0);
+        if (routes) {
+          expect(out).toMatchObject({
+            hookSpecificOutput: {
+              additionalContext: expect.stringContaining('mcp__router__request'),
+            },
+          });
+          await server.run(await handler('PreToolUse', 'webrun'), codexEvent('native'));
+          expect(fake.deposits).toBe(1);
+          expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
+        } else {
+          expect(out).toMatchObject({ systemMessage: expect.stringContaining('could not pay') });
+          expect(fake.paidRequests()).toBe(0);
+          expect(await readSpendSummary(dir)).toBeNull();
+        }
+        expect(rpcCalls).toEqual(routes ? [DEFAULT_RPC_URL, FALLBACK_RPC_URLS[0]] : [rpcUrl]);
+      } finally {
+        try {
+          await server?.close();
+        } finally {
+          rpc.mockRestore();
+        }
+      }
+    },
+  );
+
   it('pay the routing fee in the router MCP server and inject its offer', async () => {
     const fake = new FakeRouter();
     fake.body = await offer();

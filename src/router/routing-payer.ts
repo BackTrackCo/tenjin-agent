@@ -83,7 +83,7 @@ export { reasonCode } from '../lib/payment-failure';
  *   gives it back. The deposit is the spend: each fee
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
- * - A DEPOSIT READS THE BALANCE ONCE, bounded by the call deadline.
+ * - A DEPOSIT MAKES ONE BALANCE LOOKUP, bounded by the call deadline.
  *   Ordinary vouchers make no balance read. The facilitator still checks
  *   funds. A 402 that `paymentShortOfFunds` reads as low funds (a reason
  *   code of `insufficient_funds`, `invalid_exact_evm_insufficient_funds`, or
