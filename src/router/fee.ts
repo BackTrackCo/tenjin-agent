@@ -41,8 +41,10 @@ export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 export const ROUTING_WALLET_RESERVE_ATOMIC = 10_000n;
 /** Buffered top-up for a wallet that cannot fit the normal SDK target. */
 export const SMALL_CHANNEL_DEPOSIT_ATOMIC = 10_000n;
+/** Below ten cents liquid, use the small deposit even when the buffer fits. */
+export const SMALL_WALLET_THRESHOLD_ATOMIC = 100_000n;
 
-/** Use the SDK target when it leaves the reserve; otherwise use the small
+/** Use the SDK target at ten cents or more when it leaves the reserve; otherwise use the small
  * deposit, raised only as far as the next voucher requires. Zero refuses a
  * top-up that would spend the reserve. Null is doctor's unknown estimate. */
 export function routingDepositAtomic(o: {
@@ -55,7 +57,11 @@ export function routingDepositAtomic(o: {
   const least = (a: bigint, b: bigint) => (b < a ? b : a);
   const target = least(least(o.suggestedAtomic, o.perCallAtomic), o.maxAtomic);
   if (o.balanceAtomic === null) return target;
-  if (o.balanceAtomic >= target + ROUTING_WALLET_RESERVE_ATOMIC) return target;
+  if (
+    o.balanceAtomic >= SMALL_WALLET_THRESHOLD_ATOMIC &&
+    o.balanceAtomic >= target + ROUTING_WALLET_RESERVE_ATOMIC
+  )
+    return target;
   const smaller = least(
     target,
     o.neededAtomic > SMALL_CHANNEL_DEPOSIT_ATOMIC ? o.neededAtomic : SMALL_CHANNEL_DEPOSIT_ATOMIC,

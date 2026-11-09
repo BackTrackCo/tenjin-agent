@@ -75,7 +75,7 @@ export { reasonCode } from '../lib/payment-failure';
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
  *   (the SDK target, bounded by {@link routingDepositAtomic} using a
- *   deposit-only balance read, a $0.01 small-wallet target and a $0.01
+ *   deposit-only balance read, a $0.01 target below $0.10 liquid and a $0.01
  *   liquid reserve) and reserves it through the local spend authorizer,
  *   so it counts against the per-call
  *   limit, the rolling daily budget and the creator allowlist like any other;

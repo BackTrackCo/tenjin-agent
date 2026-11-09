@@ -166,6 +166,9 @@ describe('RoutingPayer', () => {
   it.each<[string, { amount?: string; walletAtomic?: bigint; perCall?: bigint }, bigint]>([
     ['a $10 wallet signs the $0.05 hint', { walletAtomic: 10_000_000n }, 50_000n],
     ['a $0.50 wallet signs the $0.05 hint', { walletAtomic: 500_000n }, 50_000n],
+    ['a $0.10 wallet signs the $0.05 hint', { walletAtomic: 100_000n }, 50_000n],
+    ['a wallet one unit below $0.10 uses $0.01', { walletAtomic: 99_999n }, 10_000n],
+    ['a $0.06 wallet uses $0.01 even though $0.05 fits', { walletAtomic: 60_000n }, 10_000n],
     ['a $0.05 wallet uses the $0.01 deposit', { walletAtomic: 50_000n }, 10_000n],
     [
       'a $0.015 per-call limit under a $0.001 quote signs the limit',

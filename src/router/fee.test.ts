@@ -40,8 +40,13 @@ describe('routingDepositAtomic', () => {
     });
   it.each<[string, Parameters<typeof size>[0], bigint]>([
     ['a funded wallet keeps the SDK buffer', {}, 50_000n],
-    ['the exact normal boundary preserves one cent', { balance: 60_000n }, 50_000n],
-    ['one unit below the normal boundary uses one cent', { balance: 59_999n }, 10_000n],
+    ['ten cents uses the normal buffer', { balance: 100_000n }, 50_000n],
+    ['one unit below ten cents uses one cent', { balance: 99_999n }, 10_000n],
+    [
+      'six cents still uses one cent even though the normal buffer fits',
+      { balance: 60_000n },
+      10_000n,
+    ],
     ['the exact small boundary preserves one cent', { balance: 20_000n }, 10_000n],
     ['one unit below the small boundary skips the top-up', { balance: 19_999n }, 0n],
     ['a wallet below one cent skips the top-up', { balance: 9_999n }, 0n],
