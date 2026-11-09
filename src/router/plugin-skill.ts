@@ -47,10 +47,11 @@ before the first call to an endpoint, and again when the body or the headers
 change: some endpoints price by request shape.
 
 \`signIn: true\` with no \`accepts\` means the endpoint asks the wallet that paid
-it to sign in, as the status URL of a paid run does. \`tenjin pay <url> --json\`
-answers it and pays nothing, so it needs no \`--max-price\` or \`--yes\`. It signs
-only for the URL that asked, and only when this wallet paid that host in the
-last 7 days; otherwise it refuses with exit 3.
+it to sign in, as the status URL of a paid run does. \`tenjin pay <url> --json\`,
+a plain GET, answers it and pays nothing, so it needs no \`--max-price\` or
+\`--yes\`. It signs only for the URL that asked, and only when \`tenjin payments\`
+shows this wallet paid that host in the last 7 days; otherwise it refuses
+with exit 3.
 
 ## Pay
 

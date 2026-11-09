@@ -97,7 +97,7 @@ Free delivery and entitled zero-price sign-in are distinct from positive payment
 
 ## Jobs, files and records
 
-A provider can accept a paid submission before its result is ready. Job rules specify polling and completion. Polls stay on the submission host over HTTPS, use validated public addresses, follow no redirects and carry no payment. A poll answering 402 stops the job; it cannot cause another purchase.
+A provider can accept a paid submission before its result is ready. Job rules specify polling and completion. Polls stay on the submission host over HTTPS, use validated public addresses, follow no redirects and carry no payment. A poll answering 402 with no way to pay and the seller's own sign-in challenge is signed in once, by the wallet that paid for the job. Any other 402 stops the job and cannot cause another purchase.
 
 Ordinary calls wait up to the client budget; Claude Code 2.1.212+ can background a long call and receive progress notifications until the job's `maxWaitS`. The response's job ID resumes it until its keep time expires. Stored job files contain polling state, never a payment header. Multiple takes have independent request keys and exactly one submission payment each.
 
