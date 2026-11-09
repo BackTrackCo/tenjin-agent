@@ -9,7 +9,7 @@ import type { SpendPolicy } from '../lib/policy';
 import type { WalletProvider, WalletVerification } from '../lib/wallet/provider';
 import { ENV_PASSPHRASE_WRONG, type SigningSource } from '../lib/wallet-unlock';
 import { checkEligibility, type EligibilityInput } from './eligibility-check';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
 import { WALLET_REASONS } from './wallet-reasons';
 
 const ADDRESS = ('0x' + 'ab'.repeat(20)) as Address;
@@ -244,7 +244,7 @@ describe('checkEligibility', () => {
         // Below the next voucher: a higher limit can size the buffer down.
         policy: {
           ...POLICY,
-          maxAutoSpendAtomic: ROUTING_FEE_CEILING_ATOMIC - 1n,
+          maxAutoSpendAtomic: LEGACY_ROUTING_QUOTE_ATOMIC - 1n,
         },
         provider: fakeProvider({ verify: async () => verified('keychain') }),
       }),

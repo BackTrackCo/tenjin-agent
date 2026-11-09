@@ -1009,12 +1009,12 @@ it('status separates routing deposits in the spend window from the remaining rou
       routingDeposits: { atomic: '250000' },
       automaticExposure: { atomic: '300000' },
     },
-    routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
+    routingCredit: { remaining: { atomic: '240000' } },
   });
   expect(result.humanLines?.slice(0, 4)).toEqual([
     'lookups 0.05 USD',
     'deposited for routing in the rolling 24h window: 0.25 USD',
-    'set aside for routing: approximately 0.24 USD (at least 80 calls; local estimate)',
+    'set aside for routing: approximately 0.24 USD (local estimate)',
     'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
   ]);
 });

@@ -66,9 +66,9 @@ describe('probeRouter on the paid route', () => {
   });
 
   it('warns on a quote above the ceiling, naming it, or a 402 it cannot read', async () => {
-    const above = await probe(charging('3001'));
+    const above = await probe(charging('250001'));
     expect(above).toMatchObject({ status: 'warn', required: true });
-    expect(above.detail).toContain('quotes $0.003001 a routing call, more than the $0.003');
+    expect(above.detail).toContain('quotes $0.250001 a routing call, more than the $0.25');
     expect(await probe(answer(402))).toMatchObject({ status: 'warn' });
   });
 

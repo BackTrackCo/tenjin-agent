@@ -36,7 +36,7 @@ import {
   routingDepositAtomic,
 } from './fee';
 import type { RouterObservation } from './router-observation';
-import { quoteOf, routingOffers } from './routing-quote';
+import { chosenOffer, quoteOf, routingOffers } from './routing-quote';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 export { reasonCode } from '../lib/payment-failure';
@@ -57,11 +57,14 @@ export { reasonCode } from '../lib/payment-failure';
  *
  * What is Tenjin's own, because the SDK has no equivalent:
  *
- * - THE QUOTE, UNDER A CEILING. The router's 402 is the only price. This pays
- *   it when it is at or below `ROUTING_FEE_CEILING_ATOMIC`, inside the SDK's
- *   per-payment cap, the deposit cap and the spend limits; a quote above the
- *   ceiling is not paid (`fee_above_ceiling`), and is read before the wallet
- *   is unlocked. Nothing else is pinned: not the payee, not the exact price.
+ * - THE QUOTE, UNDER A CEILING. The router's 402 is the only price: this
+ *   answer's own quote, picked ahead of the fixed one beside it
+ *   (`chosenOffer`). This pays it when it is at or below
+ *   `ROUTING_FEE_CEILING_ATOMIC`, inside the SDK's per-payment cap, the
+ *   deposit cap and the spend limits; a quote above the ceiling is not paid
+ *   (`fee_above_ceiling`), and is read before the wallet is unlocked. A dear
+ *   quote the channel cannot cover gets its deposit inline, on the same call.
+ *   Nothing else is pinned: not the payee, not the exact price.
  *   It pays only the configured router's paid route ({@link RoutingPayer.routeFor}),
  *   so the ceiling never applies to a provider's 402, which `runPay` checks
  *   against that service's own spec price. A charge below the quote (batch
@@ -131,12 +134,13 @@ const NOT_CHECKED: SignVerdict = {
 };
 
 /**
- * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
- * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
- * two together are the largest deposit: $0.05 × 5 = $0.25
- * (`MAX_CHANNEL_DEPOSIT_ATOMIC`). The fee ceiling is the payment policy's to hold.
+ * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default:
+ * the fee ceiling, so the SDK never filters out a quote the payment policy
+ * allows. The SDK's own deposit bound is this cap times `depositMultiplier`
+ * ($1.25); the deposit strategy holds every deposit to
+ * `MAX_CHANNEL_DEPOSIT_ATOMIC` ($0.25) on its own, whatever that bound says.
  */
-export const ROUTING_SPEND_CAP = '$0.05';
+export const ROUTING_SPEND_CAP = '$0.25';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
 export const DEPOSIT_MULTIPLIER = 5;
 
@@ -289,15 +293,16 @@ interface Call {
 }
 
 /**
- * THE PAYMENT POLICY, the guide's check of the requirement before signing: a
- * routing offer at or below the fee ceiling. The server's `payTo` is not
- * pinned: the client ships no treasury address, and what the user approved
- * is a fee no higher than the ceiling, which this holds.
+ * THE PAYMENT POLICY, the guide's check of the requirement before signing:
+ * the one routing offer `chosenOffer` picks, the per-answer quote ahead of the
+ * fixed one, at or below the fee ceiling. The server's `payTo` is not pinned:
+ * the client ships no treasury address, and what the user approved is a fee
+ * no higher than the ceiling, which this holds.
  */
-const routingPolicy: PaymentPolicy = (version, requirements) =>
-  routingOffers(version, requirements).filter(
-    (r) => BigInt(r.amount) <= ROUTING_FEE_CEILING_ATOMIC,
-  );
+const routingPolicy: PaymentPolicy = (version, requirements) => {
+  const chosen = chosenOffer(routingOffers(version, requirements));
+  return chosen?.allowed === true ? [chosen.offer] : [];
+};
 
 /** A call to anything but the configured router's paid route is not paid. */
 const NOT_ROUTE = 'not_the_routing_route';

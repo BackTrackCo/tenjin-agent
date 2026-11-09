@@ -1164,7 +1164,7 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // The router quotes the fee; the only amount written here is this CLI's ceiling.
       expect(request.description).toContain(
-        'Paid routing costs a fee the router quotes, never more than $0.003 a call;',
+        'Paid routing costs a fee the router quotes, never more than $0.25 a call;',
       );
     } finally {
       await client.close();

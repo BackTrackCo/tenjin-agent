@@ -20,14 +20,21 @@ import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
  */
 
 /**
- * THE ROUTING FEE CEILING, atomic USDC ($0.003): the most one routing call
- * pays, and the fee every install so far agreed to. A quote at or below it is
- * paid inside the spend limits; one above it is not paid at all
- * ({@link FEE_ABOVE_CEILING}). A lower price needs no release; a higher one
- * does. A count that has no quote to go on (calls a channel still covers, a
- * funded-enough check) uses it, so it never overstates.
+ * THE ROUTING FEE CEILING, atomic USDC ($0.25): the most one routing answer
+ * pays, and the most one routing deposit holds ({@link MAX_CHANNEL_DEPOSIT_ATOMIC}).
+ * The router quotes each answer its own fee, usually far below this; a quote
+ * at or below it is paid inside the spend limits, and one above it is not
+ * paid at all ({@link FEE_ABOVE_CEILING}). It is a limit, not a price.
  */
-export const ROUTING_FEE_CEILING_ATOMIC = 3_000n;
+export const ROUTING_FEE_CEILING_ATOMIC = 250_000n;
+/**
+ * THE ROUTER'S FIXED QUOTE ($0.003), which it still offers beside a per-answer
+ * quote for the CLIs released before per-answer quotes. This client pays it
+ * only when it is the 402's only routing offer (`routing-quote.ts`). An
+ * estimate with no 402 in hand (doctor's funded-enough check, the fund line
+ * under an empty wallet) sizes from it.
+ */
+export const LEGACY_ROUTING_QUOTE_ATOMIC = 3_000n;
 /** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
 export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
 /** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`, and the
@@ -182,13 +189,13 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 
 /**
  * The one line said when a routing call's deposit went through: the money is
- * funds set aside for the next routing fees, not a lookup it bought. Each fee
- * from it is the router's quote at that call, so the line names the ceiling,
- * the one bound every later call keeps. It still counts toward the daily limit
- * ({@link feeRefusal}).
+ * funds set aside for the next routing fees, not a lookup it bought. It names
+ * no fee: each one is the router's quote for its own answer, and the ceiling
+ * is a limit, not a price. The deposit counted toward the spend limits once,
+ * when it was sent ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing call costs at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}.`;
+  return `Tenjin set aside $${usd(amountAtomic)} for routing fees. It counts toward your spend limits once.`;
 }
 
 /**

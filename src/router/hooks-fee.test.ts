@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind, STALE_HOOK_LINE } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
-import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
 import { CliError } from '../lib/errors';
 import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
 import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
@@ -237,7 +237,7 @@ describe('the hook legs and the routing fee', () => {
       'POST /api/x402-router/route paid',
     ]);
     expect(fake.deposits).toBe(1);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * LEGACY_ROUTING_QUOTE_ATOMIC);
   });
 
   it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
@@ -249,7 +249,7 @@ describe('the hook legs and the routing fee', () => {
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
+      'Tenjin set aside $0.05 for routing fees. It counts toward your spend limits once.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
@@ -489,7 +489,7 @@ describe('the hook legs and the routing fee', () => {
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
     expect(fake.paidRequests()).toBe(2);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * LEGACY_ROUTING_QUOTE_ATOMIC);
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');
