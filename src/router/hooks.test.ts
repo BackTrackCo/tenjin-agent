@@ -24,6 +24,7 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
 import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
+import { UNPAID_GATE_TIMEOUT_MS } from './gate';
 import {
   claimRedirect,
   renderProgress,
@@ -279,6 +280,7 @@ describe('the prompt hook', () => {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
+      now: () => 1_800_000_000_000,
     });
     const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
       .hookSpecificOutput.additionalContext;
@@ -290,15 +292,16 @@ describe('the prompt hook', () => {
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
     expect(sent.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
-    // The route reads a STRICT object: an extra field is a 400, which is a
-    // turn with no hint.
+    // The hook tells the router how long this decision can still wait.
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'budgetMs',
       'harness',
       'packet',
       'schemaVersion',
       'sessionId',
     ]);
+    expect(sent.body.budgetMs).toBe(UNPAID_GATE_TIMEOUT_MS);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
@@ -545,6 +548,7 @@ describe('the shortfall hook', () => {
     const sent = calls[0] as { body: Record<string, unknown> };
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'budgetMs',
       'harness',
       'packet',
       'schemaVersion',
@@ -2423,6 +2427,7 @@ describe('the delegation hook', () => {
       const sent = calls[0] as { body: Record<string, unknown> };
       expect(Object.keys(sent.body).sort()).toEqual([
         'accepts',
+        'budgetMs',
         'harness',
         'packet',
         'schemaVersion',

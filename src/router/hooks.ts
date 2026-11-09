@@ -25,7 +25,7 @@ import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
-import { GATE_TIMEOUT_MS } from './gate';
+import { GATE_TIMEOUT_MS, UNPAID_GATE_TIMEOUT_MS } from './gate';
 import {
   clearRouterMemo,
   readRouterMemo,
@@ -610,7 +610,10 @@ function resolveBaseUrl(deps: HookDeps, config: PartialConfig): string {
 
 /** The decision's deadline, bounded by the hook timeout. */
 function gateDeadline(deps: HookDeps): number {
-  return (deps.now?.() ?? Date.now()) + (deps.timeoutMs ?? GATE_TIMEOUT_MS);
+  return (
+    (deps.now?.() ?? Date.now()) +
+    (deps.timeoutMs ?? (deps.route ? GATE_TIMEOUT_MS : UNPAID_GATE_TIMEOUT_MS))
+  );
 }
 
 /**

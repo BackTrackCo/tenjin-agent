@@ -596,8 +596,22 @@ export class RoutingPayer {
       }
     }
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
+    const hookBody = options.jsonBody;
+    const refreshHookBudget = (request: Request): Request => {
+      if (hookBody === null || typeof hookBody !== 'object' || !('budgetMs' in hookBody)) {
+        return request;
+      }
+      // The payer may have waited in its queue, for the 402, and for wallet
+      // work. A deposit can also extend this deadline before the paid send.
+      return new Request(request, {
+        body: JSON.stringify({
+          ...hookBody,
+          budgetMs: Math.min(5_000, Math.max(0, call.until - this.now())),
+        }),
+      });
+    };
     const askFirst: typeof fetch = async (input, init) => {
-      const request = new Request(input, init);
+      const request = refreshHookBudget(new Request(input, init));
       // Every send below gets the caller's budget signal itself. A signal that
       // only follows it through copied Requests stops following once a copy is
       // garbage collected, and the call then outlives the hook's budget.
@@ -631,7 +645,7 @@ export class RoutingPayer {
         throw err;
       }
       const watched: typeof fetch = async (input, init) => {
-        const request = new Request(input, init);
+        const request = refreshHookBudget(new Request(input, init));
         const paying = request.headers.has('PAYMENT-SIGNATURE') && !signal.aborted;
         if (!paying && asked !== undefined) {
           const first = asked;

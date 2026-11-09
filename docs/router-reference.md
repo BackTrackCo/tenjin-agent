@@ -27,7 +27,7 @@ Claude Code exposes `mcp__plugin_tenjin_router__request`; Codex exposes `mcp__ro
 | `{id, input, count}`     | Run 2–5 takes, where that spec supports them.             | Each take is a separate provider payment; the total meets the limits before signing. |
 | `{job}`                  | Resume/check a previously submitted job.                  | No repeat submission or new payment for polling.                                     |
 
-A catalog row being free describes its provider price. It is not a promise that every selection route is free. Some library-doc offers have no spec and instead ask for a query; follow the response's supported form rather than inventing one. Do not retry a refused free or paid call through another payment path.
+A catalog row being free describes its provider price. It is not a promise that every selection route is free. For selected Context7 docs, inspection returns the `{tool, query}` call, which needs no wallet, routing fee or provider payment. Follow the response's supported form rather than inventing one. Do not retry a refused free or paid call through another payment path.
 
 Specs contain the real input schema, pinned fields and request construction. The CLI applies the pins over supplied input, validates it and refuses unsupported schemas before contacting a provider. Missing or invalid fields return the problems and spec so the agent can correct them without paying for a guess. A cached spec can expire; inspect the chosen tool again or follow the explicit recovery instruction.
 
