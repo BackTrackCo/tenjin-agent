@@ -14,9 +14,9 @@ import { unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import type { CommandContext } from '../context';
 import { decodePaymentRequiredHeader, encodePaymentRequiredHeader } from '@x402/core/http';
 import { requestDecision, RouteSkipped } from './decision';
+import { checkEligibility } from './eligibility-check';
 import {
   CHANNEL_DEPOSIT_ATOMIC,
-  DEPOSIT_FLOOR_FEES,
   FEE_ABOVE_CEILING,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
   payerDir,
@@ -30,6 +30,7 @@ import {
   chainReader,
   DEPOSIT_MULTIPLIER,
   PAID_CALL_RESERVE_MS,
+  reasonCode,
   RoutingPayer,
   RPC_TIMEOUT_MS,
   ROUTING_SPEND_CAP,
@@ -45,8 +46,8 @@ import {
  */
 
 const wallet = privateKeyToAccount(generatePrivateKey());
-/** The smallest deposit at the fake's quote: ten fees at the ceiling ($0.03). */
-const FLOOR = DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC;
+/** The smallest deposit at the fake's quote: the next voucher's shortfall. */
+const FLOOR = ROUTING_FEE_CEILING_ATOMIC;
 
 let dir: string;
 let clock: number;
@@ -94,15 +95,16 @@ function delayArmed(router: FakeRouter): Promise<void> {
 
 type PayerOpts = Partial<RoutingPayerDeps> & {
   policy_?: Partial<SpendPolicy>;
+  /** The wallet the fake facilitator verifies deposits against. */
   walletAtomic?: bigint | null;
 };
 
 function payer(router: FakeRouter, opts: PayerOpts = {}): RoutingPayer {
   const { policy_, walletAtomic, ...rest } = opts;
+  if (walletAtomic !== undefined) router.walletAtomic = walletAtomic;
   return new RoutingPayer(
     payerDeps(router, dir, wallet, {
       policy: async () => ({ ...TEST_POLICY, ...policy_ }),
-      walletBalance: async () => (walletAtomic === undefined ? 10_000_000n : walletAtomic),
       now: () => clock,
       ...rest,
     }),
@@ -160,27 +162,25 @@ function unlockFails(reason: UnlockReason): () => Promise<never> {
 }
 
 describe('RoutingPayer', () => {
-  // The deposit: the smallest of the server's hint, the wallet and the
-  // per-call limit, never below ten quoted fees; the rest stays in the
-  // wallet, which pays the tools routing suggests.
-  it.each<[string, { amount?: string; walletAtomic: bigint; perCall?: bigint }, bigint]>([
+  // The SDK supplies the buffer; small wallets use a one-cent target.
+  it.each<[string, { amount?: string; walletAtomic?: bigint; perCall?: bigint }, bigint]>([
     ['a $10 wallet signs the $0.05 hint', { walletAtomic: 10_000_000n }, 50_000n],
     ['a $0.50 wallet signs the $0.05 hint', { walletAtomic: 500_000n }, 50_000n],
-    ['a $0.03 wallet signs all of it', { walletAtomic: 30_000n }, 30_000n],
-    [
-      'a $0.02 wallet under a $0.001 quote signs all of it',
-      { amount: '1000', walletAtomic: 20_000n },
-      20_000n,
-    ],
+    ['a $0.10 wallet signs the $0.05 hint', { walletAtomic: 100_000n }, 50_000n],
+    ['a wallet one unit below $0.10 uses $0.01', { walletAtomic: 99_999n }, 10_000n],
+    ['a $0.06 wallet uses $0.01 even though $0.05 fits', { walletAtomic: 60_000n }, 10_000n],
+    ['a $0.05 wallet uses the $0.01 deposit', { walletAtomic: 50_000n }, 10_000n],
+    ['a $0.015 wallet shrinks to $0.005', { walletAtomic: 15_000n, amount: '600' }, 5_000n],
+    ['the exact voucher deficit leaves one cent', { walletAtomic: 10_600n, amount: '600' }, 600n],
     [
       'a $0.015 per-call limit under a $0.001 quote signs the limit',
-      { amount: '1000', walletAtomic: 10_000_000n, perCall: 15_000n },
+      { amount: '1000', perCall: 15_000n },
       15_000n,
     ],
   ])('sizes the deposit: %s', async (_label, o, signed) => {
     const router = new FakeRouter(o.amount !== undefined ? { amount: o.amount } : {});
     const p = payer(router, {
-      walletAtomic: o.walletAtomic,
+      ...(o.walletAtomic !== undefined ? { walletAtomic: o.walletAtomic } : {}),
       ...(o.perCall !== undefined ? { policy_: { maxAutoSpendAtomic: o.perCall } } : {}),
     });
     const result = await routeOnce(p, router);
@@ -188,32 +188,145 @@ describe('RoutingPayer', () => {
     expect(unpaidWhy(result)).toBeUndefined();
     expect([...router.channels.values()][0]?.balance).toBe(signed);
     expect((await readSpendSummary(dir))?.committedAtomic).toBe(signed.toString());
-    // It rode the routing call itself, which paid its fee from it.
+    // It rode the routing call itself, which paid its fee from it, once.
+    expect(router.paidRequests()).toBe(1);
     expect(router.deposits).toBe(1);
     expect(router.settledFees).toBe(1);
   });
 
-  it('refuses a $0.02 wallet as wallet_low and signs nothing', async () => {
-    const router = new FakeRouter();
+  it('uses the small deposit while keeping one cent available for providers', async () => {
+    const router = new FakeRouter({ amount: '600' });
     const p = payer(router, { walletAtomic: 20_000n });
-    expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');
-    expect(router.paidRequests()).toBe(0);
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect([...router.channels.values()][0]?.balance).toBe(10_000n);
+    expect((await readSpendSummary(dir))?.committedAtomic).toBe('10000');
   });
 
-  it("refuses a wallet below ten quoted fees, not below the server's hint", async () => {
+  it('shrinks an oversized server hint through the SDK strategy', async () => {
     const router = new FakeRouter({ minDeposit: '90000' });
-    const low = await routeOnce(payer(router, { walletAtomic: FLOOR - 1n }), router);
-    expect(skippedWhy(low, router)).toBe('wallet_low');
+    const p = payer(router, { walletAtomic: 89_999n });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect([...router.channels.values()][0]?.balance).toBe(10_000n);
+    expect(router.paidRequests()).toBe(1);
+  });
+
+  it('reads once for a deposit and spends existing channel credit without reading again', async () => {
+    const router = new FakeRouter();
+    const read = vi.fn<NonNullable<RoutingPayerDeps['walletBalance']>>(async () => 60_000n);
+    const p = payer(router, { walletBalance: read });
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    read.mockResolvedValue(null);
+    expect((await routeOnce(p, router)).status).toBe('decided');
+    expect(read).toHaveBeenCalledExactlyOnceWith(wallet.address, expect.any(Number));
+    expect(router.deposits).toBe(1);
+  });
+
+  it.each([
+    { balance: null, amount: '3000' },
+    { balance: 12_999n, amount: '3000' },
+    { balance: 10_599n, amount: '600' },
+    { balance: 10_000n, amount: '600' },
+  ])(
+    'signs and reserves nothing with balance $balance and quote $amount',
+    async ({ balance, amount }) => {
+      const router = new FakeRouter({ amount });
+      const read = vi.fn(async () => balance);
+      const p = payer(router, { walletBalance: read });
+      expect(skippedWhy(await routeOnce(p, router), router)).toBe(
+        balance === null ? 'chain_unreadable' : 'wallet_low',
+      );
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(router.paidRequests()).toBe(0);
+      expect(await readSpendSummary(dir)).toBeNull();
+    },
+  );
+
+  it.each([
+    [3_500, RPC_TIMEOUT_MS],
+    // The deposit gets one extra second, retained for signing and sending.
+    [1_500, 1_500],
+  ])('bounds a hanging deposit balance read with a %s ms call budget', async (budget, bound) => {
+    const router = new FakeRouter();
+    const { timers, armed } = armedTimers();
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    const read = vi.fn(() => {
+      readStarted();
+      return new Promise<bigint | null>(() => {});
+    });
+    const p = payer(router, { now: () => Date.now(), timers, walletBalance: read });
+    holdTime();
+    const pending = requestDecision(
+      'tool',
+      { query: 'q' },
+      {
+        ctx: ctx(),
+        baseUrl: BASE,
+        fetchImpl: router.fetch,
+        timeoutMs: budget,
+        route: p.routeFor(BASE),
+      },
+    );
+    await reading;
+    await armed(bound);
+    await vi.advanceTimersByTimeAsync(bound);
+    expect(skippedWhy(await pending, router)).toBe('chain_unreadable');
+    expect(read).toHaveBeenCalledExactlyOnceWith(wallet.address, bound);
     expect(router.paidRequests()).toBe(0);
-    // Above the floor, under the hint: what the wallet holds.
-    const enough = await routeOnce(payer(router, { walletAtomic: 60_000n }), router);
-    expect(enough.status).toBe('decided');
-    expect([...router.channels.values()][0]?.balance).toBe(60_000n);
+    expect(await readSpendSummary(dir)).toBeNull();
+  });
+
+  // Production answers `<code>: <detail>`; only the code is matched.
+  it.each([
+    'invalid_batch_settlement_evm_insufficient_balance: payer balance 0 is less than deposit amount 50000',
+    'invalid_batch_settlement_evm_insufficient_balance',
+    'insufficient_funds',
+    'invalid_exact_evm_insufficient_balance',
+    'invalid_exact_evm_insufficient_funds',
+    'permit2_insufficient_balance',
+    'facilitator_prefixed_insufficient_balance',
+    'Facilitator verify failed (400): {"invalidReason":"insufficient_funds","isValid":false}',
+  ])('skips as wallet_low on the facilitator reason %j', async (error) => {
+    const router = new FakeRouter();
+    router.depositError = error;
+    const result = await routeOnce(payer(router), router);
+    expect(unpaidWhy(result)).toBe('wallet_low');
+    expect(router.paidRequests()).toBe(1);
+  });
+
+  it('reads the reason code before the detail, which can name another code', () => {
+    expect(reasonCode('invalid_batch_settlement_evm_insufficient_balance: payer balance 0')).toBe(
+      'invalid_batch_settlement_evm_insufficient_balance',
+    );
+    expect(
+      reasonCode(
+        'invalid_batch_settlement_evm_channel_busy: Channel is already processing a request',
+      ),
+    ).toBe('invalid_batch_settlement_evm_channel_busy');
+    expect(reasonCode('invalid_signature: not insufficient_balance')).toBe('invalid_signature');
+    expect(reasonCode(undefined)).toBeUndefined();
+  });
+
+  it.each([
+    'invalid_batch_settlement_evm_invalid_signature',
+    'invalid_signature: not insufficient_balance',
+    'invalid_exact_evm_failed_to_get_balance',
+    'erc20_approval_insufficient_eth_for_gas',
+    'invalid_exact_solana_payload_amount_insufficient',
+    'batch_settlement_refund_amount_exceeds_balance',
+    'A message quoting insufficient_funds',
+  ])('skips a deposit refused for %j as payment_failed, with no retry', async (error) => {
+    const router = new FakeRouter();
+    router.depositError = error;
+    expect(unpaidWhy(await routeOnce(payer(router), router))).toBe('payment_failed');
+    expect(router.paidRequests()).toBe(1);
   });
 
   it.each<[string, bigint | null]>([
     ['a $10 wallet', 10_000_000n],
-    ['an unread balance', null],
+    ['a facilitator that checks nothing', null],
   ])(
     'keeps the SDK ceiling when the server suggests an oversized deposit: %s',
     async (_label, walletAtomic) => {
@@ -229,19 +342,11 @@ describe('RoutingPayer', () => {
     },
   );
 
-  it("signs the server's hint when the wallet balance cannot be read", async () => {
-    const router = new FakeRouter();
-    const result = await routeOnce(payer(router, { walletAtomic: null }), router);
-    expect(unpaidWhy(result)).toBeUndefined();
-    expect([...router.channels.values()][0]?.balance).toBe(CHANNEL_DEPOSIT_ATOMIC);
-  });
-
-  it('signs the fallback hint when the 402 carries no extra.minDeposit', async () => {
+  it('uses the SDK fallback when the 402 carries no extra.minDeposit', async () => {
     const router = new FakeRouter({ amount: '1000', minDeposit: null });
     const result = await routeOnce(payer(router), router);
     expect(result.status).toBe('decided');
-    // Not the SDK's own five quotes: the hint Tenjin keeps for a 402 without one.
-    expect([...router.channels.values()][0]?.balance).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect([...router.channels.values()][0]?.balance).toBe(5_000n);
   });
 
   it('reserves the last daily deposit only once when two wallets race', async () => {
@@ -549,14 +654,14 @@ describe('RoutingPayer', () => {
     });
   });
 
-  it('sizes the deposit under a per-call limit an earlier release left lower, and refuses one below ten fees', async () => {
+  it('sizes the deposit under a per-call limit an earlier release left lower, and refuses one below the required voucher', async () => {
     const router = new FakeRouter();
     const under = payer(router, {
       policy_: { maxAutoSpendAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC - 1n },
     });
     expect((await routeOnce(under, router)).status).toBe('decided');
     expect([...router.channels.values()][0]?.balance).toBe(CHANNEL_DEPOSIT_ATOMIC);
-    // A wallet with no channel yet, under a limit below ten fees.
+    // A wallet with no channel yet, under a limit below the required voucher.
     const fresh = new FakeRouter();
     const other = privateKeyToAccount(generatePrivateKey());
     const p = payer(fresh, {
@@ -578,6 +683,72 @@ describe('RoutingPayer', () => {
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('budget_reached');
     expect(router.paidRequests()).toBe(0);
     expect((await readSpendSummary(dir, { now: () => clock }))?.reservations ?? []).toEqual([]);
+  });
+
+  // Doctor sizes the deposit as the payer does, and predicts the facilitator's
+  // refusal from the balance it reads; the payer reads only when depositing.
+  it.each<[string, Partial<SpendPolicy>, bigint, string | undefined, bigint?]>([
+    [
+      '$0.10 daily budget',
+      { sessionBudgetAtomic: 100_000n },
+      MAX_CHANNEL_DEPOSIT_ATOMIC,
+      undefined,
+    ],
+    [
+      '$0.10 per-call limit',
+      { maxAutoSpendAtomic: 100_000n },
+      MAX_CHANNEL_DEPOSIT_ATOMIC,
+      undefined,
+    ],
+    [
+      'daily budget below the hint',
+      { sessionBudgetAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n },
+      MAX_CHANNEL_DEPOSIT_ATOMIC,
+      'budget_reached',
+    ],
+    [
+      'router outside the allowlist',
+      { allowlistCreators: ['someone-else'] },
+      MAX_CHANNEL_DEPOSIT_ATOMIC,
+      'not_allowlisted',
+    ],
+    ['a wallet with less than the voucher available after the reserve', {}, 12_999n, 'wallet_low'],
+    ['a shrunken small-wallet deposit', {}, 15_000n, undefined, 5_000n],
+    ['the exact voucher deficit above the reserve', {}, 13_000n, undefined, 3_000n],
+  ])('doctor and the payer agree: %s', async (_label, policy_, balance, why, deposit) => {
+    const router = new FakeRouter();
+    const eligibility = await checkEligibility({
+      dataDir: dir,
+      env: {},
+      policy: { ...TEST_POLICY, ...policy_ },
+      rpcUrl: 'https://rpc.test',
+      host: new URL(BASE).host,
+      timeoutMs: 1_000,
+      provider: {
+        id: 'test',
+        describe: async () => ({
+          address: wallet.address,
+          provider: 'test',
+          credentialSource: 'env',
+          policyEnforcement: 'client-only',
+        }),
+        getSigner: async () => testSigner(wallet),
+        verify: async () => ({ status: 'verified', detail: 'test', source: 'key-env' }),
+        diagnostics: async () => ({ warnings: [] }),
+      },
+      readBalance: async () => balance,
+      readCredit: async () => 0n,
+      readSpent: async () => 0n,
+    });
+    expect(eligibility.canPayRouting).toMatchObject(
+      why === undefined ? { status: 'ready' } : { status: 'blocked', reason: why },
+    );
+    const result = await routeOnce(payer(router, { policy_, walletAtomic: balance }), router);
+    expect(unpaidWhy(result)).toBe(why);
+    expect(router.deposits).toBe(why === undefined ? 1 : 0);
+    expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic ?? '0').toBe(
+      why === undefined ? (deposit ?? CHANNEL_DEPOSIT_ATOMIC).toString() : '0',
+    );
   });
 
   /** `router`, except that a request carrying a payment gets `answer` instead. */
@@ -859,11 +1030,12 @@ describe('RoutingPayer', () => {
     expect(router.paidRequests()).toBe(0);
   });
 
-  it('signs no deposit from a wallet that cannot cover it', async () => {
+  it('refuses a wallet below the required top-up before signing', async () => {
     const router = new FakeRouter();
     const p = payer(router, { walletAtomic: FLOOR - 1n });
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('wallet_low');
     expect(router.paidRequests()).toBe(0);
+    expect(router.deposits).toBe(0);
   });
 
   it('applies the creator allowlist to a deposit', async () => {

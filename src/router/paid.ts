@@ -15,7 +15,8 @@ import { releaseUnchargedExposure } from '../lib/wallet/spend';
 /**
  * WHAT A PAID ROUTER CALL BOUGHT, KEPT ON THIS MACHINE. One JSON line per paid
  * call in `~/.tenjin/paid/ledger.jsonl`: who was paid, for what, how much, the
- * settlement it carried and the files it saved. It is the user's own record
+ * settlement it carried and the files it saved. A direct `tenjin pay` the
+ * seller did not deliver on is a line too. It is the user's own record
  * and the receipt `tenjin payments reconcile` resolves an unknown settlement
  * against. Nothing here can fail a lookup: every write swallows its own error.
  */

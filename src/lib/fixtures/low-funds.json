@@ -1,0 +1,30 @@
+[
+  {
+    "name": "header code with contract detail and empty body",
+    "error": "insufficient_funds: contract call failed: unable to call contract: execution reverted",
+    "body": {}
+  },
+  {
+    "name": "header code with null body",
+    "error": "insufficient_funds",
+    "body": null
+  },
+  {
+    "name": "facilitator verify JSON detail",
+    "error": "Facilitator verify failed (400): {\"invalidMessage\":\"contract call failed: unable to call contract: execution reverted\",\"invalidReason\":\"insufficient_funds\",\"isValid\":false}",
+    "body": { "error": "Payment required" }
+  },
+  {
+    "name": "exact balance code in header and body",
+    "error": "invalid_exact_evm_insufficient_balance",
+    "body": { "error": "invalid_exact_evm_insufficient_balance" }
+  },
+  {
+    "name": "body reason without a payment-required header",
+    "body": {
+      "error": "payment_failed",
+      "reason": "insufficient_funds",
+      "suggestion": "The paying wallet does not hold enough USDC for this call - top it up and retry."
+    }
+  }
+]

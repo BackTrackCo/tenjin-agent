@@ -26,7 +26,7 @@ import { buildSpecRequest, mergedInput } from './spec-call';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, UNPAID_GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
-import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
+import { RPC_TIMEOUT_MS } from './routing-payer';
 import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
 import { MAX_BINARY_BODY_BYTES } from '../lib/http';
 
@@ -1049,7 +1049,7 @@ describe('the hook time budget', () => {
   const FLOOR_MS = 500;
 
   /** The slowest routing leg is a paid call that carries a deposit: the 402,
-   *  the SDK's chain read, the wallet read and the paid request all run inside
+   *  the SDK's chain read and the paid request all run inside
    *  its longer budget, and each read is also cut at what is left of it. A
    *  stuck server holds a prompt 5 s at most. */
   it('fits the slowest paid call inside the timeout install writes', () => {
@@ -1060,8 +1060,8 @@ describe('the hook time budget', () => {
     expect(budget - UNPAID_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
     expect(DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
-    // The chain read and the wallet read leave the requests time of their own.
-    expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
+    // The required channel read leaves the requests time of their own.
+    expect(RPC_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
   });
 
   it('keeps the no-payer decision wait at most 3.5 seconds', () => {

@@ -37,37 +37,38 @@ export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
-/** The fewest quoted fees a deposit covers, so a deposit's on-chain settle is
- *  not spent on one or two calls. */
-export const DEPOSIT_FLOOR_FEES = 10n;
+/** Keep this much USDC outside the routing channel for provider payments. */
+export const ROUTING_WALLET_RESERVE_ATOMIC = 10_000n;
+/** Buffered top-up for a wallet that cannot fit the normal SDK target. */
+export const SMALL_CHANNEL_DEPOSIT_ATOMIC = 10_000n;
+/** Below ten cents liquid, use the small deposit even when the buffer fits. */
+export const SMALL_WALLET_THRESHOLD_ATOMIC = 100_000n;
 
-/**
- * THE DEPOSIT TENJIN SIGNS: the smallest of the server's hint
- * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
- * wallet holding more than the hint keeps the rest for the paid tools routing
- * suggests, which pay from the wallet, never the channel; one between the
- * floor and the hint deposits all it holds. Never below {@link DEPOSIT_FLOOR_FEES}
- * quoted fees or what the next voucher needs, and never above the SDK's
- * ceiling. A balance that could not be read bounds nothing. The caller
- * refuses a wallet below the result (`wallet_low`), and the spend authorizer
- * a limit below it.
- */
+/** Use the SDK target when it fits at ten cents or more; otherwise use the
+ * small target, raised for a larger voucher deficit. Shrink to the balance
+ * above the reserve; zero refuses less than the deficit. Null is doctor's estimate. */
 export function routingDepositAtomic(o: {
-  hintAtomic: bigint;
-  quoteAtomic: bigint;
-  walletAtomic: bigint | null;
+  suggestedAtomic: bigint;
+  neededAtomic: bigint;
+  balanceAtomic: bigint | null;
   perCallAtomic: bigint;
   maxAtomic: bigint;
-  neededAtomic?: bigint;
 }): bigint {
   const least = (a: bigint, b: bigint) => (b < a ? b : a);
-  let amount = least(o.hintAtomic, o.perCallAtomic);
-  if (o.walletAtomic !== null) amount = least(amount, o.walletAtomic);
-  const floor = DEPOSIT_FLOOR_FEES * o.quoteAtomic;
-  const needed = o.neededAtomic ?? 0n;
-  if (amount < floor) amount = floor;
-  if (amount < needed) amount = needed;
-  return least(amount, o.maxAtomic);
+  const target = least(least(o.suggestedAtomic, o.perCallAtomic), o.maxAtomic);
+  if (o.balanceAtomic === null) return target;
+  if (
+    o.balanceAtomic >= SMALL_WALLET_THRESHOLD_ATOMIC &&
+    o.balanceAtomic >= target + ROUTING_WALLET_RESERVE_ATOMIC
+  )
+    return target;
+  const smaller = least(
+    target,
+    o.neededAtomic > SMALL_CHANNEL_DEPOSIT_ATOMIC ? o.neededAtomic : SMALL_CHANNEL_DEPOSIT_ATOMIC,
+  );
+  const available = o.balanceAtomic - ROUTING_WALLET_RESERVE_ATOMIC;
+  const amount = least(smaller, available);
+  return amount > 0n && amount >= o.neededAtomic ? amount : 0n;
 }
 
 /**
@@ -136,7 +137,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
+    reason: 'the wallet holds less than the deposit Tenjin sets aside for routing',
     fix: `Fund it with \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
