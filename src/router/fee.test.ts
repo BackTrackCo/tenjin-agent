@@ -48,7 +48,11 @@ describe('routingDepositAtomic', () => {
       10_000n,
     ],
     ['the exact small boundary preserves one cent', { balance: 20_000n }, 10_000n],
-    ['one unit below the small boundary skips the top-up', { balance: 19_999n }, 0n],
+    ['one unit below two cents shrinks the target', { balance: 19_999n }, 9_999n],
+    ['one and a half cents deposits half a cent', { balance: 15_000n }, 5_000n],
+    ['the exact voucher deficit fits above the reserve', { balance: 10_600n }, 600n],
+    ['one unit below the voucher deficit refuses', { balance: 10_599n }, 0n],
+    ['the reserve alone leaves no deposit', { balance: 10_000n }, 0n],
     ['a wallet below one cent skips the top-up', { balance: 9_999n }, 0n],
     [
       'a larger voucher deficit still fits above the reserve',

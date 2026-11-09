@@ -236,7 +236,7 @@ describe('Codex automatic hooks', () => {
     const fake = new FakeRouter();
     fake.body = await offer();
     // The deposit-only balance read preserves the last liquid cent.
-    fake.walletAtomic = 19_999n;
+    fake.walletAtomic = 12_999n;
     const server = await connect(fake);
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));

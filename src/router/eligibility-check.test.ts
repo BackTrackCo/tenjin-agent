@@ -101,12 +101,12 @@ describe('checkEligibility', () => {
     },
   );
 
-  it('a wallet below the deposit is wallet_low, as the facilitator would refuse it', async () => {
+  it('a wallet unable to cover the fee above its liquid reserve is wallet_low', async () => {
     await writeWallet();
     const e = await checkEligibility(
       input({
         provider: fakeProvider({ verify: async () => verified('keychain') }),
-        readBalance: async () => 19_999n,
+        readBalance: async () => 12_999n,
       }),
     );
     expect(e.canPayRouting).toMatchObject({ status: 'blocked', reason: 'wallet_low' });

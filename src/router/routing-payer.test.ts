@@ -170,6 +170,8 @@ describe('RoutingPayer', () => {
     ['a wallet one unit below $0.10 uses $0.01', { walletAtomic: 99_999n }, 10_000n],
     ['a $0.06 wallet uses $0.01 even though $0.05 fits', { walletAtomic: 60_000n }, 10_000n],
     ['a $0.05 wallet uses the $0.01 deposit', { walletAtomic: 50_000n }, 10_000n],
+    ['a $0.015 wallet shrinks to $0.005', { walletAtomic: 15_000n, amount: '600' }, 5_000n],
+    ['the exact voucher deficit leaves one cent', { walletAtomic: 10_600n, amount: '600' }, 600n],
     [
       'a $0.015 per-call limit under a $0.001 quote signs the limit',
       { amount: '1000', perCall: 15_000n },
@@ -219,10 +221,15 @@ describe('RoutingPayer', () => {
     expect(router.deposits).toBe(1);
   });
 
-  it.each([null, 19_999n])(
-    'signs and reserves nothing when the deposit balance is %s',
-    async (balance) => {
-      const router = new FakeRouter();
+  it.each([
+    { balance: null, amount: '3000' },
+    { balance: 12_999n, amount: '3000' },
+    { balance: 10_599n, amount: '600' },
+    { balance: 10_000n, amount: '600' },
+  ])(
+    'signs and reserves nothing with balance $balance and quote $amount',
+    async ({ balance, amount }) => {
+      const router = new FakeRouter({ amount });
       const read = vi.fn(async () => balance);
       const p = payer(router, { walletBalance: read });
       expect(skippedWhy(await routeOnce(p, router), router)).toBe(
@@ -680,7 +687,7 @@ describe('RoutingPayer', () => {
 
   // Doctor sizes the deposit as the payer does, and predicts the facilitator's
   // refusal from the balance it reads; the payer reads only when depositing.
-  it.each<[string, Partial<SpendPolicy>, bigint, string | undefined]>([
+  it.each<[string, Partial<SpendPolicy>, bigint, string | undefined, bigint?]>([
     [
       '$0.10 daily budget',
       { sessionBudgetAtomic: 100_000n },
@@ -705,8 +712,10 @@ describe('RoutingPayer', () => {
       MAX_CHANNEL_DEPOSIT_ATOMIC,
       'not_allowlisted',
     ],
-    ['a wallet below the small-deposit boundary', {}, 19_999n, 'wallet_low'],
-  ])('doctor and the payer agree: %s', async (_label, policy_, balance, why) => {
+    ['a wallet with less than the voucher available after the reserve', {}, 12_999n, 'wallet_low'],
+    ['a shrunken small-wallet deposit', {}, 15_000n, undefined, 5_000n],
+    ['the exact voucher deficit above the reserve', {}, 13_000n, undefined, 3_000n],
+  ])('doctor and the payer agree: %s', async (_label, policy_, balance, why, deposit) => {
     const router = new FakeRouter();
     const eligibility = await checkEligibility({
       dataDir: dir,
@@ -738,7 +747,7 @@ describe('RoutingPayer', () => {
     expect(unpaidWhy(result)).toBe(why);
     expect(router.deposits).toBe(why === undefined ? 1 : 0);
     expect((await readSpendSummary(dir, { now: () => clock }))?.committedAtomic ?? '0').toBe(
-      why === undefined ? CHANNEL_DEPOSIT_ATOMIC.toString() : '0',
+      why === undefined ? (deposit ?? CHANNEL_DEPOSIT_ATOMIC).toString() : '0',
     );
   });
 
