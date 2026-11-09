@@ -392,6 +392,55 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
     expect(take).toMatchObject({ state: 'done', statusUrl: 'https://treza.example/jobs/42' });
   });
 
+  // A seller that settles before it works: the chain read on the cut-off leg
+  // showed the payment taken, and the submit's row still said unknown.
+  it('records the submit settled when the chain shows the cut-off payment taken', async () => {
+    await storeSpecs(dir, [TREZA]);
+    const { fetchImpl } = submit(
+      TREZA,
+      (init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              init?.signal?.addEventListener('abort', () =>
+                controller.error(new DOMException('The operation was aborted', 'AbortError')),
+              );
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'X-Status-Url': '/jobs/42', 'content-type': 'application/json' },
+          },
+        ),
+      { maxTimeoutSeconds: 0 },
+    );
+    const { transport } = polls([
+      { status: 200, body: { status: 'done', audio_url: 'https://treza.example/out/clip.mp3' } },
+    ]);
+    const used = (async () =>
+      json(200, { jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` })) as typeof fetch;
+    const run = deps(fetchImpl, transport, { timeout: 50 });
+    // The paid leg's own timer is the test's: it runs out when moved, never
+    // by waiting.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let result: Awaited<ReturnType<typeof runRequestTool>> | undefined;
+    try {
+      const pending = runRequestTool(
+        { id: ID, input: INPUT },
+        { ...run, payDeps: { ...run.payDeps, chainFetch: used } },
+      ).then((done) => (result = done));
+      while (result === undefined) {
+        await vi.advanceTimersByTimeAsync(50);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(await ledger()).toMatchObject([{ amountAtomic: '60000', settlement: 'settled' }]);
+  });
+
   it('answers a finished take that missed its success rule unverified, resumed too', async () => {
     const ruled = { ...TREZA, resultSchema: { type: 'object', required: ['audio_url'] } };
     await storeSpecs(dir, [ruled]);
