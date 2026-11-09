@@ -93,6 +93,12 @@ describe('UNPAID wallet entries', () => {
     expect(unpaid('unlock_timeout')).toBeNull();
     expect(unpaidSentence('unlock_timeout')).toBeNull();
   });
+
+  it('says nothing when the balance before a deposit could not be read: nothing was paid', () => {
+    expect(unpaid('balance_unreadable')).toBeNull();
+    expect(unpaidSentence('balance_unreadable', 'person')).toBeNull();
+    expect(unpaidSentence('balance_unreadable', 'agent')).toBeNull();
+  });
 });
 
 describe('unpaidSentence', () => {

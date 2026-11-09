@@ -174,7 +174,8 @@ export type RouteFor = (baseUrl: string) => DecisionRoute;
  * budget, or a payment still out when the call's
  * budget ran out (it finishes in the background), or an unlock that did not
  * finish inside the call's budget (it keeps running, and the next call gets
- * its answer).
+ * its answer), or a balance read before a deposit that failed or ran out of
+ * time (nothing was signed or sent).
  *
  * THE WALLET'S OWN REASONS ARE `WALLET_REASONS`, spread in rather than written
  * twice, so a notice names the same cause in the same words as doctor. They
@@ -228,6 +229,7 @@ const NO_FAULT = new Set([
   'no_call',
   'deadline_after_payment_sent',
   'unlock_timeout',
+  'balance_unreadable',
 ]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */
