@@ -137,18 +137,18 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit the payer would sign for this balance, from the production
-  // server's hint and with no quote to go on but the ceiling, evaluated
-  // against the whole policy as the payer's is.
+  // Doctor has no live SDK quote; estimate the announced target and the
+  // known fee ceiling using the same liquidity policy as the deposit strategy.
+  const depositAtomic = routingDepositAtomic({
+    suggestedAtomic: CHANNEL_DEPOSIT_ATOMIC,
+    neededAtomic: ROUTING_FEE_CEILING_ATOMIC,
+    balanceAtomic,
+    perCallAtomic: input.policy.maxAutoSpendAtomic,
+    maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
+  });
   const deposit = evaluateSpendPolicy(input.policy, {
     mode: 'automatic',
-    amountAtomic: routingDepositAtomic({
-      hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
-      quoteAtomic: ROUTING_FEE_CEILING_ATOMIC,
-      walletAtomic: balanceAtomic,
-      perCallAtomic: input.policy.maxAutoSpendAtomic,
-      maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
-    }),
+    amountAtomic: depositAtomic,
     creator: input.host,
     sessionSpentAtomic: spent ?? 0n,
   });
@@ -158,6 +158,7 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
     sign,
     creditAtomic,
     depositRefusal: deposit.decision === 'allow' ? null : refusedWhy(deposit.reason),
+    depositAtomic,
     balanceAtomic,
   });
 

@@ -24,6 +24,7 @@ import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
 import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
+import { UNPAID_GATE_TIMEOUT_MS } from './gate';
 import {
   claimRedirect,
   renderProgress,
@@ -279,6 +280,7 @@ describe('the prompt hook', () => {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
+      now: () => 1_800_000_000_000,
     });
     const line = (out.response as { hookSpecificOutput: { additionalContext: string } })
       .hookSpecificOutput.additionalContext;
@@ -290,15 +292,16 @@ describe('the prompt hook', () => {
     expect(calls).toHaveLength(1);
     const sent = calls[0] as { url: string; body: Record<string, unknown> };
     expect(sent.url).toBe(`${BASE}${ROUTE_PAID_PATH}`);
-    // The route reads a STRICT object: an extra field is a 400, which is a
-    // turn with no hint.
+    // The hook tells the router how long this decision can still wait.
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'budgetMs',
       'harness',
       'packet',
       'schemaVersion',
       'sessionId',
     ]);
+    expect(sent.body.budgetMs).toBe(UNPAID_GATE_TIMEOUT_MS);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
   });
 
@@ -545,6 +548,7 @@ describe('the shortfall hook', () => {
     const sent = calls[0] as { body: Record<string, unknown> };
     expect(Object.keys(sent.body).sort()).toEqual([
       'accepts',
+      'budgetMs',
       'harness',
       'packet',
       'schemaVersion',
@@ -1143,7 +1147,7 @@ describe('never redirected twice for one target', () => {
     });
     expect(retry).toEqual(WITHHELD);
     expect(calls).toHaveLength(0);
-    expect(rpcCalls).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(0);
   });
 
   it('keeps the promise under parallel calls: A, then B, then A again', async () => {
@@ -1214,133 +1218,31 @@ describe('never redirected twice for one target', () => {
   });
 });
 
-/**
- * A WALLET THAT CANNOT PAY IS NOT SENT TO PAY. A fresh install's wallet holds
- * no USDC, so a deny or a hint toward `request` ended in a refused payment
- * after the free call had already been stopped. A redirect, a hint and a
- * subagent offer each read one `balanceOf`, and only a balance read below the
- * price withholds: one that cannot be read leaves the policy to decide, as
- * before, so a flaky or rate-limited RPC never switches routing off.
- */
-describe('a wallet that cannot cover the lookup', () => {
-  it('reads one balanceOf for the wallet, and denies when it covers the price', async () => {
-    rpcAnswer = 15_000n; // the fixture's price, exactly
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runNativeHook(await preCall('https://example.test/spec'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
-    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
-    expect(rpcCalls).toEqual([
-      {
-        url: RPC,
-        body: {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'eth_call',
-          params: [
-            {
-              to: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-              data: `0x70a08231${'0'.repeat(24)}${WALLET.slice(2).toLowerCase()}`,
-            },
-            'latest',
-          ],
-        },
-      },
-    ]);
-  });
+/** Offer eligibility uses local policy and signer facts, never balance RPCs. */
+describe('offline offer eligibility', () => {
+  it.each([0n, 14_999n, 15_000n])(
+    'does not read the balance (%s) before offering',
+    async (balance) => {
+      rpcAnswer = balance;
+      const { fetchImpl } = router(EXECUTE);
+      const out = await runNativeHook(await preCall('https://example.test/spec'), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl,
+      });
+      expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+      expect(rpcCalls).toEqual([]);
+    },
+  );
 
-  it.each([
-    ['holds no USDC', 0n],
-    ['holds less than the price', 14_999n],
-  ])('lets the free call run, and shows no hint, when it %s', async (_label, balance) => {
-    rpcAnswer = balance;
-    const { fetchImpl } = router(EXECUTE);
-    const deps = { dataDir: dir, baseUrl: BASE, fetchImpl };
-    const event = await preCall('https://x.com/a', 'WebFetch', { tool_use_id: 'toolu_5' });
-    const out = await runNativeHook(event, deps);
-    expect(out).toMatchObject({ response: null, action: 'execute', withheld: true });
-    expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · search: native tools (balance too low)',
-    );
-    expect(await runPromptHook(promptEvent('read https://x.com/a'), deps)).toEqual({
-      response: null,
-      action: 'execute',
-      withheld: true,
-    });
-    // The same payment eligibility applies to the after-call offer.
-    const after = await runShortfallHook(
-      {
-        ...((await readableEvent('https://x.com/a', 'WebFetch')) as object),
-        tool_use_id: 'toolu_5',
-      },
-      deps,
-    );
-    expect(after.response).toBeNull();
-  });
-
-  /** Base's public RPC refuses the sixth `eth_call` in a second, which a
-   *  burst of parallel lookups reaches: a minute-old read stands. */
-  it('reads the balance once for a burst of lookups', async () => {
+  it('makes no balance RPCs for parallel lookups', async () => {
     const deps = { dataDir: dir, baseUrl: BASE, fetchImpl: router(EXECUTE).fetchImpl };
-    expect((await runNativeHook(await preCall('https://x.test/a'), deps)).response).not.toBeNull();
-    expect((await runNativeHook(await preCall('https://x.test/b'), deps)).response).not.toBeNull();
-    expect(rpcCalls).toHaveLength(1);
-  });
-
-  it.each([
-    ['answers 500', async () => new Response('nope', { status: 500 })],
-    [
-      'answers an RPC error',
-      async () =>
-        new Response(
-          JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'x' } }),
-        ),
-    ],
-    [
-      'cannot be reached',
-      async (): Promise<Response> => {
-        throw new TypeError('fetch failed');
-      },
-    ],
-  ])('leaves the policy to decide, and says why, when the RPC %s', async (_label, answer) => {
-    rpcAnswer = answer;
-    const lines: string[] = [];
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runNativeHook(await preCall('https://example.test/spec'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      warn: (line) => lines.push(line),
-    });
-    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
-    // Every fallback was asked, in order, before the policy decided alone.
-    expect(rpcCalls.map((call) => call.url)).toEqual(RPCS);
-    expect(lines).toEqual([
-      "tenjin hook: the wallet's USDC balance could not be read from mainnet.base.org, so the spend policy alone decides",
-    ]);
-  });
-
-  it('spends only what the decision left of the gate budget on the read', async () => {
-    // A decision that used the whole budget leaves the read nothing: it is not
-    // sent, the hook still answers inside the timeout `install` writes, and
-    // the policy decides alone.
-    let clock = 1_000_000;
-    const answer = router(EXECUTE).fetchImpl;
-    const fetchImpl = (async (...args: Parameters<typeof fetch>) => {
-      if (String(args[0]) !== RPC) clock += 3_500;
-      return answer(...args);
-    }) as typeof fetch;
-    const out = await runNativeHook(await preCall('https://example.test/spec'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-      now: () => clock,
-      warn: () => undefined,
-    });
-    expect(out.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
-    expect(rpcCalls).toHaveLength(0);
+    await Promise.all(
+      ['a', 'b', 'c', 'd'].map(async (key) =>
+        runNativeHook(await preCall(`https://x.test/${key}`), deps),
+      ),
+    );
+    expect(rpcCalls).toEqual([]);
   });
 
   /** No wallet file and no key is a wallet that definitely cannot sign: the
@@ -2525,6 +2427,7 @@ describe('the delegation hook', () => {
       const sent = calls[0] as { body: Record<string, unknown> };
       expect(Object.keys(sent.body).sort()).toEqual([
         'accepts',
+        'budgetMs',
         'harness',
         'packet',
         'schemaVersion',
@@ -2607,7 +2510,7 @@ describe('the delegation hook', () => {
     expect(out).toMatchObject({ response: null, withheld: true });
   });
 
-  it('withholds an offer the wallet cannot cover', async () => {
+  it('offers without a balance preflight', async () => {
     rpcAnswer = 0n;
     const { fetchImpl } = router(EXECUTE);
     const out = await runDelegationHook(await delegation(), {
@@ -2615,8 +2518,8 @@ describe('the delegation hook', () => {
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out).toMatchObject({ response: null, withheld: true });
-    expect(rpcCalls).toHaveLength(1);
+    expect(out.response).not.toBeNull();
+    expect(rpcCalls).toHaveLength(0);
   });
 });
 
@@ -3385,7 +3288,7 @@ describe('a discovered service', () => {
     expect(line).toContain('Other options: ClipForge ($0.90), Reelsmith ($1.10).');
   });
 
-  it('is shown when the wallet cannot cover it, with a note to fund it', async () => {
+  it('does not use a balance RPC to annotate a discovered offer', async () => {
     rpcAnswer = 10_000n;
     const { fetchImpl } = router(DISCOVERED);
     const out = await runPromptHook(promptEvent('make me a whoosh sound effect'), {
@@ -3396,9 +3299,7 @@ describe('a discovered service', () => {
     expect(
       (out.response as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
         .additionalContext,
-    ).toBe(
-      `${SEEN_LINE} Note: A call to BlockRun costs $0.053501 and your Tenjin balance is $0.01. Add funds with \`tenjin fund 5 --for "BlockRun" --price 0.053501\`.`,
-    );
+    ).toBe(SEEN_LINE);
   });
 
   it('denies the main agent a native call over the cap, with the note in the reason', async () => {
@@ -3603,22 +3504,21 @@ describe('a question to the user', () => {
    * install's empty wallet, or a price over the cap, would turn the deny into
    * "ask the user", which the denied question already was: the question runs.
    */
-  it.each([
-    ['an empty wallet', { balance: 0n }],
-    ['a price over the cap', { config: { ...ROUTER_POLICY, maxAutoSpend: '50000' } }],
-  ])('lets the question run with %s', async (_label, setup) => {
-    if ('balance' in setup) rpcAnswer = setup.balance;
-    if ('config' in setup) {
-      const fs = await import('node:fs/promises');
-      await fs.writeFile(join(dir, 'config.json'), JSON.stringify(setup.config));
-    }
-    const out = await runAskHook(await askEvent(), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: router(DISCOVERED).fetchImpl,
-    });
-    expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
-  });
+  it.each([['a price over the cap', { config: { ...ROUTER_POLICY, maxAutoSpend: '50000' } }]])(
+    'lets the question run with %s',
+    async (_label, setup) => {
+      if ('config' in setup) {
+        const fs = await import('node:fs/promises');
+        await fs.writeFile(join(dir, 'config.json'), JSON.stringify(setup.config));
+      }
+      const out = await runAskHook(await askEvent(), {
+        dataDir: dir,
+        baseUrl: BASE,
+        fetchImpl: router(DISCOVERED).fetchImpl,
+      });
+      expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
+    },
+  );
 
   it('never denies it for a free offer', async () => {
     const { fetchImpl } = router({

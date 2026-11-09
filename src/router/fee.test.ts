@@ -25,40 +25,49 @@ const ALL_KEYS = [
 ];
 
 describe('routingDepositAtomic', () => {
-  /** The deposit: the smallest of the hint, the wallet and the per-call
-   *  limit, never below ten quoted fees, never above the SDK's ceiling. */
   const size = (o: {
-    hint?: bigint;
-    quote?: bigint;
-    wallet?: bigint | null;
-    perCall?: bigint;
+    suggested?: bigint;
     needed?: bigint;
+    balance?: bigint | null;
+    perCall?: bigint;
   }) =>
     routingDepositAtomic({
-      hintAtomic: o.hint ?? CHANNEL_DEPOSIT_ATOMIC,
-      quoteAtomic: o.quote ?? 3_000n,
-      walletAtomic: o.wallet === undefined ? 10_000_000n : o.wallet,
+      suggestedAtomic: o.suggested ?? 50_000n,
+      neededAtomic: o.needed ?? 600n,
+      balanceAtomic: o.balance === undefined ? 1_000_000n : o.balance,
       perCallAtomic: o.perCall ?? 250_000n,
       maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
-      ...(o.needed !== undefined ? { neededAtomic: o.needed } : {}),
     });
-
   it.each<[string, Parameters<typeof size>[0], bigint]>([
-    ['the hint, from a big wallet', {}, CHANNEL_DEPOSIT_ATOMIC],
-    ['the hint, from a $0.50 wallet', { wallet: 500_000n }, CHANNEL_DEPOSIT_ATOMIC],
-    ['the hint, with the balance unread', { wallet: null }, CHANNEL_DEPOSIT_ATOMIC],
-    ['a wallet below the hint, all of it', { quote: 1_000n, wallet: 20_000n }, 20_000n],
-    ['a per-call limit below the hint', { quote: 1_000n, perCall: 15_000n }, 15_000n],
-    ['ten quoted fees, over a smaller wallet', { quote: 1_000n, wallet: 4_000n }, 10_000n],
-    ['ten quoted fees, over a smaller limit', { perCall: 2_000n }, 30_000n],
-    ['what the next voucher needs, over the floor', { needed: 60_000n }, 60_000n],
+    ['a funded wallet keeps the SDK buffer', {}, 50_000n],
+    ['ten cents uses the normal buffer', { balance: 100_000n }, 50_000n],
+    ['one unit below ten cents uses one cent', { balance: 99_999n }, 10_000n],
     [
-      'a bigger hint, up to the ceiling',
-      { hint: 1_000_000n, perCall: 1_000_000n },
-      MAX_CHANNEL_DEPOSIT_ATOMIC,
+      'six cents still uses one cent even though the normal buffer fits',
+      { balance: 60_000n },
+      10_000n,
     ],
-  ])('signs %s', (_label, o, signed) => {
-    expect(size(o)).toBe(signed);
+    ['the exact small boundary preserves one cent', { balance: 20_000n }, 10_000n],
+    ['one unit below two cents shrinks the target', { balance: 19_999n }, 9_999n],
+    ['one and a half cents deposits half a cent', { balance: 15_000n }, 5_000n],
+    ['the exact voucher deficit fits above the reserve', { balance: 10_600n }, 600n],
+    ['one unit below the voucher deficit refuses', { balance: 10_599n }, 0n],
+    ['the reserve alone leaves no deposit', { balance: 10_000n }, 0n],
+    ['a wallet below one cent skips the top-up', { balance: 9_999n }, 0n],
+    [
+      'a larger voucher deficit still fits above the reserve',
+      { needed: 30_000n, balance: 40_000n },
+      30_000n,
+    ],
+    [
+      'a smaller SDK target stays smaller',
+      { suggested: 5_000n, needed: 1_000n, balance: 15_000n },
+      5_000n,
+    ],
+    ['a per-call bound reduces the buffer', { perCall: 15_000n }, 15_000n],
+    ['an oversized hint still meets the deposit ceiling', { suggested: 1_000_000n }, 250_000n],
+  ])('%s', (_label, o, amount) => {
+    expect(size(o)).toBe(amount);
   });
 });
 
@@ -90,7 +99,7 @@ describe('unpaidSentence', () => {
   it('explains automatic unfunded routing without reopening checkout, while doctor retains its fix', () => {
     expect(unpaidSentence('wallet_low', 'agent')).toContain('could not pay the routing fee');
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
-      /wallet fund|send USDC|add funds|checkout/i,
+      /wallet fund|send USDC|add funds|checkout|USDC|RPC|channel|facilitator/i,
     );
     expect(unpaidSentence('wallet_low')).not.toContain('tenjin fund');
     expect(unpaid('wallet_low')?.fix).toContain('tenjin fund 5');
@@ -118,7 +127,7 @@ describe('unpaidSentence', () => {
     no_wallet:
       'Tenjin could not pay the routing fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin could not pay the routing fee (the wallet holds less than the $0.03 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Tenjin could not pay the routing fee (the wallet holds less than the deposit Tenjin sets aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
     no_payer:
       'Tenjin could not pay the routing fee (the router charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:

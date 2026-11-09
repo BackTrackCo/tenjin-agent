@@ -23,10 +23,10 @@ import {
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
-import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
+import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, UNPAID_GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
-import { BALANCE_TIMEOUT_MS, RPC_TIMEOUT_MS } from './routing-payer';
+import { RPC_TIMEOUT_MS } from './routing-payer';
 import { MAX_PAID_LEG_TIMEOUT_MS } from '../commands/pay';
 import { MAX_BINARY_BODY_BYTES } from '../lib/http';
 
@@ -49,10 +49,9 @@ function fixture(name: string): Record<string, unknown> {
 
 describe('the request bodies', () => {
   /**
-   * THE ROUTE READS THESE WITH STRICT OBJECTS, so an extra field is a 400 and
-   * a 400 is a turn with no hint. Which hook is asking is not a field: the
-   * route reads it from `packet.pendingCall`, which the native hook sets and
-   * the prompt hook does not.
+   * The route reads the hook body tolerantly, including the optional budget.
+   * Which hook is asking is not a field: the route reads it from
+   * `packet.pendingCall`, which the native hook sets and the prompt hook does not.
    */
   it.each([
     ['wire-hook-request-prompt.json'],
@@ -61,7 +60,9 @@ describe('the request bodies', () => {
     ['wire-hook-request-native-no-content.json'],
   ])('builds %s byte for byte', (name) => {
     const canonical = fixture(name);
-    expect(buildHookBody(canonical.packet as Packet)).toEqual(canonical);
+    expect(
+      buildHookBody(canonical.packet as Packet, { budgetMs: canonical.budgetMs as number }),
+    ).toEqual(canonical);
   });
 
   it('tells the two hook bodies apart only by the pending call', () => {
@@ -70,7 +71,9 @@ describe('the request bodies', () => {
     expect(prompt.pendingCall).toBeUndefined();
     expect(native.pendingCall).toEqual({ tool: 'WebSearch', query: 'btc eth price today' });
     for (const packet of [prompt, native]) {
-      expect(Object.keys(buildHookBody(packet)).sort()).toEqual(['packet', 'schemaVersion']);
+      expect(
+        Object.keys(buildHookBody(packet, { budgetMs: UNPAID_GATE_TIMEOUT_MS })).sort(),
+      ).toEqual(['budgetMs', 'packet', 'schemaVersion']);
       expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(MAX_PACKET_BYTES);
       expect(packet.historyStatus).toBe('ok');
     }
@@ -122,6 +125,7 @@ describe('the request bodies', () => {
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
         accepts: canonical.accepts as string[],
+        budgetMs: canonical.budgetMs as number,
       }),
     ).toEqual(canonical);
     const packet = canonical.packet as Packet;
@@ -140,6 +144,7 @@ describe('the request bodies', () => {
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
         accepts: canonical.accepts as string[],
+        budgetMs: canonical.budgetMs as number,
       }),
     ).toEqual(canonical);
   });
@@ -153,6 +158,7 @@ describe('the request bodies', () => {
       buildHookBody(canonical.packet as Packet, {
         sessionId: canonical.sessionId as string,
         accepts: canonical.accepts as string[],
+        budgetMs: canonical.budgetMs as number,
       }),
     ).toEqual(canonical);
     const tool = fixture('wire-tool-request-catalog.json');
@@ -287,12 +293,16 @@ describe('the request bodies', () => {
   it('builds the hook request with improve, byte for byte, and without it when off', () => {
     const canonical = fixture('wire-hook-request-improve.json');
     const packet = canonical.packet as Packet;
-    expect(JSON.stringify(buildHookBody(packet, { improve: true }), null, 2)).toBe(
-      readFileSync(join(dir, 'wire-hook-request-improve.json'), 'utf8').trimEnd(),
-    );
-    expect(buildHookBody(packet, { improve: false })).toEqual(
-      fixture('wire-hook-request-prompt.json'),
-    );
+    expect(
+      JSON.stringify(
+        buildHookBody(packet, { improve: true, budgetMs: canonical.budgetMs as number }),
+        null,
+        2,
+      ),
+    ).toBe(readFileSync(join(dir, 'wire-hook-request-improve.json'), 'utf8').trimEnd());
+    expect(
+      buildHookBody(packet, { improve: false, budgetMs: canonical.budgetMs as number }),
+    ).toEqual(fixture('wire-hook-request-prompt.json'));
     expect(buildToolBody({ query: 'btc price', improve: true })).toEqual({
       schemaVersion: 1,
       query: 'btc price',
@@ -313,7 +323,9 @@ describe('the request bodies', () => {
       historyStatus: 'ok',
     };
     const own = { ownHosts: ['github.com', 'claude.ai'] };
-    expect(buildHookBody(seal(raw, own).packet)).toEqual(canonical);
+    expect(
+      buildHookBody(seal(raw, own).packet, { budgetMs: canonical.budgetMs as number }),
+    ).toEqual(canonical);
     // Another host's link is not the user's own, and with no own hosts none is.
     const more = { ...raw, literalUrls: [...raw.literalUrls, 'https://example.test/elsewhere'] };
     expect(seal(more, own).packet.ownUrls).toEqual(packet.ownUrls);
@@ -354,6 +366,7 @@ describe('the request bodies', () => {
       buildHookBody(canonical.packet as Packet, {
         accepts: canonical.accepts as string[],
         harness: 'codex',
+        budgetMs: canonical.budgetMs as number,
       }),
     ).toEqual(canonical);
   });
@@ -375,6 +388,7 @@ describe('the request bodies', () => {
         ...(canonical.accepts !== undefined ? { accepts: canonical.accepts as string[] } : {}),
         harness: 'claude',
         improve: canonical.improve === true,
+        budgetMs: canonical.budgetMs as number,
       });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
@@ -1035,17 +1049,23 @@ describe('the hook time budget', () => {
   const FLOOR_MS = 500;
 
   /** The slowest routing leg is a paid call that carries a deposit: the 402,
-   *  the SDK's chain read, the wallet read and the paid request all run inside
+   *  the SDK's chain read and the paid request all run inside
    *  its longer budget, and each read is also cut at what is left of it. A
    *  stuck server holds a prompt 5 s at most. */
   it('fits the slowest paid call inside the timeout install writes', () => {
     const budget = ROUTE_HOOK_TIMEOUT_SECONDS * 1_000;
     expect(ROUTE_HOOK_TIMEOUT_SECONDS).toBeLessThanOrEqual(5);
     expect(budget - GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
+    expect(UNPAID_GATE_TIMEOUT_MS).toBe(GATE_TIMEOUT_MS);
+    expect(budget - UNPAID_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
     expect(DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThan(GATE_TIMEOUT_MS);
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
-    // The chain read and the wallet read leave the requests time of their own.
-    expect(RPC_TIMEOUT_MS + BALANCE_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
+    // The required channel read leaves the requests time of their own.
+    expect(RPC_TIMEOUT_MS).toBeLessThan(GATE_TIMEOUT_MS);
+  });
+
+  it('keeps the no-payer decision wait at most 3.5 seconds', () => {
+    expect(UNPAID_GATE_TIMEOUT_MS).toBeLessThanOrEqual(3_500);
   });
 
   /** The after-call leg waits for nothing of its own: a noted search reads

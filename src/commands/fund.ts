@@ -12,7 +12,6 @@ import {
   type TenjinSigner,
 } from '../lib/wallet';
 import { getUsdcBalance } from '../lib/usdc';
-import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { toMoney } from '../lib/money';
 import { emitWriteNotice, paint, style } from '../lib/output';
 import { addressQrLines, textQrLines } from '../lib/qr';
@@ -361,10 +360,7 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   }
 
   const arrived = end?.kind === 'arrived' ? end : undefined;
-  if (arrived !== undefined) {
-    await forgetRememberedBalance(ctx.dataDir);
-    await forgetLink(ctx.dataDir);
-  }
+  if (arrived !== undefined) await forgetLink(ctx.dataDir);
   const status: LinkStatus | undefined = end?.status ?? onItsWay;
   const balanceAtomic = arrived?.balance ?? startBalance;
   const amount = preset !== undefined ? String(preset) : SUGGESTED_FUND_USD;
@@ -520,7 +516,6 @@ async function fundByCrypto(
     pollStatus = end.kind === 'arrived' ? 'arrived' : 'timed-out';
   }
   const arrived = end?.kind === 'arrived' ? end : undefined;
-  if (arrived !== undefined) await forgetRememberedBalance(ctx.dataDir);
   const balanceAtomic = arrived?.balance ?? startBalance;
   return {
     data: {

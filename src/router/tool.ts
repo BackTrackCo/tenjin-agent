@@ -15,8 +15,8 @@ import {
   projectBody,
   validateResultBody,
 } from '../lib/request-schema';
-import { resolveContextSettings } from '../lib/settings';
-import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
+import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
+import { admitPlan, admitQuote, reopenShortQuote, type PlanSlot } from '../lib/spend-plan';
 import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -31,6 +31,7 @@ import {
 import {
   claimSpecPayment,
   readSpec,
+  releaseSpecClaim,
   settleSpecPayment,
   storeChoices,
   storeFullResult,
@@ -63,11 +64,10 @@ import {
   planStop,
   quotedCall,
   quoteView,
-  walletBalance,
   type PlanStop,
   type QuotedCall,
 } from './plan';
-import { depositSentence, fundsFix, unpaidSentence, usd, type RouteFor } from './fee';
+import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -139,7 +139,7 @@ import {
  * success rule against the compiler, its destination against the shared
  * preflight inside `runPay`, and the call's SPEND PLAN: every payment it will
  * make, at its quoted amount, whose total meets `maxAutoSpend` (the limit for
- * the whole call), the day's `sessionBudget` and the balance at once
+ * the whole call) and the day's `sessionBudget` at once
  * (`lib/spend-plan.ts`). `runPay` signs a router payment only against a slot
  * of an admitted plan, and `gateSpend` still meets each one. That is the
  * whole money story: a hostile backend can name any origin and spend at most
@@ -299,8 +299,9 @@ export interface ApproveToolArgs {
  * person's yes; nothing on disk counts as one. The prompt shows the call's
  * arguments, so the total and what it buys must be there and must be the
  * quote's. A yes runs the quote once, past `maxAutoSpend` and the day's
- * budget, which a person just agreed to, never past the balance, and answers
- * as `request` would have.
+ * budget, which a person just agreed to, and answers
+ * as `request` would have. A run whose every payment was refused as short of
+ * funds leaves the quote open for the next yes (`reopenShortQuote`).
  */
 export async function runApproveTool(
   args: ApproveToolArgs,
@@ -378,7 +379,6 @@ export async function runApproveTool(
   };
   const settings = await resolveContextSettings(deps.ctx);
   const admitted = await admitQuote(dataDir, quote.id, {
-    balance: () => walletBalance(call_, settings.rpcUrl),
     now,
   });
   if ('refused' in admitted) {
@@ -390,17 +390,6 @@ export async function runApproveTool(
       { nextStep: fresh },
     );
   }
-  if ('short' in admitted) {
-    const { balanceAtomic, totalAtomic } = admitted.short;
-    return fail(
-      'failed',
-      `${quote.sentence} Your Tenjin balance is $${usd(balanceAtomic)}, so nothing was paid. ${fundsFix(quote.what, totalAtomic, balanceAtomic)}`,
-      {
-        nextStep:
-          'Ask the person once whether to add funds, saying what this call is for and what it costs; on a yes, run the `tenjin fund` command in the reason and follow its nextStep. Nothing was paid. The quote waits ten minutes, so call approve again once the funds arrive.',
-      },
-    );
-  }
   const slots = admitted.admitted;
   const reportDeps: ReportDeps = {
     ctx: deps.ctx,
@@ -409,6 +398,39 @@ export async function runApproveTool(
   };
   const footer = await openLookupFooter(dataDir, call.kind !== 'call' ? { id: call.id } : {});
   await footer.routing();
+  const result = await runQuoted(call, slots, call_, footer, reportDeps, settings);
+  // A SHORT WALLET'S QUOTE STAYS OPEN: funded, the same quote runs on the
+  // person's next yes, with no new quote to ask for. Its offers' claims go
+  // with it, or the rerun would find each one paid.
+  const reopened = await reopenShortQuote(dataDir, quote.id, slots, {
+    now,
+    releaseClaims: async () => {
+      for (const slot of slots) {
+        const held = claimOfSlot.get(slot);
+        if (held !== undefined) await releaseSpecClaim(dataDir, held.claim, held.owner);
+      }
+    },
+  });
+  if (!reopened) return result;
+  return {
+    ...result,
+    envelope: {
+      ...result.envelope,
+      quote: quoteView(quote),
+      nextStep: `Ask the person to add funds with \`tenjin wallet fund\`. The quote stays open for its ten minutes: once the funds arrive, call ${approveCall(quote)} again.`,
+    },
+  };
+}
+
+/** Run an approved quote's call on its slots. */
+async function runQuoted(
+  call: QuotedCall,
+  slots: PlanSlot[],
+  call_: RequestToolDeps,
+  footer: LookupFooter,
+  reportDeps: ReportDeps,
+  settings: ResolvedSettings,
+): Promise<RequestToolResult> {
   switch (call.kind) {
     case 'spec':
       return runSpec(call.id, call.spec, call.input, call_, footer, reportDeps, slots);
@@ -1170,8 +1192,12 @@ export async function paySpec(
   );
   const { outcome, left } = paid;
   // The claim survives anything that may have signed: only a call that
-  // signed nothing frees the id for a fixed input.
-  await settleSpecPayment(deps.ctx.dataDir, take?.claim ?? id, left);
+  // signed nothing frees the id for a fixed input, or a short wallet's
+  // reopened quote (`runApproveTool`), which drops the record this payment
+  // wrote and no other.
+  const claim = take?.claim ?? id;
+  const owner = await settleSpecPayment(deps.ctx.dataDir, claim, left);
+  if ('slot' in admission && owner !== undefined) claimOfSlot.set(admission.slot, { claim, owner });
   // A refusal before payment (the spend policy, the spec's terms, the
   // provider's own 4xx) arrives as `unpaid` or `needs_approval`, neither of
   // which the server counts as the offer taken; a call that ran, or may have
@@ -1182,6 +1208,10 @@ export async function paySpec(
   }
   return paid;
 }
+
+/** The spec claim an approved quote's slot paid under, and the owner token
+ *  of the record its payment wrote. */
+const claimOfSlot = new WeakMap<PlanSlot, { claim: string; owner: string }>();
 
 /** The deal a spec's call is held to: its price ceiling, payee, chain and token. */
 export function specTerms(spec: OfferSpec): AdvertisedTerms {
@@ -1271,7 +1301,7 @@ const PLAN_STOP = 'planStop';
 /**
  * A PLAN OF ONE, admitted at the price `runPay` is about to sign, before the
  * wallet is opened: the same planner several payments meet, so one call is
- * one rule. Over the limits, under the allowlist, or past the balance it is
+ * one rule. Over the limits or outside the allowlist it is
  * stopped, and the stop rides the throw back to {@link payAndDeliver}.
  */
 function admitAlone(
@@ -1285,7 +1315,6 @@ function admitAlone(
     const admission = await admitPlan(payments, {
       dataDir: deps.ctx.dataDir,
       policy: settings.policy,
-      balance: () => walletBalance(deps, settings.rpcUrl),
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     });
     if ('admitted' in admission) return admission.admitted[0]!;

@@ -1,13 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
-import { configPath, walletPath } from '../lib/paths';
-import {
-  DEFAULT_RPC_URL,
-  readUsdcBalanceWithFallback,
-  rememberingBalanceReader,
-} from '../lib/usdc-balance';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { noticeFor } from './notice-markers';
 import { sessionStartMessage } from './wallet-reasons';
@@ -38,8 +31,6 @@ import { sessionStartMessage } from './wallet-reasons';
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAMP = 'plugin-loaded.json';
-/** When the balance notice was last said ({@link walletNotice}). */
-const BALANCE_NOTICE_FILE = 'balance-notice.json';
 /** A session id names a file only through its hash, so any string is safe. */
 const MAX_SESSION_ID = 200;
 
@@ -171,97 +162,27 @@ export async function readAliveStamp(dataDir: string): Promise<AliveStamp | null
   }
 }
 
-/** `uninstall`: the markers, the stamp and the notice record, and nothing else under the data dir. */
+/** `uninstall`: the markers and the stamp, and nothing else under the data dir. */
 export async function removeAliveState(dataDir: string): Promise<boolean> {
   const dir = aliveDir(dataDir);
   const existed = (await stat(dir).catch(() => null)) !== null;
   if (!existed) return false;
   for (const name of await readdir(dir).catch(() => [] as string[])) {
-    if (name === STAMP || name === BALANCE_NOTICE_FILE || /^[0-9a-f]{32}$/.test(name))
-      await rm(join(dir, name), { force: true });
+    if (name === STAMP || /^[0-9a-f]{32}$/.test(name)) await rm(join(dir, name), { force: true });
   }
   // Only when empty: a file somebody else put there keeps the folder.
   await rmdir(dir).catch(() => undefined);
   return true;
 }
 
-/** How long the leg waits on a balance read before it says nothing. */
-export const WALLET_READ_MS = 2_000;
-
-/** The balance notice is said at most once in this long, across sessions. */
-export const BALANCE_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
-
-/**
- * THE BALANCE, SAID TO THE PERSON AT THE START OF A SESSION while it is under
- * the per-call limit: the leg's `systemMessage`, which Claude Code shows the
- * user and never the model, on every surface and without the mod. At most
- * once a day (`balance-notice.json`): a reminder at every session start gets
- * Tenjin uninstalled. Null when there is no wallet, the balance could not be
- * read in time, it holds at least the per-call limit, or the notice was said
- * in the last day.
- */
-export async function walletNotice(
-  dataDir: string,
-  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number; now?: () => number } = {},
-): Promise<string | null> {
-  const now = (opts.now ?? Date.now)();
-  const noticePath = join(aliveDir(dataDir), BALANCE_NOTICE_FILE);
-  const last = (await readJson(noticePath))?.at;
-  if (typeof last === 'number' && now >= last && now - last < BALANCE_NOTICE_EVERY_MS) return null;
-  const wallet = await readJson(walletPath(dataDir));
-  const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
-  if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
-  const config = await readJson(configPath(dataDir));
-  const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
-  const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
-  const read = rememberingBalanceReader(dataDir, {
-    ...(opts.read !== undefined ? { read: opts.read } : {}),
-  });
-  const balance = await read(address, rpcUrl, { timeoutMs });
-  if (balance === null) return null;
-  // The per-call limit as the spend policy reads it: the file's, else the default.
-  const cap = BigInt(
-    typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
-      ? config.maxAutoSpend
-      : DEFAULT_MAX_AUTO_SPEND,
-  );
-  if (balance > 0n && balance >= cap) return null;
-  // A notice that cannot record itself is not said: unrecorded, it would
-  // come back at every session start.
-  try {
-    await mkdir(aliveDir(dataDir), { recursive: true, mode: 0o700 });
-    await writeFile(noticePath, JSON.stringify({ at: now }), { mode: 0o600 });
-  } catch {
-    return null;
-  }
-  // Only the person reads it, inside the session: they say so, the agent runs it.
-  return `Tenjin balance $${dollars(balance)} · low. Say "add funds" when you're ready.`;
-}
-
-/** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
-function dollars(atomic: bigint): string {
-  const fraction = (atomic % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
-  return `${atomic / 1_000_000n}.${fraction.padEnd(2, '0')}`;
-}
-
-async function readJson(path: string): Promise<Record<string, unknown> | null> {
-  try {
-    const value: unknown = JSON.parse(await readFile(path, 'utf8'));
-    return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The command form's entry, read off stdin: `tenjin hook alive`. It writes the
  * answer, when there is one, as one JSON line and WAITS for the write to land:
  * on macOS stdout to a pipe is asynchronous, and `src/index.ts` calls
- * `process.exit(0)` right after this returns, which would drop it. With no
- * answer from the wallet's files, it prints the balance notice
- * ({@link walletNotice}) as a JSON `systemMessage`, which Claude Code shows the
- * user; plain text would be added to the session's context. A wallet that
- * cannot sign is told that, never to add funds.
+ * `process.exit(0)` right after this returns, which would drop it. It reads
+ * no balance: a wallet short of funds is told by the failed deposit on the
+ * session's first paid call. A wallet that cannot sign is told that, never to
+ * add funds.
  */
 export async function aliveMain(opts: {
   dataDir: string;
@@ -277,13 +198,11 @@ export async function aliveMain(opts: {
     version: opts.version,
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   });
-  const notice = answer === null ? await walletNotice(opts.dataDir).catch(() => null) : null;
-  const payload = answer ?? (notice !== null ? { systemMessage: notice } : null);
-  if (payload === null) return;
+  if (answer === null) return;
   const out = opts.stdout ?? process.stdout;
   await new Promise<void>((resolve) => {
     try {
-      out.write(`${JSON.stringify(payload)}\n`, () => resolve());
+      out.write(`${JSON.stringify(answer)}\n`, () => resolve());
     } catch {
       resolve();
     }

@@ -3,10 +3,8 @@ import { toMoney } from '../lib/money';
 import { policyFix } from '../lib/spend-gate';
 import type { PlanAdmission, PlannedPayment } from '../lib/spend-plan';
 import { createQuote, type Quote } from '../lib/spend-quotes';
-import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
-import { fundsFix } from './fee';
 import { KeptChoicesSchema, type KeptChoices } from './specs';
 import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './tool';
 
@@ -181,9 +179,7 @@ export interface PlanStop {
  * WHY A PLAN DID NOT RUN, AND WHAT FOLLOWS. Over the automatic limits it is
  * kept as a quote, and the answer is the sentence and the approve call. A
  * payee outside `allowlistCreators` is the user's own hard rule, which no
- * approval clears. A balance short of the total names the fund command for
- * this call, as for any payment. `alternative` is the smaller call the agent
- * may make instead.
+ * approval clears. `alternative` is the smaller call the agent may make instead.
  * A host that does not offer `approve` keeps no quote: nobody could run it.
  */
 export async function planStop(
@@ -199,17 +195,6 @@ export async function planStop(
       reason: `${plan.sentence} ${admission.refused.message} ${policyFix('not_allowlisted', 'this host')}`,
       extras: { nextStep: `Tell the user${or}; nothing was paid.` },
       outcome: { status: 'needs_approval' },
-    };
-  }
-  if ('short' in admission) {
-    const { balanceAtomic, totalAtomic } = admission.short;
-    return {
-      status: 'failed',
-      reason: `${plan.sentence} Your Tenjin balance is ${usd(balanceAtomic)}, so nothing was paid. ${fundsFix(plan.what, totalAtomic, balanceAtomic)}`,
-      extras: {
-        nextStep: `Ask the person once whether to add funds, saying what this call is for and what it costs; on a yes, run the \`tenjin fund\` command in the reason and follow its nextStep${or}; nothing was paid.`,
-      },
-      outcome: { status: 'unpaid', reason: 'wallet' },
     };
   }
   const why = whyAsked(admission.over);
@@ -247,18 +232,4 @@ export async function planStop(
  *  provider, the test seam's, or this machine's own. */
 export function paymentProvider(deps: RequestToolDeps): WalletProvider {
   return deps.provider ?? deps.payDeps?.provider ?? resolveWalletProvider(deps.ctx);
-}
-
-/** The paying wallet's USDC balance, read the way `runPay` reads it, or null
- *  when there is no wallet or the read failed. */
-export async function walletBalance(deps: RequestToolDeps, rpcUrl: string): Promise<bigint | null> {
-  try {
-    const { address } = await paymentProvider(deps).describe();
-    const read = deps.payDeps?.readBalance ?? readUsdcBalanceWithFallback;
-    return await read(address, rpcUrl, {
-      timeoutMs: Math.max(1, Math.floor(deps.ctx.flags.timeout / 2)),
-    });
-  } catch {
-    return null;
-  }
 }

@@ -4,7 +4,6 @@ import { toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
 import { getUsdcBalance } from '../lib/usdc';
-import { forgetRememberedBalance } from '../lib/usdc-balance';
 import {
   describeWallet,
   resolveWalletProvider,
@@ -20,8 +19,7 @@ import type { CommandContext, CommandResult } from '../context';
 /**
  * `tenjin balance` (and `tenjin wallet balance`): the balance in dollars, the
  * limits that apply to it, and a word only when it needs attention. A chain
- * read: no key is unlocked and nothing is spent. An explicit read also clears
- * the hooks' remembered balance, so routing sees new funds at once.
+ * read: no key is unlocked and nothing is spent.
  *
  * `--wait` reads it, then watches until it rises: what an agent runs in the
  * background after opening checkout, so it wakes when the money lands. A link
@@ -68,7 +66,6 @@ export async function runBalance(
   if (opts.wait === true) return waitForFunds(ctx, desc.address, read, opts);
 
   const atomic = await read();
-  await forgetRememberedBalance(ctx.dataDir);
 
   const balance = toMoney(atomic.toString());
   // The routing balance is a local estimate, separate from on-chain funds.
@@ -170,7 +167,6 @@ async function waitForFunds(
       },
     );
   }
-  await forgetRememberedBalance(ctx.dataDir);
   if (link !== null) await forgetLink(ctx.dataDir);
   const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
   const line = `+${dollars(end.added)} · balance ${dollars(end.balance)}`;

@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
-import { atomicToUsd, formatUsdDisplay } from '../lib/money';
+import { formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import { NO_PAYER, type DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
@@ -38,37 +38,38 @@ export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
-/** The fewest quoted fees a deposit covers, so a deposit's on-chain settle is
- *  not spent on one or two calls. */
-export const DEPOSIT_FLOOR_FEES = 10n;
+/** Keep this much USDC outside the routing channel for provider payments. */
+export const ROUTING_WALLET_RESERVE_ATOMIC = 10_000n;
+/** Buffered top-up for a wallet that cannot fit the normal SDK target. */
+export const SMALL_CHANNEL_DEPOSIT_ATOMIC = 10_000n;
+/** Below ten cents liquid, use the small deposit even when the buffer fits. */
+export const SMALL_WALLET_THRESHOLD_ATOMIC = 100_000n;
 
-/**
- * THE DEPOSIT TENJIN SIGNS: the smallest of the server's hint
- * (the 402's `extra.minDeposit`), the wallet and the per-call limit, so a
- * wallet holding more than the hint keeps the rest for the paid tools routing
- * suggests, which pay from the wallet, never the channel; one between the
- * floor and the hint deposits all it holds. Never below {@link DEPOSIT_FLOOR_FEES}
- * quoted fees or what the next voucher needs, and never above the SDK's
- * ceiling. A balance that could not be read bounds nothing. The caller
- * refuses a wallet below the result (`wallet_low`), and the spend authorizer
- * a limit below it.
- */
+/** Use the SDK target when it fits at ten cents or more; otherwise use the
+ * small target, raised for a larger voucher deficit. Shrink to the balance
+ * above the reserve; zero refuses less than the deficit. Null is doctor's estimate. */
 export function routingDepositAtomic(o: {
-  hintAtomic: bigint;
-  quoteAtomic: bigint;
-  walletAtomic: bigint | null;
+  suggestedAtomic: bigint;
+  neededAtomic: bigint;
+  balanceAtomic: bigint | null;
   perCallAtomic: bigint;
   maxAtomic: bigint;
-  neededAtomic?: bigint;
 }): bigint {
   const least = (a: bigint, b: bigint) => (b < a ? b : a);
-  let amount = least(o.hintAtomic, o.perCallAtomic);
-  if (o.walletAtomic !== null) amount = least(amount, o.walletAtomic);
-  const floor = DEPOSIT_FLOOR_FEES * o.quoteAtomic;
-  const needed = o.neededAtomic ?? 0n;
-  if (amount < floor) amount = floor;
-  if (amount < needed) amount = needed;
-  return least(amount, o.maxAtomic);
+  const target = least(least(o.suggestedAtomic, o.perCallAtomic), o.maxAtomic);
+  if (o.balanceAtomic === null) return target;
+  if (
+    o.balanceAtomic >= SMALL_WALLET_THRESHOLD_ATOMIC &&
+    o.balanceAtomic >= target + ROUTING_WALLET_RESERVE_ATOMIC
+  )
+    return target;
+  const smaller = least(
+    target,
+    o.neededAtomic > SMALL_CHANNEL_DEPOSIT_ATOMIC ? o.neededAtomic : SMALL_CHANNEL_DEPOSIT_ATOMIC,
+  );
+  const available = o.balanceAtomic - ROUTING_WALLET_RESERVE_ATOMIC;
+  const amount = least(smaller, available);
+  return amount > 0n && amount >= o.neededAtomic ? amount : 0n;
 }
 
 /**
@@ -81,61 +82,6 @@ export const SUGGESTED_FUND_USD = '5';
 export const FUNDING_LINE = `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`, or send USDC from a crypto wallet with \`tenjin fund --crypto\`.`;
 /** The funding line under a balance of exactly $0, in `tenjin balance` and `tenjin status`. */
 export const FUND_COMMAND_LINE = 'Add funds with `tenjin fund`, or ask your agent.';
-
-/** The most a fund link's `need` may name as its price (the link route's bound). */
-const NEED_PRICE_MAX_ATOMIC = 100_000_000n;
-/** A `--for` label: the link route takes 1 to 60 characters. */
-const NEED_LABEL_MAX = 60;
-
-/**
- * THE COMMAND THAT OPENS CHECKOUT FOR ONE WAITING CALL: `tenjin fund 5 --for
- * "X post read" --price 0.006`, so the checkout page says what the money is
- * for. The amount is the suggested top-up, or the whole dollars short when
- * that is more. The label keeps only characters that are inert inside double
- * quotes in any shell.
- */
-export function fundForCommand(label: string, priceAtomic: bigint, balanceAtomic = 0n): string {
-  const short = priceAtomic > balanceAtomic ? priceAtomic - balanceAtomic : 0n;
-  const wholeShort = (short + 999_999n) / 1_000_000n;
-  const amount =
-    wholeShort > BigInt(SUGGESTED_FUND_USD) ? wholeShort.toString() : SUGGESTED_FUND_USD;
-  const safe = [
-    ...label
-      .replace(/[^\p{L}\p{N} .,:'()/+&-]/gu, ' ')
-      .replace(/\s+/g, ' ')
-      .trim(),
-  ]
-    .slice(0, NEED_LABEL_MAX)
-    .join('')
-    .trim();
-  const named =
-    safe.length > 0 && priceAtomic > 0n && priceAtomic <= NEED_PRICE_MAX_ATOMIC
-      ? ` --for "${safe}" --price ${atomicToUsd(priceAtomic.toString())}`
-      : '';
-  return `tenjin fund ${amount}${named}`;
-}
-
-/**
- * A PAID CALL THE BALANCE CANNOT COVER, in plain dollars: "This X post read
- * costs $0.006 and your Tenjin balance is $0.00. Add funds with `tenjin fund 5
- * --for "X post read" --price 0.006`." On the person's yes, the agent runs
- * that command, which opens checkout with the call named on the page. A service with no display
- * label is named by its provider ("A call to BlockRun costs …").
- */
-export function shortOfFunds(o: {
-  label?: string | undefined;
-  provider: string;
-  priceAtomic: bigint;
-  balanceAtomic: bigint;
-}): string {
-  const subject = o.label !== undefined ? `This ${o.label}` : `A call to ${o.provider}`;
-  return `${subject} costs $${usd(o.priceAtomic)} and your Tenjin balance is $${usd(o.balanceAtomic)}. ${fundsFix(o.label ?? o.provider, o.priceAtomic, o.balanceAtomic)}`;
-}
-
-/** The "Add funds with …" sentence alone, for a reason that already said what it costs. */
-export function fundsFix(label: string, priceAtomic: bigint, balanceAtomic: bigint): string {
-  return `Add funds with \`${fundForCommand(label, priceAtomic, balanceAtomic)}\`.`;
-}
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 
@@ -192,7 +138,7 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 );
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
-    reason: `the wallet holds less than the $${usd(DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
+    reason: 'the wallet holds less than the deposit Tenjin sets aside for routing',
     fix: `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
