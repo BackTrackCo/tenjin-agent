@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
-import { formatUsdDisplay } from '../lib/money';
+import { atomicToUsd, formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
 import { NO_PAYER, type DecisionRoute } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
@@ -82,6 +82,55 @@ export const SUGGESTED_FUND_USD = '5';
 export const FUNDING_LINE = `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`, or send USDC from a crypto wallet with \`tenjin fund --crypto\`.`;
 /** The funding line under a balance of exactly $0, in `tenjin balance` and `tenjin status`. */
 export const FUND_COMMAND_LINE = 'Add funds with `tenjin fund`, or ask your agent.';
+
+/** The most a fund link's `need` may name as its price (the link route's bound). */
+const NEED_PRICE_MAX_ATOMIC = 100_000_000n;
+/** A `--for` label: the link route takes 1 to 60 characters. */
+const NEED_LABEL_MAX = 60;
+
+/**
+ * THE COMMAND THAT OPENS CHECKOUT FOR ONE WAITING CALL: `tenjin fund 5 --for
+ * "X post read" --price 0.006`, so the checkout page says what the money is
+ * for. The amount is the suggested top-up, or the price in whole dollars when
+ * that is more. The label keeps only characters that are inert inside double
+ * quotes in any shell.
+ */
+export function fundForCommand(label: string, priceAtomic: bigint): string {
+  const wholePrice = (priceAtomic + 999_999n) / 1_000_000n;
+  const amount =
+    wholePrice > BigInt(SUGGESTED_FUND_USD) ? wholePrice.toString() : SUGGESTED_FUND_USD;
+  const safe = [
+    ...label
+      .replace(/[^\p{L}\p{N} .,:'()/+&-]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  ]
+    .slice(0, NEED_LABEL_MAX)
+    .join('')
+    .trim();
+  const named =
+    safe.length > 0 && priceAtomic > 0n && priceAtomic <= NEED_PRICE_MAX_ATOMIC
+      ? ` --for "${safe}" --price ${atomicToUsd(priceAtomic.toString())}`
+      : '';
+  return `tenjin fund ${amount}${named}`;
+}
+
+/**
+ * A PAID CALL REFUSED FOR LOW FUNDS, said with what the money is for: "This X
+ * post read costs $0.006, more than your Tenjin balance. Ask the person once
+ * to add funds; on yes, run `tenjin fund 5 --for "X post read" --price
+ * 0.006`." That command opens checkout with the call named on the page. A
+ * service with no display label is named by its provider ("A call to
+ * BlockRun costs …").
+ */
+export function shortOfFunds(o: {
+  label?: string | undefined;
+  provider: string;
+  priceAtomic: bigint;
+}): string {
+  const subject = o.label !== undefined ? `This ${o.label}` : `A call to ${o.provider}`;
+  return `${subject} costs $${usd(o.priceAtomic)}, more than your Tenjin balance. Ask the person once to add funds; on yes, run \`${fundForCommand(o.label ?? o.provider, o.priceAtomic)}\`.`;
+}
 /** The spend ledger key a deposit's exposure is recorded under, before its id. */
 export const ROUTING_DEPOSIT_KEY = 'routing-deposit:';
 

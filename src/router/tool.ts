@@ -1,4 +1,6 @@
 import {
+  isLowFundsRefusal,
+  LOW_FUNDS_TAIL,
   runPay,
   settlementTx,
   type AdvertisedTerms,
@@ -17,7 +19,7 @@ import {
 } from '../lib/request-schema';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { admitPlan, admitQuote, reopenShortQuote, type PlanSlot } from '../lib/spend-plan';
-import { quoteClosed, readQuote } from '../lib/spend-quotes';
+import { quoteClosed, readQuote, type Quote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
@@ -67,7 +69,7 @@ import {
   type PlanStop,
   type QuotedCall,
 } from './plan';
-import { depositSentence, unpaidSentence, type RouteFor } from './fee';
+import { depositSentence, shortOfFunds, unpaidSentence, type RouteFor } from './fee';
 import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -417,9 +419,25 @@ export async function runApproveTool(
     envelope: {
       ...result.envelope,
       quote: quoteView(quote),
-      nextStep: `Ask the person to add funds with \`tenjin wallet fund\`. The quote stays open for its ten minutes: once the funds arrive, call ${approveCall(quote)} again.`,
+      nextStep: `${shortOfFunds(quoteFor(call, quote))} The quote stays open for its ten minutes: once the funds arrive, call ${approveCall(quote)} again.`,
     },
   };
+}
+
+/**
+ * What a short quote's ask for funds names: the one call's display label, else
+ * its provider, or what a count or a choice set buys, at the quote's total.
+ */
+function quoteFor(
+  call: QuotedCall,
+  quote: Quote,
+): { label?: string | undefined; provider: string; priceAtomic: bigint } {
+  const priceAtomic = BigInt(quote.totalAtomic);
+  if (call.kind === 'spec')
+    return { label: call.spec.label, provider: call.spec.provider, priceAtomic };
+  if (call.kind === 'call')
+    return { label: call.call.label, provider: call.call.provider, priceAtomic };
+  return { label: quote.what, provider: quote.what, priceAtomic };
 }
 
 /** Run an approved quote's call on its slots. */
@@ -1553,9 +1571,11 @@ async function payAndDeliver(
       ? `${call.provider} prices this input at $${toMoney(live).usd}, over this spec's $${toMoney(ceiling).usd} ceiling, so nothing was signed. Change the input (a smaller size, a shorter clip, fewer items) and call again with the same id.`
       : rejectedInput
         ? `${call.provider} rejected this input before any payment (HTTP ${String(detail.status)}): see providerError. Fix the input and call again with the same id.`
-        : cli !== undefined
-          ? `${cli.message} ${agentFixOf(cli)}`.trim()
-          : String(err);
+        : cli !== undefined && isLowFundsRefusal(cli)
+          ? `${shortOfFunds({ label: call.label, provider: call.provider, priceAtomic: leftAtomic })} ${LOW_FUNDS_TAIL}`
+          : cli !== undefined
+            ? `${cli.message} ${agentFixOf(cli)}`.trim()
+            : String(err);
     await footer.done(status, {
       provider: built.url,
       ...named,

@@ -63,6 +63,18 @@ const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
 
+/** A paid leg the seller refused as short of funds (`paymentShortOfFunds`). */
+const LOW_FUNDS_MESSAGE = 'The wallet does not hold enough USDC for this payment.';
+/** What a low-funds refusal says after its ask for funds: the `request` tool
+ *  keeps it behind its own ask, which names the call ({@link isLowFundsRefusal}). */
+export const LOW_FUNDS_TAIL =
+  'The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.';
+
+/** A `runPay` failure that is the seller refusing the payment as short of funds. */
+export function isLowFundsRefusal(err: CliError): boolean {
+  return err.code === 'PAYMENT_FAILED' && err.message === LOW_FUNDS_MESSAGE;
+}
+
 /**
  * What a caller was told this endpoint costs, BEFORE the live 402 is seen. It
  * stands in for the registry lookup on a lane that has one from elsewhere (the
@@ -669,7 +681,7 @@ async function executePay(
   throw new CliError(
     'PAYMENT_FAILED',
     lowFunds
-      ? 'The wallet does not hold enough USDC for this payment.'
+      ? LOW_FUNDS_MESSAGE
       : refusal !== undefined
         ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
         : paid.status === 402
@@ -677,7 +689,7 @@ async function executePay(
           : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
       fix: lowFunds
-        ? 'Ask the person to add funds with `tenjin wallet fund`. The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.'
+        ? `Ask the person once to add funds; on yes, run \`tenjin fund\`. ${LOW_FUNDS_TAIL}`
         : refusal !== undefined
           ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
           : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',

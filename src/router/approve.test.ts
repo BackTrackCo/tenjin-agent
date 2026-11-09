@@ -348,7 +348,9 @@ describe("approve, called through the host's own prompt", () => {
     const d = { ...deps(short.fetchImpl), approves: true };
     const refused = await runApproveTool(args, d);
     expect(refused.envelope).toMatchObject({ status: 'failed', quote: { id: quote.id } });
-    expect(String(refused.envelope.nextStep)).toContain('tenjin wallet fund');
+    expect(String(refused.envelope.nextStep)).toContain(
+      'Ask the person once to add funds; on yes, run `tenjin fund 5',
+    );
     expect(String(refused.envelope.nextStep)).toContain(`approve({quote: "${quote.id}"`);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
     short.fund();
@@ -356,6 +358,25 @@ describe("approve, called through the host's own prompt", () => {
     expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
     expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
     expect(short.refused()).toBe(1);
+  });
+
+  /** WHAT THE MONEY IS FOR: a short quote names its call and price, and the
+   *  fund command carries both to the checkout page. */
+  it('names the call, its price and the fund command when a quote is short of funds', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    await storeSpecs(dir, [{ ...SPEC, label: 'Hailuo video' }]);
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const refused = await runApproveTool(args, { ...deps(short.fetchImpl), approves: true });
+    const ask =
+      'This Hailuo video costs $0.155, more than your Tenjin balance. Ask the person once to add funds; on yes, run `tenjin fund 5 --for "Hailuo video" --price 0.155`.';
+    expect(refused.envelope.nextStep).toBe(
+      `${ask} The quote stays open for its ten minutes: once the funds arrive, call approve({quote: "${quote.id}", total: "$0.155", what: "${quote.what}"}) again.`,
+    );
+    expect(String(refused.envelope.reason)).toContain(ask);
+    expect(String(refused.envelope.reason)).not.toContain('wallet fund');
   });
 
   it('reruns every take of a reopened count once the wallet is funded', async () => {

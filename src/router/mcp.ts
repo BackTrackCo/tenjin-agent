@@ -100,9 +100,9 @@ const INSTRUCTIONS =
   'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin fund 5` (or the ' +
-  'amount they name). When a Tenjin note says a paid call costs more than the balance, ask the ' +
-  'person once whether to add funds, saying what the call is for and what it costs, and run the ' +
-  '`tenjin fund` command it names only on a yes. Opening checkout moves no money. Follow its `nextStep`: ' +
+  'amount they name). When a paid call fails for low balance, ask the person once to add ' +
+  'funds, saying what the call is for and what it costs, and run the `tenjin fund` command it ' +
+  'names only on a yes. Opening checkout moves no money. Follow its `nextStep`: ' +
   'say in a sentence or two what the money is for, run `tenjin balance --wait` in the ' +
   'background so you wake when the money lands, and carry on with the task then. Never ask ' +
   'the person to type "done". Offer funding at most once per session; if they decline, carry ' +
