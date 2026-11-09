@@ -30,6 +30,25 @@ describe('the device name a fund link carries', () => {
     );
   });
 
+  it.each([
+    'DESKTOP-7F3K2LQ',
+    'LAPTOP-91XQ2B7R',
+    'ip-172-31-5-10',
+    'ip-10-0-0-5.ec2.internal',
+    'a3f9c2e1b7d4',
+    'codespaces-1a2b3c',
+    'localhost',
+    '192.168.1.20',
+  ])('leaves out a hostname the machine made up: %s', async (host) => {
+    expect(await deviceName({ platform: 'win32', hostname: () => host })).toBeUndefined();
+  });
+
+  it('keeps a hostname a person chose', async () => {
+    for (const host of ['ada-thinkpad', 'Ada-PC', 'devbox', 'DESKTOP-ADA']) {
+      expect(await deviceName({ platform: 'linux', hostname: () => host })).toBe(host);
+    }
+  });
+
   it('drops controls and direction marks, caps at 64 characters, and never throws', async () => {
     const name = await deviceName({
       platform: 'linux',

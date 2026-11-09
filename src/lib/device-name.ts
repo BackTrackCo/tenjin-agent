@@ -8,10 +8,21 @@ import { hostname } from 'node:os';
  *
  * macOS asks `scutil --get ComputerName`, the name System Settings shows,
  * because `os.hostname()` there is the network name (`adas-mbp.local`).
- * Windows and Linux report the name people set as the hostname. A trailing
- * `.local` is dropped, controls and anything past 64 characters are cut, and
- * nothing here ever throws: a fund link never fails over its label.
+ * Windows and Linux report the hostname, which is often one the machine made
+ * up (`DESKTOP-7F3K2LQ`, `ip-172-31-5-10`, a container id): those read as noise
+ * on a payment page, so they are left out and the page says just "tenjin". A
+ * trailing `.local` is dropped, controls and anything past 64 characters are
+ * cut, and nothing here ever throws: a fund link never fails over its label.
  */
+
+/** Hostnames a machine or a cloud gives itself, never a name a person chose. */
+const GENERATED_HOSTNAME = [
+  /^(desktop|laptop|win)-[a-z0-9]{5,}$/i, // Windows' default names
+  /^ip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}\b/i, // AWS
+  /^[0-9a-f]{12}([0-9a-f]{52})?$/i, // a Docker container id
+  /^codespaces-[0-9a-z]+$/i, // GitHub Codespaces
+  /^(localhost|\d{1,3}(\.\d{1,3}){3})(\.localdomain)?$/i,
+];
 
 const MAX_DEVICE_NAME = 64;
 const SCUTIL = '/usr/sbin/scutil';
@@ -30,7 +41,8 @@ export async function deviceName(deps: DeviceNameDeps = {}): Promise<string | un
     const fromMac = platform === 'darwin' ? await (deps.computerName ?? macComputerName)() : null;
     const named = clean(fromMac ?? '');
     if (named !== undefined) return named;
-    return clean((deps.hostname ?? hostname)());
+    const host = clean((deps.hostname ?? hostname)());
+    return host !== undefined && GENERATED_HOSTNAME.some((re) => re.test(host)) ? undefined : host;
   } catch {
     return undefined;
   }
