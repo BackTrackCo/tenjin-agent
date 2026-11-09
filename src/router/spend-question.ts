@@ -1,6 +1,6 @@
 import { DEFAULT_MAX_AUTO_SPEND, DEFAULT_SESSION_BUDGET } from '../lib/config';
 import { toMoney } from '../lib/money';
-import { MAX_CHANNEL_DEPOSIT_ATOMIC, usd } from './fee';
+import { MAX_CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC, usd } from './fee';
 
 /**
  * THE SPEND QUESTION, ONE TEXT FOR EVERY PLACE THAT ASKS IT: the defaults, or
@@ -41,8 +41,9 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
   };
 }
 
-/** Setup states the current price; payment checks enforce the ceiling in fee.ts. */
-export const ROUTING_FEE_TERMS = `Paid routing currently costs $0.001 per call. Tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for routing; each deposit counts toward your limits once.`;
+/** Setup states the terms with no rate: the router quotes each answer, and
+ *  payment checks enforce the ceiling in fee.ts. */
+export const ROUTING_FEE_TERMS = `Paid routing costs a fee the router quotes for each answer, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}; offers show no fee. Tool charges are separate. Tenjin may set aside up to $${usd(MAX_CHANNEL_DEPOSIT_ATOMIC)} at a time for routing; each deposit counts toward your limits once, when it is sent.`;
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either answer also approves the routing fee.';

@@ -199,6 +199,15 @@ export function depositSentence(amountAtomic: bigint): string {
 }
 
 /**
+ * What a call the wallet could not fund says. Routing has not stopped: an
+ * answer that needs no payment can still come, so the line says only that
+ * this answer went unpaid, and opens no checkout (explicit balance, payment
+ * and doctor results keep `unpaid().fix`).
+ */
+export const WALLET_LOW_SENTENCE =
+  'Tenjin could not pay for this routing answer. Routing answers that need no payment can still work. Your usual tools still work.';
+
+/**
  * The one line the user sees, once per session and reason, when a call was not
  * paid. Its reader picks the fix (B1): the person's by default; for the model
  * (the `request` tool's text) a wallet unlock reason's `agentFix`, which asks
@@ -212,14 +221,8 @@ export function unpaidSentence(
 ): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  // An automatic fallback explains the missing funds without reopening checkout.
-  // Explicit balance/payment/doctor results retain `unpaid().fix`.
-  const fix =
-    why === 'wallet_low'
-      ? 'Your usual tools still work.'
-      : reader === 'agent'
-        ? agentFixFor(why, u.fix)
-        : u.fix;
+  if (why === 'wallet_low') return WALLET_LOW_SENTENCE;
+  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : u.fix;
   const reason =
     why === FEE_ABOVE_CEILING && quotedAtomic !== undefined
       ? `the router quoted $${usd(quotedAtomic)} a call, more than this install agreed to pay`

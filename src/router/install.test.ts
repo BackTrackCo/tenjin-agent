@@ -42,7 +42,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Paid routing currently costs $0.001 per call. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for routing; each deposit counts toward your limits once.';
+  'Paid routing costs a fee the router quotes for each answer, never more than $0.25; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for routing; each deposit counts toward your limits once, when it is sent.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
 const ASK_LINES = [

@@ -95,9 +95,9 @@ const INSTRUCTIONS =
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
   'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs a fee the router ` +
-  `quotes, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)} a call; a wallet on THIS ` +
-  'machine pays it and the provider under the local spend ' +
-  'policy. A call whose total is over the per-call limit or remaining daily budget pays ' +
+  `quotes for each answer, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}; offers show no ` +
+  'fee. A wallet on THIS machine pays it and the provider under the local spend ' +
+  'policy, and a routing deposit counts against that policy once, when it is sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin wallet fund` ' +
   '(with $5 or more), give them the link and follow its `nextStep`. If the host automatically ' +

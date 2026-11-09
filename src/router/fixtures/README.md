@@ -198,10 +198,11 @@ clients without it get `spec_missing`, pointing at `request({query})`.
 
 `POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms,
 behind x402
-`batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). The 402 is the
-only price: this client pays any quote at or below its ceiling of 3000 atomic
-USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the user's spend limits,
-pays nothing above it, and pins no payee. With the fee `off`, the route answers
+`batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15), or at the
+answer's own quote first with 3000 second. The 402 is the only price: this
+client pays the answer's own quote ahead of 3000, at or below its ceiling of
+250000 atomic USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the
+user's spend limits, pays nothing above it, and pins no payee. With the fee `off`, the route answers
 with no 402. An answer from
 a completed Jev gate settles that fee; any other answer settles at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an

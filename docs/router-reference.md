@@ -39,7 +39,7 @@ If a spec declares output fields, the inline result contains those fields and `f
 
 ### Routing fee and deposit
 
-A general routing call goes to the configured router's paid route. `tenjin mcp` uses the x402 SDK to pay the quoted fee only in USDC on Base, under a $0.003 ceiling and the local spend policy. The provider's price is checked against its own spec, independently of this fee ceiling. A decision can charge a routing fee even when it suggests no tool.
+A general routing call goes to the configured router's paid route. `tenjin mcp` uses the x402 SDK to pay the quoted fee only in USDC on Base, under a $0.25 ceiling and the local spend policy. It pays the answer's own quote ahead of the router's fixed $0.003 quote, and the fixed quote only when it is the only offer. The provider's price is checked against its own spec, independently of this fee ceiling. A decision can charge a routing fee even when it suggests no tool.
 
 Routing uses a channel funded by deposits. When another fee cannot fit, the deposit is bounded by the server's current hint, available wallet balance and `maxAutoSpend`, with a floor of ten quoted fees and the SDK ceiling of $0.25. The server hint is live data, not a fixed amount in this document. Unused deposited funds remain in the routing channel and do not pay provider calls.
 
