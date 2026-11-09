@@ -37,33 +37,30 @@ export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
  *  `depositMultiplier` (`routing-payer.ts`). */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
-/** The fewest quoted fees a deposit covers, so a deposit's on-chain settle is
- *  not spent on one or two calls. */
-export const DEPOSIT_FLOOR_FEES = 10n;
+/** Keep this much USDC outside the routing channel for provider payments. */
+export const ROUTING_WALLET_RESERVE_ATOMIC = 10_000n;
+/** Buffered top-up for a wallet that cannot fit the normal SDK target. */
+export const SMALL_CHANNEL_DEPOSIT_ATOMIC = 10_000n;
 
-/**
- * THE DEPOSIT TENJIN SIGNS: the smaller of the server's hint (the 402's
- * `extra.minDeposit`) and the per-call limit, never below
- * {@link DEPOSIT_FLOOR_FEES} quoted fees or what the next voucher needs, and
- * never above the SDK's ceiling. Nothing reads the wallet first: the
- * facilitator checks the balance when it verifies the deposit, and a wallet
- * below it is refused there (`wallet_low`). The spend authorizer refuses a
- * limit below it.
- */
+/** Use the SDK target when it leaves the reserve; otherwise use the small
+ * deposit, raised only as far as the next voucher requires. Zero refuses a
+ * top-up that would spend the reserve. Null is doctor's unknown estimate. */
 export function routingDepositAtomic(o: {
-  hintAtomic: bigint;
-  quoteAtomic: bigint;
+  suggestedAtomic: bigint;
+  neededAtomic: bigint;
+  balanceAtomic: bigint | null;
   perCallAtomic: bigint;
   maxAtomic: bigint;
-  neededAtomic?: bigint;
 }): bigint {
   const least = (a: bigint, b: bigint) => (b < a ? b : a);
-  let amount = least(o.hintAtomic, o.perCallAtomic);
-  const floor = DEPOSIT_FLOOR_FEES * o.quoteAtomic;
-  const needed = o.neededAtomic ?? 0n;
-  if (amount < floor) amount = floor;
-  if (amount < needed) amount = needed;
-  return least(amount, o.maxAtomic);
+  const target = least(least(o.suggestedAtomic, o.perCallAtomic), o.maxAtomic);
+  if (o.balanceAtomic === null) return target;
+  if (o.balanceAtomic >= target + ROUTING_WALLET_RESERVE_ATOMIC) return target;
+  const smaller = least(
+    target,
+    o.neededAtomic > SMALL_CHANNEL_DEPOSIT_ATOMIC ? o.neededAtomic : SMALL_CHANNEL_DEPOSIT_ATOMIC,
+  );
+  return o.balanceAtomic >= smaller + ROUTING_WALLET_RESERVE_ATOMIC ? smaller : 0n;
 }
 
 /**

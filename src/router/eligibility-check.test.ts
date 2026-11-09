@@ -9,7 +9,7 @@ import type { SpendPolicy } from '../lib/policy';
 import type { WalletProvider, WalletVerification } from '../lib/wallet/provider';
 import { ENV_PASSPHRASE_WRONG, type SigningSource } from '../lib/wallet-unlock';
 import { checkEligibility, type EligibilityInput } from './eligibility-check';
-import { CHANNEL_DEPOSIT_ATOMIC, DEPOSIT_FLOOR_FEES, ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC } from './fee';
 import { WALLET_REASONS } from './wallet-reasons';
 
 const ADDRESS = ('0x' + 'ab'.repeat(20)) as Address;
@@ -77,11 +77,11 @@ function input(over: Partial<EligibilityInput> = {}): EligibilityInput {
 describe('checkEligibility', () => {
   it.each<[string, bigint, bigint, string]>([
     ['$0.21 wallet, room for its $0.05', 210_000n, 50_000n, 'ready'],
-    ['$0.21 wallet, room one unit short', 210_000n, 49_999n, 'blocked'],
+    ['$0.21 wallet, room for its buffer', 210_000n, 49_999n, 'blocked'],
     // A big wallet signs the hint too, not the $0.25 ceiling.
     ['$0.50 wallet, room for its $0.05', 500_000n, 50_000n, 'ready'],
     ['$0.50 wallet, room one unit short', 500_000n, 49_999n, 'blocked'],
-    // The payer signs the same deposit with no balance read, so a $0.10
+    // The payer signs the same balance-sized deposit, so a $0.10
     // budget routes a $0.25 wallet.
     ['$0.25 wallet, $0.10 of room', 250_000n, 100_000n, 'ready'],
   ])(
@@ -106,7 +106,7 @@ describe('checkEligibility', () => {
     const e = await checkEligibility(
       input({
         provider: fakeProvider({ verify: async () => verified('keychain') }),
-        readBalance: async () => CHANNEL_DEPOSIT_ATOMIC - 1n,
+        readBalance: async () => 19_999n,
       }),
     );
     expect(e.canPayRouting).toMatchObject({ status: 'blocked', reason: 'wallet_low' });
@@ -241,10 +241,10 @@ describe('checkEligibility', () => {
     await writeWallet();
     const e = await checkEligibility(
       input({
-        // Under ten fees at the ceiling: a limit above that only sizes the deposit down.
+        // Below the next voucher: a higher limit can size the buffer down.
         policy: {
           ...POLICY,
-          maxAutoSpendAtomic: DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC - 1n,
+          maxAutoSpendAtomic: ROUTING_FEE_CEILING_ATOMIC - 1n,
         },
         provider: fakeProvider({ verify: async () => verified('keychain') }),
       }),

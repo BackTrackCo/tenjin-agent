@@ -137,12 +137,12 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit the payer would sign, from the production server's hint and
-  // with no quote to go on but the ceiling, evaluated against the whole
-  // policy as the payer's is. Neither reads the balance to size it.
+  // Doctor has no live SDK quote; estimate the announced target and the
+  // known fee ceiling using the same liquidity policy as the deposit strategy.
   const depositAtomic = routingDepositAtomic({
-    hintAtomic: CHANNEL_DEPOSIT_ATOMIC,
-    quoteAtomic: ROUTING_FEE_CEILING_ATOMIC,
+    suggestedAtomic: CHANNEL_DEPOSIT_ATOMIC,
+    neededAtomic: ROUTING_FEE_CEILING_ATOMIC,
+    balanceAtomic,
     perCallAtomic: input.policy.maxAutoSpendAtomic,
     maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
   });

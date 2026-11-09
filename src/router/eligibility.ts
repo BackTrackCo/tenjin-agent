@@ -147,8 +147,8 @@ export function canSign(f: SignFacts): SignVerdict {
  * Definite money facts come AHEAD of an unknown signer (decision 11): a
  * command-mode hook cannot unlock, so its signer is always unknown, and a
  * balance below the deposit must still withhold there as it does today. The
- * payer reads no balance: the facilitator refuses a deposit the wallet cannot
- * cover, so a balance read here predicts that refusal. A
+ * payer reads the balance only when depositing and uses the same liquidity
+ * bounds as this doctor estimate. A
  * channel that already holds the fee needs no deposit, so neither the deposit
  * policy nor the balance matters to it (checklist item 8: $0 with credit).
  */
@@ -157,7 +157,7 @@ export function canPayRouting(r: RoutingFacts): Verdict {
   if (r.sign.status === 'blocked') return r.sign;
   if ((r.creditAtomic ?? 0n) >= ROUTING_FEE_CEILING_ATOMIC) return r.sign;
   if (r.depositRefusal !== null) return moneyBlocked(r.depositRefusal);
-  if (r.balanceAtomic !== null && r.balanceAtomic < r.depositAtomic) {
+  if (r.balanceAtomic !== null && (r.depositAtomic === 0n || r.balanceAtomic < r.depositAtomic)) {
     return moneyBlocked('wallet_low');
   }
   if (r.sign.status === 'unknown') return r.sign;

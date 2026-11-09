@@ -1,8 +1,8 @@
 /**
  * Base USDC's address and one `balanceOf` over plain JSON-RPC, for the
  * commands that read a balance on request (`tenjin status`, `tenjin doctor`).
- * No viem on purpose: one `eth_call` needs nothing viem adds. The hooks never
- * read a balance; the facilitator's check on a deposit is theirs.
+ * No viem on purpose: one `eth_call` needs nothing viem adds. Routing reads
+ * only before a channel deposit to preserve liquid provider funds.
  * `usdc.ts` keeps the viem client for the send path and re-exports the
  * address from here.
  */

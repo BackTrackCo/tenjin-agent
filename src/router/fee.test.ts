@@ -25,29 +25,40 @@ const ALL_KEYS = [
 ];
 
 describe('routingDepositAtomic', () => {
-  /** The deposit: the smaller of the hint and the per-call limit, never
-   *  below ten quoted fees, never above the SDK's ceiling. No balance. */
-  const size = (o: { hint?: bigint; quote?: bigint; perCall?: bigint; needed?: bigint }) =>
+  const size = (o: {
+    suggested?: bigint;
+    needed?: bigint;
+    balance?: bigint | null;
+    perCall?: bigint;
+  }) =>
     routingDepositAtomic({
-      hintAtomic: o.hint ?? CHANNEL_DEPOSIT_ATOMIC,
-      quoteAtomic: o.quote ?? 3_000n,
+      suggestedAtomic: o.suggested ?? 50_000n,
+      neededAtomic: o.needed ?? 600n,
+      balanceAtomic: o.balance === undefined ? 1_000_000n : o.balance,
       perCallAtomic: o.perCall ?? 250_000n,
       maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
-      ...(o.needed !== undefined ? { neededAtomic: o.needed } : {}),
     });
-
   it.each<[string, Parameters<typeof size>[0], bigint]>([
-    ['the hint', {}, CHANNEL_DEPOSIT_ATOMIC],
-    ['a per-call limit below the hint', { quote: 1_000n, perCall: 15_000n }, 15_000n],
-    ['ten quoted fees, over a smaller limit', { perCall: 2_000n }, 30_000n],
-    ['what the next voucher needs, over the floor', { needed: 60_000n }, 60_000n],
+    ['a funded wallet keeps the SDK buffer', {}, 50_000n],
+    ['the exact normal boundary preserves one cent', { balance: 60_000n }, 50_000n],
+    ['one unit below the normal boundary uses one cent', { balance: 59_999n }, 10_000n],
+    ['the exact small boundary preserves one cent', { balance: 20_000n }, 10_000n],
+    ['one unit below the small boundary skips the top-up', { balance: 19_999n }, 0n],
+    ['a wallet below one cent skips the top-up', { balance: 9_999n }, 0n],
     [
-      'a bigger hint, up to the ceiling',
-      { hint: 1_000_000n, perCall: 1_000_000n },
-      MAX_CHANNEL_DEPOSIT_ATOMIC,
+      'a larger voucher deficit still fits above the reserve',
+      { needed: 30_000n, balance: 40_000n },
+      30_000n,
     ],
-  ])('signs %s', (_label, o, signed) => {
-    expect(size(o)).toBe(signed);
+    [
+      'a smaller SDK target stays smaller',
+      { suggested: 5_000n, needed: 1_000n, balance: 15_000n },
+      5_000n,
+    ],
+    ['a per-call bound reduces the buffer', { perCall: 15_000n }, 15_000n],
+    ['an oversized hint still meets the deposit ceiling', { suggested: 1_000_000n }, 250_000n],
+  ])('%s', (_label, o, amount) => {
+    expect(size(o)).toBe(amount);
   });
 });
 

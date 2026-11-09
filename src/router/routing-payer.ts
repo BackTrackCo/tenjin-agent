@@ -4,7 +4,6 @@ import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/clien
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import {
   BatchSettlementEvmScheme,
-  parseAnnouncedMinDeposit,
   type BatchSettlementDepositStrategyContext,
 } from '@x402/evm/batch-settlement/client';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
@@ -27,7 +26,6 @@ import {
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import {
-  CHANNEL_DEPOSIT_ATOMIC,
   FEE_ABOVE_CEILING,
   feeRefusal,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
@@ -76,16 +74,18 @@ export { reasonCode } from '../lib/payment-failure';
  *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
- *   ({@link routingDepositAtomic}: the smaller of the 402's `extra.minDeposit`
- *   and the per-call limit, never below ten quoted fees) and reserves it
- *   through the local spend authorizer, so it counts against the per-call
+ *   (the SDK target, bounded by {@link routingDepositAtomic} using a
+ *   deposit-only balance read, a $0.01 small-wallet target and a $0.01
+ *   liquid reserve) and reserves it through the local spend authorizer,
+ *   so it counts against the per-call
  *   limit, the rolling daily budget and the creator allowlist like any other;
  *   it counts from the moment it is sent, and only an answered 4xx or 5xx
  *   gives it back. The deposit is the spend: each fee
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
- * - THE FACILITATOR IS THE BALANCE CHECK. Nothing reads the wallet before a
- *   deposit. A 402 that `paymentShortOfFunds` reads as low funds (a reason
+ * - A DEPOSIT READS THE BALANCE ONCE, bounded by the call deadline.
+ *   Ordinary vouchers make no balance read. The facilitator still checks
+ *   funds. A 402 that `paymentShortOfFunds` reads as low funds (a reason
  *   code of `insufficient_funds`, `invalid_exact_evm_insufficient_funds`, or
  *   one ending in `insufficient_balance`) skips the call as `wallet_low`,
  *   with no retry.
@@ -194,6 +194,8 @@ export interface RoutingPayerDeps {
   policy: () => Promise<SpendPolicy>;
   /** The local spend authorizer over that policy (`createLocalSpendAuthorizer`). */
   authorizer: (policy: SpendPolicy) => SpendAuthorizer;
+  /** One bounded balance read only when the SDK needs a deposit. */
+  walletBalance: (address: string, timeoutMs: number) => Promise<bigint | null>;
   /** Chain reads for the SDK's channel recovery. */
   readContract?: ChainRead;
   fetchImpl?: typeof fetch;
@@ -743,38 +745,28 @@ export class RoutingPayer {
     throw new RouteSkipped(why);
   }
 
-  /**
-   * THE SDK'S `depositStrategy`, called right before it signs a deposit: the
-   * size and the refusals.
-   *
-   * THE SIZE is {@link routingDepositAtomic}: the smaller of the 402's
-   * `extra.minDeposit` ({@link CHANNEL_DEPOSIT_ATOMIC} when it has none) and
-   * the per-call limit, never below ten quoted fees, and inside the SDK's
-   * ceiling (cap × multiplier). Nothing reads the wallet first: the
-   * facilitator refuses a deposit the wallet cannot cover, and
-   * {@link RoutingPayer.pay} skips that call as `wallet_low`. A spend the
-   * authorizer denies (the per-call limit, the daily budget, the creator
-   * allowlist) refuses it here, and the call is not paid.
-   */
+  /** Use the SDK's target and voucher deficit, with local liquidity bounds.
+   * The balance read happens only for a deposit; vouchers use channel credit. */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
     const policy = await this.deps.policy();
-    const quote = BigInt(ctx.requestAmount);
-    if (call.until - this.now() <= 0) this.refuse('busy');
-    const sdkMax = ctx.maxDeposit === undefined ? null : BigInt(ctx.maxDeposit);
+    const needed = BigInt(ctx.minimumDepositAmount);
+    const sdkMax =
+      ctx.maxDeposit === undefined ? MAX_CHANNEL_DEPOSIT_ATOMIC : BigInt(ctx.maxDeposit);
+    const max = sdkMax < MAX_CHANNEL_DEPOSIT_ATOMIC ? sdkMax : MAX_CHANNEL_DEPOSIT_ATOMIC;
+    if (needed > max || needed > policy.maxAutoSpendAtomic) this.refuse('limit_below_deposit');
+    const balance = await this.depositBalance(ctx.channelConfig.payer);
+    if (balance < needed) this.refuse('wallet_low');
     const amount = routingDepositAtomic({
-      hintAtomic:
-        parseAnnouncedMinDeposit(ctx.paymentRequirements.extra?.['minDeposit'], quote) ??
-        CHANNEL_DEPOSIT_ATOMIC,
-      quoteAtomic: quote,
+      suggestedAtomic: BigInt(ctx.depositAmount),
+      neededAtomic: needed,
+      balanceAtomic: balance,
       perCallAtomic: policy.maxAutoSpendAtomic,
-      maxAtomic:
-        sdkMax !== null && sdkMax < MAX_CHANNEL_DEPOSIT_ATOMIC
-          ? sdkMax
-          : MAX_CHANNEL_DEPOSIT_ATOMIC,
-      neededAtomic: BigInt(ctx.minimumDepositAmount),
+      maxAtomic: max,
     });
+    if (amount === 0n) this.refuse('wallet_low');
+    if (call.until - this.now() <= 0) this.refuse('busy');
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
       mode: 'automatic',
@@ -793,6 +785,28 @@ export class RoutingPayer {
       state: 'signed',
     });
     return amount;
+  }
+
+  /** A failed or late balance read sends no new deposit or authorization. */
+  private async depositBalance(address: string): Promise<bigint> {
+    const left = (this.call?.until ?? 0) - this.now() - PAID_CALL_RESERVE_MS;
+    if (left <= 0) this.refuse('busy');
+    const timeoutMs = Math.min(RPC_TIMEOUT_MS, left);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const balance = await Promise.race([
+        this.deps.walletBalance(address, timeoutMs),
+        new Promise<null>((resolve) => {
+          timer = this.timers.setTimeout(() => resolve(null), timeoutMs);
+        }),
+      ]);
+      if (balance === null || balance < 0n) this.refuse('chain_unreadable');
+      return balance;
+    } catch {
+      this.refuse('chain_unreadable');
+    } finally {
+      this.timers.clearTimeout(timer);
+    }
   }
 
   /**

@@ -123,7 +123,7 @@ Example provider prices vary by tool and inputs and exclude Tenjin's routing fee
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $0.25   |
 
-A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. When the routing channel needs funds, Tenjin deposits the smaller of the server's current hint and your per-call limit, with a floor of ten quoted fees and a $0.25 ceiling. The deposit counts toward automatic spending once; fees drawn from it do not count again, and unused funds remain yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. When the routing channel needs funds, Tenjin reads your USDC balance once and uses the SDK's deposit target, usually $0.05, within your per-call limit and a $0.25 ceiling. It leaves $0.01 liquid for provider payments. If the normal target will not fit, it uses $0.01 or the next voucher's larger shortfall; if that would consume the reserve, it skips the top-up. The deposit counts toward automatic spending once; fees drawn from it do not count again, and unused funds remain yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 

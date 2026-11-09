@@ -283,6 +283,7 @@ export function payerDeps(
         policy,
         ...(overrides.now !== undefined ? { now: overrides.now } : {}),
       }),
+    walletBalance: async () => router.walletAtomic ?? 10_000_000n,
     readContract: router.readContract as never,
     fetchImpl: router.fetch,
     warn: () => undefined,
