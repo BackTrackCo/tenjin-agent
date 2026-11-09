@@ -1,6 +1,7 @@
 import {
   runPay,
   settlementTx,
+  signInForPoll,
   type AdvertisedTerms,
   type PaidLeg,
   type PayDeps,
@@ -73,6 +74,7 @@ import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
+  extensionFor,
   MAX_MEDIA_FILES,
   mediaUrlsIn,
   reconcilePayments,
@@ -1489,6 +1491,8 @@ async function payAndDeliver(
       providerError?: string;
       /** The seller's reason for not settling, from its payment-response header. */
       settlementError?: string;
+      /** The seller's reason for refusing the payment, from its PAYMENT-REQUIRED header. */
+      paymentError?: string;
       /** Where a long job's result will be, named by the seller before the paid
        *  leg timed out. */
       statusUrl?: string;
@@ -1564,11 +1568,14 @@ async function payAndDeliver(
     });
     // An authorization that left is a paid call whatever came back: recorded
     // with its settlement unknown, for `tenjin payments reconcile` to resolve.
+    // A failure the chain already shows was charged (`runPay` read it) is
+    // recorded settled.
     if (leftAtomic > 0n) {
       await appendPaidRecord(
         deps.ctx.dataDir,
         paidRecord(call, built.url, call.sent, leftAtomic, {
           ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+          ...(detail.settlement === 'settled' ? { settled: true } : {}),
           savedFiles: [],
           ...(deps.now !== undefined ? { now: deps.now } : {}),
         }),
@@ -1601,6 +1608,9 @@ async function payAndDeliver(
         ...(typeof detail.settlementError === 'string'
           ? { settlementError: detail.settlementError }
           : {}),
+        // THE SELLER'S REASON FOR REFUSING THE PAYMENT, from its 402's own
+        // PAYMENT-REQUIRED header, which the body may not repeat.
+        ...(typeof detail.paymentError === 'string' ? { paymentError: detail.paymentError } : {}),
         // WHAT WAS SENT, on a failure too: the agent cannot match a 400 to a
         // field it cannot see.
         request: { method: built.method, url: built.url },
@@ -1993,14 +2003,21 @@ function failedNextStep(txHash: string | undefined): string {
     : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
 }
 
-/** The poll's seams, and who is told of each poll. */
+/** The poll's seams, who is told of each poll, and the wallet a seller's
+ *  sign-in challenge is answered with: the one the provider leg pays with. */
 function pollDeps(deps: RequestToolDeps): PollDeps {
+  const provider = deps.provider ?? deps.payDeps?.provider;
   return {
     ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     ...(deps.onPoll !== undefined ? { onPoll: deps.onPoll } : {}),
+    signIn: (challenge, url) =>
+      signInForPoll(challenge, url, deps.ctx, {
+        ...(provider !== undefined ? { provider } : {}),
+        ...(deps.now !== undefined ? { now: deps.now } : {}),
+      }),
   };
 }
 
@@ -2472,7 +2489,8 @@ export function failureOutcome(
   }
 }
 
-/** One ledger line for a paid call; the settlement is known only with a tx. */
+/** One ledger line for a paid call; the settlement is known only with a tx,
+ *  or once the chain shows the authorization used (`settled`). */
 function paidRecord(
   decision: { capabilityId: string; provider: string; label?: string },
   url: string,
@@ -2481,6 +2499,7 @@ function paidRecord(
   opts: {
     txHash?: string;
     authorization?: SignedAuthorization;
+    settled?: boolean;
     savedFiles: string[];
     now?: () => number;
   },
@@ -2495,43 +2514,10 @@ function paidRecord(
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
     ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
-    settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
+    settlement: opts.txHash !== undefined || opts.settled === true ? 'settled' : 'unknown',
     savedFiles: opts.savedFiles,
     ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
   };
-}
-
-/** Extensions for the media types a paid lookup plausibly returns; any other
- *  type, `text/html` from a seller included, is saved as `.bin`. */
-const EXTENSIONS: Record<string, string> = {
-  'audio/mpeg': 'mp3',
-  'audio/mp3': 'mp3',
-  'audio/wav': 'wav',
-  'audio/x-wav': 'wav',
-  'audio/wave': 'wav',
-  'audio/ogg': 'ogg',
-  'audio/aac': 'aac',
-  'audio/flac': 'flac',
-  'audio/webm': 'webm',
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'image/svg+xml': 'svg',
-  'image/avif': 'avif',
-  'audio/mp4': 'm4a',
-  'audio/x-m4a': 'm4a',
-  'video/quicktime': 'mov',
-  'video/mp4': 'mp4',
-  'video/webm': 'webm',
-  'application/pdf': 'pdf',
-  'application/zip': 'zip',
-  'application/octet-stream': 'bin',
-};
-
-export function extensionFor(contentType: string): string {
-  const type = contentType.split(';')[0]!.trim().toLowerCase();
-  return EXTENSIONS[type] ?? 'bin';
 }
 
 /**
@@ -2719,6 +2705,9 @@ export interface FailExtras {
   /** Why the seller says it did not settle a signed payment, bounded and
    *  redacted. Provider content. */
   settlementError?: string;
+  /** Why the seller refused a payment, from its 402's PAYMENT-REQUIRED
+   *  header, bounded and redacted. Provider content. */
+  paymentError?: string;
   /** Where a long job's result will be, as the seller named it. Provider content. */
   statusUrl?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
@@ -2793,6 +2782,7 @@ export function fail(
       ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
       ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
       ...(extras.settlementError !== undefined ? { settlementError: extras.settlementError } : {}),
+      ...(extras.paymentError !== undefined ? { paymentError: extras.paymentError } : {}),
       ...(extras.statusUrl !== undefined ? { statusUrl: extras.statusUrl } : {}),
       ...(extras.request !== undefined ? { request: extras.request } : {}),
       ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),

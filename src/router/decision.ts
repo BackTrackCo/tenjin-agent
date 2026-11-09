@@ -217,9 +217,10 @@ export const POLL_REFERENCE = /^\$(input|result)\.([A-Za-z_][A-Za-z0-9_]{0,63})$
  * the status is (a field or header of the submit's answer, or one fixed URL),
  * how a poll is sent, what says it is still running or failed, how often and
  * how long to poll, and how many hours the job can be resumed. `always`: the
- * seller never answers inline. A poll is never signed: the take's one payment
- * is its submit. Every field is the server's: the poll and complete URLs are
- * still checked here against the submit's host (`jobs.ts`).
+ * seller never answers inline. A poll never carries a payment: the take's one
+ * payment is its submit. It signs in only to answer the seller's own sign-in
+ * challenge (`jobs.ts`). Every field is the server's: the poll and complete
+ * URLs are still checked here against the submit's host (`jobs.ts`).
  */
 export const JobSchema = z
   .object({

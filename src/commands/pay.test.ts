@@ -17,9 +17,15 @@ import lowFundsFixtures from '../lib/fixtures/low-funds.json';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
-import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
+import { parseSIWxHeader, verifySIWxSignature } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
-import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
+import {
+  buildPaymentRequired,
+  buildSignInChallenge,
+  testSigner,
+  testWalletProvider,
+  withBuilderCode,
+} from '../lib/read-test-utils';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import { buildSpecRequest } from '../router/spec-call';
 import type { ToolSpec } from '../router/decision';
@@ -73,7 +79,30 @@ async function planned(amountAtomic: bigint): Promise<PlanSlot> {
 const PUBLIC_DNS = {
   readBalance: async () => 100_000_000n,
   destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
+  chainFetch: chain(false).fetch,
 };
+
+/**
+ * USDC on Base, answering `authorizationState` with `used` for every
+ * authorization: what a failed paid call reads to say whether it was charged.
+ */
+function chain(used: boolean): { fetch: typeof fetch; asked: () => number } {
+  let asked = 0;
+  const impl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const { method } = JSON.parse(String(init?.body)) as { method: string };
+    if (method !== 'eth_call') throw new Error(`unscripted RPC ${method}`);
+    asked += 1;
+    return new Response(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        result: `0x${(used ? 1 : 0).toString(16).padStart(64, '0')}`,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  return { fetch: impl, asked: () => asked };
+}
 
 function fakeAuthorizer(
   decision: SpendAuthorization['decision'],
@@ -839,6 +868,262 @@ describe('runPay, the sign-in-with-x extension', () => {
     };
     expect(payload.domain).toBe('seller.example');
     expect(payload.uri).toContain('https://seller.example');
+  });
+});
+
+describe('runPay, a seller that asks only for a sign-in', () => {
+  const POLL_URL = 'https://seller.example/v1/runs/R1';
+
+  /** Pays FOREIGN_URL once, as `tenjin pay` paid Monid's run: the paid ledger
+   *  then holds this wallet's payment to the host. */
+  async function payTheRun(): Promise<void> {
+    await writeConfig();
+    stubRegistry(() => json(200, registryListing(FOREIGN_URL, LIVE_ACCEPT)));
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(202, { runId: 'R1', status: 'RUNNING', pollUrl: POLL_URL }),
+    ]);
+    await runPay({ url: FOREIGN_URL, data: '{"provider":"crunchbase"}' }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+  }
+
+  // Monid's async runs: 22 paid runs waited uncollected because `tenjin pay`
+  // stopped at the empty `accepts`.
+  it("signs the seller's own challenge for a host this wallet paid, and pays nothing", async () => {
+    await payTheRun();
+    expect(await readPaidRecords(dir)).toMatchObject([{ url: FOREIGN_URL, settlement: 'unknown' }]);
+    const challenge = buildSignInChallenge(POLL_URL);
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': challenge.header }),
+      json(200, { runId: 'R1', status: 'COMPLETED', output: { rounds: 3 } }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    const result = await runPay({ url: POLL_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    });
+    expect(result.data).toMatchObject({
+      paid: false,
+      signedIn: true,
+      status: 200,
+      body: { status: 'COMPLETED' },
+    });
+    expect(calls).toHaveLength(2);
+    const header = calls[1]!.headers['sign-in-with-x'];
+    const payload = parseSIWxHeader(header!);
+    expect(payload).toMatchObject({
+      domain: 'seller.example',
+      nonce: challenge.nonce,
+      chainId: 'eip155:8453',
+      address: testSigner().address,
+    });
+    expect(await verifySIWxSignature(payload)).toMatchObject({ isValid: true });
+    expect(calls.every((call) => call.headers['payment-signature'] === undefined)).toBe(true);
+    expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'a host this wallet has not paid',
+      paid: false,
+      over: {},
+      reason: 'sign_in_unpaid',
+    },
+    {
+      name: 'a challenge naming another domain',
+      paid: true,
+      over: { domain: 'evil.example' },
+      reason: 'sign_in_origin',
+    },
+    {
+      name: 'a challenge whose uri is on another origin',
+      paid: true,
+      over: { uri: 'https://evil.example/x402/v1/runs/R1' },
+      reason: 'sign_in_origin',
+    },
+  ])('signs nothing for $name, and opens no wallet', async ({ paid, over, reason }) => {
+    if (paid) await payTheRun();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(POLL_URL, over).header }),
+    ]);
+    const getSigner = vi.fn(async () => testSigner());
+    await expect(
+      runPay({ url: POLL_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: { ...testWalletProvider(), getSigner },
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({ code: 'REFUSED', details: { reason, signIn: true } });
+    expect(calls).toHaveLength(1);
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  it('pays nothing when the seller answers the sign-in with another 402, even one with a price', async () => {
+    await payTheRun();
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(POLL_URL).header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+    ]);
+    const authorizer = fakeAuthorizer('allow');
+    await expect(
+      runPay({ url: POLL_URL, yes: true }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer,
+      }),
+    ).rejects.toMatchObject({
+      code: 'API_UNREACHABLE',
+      message: "seller.example did not accept this wallet's sign-in.",
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.headers['payment-signature'] === undefined)).toBe(true);
+    expect(authorizer.authorize).not.toHaveBeenCalled();
+  });
+
+  it('quotes it as a sign-in, opening no wallet', async () => {
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(POLL_URL).header }),
+    ]);
+    const getSigner = vi.fn(async () => testSigner());
+    const result = await runPay({ url: POLL_URL, quote: true }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: { ...testWalletProvider(), getSigner },
+    });
+    expect(result.data).toMatchObject({ quote: true, signIn: true, accepts: [] });
+    expect(result.humanLines?.[0]).toContain('asks the wallet that paid it to sign in');
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  it("leaves the router's provider leg to refuse it, as before", async () => {
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(FOREIGN_URL).header }),
+    ]);
+    await expect(
+      runPay(
+        {
+          url: FOREIGN_URL,
+          terms: { maxAmountAtomic: '100000', payTo: LIVE_ACCEPT.payTo },
+          admit: planned,
+        },
+        makeCtx(),
+        {
+          ...PUBLIC_DNS,
+          fetchImpl: fetch,
+          provider: testWalletProvider(),
+          authorizer: fakeAuthorizer('allow'),
+        },
+      ),
+    ).rejects.toBeInstanceOf(CliError);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('runPay, a binary body', () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+
+  // agent402's PNG screenshot came back garbled: the body was read as text.
+  it('saves a paid file whole and returns its path, never the bytes as text', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } }),
+    ]);
+    const result = await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    const data = result.data as Record<string, unknown>;
+    expect(data).toMatchObject({ paid: true, contentType: 'image/png', bytes: PNG.byteLength });
+    expect(data).not.toHaveProperty('bodyBytes');
+    const savedTo = data.savedTo as string;
+    expect(savedTo.startsWith(join(dir, 'downloads'))).toBe(true);
+    expect(savedTo.endsWith('.png')).toBe(true);
+    expect(new Uint8Array(await readFile(savedTo))).toEqual(PNG);
+    expect(result.humanLines?.join('\n')).toContain(savedTo);
+    expect((await readPaidRecords(dir))[0]).toMatchObject({ savedFiles: [savedTo] });
+  });
+});
+
+describe('runPay, a paid call that failed', () => {
+  // AnyAPI and Orthogonal refused settlement; a v2 seller's reason rides only
+  // in the 402's PAYMENT-REQUIRED header, which the failure dropped.
+  it("keeps the seller's PAYMENT-REQUIRED error", async () => {
+    const fixture = buildPaymentRequired();
+    const refused = buildPaymentRequired({}, { error: 'payment settlement failed; please retry' });
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(402, {}, { 'PAYMENT-REQUIRED': refused.header }),
+    ]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({
+      code: 'PAYMENT_FAILED',
+      message: 'Payment was not accepted by the endpoint: payment settlement failed; please retry.',
+      details: { paymentError: 'payment settlement failed; please retry', settlement: 'unknown' },
+    });
+  });
+
+  // AiSpace's voiceover queue refused the input with a 400 after the payment
+  // settled: the failure said settlement was unknown for money already taken.
+  it('reads the authorization on-chain and calls a used one charged, recorded settled', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(400, { error: 'Invalid request parameters' }),
+    ]);
+    const used = chain(true);
+    const err = (await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      chainFetch: used.fetch,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    }).catch((e: unknown) => e)) as CliError;
+    expect(err).toMatchObject({
+      code: 'PAYMENT_FAILED',
+      message:
+        'The endpoint answered 400 on the paid request. The chain shows the authorization was used, so it was charged.',
+      details: { status: 400, settlement: 'settled', amountAtomic: '100000' },
+    });
+    expect(used.asked()).toBe(1);
+    expect(await readPaidRecords(dir)).toMatchObject([{ settlement: 'settled' }]);
+  });
+
+  it('leaves an authorization the chain shows unused unknown, never not charged', async () => {
+    const fixture = buildPaymentRequired();
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': fixture.header }),
+      json(400, { error: 'Invalid request parameters' }),
+    ]);
+    const unused = chain(false);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        chainFetch: unused.fetch,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({ details: { settlement: 'unknown' } });
+    expect(unused.asked()).toBe(1);
+    expect(await readPaidRecords(dir)).toMatchObject([{ settlement: 'unknown' }]);
   });
 });
 

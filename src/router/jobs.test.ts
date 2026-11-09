@@ -2,7 +2,14 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
+import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
+import {
+  buildPaymentRequired,
+  buildSignInChallenge,
+  testAuthorizer,
+  testSigner,
+  testWalletProvider,
+} from '../lib/read-test-utils';
 import type { SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
@@ -817,6 +824,84 @@ describe('several takes, each its own job', () => {
     expect(resumed.envelope).toMatchObject({ status: 'fulfilled' });
     expect(await readdir(join(dir, 'downloads'))).toHaveLength(2);
     expect(auth.authorize).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * MONID'S ASYNC RUNS: the submit answers 202 with a `pollUrl` on its own host,
+ * and every poll answers 402 with no way to pay and Monid's own sign-in
+ * challenge, until the wallet that paid signs it (tenjin#977).
+ */
+describe('a poll the seller answers with a sign-in challenge', () => {
+  const RUN_URL = 'https://x402.monid.ai/v1/runs/R1';
+  const MONID = spec({
+    capabilityId: 'monid-crunchbase-rounds',
+    provider: 'Monid (Crunchbase)',
+    output: 'json',
+    priceAtomic: '20000',
+    maxAmountAtomic: '20000',
+    request: { method: 'POST', url: 'https://x402.monid.ai/v1/run', fields: {}, location: 'body' },
+    pinned: {},
+    job: {
+      pollUrl: { field: 'pollUrl' },
+      pollMethod: 'GET',
+      running: { field: 'status', values: ['RUNNING'] },
+      failed: { field: 'status', values: ['FAILED'] },
+      everyS: 3,
+      maxWaitS: 300,
+      keepH: 24,
+    },
+  });
+  const started = () => json(202, { runId: 'R1', status: 'RUNNING', pollUrl: RUN_URL });
+
+  it('signs in with the wallet that paid, and pays nothing for the poll', async () => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const challenge = buildSignInChallenge(RUN_URL);
+    const { transport, seen } = polls([
+      { status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge.header } },
+      { status: 200, body: { runId: 'R1', status: 'COMPLETED', output: { rounds: 3 } } },
+    ]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]!.request.headers['sign-in-with-x']).toBeUndefined();
+    expect(parseSIWxHeader(seen[1]!.request.headers['sign-in-with-x']!)).toMatchObject({
+      domain: 'x402.monid.ai',
+      nonce: challenge.nonce,
+      address: testSigner().address,
+    });
+    for (const poll of seen) expect(paymentOf(poll.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it('signs nothing for a challenge bound to another host, and fails the take', async () => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: {
+          'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL, { domain: 'evil.example' }).header,
+        },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(String(result.envelope.reason)).toContain(
+      'the seller asks the wallet that paid it to sign in, and nothing was signed: its challenge names evil.example',
+    );
+    expect(seen).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
   });
 });
 
