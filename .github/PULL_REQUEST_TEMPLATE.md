@@ -10,4 +10,22 @@
 
 <!-- Say what you checked and what you found.
      For docs, skills, prompts or CLI copy, use the docs-change guidance in
-     RELEASING.md, add the documentation label and say how you checked what readers see. -->
+     RELEASING.md and say how you checked what readers see.
+     Add documentation for a guide, reference or skill that needs its own review.
+     Routine release notes and incidental updates don't need the label. -->
+
+## User and agent changes
+
+<!-- Keep this section when a Tenjin user or agent sees or does something different.
+     Use User or Agent for Audience. Include added, changed or removed messages
+     and changes in behavior or timing. Quote short messages as shown.
+     For longer flows, link a preview, screenshot or transcript.
+     Add experience-change only if a step, when someone is asked to act,
+     a default, a charge, a permission or an expected agent action changes.
+     Routine copy, visual and catalog edits that leave those alone only need a row.
+     Before approving, check the rows and label against the latest diff.
+     Remove this section for internal changes. -->
+
+| Audience | Where and when | Before | After |
+| -------- | -------------- | ------ | ----- |
+|          |                |        |       |
