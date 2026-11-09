@@ -24,7 +24,8 @@ Use the [PR template](./.github/PULL_REQUEST_TEMPLATE.md). For docs, skills, pro
 docs-change paragraph in the [QA guide](./RELEASING.md#release-acceptance-and-weekly-qa).
 
 - Add `experience-change` for changes to user steps, prompts to act, defaults, charges, permissions, or expected agent actions.
-- Add `documentation` if a guide, reference, or skill needs its own review.
+- Add `documentation` for changes to the README or public docs for Tenjin users, agents, or developers.
+  This includes linked guides, contributor docs, and shipped skills.
 
 Before you approve, check the before/after table and labels against the latest diff.
 
