@@ -174,7 +174,13 @@ describe('terminal installation funding through the CLI', () => {
     expect(stubs.fund).toHaveBeenCalledOnce();
     expect(stubs.fund).toHaveBeenCalledWith(
       expect.objectContaining({ dataDir: join(sandbox, '.tenjin') }),
-      { amountUsd: '5', source: 'install', header: false },
+      expect.objectContaining({
+        amountUsd: '5',
+        source: 'install',
+        header: false,
+        // A Ctrl-C mid-watch ends the process; the next step prints from there.
+        onStopLines: expect.arrayContaining(['Next: Open a new Claude Code session.']),
+      }),
     );
     // The receipt, then checkout and its balance, then the next step.
     const balance = out.stdout.indexOf('Balance   $5.00');
