@@ -3,7 +3,7 @@ import type { FundOptions, runFund } from '../commands/fund';
 import type { CommandContext, CommandResult } from '../context';
 import { selectOne } from '../lib/clack';
 import { emitSuccess } from '../lib/output';
-import { SUGGESTED_FUND_USD } from './fee';
+import { SUGGESTED_FUND_USD, usd } from './fee';
 import type { QuestionStep } from './install';
 
 export interface FundStep extends QuestionStep {
@@ -55,20 +55,23 @@ export async function fundStep(
   return {
     step: {
       id: 'fund',
-      question: `Add $${SUGGESTED_FUND_USD} to Tenjin now?`,
+      question: FUND_QUESTION,
       options: [
         {
           id: 'fund',
           label: `Add $${SUGGESTED_FUND_USD}`,
           recommended: true,
-          command: `${command} --no-open --no-wait`,
+          command: `${command} --source install`,
         },
         { id: 'later', label: 'Not now', recommended: false, command: null },
       ],
-      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Run the Add $${SUGGESTED_FUND_USD} option's command yourself once to prepare the checkout link, without opening a browser or asking another funding question. Do not wait for payment. Recommend adding $${SUGGESTED_FUND_USD} and show checkoutUrl as a clickable link. Tell them links expire after a few minutes; on request, rerun the same command for a new link. Preparing the link moves no money; the person decides whether to click and confirms payment in their browser. Follow its nextStep to check funds when they return. If they decline, continue activation and their task with available tools. Do not offer funding again unless requested.`,
+      next: `${process.platform === 'win32' ? 'Use PowerShell. ' : ''}Ask this once, after the limits question, with both options: Add $${SUGGESTED_FUND_USD} opens checkout in their browser; with Not now, you ask when a task first needs a paid tool. On Add $${SUGGESTED_FUND_USD}, run its command yourself: opening checkout moves no money, and the person confirms the payment in their browser. Then follow that command's nextStep: run \`tenjin balance --wait\` in the background and carry on when it exits. Never ask the person to type "done". On Not now, continue activation and their task with the tools available, and do not offer funding again unless they ask.`,
     },
   };
 }
+
+/** The money question, in a terminal and for an agent alike. */
+export const FUND_QUESTION = `Add $${SUGGESTED_FUND_USD} to your balance now?`;
 
 async function defaultBalance(address: string, rpcUrl: string): Promise<bigint> {
   const { getUsdcBalance } = await import('../lib/usdc');
@@ -101,7 +104,13 @@ function pendingFund(data: unknown): FundStep | undefined {
     : undefined;
 }
 
-/** The setup receipt is visible before checkout, and remains true if checkout fails. */
+/**
+ * THE MONEY QUESTION IN A TERMINAL, after the receipt and before its tail:
+ * the receipt is visible before checkout and stays true if checkout fails.
+ * "Add $5" opens checkout and watches the payment land, with the live
+ * status `tenjin fund` draws; the balance, the limits, the next step and the
+ * disclosure close the output either way.
+ */
 export async function finishTerminalFunding(
   result: CommandResult,
   ctx: CommandContext,
@@ -125,42 +134,52 @@ export async function finishTerminalFunding(
         choices: [
           {
             value: 'fund',
-            label: `Add $${SUGGESTED_FUND_USD} (recommended)`,
-            hint: 'Opens checkout in your browser',
+            label: `Add $${SUGGESTED_FUND_USD}`,
+            hint: 'opens checkout in your browser',
           },
-          { value: 'later', label: 'Not now' },
+          {
+            value: 'later',
+            label: 'Not now',
+            hint: 'your agent asks when it first needs a paid tool',
+          },
         ],
         initialValue: 'fund',
       }))
   )();
-  if (answer !== 'fund')
+  if (answer !== 'fund') return { ...result, humanLines: [] };
+  try {
+    const run = opts.fund ?? (await import('../commands/fund')).runFund;
+    const funded = await run(ctx, {
+      amountUsd: String(SUGGESTED_FUND_USD),
+      source: 'install',
+      header: false,
+      // Ctrl-C ends the process inside the watch: the rest of the receipt prints there.
+      onStopLines: result.humanTail ?? [],
+    });
+    const data = funded.data as {
+      funded?: boolean;
+      pollStatus?: string;
+      nothingCharged?: boolean;
+      balance?: { atomic: string };
+    };
     return {
       ...result,
       humanLines:
-        answer === 'later'
-          ? ['Paid Tenjin tools need funds. You can add them later from your agent.']
-          : [],
-    };
-  try {
-    const run = opts.fund ?? (await import('../commands/fund')).runFund;
-    await run(ctx, {
-      amountUsd: String(SUGGESTED_FUND_USD),
-      wait: false,
-      qr: false,
-    });
-    return {
-      ...result,
-      humanLines: [
-        'Checkout link issued (printed above).',
-        'Funds not confirmed. Finish checkout, then ask your agent to check your balance before adding money again.',
-      ],
+        data.funded === true && data.balance !== undefined
+          ? ['', `Balance   $${usd(BigInt(data.balance.atomic))}`]
+          : data.pollStatus === 'skipped' || data.nothingCharged === true
+            ? []
+            : [
+                '',
+                "The payment hasn't reached your balance yet. It still can, and your agent can check it.",
+              ],
     };
   } catch (error) {
     return {
       ...result,
       humanLines: [
         `Checkout could not be opened: ${error instanceof Error ? error.message : String(error)}`,
-        'Tenjin remains installed. Continue the activation step above. Ask your agent to add funds later.',
+        'Tenjin remains installed. Ask your agent to add funds later.',
       ],
     };
   }

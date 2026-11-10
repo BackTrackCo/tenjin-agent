@@ -72,7 +72,7 @@ npm install -g tenjin-cli
 tenjin install
 ```
 
-Setup asks about spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link. If it expires, ask for a new one. In a terminal, choose **Add $5** to open checkout or **Not now** to skip it. Follow the activation step; paid tools need funds before they can run.
+Setup asks about spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
 
 Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 
@@ -129,14 +129,16 @@ A new chat does not reset the daily budget. Routing has a separate fee, quoted f
 
 ## Commands
 
-| Command                 | What it does                                  |
-| ----------------------- | --------------------------------------------- |
-| `tenjin wallet fund 5`  | Open checkout to add $5                       |
-| `tenjin wallet balance` | Check available funds                         |
-| `tenjin status`         | Show spending and limits                      |
-| `tenjin doctor`         | Check setup, activation and payment readiness |
-| `tenjin update`         | Update Tenjin                                 |
-| `tenjin uninstall`      | Remove the integration; keep your wallet      |
+| Command            | What it does                                  |
+| ------------------ | --------------------------------------------- |
+| `tenjin fund 5`    | Open checkout to add $5, and watch it land    |
+| `tenjin balance`   | Show your balance and limits                  |
+| `tenjin status`    | Show spending and limits                      |
+| `tenjin doctor`    | Check setup, activation and payment readiness |
+| `tenjin update`    | Update Tenjin                                 |
+| `tenjin uninstall` | Remove the integration; keep your wallet      |
+
+`tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
 
 ## Privacy and help
 

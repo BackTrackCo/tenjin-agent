@@ -233,7 +233,7 @@ describe('RoutingPayer', () => {
       const read = vi.fn(async () => balance);
       const p = payer(router, { walletBalance: read });
       expect(skippedWhy(await routeOnce(p, router), router)).toBe(
-        balance === null ? 'chain_unreadable' : 'wallet_low',
+        balance === null ? 'balance_unreadable' : 'wallet_low',
       );
       expect(read).toHaveBeenCalledTimes(1);
       expect(router.paidRequests()).toBe(0);
@@ -272,7 +272,7 @@ describe('RoutingPayer', () => {
     await reading;
     await armed(bound);
     await vi.advanceTimersByTimeAsync(bound);
-    expect(skippedWhy(await pending, router)).toBe('chain_unreadable');
+    expect(skippedWhy(await pending, router)).toBe('balance_unreadable');
     expect(read).toHaveBeenCalledExactlyOnceWith(wallet.address, bound);
     expect(router.paidRequests()).toBe(0);
     expect(await readSpendSummary(dir)).toBeNull();

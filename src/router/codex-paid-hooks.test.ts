@@ -245,7 +245,9 @@ describe('Codex automatic hooks', () => {
           expect(fake.deposits).toBe(1);
           expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
         } else {
-          expect(out).toMatchObject({ systemMessage: expect.stringContaining('could not pay') });
+          // A balance read that fails before a deposit is no fault
+          // (balance_unreadable): nothing is said to the person.
+          expect(out?.systemMessage).toBeUndefined();
           expect(fake.paidRequests()).toBe(0);
           expect(await readSpendSummary(dir)).toBeNull();
         }
@@ -308,7 +310,7 @@ describe('Codex automatic hooks', () => {
       expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
       expect(fake.deposits).toBe(0);
       expect(out?.systemMessage).toContain('Your usual tools still work.');
-      expect(out?.systemMessage).not.toContain('tenjin wallet fund');
+      expect(out?.systemMessage).not.toContain('tenjin fund');
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
         'prompt: fee unpaid: wallet_low',
       );

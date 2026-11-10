@@ -18,10 +18,10 @@ export interface Registration {
   io: Io;
   /** Run one command body and emit exactly one envelope, success or failure. */
   runCommand(command: string, cmd: Command, run: CommandRun): Promise<void>;
-  /** A top-level command under `group`, carrying the global flags. */
-  leaf(group: string, nameAndArgs: string, summary: string): Command;
-  /** The hidden per-command copies of the global flags, for a subcommand. */
-  addGlobalFlags(cmd: Command): Command;
+  /** A top-level command under `group`, carrying the global flags but those in `except`. */
+  leaf(group: string, nameAndArgs: string, summary: string, except?: readonly string[]): Command;
+  /** The hidden per-command copies of the global flags, for a subcommand, but those in `except`. */
+  addGlobalFlags(cmd: Command, except?: readonly string[]): Command;
   /** The context a command that bypasses {@link runCommand} still needs. */
   buildContext(cmd: Command): CommandContext;
 }

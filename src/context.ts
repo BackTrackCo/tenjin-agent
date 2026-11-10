@@ -27,6 +27,12 @@ export interface CommandContext {
 export interface CommandResult {
   data: unknown;
   humanLines?: string[];
+  /**
+   * Lines that close the human rendering, printed after `humanLines`. Install
+   * keeps its limits, next step and disclosure here, so its checkout can run
+   * between the receipt and them.
+   */
+  humanTail?: string[];
   /** One-line JSON for the default agent install handoff; not part of `data`. */
   compactJson?: boolean;
 }
