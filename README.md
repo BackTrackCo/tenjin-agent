@@ -118,7 +118,7 @@ Example provider prices vary by tool and inputs and exclude Tenjin's routing fee
 
 Browsing and inspection are free. A selected tool pays only its provider; selected Context7 docs need no wallet or routing fee.
 
-Ask your agent: "Find x402 endpoints I can use for speech synthesis, video generation and web search." When explicitly asked to discover endpoints, the shared skill checks Tenjin's catalog, public Bazaar registries and Orthogonal, then compares advertised prices, inputs and coverage. Discovery runs no provider task and pays nothing. From a terminal, `tenjin discover "speech synthesis" --json` runs the manual public-source search directly. Ordinary tasks and requests to quote or pay a known URL do not start endpoint discovery. [Discovery details →](./docs/agent-permissions.md#discover-endpoints)
+Ask your agent to find x402 endpoints for a need, and it compares Tenjin's catalog, public Bazaar registries and Orthogonal without paying anyone. [How discovery works →](./docs/agent-permissions.md#discover-endpoints)
 
 ## Wallet and limits
 

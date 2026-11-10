@@ -2,4 +2,4 @@
 'tenjin-cli': minor
 ---
 
-Ship the shared tenjin-pay skill in Codex as well as Claude Code. Teach explicit tool discovery across Tenjin's catalog and public Bazaar registries and Orthogonal only on explicit manual discovery requests. Restore the free `tenjin discover` command, and retain advertised schemas and partial-result warnings before quoting or paying an endpoint.
+The shared tenjin-pay skill now ships in Codex as well as Claude Code. When you ask your agent to find x402 endpoints, it checks Tenjin's catalog, the configured public Bazaar registries and Orthogonal, and shows each listing's advertised schema and any partial coverage before you quote or pay. New free command: `tenjin discover`.
