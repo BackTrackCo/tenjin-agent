@@ -423,31 +423,13 @@ function attributed(hint: string, host: Harness): string {
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
 
-/** This client's one sentence beside an offer the ask arm adds to a question. */
-const ASK_OFFER_NOTE =
-  'Your question was still asked. If what it asks for is needed only for this step, this pay-per-call service can do the step instead.';
-
 /**
- * WHAT A QUESTION MUST ASK FOR before the ask arm routes it: a credential or
- * paid access for a service (an API key, an access token, credentials, an
- * account, a sign-up, a subscription or a paid plan). It reads the question
- * and its options only, never the user's earlier words. A guard in front of
- * the router, not the decision: the router still judges what matches.
+ * This client's sentences beside an offer the ask arm adds to a question. The
+ * router may match the person's earlier words rather than the question, so the
+ * agent is told when the offer applies.
  */
-const ASKS_FOR_ACCESS = new RegExp(
-  [
-    String.raw`\bapi[ -]?keys?\b`,
-    String.raw`\b(?:access|secret|license|licence|developer)[ -]keys?\b`,
-    String.raw`\b(?:api|access|auth|bearer|developer)[ -]tokens?\b`,
-    String.raw`\bcredentials?\b`,
-    String.raw`\bclient[ -]secrets?\b`,
-    String.raw`\baccounts?\b`,
-    String.raw`\bsign[ -]?ups?\b`,
-    String.raw`\bsubscri(?:be|bes|ption|ptions)\b`,
-    String.raw`\b(?:paid|pro|premium)\s+(?:plan|tier)s?\b`,
-  ].join('|'),
-  'i',
-);
+const ASK_OFFER_NOTE =
+  'Your question was still asked. Use this service only if the question asks the person for an API key, an account or paid access that it would replace; otherwise ignore it and do not call it.';
 
 /** The free line after WebFetch saved a PDF its summary could not read. */
 function savedPdfHint(path: string): string {
@@ -1289,25 +1271,21 @@ function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): Na
 
 /**
  * The ask leg (PreToolUse on `AskUserQuestion`), run by `tenjin mcp`'s `hook`
- * tool. THE HOST IS ABOUT TO ASK THE USER FOR AN API KEY OR AN ACCOUNT, often
- * for a one-off step, which is the moment a pay-per-call service could do the
- * step instead. Only a question that asks for such access
- * ({@link ASKS_FOR_ACCESS}) is routed; any other question passes with no
- * output and no router call, whatever the user said earlier. The questions
- * and their options ride as the pending call.
+ * tool. THE HOST IS ABOUT TO ASK THE USER FOR SOMETHING, often an API key or an
+ * account for a one-off step, which is the moment a pay-per-call service could
+ * do the step instead. The questions and their options ride as the pending
+ * call; the router decides whether anything fits.
  *
  * IT NEVER BLOCKS THE QUESTION. An offer is added beside it as context, so the
  * person still sees the question and the agent reads the offer with the
- * answer: once for the same question, never for a free offer, and never for
- * an offer the call could not make good on alone (any shortfall, curated or
- * discovered, withholds it).
+ * answer, with {@link ASK_OFFER_NOTE} saying it applies only to a question
+ * that asks for access: once for the same question, never for a free offer,
+ * and never for an offer the call could not make good on alone (any
+ * shortfall, curated or discovered, withholds it).
  */
 export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
   const event = eventOf(raw, deps);
   if (event?.kind !== 'ask' || event.pending === null) return { response: null };
-  if (event.pending.tool !== 'AskUserQuestion' || !ASKS_FOR_ACCESS.test(event.pending.question)) {
-    return { response: null };
-  }
   // The question itself is the target, claimed exactly as a search or a URL is.
   const target = redirectTarget(event.pending);
   const routed = await routeNativeCall(event, event.pending, deps, {

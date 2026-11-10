@@ -244,11 +244,9 @@ shape.
 
 The hook's `pendingCall` can also be `{tool: "AskUserQuestion", question}`:
 the question the host is about to put to the user, its option labels and
-descriptions joined. The client sends it only when that text asks for an API
-key, an access token, credentials, an account, a sign-up, a subscription or a
-paid plan, and shows an offer beside the question, never in its place. After
-the user answers, the client sends an ordinary prompt-shaped packet whose
-`current` is the user's answers.
+descriptions joined. The client shows an offer beside the question, never in
+its place. After the user answers, the client sends an ordinary prompt-shaped
+packet whose `current` is the user's answers.
 
 Anything that is neither form is refused at validation with a plain error:
 `{packet, id}`, `{id}` alone and an empty body all fail. A `query` with an id

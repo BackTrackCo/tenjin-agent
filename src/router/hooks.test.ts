@@ -172,9 +172,10 @@ const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request(
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
-/** The ask arm's one sentence beside its offer: the question was not blocked. */
+/** The ask arm's sentences beside its offer: the question was not blocked,
+ *  and the offer applies only to a question that asks for access. */
 const ASK_OFFER_NOTE =
-  'Your question was still asked. If what it asks for is needed only for this step, this pay-per-call service can do the step instead.';
+  'Your question was still asked. Use this service only if the question asks the person for an API key, an account or paid access that it would replace; otherwise ignore it and do not call it.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
@@ -3484,9 +3485,7 @@ describe('a question to the user', () => {
     // The claim is the question's own: a different question is its own target.
     const other = await runAskHook(
       await askEvent({
-        tool_input: {
-          questions: [{ question: 'Do you have an account with a voice service?', options: [] }],
-        },
+        tool_input: { questions: [{ question: 'Which voice should narrate it?', options: [] }] },
       }),
       { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
     );
@@ -3507,13 +3506,13 @@ describe('a question to the user', () => {
   });
 
   /**
-   * THE MISFIRE THIS LEG WAS NARROWED FOR. The user's earlier words named a
-   * search service, and the host then asked an unrelated multiple-choice
-   * question. The router matched a paid search offer to those earlier words,
-   * and the question was blocked. A question that asks for no access is never
-   * routed, so it passes with no output and the router is not asked.
+   * THE MISFIRE THAT ENDED THE DENY. The user's earlier words named a search
+   * service, and the host then asked an unrelated multiple-choice question.
+   * The router matched a paid search offer to those earlier words, and the
+   * question was blocked, costing a turn. Now the question is asked, and the
+   * offer arrives beside it with the note telling the agent to ignore it here.
    */
-  it('passes a question that asks for no access, whatever the user said earlier', async () => {
+  it('never denies an unrelated question when an offer matched earlier words', async () => {
     const path = await transcriptFor([
       {
         type: 'user',
@@ -3541,8 +3540,13 @@ describe('a question to the user', () => {
       }),
       { dataDir: dir, baseUrl: BASE, fetchImpl },
     );
-    expect(out).toEqual({ response: null });
-    expect(calls).toHaveLength(0);
+    expect(out.response).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        additionalContext: `${SEEN_LINE} ${ASK_OFFER_NOTE}`,
+      },
+    });
+    expect(calls).toHaveLength(1);
   });
 
   /**
