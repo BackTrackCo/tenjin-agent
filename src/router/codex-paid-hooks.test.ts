@@ -245,7 +245,9 @@ describe('Codex automatic hooks', () => {
           expect(fake.deposits).toBe(1);
           expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
         } else {
-          expect(out).toMatchObject({ systemMessage: expect.stringContaining('could not pay') });
+          // A balance read that fails before a deposit is no fault
+          // (balance_unreadable): nothing is said to the person.
+          expect(out?.systemMessage).toBeUndefined();
           expect(fake.paidRequests()).toBe(0);
           expect(await readSpendSummary(dir)).toBeNull();
         }
