@@ -18,10 +18,11 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
  * - THE BALANCE. Only a rise counts as arrived: the status says what the page
  *   saw, never that the money is spendable.
  *
- * The last link this machine issued is remembered (`fund-link.json`, mode
- * 0600) so `tenjin balance --wait` can follow it from another process and a
- * rerun of `tenjin fund` can tell a payment already on its way from a fresh
- * start. The token in it funds this wallet only and expires with the link.
+ * The last link this machine issued, or `--crypto` handoff, is remembered
+ * (`fund-link.json`, mode 0600) so `tenjin balance --wait` can follow it from
+ * another process and a rerun of `tenjin fund` can tell a payment already on
+ * its way from a fresh start. The token in it funds this wallet only and
+ * expires with the link.
  */
 
 /** What the fund page last reported for a link. "none" means nothing yet. */
@@ -139,7 +140,11 @@ export interface RememberedLink {
   version: 1;
   /** Lowercase wallet address the link funds. */
   address: string;
-  url: string;
+  /**
+   * Absent for a `--crypto` handoff, which has no link: it is remembered for
+   * its starting balance alone, like a hosted link, and never has a token.
+   */
+  url?: string;
   /**
    * The Tenjin /fund link's token, for its payment status. A Coinbase-hosted
    * link has none: it is remembered for its starting balance alone, so a
@@ -185,7 +190,7 @@ export async function recallLink(
       row.version !== 1 ||
       typeof row.address !== 'string' ||
       row.address !== address.toLowerCase() ||
-      typeof row.url !== 'string' ||
+      (row.url !== undefined && typeof row.url !== 'string') ||
       (row.token !== undefined && typeof row.token !== 'string') ||
       typeof row.issuedAt !== 'number' ||
       typeof row.expiresAt !== 'number' ||

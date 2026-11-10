@@ -237,7 +237,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   let link: Issued =
     onItsWay !== undefined
       ? {
-          url: prior!.url,
+          // On its way means it had a token, so it is a Tenjin link with a url.
+          url: prior!.url!,
           ...(prior!.token !== undefined ? { token: prior!.token } : {}),
           expiresAt: prior!.expiresAt,
           hosted: false,
@@ -472,9 +473,28 @@ async function fundByCrypto(
   },
 ): Promise<CommandResult> {
   const { address, human, say, dim, opts } = c;
+  const now = opts.now ?? Date.now;
   const warning = "Only USDC, only on the Base network. Anything else can't be recovered.";
   const check = `starts ${address.slice(0, 6)} · ends ${address.slice(-4)}`;
-  const startBalance = c.shouldWait ? await c.readBalance() : undefined;
+  // Read the balance BEFORE the handoff, waiting or not: it is what this wait
+  // and a later `tenjin balance --wait` measure an arrival from, so a transfer
+  // that lands before that wait starts still counts. Bounded off the wait, as
+  // for a checkout, so it never holds up the agent's envelope.
+  const startBalance = c.shouldWait
+    ? await c.readBalance()
+    : await withTimeout(c.readBalance(), BASELINE_TIMEOUT_MS);
+  // Remembered with no url and no token: `tenjin fund` finds no status to
+  // follow, so it never reads this as a checkout on its way.
+  if (startBalance !== undefined) {
+    const issuedAt = now();
+    await rememberLink(ctx.dataDir, {
+      version: 1,
+      address: address.toLowerCase(),
+      issuedAt,
+      expiresAt: issuedAt + CRYPTO_WAIT_MS,
+      startBalanceAtomic: startBalance.toString(),
+    });
+  }
   if (human) {
     const err = ctx.io.stderr;
     say();
@@ -498,7 +518,6 @@ async function fundByCrypto(
   let end: WatchEnd | undefined;
   let pollStatus: FundPollStatus = c.shouldWait ? 'unavailable' : 'skipped';
   if (c.shouldWait && startBalance !== undefined) {
-    const now = opts.now ?? Date.now;
     const stopInterrupt = human ? onInterrupt(c.live, say, opts.onStopLines) : () => undefined;
     try {
       end = await watchFunding({
@@ -518,6 +537,7 @@ async function fundByCrypto(
     pollStatus = end.kind === 'arrived' ? 'arrived' : 'timed-out';
   }
   const arrived = end?.kind === 'arrived' ? end : undefined;
+  if (arrived !== undefined) await forgetLink(ctx.dataDir);
   const balanceAtomic = arrived?.balance ?? startBalance;
   return {
     data: {
@@ -545,7 +565,7 @@ async function fundByCrypto(
  * The prior link's payment status when it shows money on its way: `paying`,
  * or `paid` with the balance not yet above where it was when that link was
  * issued. Undefined otherwise, when the status cannot be read, or for a hosted
- * link, which has no status to read.
+ * link or a `--crypto` handoff, which have no status to read.
  */
 async function paymentOnItsWay(
   prior: RememberedLink,

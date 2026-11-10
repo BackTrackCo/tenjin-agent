@@ -901,3 +901,31 @@ describe('a hosted checkout, which has no payment status', () => {
     expect(server.statusCalls()).toBe(0);
   });
 });
+
+describe('a --crypto handoff, which has no link', () => {
+  // Nothing reports a transfer, so the balance at the handoff is what an
+  // arrival is measured from, as for a hosted link.
+  it('counts a transfer that lands before `tenjin balance --wait` starts', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const server = fundServer([CHECKOUT]);
+    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, crypto: true });
+
+    // Sent from a crypto wallet before the agent's background wait began.
+    mockedBalance.mockResolvedValue(5_000_000n);
+    let clock = Date.now();
+    const res = await runBalance(makeCtx(), {
+      provider,
+      wait: true,
+      waitMs: 10_000,
+      fetchImpl: server.fetchImpl,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    });
+    expect(res.data).toMatchObject({ arrived: true, added: { usd: '5' } });
+    expect(server.mints).toHaveLength(0);
+    expect(server.statusCalls()).toBe(0);
+  });
+});
