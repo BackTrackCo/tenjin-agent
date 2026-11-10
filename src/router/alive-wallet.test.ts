@@ -94,6 +94,13 @@ describe('the wallet notice at session start', () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  it('says nothing, and reads nothing, while the router is off', async () => {
+    await wallet({ router: { enabled: false } });
+    const read = vi.fn(async () => 0n);
+    expect(await walletNotice(dir, { cwd: dir, read, now: nextDay })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("asks the user's own RPC when the config names one", async () => {
     await wallet({ rpcUrl: 'https://rpc.example.test' });
     const read = vi.fn(async () => 5_000_000n);

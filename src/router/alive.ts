@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
-import { configPath, walletPath } from '../lib/paths';
+import { DEFAULT_MAX_AUTO_SPEND, loadRawConfig, type PartialConfig } from '../lib/config';
+import { walletPath } from '../lib/paths';
 import { DEFAULT_RPC_URL, readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { noticeFor } from './notice-markers';
+import { routerSettings } from './settings';
 import { sessionStartMessage } from './wallet-reasons';
 
 /**
@@ -196,12 +197,15 @@ export const BALANCE_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
  * behind it is one bounded balance read, at most once a day
  * (`balance-notice.json`), so the notice is too: a reminder at every session
  * start gets Tenjin uninstalled. Null when there is no wallet, a
- * TENJIN_WALLET_KEY shadows wallet.json, the balance was read in the last day,
- * it could not be read in time, or it holds at least the per-call limit.
+ * TENJIN_WALLET_KEY shadows wallet.json, the router is off, the balance was
+ * read in the last day, it could not be read in time, or it holds at least the
+ * per-call limit.
  */
 export async function walletNotice(
   dataDir: string,
   opts: {
+    /** The session's directory, whose project layers `router.enabled` reads too. */
+    cwd?: string;
     env?: NodeJS.ProcessEnv;
     read?: typeof readUsdcBalanceWithFallback;
     timeoutMs?: number;
@@ -219,6 +223,19 @@ export async function walletNotice(
   const wallet = await readJson(walletPath(dataDir));
   const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
   if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
+  // `router.enabled` as every hook reads it, for the session's directory: off,
+  // or a config that cannot be read, and nothing is read or said, nor recorded.
+  let config: PartialConfig;
+  try {
+    config = await loadRawConfig(dataDir);
+    const router = await routerSettings(
+      { cwd: opts.cwd ?? process.cwd(), dataDir, config },
+      { warn: () => undefined },
+    );
+    if (!router.enabled.value) return null;
+  } catch {
+    return null;
+  }
   // A read that cannot record itself is not made: unrecorded, it would
   // come back at every session start.
   try {
@@ -227,18 +244,13 @@ export async function walletNotice(
   } catch {
     return null;
   }
-  const config = await readJson(configPath(dataDir));
-  const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
+  const rpcUrl = config.rpcUrl ?? DEFAULT_RPC_URL;
   const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
   const read = opts.read ?? readThroughEnvProxy(env);
   const balance = await read(address, rpcUrl, { timeoutMs });
   if (balance === null) return null;
   // The per-call limit as the spend policy reads it: the file's, else the default.
-  const cap = BigInt(
-    typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
-      ? config.maxAutoSpend
-      : DEFAULT_MAX_AUTO_SPEND,
-  );
+  const cap = BigInt(config.maxAutoSpend ?? DEFAULT_MAX_AUTO_SPEND);
   if (balance > 0n && balance >= cap) return null;
   // Only the person reads it, inside the session: they say so, the agent runs it.
   return `Tenjin balance $${dollars(balance)} · low. Say "add funds" when you're ready.`;
@@ -290,14 +302,17 @@ export async function aliveMain(opts: {
   stdout?: Pick<NodeJS.WritableStream, 'write'>;
 }): Promise<void> {
   const raw = await (opts.readEvent ?? (() => readStdin(1_000)))().catch(() => '');
-  const answer = await runAliveHook(parseEvent(raw), {
+  const event = parseEvent(raw);
+  const answer = await runAliveHook(event, {
     dataDir: opts.dataDir,
     version: opts.version,
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   });
+  const cwd = cwdOf(event);
   const notice =
     answer === null
       ? await walletNotice(opts.dataDir, {
+          ...(cwd !== null ? { cwd } : {}),
           ...(opts.env !== undefined ? { env: opts.env } : {}),
         }).catch(() => null)
       : null;
@@ -319,6 +334,13 @@ function parseEvent(raw: string): unknown {
   } catch {
     return null;
   }
+}
+
+/** The session's directory, as the harness event names it. */
+function cwdOf(event: unknown): string | null {
+  if (event === null || typeof event !== 'object') return null;
+  const cwd = (event as { cwd?: unknown }).cwd;
+  return typeof cwd === 'string' && cwd.length > 0 ? cwd : null;
 }
 
 function readStdin(timeoutMs: number): Promise<string> {
