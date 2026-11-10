@@ -27,6 +27,8 @@ docs-change paragraph in the [QA guide](./RELEASING.md#release-acceptance-and-we
 - Add `documentation` for changes to the README or public docs for Tenjin users, agents, or developers.
   This includes linked guides, contributor docs, and shipped skills.
 
+A maintainer adds the labels when the author cannot.
+
 ### Human review for user and agent changes
 
 Get approval from the human author and a human reviewer for changes to what Tenjin
