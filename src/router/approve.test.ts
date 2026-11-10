@@ -379,6 +379,36 @@ describe("approve, called through the host's own prompt", () => {
     expect(String(refused.envelope.reason)).not.toContain('wallet fund');
   });
 
+  /** A COUNT IS ASKED ABOUT ONE TAKE AT A TIME: the fund page shows a price
+   *  per call, so the ask names one take at its own price, never the total. */
+  it('names one take at its own price when a short count quote reopens', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    await storeSpecs(dir, [
+      {
+        ...SPEC,
+        provider: 'ElevenLabs',
+        label: 'ElevenLabs voiceover',
+        priceAtomic: '50000',
+        maxAmountAtomic: '50000',
+      },
+    ]);
+    const normal = seller('50000');
+    const quote = await quoted({ id: ID, input: INPUT, count: 3 }, normal.fetchImpl);
+    expect(quote.total).toBe('$0.15');
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const refused = await runApproveTool(args, { ...deps(short.fetchImpl), approves: true });
+    const ask =
+      'This ElevenLabs voiceover costs $0.05, more than your Tenjin balance. Ask the person once to add funds; on yes, run `tenjin fund 5 --for "ElevenLabs voiceover" --price 0.05`.';
+    expect(refused.envelope.nextStep).toBe(
+      `${ask} The quote stays open for its ten minutes: once the funds arrive, call approve({quote: "${quote.id}", total: "$0.15", what: "${quote.what}"}) again.`,
+    );
+    const takes = refused.envelope.results as { reason: string }[];
+    expect(takes).toHaveLength(3);
+    for (const take of takes) expect(take.reason).toContain(ask);
+    expect(JSON.stringify(refused.envelope)).not.toContain('--price 0.15');
+  });
+
   it('reruns every take of a reopened count once the wallet is funded', async () => {
     await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
     const normal = seller();

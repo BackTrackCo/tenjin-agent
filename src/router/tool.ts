@@ -18,8 +18,14 @@ import {
   validateResultBody,
 } from '../lib/request-schema';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
-import { admitPlan, admitQuote, reopenShortQuote, type PlanSlot } from '../lib/spend-plan';
-import { quoteClosed, readQuote, type Quote } from '../lib/spend-quotes';
+import {
+  admitPlan,
+  admitQuote,
+  reopenShortQuote,
+  wasShortOfFunds,
+  type PlanSlot,
+} from '../lib/spend-plan';
+import { quoteClosed, readQuote } from '../lib/spend-quotes';
 import type { SpendAuthorizer, WalletProvider } from '../lib/wallet';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import type { CommandContext } from '../context';
@@ -419,25 +425,38 @@ export async function runApproveTool(
     envelope: {
       ...result.envelope,
       quote: quoteView(quote),
-      nextStep: `${shortOfFunds(quoteFor(call, quote))} The quote stays open for its ten minutes: once the funds arrive, call ${approveCall(quote)} again.`,
+      nextStep: `${shortOfFunds(quoteFor(call, slots))} The quote stays open for its ten minutes: once the funds arrive, call ${approveCall(quote)} again.`,
     },
   };
 }
 
 /**
- * What a short quote's ask for funds names: the one call's display label, else
- * its provider, or what a count or a choice set buys, at the quote's total.
+ * What a short quote's ask for funds names: ONE call, by its display label
+ * (else its provider), at one call's price, because the fund page and
+ * `tenjin fund` show that price per call. A count names one take. A choice
+ * set names the option its run was refused for (the dearest, when several
+ * were), else its dearest option. `slots` are the quote's, in its payments'
+ * order.
  */
 function quoteFor(
   call: QuotedCall,
-  quote: Quote,
+  slots: readonly PlanSlot[],
 ): { label?: string | undefined; provider: string; priceAtomic: bigint } {
-  const priceAtomic = BigInt(quote.totalAtomic);
-  if (call.kind === 'spec')
-    return { label: call.spec.label, provider: call.spec.provider, priceAtomic };
+  const refused = slots.filter(wasShortOfFunds);
+  const one = (refused.length > 0 ? refused : slots).reduce((dearest, slot) =>
+    slot.amountAtomic > dearest.amountAtomic ? slot : dearest,
+  );
+  const priceAtomic = one.amountAtomic;
   if (call.kind === 'call')
     return { label: call.call.label, provider: call.call.provider, priceAtomic };
-  return { label: quote.what, provider: quote.what, priceAtomic };
+  if (call.kind !== 'choices')
+    return { label: call.spec.label, provider: call.spec.provider, priceAtomic };
+  // A choice set's slots follow its keys; its specs follow the set's options.
+  const key = call.keys[slots.indexOf(one)];
+  const spec =
+    call.specs[call.kept.choices.options.findIndex((option) => option.key === key)] ??
+    call.specs[0]!;
+  return { label: spec.label, provider: spec.provider, priceAtomic };
 }
 
 /** Run an approved quote's call on its slots. */
