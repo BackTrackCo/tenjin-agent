@@ -126,7 +126,7 @@ describe('watching a link until the money lands', () => {
     expect(end).toMatchObject({ kind: 'arrived', added: 5_000_000n, status: { state: 'paid' } });
     expect(said).toEqual([
       '… Waiting for the page to open…',
-      '✓ Checkout open in your browser',
+      '✓ Checkout open',
       '… Waiting for your payment…',
       '✓ Payment received $5.20 charged',
       '… Adding to your balance…',

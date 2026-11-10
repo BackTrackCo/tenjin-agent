@@ -285,7 +285,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
     const state = status!.state;
     if (state !== 'none' && !saidOpen) {
       saidOpen = true;
-      live.ok('Checkout open in your browser');
+      live.ok('Checkout open');
     }
     if (state === 'paid' && !saidPaid) {
       saidPaid = true;
