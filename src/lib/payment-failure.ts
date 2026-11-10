@@ -1,10 +1,7 @@
+import type { x402HTTPClient } from '@x402/core/client';
+import type { PaymentRequired, SettleResponse } from '@x402/core/types';
 import type { HttpResponse } from './http';
-import {
-  headerReader,
-  paymentRequiredOf,
-  settleResponseOf,
-  type X402HeaderReader,
-} from './x402-headers';
+import { headerReader } from './x402-pay';
 
 /** Bound parsing of seller-controlled headers and embedded JSON details. */
 const MAX_ERROR_CHARS = 16_384;
@@ -53,17 +50,29 @@ function isShortOfFunds(value: unknown): boolean {
  */
 export function paymentShortOfFunds(
   res: Pick<HttpResponse, 'status' | 'header' | 'json'>,
-  http: X402HeaderReader = headerReader,
+  http: x402HTTPClient = headerReader,
 ): boolean {
   // A header over the bound reads as absent, so the SDK's own fall-through applies.
   const bounded = (name: string) => {
     const value = res.header(name);
     return value !== undefined && value.length > MAX_ERROR_CHARS ? undefined : value;
   };
-  const settled = settleResponseOf(http, bounded);
+  // The SDK throws when a header is absent or unreadable; the decoded JSON is
+  // the seller's, so it can also be `null` or not an object.
+  let settled: SettleResponse | null | undefined;
+  try {
+    settled = http.getPaymentSettleResponse(bounded);
+  } catch {
+    settled = undefined;
+  }
   if ([settled?.errorReason, settled?.errorMessage].some(isShortOfFunds)) return true;
   if (res.status !== 402) return false;
-  const required = paymentRequiredOf(http, bounded);
+  let required: PaymentRequired | null | undefined;
+  try {
+    required = http.getPaymentRequiredResponse(bounded);
+  } catch {
+    required = undefined;
+  }
   const body = record(res.json);
   return [required?.error, body?.error, body?.reason].some(isShortOfFunds);
 }

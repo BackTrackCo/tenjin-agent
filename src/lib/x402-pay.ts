@@ -147,6 +147,15 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
 }
 
 /**
+ * The SDK's header reader for a read where no payer client exists: a job's
+ * answer read in a later call, and the routing quote, read before the wallet
+ * is opened and by the router check. Nothing is registered on it, so it reads
+ * headers and can build no payment. Where a payer client exists, its own
+ * `http` reads instead.
+ */
+export const headerReader = new x402HTTPClient(new x402Client());
+
+/**
  * A VETO, in the SDK's own vocabulary: the scheme registration already limits
  * the networks, and this drops any entry on one of them whose asset is not that
  * network's canonical USDC. Without it a seller could advertise `exact` on Base

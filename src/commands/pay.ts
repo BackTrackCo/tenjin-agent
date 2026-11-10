@@ -1,5 +1,5 @@
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
-import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
+import type { PaymentRequired, PaymentRequirements, SettleResponse } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
 import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
@@ -11,7 +11,6 @@ import type { FetchJsonFailure, HttpResponse } from '../lib/http';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import { mask } from '../lib/redact';
-import { headerReader, settleResponseOf, type X402HeaderReader } from '../lib/x402-headers';
 import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
@@ -28,11 +27,12 @@ import {
 import {
   buildExactPayment,
   createPayerClient,
+  headerReader,
   isCanonicalUsdc,
   noPayableRequirement,
   selectPayableRequirement,
 } from '../lib/x402-pay';
-import type { x402Client } from '@x402/core/client';
+import type { x402Client, x402HTTPClient } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { appendPaidRecord, recordedSent } from '../router/paid';
 import type { CommandContext, CommandResult } from '../context';
@@ -1011,7 +1011,7 @@ function parseBody(data: string | undefined): unknown {
  * unreadable one, so the lookup notes which it was, and each keeps its own
  * refusal.
  */
-function decodeChallenge(res: HttpResponse, url: string, http: X402HeaderReader): PaymentRequired {
+function decodeChallenge(res: HttpResponse, url: string, http: x402HTTPClient): PaymentRequired {
   let carried = false;
   try {
     return http.getPaymentRequiredResponse((name) => {
@@ -1294,7 +1294,7 @@ type DeliverOpts = {
   | {
       paid: true;
       /** The payer client's reader, for the settlement header. */
-      http: X402HeaderReader;
+      http: x402HTTPClient;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
       authorization?: { from: string; nonce: string; validBefore: string };
@@ -1442,9 +1442,14 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
  */
 export function settlementTx(
   res: Pick<HttpResponse, 'header'>,
-  http: X402HeaderReader = headerReader,
+  http: x402HTTPClient = headerReader,
 ): string | undefined {
-  const tx = settleResponseOf(http, res.header)?.transaction;
+  let tx: unknown;
+  try {
+    tx = http.getPaymentSettleResponse(res.header).transaction;
+  } catch {
+    return undefined; // No readable payment-response header.
+  }
   return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
 }
 
@@ -1456,9 +1461,15 @@ export function settlementTx(
  */
 function settlementRefusal(
   res: Pick<HttpResponse, 'header'>,
-  http: X402HeaderReader,
+  http: x402HTTPClient,
 ): { reason?: string } | undefined {
-  const settle = settleResponseOf(http, res.header);
+  let settle: SettleResponse | null;
+  try {
+    settle = http.getPaymentSettleResponse(res.header);
+  } catch {
+    return undefined; // No readable payment-response header.
+  }
+  // The decoded JSON is the seller's: it can be `null` or not an object.
   if (settle?.success !== false) return undefined;
   const said = [settle.errorReason, settle.errorMessage].find(
     (value): value is string => typeof value === 'string' && value.trim().length > 0,

@@ -1,6 +1,5 @@
 import type { PaymentRequirements } from '@x402/core/types';
-import { headerReader } from '../lib/x402-headers';
-import { canonicalUsdcOnly } from '../lib/x402-pay';
+import { canonicalUsdcOnly, headerReader } from '../lib/x402-pay';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 
 /**
