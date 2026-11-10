@@ -55,7 +55,8 @@ export const ROUTE_HOOK_TIMEOUT_SECONDS = 5;
  * entries and re-trust Codex's for no change a user sees.
  */
 export const AFTER_CALL_TIMEOUT_SECONDS = 15;
-/** The `alive` leg and the two permission answers do no network work. */
+/** The two permission answers do no network work, and the `alive` leg's one
+ *  read, the balance at most once a day, is bounded at 2 s. */
 export const LOCAL_HOOK_TIMEOUT_SECONDS = 5;
 
 /** The subagent tool, under its current name and its older one. */

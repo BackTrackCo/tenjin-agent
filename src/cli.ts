@@ -23,8 +23,24 @@ import type { CommandContext, CommandRun, GlobalFlags } from './context';
 const GlobalOptsSchema = z.object({
   json: z.boolean().default(false),
   baseUrl: z.url().optional(),
-  timeout: z.coerce.number().int().positive().default(10000),
+  timeout: z
+    .preprocess((v) => (typeof v === 'string' ? durationMs(v) : v), z.number().int().positive())
+    .default(10000),
 });
+
+/**
+ * `--timeout` in milliseconds, or as a duration (`90s`, `15m`, `1h`): the
+ * root takes the flag wherever it is placed, and `balance --wait --timeout
+ * 15m` reads it as how long to wait. NaN for anything else, which the
+ * schema refuses as USAGE.
+ */
+function durationMs(raw: string): number {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*$/i.exec(raw);
+  if (m === null) return NaN;
+  const unit = (m[2] ?? 'ms').toLowerCase();
+  const scale = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1;
+  return Math.round(Number(m[1]) * scale);
+}
 
 /**
  * The three global flags: flags, description, and the root's default. Each is
@@ -49,9 +65,16 @@ const GLOBAL_FLAGS: readonly (readonly [string, string, string?])[] = [
  * The per-command copies, hidden from that command's help: a global flag belongs
  * on `tenjin --help` once, and re-listing the same three under every command
  * buries the flags the command actually has.
+ *
+ * `except` names a long flag the command declares itself, in place of the
+ * global copy: `balance --wait --timeout 15m` reads its own duration there,
+ * parsed to the milliseconds the global flag carries.
  */
-function addGlobalFlags(cmd: Command): Command {
-  for (const [flags, help] of GLOBAL_FLAGS) cmd.addOption(new Option(flags, help).hideHelp());
+function addGlobalFlags(cmd: Command, except: readonly string[] = []): Command {
+  for (const [flags, help] of GLOBAL_FLAGS) {
+    if (except.includes(flags.split(' ')[0]!)) continue;
+    cmd.addOption(new Option(flags, help).hideHelp());
+  }
   return cmd;
 }
 
@@ -64,7 +87,13 @@ function addGlobalFlags(cmd: Command): Command {
  * INSIDE a group (`tenjin wallet help show` is a third spelling of one thing);
  * the root keeps it, see {@link rootHelpCommand}.
  */
-function leaf(program: Command, group: string, nameAndArgs: string, summary: string): Command {
+function leaf(
+  program: Command,
+  group: string,
+  nameAndArgs: string,
+  summary: string,
+  except: readonly string[] = [],
+): Command {
   return addGlobalFlags(
     program
       .command(nameAndArgs)
@@ -75,6 +104,7 @@ function leaf(program: Command, group: string, nameAndArgs: string, summary: str
       // instance with every descendant, and the root's sits in the Global
       // options block, which would leave each command a block holding `-h` alone.
       .helpOption('-h, --help', 'show this help'),
+    except,
   );
 }
 
@@ -147,7 +177,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     try {
       const ctx = buildContext(cmd, io);
       const result = await run(ctx);
-      emitSuccess(ctx.io, command, result.data, result.humanLines, {
+      const human = [...(result.humanLines ?? []), ...(result.humanTail ?? [])];
+      emitSuccess(ctx.io, command, result.data, human, {
         json: ctx.flags.json,
         compactJson: result.compactJson,
         updateAvailable,
@@ -210,7 +241,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     program,
     io,
     runCommand,
-    leaf: (group, nameAndArgs, summary) => leaf(program, group, nameAndArgs, summary),
+    leaf: (group, nameAndArgs, summary, except) =>
+      leaf(program, group, nameAndArgs, summary, except),
     addGlobalFlags,
     buildContext: (cmd) => buildContext(cmd, io),
   };
@@ -225,7 +257,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     `
 Examples:
   $ tenjin install
-  $ tenjin wallet fund
+  $ tenjin fund
   $ tenjin status
 
 Learn more:

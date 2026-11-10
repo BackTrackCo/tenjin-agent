@@ -1367,7 +1367,7 @@ export function routingFeeRow(e: Pick<Eligibility, 'canPayRouting'>, host: strin
   }
   const u = unpaid(why);
   const fixes: Record<string, string> = {
-    no_wallet: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
+    no_wallet: `Run \`tenjin wallet create\`, then \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
     limit_below_deposit: `Raise it with \`tenjin config set maxAutoSpend ${usd(MAX_AUTO_SPEND_FLOOR_ATOMIC)}\`.`,
     budget_reached:
       'Room comes back when the daily budget resets, or raise it with `tenjin config set sessionBudget <usd>`.',
@@ -1490,7 +1490,7 @@ export function walletRow(e: Eligibility, dataDir: string): RouterCheck {
       status: 'fail',
       required: true,
       detail: 'no wallet on this machine, so nothing can pay',
-      fix: `Run \`tenjin wallet create\`, then \`tenjin wallet fund ${SUGGESTED_FUND_USD}\`.`,
+      fix: `Run \`tenjin wallet create\`, then \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
     };
   }
   if (sign.status === 'blocked' && sign.reason === 'env_key_invalid') {

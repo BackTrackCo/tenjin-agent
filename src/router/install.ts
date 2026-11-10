@@ -60,6 +60,8 @@ import {
   type ListProcesses,
 } from './mcp-processes';
 import {
+  DEFAULTS_LABEL,
+  limitsLine,
   ROUTER_DEFAULTS,
   ROUTING_FEE_TERMS,
   shownLimits,
@@ -105,6 +107,32 @@ export const DISCLOSURE: readonly string[] = [
   'Relevant task context and your wallet address are sent to Tenjin for routing. Documentation queries go to Context7. Your private key stays on this machine.',
   'Privacy: https://tenjin.sh/privacy · Terms: https://tenjin.sh/terms',
 ];
+
+/**
+ * What Tenjin adds, said right after the success line: three things an agent
+ * cannot do on its own (the groups tenjin.sh/tools leads with), and where the
+ * rest is.
+ */
+export const CAPABILITY_LINES: readonly string[] = [
+  "Your agent can now make images, voiceovers and music, look up people and companies, read pages normal fetches can't open, and more.",
+  'See every tool at tenjin.sh/tools',
+];
+
+/**
+ * The end of an install's receipt, kept apart (`humanTail`) so a checkout run
+ * in the terminal comes before it: the limits, the one next step, then the
+ * disclosure, dimmed and word for word.
+ */
+export function receiptTail(ctx: CommandContext, policy: SpendPolicy, next: string): string[] {
+  return [
+    '',
+    `Limits    ${limitsLine(policy)}`,
+    '',
+    `Next: ${next}`,
+    '',
+    ...DISCLOSURE.map((line) => paint(ctx.io, 'dim', line)),
+  ];
+}
 
 /**
  * While a settings install is still here, a reload would load the plugin beside the
@@ -560,7 +588,7 @@ export async function runRouterInstall(
           wallet,
           effective.rpcUrl,
           deps,
-          `${command} wallet fund ${SUGGESTED_FUND_USD}`,
+          `${command} fund ${SUGGESTED_FUND_USD}`,
         )
       : Promise.resolve(undefined),
   ]);
@@ -622,6 +650,7 @@ export async function runRouterInstall(
       ...removedKeysLines,
       ...serverLines,
     ],
+    humanTail: receiptTail(ctx, effective.policy, data.next),
   };
 }
 
@@ -1171,7 +1200,7 @@ export async function approveLimits(
   deps: Pick<RouterInstallDeps, 'promptLimits' | 'promptAmount'>,
 ): Promise<RouterLimits> {
   const choice = await (deps.promptLimits ?? promptLimits)(
-    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS}\n${FEE_APPROVAL}`,
+    `${SPEND_QUESTION}\n${ROUTING_FEE_TERMS} ${FEE_APPROVAL}`,
   );
   if (choice === null) throw installCancelled();
   if (choice === 'approve') return { ...ROUTER_DEFAULTS };
@@ -1243,7 +1272,7 @@ function promptLimits(message: string): Promise<LimitsChoice | null> {
   return selectOne<LimitsChoice>({
     message,
     choices: [
-      { value: 'approve', label: 'Use the defaults' },
+      { value: 'approve', label: `${DEFAULTS_LABEL} (recommended)` },
       { value: 'own', label: 'Set my own limits' },
     ],
     initialValue: 'approve',
@@ -1393,22 +1422,16 @@ function lines(
 ): string[] {
   const ok = paint(ctx.io, 'green', '✓');
   const warn = (text: string) => paint(ctx.io, 'yellow', `! ${text}`);
-  const limits = effectiveLimits(s.policy);
-  const daily =
-    s.policy.sessionBudgetAtomic === null
-      ? limits.sessionBudget
-      : `daily budget $${limits.sessionBudget} shared across chats`;
-  const spend = [
-    `  Automatic router: up to $${limits.maxAutoSpend} per call; ${daily}`,
-    ...(s.spendAsk !== undefined
+  const spend =
+    s.spendAsk !== undefined
       ? [
           `  Ask the person in this session: ${s.spendAsk.question}`,
           ...s.spendAsk.options.map(
             (o) => `  ${o.label}${o.recommended ? ' (recommended)' : ''}: ${o.command}`,
           ),
         ]
-      : []),
-  ];
+      : [];
+  const installed = s.plugin.state !== 'failed' && s.plugin.state !== 'deferred';
   // A warning is the router answering with a 402 this CLI does not pay.
   const router =
     s.router.status === 'ok'
@@ -1427,10 +1450,10 @@ function lines(
       : s.plugin.state === 'deferred'
         ? warn('Tenjin keeps its earlier Claude Code setup until Claude Code is updated')
         : `${ok} Tenjin is set up for Claude Code (plugin ${s.plugin.id ?? PLUGIN_ID})`,
+    ...(installed ? CAPABILITY_LINES.map((line) => `  ${line}`) : []),
     ...(s.plugin.scope === 'local' && s.plugin.state !== 'failed'
       ? [`  For this project only; check it with: ${continuationCommand(s.rt)} doctor --project`]
       : []),
-    ...DISCLOSURE,
     ...spend,
     ...runtimeLines(ctx, s.rt, s.home, true),
     ...walletLines(ctx, s.wallet),
@@ -1439,8 +1462,6 @@ function lines(
     ...claudeLines(ctx, s.claude),
     ...migrationLines(ctx, s.migration),
     ...router,
-    '',
-    `Next: ${nextStep(s.plugin, s.claude, s.wallet, s.migration, s.asks, ctx.io.isTTY, continuationCommand(s.rt), s.env)}`,
   ];
 }
 
