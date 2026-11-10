@@ -487,8 +487,10 @@ async function fundByCrypto(
   // follow, so it never reads this as a checkout on its way. A live checkout
   // link with a token is kept instead: replacing it would hide a card payment
   // still landing from the next `tenjin fund`, which would open a second
-  // checkout. `tenjin balance --wait` then measures from that link's earlier
-  // starting balance, so a transfer is still counted.
+  // checkout. Its starting balance drops to this reading when that is lower
+  // or it has none (its own read failed, or money was spent since), so
+  // `tenjin balance --wait` counts a transfer that lands before it starts,
+  // and a card payment still rises above it.
   if (startBalance !== undefined) {
     const prior = await recallLink(ctx.dataDir, address, now());
     if (prior?.token === undefined) {
@@ -500,6 +502,11 @@ async function fundByCrypto(
         expiresAt: issuedAt + CRYPTO_WAIT_MS,
         startBalanceAtomic: startBalance.toString(),
       });
+    } else if (
+      prior.startBalanceAtomic === undefined ||
+      startBalance < BigInt(prior.startBalanceAtomic)
+    ) {
+      await rememberLink(ctx.dataDir, { ...prior, startBalanceAtomic: startBalance.toString() });
     }
   }
   if (human) {

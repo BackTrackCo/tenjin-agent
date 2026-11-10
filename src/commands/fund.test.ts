@@ -958,4 +958,59 @@ describe('a --crypto handoff, which has no link', () => {
     expect(again.mints).toHaveLength(0);
     expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true, status: 'paying' });
   });
+
+  // The kept card link's start is lowered to the handoff's own reading, so a
+  // transfer that lands before `tenjin balance --wait` starts still counts.
+  it.each([
+    ['no start, its balance read having failed', undefined, 0n],
+    ['a higher start, money having been spent since', 10_000_000n, 4_000_000n],
+  ])(
+    'counts a transfer before the wait when the card link has %s',
+    async (_label, cardStart, cryptoStart) => {
+      const { provider } = fakeProvider();
+      const link = pageLink(Date.now() + 600_000);
+      if (cardStart === undefined) mockedBalance.mockRejectedValue(new Error('rpc down'));
+      else mockedBalance.mockResolvedValue(cardStart);
+      const first = fundServer([link]);
+      await fund(makeCtx(), { provider, fetchImpl: first.fetchImpl, wait: false, open: false });
+
+      mockedBalance.mockResolvedValue(cryptoStart);
+      await fund(makeCtx(), {
+        provider,
+        fetchImpl: first.fetchImpl,
+        crypto: true,
+        env: { CLAUDECODE: '1' },
+      });
+
+      // The card payment is still on its way: no second checkout.
+      const again = fundServer(
+        [pageLink(Date.now() + 600_000)],
+        [[200, { state: 'paying', updatedAt: 'x' }]],
+      );
+      const res = await fund(makeCtx(), {
+        provider,
+        fetchImpl: again.fetchImpl,
+        wait: false,
+        open: false,
+        env: { CLAUDECODE: '1' },
+      });
+      expect(again.mints).toHaveLength(0);
+      expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true });
+
+      // The transfer lands before the agent's background wait began.
+      mockedBalance.mockResolvedValue(cryptoStart + 5_000_000n);
+      let clock = Date.now();
+      const waited = await runBalance(makeCtx(), {
+        provider,
+        wait: true,
+        waitMs: 10_000,
+        fetchImpl: again.fetchImpl,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+      });
+      expect(waited.data).toMatchObject({ arrived: true, added: { usd: '5' } });
+    },
+  );
 });
