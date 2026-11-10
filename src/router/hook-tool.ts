@@ -9,7 +9,7 @@
  */
 
 /** The routing legs, one per hook entry `install` writes. */
-export const HOOK_KINDS = ['prompt', 'native', 'shortfall', 'agent', 'ask', 'answer'] as const;
+export const HOOK_KINDS = ['prompt', 'native', 'shortfall', 'agent', 'answer'] as const;
 export type HookKind = (typeof HOOK_KINDS)[number];
 
 /** The tool `tenjin mcp` registers for the hook entries. */
@@ -23,7 +23,6 @@ const FIELDS: Record<HookKind, readonly string[]> = {
   prompt: [...COMMON, 'prompt'],
   native: [...COMMON, ...CALL],
   agent: [...COMMON, ...CALL],
-  ask: [...COMMON, ...CALL],
   answer: [...COMMON, ...CALL, 'tool_response'],
   shortfall: [...COMMON, ...CALL, 'tool_response', 'error', 'is_interrupt'],
 };

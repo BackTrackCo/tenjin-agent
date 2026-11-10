@@ -142,13 +142,12 @@ describe('the mod', () => {
 });
 
 describe("the plugin's hooks", () => {
-  it('carry the seven routing legs as mcp_tool calls on the plugin server, with the same inputs and timeouts', () => {
+  it('carry the six routing legs as mcp_tool calls on the plugin server, with the same inputs and timeouts', () => {
     const { hooks } = renderPluginHooks();
     expect(hooks.UserPromptSubmit).toEqual([{ hooks: leg('prompt') }]);
     expect(hooks.PreToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('native') },
       { matcher: 'Agent|Task', hooks: leg('agent') },
-      { matcher: 'AskUserQuestion', hooks: leg('ask') },
       { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
       { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
     ]);

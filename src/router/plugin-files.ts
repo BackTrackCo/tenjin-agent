@@ -62,7 +62,7 @@ export const LOCAL_HOOK_TIMEOUT_SECONDS = 5;
 export const DELEGATION_MATCHER = 'Agent|Task';
 /** The native tools both native arms watch. */
 export const NATIVE_MATCHER = 'WebSearch|WebFetch';
-/** The host's question to the user, watched before it is asked and after. */
+/** The host's question to the user, watched after the user answers it. */
 export const ASK_MATCHER = 'AskUserQuestion';
 
 /**
@@ -189,14 +189,13 @@ function command(launch: ExecLaunch): unknown[] {
 }
 
 /**
- * The seven routing legs. The native tools are routed twice over one lookup:
+ * The six routing legs. The native tools are routed twice over one lookup:
  * BEFORE the call, with a line pointing to a paid lookup when one fits; and
  * AFTER it, only when it came back short and nothing was said before, or to
  * add the free docs the pre-call arm fetched to a search's results. A failed
  * call fires PostToolUseFailure rather than PostToolUse, so the second takes
- * both. The host's question to the user is routed the same two ways: before it
- * is asked, when a service could stand in for what it asks for, and after,
- * with the user's answers read as their own words.
+ * both. The host's question to the user is never routed before it is asked;
+ * after it, the user's answers are routed as their own words.
  */
 export function routerHookPlan(): { event: string; matcher?: string; hooks: unknown[] }[] {
   const afterCall = () => leg('shortfall', AFTER_CALL_TIMEOUT_SECONDS);
@@ -206,7 +205,6 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
     { event: 'PreToolUse', matcher: DELEGATION_MATCHER, hooks: leg('agent') },
     { event: 'PostToolUse', matcher: NATIVE_MATCHER, hooks: afterCall() },
     { event: 'PostToolUseFailure', matcher: NATIVE_MATCHER, hooks: afterCall() },
-    { event: 'PreToolUse', matcher: ASK_MATCHER, hooks: leg('ask') },
     { event: 'PostToolUse', matcher: ASK_MATCHER, hooks: leg('answer') },
   ];
 }
@@ -215,7 +213,7 @@ export function routerHookPlan(): { event: string; matcher?: string; hooks: unkn
 export const MOD_MODULE = './register.tsx';
 
 /**
- * `hooks/hooks.json`: the `alive` leg, the seven routing legs and the two
+ * `hooks/hooks.json`: the `alive` leg, the six routing legs and the two
  * permission answers, and the mod's module when `o.mod` carries it. `o.node`
  * runs all three commands, the answers included, so the runtime render names
  * no `node` from PATH at all.

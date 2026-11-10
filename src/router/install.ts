@@ -87,7 +87,7 @@ import { agentFixFor, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
  * this package's development plugin folder. The plugin goes through Claude
  * Code's own `claude plugin` commands (see `plugin-registration.ts`), or is
  * written as a folder under the config dir's `skills/` where no `claude`
- * binary can be run. The plugin carries the seven routing legs, the `router`
+ * binary can be run. The plugin carries the six routing legs, the `router`
  * MCP server, and the hooks that allow the request tool and deny the legs' own
  * tool to the model, so this command writes nothing into `settings.json` or
  * `~/.claude.json` itself.
