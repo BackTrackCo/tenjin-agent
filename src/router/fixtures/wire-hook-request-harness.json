@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "budgetMs": 3500,
   "accepts": ["catalog", "spec", "label", "fields"],
   "harness": "codex",
   "packet": {

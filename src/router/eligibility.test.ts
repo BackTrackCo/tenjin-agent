@@ -12,12 +12,7 @@ import {
   type SignFacts,
   type SignVerdict,
 } from './eligibility';
-import {
-  CHANNEL_DEPOSIT_ATOMIC,
-  DEPOSIT_FLOOR_FEES,
-  ROUTING_FEE_CEILING_ATOMIC,
-  unpaid,
-} from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC, unpaid } from './fee';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 const READY: SignVerdict = { status: 'ready', source: 'keychain' };
@@ -131,14 +126,12 @@ describe('canSign (section 2.4)', () => {
   });
 });
 
-/** The smallest deposit the payer signs with no quote to go on: ten fees at the ceiling. */
-const FLOOR = DEPOSIT_FLOOR_FEES * ROUTING_FEE_CEILING_ATOMIC;
-
 const ROUTING: RoutingFacts = {
   feeRefusal: null,
   sign: READY,
   creditAtomic: null,
   depositRefusal: null,
+  depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
   balanceAtomic: CHANNEL_DEPOSIT_ATOMIC,
 };
 
@@ -176,14 +169,14 @@ describe('canPayRouting (section 2.4)', () => {
       { depositRefusal: 'budget_reached' },
       money('budget_reached'),
     ],
+    // The facilitator refuses a deposit the wallet cannot cover, so the
+    // balance read here predicts it: below the deposit is wallet_low.
     [
-      '5. a balance below the deposit floor is wallet_low',
-      { balanceAtomic: FLOOR - 1n },
+      '5. a balance below the deposit is wallet_low',
+      { balanceAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n },
       money('wallet_low'),
     ],
-    // The payer deposits all of a wallet between the floor and the hint.
-    ['5. a balance at the floor is ready', { balanceAtomic: FLOOR }, READY],
-    ['5. a balance under the hint is ready', { balanceAtomic: CHANNEL_DEPOSIT_ATOMIC - 1n }, READY],
+    ['5. a balance at the deposit is ready', { balanceAtomic: CHANNEL_DEPOSIT_ATOMIC }, READY],
     ['6. sign unknown is unknown', { sign: UNKNOWN }, UNKNOWN],
     [
       '7. an unreadable balance is unknown',
@@ -349,8 +342,7 @@ describe('the invariants, over a seeded random sweep', () => {
     0n,
     1n,
     ROUTING_FEE_CEILING_ATOMIC,
-    FLOOR - 1n,
-    FLOOR,
+    CHANNEL_DEPOSIT_ATOMIC - 1n,
     CHANNEL_DEPOSIT_ATOMIC,
     10n ** 9n,
   ];
@@ -384,6 +376,7 @@ describe('the invariants, over a seeded random sweep', () => {
         sign,
         creditAtomic: pick(amounts),
         depositRefusal: pick([null, null, null, 'budget_reached']),
+        depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
         balanceAtomic: pick(amounts),
       });
       const provider = canPayProvider(
@@ -409,6 +402,7 @@ describe('the invariants, over a seeded random sweep', () => {
           sign: unknownSign,
           creditAtomic: pick([null, 0n]),
           depositRefusal: null,
+          depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
           balanceAtomic: null,
         }).status,
       ).toBe('unknown');

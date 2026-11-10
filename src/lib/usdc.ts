@@ -15,7 +15,10 @@ import type { TenjinSigner } from './wallet/provider';
 export const USDC_ADDRESS: Address = USDC;
 
 export async function getUsdcBalance(address: Address, rpcUrl: string): Promise<bigint> {
-  const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
+  const client = createPublicClient({
+    chain: base,
+    transport: http(rpcUrl, { timeout: 2_000, retryCount: 0 }),
+  });
   return client.readContract({
     address: USDC_ADDRESS,
     abi: erc20Abi,

@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "budgetMs": 3500,
   "packet": {
     "current": {
       "role": "user",

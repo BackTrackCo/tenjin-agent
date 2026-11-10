@@ -5,9 +5,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
 import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
 import { readQuote } from '../lib/spend-quotes';
+import { admitQuote, markShortOfFunds, reopenShortQuote, spendSlot } from '../lib/spend-plan';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
-import { storeChoices, storeSpecs } from './specs';
+import {
+  claimSpecPayment,
+  releaseSpecClaim,
+  settleSpecPayment,
+  storeChoices,
+  storeSpecs,
+} from './specs';
 import { agentFixOf } from './wallet-reasons';
 import type { Choices, OfferSpec } from './decision';
 import { runApproveTool, runRequestTool } from './tool';
@@ -272,19 +279,225 @@ describe("approve, called through the host's own prompt", () => {
     expect(paidCalls()).toEqual([]);
   });
 
-  it('never runs past the balance, and leaves the quote for a funded wallet', async () => {
+  it('uses an approved quote once without a balance preflight', async () => {
     await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
     const { fetchImpl, paidCalls } = seller();
     const quote = await quoted({ id: ID, input: INPUT }, fetchImpl);
-    const short = await runApproveTool(
-      { quote: quote.id, total: quote.total, what: quote.what },
-      { ...deps(fetchImpl, authorizer(), 100_000n), approves: true },
-    );
-    // The wallet emptied after the quote: the fund command, nothing paid.
-    expect(short.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
-    expect(String(short.envelope.reason)).toContain('`tenjin wallet fund`');
-    expect(paidCalls()).toEqual([]);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const low = { ...deps(fetchImpl, authorizer(), 100_000n), approves: true };
+    expect((await runApproveTool(args, low)).envelope).toMatchObject({ status: 'fulfilled' });
+    expect(paidCalls().length).toBeGreaterThan(0);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, low)).envelope).toMatchObject({ status: 'needs_input' });
+  });
+
+  it('does not reopen an approved quote after a transmitted payment is rejected', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    let signed = 0;
+    const rejected = (async (...args: Parameters<typeof fetch>) => {
+      if (new Headers(args[1]?.headers).has('payment-signature')) {
+        signed += 1;
+        return new Response('{}', { status: 402 });
+      }
+      return normal.fetchImpl(...args);
+    }) as typeof fetch;
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(rejected), approves: true };
+    expect((await runApproveTool(args, d)).envelope.status).toBe('failed');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(signed).toBe(1);
+  });
+
+  /** The seller's facilitator, refusing each signed payment as short of
+   *  funds until `funded()` says the wallet was topped up. */
+  function shortUntilFunded(normal: ReturnType<typeof seller>, deliver = 0) {
+    let funded = false;
+    let refused = 0;
+    let delivered = 0;
+    const fetchImpl = (async (...args: Parameters<typeof fetch>) => {
+      if (new Headers(args[1]?.headers).has('payment-signature') && !funded) {
+        if (delivered < deliver) {
+          delivered += 1;
+          return normal.fetchImpl(...args);
+        }
+        refused += 1;
+        return new Response(
+          JSON.stringify({ error: 'payment_failed', reason: 'insufficient_funds' }),
+          {
+            status: 402,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+      return normal.fetchImpl(...args);
+    }) as typeof fetch;
+    return { fetchImpl, refused: () => refused, fund: () => (funded = true) };
+  }
+
+  /** A SHORT WALLET KEEPS THE PERSON'S YES: the quote stays open, and once
+   *  the wallet is funded the same quote runs without a new one. */
+  it('leaves an approved quote open when its payment is refused as short of funds', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(short.fetchImpl), approves: true };
+    const refused = await runApproveTool(args, d);
+    expect(refused.envelope).toMatchObject({ status: 'failed', quote: { id: quote.id } });
+    expect(String(refused.envelope.nextStep)).toContain('tenjin wallet fund');
+    expect(String(refused.envelope.nextStep)).toContain(`approve({quote: "${quote.id}"`);
     expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('fulfilled');
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+    expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+    expect(short.refused()).toBe(1);
+  });
+
+  it('reruns every take of a reopened count once the wallet is funded', async () => {
+    await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT, count: 2 }, normal.fetchImpl);
+    const short = shortUntilFunded(normal);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(short.fetchImpl), approves: true };
+    expect((await runApproveTool(args, d)).envelope).toMatchObject({ quote: { id: quote.id } });
+    expect(short.refused()).toBe(2);
+    short.fund();
+    expect((await runApproveTool(args, d)).envelope).toMatchObject({
+      status: 'fulfilled',
+      count: 2,
+    });
+    expect(normal.paidCalls()).toHaveLength(2);
+  });
+
+  it('keeps a short quote closed through claim cleanup, then admits only one overlapping retry', async () => {
+    await policy({ maxAutoSpend: '100000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT }, normal.fetchImpl);
+    const admitted = await admitQuote(dir, quote.id, { now: () => clock });
+    if (!('admitted' in admitted)) throw new Error('quote must admit its first run');
+    const slot = admitted.admitted[0]!;
+    expect(spendSlot(slot, BigInt(SPEC.priceAtomic))).toBeNull();
+    markShortOfFunds(slot);
+    expect(await claimSpecPayment(dir, ID)).toBeNull();
+    const owner = await settleSpecPayment(dir, ID, { amountAtomic: 0n, signed: true });
+    expect(owner).toBeDefined();
+
+    let startCleanup!: () => void;
+    const cleaning = new Promise<void>((resolve) => {
+      startCleanup = resolve;
+    });
+    let finishCleanup!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const opts = {
+      now: () => clock,
+      releaseClaims: async () => {
+        startCleanup();
+        await blocked;
+        await releaseSpecClaim(dir, ID, owner!);
+      },
+    };
+    const reopening = reopenShortQuote(dir, quote.id, admitted.admitted, opts);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const d = { ...deps(normal.fetchImpl), approves: true };
+    try {
+      await Promise.race([cleaning, reopening]);
+      expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
+      expect((await runApproveTool(args, d)).envelope.status).toBe('needs_input');
+      expect(normal.paidCalls()).toHaveLength(0);
+    } finally {
+      finishCleanup();
+      await reopening;
+    }
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    const retries = await Promise.all([runApproveTool(args, d), runApproveTool(args, d)]);
+    expect(retries.map((result) => result.envelope.status).sort()).toEqual([
+      'fulfilled',
+      'needs_input',
+    ]);
+    expect(normal.paidCalls()).toHaveLength(1);
+  });
+
+  /** A REOPEN FREES ONLY THE CLAIMS ITS OWN SHORT PAYMENTS WROTE. One option
+   *  fails before signing and drops its claim; another session claims and
+   *  pays that offer while the other option waits on its low-funds refusal.
+   *  The reopen leaves that newer claim alone, so the offer cannot pay twice. */
+  it("keeps another session's newer claim when a short choice set reopens", async () => {
+    const other: OfferSpec = {
+      ...SPEC,
+      id: '0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d42',
+      capabilityId: 'aispace-other-video',
+      provider: 'AiSpace (Other)',
+      request: { ...SPEC.request, url: 'https://x402.aispace.bot/api/v1/video/other' },
+    };
+    const choices: Choices = {
+      group: 'video',
+      default: 'hailuo',
+      input: ['prompt'],
+      options: [
+        { key: 'hailuo', label: 'Hailuo 3 Max', strength: 'Cinematic.', id: SPEC.id },
+        { key: 'other', label: 'Other', strength: 'Cheap.', id: other.id },
+      ],
+      all: { totalAtomic: '310000' },
+    };
+    await storeSpecs(dir, [SPEC, other]);
+    await storeChoices(dir, SPEC.id, { choices, hint: 'Pick one, or all.' });
+    const normal = seller();
+    const quote = await quoted({ id: SPEC.id, choice: 'all', input: INPUT }, normal.fetchImpl);
+    let newer = false;
+    const racing = (async (...args: Parameters<typeof fetch>) => {
+      const url = String(args[0]);
+      const signed = new Headers(args[1]?.headers).has('payment-signature');
+      if (url === other.request.url) return new Response('down', { status: 500 });
+      if (signed) {
+        // Another session takes the offer the moment its claim is free.
+        for (let tries = 0; tries < 1_000 && !newer; tries += 1) {
+          if ((await claimSpecPayment(dir, other.id)) === null) {
+            await settleSpecPayment(dir, other.id, { amountAtomic: 155_000n, signed: true });
+            newer = true;
+          } else {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        }
+        return new Response(
+          JSON.stringify({ error: 'payment_failed', reason: 'insufficient_funds' }),
+          {
+            status: 402,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+      return normal.fetchImpl(...args);
+    }) as typeof fetch;
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const result = await runApproveTool(args, { ...deps(racing), approves: true });
+    expect(newer).toBe(true);
+    expect(result.envelope).toMatchObject({ quote: { id: quote.id } });
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeUndefined();
+    expect(await claimSpecPayment(dir, other.id)).toMatchObject({ state: 'paid' });
+    // This run's own short payment is freed for the rerun.
+    expect(await claimSpecPayment(dir, SPEC.id)).toBeNull();
+  });
+
+  /** A plan that paid one payment and was short for the next is never run
+   *  again: a second run would pay the first again. */
+  it('keeps a quote used when one payment delivered and the next was short', async () => {
+    await policy({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+    const normal = seller();
+    const quote = await quoted({ id: ID, input: INPUT, count: 2 }, normal.fetchImpl);
+    const short = shortUntilFunded(normal, 1);
+    const args = { quote: quote.id, total: quote.total, what: quote.what };
+    const result = await runApproveTool(args, { ...deps(short.fetchImpl), approves: true });
+    expect(result.envelope).not.toHaveProperty('quote');
+    expect(short.refused()).toBe(1);
+    expect((await readQuote(dir, quote.id))!.usedAt).toBeDefined();
   });
 
   /** THE WALLET OPENS BEFORE THE QUOTE IS USED UP: a saved passphrase that

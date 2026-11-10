@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "budgetMs": 3500,
   "sessionId": "0bb65d2b-5158-492f-8963-33428f4808f1",
   "accepts": ["discovered", "spec", "label", "fields"],
   "packet": {
