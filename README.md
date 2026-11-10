@@ -138,7 +138,7 @@ A new chat does not reset the daily budget. Routing has a separate fee, quoted f
 | `tenjin update`    | Update Tenjin                                 |
 | `tenjin uninstall` | Remove the integration; keep your wallet      |
 
-`tenjin fund --crypto` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
+`tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
 
 ## Privacy and help
 

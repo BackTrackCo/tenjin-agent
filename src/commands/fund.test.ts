@@ -852,14 +852,14 @@ describe('runFund: the link, its context and its status', () => {
     expect(out.humanLines).toEqual([]);
   });
 
-  it('--crypto shows the address with its rule and watches the balance, minting nothing', async () => {
+  it('--usdc shows the address with its rule and watches the balance, minting nothing', async () => {
     const { provider, address } = fakeProvider();
     mockedBalance.mockResolvedValueOnce(210_000n).mockResolvedValueOnce(5_210_000n);
     const server = fundServer([CHECKOUT]);
     const res = await fund(makeCtx({ isTTY: true, json: false, columns: 80 }), {
       provider,
       fetchImpl: server.fetchImpl,
-      crypto: true,
+      usdc: true,
       sleep: async () => {},
       pollIntervalMs: 1,
     });
@@ -870,7 +870,7 @@ describe('runFund: the link, its context and its status', () => {
     expect(out).toContain(address);
     expect(out).toContain(`starts ${address.slice(0, 6)} · ends ${address.slice(-4)}`);
     expect(out).toContain('USDC on Base (eip155:8453)');
-    expect(res.data).toMatchObject({ crypto: true, funded: true, added: { usd: '5' } });
+    expect(res.data).toMatchObject({ usdc: true, funded: true, added: { usd: '5' } });
   });
 });
 
@@ -902,14 +902,14 @@ describe('a hosted checkout, which has no payment status', () => {
   });
 });
 
-describe('a --crypto handoff, which has no link', () => {
+describe('a --usdc handoff, which has no link', () => {
   // Nothing reports a transfer, so the balance at the handoff is what an
   // arrival is measured from, as for a hosted link.
   it('counts a transfer that lands before `tenjin balance --wait` starts', async () => {
     const { provider } = fakeProvider();
     mockedBalance.mockResolvedValue(0n);
     const server = fundServer([CHECKOUT]);
-    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, crypto: true });
+    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, usdc: true });
 
     // Sent from a crypto wallet before the agent's background wait began.
     mockedBalance.mockResolvedValue(5_000_000n);
@@ -940,7 +940,7 @@ describe('a --crypto handoff, which has no link', () => {
     await fund(makeCtx(), {
       provider,
       fetchImpl: first.fetchImpl,
-      crypto: true,
+      usdc: true,
       env: { CLAUDECODE: '1' },
     });
 
@@ -966,7 +966,7 @@ describe('a --crypto handoff, which has no link', () => {
     ['a higher start, money having been spent since', 10_000_000n, 4_000_000n],
   ])(
     'counts a transfer before the wait when the card link has %s',
-    async (_label, cardStart, cryptoStart) => {
+    async (_label, cardStart, usdcStart) => {
       const { provider } = fakeProvider();
       const link = pageLink(Date.now() + 600_000);
       if (cardStart === undefined) mockedBalance.mockRejectedValue(new Error('rpc down'));
@@ -974,11 +974,11 @@ describe('a --crypto handoff, which has no link', () => {
       const first = fundServer([link]);
       await fund(makeCtx(), { provider, fetchImpl: first.fetchImpl, wait: false, open: false });
 
-      mockedBalance.mockResolvedValue(cryptoStart);
+      mockedBalance.mockResolvedValue(usdcStart);
       await fund(makeCtx(), {
         provider,
         fetchImpl: first.fetchImpl,
-        crypto: true,
+        usdc: true,
         env: { CLAUDECODE: '1' },
       });
 
@@ -998,7 +998,7 @@ describe('a --crypto handoff, which has no link', () => {
       expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true });
 
       // The transfer lands before the agent's background wait began.
-      mockedBalance.mockResolvedValue(cryptoStart + 5_000_000n);
+      mockedBalance.mockResolvedValue(usdcStart + 5_000_000n);
       let clock = Date.now();
       const waited = await runBalance(makeCtx(), {
         provider,

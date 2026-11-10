@@ -79,7 +79,7 @@ export function routingDepositAtomic(o: {
  */
 export const SUGGESTED_FUND_USD = '5';
 /** The funding line a new wallet is told, after `tenjin wallet create`. */
-export const FUNDING_LINE = `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`, or send USDC from a crypto wallet with \`tenjin fund --crypto\`.`;
+export const FUNDING_LINE = `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`, or send USDC from a crypto wallet with \`tenjin fund --usdc\`.`;
 /** The funding line under a balance of exactly $0, in `tenjin balance` and `tenjin status`. */
 export const FUND_COMMAND_LINE = 'Add funds with `tenjin fund`, or ask your agent.';
 

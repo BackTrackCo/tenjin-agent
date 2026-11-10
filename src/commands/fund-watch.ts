@@ -18,7 +18,7 @@ import { PRODUCTION_ORIGIN } from '../lib/production-origin';
  * - THE BALANCE. Only a rise counts as arrived: the status says what the page
  *   saw, never that the money is spendable.
  *
- * The last link this machine issued, or `--crypto` handoff, is remembered
+ * The last link this machine issued, or `--usdc` handoff, is remembered
  * (`fund-link.json`, mode 0600) so `tenjin balance --wait` can follow it from
  * another process and a rerun of `tenjin fund` can tell a payment already on
  * its way from a fresh start. The token in it funds this wallet only and
@@ -141,7 +141,7 @@ export interface RememberedLink {
   /** Lowercase wallet address the link funds. */
   address: string;
   /**
-   * Absent for a `--crypto` handoff, which has no link: it is remembered for
+   * Absent for a `--usdc` handoff, which has no link: it is remembered for
    * its starting balance alone, like a hosted link, and never has a token.
    */
   url?: string;
@@ -248,7 +248,7 @@ export interface WatchOptions {
   /** End with `timed-out` once this passes. */
   deadline: number;
   /** What the lines say: a checkout in the browser, or a crypto send. */
-  view: 'checkout' | 'crypto' | 'funds';
+  view: 'checkout' | 'usdc' | 'funds';
   live?: LiveLine;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -270,7 +270,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
   const interval = o.intervalMs ?? STATUS_INTERVAL_MS;
   const live = o.live;
   let status: LinkStatus | undefined;
-  let statusOn = o.token !== undefined && o.view !== 'crypto';
+  let statusOn = o.token !== undefined && o.view !== 'usdc';
   let statusKnown = false;
   let backoff = 0;
   let saidOpen = false;
@@ -279,7 +279,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
 
   const render = (t: number) => {
     if (live === undefined) return;
-    if (o.view === 'crypto') return live.spin('Watching for it to arrive…');
+    if (o.view === 'usdc') return live.spin('Watching for it to arrive…');
     const left =
       o.expiresAt !== undefined && t < o.expiresAt ? timeLeft(o.expiresAt - t) : undefined;
     if (!statusKnown) {
@@ -339,7 +339,7 @@ export async function watchFunding(o: WatchOptions): Promise<WatchEnd> {
         const added = balance - o.startBalance;
         if (live !== undefined) {
           live.stop();
-          if (o.view === 'crypto') {
+          if (o.view === 'usdc') {
             live.ok('Received from a crypto wallet', `+${dollars(added)}`);
           } else {
             if (statusKnown && status?.state === 'paid' && !saidPaid) {

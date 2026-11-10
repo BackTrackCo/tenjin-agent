@@ -273,7 +273,7 @@ describe('global flags are position-independent', () => {
   it('`fund` and `balance` are top-level commands with their own flags', async () => {
     for (const [argv, command] of [
       [['fund', '5', '--for', 'X post read', '--price', '0.006', '--timeout', 'abc'], 'fund'],
-      [['fund', '--crypto', '--no-wait', '--timeout', 'abc'], 'fund'],
+      [['fund', '--usdc', '--no-wait', '--timeout', 'abc'], 'fund'],
       [['balance', '--wait', '--timeout', 'abc'], 'balance'],
       [['wallet', 'balance', '--wait', '--timeout', 'abc'], 'wallet.balance'],
     ] as const) {

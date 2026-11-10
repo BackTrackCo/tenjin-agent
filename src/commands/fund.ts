@@ -49,7 +49,7 @@ import type { CommandContext, CommandResult } from '../context';
  *
  * At a terminal it then watches: the link's payment status from the server
  * and the balance, on one status line, until the money lands
- * (`fund-watch.ts`). `--crypto` shows the address to send USDC to instead,
+ * (`fund-watch.ts`). `--usdc` shows the address to send USDC to instead,
  * and watches the same way.
  */
 
@@ -85,8 +85,8 @@ const BASELINE_TIMEOUT_MS = 4_000;
  * one on its way: a rerun waits on it rather than opening a second checkout.
  */
 const DUPLICATE_WINDOW_MS = 15 * 60_000;
-/** How long `--crypto` watches for a transfer. */
-const CRYPTO_WAIT_MS = 15 * 60_000;
+/** How long `--usdc` watches for a transfer. */
+const USDC_WAIT_MS = 15 * 60_000;
 
 /**
  * Why the run is not reporting an arrival, kept distinct in the envelope because
@@ -116,8 +116,8 @@ export interface FundOptions extends ResolveWalletProviderOptions {
   qr?: boolean;
   /** Watch for the payment after issuing the link. Defaults to ON at a TTY, OFF otherwise. */
   wait?: boolean;
-  /** `--crypto`: the address and a QR to send USDC to, no checkout. */
-  crypto?: boolean;
+  /** `--usdc`: the address and a QR to send USDC to, no checkout. */
+  usdc?: boolean;
   /** `--for` and `--price`: the paid call the money is for, shown on the page. */
   forLabel?: string;
   priceUsd?: string;
@@ -176,8 +176,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
   const say = (line = '') => err.write(`${line}\n`);
   const dim = (text: string) => style('dim', text, err);
 
-  if (opts.crypto === true) {
-    return fundByCrypto(ctx, { address, readBalance, human, shouldWait, live, say, dim, opts });
+  if (opts.usdc === true) {
+    return fundByUsdc(ctx, { address, readBalance, human, shouldWait, live, say, dim, opts });
   }
 
   // Read the balance BEFORE minting, every time: it is the baseline the wait
@@ -455,11 +455,11 @@ function agentNextStep(o: {
 }
 
 /**
- * `--crypto`: the address to send USDC to, its safety rule first, and a QR of
+ * `--usdc`: the address to send USDC to, its safety rule first, and a QR of
  * the plain address. Nothing is minted and no key is unlocked; the wait is
  * the balance alone.
  */
-async function fundByCrypto(
+async function fundByUsdc(
   ctx: CommandContext,
   c: {
     address: string;
@@ -499,7 +499,7 @@ async function fundByCrypto(
         version: 1,
         address: address.toLowerCase(),
         issuedAt,
-        expiresAt: issuedAt + CRYPTO_WAIT_MS,
+        expiresAt: issuedAt + USDC_WAIT_MS,
         startBalanceAtomic: startBalance.toString(),
       });
     } else if (
@@ -537,8 +537,8 @@ async function fundByCrypto(
       end = await watchFunding({
         startBalance,
         readBalance: c.readBalance,
-        deadline: now() + (opts.pollTimeoutMs ?? CRYPTO_WAIT_MS),
-        view: 'crypto',
+        deadline: now() + (opts.pollTimeoutMs ?? USDC_WAIT_MS),
+        view: 'usdc',
         ...(human ? { live: c.live } : {}),
         ...(opts.sleep !== undefined ? { sleep: opts.sleep } : {}),
         ...(opts.pollIntervalMs !== undefined ? { intervalMs: opts.pollIntervalMs } : {}),
@@ -556,7 +556,7 @@ async function fundByCrypto(
   return {
     data: {
       address,
-      crypto: true,
+      usdc: true,
       funded: arrived !== undefined,
       pollStatus,
       nextStep:
@@ -579,7 +579,7 @@ async function fundByCrypto(
  * The prior link's payment status when it shows money on its way: `paying`,
  * or `paid` with the balance not yet above where it was when that link was
  * issued. Undefined otherwise, when the status cannot be read, or for a hosted
- * link or a `--crypto` handoff, which have no status to read.
+ * link or a `--usdc` handoff, which have no status to read.
  */
 async function paymentOnItsWay(
   prior: RememberedLink,

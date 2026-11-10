@@ -461,7 +461,7 @@ Examples:
 function fundCommand(cmd: Command, name: string, runCommand: Registration['runCommand']): void {
   cmd
     .description(
-      'Open checkout in your browser to add funds, then watch the payment land: the page opening, the payment, and the new balance. Confirm the amount and any fee in the browser. Ctrl-C stops watching; it does not cancel checkout. With --crypto, show the address to send USDC to instead.',
+      'Open checkout in your browser to add funds, then watch the payment land: the page opening, the payment, and the new balance. Confirm the amount and any fee in the browser. Ctrl-C stops watching; it does not cancel checkout. With --usdc, show the address to send USDC to instead.',
     )
     .option('--no-open', 'print the checkout link without opening a browser')
     .option('--no-qr', 'no QR code, even when no browser can open the link')
@@ -469,7 +469,7 @@ function fundCommand(cmd: Command, name: string, runCommand: Registration['runCo
       '--no-wait',
       'return once the link is issued instead of watching for the payment (already the default when not at a terminal)',
     )
-    .option('--crypto', 'send USDC from a crypto wallet instead: shows the address and its QR code')
+    .option('--usdc', 'send USDC from a crypto wallet instead: shows the address and its QR code')
     .option('--for <label>', 'what the money is for, shown on the checkout page (with --price)')
     .option('--price <usd>', 'the price of that call in USD (with --for)')
     .addOption(
@@ -484,7 +484,7 @@ Examples:
   $ tenjin fund
   $ tenjin fund 10
   $ tenjin fund 5 --for "X post read" --price 0.006
-  $ tenjin fund --crypto
+  $ tenjin fund --usdc
 `,
     )
     .action(async function (this: Command, amountUsd: string | undefined) {
@@ -496,7 +496,7 @@ Examples:
           ...(o.open === false ? { open: false } : {}),
           ...(o.qr === false ? { qr: false } : {}),
           ...(o.wait === false ? { wait: false } : {}),
-          ...(o.crypto === true ? { crypto: true } : {}),
+          ...(o.usdc === true ? { usdc: true } : {}),
           ...(typeof o.for === 'string' ? { forLabel: o.for } : {}),
           ...(typeof o.price === 'string' ? { priceUsd: o.price } : {}),
           ...(typeof o.source === 'string'
