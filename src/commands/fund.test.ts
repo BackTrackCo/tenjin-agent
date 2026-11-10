@@ -928,4 +928,34 @@ describe('a --crypto handoff, which has no link', () => {
     expect(server.mints).toHaveLength(0);
     expect(server.statusCalls()).toBe(0);
   });
+
+  it('keeps a card payment on its way, so a later `tenjin fund` opens no second checkout', async () => {
+    const { provider } = fakeProvider();
+    const link = pageLink(Date.now() + 600_000);
+    mockedBalance.mockResolvedValue(0n);
+    const first = fundServer([link]);
+    await fund(makeCtx(), { provider, fetchImpl: first.fetchImpl, wait: false, open: false });
+
+    // The agent hands over the address too while the card payment is landing.
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: first.fetchImpl,
+      crypto: true,
+      env: { CLAUDECODE: '1' },
+    });
+
+    const again = fundServer(
+      [pageLink(Date.now() + 600_000)],
+      [[200, { state: 'paying', updatedAt: 'x' }]],
+    );
+    const res = await fund(makeCtx(), {
+      provider,
+      fetchImpl: again.fetchImpl,
+      wait: false,
+      open: false,
+      env: { CLAUDECODE: '1' },
+    });
+    expect(again.mints).toHaveLength(0);
+    expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true, status: 'paying' });
+  });
 });

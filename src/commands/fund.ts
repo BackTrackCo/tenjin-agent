@@ -484,16 +484,23 @@ async function fundByCrypto(
     ? await c.readBalance()
     : await withTimeout(c.readBalance(), BASELINE_TIMEOUT_MS);
   // Remembered with no url and no token: `tenjin fund` finds no status to
-  // follow, so it never reads this as a checkout on its way.
+  // follow, so it never reads this as a checkout on its way. A live checkout
+  // link with a token is kept instead: replacing it would hide a card payment
+  // still landing from the next `tenjin fund`, which would open a second
+  // checkout. `tenjin balance --wait` then measures from that link's earlier
+  // starting balance, so a transfer is still counted.
   if (startBalance !== undefined) {
-    const issuedAt = now();
-    await rememberLink(ctx.dataDir, {
-      version: 1,
-      address: address.toLowerCase(),
-      issuedAt,
-      expiresAt: issuedAt + CRYPTO_WAIT_MS,
-      startBalanceAtomic: startBalance.toString(),
-    });
+    const prior = await recallLink(ctx.dataDir, address, now());
+    if (prior?.token === undefined) {
+      const issuedAt = now();
+      await rememberLink(ctx.dataDir, {
+        version: 1,
+        address: address.toLowerCase(),
+        issuedAt,
+        expiresAt: issuedAt + CRYPTO_WAIT_MS,
+        startBalanceAtomic: startBalance.toString(),
+      });
+    }
   }
   if (human) {
     const err = ctx.io.stderr;
