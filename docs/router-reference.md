@@ -124,7 +124,7 @@ The guide's [sharing section](./agent-permissions.md#what-the-hooks-send) descri
 
 ## Host integration
 
-Claude Code's plugin registers the `router` MCP server and exec-form hooks against Tenjin's verified runtime. Native searches/fetches, prompts, delegated tasks and questions can trigger suggestions. A redirect applies at most once per same native call per agent in its retry window, so retrying with native tools is possible. Free docs notes do not block a native search. Session startup records plugin presence; a real prompt/tool call establishes activity in the chat.
+Claude Code's plugin registers the `router` MCP server and exec-form hooks against Tenjin's verified runtime. Native searches/fetches, prompts, delegated tasks and the agent's questions to you can trigger suggestions. A question triggers one only when it asks you for an API key, an access token, credentials, an account, a sign-up, a subscription or a paid plan; the suggestion is added beside the question and never stops it from being asked. A redirect applies at most once per same native call per agent in its retry window, so retrying with native tools is possible. Free docs notes do not block a native search. Session startup records plugin presence; a real prompt/tool call establishes activity in the chat.
 
 The plugin permits its request tool and denies model use of its internal hook tool. It does not authorize other shell commands. Its optional visual mod reads existing state/results to draw tool rows; it does not grant permissions or change prompts/config. Expanded output remains the host's detailed tool record.
 

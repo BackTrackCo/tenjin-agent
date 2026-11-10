@@ -172,9 +172,9 @@ const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request(
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
-/** The ask arm's form of it, about the question. */
-const ONE_BLOCK_QUESTION =
-  'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
+/** The ask arm's one sentence beside its offer: the question was not blocked. */
+const ASK_OFFER_NOTE =
+  'Your question was still asked. If what it asks for is needed only for this step, this pay-per-call service can do the step instead.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
@@ -3443,7 +3443,7 @@ describe('a question to the user', () => {
     });
   });
 
-  it('leaves the offer record for the question it denied', async () => {
+  it('leaves the offer record for the question it offered beside', async () => {
     await runAskHook(await askEvent(), {
       dataDir: dir,
       baseUrl: BASE,
@@ -3458,7 +3458,12 @@ describe('a question to the user', () => {
     });
   });
 
-  it('denies the question once on an offer, then lets it be asked', async () => {
+  /**
+   * A QUESTION THAT ASKS FOR AN API KEY GETS THE OFFER BESIDE IT, NEVER IN ITS
+   * PLACE. No `permissionDecision`, so the person still sees the question, and
+   * the offer is added once for the same question.
+   */
+  it('adds an offer beside a question that asks for an API key, once, and never denies it', async () => {
     const first = await runAskHook(await askEvent(), {
       dataDir: dir,
       baseUrl: BASE,
@@ -3467,8 +3472,7 @@ describe('a question to the user', () => {
     expect(first.response).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK_QUESTION}`,
+        additionalContext: `${SEEN_LINE} ${ASK_OFFER_NOTE}`,
       },
     });
     const second = await runAskHook(await askEvent(), {
@@ -3480,23 +3484,65 @@ describe('a question to the user', () => {
     // The claim is the question's own: a different question is its own target.
     const other = await runAskHook(
       await askEvent({
-        tool_input: { questions: [{ question: 'Which voice should narrate it?', options: [] }] },
+        tool_input: {
+          questions: [{ question: 'Do you have an account with a voice service?', options: [] }],
+        },
       }),
       { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
     );
-    expect(other.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(other.response).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: expect.any(String) },
+    });
   });
 
-  it('denies it on a curated offer too, with the same wording', async () => {
+  it('adds a curated offer the same way', async () => {
     const { fetchImpl } = router(EXECUTE);
     const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
     expect(out.response).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: `${SEEN} ${ONE_BLOCK_QUESTION}`,
+        additionalContext: `${SEEN} ${ASK_OFFER_NOTE}`,
       },
     });
+  });
+
+  /**
+   * THE MISFIRE THIS LEG WAS NARROWED FOR. The user's earlier words named a
+   * search service, and the host then asked an unrelated multiple-choice
+   * question. The router matched a paid search offer to those earlier words,
+   * and the question was blocked. A question that asks for no access is never
+   * routed, so it passes with no output and the router is not asked.
+   */
+  it('passes a question that asks for no access, whatever the user said earlier', async () => {
+    const path = await transcriptFor([
+      {
+        type: 'user',
+        sessionId: 'sess-1',
+        message: { content: 'look up recent posts on this with the SearchCo search service' },
+      },
+    ]);
+    const { fetchImpl, calls } = router(DISCOVERED);
+    const out = await runAskHook(
+      await askEvent({
+        transcript_path: path,
+        tool_input: {
+          questions: [
+            {
+              question: 'Which of the review comments should I address in this change?',
+              header: 'Review',
+              multiSelect: true,
+              options: [
+                { label: 'The null check', description: 'Guard the parser against empty input.' },
+                { label: 'The rename', description: 'Rename the helper to match its module.' },
+              ],
+            },
+          ],
+        },
+      }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl },
+    );
+    expect(out).toEqual({ response: null });
+    expect(calls).toHaveLength(0);
   });
 
   /**
@@ -3608,7 +3654,11 @@ describe('a question to the user', () => {
 
   it('is what the hook tool answers for `ask` and `answer` legs', async () => {
     for (const [kind, event, expected] of [
-      ['ask', await askEvent(), { hookEventName: 'PreToolUse', permissionDecision: 'deny' }],
+      [
+        'ask',
+        await askEvent(),
+        { hookEventName: 'PreToolUse', additionalContext: `${SEEN_LINE} ${ASK_OFFER_NOTE}` },
+      ],
       [
         'answer',
         await answerEvent({ 'For the audio, which can you get?': 'use a paid service' }),
