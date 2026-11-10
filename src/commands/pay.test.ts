@@ -391,6 +391,36 @@ describe('runPay, tenjin lane', () => {
       runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
+
+  // The SDK's reader accepts a v1 challenge from the body when the header is
+  // absent. This command pays only a v2 header, so it never hands it the body.
+  it('refuses a v1 challenge in the body as a 402 with no PAYMENT-REQUIRED header', async () => {
+    const v1 = { x402Version: 1, accepts: buildPaymentRequired().paymentRequired.accepts };
+    const { fetch, calls } = scriptedFetch([json(402, v1)]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: `The 402 from ${TENJIN_URL} carried no PAYMENT-REQUIRED header.`,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  // The SDK throws one error for an absent header and an empty one; an empty
+  // header was sent, so it is the undecodable one.
+  it.each([
+    ['empty', ''],
+    ['not base64 JSON', 'not base64 json'],
+  ])('a 402 whose PAYMENT-REQUIRED header is %s cannot be decoded', async (_label, value) => {
+    const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': value })]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: 'Could not decode the PAYMENT-REQUIRED header.',
+    });
+    expect(calls).toHaveLength(1);
+  });
 });
 
 /** The builder-code `info` the CLI put on the wire, or undefined when it sent none. */

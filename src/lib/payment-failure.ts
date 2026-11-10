@@ -1,5 +1,10 @@
-import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import type { HttpResponse } from './http';
+import {
+  headerReader,
+  paymentRequiredOf,
+  settleResponseOf,
+  type X402HeaderReader,
+} from './x402-headers';
 
 /** Bound parsing of seller-controlled headers and embedded JSON details. */
 const MAX_ERROR_CHARS = 16_384;
@@ -41,18 +46,6 @@ function isShortOfFunds(value: unknown): boolean {
   }
 }
 
-function headerObject(
-  header: string | undefined,
-  decode: (header: string) => unknown,
-): Record<string, unknown> | undefined {
-  if (header === undefined || header.length > MAX_ERROR_CHARS) return undefined;
-  try {
-    return record(decode(header));
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Seller-reported low funds: for failure messaging, and to keep an approved
  * quote open for the person's next yes (`spend-plan.ts`). Never evidence to
@@ -60,14 +53,12 @@ function headerObject(
  */
 export function paymentShortOfFunds(
   res: Pick<HttpResponse, 'status' | 'header' | 'json'>,
+  http: X402HeaderReader = headerReader,
 ): boolean {
-  const settled = headerObject(
-    res.header('PAYMENT-RESPONSE') ?? res.header('X-PAYMENT-RESPONSE'),
-    decodePaymentResponseHeader,
-  );
+  const settled = settleResponseOf(http, res.header, MAX_ERROR_CHARS);
   if ([settled?.errorReason, settled?.errorMessage].some(isShortOfFunds)) return true;
   if (res.status !== 402) return false;
-  const required = headerObject(res.header('PAYMENT-REQUIRED'), decodePaymentRequiredHeader);
+  const required = paymentRequiredOf(http, res.header, MAX_ERROR_CHARS);
   const body = record(res.json);
   return [required?.error, body?.error, body?.reason].some(isShortOfFunds);
 }
