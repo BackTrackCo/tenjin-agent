@@ -76,7 +76,8 @@ tenjin pay <url> --json --max-price <usd> [-X <method>] [-d '<json-body>'] [-H '
   turn. Batch work needs the user's consent for the whole batch and its total.
 - A paid 2xx returns \`amountPaid\`, \`payTo\`, \`settlementTxHash\` when the
   seller reported one, and the body. A file (an image, a sound, a PDF) is saved
-  instead: \`savedTo\` is its path, beside \`contentType\` and \`bytes\`. A 4xx
+  instead: \`savedTo\` is its path, beside \`contentType\` and \`bytes\`. If no
+  folder takes it, \`saveError\` says why and \`bodyBase64\` holds the bytes. A 4xx
   or 5xx AFTER payment is exit 4 (\`PAYMENT_FAILED\`): the signed authorization
   already left, so do not retry blindly. Read the provider's error in
   \`details.body\` and, for a refused payment, \`details.paymentError\`; fix the

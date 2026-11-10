@@ -1,4 +1,5 @@
 import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
@@ -1588,17 +1589,20 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
       ),
       ...(opts.caveat !== undefined ? [sanitizeForTerminal(opts.caveat)] : []),
       ...(opts.saved !== undefined ? [savedLine(opts.saved)] : []),
+      // The paid bytes no folder took: the only copy, so printed whole.
+      ...(opts.saved?.bodyBase64 !== undefined ? [opts.saved.bodyBase64] : []),
       ...(preview.length > 0 ? [preview] : []),
     ],
   };
 }
 
 /** A binary body a direct pay wrote to a file, tried to, or (on a quote)
- *  left unwritten. */
+ *  left unwritten. `bodyBase64` holds the bytes when no folder took them. */
 interface SavedBody {
   savedTo?: string;
   saveError?: string;
   notSaved?: string;
+  bodyBase64?: string;
   contentType: string;
   bytes: number;
 }
@@ -1616,9 +1620,11 @@ function describeBody(res: Pick<HttpResponse, 'bytes' | 'header'>): SavedBody | 
 /**
  * WRITE A DIRECT PAY'S BINARY BODY TO A FILE, under the downloads directory,
  * named for the host with the extension its type implies, and say where. A
- * text body is undefined: it is delivered as text. NEVER THROWS: on the paid
- * leg the money has already moved, so a file that could not be written is
- * said so beside the amount, and a partial file is removed.
+ * text body is undefined: it is delivered as text. NEVER THROWS, AND NEVER
+ * DROPS THE BYTES: on the paid leg the money has already moved, and a retry
+ * pays again. A downloads folder that cannot take the file (full, or not
+ * writable) falls back to the OS temp folder, with the first error said. When
+ * that fails too, the bytes come back in the result as base64.
  */
 async function keepBody(
   dataDir: string,
@@ -1628,33 +1634,53 @@ async function keepBody(
   if (res.bytes === undefined) return undefined;
   const contentType = res.header('content-type') ?? '';
   const described = { contentType, bytes: res.bytes.byteLength };
+  const stem = `pay-${new URL(url).hostname.slice(0, 60)}-${Date.now()}`;
+  const first = await writeBody(downloadsDir(dataDir), stem, contentType, res.bytes);
+  if ('path' in first) return { savedTo: first.path, ...described };
+  const second = await writeBody(tmpdir(), stem, contentType, res.bytes);
+  if ('path' in second) return { savedTo: second.path, saveError: first.error, ...described };
+  return {
+    saveError: `${first.error}; the temp folder failed too: ${second.error}`,
+    bodyBase64: Buffer.from(res.bytes).toString('base64'),
+    ...described,
+  };
+}
+
+/** One try at a new file in `directory`; a partial file is removed. */
+async function writeBody(
+  directory: string,
+  stem: string,
+  contentType: string,
+  bytes: Uint8Array,
+): Promise<{ path: string } | { error: string }> {
   let path: string | undefined;
   try {
-    const file = await createUniqueFile(
-      downloadsDir(dataDir),
-      `pay-${new URL(url).hostname.slice(0, 60)}-${Date.now()}`,
-      extensionFor(contentType),
-    );
+    const file = await createUniqueFile(directory, stem, extensionFor(contentType));
     path = file.path;
     try {
-      await writeAll(file.handle, res.bytes);
+      await writeAll(file.handle, bytes);
     } finally {
       await file.handle.close();
     }
-    return { savedTo: file.path, ...described };
+    return { path: file.path };
   } catch (err) {
     if (path !== undefined) await rm(path, { force: true }).catch(() => undefined);
-    return { saveError: err instanceof Error ? err.message : String(err), ...described };
+    return { error: err instanceof Error ? err.message : String(err) };
   }
 }
 
 function savedLine(saved: SavedBody): string {
   const what = `${saved.bytes}-byte ${sanitizeForTerminal(saved.contentType) || 'binary'} body`;
-  return saved.savedTo !== undefined
-    ? `saved the ${what} to ${saved.savedTo}`
-    : saved.notSaved !== undefined
-      ? `the ${what} was not saved: ${saved.notSaved}`
-      : `the ${what} could not be saved: ${sanitizeForTerminal(saved.saveError ?? 'unknown error')}`;
+  const why = sanitizeForTerminal(saved.saveError ?? 'unknown error');
+  if (saved.savedTo !== undefined) {
+    return saved.saveError !== undefined
+      ? `the downloads folder could not take the ${what} (${why}), so it was saved to ${saved.savedTo}`
+      : `saved the ${what} to ${saved.savedTo}`;
+  }
+  if (saved.notSaved !== undefined) return `the ${what} was not saved: ${saved.notSaved}`;
+  return saved.bodyBase64 !== undefined
+    ? `the ${what} could not be saved (${why}); its bytes follow as base64`
+    : `the ${what} could not be saved: ${why}`;
 }
 
 /**

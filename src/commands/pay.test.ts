@@ -1129,6 +1129,56 @@ describe('runPay, a binary body', () => {
     expect((await readPaidRecords(dir))[0]).toMatchObject({ savedFiles: [savedTo] });
   });
 
+  /** A paid PNG, with the downloads folder a plain file (so it cannot take
+   *  one) and the OS temp folder at `temp`. */
+  async function paidWithNoDownloads(temp: string) {
+    await writeFile(join(dir, 'downloads'), 'not a folder');
+    for (const name of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(name, temp);
+    try {
+      const { fetch } = scriptedFetch([
+        json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+        new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } }),
+      ]);
+      return await runPay({ url: TENJIN_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+        authorizer: fakeAuthorizer('allow'),
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }
+
+  // A full disk or an unwritable downloads folder dropped the paid bytes, and
+  // a retry paid again.
+  it('saves a paid file to the temp folder when the downloads folder fails', async () => {
+    const temp = await mkdtemp(join(dir, 'temp-'));
+    const result = await paidWithNoDownloads(temp);
+    const data = result.data as Record<string, unknown>;
+    expect(data).toMatchObject({ paid: true, contentType: 'image/png', bytes: PNG.byteLength });
+    expect(data.saveError).toEqual(expect.any(String));
+    expect(data).not.toHaveProperty('bodyBase64');
+    const savedTo = data.savedTo as string;
+    expect(savedTo.startsWith(temp)).toBe(true);
+    expect(new Uint8Array(await readFile(savedTo))).toEqual(PNG);
+    expect(result.humanLines?.join('\n')).toContain(`so it was saved to ${savedTo}`);
+    expect((await readPaidRecords(dir))[0]).toMatchObject({ savedFiles: [savedTo] });
+  });
+
+  it('hands back the paid bytes as base64 when no folder takes the file', async () => {
+    const temp = join(dir, 'temp-file');
+    await writeFile(temp, 'not a folder either');
+    const result = await paidWithNoDownloads(temp);
+    const data = result.data as Record<string, unknown>;
+    const base64 = Buffer.from(PNG).toString('base64');
+    expect(data).toMatchObject({ paid: true, bodyBase64: base64, bytes: PNG.byteLength });
+    expect(String(data.saveError)).toContain('the temp folder failed too');
+    expect(data).not.toHaveProperty('savedTo');
+    expect(result.humanLines).toContain(base64);
+    expect((await readPaidRecords(dir))[0]).toMatchObject({ savedFiles: [] });
+  });
+
   // `--quote` is a read: a free file it meets is described, never written.
   it('writes no file for a free binary body met by --quote', async () => {
     const { fetch } = scriptedFetch([
