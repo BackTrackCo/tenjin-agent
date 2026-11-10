@@ -109,7 +109,7 @@ Use Tenjin to make a 10-second welcome voiceover for my app.
 | X and Reddit                      | glim                            | 0.1¢ to 1¢     |
 | Images                            | GPT Image, Nano Banana, Recraft | 3.5¢ to 14.4¢  |
 | Voiceovers, sound effects, music  | ElevenLabs, Google Lyria        | 1¢ to 12¢      |
-| Video clips                       | MiniMax Hailuo                  | 17¢ to 42¢     |
+| Video clips                       | MiniMax Hailuo                  | 17¢ to 84¢     |
 | Papers and SEC filings            | arXiv, PubMed, SEC EDGAR        | 0.3¢ to 4¢     |
 | Instagram, TikTok and Google Maps | Scrape Creators, Google Maps    | 2¢             |
 | PDFs, screenshots and hosting     | Cloudflare and others           | 0.2¢ to 50¢    |
