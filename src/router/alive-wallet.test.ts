@@ -86,6 +86,14 @@ describe('the wallet notice at session start', () => {
     expect(await walletNotice(dir, { read: async () => null })).toBeNull();
   });
 
+  it('says nothing, and reads nothing, when TENJIN_WALLET_KEY shadows wallet.json', async () => {
+    await wallet();
+    const read = vi.fn(async () => 0n);
+    const env = { TENJIN_WALLET_KEY: `0x${'1'.repeat(64)}` };
+    expect(await walletNotice(dir, { env, read, now: nextDay })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("asks the user's own RPC when the config names one", async () => {
     await wallet({ rpcUrl: 'https://rpc.example.test' });
     const read = vi.fn(async () => 5_000_000n);

@@ -195,9 +195,9 @@ export const BALANCE_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
  * user and never the model, on every surface and without the mod. The read
  * behind it is one bounded balance read, at most once a day
  * (`balance-notice.json`), so the notice is too: a reminder at every session
- * start gets Tenjin uninstalled. Null when there is no wallet, the balance was
- * read in the last day, it could not be read in time, or it holds at least the
- * per-call limit.
+ * start gets Tenjin uninstalled. Null when there is no wallet, a
+ * TENJIN_WALLET_KEY shadows wallet.json, the balance was read in the last day,
+ * it could not be read in time, or it holds at least the per-call limit.
  */
 export async function walletNotice(
   dataDir: string,
@@ -209,6 +209,9 @@ export async function walletNotice(
   } = {},
 ): Promise<string | null> {
   const env = opts.env ?? process.env;
+  // The env key, valid or not, shadows wallet.json as in {@link walletAtStart}:
+  // the file's address is not the wallet that pays, so it is never read for.
+  if ((env.TENJIN_WALLET_KEY?.trim() ?? '') !== '') return null;
   const now = (opts.now ?? Date.now)();
   const noticePath = join(aliveDir(dataDir), BALANCE_NOTICE_FILE);
   const last = (await readJson(noticePath))?.at;
