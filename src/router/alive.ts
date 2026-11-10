@@ -30,6 +30,8 @@ import { sessionStartMessage } from './wallet-reasons';
  * this session ({@link walletAtStart}). That is a file fact, not a verdict:
  * `alive` never unlocks, never execs, never reads a keychain and never replays
  * what a router saw (Q4). Everything else waits for the router's first notice.
+ * Its one network call is the balance read behind {@link walletNotice}, at
+ * most once a day and bounded at 2 s, through the env proxy it sets up then.
  */
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -199,8 +201,14 @@ export const BALANCE_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
  */
 export async function walletNotice(
   dataDir: string,
-  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number; now?: () => number } = {},
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    read?: typeof readUsdcBalanceWithFallback;
+    timeoutMs?: number;
+    now?: () => number;
+  } = {},
 ): Promise<string | null> {
+  const env = opts.env ?? process.env;
   const now = (opts.now ?? Date.now)();
   const noticePath = join(aliveDir(dataDir), BALANCE_NOTICE_FILE);
   const last = (await readJson(noticePath))?.at;
@@ -219,7 +227,7 @@ export async function walletNotice(
   const config = await readJson(configPath(dataDir));
   const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
   const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
-  const read = opts.read ?? readUsdcBalanceWithFallback;
+  const read = opts.read ?? readThroughEnvProxy(env);
   const balance = await read(address, rpcUrl, { timeoutMs });
   if (balance === null) return null;
   // The per-call limit as the spend policy reads it: the file's, else the default.
@@ -231,6 +239,18 @@ export async function walletNotice(
   if (balance > 0n && balance >= cap) return null;
   // Only the person reads it, inside the session: they say so, the agent runs it.
   return `Tenjin balance $${dollars(balance)} · low. Say "add funds" when you're ready.`;
+}
+
+/**
+ * The balance read, through the proxy the environment names. The bin entry
+ * sets that proxy up only after this leg has exited, and here only a read that
+ * is due loads it, so a session start with nothing to read pays nothing for it.
+ */
+function readThroughEnvProxy(env: NodeJS.ProcessEnv): typeof readUsdcBalanceWithFallback {
+  return async (address, rpcUrl, opts) => {
+    (await import('../lib/env-proxy')).useEnvProxy(env);
+    return readUsdcBalanceWithFallback(address, rpcUrl, opts);
+  };
 }
 
 /** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
@@ -272,7 +292,12 @@ export async function aliveMain(opts: {
     version: opts.version,
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   });
-  const notice = answer === null ? await walletNotice(opts.dataDir).catch(() => null) : null;
+  const notice =
+    answer === null
+      ? await walletNotice(opts.dataDir, {
+          ...(opts.env !== undefined ? { env: opts.env } : {}),
+        }).catch(() => null)
+      : null;
   const payload = answer ?? (notice !== null ? { systemMessage: notice } : null);
   if (payload === null) return;
   const out = opts.stdout ?? process.stdout;
