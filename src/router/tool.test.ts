@@ -28,6 +28,7 @@ import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
+import { TERMS_CHANGED_SENTENCE } from './terms-notice';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -2838,6 +2839,8 @@ describe('the tool list, read for free', () => {
         { ...deps(listed.fetchImpl), route, harness },
       );
       expect(browsed.envelope.status).toBe('browse');
+      expect(browsed.summary).not.toContain(TERMS_CHANGED_SENTENCE);
+      await expect(stat(join(dir, 'router', 'terms'))).rejects.toMatchObject({ code: 'ENOENT' });
       expect(JSON.parse(listed.calls[0]!.body!)).toMatchObject({
         browse: 'crypto prices',
         harness,
@@ -2857,6 +2860,16 @@ describe('the tool list, read for free', () => {
       });
       expect(route).not.toHaveBeenCalled();
 
+      const inspected = await runRequestTool(
+        { id: decision.id },
+        { ...deps(net([]).fetchImpl), route, harness },
+      );
+      expect(inspected.envelope.status).toBe('spec');
+      for (const result of [shown, inspected]) {
+        expect(result.summary).not.toContain(TERMS_CHANGED_SENTENCE);
+      }
+      await expect(stat(join(dir, 'router', 'terms'))).rejects.toMatchObject({ code: 'ENOENT' });
+
       const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
       const ran = await runRequestTool(
         { id: decision.id, input: { symbol: 'BTC,ETH', convert: 'USD' } },
@@ -2869,6 +2882,8 @@ describe('the tool list, read for free', () => {
         status: 'fulfilled',
         cost: ['provider price 0.01 USD'],
       });
+      expect(ran.summary).not.toContain(TERMS_CHANGED_SENTENCE);
+      await expect(stat(join(dir, 'router', 'terms'))).rejects.toMatchObject({ code: 'ENOENT' });
       // The footer names the service by its label, and the ledger keeps it.
       expect(await renderProgress(dir, 'sess-1')).toBe(
         'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',

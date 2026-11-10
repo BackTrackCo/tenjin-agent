@@ -52,7 +52,7 @@ The balance lookup takes at most two seconds, inside the call's own deadline. Wi
 
 A deposit meets your automatic limits (per-call limit, daily budget, creator allowlist) before it is signed, and counts against automatic spending once. Fees drawn from it do not consume the daily budget again. Each fee still obeys the per-payment policy and creator allowlist; a zero daily budget stops automatic fees even from an already-funded balance. A deposit counts from the moment it is sent. An answered 4xx or 5xx response releases it, because the server settles nothing on those. An unanswered request does not release it or prove that no money moved. Unused routing funds stay yours and pay later routing fees, never provider calls.
 
-`tenjin status` and `tenjin balance` show what routing has cost so far, beside the funds set aside for it: the deposits sent less the credit they still hold, a local estimate from the routing channel files, with no extra network read. Offers show no fee, so this is where the cost appears. An install that did not approve limits on these terms is told them once, on its first routing call after the update; no spend limit changes.
+`tenjin status` and `tenjin balance` show what routing has cost so far, beside the funds set aside for it: the deposits sent less the credit they still hold, a local estimate from the routing channel files, with no extra network read. Offers show no fee, so this is where the cost appears. An install that did not approve limits on these terms is told them once, on its first routing call after the update, in the hook's message or the request tool's result. The notice is shared between them; browsing, inspection and selected-tool calls neither show nor consume it. No spend limit changes.
 
 The facilitator checks the wallet's funds when it verifies the deposit. If it answers that the wallet holds less, that call gets no route, the wallet is reported as too low, and Tenjin does not retry.
 
@@ -74,7 +74,7 @@ Hosts without this facility, including Codex, refuse the over-limit call. A quot
 
 ### Failure and balance
 
-A routing payment that cannot be made is skipped without a second unpaid routing attempt. Native tools remain usable. Lasting wallet, balance and policy causes are reported once; temporary channel contention does not create another funding prompt.
+A routing payment that cannot be made is skipped without a second unpaid routing attempt. The next request still reaches the router, even after a missing-wallet or signing block: a free 200 answer is used without touching the wallet, and another 402 keeps a fresh block without unlocking or signing. Native tools remain usable. Lasting wallet, balance and policy causes are reported once; temporary channel contention does not create another funding prompt.
 
 A wallet that cannot sign suppresses paid offers. Tenjin reads no balance when it offers a tool, admits a plan or signs a provider payment: the facilitator checks funds when it verifies each payment, and a payment it refuses as short of funds is reported as a low wallet, with no retry. The automatic routing notice says only that Tenjin could not pay for that answer and that answers needing no payment can still work. A balance check cannot prevent a concurrent transfer or guarantee settlement. `tenjin balance`, `tenjin status` and `tenjin doctor` read the balance when you run them, and a once-a-day session-start notice reads it too.
 

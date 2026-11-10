@@ -1077,6 +1077,40 @@ describe('RoutingPayer', () => {
     expect(router.log).toEqual(['POST /api/x402-router/route unpaid']);
   });
 
+  it.each([false, true])(
+    'asks again after a no-wallet block when the next answer requires payment: %s',
+    async (paid) => {
+      const options = { paid: true };
+      const router = new FakeRouter(options);
+      const signer = testSigner(wallet);
+      const sign = vi.spyOn(signer, 'signTypedData');
+      const getSigner = vi.fn(async () => signer).mockImplementationOnce(noWallet);
+      const walletBalance = vi.fn(async () => 10_000_000n);
+      const observe = vi.fn();
+      const p = payer(router, { getSigner, walletBalance, observe });
+      expect(skippedWhy(await routeOnce(p, router), router)).toBe('no_wallet');
+      const observations = observe.mock.calls.length;
+      getSigner.mockClear();
+      options.paid = paid;
+
+      const next = await routeOnce(p, router);
+      if (paid) {
+        expect(next).toMatchObject({ status: 'skipped', why: 'no_wallet', answered: true });
+      } else {
+        expect(next).toMatchObject({ status: 'decided', decision: router.body });
+      }
+      expect(router.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route unpaid',
+      ]);
+      expect(getSigner).not.toHaveBeenCalled();
+      expect(walletBalance).not.toHaveBeenCalled();
+      expect(sign).not.toHaveBeenCalled();
+      expect(router.paidRequests()).toBe(0);
+      expect(observe).toHaveBeenCalledTimes(observations);
+    },
+  );
+
   it('pays nothing when the wallet cannot be unlocked, and an unclassified failure is wallet_locked', async () => {
     const router = new FakeRouter();
     const warned: string[] = [];
@@ -1377,7 +1411,7 @@ describe('RoutingPayer and the wallet verdict', () => {
     expect(getSigner).toHaveBeenCalledWith();
   });
 
-  it('remembers a definite block: no unlock and no request until the wallet changes or a minute passes', async () => {
+  it('remembers a definite block: requests continue without unlocking until the wallet changes or a minute passes', async () => {
     const router = new FakeRouter();
     let stamp = '1:1';
     let unlocks = 0;
@@ -1389,15 +1423,15 @@ describe('RoutingPayer and the wallet verdict', () => {
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
     expect(unlocks).toBe(1);
 
-    // After the 402 and the block: nothing is sent on the paid path, nothing unlocked.
+    // Each answer may be free, but another 402 must not retry a blocked unlock.
     let from = router.log.length;
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
-    expect(paidPathSince(router, from)).toEqual([]);
+    expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(1);
     clock += SIGNER_RECHECK_MS - 1;
     from = router.log.length;
     expect(skippedWhy(await routeOnce(p, router), router)).toBe('passphrase_wrong');
-    expect(paidPathSince(router, from)).toEqual([]);
+    expect(paidPathSince(router, from)).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(1);
 
     // A repair rewrites the sidecar: the next call checks again at once.

@@ -76,6 +76,7 @@ import {
   type QuotedCall,
 } from './plan';
 import { depositSentence, shortOfFunds, unpaidSentence, type RouteFor } from './fee';
+import { termsNotice } from './terms-notice';
 import { agentFixOf } from './wallet-reasons';
 import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
@@ -280,9 +281,13 @@ export async function runRequestTool(
           },
         },
   );
+  const terms = routes.length > 0 ? await termsNotice(deps.ctx.dataDir) : null;
   const deposited = routes.reduce((sum, r) => sum + (r.deposited?.() ?? 0n), 0n);
-  return deposited > 0n
-    ? { ...result, summary: `${result.summary}\n${depositSentence(deposited)}` }
+  const notices = [terms, deposited > 0n ? depositSentence(deposited) : null].filter(
+    (notice) => notice !== null,
+  );
+  return notices.length > 0
+    ? { ...result, summary: [result.summary, ...notices].join('\n') }
     : result;
 }
 

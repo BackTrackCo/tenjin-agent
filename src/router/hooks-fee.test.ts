@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
@@ -10,8 +10,9 @@ import { runHookCommand, runHookKind, STALE_HOOK_LINE } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
 import { LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
 import { recordTermsTold, TERMS_CHANGED_SENTENCE } from './terms-notice';
+import { runRequestTool } from './tool';
 import { CliError } from '../lib/errors';
-import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
+import { FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
 import { RoutingPayer, type RoutingPayerDeps } from './routing-payer';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
@@ -272,6 +273,42 @@ describe('the hook legs and the routing fee', () => {
     const later = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
     expect(systemMessageOf(later)).toBeUndefined();
   });
+
+  it.each(['tool', 'hook'] as const)(
+    'shares the terms notice across tool and hook when the %s routes first',
+    async (first) => {
+      await rm(join(dir, 'router', 'terms'), { recursive: true, force: true });
+      const fake = new FakeRouter({ amount: '1000' });
+      const p = payer(fake);
+      const authorizer = payerDeps(fake, dir, wallet).authorizer(TEST_POLICY);
+      const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+      const tool = async () =>
+        (
+          await runRequestTool(
+            { query: 'what is the current price of ETH in USD' },
+            {
+              ctx: {
+                dataDir: dir,
+                flags: { json: true, timeout: 5000, baseUrl: BASE },
+                io: { stdout: sink, stderr: sink, isTTY: false },
+              },
+              cwd: dir,
+              authorizer,
+              fetchImpl: fake.fetch,
+              route: p.routeFor.bind(p),
+            },
+          )
+        ).summary;
+      const hook = async () =>
+        systemMessageOf(await runHookKind('prompt', prompt(), deps(fake.fetch, p))) ?? '';
+
+      expect(await (first === 'tool' ? tool() : hook())).toContain(TERMS_CHANGED_SENTENCE);
+      expect((await stat(join(dir, 'router', 'terms', 'per-answer-quote'))).isFile()).toBe(true);
+      expect(await tool()).not.toContain(TERMS_CHANGED_SENTENCE);
+      expect(await hook()).not.toContain(TERMS_CHANGED_SENTENCE);
+      expect(fake.settledFees).toBe(3);
+    },
+  );
 
   it("skips, and says nothing, when another session's call holds the channel", async () => {
     const fake = new FakeRouter();

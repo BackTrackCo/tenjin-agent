@@ -149,9 +149,6 @@ const DEPOSIT_EXTRA_MS = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS;
 /** How long a paid request still out at its call's deadline may run on. */
 export const DETACHED_CEILING_MS = 15_000;
 
-/** How long after this process last saw a 402 a wallet known not to sign
- *  sends nothing: the 402 is then certain. */
-const FEE_SEEN_TTL_MS = 60 * 60_000;
 /**
  * HOW LONG A DEFINITE SIGN BLOCK IS BELIEVED without unlocking again, unless
  * the wallet file or the passphrase sidecar changes first (`unlockStamp`): a
@@ -330,8 +327,6 @@ export class RoutingPayer {
   private handoff: TenjinSigner | null = null;
   /** The last settled unlock's verdict (decision 16). */
   private memo: SignMemo | null = null;
-  /** When this process last saw the server ask for the fee. */
-  private paidPathSeenAt: number | null = null;
   /** The sign and routing verdicts last reported to `observe`, as status:reason. */
   private reported: { sign?: string; routing?: string } = {};
 
@@ -588,18 +583,6 @@ export class RoutingPayer {
     };
     // The route's own record, which its `deposited` reads once the call ends.
     calls.push(call);
-    // A WALLET KNOWN NOT TO SIGN, ON A SERVER KNOWN TO CHARGE: the 402 is
-    // certain and nothing could answer it, so nothing is sent. Before this
-    // process has seen a 402, the server is asked first as always (a fee that
-    // is off costs no unlock), and an unknown verdict never gets here.
-    if (this.paidPathSeenAt !== null && this.now() - this.paidPathSeenAt < FEE_SEEN_TTL_MS) {
-      const blocked = await this.freshBlock();
-      if (blocked !== null) {
-        this.last = call;
-        call.skipped = blocked.reason;
-        throw new RouteSkipped(blocked.reason);
-      }
-    }
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const hookBody = options.jsonBody;
     const refreshHookBudget = (request: Request): Request => {
@@ -624,7 +607,6 @@ export class RoutingPayer {
       let asked: Response | undefined = await base(request.clone(), { signal });
       call.answered = true;
       if (asked.status !== 402) return asked;
-      this.paidPathSeenAt = this.now();
       try {
         // THE QUOTE, read before the wallet is even unlocked: one above the
         // ceiling is not paid, and the rest get the per-payment checks

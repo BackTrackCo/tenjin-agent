@@ -6,9 +6,10 @@ import { PRIVATE } from './store-files';
 
 /**
  * THE ROUTING TERMS, TOLD ONCE AFTER THEY CHANGE. An install that approved
- * the fixed $0.003 routing fee hears the per-answer terms once, on its first
- * routing call after the update, in the hook's `systemMessage`. It is told,
- * not asked: no stored or default spend limit changes. An install whose person
+ * the $0.003 routing-fee ceiling hears the per-answer terms once, on its first
+ * routing call after the update, in the hook's `systemMessage` or request
+ * tool's summary. It is told, not asked: no stored or default spend limit
+ * changes. An install whose person
  * approved limits on these terms is recorded as told, so it hears nothing.
  *
  * One file per terms id under `<dataDir>/router/terms`, made with an exclusive
