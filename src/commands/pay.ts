@@ -1759,6 +1759,30 @@ function paymentRequiredError(res: Pick<HttpResponse, 'header' | 'json'>): strin
 }
 
 /**
+ * A SELLER'S SIGN-IN CHALLENGE, read from a 402's PAYMENT-REQUIRED header:
+ * the challenge and its `sign-in-with-x` extension when the 402 offers no
+ * payment and asks only for a sign-in, else undefined (a price, a header too
+ * long or one that does not decode). Reading it signs nothing and opens no
+ * wallet, so a router poll uses it to tell a sign-in it refuses from a seller
+ * asking to be paid again.
+ */
+export function signInOnlyHeader(
+  paymentRequiredHeader: string,
+):
+  | { challenge: PaymentRequired; extension: NonNullable<ReturnType<typeof signInOnlyChallenge>> }
+  | undefined {
+  if (paymentRequiredHeader.length > MAX_CHALLENGE_CHARS) return undefined;
+  let challenge: PaymentRequired;
+  try {
+    challenge = decodePaymentRequiredHeader(paymentRequiredHeader);
+  } catch {
+    return undefined;
+  }
+  const extension = signInOnlyChallenge(challenge);
+  return extension !== undefined ? { challenge, extension } : undefined;
+}
+
+/**
  * THE ROUTER'S JOB POLLS, SIGNED IN AS A DIRECT PAY IS (tenjin#977): a poll
  * the seller answered 402 with a sign-in challenge and no way to pay gets the
  * headers that answer it, signed for the URL that sent it, by the wallet that
@@ -1769,7 +1793,9 @@ function paymentRequiredError(res: Pick<HttpResponse, 'header' | 'json'>): strin
  * any other 402, which the poll treats as a seller asking to be paid again.
  * A wallet that could not be opened is an `error`, which the poll counts and
  * survives, never a refusal that ends a paid take. Never pays: the challenge
- * offers no payment, and none is built.
+ * offers no payment, and none is built. Only a GET poll is handed here: a
+ * POST poll's challenge is refused unsigned in `router/jobs.ts`, as a direct
+ * pay's write is (`sign_in_method`).
  */
 export async function signInForPoll(
   paymentRequiredHeader: string,
@@ -1783,15 +1809,9 @@ export async function signInForPoll(
 ): Promise<
   { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
 > {
-  if (paymentRequiredHeader.length > MAX_CHALLENGE_CHARS) return undefined;
-  let challenge: PaymentRequired;
-  try {
-    challenge = decodePaymentRequiredHeader(paymentRequiredHeader);
-  } catch {
-    return undefined;
-  }
-  const extension = signInOnlyChallenge(challenge);
-  if (extension === undefined) return undefined;
+  const read = signInOnlyHeader(paymentRequiredHeader);
+  if (read === undefined) return undefined;
+  const { challenge, extension } = read;
   const { paidBy } = deps;
   try {
     const provider = resolveWalletProvider(

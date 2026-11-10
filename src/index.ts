@@ -86,23 +86,25 @@ if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] =
   process.exit(0);
 }
 
-// After the status line, which sends no request: every other process from this
-// bin (the CLI, the hooks, `tenjin mcp`) honours HTTPS_PROXY and NO_PROXY.
-const { useEnvProxy } = await import('./lib/env-proxy');
-useEnvProxy(process.env);
+// Stdio's errors are taken before the command writes anything, so a reader
+// that already went away (EPIPE) never turns its exit code into a crash; what
+// it printed reaches the reader before the exit, since on a pipe an exit
+// before stdout drains cuts a large body off (lib/flush-stdio).
+const { exitAfter } = await import('./lib/flush-stdio');
+await exitAfter(async () => {
+  // After the status line, which sends no request: every other process from
+  // this bin (the CLI, the hooks, `tenjin mcp`) honours HTTPS_PROXY and NO_PROXY.
+  const { useEnvProxy } = await import('./lib/env-proxy');
+  useEnvProxy(process.env);
 
-const { main } = await import('./cli');
-// Here and not in `main`, so an in-process test of the command tree sends no
-// telemetry and mints no install id; see lib/install-identity.
-const { enableCliIdentity } = await import('./lib/install-identity');
-const { dataDir } = await import('./lib/paths');
-enableCliIdentity(dataDir(process.env));
-const exitCode = await main(process.argv.slice(2));
-// What was printed reaches the reader first: on a pipe, an exit before stdout
-// drains cuts a large body off (lib/flush-stdio).
-const { flushStdio } = await import('./lib/flush-stdio');
-await flushStdio();
-process.exit(exitCode);
+  const { main } = await import('./cli');
+  // Here and not in `main`, so an in-process test of the command tree sends no
+  // telemetry and mints no install id; see lib/install-identity.
+  const { enableCliIdentity } = await import('./lib/install-identity');
+  const { dataDir } = await import('./lib/paths');
+  enableCliIdentity(dataDir(process.env));
+  return main(process.argv.slice(2));
+});
 
 // Marks this file a module so top-level await is legal; emits nothing.
 export {};

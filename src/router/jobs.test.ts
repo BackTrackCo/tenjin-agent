@@ -1107,6 +1107,59 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     ]);
   });
 
+  // A sign-in answers only a GET, as a direct pay's does: a signed POST would
+  // resend the retrieve's body as the wallet, a write that could spend credit
+  // the seller holds for it. The challenge is refused unsigned and the take
+  // fails, with no second poll and no wallet asked to sign.
+  it('signs nothing when a POST retrieve answers with a sign-in challenge', async () => {
+    await storeSpecs(dir, [AISPACE]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(AISPACE, queued);
+    const retrieve = 'https://x402.aispace.bot/api/v1/video/retrieve';
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(retrieve).header },
+      },
+    ]);
+    const signIn = vi.fn(async () => undefined);
+    const direct = await pollUntil(
+      {
+        poll: { url: retrieve, method: 'POST', body: '{"queue_id":"q-77"}' },
+        job: AISPACE_JOB,
+      },
+      { deadline: clock + 60_000, firstWaitMs: 0 },
+      {
+        transport: polls([
+          {
+            status: 402,
+            body: {},
+            headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(retrieve).header },
+          },
+        ]).transport,
+        now: () => clock,
+        destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
+        signIn,
+      },
+    );
+    expect(signIn).not.toHaveBeenCalled();
+    expect(direct).toMatchObject({ state: 'failed', status: 402 });
+
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(String(result.envelope.reason)).toContain(
+      'nothing was signed: a sign-in answers only a GET, and this poll is a POST',
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.request.headers['sign-in-with-x']).toBeUndefined();
+    expect(paymentOf(seen[0]!.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a clip that could not be saved resumable, and fetches it again unpaid', async () => {
     await storeSpecs(dir, [AISPACE]);
     // The downloads directory cannot be made: every save fails.
