@@ -19,6 +19,7 @@ vi.mock('../lib/usdc', () => ({
 import { getUsdcBalance } from '../lib/usdc';
 import { runFund, type FundOptions } from './fund';
 import { runBalance } from './balance';
+import { finishTerminalFunding, fundStep } from '../router/install-funding';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
@@ -810,6 +811,45 @@ describe('runFund: the link, its context and its status', () => {
     expect(readKey).toHaveBeenCalledTimes(1);
     expect(stderr.join('')).toContain('The checkout link expired. Nothing was charged.');
     expect(res.data).toMatchObject({ funded: false, checkoutUrl: pageLink(1_000_000 + 600_000) });
+  });
+
+  it('install does not say the payment can still land after its link expired with nothing charged', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    let clock = 1_000_000;
+    const server = fundServer(
+      [pageLink(clock + 4_000)],
+      [[200, { state: 'opened', updatedAt: 'x' }]],
+    );
+    const offer = await fundStep(
+      { status: 'created', address, signing: { status: 'ready', source: 'file' } },
+      'unused',
+      {},
+      'tenjin fund 5',
+    );
+    const out = await finishTerminalFunding(
+      { data: { nextSteps: [offer!.step] }, humanLines: [] },
+      makeCtx({ isTTY: true, json: false }),
+      {
+        isInteractive: true,
+        ask: async () => 'fund',
+        // The person presses q at the expired link.
+        fund: (ctx, opts) =>
+          fund(ctx, {
+            ...opts,
+            provider,
+            fetchImpl: server.fetchImpl,
+            openUrl: async () => true,
+            readKey: async () => 'q',
+            now: () => clock,
+            sleep: async (ms) => {
+              clock += ms;
+            },
+          }),
+      },
+    );
+    expect(stderr.join('')).toContain('The checkout link expired. Nothing was charged.');
+    expect(out.humanLines).toEqual([]);
   });
 
   it('--crypto shows the address with its rule and watches the balance, minting nothing', async () => {

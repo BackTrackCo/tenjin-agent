@@ -159,6 +159,7 @@ export async function finishTerminalFunding(
     const data = funded.data as {
       funded?: boolean;
       pollStatus?: string;
+      nothingCharged?: boolean;
       balance?: { atomic: string };
     };
     return {
@@ -166,7 +167,7 @@ export async function finishTerminalFunding(
       humanLines:
         data.funded === true && data.balance !== undefined
           ? ['', `Balance   $${usd(BigInt(data.balance.atomic))}`]
-          : data.pollStatus === 'skipped'
+          : data.pollStatus === 'skipped' || data.nothingCharged === true
             ? []
             : [
                 '',

@@ -374,6 +374,8 @@ export async function runFund(ctx: CommandContext, opts: FundOptions = {}): Prom
       pollStatus,
       ...(status !== undefined ? { status: status.state } : {}),
       ...(onItsWay !== undefined ? { paymentInFlight: true } : {}),
+      // The link expired and this round's status read said no payment is on it.
+      ...(end?.kind === 'expired' && end.statusKnown ? { nothingCharged: true } : {}),
       source,
       ...(need !== undefined ? { need } : {}),
       nextStep:
