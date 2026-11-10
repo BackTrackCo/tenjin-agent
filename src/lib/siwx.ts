@@ -93,7 +93,7 @@ export type SignInAnswer =
 export interface SignInWallet {
   /** Its address, read without opening it, once the challenge is bound. */
   address: () => Promise<string>;
-  /** Whether that address paid `host` recently, by the local payment ledger. */
+  /** Whether that address paid `host`, by the local payment ledger. */
   paidHost: (host: string, address: string) => Promise<boolean>;
   /** Opens the wallet; called only after both checks pass. */
   signer: () => Promise<TenjinSigner>;
@@ -112,7 +112,7 @@ function named(value: unknown): string {
  * 1. The challenge's `domain` and `uri` origin are the URL that sent it: the
  *    spec has a client refuse one that differs. Checked before the wallet is
  *    opened.
- * 2. This wallet paid that host recently, by the local payment ledger. That
+ * 2. This wallet paid that host, by the local payment ledger. That
  *    seller already holds the address from the payment, so the signature
  *    tells it only that this is the wallet that paid.
  *
@@ -135,7 +135,7 @@ export async function answerSignInChallenge(
   }
   const unpaid: SignInAnswer = {
     refused: 'unpaid',
-    reason: `this wallet has not paid ${target.host} recently`,
+    reason: `this wallet has not paid ${target.host}`,
   };
   const address = await wallet.address();
   if (!(await wallet.paidHost(target.host, address))) return unpaid;

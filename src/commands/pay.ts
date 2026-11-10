@@ -46,7 +46,7 @@ import {
   chargedOnChain,
   createUniqueFile,
   extensionFor,
-  paidHostRecently,
+  walletPaidHost,
   recordedSent,
   writeAll,
   type Settlement,
@@ -394,7 +394,7 @@ async function executePay(
   // A SELLER THAT ASKS ONLY FOR A SIGN-IN: a 402 offering no payment, with
   // its own sign-in-with-x challenge, as Monid answers a poll of a run it was
   // paid for. It is signed only for a GET, as a poll is, for the URL that
-  // sent it and a host this wallet paid recently, and nothing is paid on this
+  // sent it and a host this wallet paid, and nothing is paid on this
   // path. A write behind a sign-in could spend the wallet's credit with the
   // seller off-protocol, so it is refused unsigned. The router's provider leg
   // never takes it: its job polls answer the same challenge in
@@ -417,7 +417,7 @@ async function executePay(
     );
     const answer = await answerSignInChallenge(paymentRequired, signIn, url, {
       address: async () => (await describeOpenable(provider)).address,
-      paidHost: (host, address) => paidHostRecently(ctx.dataDir, host, address),
+      paidHost: (host, address) => walletPaidHost(ctx.dataDir, host, address),
       signer: () => openWallet(provider),
     });
     if ('refused' in answer) {
@@ -1482,7 +1482,7 @@ function deliverQuote(
     ...(a.extra !== undefined ? { extra: a.extra } : {}),
   }));
   // A 402 that asks only for a sign-in: `tenjin pay` answers it, paying
-  // nothing, when this wallet paid that host recently.
+  // nothing, when this wallet paid that host.
   const signIn = signInOnlyChallenge(challenge) !== undefined;
   const data = {
     url,
@@ -1801,7 +1801,7 @@ export function signInOnlyHeader(
  * paid. The take is that proof: `paidBy` names the wallet that signed its
  * submit and the submit's URL, and the wallet signs only when it is that
  * address and the poll is on that host. A take with no authorization falls
- * back to the paid ledger (a host this wallet paid recently). Undefined for
+ * back to the paid ledger (a host this wallet paid). Undefined for
  * any other 402, which the poll treats as a seller asking to be paid again.
  * A wallet that could not be opened is an `error`, which the poll counts and
  * survives, never a refusal that ends a paid take. Never pays: the challenge
@@ -1815,7 +1815,6 @@ export async function signInForPoll(
   ctx: CommandContext,
   deps: {
     provider?: WalletProvider;
-    now?: () => number;
     paidBy?: { from: string; url: string };
   } = {},
 ): Promise<
@@ -1835,12 +1834,7 @@ export async function signInForPoll(
       paidHost: async (host, address) =>
         paidBy !== undefined
           ? hostOf(paidBy.url) === host && paidBy.from.toLowerCase() === address.toLowerCase()
-          : paidHostRecently(
-              ctx.dataDir,
-              host,
-              address,
-              deps.now !== undefined ? { now: deps.now } : {},
-            ),
+          : walletPaidHost(ctx.dataDir, host, address),
       signer: () => openWallet(provider),
     });
     return 'refused' in answer ? { refused: answer.reason } : answer;

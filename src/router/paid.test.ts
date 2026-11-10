@@ -8,13 +8,12 @@ import {
   maskDeep,
   MAX_SENT_CHARS,
   mediaUrlsIn,
-  paidHostRecently,
   pinnedLookup,
   RECHECK_MS,
   reconcilePayments,
   recordedSent,
   saveMedia,
-  SIGN_IN_PAID_WINDOW_MS,
+  walletPaidHost,
   writeAll,
   type MediaTransport,
   type PaidRecord,
@@ -42,7 +41,7 @@ describe('what the ledger records as sent', () => {
   });
 });
 
-describe("whether this wallet paid a seller's host recently", () => {
+describe("whether this wallet paid a seller's host", () => {
   const WALLET = '0x65eDa17cCEb66844EfE862D4062D664b33960888';
   const NOW = Date.parse('2026-11-09T08:00:00Z');
 
@@ -63,14 +62,14 @@ describe("whether this wallet paid a seller's host recently", () => {
   }
 
   // The rule a seller's sign-in challenge is signed under without asking: a
-  // payment to that host, from this wallet, recently, that the chain has not
+  // payment to that host, from this wallet, at any time, that the chain has not
   // shown went unused.
   it.each([
     { name: 'a payment a minute ago', over: {}, expected: true },
     {
-      name: 'one past the window',
-      over: { ts: new Date(NOW - SIGN_IN_PAID_WINDOW_MS - 1).toISOString() },
-      expected: false,
+      name: 'a payment a year ago',
+      over: { ts: new Date(NOW - 365 * 86_400_000).toISOString() },
+      expected: true,
     },
     {
       name: 'one the chain showed unused',
@@ -96,7 +95,7 @@ describe("whether this wallet paid a seller's host recently", () => {
     },
   ])('counts $name: $expected', async ({ over, expected }) => {
     await appendPaidRecord(dir, row(over));
-    expect(await paidHostRecently(dir, 'x402.monid.ai', WALLET, { now: () => NOW })).toBe(expected);
+    expect(await walletPaidHost(dir, 'x402.monid.ai', WALLET)).toBe(expected);
   });
 });
 

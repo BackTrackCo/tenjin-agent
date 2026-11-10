@@ -337,30 +337,22 @@ export async function chargedOnChain(
   return (await authorizationUsed(authorization, rpcUrl, opts)) === true ? 'settled' : 'unknown';
 }
 
-/** How long a payment to a host lets this wallet answer that host's sign-in. */
-export const SIGN_IN_PAID_WINDOW_MS = 7 * 86_400_000;
-
 /**
- * WHETHER THIS WALLET PAID THIS HOST RECENTLY, by the paid ledger: a row for
- * the same host (with its port) whose authorization this address signed, in
- * the last {@link SIGN_IN_PAID_WINDOW_MS}, that the chain has not shown went
- * unused. It is what lets a seller's sign-in challenge be signed without
- * asking: that seller already holds this address.
+ * WHETHER THIS WALLET PAID THIS HOST, by the paid ledger: a row for the same
+ * host (with its port) whose authorization this address signed, that the
+ * chain has not shown went unused. There is no time limit. It is what lets a
+ * seller's sign-in challenge be signed without asking: that seller already
+ * holds this address.
  */
-export async function paidHostRecently(
+export async function walletPaidHost(
   dataDir: string,
   host: string,
   address: string,
-  opts: { now?: () => number; windowMs?: number } = {},
 ): Promise<boolean> {
-  const now = (opts.now ?? Date.now)();
-  const windowMs = opts.windowMs ?? SIGN_IN_PAID_WINDOW_MS;
   const from = address.toLowerCase();
   return (await readPaidRecords(dataDir)).some((record) => {
     if (record.settlement === 'not_charged') return false;
     if (record.authorization?.from.toLowerCase() !== from) return false;
-    const at = Date.parse(record.ts);
-    if (!Number.isFinite(at) || at > now || now - at > windowMs) return false;
     try {
       return new URL(record.url).host === host;
     } catch {

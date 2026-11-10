@@ -2062,7 +2062,6 @@ function pollDeps(deps: RequestToolDeps, take?: JobTake): PollDeps {
     signIn: (challenge, url) =>
       signInForPoll(challenge, url, deps.ctx, {
         ...(provider !== undefined ? { provider } : {}),
-        ...(deps.now !== undefined ? { now: deps.now } : {}),
         ...(take !== undefined && from !== undefined
           ? { paidBy: { from, url: take.call.url } }
           : {}),

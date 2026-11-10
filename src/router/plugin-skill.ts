@@ -50,8 +50,7 @@ change: some endpoints price by request shape.
 it to sign in, as the status URL of a paid run does. \`tenjin pay <url> --json\`,
 a plain GET, answers it and pays nothing, so it needs no \`--max-price\` or
 \`--yes\`. It signs only for the URL that asked, and only when \`tenjin payments\`
-shows this wallet paid that host in the last 7 days; otherwise it refuses
-with exit 3.
+shows this wallet paid that host; otherwise it refuses with exit 3.
 
 ## Pay
 
