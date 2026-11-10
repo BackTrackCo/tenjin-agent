@@ -806,7 +806,9 @@ export class RoutingPayer {
     return amount;
   }
 
-  /** A failed or late balance read sends no new deposit or authorization. */
+  /** A failed or late balance read sends no new deposit or authorization. The
+   *  call skips as `balance_unreadable`, a no-fault reason (fee.ts `NO_FAULT`):
+   *  nothing failed and nothing was paid. */
   private async depositBalance(address: string): Promise<bigint> {
     const left = (this.call?.until ?? 0) - this.now() - PAID_CALL_RESERVE_MS;
     if (left <= 0) this.refuse('busy');
@@ -819,10 +821,10 @@ export class RoutingPayer {
           timer = this.timers.setTimeout(() => resolve(null), timeoutMs);
         }),
       ]);
-      if (balance === null || balance < 0n) this.refuse('chain_unreadable');
+      if (balance === null || balance < 0n) this.refuse('balance_unreadable');
       return balance;
     } catch {
-      this.refuse('chain_unreadable');
+      this.refuse('balance_unreadable');
     } finally {
       this.timers.clearTimeout(timer);
     }

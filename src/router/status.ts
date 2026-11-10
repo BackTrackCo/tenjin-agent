@@ -172,7 +172,7 @@ export async function runRouterStatus(
     wallet === null
       ? []
       : wallet.atomic === null
-        ? ['wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries']
+        ? ['wallet balance unknown: the RPC did not answer; `tenjin balance` retries']
         : [
             `wallet ${toMoney(wallet.atomic.toString()).usd} USD`,
             ...(wallet.atomic === 0n && creditAtomic < LEGACY_ROUTING_QUOTE_ATOMIC

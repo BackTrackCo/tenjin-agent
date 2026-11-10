@@ -315,7 +315,8 @@ describe('the hook legs and the routing fee', () => {
           allowlistCreators: [],
         }),
       },
-      '`tenjin doctor`',
+      // A spend limit, never checkout: the balance is not the cause.
+      'or ask your agent to raise it.',
     ],
   ])(
     'skips the call in one request when %s, and tells the user once per session',
@@ -328,7 +329,7 @@ describe('the hook legs and the routing fee', () => {
       expect(contextOf(first)).toBeUndefined();
       expect(systemMessageOf(first)).toContain('could not pay');
       expect(systemMessageOf(first)).toContain(fix);
-      expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
+      expect(systemMessageOf(first)).not.toContain('tenjin fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
       expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
       // Not again in this session.
@@ -398,7 +399,9 @@ describe('the hook legs and the routing fee', () => {
     expect(notice).toContain(
       'the per-call spend limit cannot cover the routing fee or its deposit',
     );
-    expect(notice).toContain('Run `tenjin doctor`.');
+    expect(notice).toContain('Ask your agent to raise it.');
+    expect(notice).not.toContain('tenjin config');
+    expect(notice).not.toContain('tenjin fund');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
     expect(fake.paidRequests()).toBe(0);
@@ -622,7 +625,7 @@ describe('wallet notices', () => {
     const fake = new FakeRouter();
     const p = payer(fake);
     const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(answer)).not.toContain('wallet fund');
+    expect(systemMessageOf(answer)).not.toContain('tenjin fund');
     expect(fake.paidRequests()).toBeGreaterThan(0);
   });
 
@@ -635,7 +638,7 @@ describe('wallet notices', () => {
     expect(fake.deposits).toBe(0);
     expect(systemMessageOf(answer)).toContain('could not pay');
     expect(systemMessageOf(answer)).toContain('Your usual tools still work.');
-    expect(systemMessageOf(answer)).not.toContain('tenjin wallet fund');
+    expect(systemMessageOf(answer)).not.toContain('tenjin fund');
   });
 
   it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {

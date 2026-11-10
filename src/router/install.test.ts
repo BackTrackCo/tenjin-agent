@@ -42,19 +42,28 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Paid routing costs a fee the router quotes for each answer, never more than $0.25; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for routing; each deposit counts toward your limits once, when it is sent.';
+  'Routing costs a fee the router quotes for each answer, never more than $0.25; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits once, when it is sent. Either choice approves this.';
 /** What a run that could not ask prints for the agent that ran it. */
-const QUESTION = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. ${FEE_TERMS} Either answer also approves the routing fee.`;
+const QUESTION = `How much can your agent spend from its balance? ${FEE_TERMS}`;
 const ASK_LINES = [
-  '  Automatic router: up to $0.25 per call; daily budget $5 shared across chats',
   `  Ask the person in this session: ${QUESTION}`,
-  '  Use the defaults (recommended): tenjin install --yes',
+  '  Up to $0.25 a call and $5 a day (recommended): tenjin install --yes',
   '  Set my own limits: tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
 ];
 /** What Claude Code exports to the commands its agent runs. */
 const HARNESS_ENV = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-1' };
 const RELOAD =
   'run `/reload-plugins` in this conversation so Tenjin loads, then continue your task';
+
+/** What a person reads: the receipt, then its tail (limits, next step, disclosure). */
+function receipt(r: { humanLines?: string[]; humanTail?: string[] }): string[] {
+  return [...(r.humanLines ?? []), ...(r.humanTail ?? [])];
+}
+
+/** The receipt's one `Next:` line. */
+function nextLine(r: { humanLines?: string[]; humanTail?: string[] }): string | undefined {
+  return receipt(r).find((line) => line.startsWith('Next: '));
+}
 
 /** Wallet seams are always stubbed: the real create writes to the OS keychain. */
 function deps(over: Record<string, unknown> = {}) {
@@ -129,7 +138,7 @@ describe('tenjin install', () => {
           options: [
             {
               id: 'default',
-              label: 'Use the defaults',
+              label: 'Up to $0.25 a call and $5 a day',
               recommended: true,
               command: 'tenjin install --yes',
             },
@@ -177,9 +186,7 @@ describe('tenjin install', () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '100000' }));
     const result = await runRouterInstall({}, ctx(), deps());
     expect(spendStepOf(result)).toBeUndefined();
-    expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.1 per call; daily budget $5 shared across chats',
-    );
+    expect(receipt(result)).toContain('Limits    $0.10 a call · $5.00 a day');
     expect(await loadRawConfig(data)).toEqual({ maxAutoSpend: '100000' });
   });
 
@@ -227,12 +234,12 @@ describe('tenjin install', () => {
 
   it('leads with setup, sharing, limits and activation while keeping diagnostics available', async () => {
     const result = await runRouterInstall({}, humanCtx(), deps({ isInteractive: false }));
-    expect(result.humanLines?.[0]).toContain('Tenjin is set up for Claude Code');
-    const text = result.humanLines!.join('\n');
+    expect(receipt(result)[0]).toContain('Tenjin is set up for Claude Code');
+    const text = receipt(result).join('\n');
     expect(text).toContain('task context and your wallet address are sent to Tenjin for routing');
     expect(text).toContain('https://tenjin.sh/privacy');
     expect(text).toContain('https://tenjin.sh/terms');
-    expect(text).toContain('daily budget $5 shared across chats');
+    expect(text).toContain('Limits    $0.25 a call · $5.00 a day');
     expect(text).toContain('open a new Claude Code session');
     expect(text).not.toContain('this conversation');
     expect(text).not.toContain(ADDRESS);
@@ -255,8 +262,8 @@ describe('tenjin install', () => {
     expect(router.detail).toContain('a proxy, firewall or VPN on the way most likely refused');
     expect(router.fix).toContain('Allow tenjin.sh through your proxy, firewall or VPN');
     expect(router.fix).not.toContain('config set baseUrl');
-    expect(result.humanLines).toContain(`! The router did not answer: ${router.detail}`);
-    expect(result.humanLines).toContain(`  ${router.fix}`);
+    expect(receipt(result)).toContain(`! The router did not answer: ${router.detail}`);
+    expect(receipt(result)).toContain(`  ${router.fix}`);
   });
 
   it('names running servers that predate this install, with the in-session fix, and stops none', async () => {
@@ -267,15 +274,15 @@ describe('tenjin install', () => {
       deps({ listMcpProcesses, installedAt: async () => 2 }),
     );
     expect(result.data).toMatchObject({ mcpServer: { name: 'mcp server', status: 'warn' } });
-    expect(result.humanLines!.join('\n')).toContain('started before this install');
-    expect(result.humanLines!.join('\n')).toContain(RECONNECT_FIX);
+    expect(receipt(result).join('\n')).toContain('started before this install');
+    expect(receipt(result).join('\n')).toContain(RECONNECT_FIX);
     // The refresh `tenjin update` runs says it too.
     const refreshed = await runRouterInstall(
       { refresh: true },
       ctx(),
       deps({ listMcpProcesses, installedAt: async () => 2 }),
     );
-    expect(refreshed.humanLines!.join('\n')).toContain(RECONNECT_FIX);
+    expect(receipt(refreshed).join('\n')).toContain(RECONNECT_FIX);
   });
 
   it('keeps the conversation for a fresh install and requires a new session for a settings upgrade', () => {
@@ -311,7 +318,7 @@ describe('tenjin install', () => {
       expect(next).not.toContain('/reload-plugins');
       expect(next).not.toMatch(/quit|reinstall|new wallet|<[^>]+>/i);
       expect((result.data as { nextSteps: { id: string }[] }).nextSteps).toEqual([]);
-      expect(result.humanLines?.at(-1)).toBe(`Next: ${next}`);
+      expect(nextLine(result)).toBe(`Next: ${next}`);
     },
   );
 
@@ -332,7 +339,7 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({ refresh: true }, ctx(), deps());
     expect(result.data).toMatchObject({ refresh: true, plugin: { state: 'written' } });
     expect((await loadRawConfig(data)).maxAutoSpend).toBe('1');
-    expect(result.humanLines![0]).toBe('✓ Tenjin is up to date (plugin tenjin@skills-dir)');
+    expect(receipt(result)[0]).toBe('✓ Tenjin is up to date (plugin tenjin@skills-dir)');
   });
 
   it('creates a wallet when there is none, without asking', async () => {
@@ -353,11 +360,11 @@ describe('tenjin install', () => {
     );
     expect(createWallet).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({ wallet: { status: 'existing', address: ADDRESS } });
-    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
+    expect(receipt(result).join('\n')).not.toContain(ADDRESS);
     expect(result.data).toMatchObject({
       wallet: { address: ADDRESS, signing: { status: 'ready' } },
     });
-    expect(result.humanLines!.at(-1)).toContain('open a new Claude Code session');
+    expect(nextLine(result)).toContain('open a new Claude Code session');
   });
 
   it('creates no wallet with --no-wallet', async () => {
@@ -365,7 +372,7 @@ describe('tenjin install', () => {
     const result = await runRouterInstall({ noWallet: true }, ctx(), deps({ createWallet }));
     expect(createWallet).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({ wallet: { status: 'skipped', reason: 'flag' } });
-    expect(result.humanLines!.join('\n')).toContain('tenjin wallet create');
+    expect(receipt(result).join('\n')).toContain('tenjin wallet create');
   });
 
   it('still succeeds, with the fix, when the wallet cannot be created', async () => {
@@ -373,7 +380,7 @@ describe('tenjin install', () => {
       throw new Error('disk full');
     });
     const result = await runRouterInstall({}, ctx(), deps({ createWallet }));
-    const text = result.humanLines!.join('\n');
+    const text = receipt(result).join('\n');
     expect(text).toContain('No wallet was created');
     expect(text).toContain('disk full');
     expect(text).toContain('tenjin wallet create');
@@ -412,7 +419,7 @@ function amounts(answers: (string | null)[]) {
   });
 }
 
-const SELECTOR = `Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits.\n${FEE_TERMS}\nEither answer also approves the routing fee.`;
+const SELECTOR = `How much can your agent spend from its balance?\n${FEE_TERMS}`;
 
 describe('install asks a person the spend question once', () => {
   it('"Use the defaults" names the routing fee and writes $0.25 a call and $5 a day', async () => {
@@ -429,9 +436,7 @@ describe('install asks a person the spend question once', () => {
       maxAutoSpend: '250000',
       sessionBudget: '5000000',
     });
-    expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.25 per call; daily budget $5 shared across chats',
-    );
+    expect(receipt(result)).toContain('Limits    $0.25 a call · $5.00 a day');
   });
 
   it('"Set my own limits" asks the daily amount, then the per-call one, and writes both', async () => {
@@ -449,9 +454,7 @@ describe('install asks a person the spend question once', () => {
       maxAutoSpend: '500000',
       sessionBudget: '2000000',
     });
-    expect(result.humanLines).toContain(
-      '  Automatic router: up to $0.5 per call; daily budget $2 shared across chats',
-    );
+    expect(receipt(result)).toContain('Limits    $0.50 a call · $2.00 a day');
   });
 
   it('takes none for the daily limit', async () => {
@@ -536,7 +539,7 @@ describe('install asks a person the spend question once', () => {
         spend: { set: [], kept: [], effective: { maxAutoSpend: '0.25', sessionBudget: '5' } },
       });
       // An agent's shell has no terminal: the question goes to the agent instead.
-      expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
+      expect(receipt(result)).toEqual(expect.arrayContaining(ASK_LINES));
       expect(result.data).toMatchObject({ plugin: { state: 'written' } });
     },
   );
@@ -871,8 +874,8 @@ describe('the install readout and the status window', () => {
       JSON.stringify({ maxAutoSpend: '1000000', sessionBudget: '10000000' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
-    const text = result.humanLines!.join('\n');
-    expect(text).toContain('Automatic router: up to $1 per call; daily budget $10');
+    const text = receipt(result).join('\n');
+    expect(text).toContain('Limits    $1.00 a call · $10.00 a day');
     expect(text).not.toContain('$0.25');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '1', sessionBudget: '10' } },
@@ -885,7 +888,7 @@ describe('the install readout and the status window', () => {
       JSON.stringify({ maxAutoSpend: '500000', sessionBudget: 'none' }),
     );
     const result = await runRouterInstall({}, ctx(), deps());
-    expect(result.humanLines!.join('\n')).toContain('no daily budget limit');
+    expect(receipt(result).join('\n')).toContain('no daily limit');
     expect(result.data).toMatchObject({
       spend: { effective: { maxAutoSpend: '0.5', sessionBudget: 'no daily budget limit' } },
     });
@@ -954,9 +957,7 @@ describe('payment configuration and obsolete skill cutover', () => {
       expect(await loadRawConfig(data)).not.toHaveProperty('confirm');
       expect(await loadRawConfig(data)).not.toHaveProperty('bazaarPay');
       expect(result.data).toMatchObject({ spend: { removed: ['bazaarPay', 'confirm'] } });
-      expect(result.humanLines?.join('\n')).toContain(
-        'Removed retired settings: bazaarPay, confirm',
-      );
+      expect(receipt(result).join('\n')).toContain('Removed retired settings: bazaarPay, confirm');
       await writeFile(join(data, 'config.json'), JSON.stringify(legacy));
       const refresh = await runRouterInstall({ refresh: true }, ctx(), deps());
       expect(refresh.data).toMatchObject({ spend: { removed: ['bazaarPay', 'confirm'], set: [] } });
@@ -988,8 +989,8 @@ describe('daily limit readouts', () => {
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
-      expect(result.humanLines?.join('\n')).toContain('automatic router up to');
-      expect(result.humanLines?.join('\n')).not.toContain('per call at most');
+      expect(receipt(result).join('\n')).toContain('automatic router up to');
+      expect(receipt(result).join('\n')).not.toContain('per call at most');
     },
   );
 });
@@ -1024,7 +1025,7 @@ it('status separates routing deposits in the spend window from the remaining rou
     },
     routingCredit: { remaining: { atomic: '240000' } },
   });
-  expect(result.humanLines?.slice(0, 4)).toEqual([
+  expect(receipt(result).slice(0, 4)).toEqual([
     'lookups 0.05 USD',
     'deposited for routing in the rolling 24h window: 0.25 USD',
     'set aside for routing: approximately 0.24 USD (local estimate)',
@@ -1038,7 +1039,7 @@ it('status shows no funds set aside before any deposit', async () => {
     wallet: async () => null,
     routingCredit: async () => 0n,
   });
-  expect(result.humanLines?.[0]).toBe('lookups 0 USD');
+  expect(receipt(result)[0]).toBe('lookups 0 USD');
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {
@@ -1066,7 +1067,7 @@ it('status warns about ignored retired keys and reports automatic exposure separ
       budget: { atomic: '5000000' },
     },
   });
-  expect(result.humanLines?.join('\n')).toContain('manual pay always requires consent');
+  expect(receipt(result).join('\n')).toContain('manual pay always requires consent');
 });
 
 describe('install applies the spend answer an agent relays, in one command', () => {
@@ -1166,14 +1167,14 @@ describe('install run by an agent hands back spending and funding instructions',
     const result = await runRouterInstall({}, ctx(), deps({ env: HARNESS_ENV }));
     expect(stepsOf(result).map((q) => q.id)).toEqual(['spend']);
     expect(stepsOf(result)[0]).toMatchObject({ question: QUESTION });
-    expect(result.humanLines).toEqual(expect.arrayContaining(ASK_LINES));
-    expect(result.humanLines).not.toContain('  Ask the person: Add $5 to Tenjin now?');
+    expect(receipt(result)).toEqual(expect.arrayContaining(ASK_LINES));
+    expect(receipt(result)).not.toContain('  Ask the person: Add $5 to Tenjin now?');
     const { next } = result.data as { next: string };
     expect(next).toBe(`follow the instructions in nextSteps, then ${RELOAD}`);
     expect(next).not.toContain('wallet fund');
   });
 
-  it('the completed install hands back a link-preparation command without minting checkout', async () => {
+  it('the completed install hands back the fund command without minting checkout', async () => {
     // No link is minted: nothing reaches the fund route, and no wallet unlock is needed.
     const routes: string[] = [];
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
@@ -1191,24 +1192,22 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(steps.map((q) => q.id)).toEqual(['fund']);
     const fund = steps[0]!;
     expect(fund).toMatchObject({
-      question: 'Add $5 to Tenjin now?',
+      question: 'Add $5 to your balance now?',
       options: [
-        { id: 'fund', label: 'Add $5', command: 'tenjin wallet fund 5 --no-open --no-wait' },
+        { id: 'fund', label: 'Add $5', command: 'tenjin fund 5 --source install' },
         { id: 'later', label: 'Not now', command: null },
       ],
     });
     expect(fund).not.toHaveProperty('url');
-    expect(fund.next).toContain('without opening a browser or asking another funding question');
-    expect(fund.next).toContain('show checkoutUrl as a clickable link');
-    expect(fund.next).toContain('on request, rerun the same command for a new link');
-    expect(fund.next).toContain('the person decides whether to click and confirms payment');
-    expect(fund.next).toContain("option's command yourself once");
-    expect(fund.next).toContain('Do not wait for payment.');
-    expect(fund.next).toContain('Do not offer funding again unless requested.');
-    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
-    expect(result.humanLines!.at(-1)).toBe(
-      `Next: follow the instructions in nextSteps, then ${RELOAD}`,
-    );
+    // The agent opens checkout itself, waits in the background, and carries on.
+    expect(fund.next).toContain('run its command yourself');
+    expect(fund.next).toContain('the person confirms the payment in their browser');
+    expect(fund.next).toContain('`tenjin balance --wait` in the background');
+    expect(fund.next).toContain('Never ask the person to type "done"');
+    expect(fund.next).toContain('you ask when a task first needs a paid tool');
+    expect(fund.next).toContain('do not offer funding again unless they ask');
+    expect(receipt(result).join('\n')).not.toContain(ADDRESS);
+    expect(nextLine(result)).toBe(`Next: follow the instructions in nextSteps, then ${RELOAD}`);
     expect((result.data as { next: string }).next).not.toContain('wallet fund');
   });
 
@@ -1241,7 +1240,7 @@ describe('install run by an agent hands back spending and funding instructions',
       }),
     );
     expect(stepsOf(result).map((q) => q.id)).toEqual([]);
-    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
+    expect(nextLine(result)).toBe(`Next: ${RELOAD}`);
   });
 
   it('does not suggest adding money when an existing balance cannot be checked', async () => {
@@ -1260,9 +1259,9 @@ describe('install run by an agent hands back spending and funding instructions',
     expect(result.data).toMatchObject({
       fundingWarning: expect.stringContaining('Could not check your Tenjin funds'),
     });
-    expect(result.humanLines!.join(' ')).toContain('does not mean you need to add money again');
-    expect(result.humanLines!.join(' ')).not.toContain('Add $5');
-    expect(result.humanLines!.at(-1)).toBe(`Next: ${RELOAD}`);
+    expect(receipt(result).join(' ')).toContain('does not mean you need to add money again');
+    expect(receipt(result).join(' ')).not.toContain('Add $5');
+    expect(nextLine(result)).toBe(`Next: ${RELOAD}`);
   });
 
   it('a terminal installer offers funding without making activation depend on it', async () => {
@@ -1276,7 +1275,7 @@ describe('install run by an agent hands back spending and funding instructions',
       }),
     );
     expect(stepsOf(result).map((step) => step.id)).toEqual(['fund']);
-    expect(result.humanLines!.at(-1)).toContain('open a new Claude Code session');
+    expect(nextLine(result)).toContain('open a new Claude Code session');
     expect((result.data as { next: string }).next).not.toContain('fund');
   });
 
@@ -1323,7 +1322,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
       ctx(),
       deps({ walletExists: async () => true, walletSigning: async () => blocked }),
     );
-    const lines = result.humanLines!;
+    const lines = receipt(result);
     expect(lines.some((l) => l.includes('✓ Wallet'))).toBe(false);
     const at = lines.indexOf(
       `! Wallet ${ADDRESS} cannot be unlocked by Claude Code: no saved wallet passphrase can be reached.`,
@@ -1343,7 +1342,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
       humanCtx(),
       deps({ walletExists: async () => true, walletSigning: async () => blocked }),
     );
-    const lines = result.humanLines!;
+    const lines = receipt(result);
     const at = lines.findIndex((l) => l.includes('cannot be unlocked by Claude Code'));
     expect(lines[at + 1]).toBe(`  ${PERSON_REPAIR_FIX}`);
     const next = (result.data as { next: string }).next;
@@ -1372,9 +1371,9 @@ describe('the wallet line: can Claude Code unlock it', () => {
           }),
         }),
       );
-      const text = result.humanLines!.join('\n');
+      const text = receipt(result).join('\n');
       expect(text).not.toContain('✓ Wallet');
-      const line = result.humanLines!.find((l) => l.startsWith(`! Wallet: ${ADDRESS}`))!;
+      const line = receipt(result).find((l) => l.startsWith(`! Wallet: ${ADDRESS}`))!;
       expect(line).toContain('TENJIN_WALLET_PASSPHRASE in this shell');
       expect(line).toContain('tenjin wallet repair');
       expect(line).toContain(says);
@@ -1395,7 +1394,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
         observedSigning: async () => true,
       }),
     );
-    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
+    expect(receipt(result).join('\n')).not.toContain(ADDRESS);
     expect(result.data).toMatchObject({
       wallet: { address: ADDRESS, signing: { status: 'ready' } },
     });
@@ -1418,8 +1417,8 @@ describe('the wallet line: can Claude Code unlock it', () => {
     expect(createWallet).not.toHaveBeenCalled();
     const wallet = (result.data as { wallet: { status: string; address: string } }).wallet;
     expect(wallet).toMatchObject({ status: 'existing', shellOnly: 'key' });
-    expect(result.humanLines!.join('\n')).not.toContain('✓ Wallet');
-    expect(result.humanLines).toContain(
+    expect(receipt(result).join('\n')).not.toContain('✓ Wallet');
+    expect(receipt(result)).toContain(
       `! Wallet: ${wallet.address} signs here only through TENJIN_WALLET_KEY in this shell; Claude Code must have the same variable.`,
     );
   });
@@ -1441,8 +1440,8 @@ describe('the wallet line: can Claude Code unlock it', () => {
         }),
       }),
     );
-    expect(result.humanLines!.join('\n')).not.toContain(note);
-    expect(result.humanLines!.join('\n')).not.toContain(ADDRESS);
+    expect(receipt(result).join('\n')).not.toContain(note);
+    expect(receipt(result).join('\n')).not.toContain(ADDRESS);
     expect(result.data).toMatchObject({
       wallet: { status: 'created', signing: { status: 'ready', source: 'file' } },
     });
@@ -1465,7 +1464,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
       }),
     );
     expect(result.data).toMatchObject({ wallet: { status: 'created', shellOnly: 'passphrase' } });
-    expect(result.humanLines!.join('\n')).not.toContain('✓ Wallet');
+    expect(receipt(result).join('\n')).not.toContain('✓ Wallet');
   });
 
   it('a reinstall with an empty existing wallet keeps today’s activation and funding instructions (S6)', async () => {
@@ -1479,7 +1478,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
     expect(data_.nextSteps).toEqual([
       expect.objectContaining({
         id: 'fund',
-        question: 'Add $5 to Tenjin now?',
+        question: 'Add $5 to your balance now?',
       }),
     ]);
   });
@@ -1564,7 +1563,7 @@ describe('the wallet line: can Claude Code unlock it', () => {
         installedAt: async () => Date.now(),
       }),
     );
-    expect(result.humanLines!.join('\n')).not.toContain('started before this install');
+    expect(receipt(result).join('\n')).not.toContain('started before this install');
   });
 
   it('counts only a router that served a Claude session as one that signs (B2)', async () => {
@@ -1631,7 +1630,7 @@ describe('the default wallet steps, on a fake keychain', () => {
         walletPassphrase: { platform: 'darwin', isTTY: false, exec },
       }),
     );
-    expect(result.humanLines!.join('\n')).not.toContain(record.address);
+    expect(receipt(result).join('\n')).not.toContain(record.address);
     expect(result.data).toMatchObject({
       wallet: { status: 'existing', signing: { status: 'ready', source: 'keychain' } },
     });
@@ -1662,7 +1661,7 @@ describe('the default wallet steps, on a fake keychain', () => {
     expect(wallet.status).toBe('created');
     expect(wallet.passphrase.store).toBe('file');
     expect(wallet.passphrase.note).toBe(NO_KEYRING_LINE(wallet.passphrase.location));
-    expect(result.humanLines!.join('\n')).not.toContain(wallet.passphrase.note);
+    expect(receipt(result).join('\n')).not.toContain(wallet.passphrase.note);
   });
 
   it.each([

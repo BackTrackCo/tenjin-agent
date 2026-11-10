@@ -270,6 +270,32 @@ describe('global flags are position-independent', () => {
     }
   });
 
+  it('`fund` and `balance` are top-level commands with their own flags', async () => {
+    for (const [argv, command] of [
+      [['fund', '5', '--for', 'X post read', '--price', '0.006', '--timeout', 'abc'], 'fund'],
+      [['fund', '--usdc', '--no-wait', '--timeout', 'abc'], 'fund'],
+      [['balance', '--wait', '--timeout', 'abc'], 'balance'],
+      [['wallet', 'balance', '--wait', '--timeout', 'abc'], 'wallet.balance'],
+    ] as const) {
+      const cap = captureIo();
+      expect(await main([...argv], cap.io)).toBe(2);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.command).toBe(command);
+    }
+  });
+
+  // The root takes --timeout wherever it is placed, so the wait's duration has
+  // to pass the global parse: `15m` once failed it as NaN.
+  it('`balance --wait --timeout 15m` passes the global parse and reaches the command', async () => {
+    const cap = captureIo();
+    await main(['balance', '--wait', '--timeout', '15m'], cap.io);
+    const parsed = JSON.parse(cap.stdout());
+    // The sandbox has no wallet: the body ran, past the flags.
+    expect(parsed.command).toBe('balance');
+    expect(parsed.error.code).not.toBe('USAGE');
+  });
+
   it('`wallet repair` resolves to wallet.repair, and --insecure-storage parses on repair and create', async () => {
     for (const verb of ['repair', 'create']) {
       const cap = captureIo();

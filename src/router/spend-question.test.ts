@@ -27,16 +27,16 @@ describe('the spend question', () => {
     });
   });
 
-  it('asks the defaults or your own limits, with the fee terms either answer approves', () => {
+  it('asks how much the agent may spend, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'Use the defaults ($5 daily budget shared across chats, $0.25 a call) or set your own limits. Paid routing costs a fee the router quotes for each answer, never more than $0.25; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for routing; each deposit counts toward your limits once, when it is sent. Either answer also approves the routing fee.',
+      'How much can your agent spend from its balance? Routing costs a fee the router quotes for each answer, never more than $0.25; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits once, when it is sent. Either choice approves this.',
     );
   });
 
   it('offers an agent two answers, each applied by one install command', () => {
     const options = spendOptions('tenjin install');
     expect(options.map((o) => [o.label, o.recommended, o.command])).toEqual([
-      ['Use the defaults', true, 'tenjin install --yes'],
+      ['Up to $0.25 a call and $5 a day', true, 'tenjin install --yes'],
       [
         'Set my own limits',
         false,
@@ -46,7 +46,7 @@ describe('the spend question', () => {
     // No answer turns automatic spending off, and none is a command for the
     // person or one joined with funding.
     for (const o of options) {
-      expect(o.command).not.toMatch(/&&|;|wallet fund|config set/);
+      expect(o.command).not.toMatch(/&&|;|tenjin fund|wallet fund|config set/);
       expect(o.label).not.toMatch(/no automatic/i);
     }
   });
