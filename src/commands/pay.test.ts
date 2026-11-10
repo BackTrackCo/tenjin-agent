@@ -8,6 +8,7 @@ import {
   quoteRouterCall,
   runPay,
   signInForPoll,
+  signInOnlyHeader,
   type PaidLeg,
 } from './pay';
 import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
@@ -1051,6 +1052,12 @@ describe('runPay, a seller that asks only for a sign-in', () => {
 });
 
 describe('signInForPoll, a router poll the seller answers with a sign-in', () => {
+  // A POST poll reads the challenge with no catch around it: a header that
+  // decoded to JSON null threw a raw TypeError out of the poll.
+  it('reads a PAYMENT-REQUIRED that decodes to null as no sign-in', () => {
+    expect(signInOnlyHeader(Buffer.from('null').toString('base64'))).toBeUndefined();
+  });
+
   const POLL_URL = 'https://seller.example/v1/runs/R1';
   const SUBMIT_URL = 'https://seller.example/v1/run';
   const PAYER = testSigner().address;

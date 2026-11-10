@@ -67,9 +67,11 @@ export async function buildSiwxHeader(
  * was paid for. The seller names its own nonce and a five-minute expiry, which
  * {@link buildSiwxHeader} cannot sign, since it mints its own nonce to sign in
  * to Tenjin. Any 402 that offers a payment is not one, so the path that
- * answers this never meets a price.
+ * answers this never meets a price. The challenge is decoded seller JSON, so
+ * it can be any value: one that is not an object is not a challenge.
  */
-export function signInOnlyChallenge(challenge: PaymentRequired): SIWxExtension | undefined {
+export function signInOnlyChallenge(challenge: PaymentRequired | null): SIWxExtension | undefined {
+  if (typeof challenge !== 'object' || challenge === null) return undefined;
   if (!Array.isArray(challenge.accepts) || challenge.accepts.length > 0) return undefined;
   const extension = challenge.extensions?.[SIGN_IN_WITH_X] as Partial<SIWxExtension> | undefined;
   const info = extension?.info as Partial<SIWxExtension['info']> | undefined;
