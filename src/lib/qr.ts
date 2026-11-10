@@ -33,13 +33,35 @@ interface TerminalFacts {
  */
 export function addressQrLines(address: string, stream: NodeJS.WritableStream): string[] {
   if (!isAddress(address, { strict: false })) return [];
+  const lines = qrLines(getAddress(address), stream, correction.M);
+  return lines.length > 0 ? [...lines, QR_NETWORK_LINE] : [];
+}
+
+/**
+ * The same block for any text, with no line under it: the checkout link, so a
+ * phone camera opens the fund page when this machine has no browser (SSH).
+ * The lowest error correction that fits keeps a long link's code small enough
+ * for an 80-column terminal. [] under the same conditions as above.
+ */
+export function textQrLines(text: string, stream: NodeJS.WritableStream): string[] {
+  return qrLines(text, stream, correction.L);
+}
+
+function qrLines(
+  text: string,
+  stream: NodeJS.WritableStream,
+  level: (typeof correction)[keyof typeof correction],
+): string[] {
   const facts = stream as TerminalFacts;
   if (typeof facts.hasColors !== 'function') return [];
   if (facts.hasColors.call(stream, 256) !== true) return [];
-  const code = generate(getAddress(address), {
-    minCorrectionLevel: correction.M,
-    maxCorrectionLevel: correction.M,
-  });
+  let code: ReturnType<typeof generate>;
+  try {
+    code = generate(text, { minCorrectionLevel: level, maxCorrectionLevel: level });
+  } catch {
+    // Too long for any QR version.
+    return [];
+  }
   const span = code.size + 2 * QUIET_ZONE;
   if (typeof facts.columns !== 'number' || facts.columns < span) return [];
 
@@ -55,6 +77,5 @@ export function addressQrLines(address: string, stream: NodeJS.WritableStream): 
     }
     lines.push(`${DARK_ON_LIGHT}${line}${RESET}`);
   }
-  lines.push(QR_NETWORK_LINE);
   return lines;
 }

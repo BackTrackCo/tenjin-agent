@@ -1719,7 +1719,7 @@ describe('runPay, bazaar lane', () => {
     const err = await rejectedWith(undefined, 'PAYMENT-RESPONSE', json(402, fixture.body, headers));
     expect(err.code).toBe('PAYMENT_FAILED');
     expect(err.message).toBe('The wallet does not hold enough USDC for this payment.');
-    expect(err.fix).toContain('Ask the person to add funds with `tenjin wallet fund`');
+    expect(err.fix).toContain('Ask the person once to add funds; on yes, run `tenjin fund`.');
     expect(err.fix).toContain('stays counted until it expires');
     expect(err.fix).toContain('Do not simply retry');
     expect(err.fix).not.toContain('different service');

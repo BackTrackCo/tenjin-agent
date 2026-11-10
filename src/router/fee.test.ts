@@ -93,6 +93,12 @@ describe('UNPAID wallet entries', () => {
     expect(unpaid('unlock_timeout')).toBeNull();
     expect(unpaidSentence('unlock_timeout')).toBeNull();
   });
+
+  it('says nothing when the balance before a deposit could not be read: nothing was paid', () => {
+    expect(unpaid('balance_unreadable')).toBeNull();
+    expect(unpaidSentence('balance_unreadable', 'person')).toBeNull();
+    expect(unpaidSentence('balance_unreadable', 'agent')).toBeNull();
+  });
 });
 
 describe('unpaidSentence', () => {
@@ -101,24 +107,41 @@ describe('unpaidSentence', () => {
     expect(unpaidSentence('wallet_low', 'agent')).not.toMatch(
       /wallet fund|send USDC|add funds|checkout|USDC|RPC|channel|facilitator/i,
     );
-    expect(unpaidSentence('wallet_low')).not.toContain('tenjin wallet fund');
-    expect(unpaid('wallet_low')?.fix).toContain('tenjin wallet fund 5');
+    expect(unpaidSentence('wallet_low')).not.toContain('tenjin fund');
+    expect(unpaid('wallet_low')?.fix).toContain('tenjin fund 5');
   });
+
+  // A spend limit is never a funding problem: money cannot help, so neither
+  // reader is pointed at checkout. The agent gets the setting to raise; the
+  // person, who reads it in chat, is told to ask their agent.
+  it.each(['budget_reached', 'limit_below_deposit'])(
+    '%s says the balance is fine and how to raise the limit, never checkout',
+    (why) => {
+      for (const reader of ['person', 'agent'] as const) {
+        const sentence = unpaidSentence(why, reader) ?? '';
+        expect(sentence).not.toMatch(/tenjin fund|wallet fund|checkout/i);
+        expect(sentence).toContain('Your balance is fine');
+      }
+      expect(unpaidSentence(why, 'agent')).toContain('`tenjin config set ');
+      expect(unpaidSentence(why, 'person')).toMatch(/ask your agent to raise it/i);
+      expect(unpaidSentence(why, 'person')).not.toContain('tenjin config');
+    },
+  );
   // User-visible notices name the reason and its recovery action, and no fee
   // amount: only a quote above the ceiling is named, with the price the payer read.
   const EXPECTED: Record<string, string> = {
     no_wallet:
       'Tenjin could not pay the routing fee (this machine has no wallet), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     wallet_low:
-      'Tenjin could not pay the routing fee (the wallet holds less than the deposit Tenjin sets aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Tenjin could not pay the routing fee (the wallet holds less than the $0.013 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
     no_payer:
       'Tenjin could not pay the routing fee (the router charges it, and this session cannot pay it), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     payment_failed:
       'Tenjin could not pay the routing fee (the routing payment failed), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     limit_below_deposit:
-      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      'Tenjin could not pay the routing fee (the per-call spend limit cannot cover the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Your balance is fine; this is the per-call limit. Ask your agent to raise it.',
     budget_reached:
-      'Tenjin could not pay the routing fee (the daily budget has no room left for the routing fee or its deposit), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
+      "Tenjin could not pay the routing fee (today's spend limit is used up), so Tenjin is not routing calls until that is fixed. Your balance is fine, and adding funds would not help. The limit frees up as the 24 hours pass, or ask your agent to raise it.",
     not_allowlisted:
       'Tenjin could not pay the routing fee (allowlistCreators does not include the router), so Tenjin is not routing calls until that is fixed. Run `tenjin doctor`.',
     fee_above_ceiling:

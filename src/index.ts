@@ -63,9 +63,11 @@ if (process.argv.length === 3 && process.argv[2] === 'status-line') {
 }
 
 // THE PLUGIN'S SessionStart LEG NEVER LOADS THE CLI EITHER. It runs before
-// every session starts, writes two small files and prints one JSON line only
-// when the wallet file or its saved passphrase file is unusable, so it takes
-// the same shortcut. A flag falls through to the command tree. Once its answer
+// every session starts, writes two small files, prints one JSON line when the
+// wallet file or its saved passphrase file is unusable, and otherwise reads the
+// balance at most once a day, bounded at 2 s, to say when it is low; so it
+// takes the same shortcut, and sets up the env proxy itself, for that read
+// only. A flag falls through to the command tree. Once its answer
 // is out, it starts the daily background update, detached (lib/auto-update):
 // after the answer, so the session waits on nothing new, and in a `finally`,
 // so a leg that throws, or a module that will not load, still starts the
@@ -92,8 +94,9 @@ if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] =
 // before stdout drains cuts a large body off (lib/flush-stdio).
 const { exitAfter } = await import('./lib/flush-stdio');
 await exitAfter(async () => {
-  // After the status line, which sends no request: every other process from
-  // this bin (the CLI, the hooks, `tenjin mcp`) honours HTTPS_PROXY and NO_PROXY.
+  // After the status line, which sends no request, and the alive leg, which
+  // sets it up for its one read: every other process from this bin (the CLI,
+  // the other hooks, `tenjin mcp`) honours HTTPS_PROXY and NO_PROXY.
   const { useEnvProxy } = await import('./lib/env-proxy');
   useEnvProxy(process.env);
 

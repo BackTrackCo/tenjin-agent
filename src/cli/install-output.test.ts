@@ -136,11 +136,12 @@ async function installedWithFunding() {
     data.wallet as WalletOutcome,
     'unused',
     {},
-    "'/private runtime/tenjin' wallet fund 5",
+    "'/private runtime/tenjin' fund 5",
   );
   stubs.install.mockResolvedValueOnce({
     data: { ...data, nextSteps: [funding!.step], next: 'Open a new Claude Code session.' },
-    humanLines: ['Installed.', 'Next: Open a new Claude Code session.'],
+    humanLines: ['Installed.'],
+    humanTail: ['', 'Next: Open a new Claude Code session.'],
   });
 }
 
@@ -154,29 +155,37 @@ describe('terminal installation funding through the CLI', () => {
     expect(stubs.select).toHaveBeenCalledOnce();
     expect(stubs.select).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'fund' }));
     expect(stubs.fund).not.toHaveBeenCalled();
-    expect(out.stdout).toContain('Installed.\nNext: Open a new Claude Code session.\n');
-    expect(out.stdout).toContain('Paid Tenjin tools need funds.');
+    expect(out.stdout).toContain('Installed.\n');
+    expect(out.stdout.indexOf('Installed.')).toBeLessThan(
+      out.stdout.indexOf('Next: Open a new Claude Code session.'),
+    );
   });
 
   it('opens checkout only after the terminal user chooses Add funds', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
     await installedWithFunding();
     stubs.select.mockResolvedValueOnce('fund');
+    stubs.fund.mockResolvedValueOnce({
+      data: { funded: true, pollStatus: 'arrived', balance: { atomic: '5000000', usd: '5' } },
+      humanLines: [],
+    });
     const out = await run(['install'], true);
     expect(out.code).toBe(0);
     expect(stubs.fund).toHaveBeenCalledOnce();
     expect(stubs.fund).toHaveBeenCalledWith(
       expect.objectContaining({ dataDir: join(sandbox, '.tenjin') }),
-      {
+      expect.objectContaining({
         amountUsd: '5',
-        wait: false,
-        qr: false,
-      },
+        source: 'install',
+        header: false,
+        // A Ctrl-C mid-watch ends the process; the next step prints from there.
+        onStopLines: expect.arrayContaining(['Next: Open a new Claude Code session.']),
+      }),
     );
-    expect(out.stdout.indexOf('Installed.')).toBeLessThan(
-      out.stdout.indexOf('Funds not confirmed'),
-    );
-    expect(out.stdout).toContain('ask your agent to check your balance');
+    // The receipt, then checkout and its balance, then the next step.
+    const balance = out.stdout.indexOf('Balance   $5.00');
+    expect(out.stdout.indexOf('Installed.')).toBeLessThan(balance);
+    expect(balance).toBeLessThan(out.stdout.indexOf('Next: Open a new Claude Code session.'));
     expect(out.stdout).not.toContain('`tenjin');
   });
 

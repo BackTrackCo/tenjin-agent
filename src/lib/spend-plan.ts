@@ -73,6 +73,11 @@ export function markShortOfFunds(slot: PlanSlot | undefined): void {
   if (slot !== undefined && minted.has(slot) && spent.has(slot)) shortOfFunds.add(slot);
 }
 
+/** The payment signed on this slot was refused as short of funds. */
+export function wasShortOfFunds(slot: PlanSlot): boolean {
+  return shortOfFunds.has(slot);
+}
+
 /** A plan over the automatic limits: what a person is asked about. */
 export interface PlanOver {
   reason: 'above_auto_spend' | 'session_budget_exceeded';

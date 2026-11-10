@@ -72,7 +72,7 @@ npm install -g tenjin-cli
 tenjin install
 ```
 
-Setup asks about spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link. If it expires, ask for a new one. In a terminal, choose **Add $5** to open checkout or **Not now** to skip it. Follow the activation step; paid tools need funds before they can run.
+Setup asks about spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and Tenjin carries on as soon as the money lands. With **Not now**, your agent asks when a task first needs a paid tool. Follow the activation step.
 
 Claude Code is supported; Codex is experimental. [Supported systems, setup and permissions →](./docs/agent-permissions.md)
 
@@ -125,18 +125,20 @@ Browsing and inspection are free. A selected tool pays only its provider; select
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $0.25   |
 
-A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. When the routing channel needs funds, Tenjin reads your USDC balance once and uses the SDK's deposit target, usually $0.05, within your per-call limit and a $0.25 ceiling. It leaves $0.01 liquid for provider payments. Below a $0.10 liquid balance, or if the normal target will not fit, it targets $0.01 or the next voucher's larger shortfall, then shrinks to the balance above the reserve. It skips the top-up only if that amount cannot cover the next voucher. The deposit counts toward automatic spending once; fees drawn from it do not count again, and unused funds remain yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing has a separate fee, quoted for each call and capped at $0.003. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 
-| Command                 | What it does                                  |
-| ----------------------- | --------------------------------------------- |
-| `tenjin wallet fund 5`  | Open checkout to add $5                       |
-| `tenjin wallet balance` | Check available funds                         |
-| `tenjin status`         | Show spending and limits                      |
-| `tenjin doctor`         | Check setup, activation and payment readiness |
-| `tenjin update`         | Update Tenjin                                 |
-| `tenjin uninstall`      | Remove the integration; keep your wallet      |
+| Command            | What it does                                  |
+| ------------------ | --------------------------------------------- |
+| `tenjin fund 5`    | Open checkout to add $5, and watch it land    |
+| `tenjin balance`   | Show your balance and limits                  |
+| `tenjin status`    | Show spending and limits                      |
+| `tenjin doctor`    | Check setup, activation and payment readiness |
+| `tenjin update`    | Update Tenjin                                 |
+| `tenjin uninstall` | Remove the integration; keep your wallet      |
+
+`tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
 
 ## Privacy and help
 

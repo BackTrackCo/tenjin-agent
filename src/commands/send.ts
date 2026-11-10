@@ -91,7 +91,7 @@ export async function runSend(
   }
   if (amountAtomic > balance) {
     throw new CliError('REFUSED', 'The amount exceeds the wallet USDC balance.', {
-      fix: 'Check `tenjin wallet balance` and send at most that amount.',
+      fix: 'Check `tenjin balance` and send at most that amount.',
       details: {
         requested: toMoney(amountAtomic.toString()),
         balance: toMoney(balance.toString()),
