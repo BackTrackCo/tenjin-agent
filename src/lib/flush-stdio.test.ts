@@ -56,17 +56,18 @@ const writeThenExit = (size: number, code: number): string =>
 
 /**
  * The bin's order (src/index.ts): the helper is loaded and its guard is on
- * before the command runs. The command writes into a pipe whose reader is
- * already gone, then keeps working (an import, a request) while the EPIPE
- * lands, and returns its code.
+ * before the command runs. The command writes, then keeps working (an
+ * import, a request) and returns its code. With `closed`, the reader is
+ * already gone, and the command works on until the EPIPE has landed and
+ * closed stdout: an event, never a timer.
  */
-const binOrder = (size: number, code: number): string =>
+const binOrder = (size: number, code: number, opts: { closed?: boolean } = {}): string =>
   `const { exitAfter } = await import(${JSON.stringify(MODULE)});
    await exitAfter(async () => {
      await new Promise((go) => process.stdin.once('data', go));
      process.stdout.write('x'.repeat(${size}));
      await import('node:path');
-     await new Promise((later) => setTimeout(later, 50));
+     ${opts.closed === true ? "if (!process.stdout.closed) await new Promise((closed) => process.stdout.once('close', closed));" : ''}
      return ${code};
    });`;
 
@@ -80,7 +81,9 @@ describe('exitAfter, the bin running a command', () => {
   });
 
   it('exits with its own code when the reader was gone before the command wrote', async () => {
-    const { code, stderr } = await run(binOrder(3_000_000, 7), { closeFirst: true });
+    const { code, stderr } = await run(binOrder(3_000_000, 7, { closed: true }), {
+      closeFirst: true,
+    });
     expect(stderr).toBe('');
     expect(code).toBe(7);
   });
