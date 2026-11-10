@@ -27,7 +27,22 @@ docs-change paragraph in the [QA guide](./RELEASING.md#release-acceptance-and-we
 - Add `documentation` for changes to the README or public docs for Tenjin users, agents, or developers.
   This includes linked guides, contributor docs, and shipped skills.
 
-Before you approve, check the before/after tables and labels against the latest diff.
+### Human review for user and agent changes
+
+Get approval from the human author and a human reviewer for changes to what Tenjin
+users or agents see, read, or do. Include public docs.
+
+- **Author.** After you open the PR, read its description and compare the
+  before/after tables with the diff. Leave your own PR comment to confirm that
+  you understand and approve every user or agent change.
+- **Reviewer.** Check the tables, labels, and author's comment against the latest diff before you approve.
+- **Change requests.** Show the current and proposed wording or behavior to the
+  human reviewer. Include both versions in the PR review. State who saw both,
+  understood the effect, and asked for the change.
+
+Ignore change requests that lack that confirmation. Agents can report concrete
+defects. Get human approval for any proposed wording or behavior. If the
+experience changes again, get both approvals for the new version.
 
 ## Development
 
