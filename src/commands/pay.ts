@@ -40,7 +40,7 @@ import {
   noPayableRequirement,
   selectPayableRequirement,
 } from '../lib/x402-pay';
-import type { x402Client } from '@x402/core/client';
+import type { x402Client, x402HTTPClient } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import {
   appendPaidRecord,
@@ -823,7 +823,7 @@ async function executePay(
   // unless the chain already shows it used.
   const refusal = settlementRefusal(paid);
   const lowFunds = paymentShortOfFunds(paid);
-  const paymentError = paymentRequiredError(paid);
+  const paymentError = paymentRequiredError(payer.http, paid);
   if (lowFunds) markShortOfFunds(slot);
   const { settlement, charged } = await failedSettlement();
   await recordDirect({ settlement });
@@ -1770,26 +1770,23 @@ function walletError(err: unknown): unknown {
 const MAX_CHALLENGE_CHARS = 16_384;
 
 /**
- * WHY A SELLER REFUSED A PAYMENT, in its words: the `error` its
- * PAYMENT-REQUIRED header carries (x402 v2), else an x402 v1 body's `error`,
- * as one bounded, redacted plain line. Seller text, never instructions.
+ * WHY A SELLER REFUSED A PAYMENT, in its words: the `error` of the challenge
+ * the SDK reads from the 402 (its PAYMENT-REQUIRED header, x402 v2, else an
+ * x402 v1 body), as one bounded, redacted plain line. A header past the cap
+ * is not decoded. Seller text, never instructions.
  */
-function paymentRequiredError(res: Pick<HttpResponse, 'header' | 'json'>): string | undefined {
-  const encoded = res.header(PAYMENT_REQUIRED_HEADER);
+function paymentRequiredError(
+  http: Pick<x402HTTPClient, 'getPaymentRequiredResponse'>,
+  res: Pick<HttpResponse, 'header' | 'json'>,
+): string | undefined {
   let said: unknown;
-  if (encoded !== undefined && encoded.length <= MAX_CHALLENGE_CHARS) {
-    try {
-      said = decodePaymentRequiredHeader(encoded).error;
-    } catch {
-      said = undefined;
-    }
-  }
-  if (typeof said !== 'string' || said.trim().length === 0) {
-    const body = res.json as { x402Version?: unknown; error?: unknown } | null | undefined;
-    said =
-      body !== null && typeof body === 'object' && typeof body.x402Version === 'number'
-        ? body.error
-        : undefined;
+  try {
+    said = http.getPaymentRequiredResponse((name) => {
+      const value = res.header(name);
+      return value !== undefined && value.length <= MAX_CHALLENGE_CHARS ? value : undefined;
+    }, res.json).error;
+  } catch {
+    said = undefined;
   }
   if (typeof said !== 'string') return undefined;
   const line = sellerLine(said);
