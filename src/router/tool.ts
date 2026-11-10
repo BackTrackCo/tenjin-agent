@@ -1943,13 +1943,13 @@ async function startJob(
     await footer.done('failed', shown);
     return {
       outcome: { status: 'failed', ...httpStatus },
-      result: fail('failed', `${reason} ${paidNothing(providerAtomic, submit.txHash)}`, {
+      result: fail('failed', `${reason} ${paidNothing(providerAtomic, submit)}`, {
         providerAtomic,
-        settlement: submit.txHash !== undefined ? 'settled' : 'unknown',
+        settlement: settledOf(submit) ? 'settled' : 'unknown',
         ...(submit.status !== undefined ? { providerStatus: submit.status } : {}),
         request: { method: built.method, url: built.url },
         ...parameters,
-        nextStep: failedNextStep(submit.txHash),
+        nextStep: failedNextStep(settledOf(submit)),
         ...extras,
       }),
     };
@@ -2003,6 +2003,7 @@ async function startJob(
     amountAtomic: providerAtomic.toString(),
     ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
     ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
+    ...(submit.settled === true ? { settled: true } : {}),
     ...httpStatus,
     state: 'running',
     savedFiles: [],
@@ -2027,22 +2028,38 @@ async function startJob(
   return finishTake(take, answer, deps, footer, { kept, parameters: call.parameters });
 }
 
+/** What is known of a submit's money: the tx its payment-response named, or
+ *  that the chain showed its authorization used. */
+interface SubmitMoney {
+  txHash?: string;
+  settled?: boolean;
+}
+
+/** The submit's payment was taken for certain. */
+function settledOf(money: SubmitMoney): boolean {
+  return money.txHash !== undefined || money.settled === true;
+}
+
 /**
  * THAT A FAILED JOB WAS PAID AND BROUGHT NOTHING BACK, and what is known of
  * the money: settled when the submit's payment-response named the
  * transaction (AiSpace settles at submit, so a refused prompt is still a paid
- * one), else unknown until the authorization expires.
+ * one) or the chain showed a cut-off submit's payment taken, else unknown
+ * until the authorization expires.
  */
-function paidNothing(amountAtomic: bigint, txHash: string | undefined): string {
+function paidNothing(amountAtomic: bigint, money: SubmitMoney): string {
   const usd = `$${toMoney(amountAtomic.toString()).usd}`;
-  return txHash !== undefined
-    ? `It was paid (${usd}, settled in tx ${txHash}) and nothing came back.`
+  if (money.txHash !== undefined) {
+    return `It was paid (${usd}, settled in tx ${money.txHash}) and nothing came back.`;
+  }
+  return money.settled === true
+    ? `It was paid (${usd}; the chain shows the payment taken) and nothing came back.`
     : `It was paid (${usd}) and nothing came back; whether that payment settles is unknown until its authorization expires.`;
 }
 
 /** What the agent does after a job failed: the money is already accounted. */
-function failedNextStep(txHash: string | undefined): string {
-  return txHash !== undefined
+function failedNextStep(settled: boolean): string {
+  return settled
     ? 'Tell the user it was paid and nothing came back; the payment is in `tenjin payments`. A new call pays again.'
     : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
 }
@@ -2196,7 +2213,7 @@ async function finishTake(
     answer.state === 'expired'
       ? `${take.call.provider} no longer has this job (HTTP ${answer.status}).`
       : `${take.call.provider}: ${answer.reason}.`
-  } ${paidNothing(providerAtomic, take.txHash)}`;
+  } ${paidNothing(providerAtomic, take)}`;
   const said = answer.state === 'failed' ? answer.said : undefined;
   const ended = await end({
     state: answer.state,
@@ -2225,12 +2242,12 @@ function failedResult(
 ): RequestToolResult {
   return fail('failed', reason, {
     providerAtomic: BigInt(take.amountAtomic),
-    settlement: take.txHash !== undefined ? 'settled' : 'unknown',
+    settlement: settledOf(take) ? 'settled' : 'unknown',
     ...(status !== undefined ? { providerStatus: status } : {}),
     ...(said !== undefined ? { providerError: said } : {}),
     request: { method: take.poll.method, url: take.poll.url },
     ...(parameters !== undefined ? { parameters } : {}),
-    nextStep: failedNextStep(take.txHash),
+    nextStep: failedNextStep(settledOf(take)),
   });
 }
 
@@ -2335,7 +2352,7 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
     failedResult(
       take,
       take.reason ??
-        `${take.call.provider}: the job ended without a result. ${paidNothing(BigInt(take.amountAtomic), take.txHash)}`,
+        `${take.call.provider}: the job ended without a result. ${paidNothing(BigInt(take.amountAtomic), take)}`,
       undefined,
       take.said,
     ),

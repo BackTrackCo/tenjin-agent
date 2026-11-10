@@ -392,9 +392,9 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
     expect(take).toMatchObject({ state: 'done', statusUrl: 'https://treza.example/jobs/42' });
   });
 
-  // A seller that settles before it works: the chain read on the cut-off leg
-  // showed the payment taken, and the submit's row still said unknown.
-  it('records the submit settled when the chain shows the cut-off payment taken', async () => {
+  /** The submit is cut off after its headers, the chain shows its payment
+   *  taken, and the status URL answers `answers`. */
+  async function cutOffTaken(answers: Answer[]) {
     await storeSpecs(dir, [TREZA]);
     const { fetchImpl } = submit(
       TREZA,
@@ -414,9 +414,7 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
         ),
       { maxTimeoutSeconds: 0 },
     );
-    const { transport } = polls([
-      { status: 200, body: { status: 'done', audio_url: 'https://treza.example/out/clip.mp3' } },
-    ]);
+    const { transport } = polls(answers);
     const used = (async () =>
       json(200, { jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` })) as typeof fetch;
     const run = deps(fetchImpl, transport, { timeout: 50 });
@@ -437,8 +435,37 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
     } finally {
       vi.useRealTimers();
     }
+    return { result, fetchImpl };
+  }
+
+  // A seller that settles before it works: the chain read on the cut-off leg
+  // showed the payment taken, and the submit's row still said unknown.
+  it('records the submit settled when the chain shows the cut-off payment taken', async () => {
+    const { result } = await cutOffTaken([
+      { status: 200, body: { status: 'done', audio_url: 'https://treza.example/out/clip.mp3' } },
+    ]);
     expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
     expect(await ledger()).toMatchObject([{ amountAtomic: '60000', settlement: 'settled' }]);
+  });
+
+  // The take kept only a tx: a failed or resumed ending said the settlement
+  // was unknown while the ledger said settled.
+  it('says a failed take was charged when the chain shows the cut-off payment taken', async () => {
+    const { result, fetchImpl } = await cutOffTaken([
+      { status: 422, body: { error: 'bad prompt' } },
+    ]);
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, settlement: 'settled' });
+    expect(String(result.envelope.reason)).toContain('the chain shows the payment taken');
+    expect(String(result.envelope.nextStep)).toContain('paid and nothing came back');
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'failed', settled: true });
+    expect(await ledger()).toMatchObject([{ amountAtomic: '60000', settlement: 'settled' }]);
+
+    // Resumed, it answers from its record, settled still.
+    const again = polls([]);
+    const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, again.transport));
+    expect(again.seen).toEqual([]);
+    expect(resumed.envelope).toMatchObject({ status: 'failed', settlement: 'settled' });
+    expect(String(resumed.envelope.nextStep)).toContain('paid and nothing came back');
   });
 
   it('answers a finished take that missed its success rule unverified, resumed too', async () => {
