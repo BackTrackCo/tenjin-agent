@@ -35,27 +35,11 @@ describe('settleResponseOf', () => {
     expect(settleResponseOf(headerReader, lookup(headers))?.transaction).toBe(TX);
   });
 
-  // KEPT DIFFERENCE: the SDK reads X-PAYMENT-RESPONSE when PAYMENT-RESPONSE is
-  // empty. This CLI never did, so an empty v2 header cannot name a settlement
-  // from a v1 header beside it.
-  it('reads nothing from a v1 header beside an empty v2 one, where the SDK would', () => {
+  // The SDK's own fall-through: an empty PAYMENT-RESPONSE is no header, so the
+  // older X-PAYMENT-RESPONSE beside it is read.
+  it('reads X-PAYMENT-RESPONSE beside an empty PAYMENT-RESPONSE', () => {
     const headers = lookup({ 'PAYMENT-RESPONSE': '', 'X-PAYMENT-RESPONSE': settle(TX) });
-    expect(headerReader.getPaymentSettleResponse(headers).transaction).toBe(TX);
-    expect(settleResponseOf(headerReader, headers)).toBeUndefined();
-  });
-
-  // KEPT DIFFERENCE: a v2 header over the bound ends the read too.
-  it('reads nothing from a v1 header within the bound beside an oversized v2 one', () => {
-    const v1 = settle(OTHER_TX);
-    const v2 = encodePaymentResponseHeader({
-      success: true,
-      transaction: TX,
-      network: 'eip155:8453',
-      payer: `0x${'ef'.repeat(20)}`,
-    });
-    expect(v2.length).toBeGreaterThan(v1.length);
-    const headers = lookup({ 'PAYMENT-RESPONSE': v2, 'X-PAYMENT-RESPONSE': v1 });
-    expect(settleResponseOf(headerReader, headers, v1.length)).toBeUndefined();
+    expect(settleResponseOf(headerReader, headers)?.transaction).toBe(TX);
   });
 
   it.each([
@@ -75,11 +59,5 @@ describe('paymentRequiredOf', () => {
     expect(paymentRequiredOf(headerReader, lookup({ 'PAYMENT-REQUIRED': header }))).toEqual(
       paymentRequired,
     );
-  });
-
-  it('is undefined for a header over the bound', () => {
-    expect(
-      paymentRequiredOf(headerReader, lookup({ 'PAYMENT-REQUIRED': header }), header.length - 1),
-    ).toBeUndefined();
   });
 });

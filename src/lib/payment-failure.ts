@@ -55,10 +55,15 @@ export function paymentShortOfFunds(
   res: Pick<HttpResponse, 'status' | 'header' | 'json'>,
   http: X402HeaderReader = headerReader,
 ): boolean {
-  const settled = settleResponseOf(http, res.header, MAX_ERROR_CHARS);
+  // A header over the bound reads as absent, so the SDK's own fall-through applies.
+  const bounded = (name: string) => {
+    const value = res.header(name);
+    return value !== undefined && value.length > MAX_ERROR_CHARS ? undefined : value;
+  };
+  const settled = settleResponseOf(http, bounded);
   if ([settled?.errorReason, settled?.errorMessage].some(isShortOfFunds)) return true;
   if (res.status !== 402) return false;
-  const required = paymentRequiredOf(http, res.header, MAX_ERROR_CHARS);
+  const required = paymentRequiredOf(http, bounded);
   const body = record(res.json);
   return [required?.error, body?.error, body?.reason].some(isShortOfFunds);
 }
