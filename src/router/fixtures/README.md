@@ -209,9 +209,13 @@ a completed Jev gate settles that fee (1000, under the 3000 quote); any other
 answer, `warm` included, settles at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an
 `{id, input}` there is a 400. A routing call never carries a deposit: this
-client's background top-up sends `warm` for it alone, sized to the smallest of
-`extra.minDeposit`, the wallet and the per-call limit and never below ten
-quoted fees. A router that answers `warm` with a 2xx that is not the `warm`
+client's background top-up sends `warm` for it alone, one process per wallet
+at a time. It sizes the deposit as it sizes any deposit: the SDK's target from
+`extra.minDeposit`, at most the per-call limit and $0.25. Below $0.10 liquid,
+or when the target and the $0.01 reserve do not both fit, it deposits $0.01,
+or the next voucher's shortfall if that is more. It always keeps $0.01 in the
+wallet for provider payments, and never deposits less than the next voucher's
+shortfall. A router that answers `warm` with a 2xx that is not the `warm`
 answer, or a 3xx or 4xx other than a 402 or 429, has no form, and for an hour
 a deposit rides the next paid call instead; a 402, 429, 5xx or no answer backs
 off. The free route answers

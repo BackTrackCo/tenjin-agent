@@ -794,11 +794,16 @@ describe('RoutingPayer', () => {
     await vi.advanceTimersByTimeAsync(TOP_UP_TIMEOUT_MS);
     await topping;
     expect(p.routeFor(BASE).toppedUp?.()).toBe(0n);
+    // Its claim holds another process's top-up off until the deposit lands.
+    const claim = () =>
+      readRouterMemo(dir, 'topping-up', BASE, Date.now(), wallet.address.toLowerCase());
+    expect(await claim()).not.toBeNull();
     // It lands, and the next leg says it.
     await vi.advanceTimersByTimeAsync(2_000);
     await p.idle();
     expect(router.deposits).toBe(1);
     expect(p.routeFor(BASE).toppedUp?.()).toBe(CHANNEL_DEPOSIT_ATOMIC);
+    expect(await claim()).toBeNull();
   });
 
   it('skips a call whose budget ends before the top-up in flight lands, as no fault', async () => {
@@ -832,19 +837,39 @@ describe('RoutingPayer', () => {
 
   it('sends one top-up for two processes on one wallet: the other skips, then pays from it', async () => {
     const router = new FakeRouter();
-    router.delayMs = 300;
+    let settle!: () => void;
+    router.hold = new Promise<void>((r) => (settle = r));
     const a = payer(router, { now: () => Date.now() });
     const b = payer(router, { now: () => Date.now() });
     await a.prewarm();
     const topping = a.topUpIfLow(BASE);
     await delayArmed(router);
-    router.delayMs = 0;
-    // b meets a's `topping-up` memo: no warm of its own, and no fault.
+    router.hold = null;
+    // b meets a's `topping-up` claim: no warm of its own, and no fault.
     expect(unpaidWhy(await routeOnce(b, router))).toBe('deposit_deferred');
+    settle();
     await topping;
     expect((await routeOnce(b, router)).status).toBe('decided');
     expect(router.deposits).toBe(1);
     expect(router.log.filter((l) => l.endsWith(' warm paid'))).toHaveLength(1);
+  });
+
+  it('lets one of two processes starting together top up the wallet, and the other sends nothing', async () => {
+    const router = new FakeRouter();
+    let settle!: () => void;
+    router.hold = new Promise<void>((r) => (settle = r));
+    const a = payer(router, { now: () => Date.now() });
+    const b = payer(router, { now: () => Date.now() });
+    await Promise.all([a.prewarm(), b.prewarm()]);
+    const both = Promise.all([a.topUpIfLow(BASE), b.topUpIfLow(BASE)]);
+    await delayArmed(router);
+    settle();
+    await both;
+    expect(router.deposits).toBe(1);
+    expect(router.log.filter((l) => l.includes(' warm '))).toEqual([
+      'POST /api/x402-router/route warm unpaid',
+      'POST /api/x402-router/route warm paid',
+    ]);
   });
 
   it('holds the next top-up off after a refusal, and says the refusal on the calls that need it', async () => {

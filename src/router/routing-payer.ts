@@ -46,8 +46,9 @@ import {
 } from './fee';
 import type { Harness } from './names';
 import {
-  clearRouterMemo,
+  claimRouterMemo,
   readRouterMemo,
+  releaseRouterMemo,
   TOPPING_UP_MEMO_MS,
   WARM_ABSENT_MS,
   writeRouterMemo,
@@ -981,22 +982,26 @@ export class RoutingPayer {
    * same turns, payment checks, spend ledger and detach as any call, on its
    * own {@link TOP_UP_TIMEOUT_MS}. The stock SDK adds the deposit the channel
    * needs to it ({@link deposit} sizes it), and the server answers in code and
-   * charges $0. Another process's top-up of the same wallet's channel on this
-   * machine (its `topping-up` memo, which names the wallet) holds this one
-   * off. A refusal prints its one routing-fee line and backs the next off
+   * charges $0. ONE PROCESS ON THIS MACHINE TOPS UP A WALLET'S CHANNEL AT A
+   * TIME: it claims the wallet's `topping-up` memo and holds it until a
+   * deposit still out at the budget has its answer. The SDK reads the channel
+   * file as it builds the payment, after the claim, so a top-up another
+   * process just made is in it and is not made twice.
+   * A refusal prints its one routing-fee line and backs the next off
    * ({@link TOP_UP_BACKOFF_MS}). A router that answers with
    * anything but the `warm` answer has no form, and the `warm-absent` memo
    * says so for {@link WARM_ABSENT_MS}.
    */
   private async runTopUp(router: string, payer: string): Promise<TopUp> {
     const { dataDir } = this.deps;
-    const marker = await readRouterMemo(dataDir, 'topping-up', router, this.now());
-    if (marker?.detail === payer) return { status: 'elsewhere' };
-    await writeRouterMemo(dataDir, 'topping-up', router, {
+    const scope = payer.toLowerCase();
+    const token = await claimRouterMemo(dataDir, 'topping-up', router, {
       now: this.now(),
       ttlMs: TOPPING_UP_MEMO_MS,
-      detail: payer,
+      scope,
     });
+    if (token === null) return { status: 'elsewhere' };
+    let landing: Promise<void> | null = null;
     try {
       const calls: Call[] = [];
       const sent = this.now();
@@ -1027,8 +1032,7 @@ export class RoutingPayer {
         // A DEPOSIT STILL OUT at the budget finishes in the background (the
         // detached request is `tail`): it is said once its answer lands.
         if (err.why === DEADLINE_AFTER_PAYMENT_SENT) {
-          const late = this.tail;
-          this.track(late.then(() => void (this.toppedUp += settledIn(calls))));
+          landing = this.tail.then(() => void (this.toppedUp += settledIn(calls)));
         }
         return this.refusedTopUp(err);
       }
@@ -1054,11 +1058,10 @@ export class RoutingPayer {
       );
       return { status: 'absent' };
     } finally {
-      // Another wallet's marker, written over this one meanwhile, stays.
-      const now = this.now();
-      if ((await readRouterMemo(dataDir, 'topping-up', router, now))?.detail === payer) {
-        await clearRouterMemo(dataDir, 'topping-up', router);
-      }
+      const release = () =>
+        releaseRouterMemo(dataDir, 'topping-up', router, { token, now: this.now(), scope });
+      if (landing === null) await release();
+      else this.track(landing.then(release));
     }
   }
 

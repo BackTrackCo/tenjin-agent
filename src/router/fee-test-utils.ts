@@ -68,7 +68,10 @@ export class FakeRouter {
   abortAfterSettle = false;
   /** How long each paid request holds its channel. */
   delayMs = 0;
-  /** Called as a paid request starts holding its channel, just before the delay timer is armed. */
+  /** Holds each paid request's channel until it resolves, with no clock: the
+   *  test decides when the settle happens. */
+  hold: Promise<void> | null = null;
+  /** Called as a paid request starts holding its channel, by `delayMs` or `hold`. */
   onDelayArmed?: () => void;
   /** The body a settled paid call answers with. */
   body: unknown = NATIVE;
@@ -159,7 +162,11 @@ export class FakeRouter {
     const charge = warm ? 0n : this.charge;
     channel.pending = true;
     try {
-      if (this.delayMs > 0) {
+      if (this.hold !== null) {
+        const held = this.hold;
+        this.onDelayArmed?.();
+        await held;
+      } else if (this.delayMs > 0) {
         const held = new Promise((r) => setTimeout(r, this.delayMs));
         this.onDelayArmed?.();
         await held;

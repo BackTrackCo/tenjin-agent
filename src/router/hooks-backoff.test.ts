@@ -7,7 +7,13 @@ import { runHookKind } from './hook-command';
 import type { HookDeps } from './hooks';
 import { FakeRouter, NATIVE, payerDeps } from './fee-test-utils';
 import { RoutingPayer } from './routing-payer';
-import { readRouterMemo, UNREACHABLE_BACKOFF_MS, writeRouterMemo } from './router-memo';
+import {
+  claimRouterMemo,
+  readRouterMemo,
+  releaseRouterMemo,
+  UNREACHABLE_BACKOFF_MS,
+  writeRouterMemo,
+} from './router-memo';
 import { requestDecision, ROUTE_PAID_PATH, RouteSkipped } from './decision';
 
 /**
@@ -315,5 +321,26 @@ describe('router-memo', () => {
     const [name] = await readdir(join(dir, 'router-memo'));
     await writeFile(join(dir, 'router-memo', name as string), 'not json');
     expect(await memo()).toBeNull();
+  });
+
+  it('gives a claim to one of two claiming together, per wallet, and lets only its holder end it', async () => {
+    const claim = (scope: string, now = clock) =>
+      claimRouterMemo(dir, 'topping-up', BASE, { now, ttlMs: 35_000, scope });
+    const [a, b] = await Promise.all([claim('0xa'), claim('0xa')]);
+    expect([a, b].filter((t) => t !== null)).toHaveLength(1);
+    expect(await claim('0xb')).not.toBeNull();
+    const holder = (a ?? b)!;
+    await releaseRouterMemo(dir, 'topping-up', BASE, { token: 'other', now: clock, scope: '0xa' });
+    expect(await claim('0xa')).toBeNull();
+    await releaseRouterMemo(dir, 'topping-up', BASE, { token: holder, now: clock, scope: '0xa' });
+    expect(await claim('0xa')).not.toBeNull();
+  });
+
+  it('takes over a claim past its window, as one left by a process that died holding it', async () => {
+    const claim = (now: number) =>
+      claimRouterMemo(dir, 'topping-up', BASE, { now, ttlMs: 35_000, scope: '0xa' });
+    expect(await claim(clock)).not.toBeNull();
+    expect(await claim(clock + 34_000)).toBeNull();
+    expect(await claim(clock + 35_000)).not.toBeNull();
   });
 });
