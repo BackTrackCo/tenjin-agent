@@ -343,4 +343,12 @@ describe('router-memo', () => {
     expect(await claim(clock + 34_000)).toBeNull();
     expect(await claim(clock + 35_000)).not.toBeNull();
   });
+
+  it('holds a claim made a moment after this one read the clock', async () => {
+    const claim = (now: number) =>
+      claimRouterMemo(dir, 'topping-up', BASE, { now, ttlMs: 35_000, scope: '0xa' });
+    expect(await claim(clock + 1)).not.toBeNull();
+    expect(await claim(clock)).toBeNull();
+    expect(await claim(clock - 35_001)).not.toBeNull();
+  });
 });

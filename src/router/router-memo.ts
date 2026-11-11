@@ -59,6 +59,19 @@ function memoPath(dataDir: string, kind: RouterMemoKind, baseUrl: string, scope?
   return join(dataDir, 'router-memo', `${kind}-${key}.json`);
 }
 
+/** The memo in the file, whatever its window, or null. Never throws. */
+async function readMemoFile(path: string): Promise<RouterMemo | null> {
+  try {
+    const raw = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    if (raw === null || typeof raw !== 'object') return null;
+    const { at, until, detail } = raw as Record<string, unknown>;
+    if (typeof at !== 'number' || typeof until !== 'number') return null;
+    return { at, until, ...(typeof detail === 'string' ? { detail } : {}) };
+  } catch {
+    return null;
+  }
+}
+
 /** The memo in force at `now`, or null. Never throws. */
 export async function readRouterMemo(
   dataDir: string,
@@ -67,18 +80,8 @@ export async function readRouterMemo(
   now: number,
   scope?: string,
 ): Promise<RouterMemo | null> {
-  try {
-    const raw = JSON.parse(
-      await readFile(memoPath(dataDir, kind, baseUrl, scope), 'utf8'),
-    ) as unknown;
-    if (raw === null || typeof raw !== 'object') return null;
-    const { at, until, detail } = raw as Record<string, unknown>;
-    if (typeof at !== 'number' || typeof until !== 'number') return null;
-    if (at > now || until <= now) return null;
-    return { at, until, ...(typeof detail === 'string' ? { detail } : {}) };
-  } catch {
-    return null;
-  }
+  const memo = await readMemoFile(memoPath(dataDir, kind, baseUrl, scope));
+  return memo === null || memo.at > now || memo.until <= now ? null : memo;
 }
 
 /** Starts a memo of `ttlMs` from `now`. Never throws. */
@@ -118,7 +121,9 @@ export async function clearRouterMemo(
  * A MEMO ONLY ONE PROCESS HOLDS. It is created whole and exclusively, so of
  * two processes claiming at once exactly one wins. One past its window, or
  * unreadable, was left by a process that died holding it: it is removed and
- * claimed once more. The claim's token, its `detail`, is what
+ * claimed once more. One dated after this claim's `now` is a contender's that
+ * read the clock a moment later and is held, unless it is a whole window
+ * ahead (the clock went back). The claim's token, its `detail`, is what
  * {@link releaseRouterMemo} checks, so a holder never ends another's claim.
  * The token, or null when another process holds it. Never throws: a claim the
  * file system refuses outright counts as this call's, as before claims existed.
@@ -139,7 +144,8 @@ export async function claimRouterMemo(
     } catch (err) {
       if (!hasCode(err, 'EEXIST')) return token;
     }
-    if ((await readRouterMemo(dataDir, kind, baseUrl, memo.now, memo.scope)) !== null) return null;
+    const held = await readMemoFile(path);
+    if (held !== null && held.until > memo.now && held.at <= memo.now + memo.ttlMs) return null;
     await rm(path, { force: true }).catch(() => undefined);
   }
   return null;
