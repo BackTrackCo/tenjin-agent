@@ -6,8 +6,8 @@ parses the same files with its own parser, so a shape only one side validates
 is a contract only one side keeps. Four divergences so far (`pendingCall`, the
 grouped arguments, the nested `diagnostics`, and three files copied by hand
 that drifted by 2026-10-28) each cost a round trip; read these files rather
-than hand-writing an equivalent. A fixture change here is a contract change.
-`tenjin`'s CI reads them from here; it keeps no copy.
+than hand-writing an equivalent. `tenjin`'s CI reads them from here; it keeps
+no copy.
 
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
@@ -205,20 +205,11 @@ only price: this client pays any quote at or below its ceiling of 3000 atomic
 USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the user's spend limits,
 pays nothing above it, and pins no payee. With the fee `off`, the route answers
 with no 402. An answer from
-a completed Jev gate settles that fee (1000, under the 3000 quote); any other
-answer, `warm` included, settles at 0, which
+a completed Jev gate settles that fee; any other answer, `warm` included,
+settles at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an
-`{id, input}` there is a 400. A routing call never carries a deposit: this
-client's background top-up sends `warm` for it alone, one process per wallet
-at a time. It sizes the deposit as it sizes any deposit: the SDK's target from
-`extra.minDeposit`, at most the per-call limit and $0.25. Below $0.10 liquid,
-or when the target and the $0.01 reserve do not both fit, it deposits $0.01,
-or the next voucher's shortfall if that is more. It always keeps $0.01 in the
-wallet for provider payments, and never deposits less than the next voucher's
-shortfall. A router that answers `warm` with a 2xx that is not the `warm`
-answer, or a 3xx or 4xx other than a 402 or 429, has no form, and for an hour
-a deposit rides the next paid call instead; a 402, 429, 5xx or no answer backs
-off. The free route answers
+`{id, input}` there is a 400. Deposits ride only `warm` (below). The free route
+answers
 `{packet}` and `{query}` with `native` and the
 `fee_required` diagnostic, telling the agent to update tenjin-cli. Outcome
 reports, `browse` and `tool` stay on the free route.
@@ -398,31 +389,17 @@ payment and reports each outcome under that option's id. Without `catalog` or
 
 ## The warm and tolerant exchanges
 
-Two pairs pin a request and the answer it gets:
-
-- **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the paid route's
-  carrier for a channel deposit. This client's background top-up sends it, and
-  nothing else does: a routing call never carries a deposit. Its payment is a
-  deposit when the channel needs one, and a voucher when it no longer does (a
-  channel another process funded meanwhile), so the server must take either.
-  The server answers it in code, with no gate and nothing stored, so it
-  settles at 0 and only a deposit riding it moves money. A server without the
-  form answers a 400 for the unknown field, which settles nothing; this client
-  reads that, any other 4xx or 3xx except a 402 or 429, and a 2xx that is not
-  the `warm` answer as no form, and lets the deposit ride its next paid call
-  for an hour. A
-  `tolerant` client's `warm` answer also carries `honored`.
+- **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the client's
+  background top-up, the only request that carries a deposit. The server
+  answers it with no gate, so it settles at 0. Its payment is a deposit, or a
+  voucher when another process already funded the channel, so the server takes
+  either. A server without the form answers 400, and the client lets the
+  deposit ride its next paid call for an hour.
 - **`tolerant`** (`wire-tool-request-by-id-tolerant.json`,
-  `wire-lookup-spec-tolerant.json`): a browse row's id from a client whose
-  `accepts` lists `tolerant`, and the server's answer. Only such a client is
-  sent the fields added since. `honored`, on the hook, tool, browse, by-id and
-  `warm` answers, names the request fields the answer used: the parsed
-  request's own fields, in the form's order, without `gateHint` and `input`,
-  which no answer applies, and without any field the form does not name. On a
-  spec, `requires`, `timeoutS` and `maxBytes` appear where the service sets
-  them: the AiSpace clip `requires` `jobs`, and no service sets `timeoutS` or
-  `maxBytes` yet. Without `tolerant`, the same request gets the same answer
-  without them.
+  `wire-lookup-spec-tolerant.json`): a client whose `accepts` lists `tolerant`
+  also gets `honored` (the request fields the answer used) and, on a spec,
+  `requires`, `timeoutS` and `maxBytes` where the service sets them. Other
+  clients get the same answer without them.
 
 ## The set
 

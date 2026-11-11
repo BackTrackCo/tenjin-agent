@@ -8,7 +8,6 @@ import {
   TOP_UP_UNAVAILABLE,
   TOPPING_UP,
   type DecisionRoute,
-  type SkipFacts,
 } from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
@@ -265,10 +264,7 @@ export function depositSentence(amountAtomic: bigint): string {
  * paid. Its reader picks the fix (B1): the person's by default; for the model
  * (the `request` tool's text) a wallet unlock reason's `agentFix`, which asks
  * the person to act and never for the passphrase, and any other reason's own.
- * A quote above the ceiling names the price quoted, when the payer read one;
- * a wallet too low names its balance and the deposit it fell short of, when
- * they were read for a deposit. This sentence, said once per session, is
- * where the person sees that balance.
+ * A quote above the ceiling names the price quoted, when the payer read one.
  */
 /**
  * A spend limit, as the person reads it in chat: their agent raises it, so they
@@ -284,9 +280,8 @@ const PERSON_FIX: Partial<Record<string, string>> = {
 export function unpaidSentence(
   why: string,
   reader: 'person' | 'agent' = 'person',
-  facts: SkipFacts = {},
+  quotedAtomic?: bigint,
 ): string | null {
-  const { quotedAtomic, balanceAtomic, depositAtomic } = facts;
   const u = unpaid(why);
   if (u === null) return null;
   // An automatic fallback explains the missing funds without reopening checkout.
@@ -300,9 +295,7 @@ export function unpaidSentence(
   const reason =
     why === FEE_ABOVE_CEILING && quotedAtomic !== undefined
       ? `the router quoted $${usd(quotedAtomic)} a call, more than this install agreed to pay`
-      : why === 'wallet_low' && balanceAtomic !== undefined && depositAtomic !== undefined
-        ? `the wallet holds $${usd(balanceAtomic)}, less than the $${usd(depositAtomic)} Tenjin needs to set aside for routing`
-        : u.reason;
+      : u.reason;
   return `Tenjin could not pay the routing fee (${reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
 }
 

@@ -317,7 +317,7 @@ describe('Codex automatic hooks', () => {
         'POST /api/x402-router/route warm unpaid',
       ]);
       expect(fake.deposits).toBe(0);
-      expect(out?.systemMessage).toContain('the wallet holds $0.012999');
+      expect(out?.systemMessage).toContain('the wallet holds less than the $0.013');
       expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin fund');
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(

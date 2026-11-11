@@ -322,8 +322,7 @@ describe('the hook legs and the routing fee', () => {
     [
       'the wallet holds less than the deposit',
       { walletBalance: async () => 12_999n },
-      // The balance the top-up read, named once.
-      'the wallet holds $0.012999, less than the $0.013 Tenjin needs to set aside for routing',
+      'the wallet holds less than the $0.013 Tenjin needs to set aside for routing',
       [ASK, WARM_ASK],
     ],
     [
@@ -380,13 +379,9 @@ describe('the hook legs and the routing fee', () => {
       expect(systemMessageOf(second)).toBeUndefined();
       expect(fake.log.filter((l) => l === WARM_ASK)).toHaveLength(log.includes(WARM_ASK) ? 1 : 0);
       expect(fake.paidRequests()).toBe(0);
-      // A new session is told once too, without a balance read before it:
-      // the reason alone, as a refusal said again.
+      // A new session is told once too.
       const other = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
-      expect(systemMessageOf(other)).toContain(
-        says.startsWith('the wallet holds $') ? 'the wallet holds less than' : says,
-      );
-      expect(systemMessageOf(other)).not.toContain('$0.02');
+      expect(systemMessageOf(other)).toContain(says);
     },
   );
 

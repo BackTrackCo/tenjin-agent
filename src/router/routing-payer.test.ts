@@ -223,11 +223,10 @@ describe('RoutingPayer', () => {
     expect((await readSpendSummary(dir))?.committedAtomic).toBe('10000');
   });
 
-  it('refuses a wallet below the reserve plus the deficit as wallet_low, names its balance, and signs nothing', async () => {
+  it('refuses a wallet below the reserve plus the deficit as wallet_low, and signs nothing', async () => {
     const router = new FakeRouter();
     const outcome = await routeOnce(payer(router, { walletAtomic: 12_999n }), router);
     expect(skippedWhy(outcome, router)).toBe('wallet_low');
-    expect(outcome).toMatchObject({ balanceAtomic: 12_999n, depositAtomic: 13_000n });
     expect(router.paidRequests()).toBe(0);
   });
 
@@ -559,11 +558,7 @@ describe('RoutingPayer', () => {
     expect(outcome).toMatchObject({ quotedAtomic: ROUTING_FEE_CEILING_ATOMIC + 1n });
     expect(router.log).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(0);
-    expect(
-      unpaidSentence(FEE_ABOVE_CEILING, 'person', {
-        quotedAtomic: ROUTING_FEE_CEILING_ATOMIC + 1n,
-      }),
-    ).toBe(
+    expect(unpaidSentence(FEE_ABOVE_CEILING, 'person', ROUTING_FEE_CEILING_ATOMIC + 1n)).toBe(
       'Tenjin could not pay the routing fee (the router quoted $0.003001 a call, more than this install agreed to pay), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
     );
   });
@@ -886,19 +881,16 @@ describe('RoutingPayer', () => {
     expect(outcome).toMatchObject({
       status: 'skipped',
       why: 'wallet_low',
-      balanceAtomic: 0n,
       answered: true,
     });
     expect(warned.filter((l) => l.includes('top-up wallet_low'))).toHaveLength(1);
     // Funded within the backoff: the next call still gets the refusal, with
-    // no second balance read and no top-up, and not the balance read before:
-    // it may be old now.
+    // no second balance read and no top-up.
     walletAtomic = 10_000_000n;
     const asked = router.log.filter((l) => l.includes(' warm ')).length;
     expect(reads).toBe(1);
     const again = await routeOnce(p, router);
     expect(unpaidWhy(again)).toBe('wallet_low');
-    expect(again).not.toHaveProperty('balanceAtomic');
     expect(router.log.filter((l) => l.includes(' warm '))).toHaveLength(asked);
     expect(reads).toBe(1);
     // Past it, the call that needs a deposit starts the next top-up and pays.

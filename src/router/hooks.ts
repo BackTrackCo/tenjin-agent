@@ -19,13 +19,7 @@ import {
   type Sealed,
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
-import {
-  requestDecision,
-  REQUIRES_UNMET,
-  ROUTE_PAID_PATH,
-  type HookDecision,
-  type SkipFacts,
-} from './decision';
+import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -1738,7 +1732,7 @@ async function decide(
     // The router answered (its 402, say) before the skip: it is reachable.
     if (outcome.answered === true) await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
     unpaid?.(outcome.why);
-    await tellOnce(deps, sessionId, outcome.why, now, outcome);
+    await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
@@ -1782,9 +1776,9 @@ async function tellOnce(
   sessionId: string,
   why: string,
   now: number,
-  facts: SkipFacts = {},
+  quotedAtomic?: bigint,
 ) {
-  const sentence = unpaidSentence(why, 'person', facts);
+  const sentence = unpaidSentence(why, 'person', quotedAtomic);
   if (sentence === null || deps.notice === undefined) return;
   const told = await noticeFor(deps.dataDir, sessionId, why, now).catch(() => 'quiet' as const);
   if (told === 'tell') deps.notice(sentence);

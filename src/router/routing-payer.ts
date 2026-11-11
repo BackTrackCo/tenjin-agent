@@ -29,7 +29,6 @@ import {
   TOP_UP_UNAVAILABLE,
   TOPPING_UP,
   type DecisionRoute,
-  type SkipFacts,
 } from './decision';
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
@@ -41,7 +40,6 @@ import {
   refusedWhy,
   ROUTING_DEPOSIT_KEY,
   ROUTING_FEE_CEILING_ATOMIC,
-  ROUTING_WALLET_RESERVE_ATOMIC,
   routingDepositAtomic,
 } from './fee';
 import type { Harness } from './names';
@@ -338,8 +336,6 @@ interface Call {
   until: number;
   /** The SDK asked for a deposit on this call, made or deferred. */
   deposit?: boolean;
-  /** What a refusal knew, for its sentence: a low wallet's balance. */
-  facts?: SkipFacts;
   /** Its payment was out when its budget ended: it finishes in the background. */
   detached?: boolean;
   /** Its budget ended before anything was paid. */
@@ -520,7 +516,11 @@ export class RoutingPayer {
           const outcome = await this.waitForTopUp(flight, until, sent);
           if (outcome === null) throw new RouteSkipped(TOPPING_UP, answered);
           if (outcome.status === 'refused' && outcome.skip.why !== DEADLINE_AFTER_PAYMENT_SENT) {
-            throw new RouteSkipped(outcome.skip.why, { ...answered, ...outcome.skip.facts() });
+            const { quotedAtomic } = outcome.skip;
+            throw new RouteSkipped(outcome.skip.why, {
+              ...answered,
+              ...(quotedAtomic !== undefined ? { quotedAtomic } : {}),
+            });
           }
           if (outcome.status !== 'done' && outcome.status !== 'absent') throw err;
           return await once();
@@ -857,7 +857,6 @@ export class RoutingPayer {
       throw new RouteSkipped(call.skipped, {
         ...answered,
         ...(call.quoted !== undefined ? { quotedAtomic: call.quoted } : {}),
-        ...call.facts,
       });
     }
     // The router could not be reached: the call ends as that transport
@@ -943,8 +942,8 @@ export class RoutingPayer {
   private deferral(call: Call): never {
     const failed = this.backedOff();
     if (failed !== null) {
-      // A refusal said again: not the balance it read, which may be old now.
-      call.facts = failed.quotedAtomic !== undefined ? { quotedAtomic: failed.quotedAtomic } : {};
+      // A refusal said again names the fee it was quoted.
+      if (failed.quotedAtomic !== undefined) call.quoted = failed.quotedAtomic;
       this.refuse(failed.why);
     }
     void this.topUp(call.router, this.channel!.payer);
@@ -1168,7 +1167,7 @@ export class RoutingPayer {
     const max = sdkMax < MAX_CHANNEL_DEPOSIT_ATOMIC ? sdkMax : MAX_CHANNEL_DEPOSIT_ATOMIC;
     if (needed > max || needed > policy.maxAutoSpendAtomic) this.refuse('limit_below_deposit');
     const balance = await this.depositBalance(ctx.channelConfig.payer);
-    if (balance < needed) this.walletLow(call, balance, needed);
+    if (balance < needed) this.refuse('wallet_low');
     const amount = routingDepositAtomic({
       suggestedAtomic: BigInt(ctx.depositAmount),
       neededAtomic: needed,
@@ -1176,7 +1175,7 @@ export class RoutingPayer {
       perCallAtomic: policy.maxAutoSpendAtomic,
       maxAtomic: max,
     });
-    if (amount === 0n) this.walletLow(call, balance, needed);
+    if (amount === 0n) this.refuse('wallet_low');
     if (call.until - this.now() <= 0) this.refuse('busy');
     const authorizer = this.deps.authorizer(policy);
     const auth = await authorizer.authorize({
@@ -1196,13 +1195,6 @@ export class RoutingPayer {
       state: 'signed',
     });
     return amount;
-  }
-
-  /** `wallet_low`, with the balance read and the least this call routes with:
-   *  the reserve kept for provider payments plus the deposit it needs. */
-  private walletLow(call: Call, balance: bigint, needed: bigint): never {
-    call.facts = { balanceAtomic: balance, depositAtomic: needed + ROUTING_WALLET_RESERVE_ATOMIC };
-    this.refuse('wallet_low');
   }
 
   /** A failed or late balance read sends no new deposit or authorization. The

@@ -43,7 +43,7 @@ A general routing call goes to the configured router's paid route. `tenjin mcp` 
 
 Routing uses a channel funded by deposits. When another fee cannot fit, the deposit is bounded by the server's current hint, available wallet balance and `maxAutoSpend`, with a floor of ten quoted fees and the SDK ceiling of $0.25. The server hint is live data, not a fixed amount in this document. Unused deposited funds remain in the routing channel and do not pay provider calls.
 
-No routing call carries a deposit. `tenjin mcp` tops the channel up in the background with one `warm` request to the paid route, which the router answers without routing and charges nothing: when it starts on a channel that cannot cover a fee, and right after a paid call leaves the channel that low. A routing call that meets a top-up in progress waits for it inside its own time limit. A router without the `warm` form gets the deposit on the next paid call instead, for an hour. A refused or failed top-up backs off before the next one. When the session ends mid top-up, `tenjin mcp` waits up to 30 seconds for the deposit to be recorded before it exits.
+No routing call carries a deposit. `tenjin mcp` funds the channel in the background when it starts and when the channel runs low, and a routing call that meets a top-up waits for it within its time limit.
 
 A deposit is reserved before signing and counts against automatic spending once. Fees drawn from it do not consume the daily budget again. Each fee still obeys the per-payment policy and creator allowlist; a zero daily budget stops automatic fees even from an already-funded channel. An uncertain response does not automatically release a deposit or prove that no money moved.
 

@@ -871,49 +871,25 @@ export interface DecisionRoute {
   toppedUp?: () => bigint;
 }
 
-/**
- * What a skip knows about the money behind it, for the one sentence that says
- * it: the fee the router quoted, when the payer read one, and for `wallet_low`
- * the balance read for the deposit (by the background top-up, or by the call's
- * own on a router with no `warm` form) and the deposit it fell short of.
- */
-export interface SkipFacts {
-  quotedAtomic?: bigint;
-  balanceAtomic?: bigint;
-  depositAtomic?: bigint;
-}
-
 /** The paid route gave this call no answer: the wallet locked, low or over
  *  its spend limits, the fee quoted above the ceiling, the channel busy or
  *  being topped up, or the payment failed. */
 export class RouteSkipped extends Error {
   /** `unreached`: the paid call could not reach the router
    *  ({@link isUnreachable}), so the call reads as that transport failure.
+   *  `quotedAtomic`: the fee the router quoted, when the payer read one.
    *  `answered`: the router answered a request of this call (its 402, say). */
   readonly unreached: FetchJsonFailure | undefined;
   readonly quotedAtomic: bigint | undefined;
-  readonly balanceAtomic: bigint | undefined;
-  readonly depositAtomic: bigint | undefined;
   readonly answered: boolean;
   constructor(
     readonly why: string,
-    opts: { unreached?: FetchJsonFailure; answered?: boolean } & SkipFacts = {},
+    opts: { unreached?: FetchJsonFailure; quotedAtomic?: bigint; answered?: boolean } = {},
   ) {
     super(`routing fee not paid: ${why}`);
     this.unreached = opts.unreached;
     this.quotedAtomic = opts.quotedAtomic;
-    this.balanceAtomic = opts.balanceAtomic;
-    this.depositAtomic = opts.depositAtomic;
     this.answered = opts.answered === true;
-  }
-
-  /** The facts it carries, with no undefined keys. */
-  facts(): SkipFacts {
-    return {
-      ...(this.quotedAtomic !== undefined ? { quotedAtomic: this.quotedAtomic } : {}),
-      ...(this.balanceAtomic !== undefined ? { balanceAtomic: this.balanceAtomic } : {}),
-      ...(this.depositAtomic !== undefined ? { depositAtomic: this.depositAtomic } : {}),
-    };
   }
 }
 
@@ -955,10 +931,10 @@ export type DecisionOutcome<T> =
       noAnswer?: true;
     }
   /** The routing fee was not paid ({@link RouteSkipped}, {@link NO_PAYER}):
-   *  nothing was routed, and the native tool runs, with what the skip knew
-   *  ({@link SkipFacts}). `answered`: the router answered first, so it is
-   *  reachable. */
-  | ({ status: 'skipped'; why: string; answered?: true } & SkipFacts);
+   *  nothing was routed, and the native tool runs. `quotedAtomic`: the fee
+   *  the router quoted, when the payer read one. `answered`: the router
+   *  answered first, so it is reachable. */
+  | { status: 'skipped'; why: string; quotedAtomic?: bigint; answered?: true };
 
 /**
  * ONE ROUTING CALL, IN TWO FORMS, ON THE PAID ROUTE. The hook sends
@@ -1030,7 +1006,7 @@ export async function requestDecision(
     return {
       status: 'skipped',
       why: err.why,
-      ...err.facts(),
+      ...(err.quotedAtomic !== undefined ? { quotedAtomic: err.quotedAtomic } : {}),
       ...(err.answered ? { answered: true as const } : {}),
     };
   }

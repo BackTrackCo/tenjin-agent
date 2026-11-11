@@ -49,13 +49,10 @@ import {
 } from './specs';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
-  DEPOSIT_DEFERRED,
   reportSpecOutcome,
   requestBrowse,
   requestDecision,
   requestToolSpec,
-  TOP_UP_UNAVAILABLE,
-  TOPPING_UP,
   type BrowseRow,
   type DecisionOutcome,
   type SpecOutcome,
@@ -719,20 +716,15 @@ async function requestTool(
         );
   if (fresh.status === 'skipped') {
     await footer.done('native');
-    const { why } = fresh;
     // A reason that lasts (money, the wallet, a limit, the fee's price) is
     // the user's to hear once; a busy channel, a slow unlock or a top-up still
     // on its way is not.
-    const lasting = unpaidSentence(why, 'agent', fresh);
+    const lasting = unpaidSentence(fresh.why, 'agent', fresh.quotedAtomic);
     return fail(
       'native',
-      why === DEADLINE_AFTER_PAYMENT_SENT
+      fresh.why === DEADLINE_AFTER_PAYMENT_SENT
         ? 'A routing payment (possibly the channel deposit) went out, and this call ran out of time before its answer. `tenjin mcp` lets it finish so it is recorded; nothing else was paid.'
-        : why === TOPPING_UP || why === DEPOSIT_DEFERRED
-          ? 'Tenjin is setting funds aside for routing fees in the background, and they had not landed when this call needed them. Nothing was routed and no provider was paid.'
-          : why === TOP_UP_UNAVAILABLE
-            ? 'Tenjin could not set funds aside for routing fees just now (the router was busy or out of reach); it tries again shortly. Nothing was routed and no provider was paid.'
-            : `${lasting ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, the wallet was still unlocking, or its balance could not be read); the next call usually routes.'} Nothing was routed and no provider was paid.`,
+        : `${lasting ?? 'Tenjin could not pay the routing fee in time for this call (another routing payment was in progress, the wallet was still unlocking, or its balance could not be read); the next call usually routes.'} Nothing was routed and no provider was paid.`,
       {
         nextStep:
           lasting !== null

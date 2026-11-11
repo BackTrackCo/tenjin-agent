@@ -154,14 +154,6 @@ describe('unpaidSentence', () => {
     }
   });
 
-  it('names the balance a low wallet holds and the deposit it fell short of, when read', () => {
-    expect(
-      unpaidSentence('wallet_low', 'person', { balanceAtomic: 0n, depositAtomic: 10_000n }),
-    ).toBe(
-      'Tenjin could not pay the routing fee (the wallet holds $0.00, less than the $0.01 Tenjin needs to set aside for routing), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
-    );
-  });
-
   it('says nothing for a deposit the background top-up has not made yet', () => {
     expect(unpaidSentence('topping_up')).toBeNull();
     expect(unpaidSentence('deposit_deferred')).toBeNull();
