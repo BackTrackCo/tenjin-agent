@@ -51,7 +51,7 @@ describe('status, the wallet line', () => {
     const result = await status(0n);
     expect(result.humanLines?.slice(0, 3)).toEqual([
       'wallet 0 USD',
-      'Fund it with `tenjin wallet fund 5`.',
+      FUND_COMMAND_LINE,
       'lookups 0 USD',
     ]);
     expect(result.data).toMatchObject({
@@ -68,7 +68,7 @@ describe('status, the wallet line', () => {
   it('says the balance is unknown when the RPC did not answer, without a funding line', async () => {
     const result = await status(null);
     expect(result.humanLines?.[0]).toBe(
-      'wallet balance unknown: the RPC did not answer; `tenjin wallet balance` retries',
+      'wallet balance unknown: the RPC did not answer; `tenjin balance` retries',
     );
     expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
     expect(result.data).toMatchObject({ wallet: { address: ADDRESS, balance: null } });

@@ -59,7 +59,7 @@ A signed payment authorization can be charged after the process stops. Treat it 
 
 ### Approval
 
-An over-limit call returns `needs_approval` before payment. Claude Code 2.1.214+ can receive an `approve` tool carrying `anthropic/requiresUserInteraction`. Its host prompt shows the quote's total and purchase; that prompt is the approval, in every permission mode. The quote is single-use, lasts ten minutes and runs unchanged. It is manual spending outside automatic headroom, still bounded by balance.
+An over-limit call returns `needs_approval` before payment. Claude Code 2.1.214+ can receive an `approve` tool carrying `anthropic/requiresUserInteraction`. Its host prompt shows the quote's total and purchase; that prompt is the approval, in every permission mode. The quote is single-use, lasts ten minutes and runs unchanged. A run whose every payment is refused for low funds leaves it open, so the person can add funds and approve the same quote again. It is manual spending outside automatic headroom, still bounded by balance.
 
 Hosts without this facility, including Codex, refuse the over-limit call. A quote file or an agent's claim of approval cannot authorize a stored quote; it needs the supported host prompt. A subagent cannot obtain it and receives only automatically payable offers.
 

@@ -120,6 +120,60 @@ function deps(fetchImpl: typeof fetch, p?: RoutingPayer): HookDeps {
   };
 }
 
+it.each([
+  // Funded by the top-up's `warm` deposit, which settles no fee.
+  { channel: 'funded', paidBudgetMs: GATE_TIMEOUT_MS - 1_500, paidRequests: 3, settledFees: 2 },
+  {
+    channel: 'new',
+    paidBudgetMs: DEPOSIT_GATE_TIMEOUT_MS - 1_500,
+    paidRequests: 1,
+    settledFees: 1,
+  },
+])(
+  'sends the paid hook the budget left after a delayed challenge on a $channel channel',
+  async ({ channel, paidBudgetMs, paidRequests, settledFees }) => {
+    const fake = new FakeRouter();
+    const budgets: { paid: boolean; budgetMs: number }[] = [];
+    const bodies: Record<string, unknown>[] = [];
+    let challengeArmed!: () => void;
+    const armed = new Promise<void>((resolve) => (challengeArmed = resolve));
+    const p = payer(fake);
+    if (channel === 'funded') {
+      await runPromptHook(prompt(), deps(fake.fetch, p));
+      // The top-up's deposit, then the call's voucher.
+      expect(fake.paidRequests()).toBe(2);
+    } else {
+      // A new channel's deposit rides the call only on a router with no `warm` form.
+      await noWarm();
+    }
+    holdTime();
+    const observe = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      const body = (await request.clone().json()) as Record<string, unknown> & { budgetMs: number };
+      const paid = request.headers.has('payment-signature');
+      budgets.push({ paid, budgetMs: body.budgetMs });
+      bodies.push(body);
+      if (!paid) {
+        const delayed = new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+        challengeArmed();
+        await delayed;
+      }
+      return fake.fetch(request);
+    }) as typeof fetch;
+    const roundTrip = runPromptHook(prompt(), deps(observe, p));
+    await armed;
+    await vi.advanceTimersByTimeAsync(1_500);
+    await roundTrip;
+    expect(fake.paidRequests()).toBe(paidRequests);
+    expect(fake.settledFees).toBe(settledFees);
+    expect(budgets).toEqual([
+      { paid: false, budgetMs: GATE_TIMEOUT_MS },
+      { paid: true, budgetMs: paidBudgetMs },
+    ]);
+    expect({ ...bodies[0], budgetMs: 0 }).toEqual({ ...bodies[1], budgetMs: 0 });
+  },
+);
+
 /**
  * Holds the timers and the clock still; file I/O and microtasks keep running.
  * The budget tests advance it by exactly the wait they model instead of
@@ -267,9 +321,9 @@ describe('the hook legs and the routing fee', () => {
   it.each<[string, Partial<RoutingPayerDeps>, string, string[]]>([
     [
       'the wallet holds less than the deposit',
-      { walletBalance: async () => 20_000n },
+      { walletBalance: async () => 12_999n },
       // The balance the top-up read, named once.
-      'the wallet holds $0.02, less than the $0.03 Tenjin needs to set aside for routing',
+      'the wallet holds $0.012999, less than the $0.013 Tenjin needs to set aside for routing',
       [ASK, WARM_ASK],
     ],
     [
@@ -302,7 +356,8 @@ describe('the hook legs and the routing fee', () => {
           allowlistCreators: [],
         }),
       },
-      '`tenjin doctor`',
+      // A spend limit, never checkout: the balance is not the cause.
+      'or ask your agent to raise it.',
       [ASK, WARM_ASK],
     ],
   ])(
@@ -316,7 +371,7 @@ describe('the hook legs and the routing fee', () => {
       expect(contextOf(first)).toBeUndefined();
       expect(systemMessageOf(first)).toContain('could not pay');
       expect(systemMessageOf(first)).toContain(says);
-      expect(systemMessageOf(first)).not.toContain('tenjin wallet fund');
+      expect(systemMessageOf(first)).not.toContain('tenjin fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
       expect(fake.log).toEqual(log);
       // Not again in this session, and no second top-up while it is held off.
@@ -391,7 +446,9 @@ describe('the hook legs and the routing fee', () => {
     expect(notice).toContain(
       'the per-call spend limit cannot cover the routing fee or its deposit',
     );
-    expect(notice).toContain('Run `tenjin doctor`.');
+    expect(notice).toContain('Ask your agent to raise it.');
+    expect(notice).not.toContain('tenjin config');
+    expect(notice).not.toContain('tenjin fund');
     expect(notice).not.toContain('not answered');
     expect(notice).not.toContain('tenjin install --yes');
     expect(fake.paidRequests()).toBe(0);
@@ -617,16 +674,36 @@ describe('wallet notices', () => {
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
+  it('says nothing about funding before the facilitator answers', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(answer)).not.toContain('tenjin fund');
+    expect(fake.paidRequests()).toBeGreaterThan(0);
+  });
+
+  it('skips as wallet_low before sending a deposit that would consume the reserve', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 2_000n;
+    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, payer(fake)));
+    // The deposit-only balance read refuses before signing.
+    expect(fake.paidRequests()).toBe(0);
+    expect(fake.deposits).toBe(0);
+    expect(systemMessageOf(answer)).toContain('could not pay');
+    expect(systemMessageOf(answer)).toContain('Your usual tools still work.');
+    expect(systemMessageOf(answer)).not.toContain('tenjin fund');
+  });
+
   it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
     const fake = new FakeRouter();
-    let balance = 20_000n;
+    fake.walletAtomic = 2_000n;
     let clock = NOW;
-    const p = payer(fake, { walletBalance: async () => balance, now: () => clock });
+    const p = payer(fake, { now: () => clock });
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(low)).toContain('could not pay');
     expect(systemMessageOf(low)).toContain('Your usual tools still work.');
-    expect(systemMessageOf(low)).not.toContain('tenjin wallet fund');
-    balance = 10_000_000n;
+    expect(systemMessageOf(low)).not.toContain('tenjin fund');
+    fake.walletAtomic = 10_000_000n;
     // The balance is read only by the next top-up, once the refused one's
     // backoff ends: then the prompt pays, and the funding is said once.
     clock += WALLET_LOW_BACKOFF_MS[0]!;

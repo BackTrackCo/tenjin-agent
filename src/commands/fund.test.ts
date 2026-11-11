@@ -7,7 +7,6 @@ import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { Address } from 'viem';
 import { CliError } from '../lib/errors';
 import { SIWX_CHAIN_ID } from '../lib/siwx';
-import { rememberingBalanceReader } from '../lib/usdc-balance';
 import type { CommandContext } from '../context';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 
@@ -18,7 +17,9 @@ vi.mock('../lib/usdc', () => ({
 }));
 
 import { getUsdcBalance } from '../lib/usdc';
-import { runFund } from './fund';
+import { runFund, type FundOptions } from './fund';
+import { runBalance } from './balance';
+import { finishTerminalFunding, fundStep } from '../router/install-funding';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
@@ -121,6 +122,15 @@ function stubFetch(status: number, json: unknown): { fetchImpl: typeof fetch; ca
   return { fetchImpl, calls };
 }
 
+/**
+ * runFund with this machine kept out of it: no harness variables from the
+ * shell running the suite, no `scutil` for the device name, and a desktop
+ * with a browser (a Linux CI runner has no display).
+ */
+function fund(ctx: CommandContext, opts: FundOptions = {}) {
+  return runFund(ctx, { env: {}, platform: 'darwin', deviceName: async () => 'Test Mac', ...opts });
+}
+
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {
   try {
     await p;
@@ -134,11 +144,11 @@ describe('runFund', () => {
   it('mints a session for the signing wallet and returns the checkout URL', async () => {
     const { provider, address } = fakeProvider();
     const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
-    const res = await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
+    const res = await fund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/fund/link`);
-    expect(calls[0]!.body).toEqual({ address });
+    expect(calls[0]!.body).toEqual({ address, source: 'terminal', deviceName: 'Test Mac' });
     expect(res.data).toMatchObject({
       address,
       checkoutUrl: CHECKOUT,
@@ -146,10 +156,12 @@ describe('runFund', () => {
       pollStatus: 'skipped',
       nextStep: expect.stringContaining('same Tenjin executable and shell'),
     });
-    expect((res.data as { nextStep: string }).nextStep).toContain('return to this conversation');
-    expect((res.data as { nextStep: string }).nextStep).toContain('Do not open another checkout');
-    expect((res.data as { nextStep: string }).nextStep).toContain('Funds not confirmed');
-    expect(mockedBalance).not.toHaveBeenCalled();
+    // The agent waits in the background and carries on; it never asks for "done".
+    const nextStep = (res.data as { nextStep: string }).nextStep;
+    expect(nextStep).toContain('`tenjin balance --wait` in the background');
+    expect(nextStep).toContain('Never ask the person to type "done"');
+    expect(nextStep).toContain('at most once per session');
+    expect(nextStep).toContain('Do not open another checkout');
 
     // What the route's withAuth actually checks, not merely that a header exists:
     // a proof bound to another domain, chain, or key would pass a defined-check.
@@ -171,7 +183,7 @@ describe('runFund', () => {
       join(ctx.dataDir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://evil.example' }),
     );
-    await runFund(ctx, { provider, fetchImpl, wait: false, open: false });
+    await fund(ctx, { provider, fetchImpl, wait: false, open: false });
 
     expect(calls[0]!.url).toBe(`${EXPECTED_FUND_ORIGIN}/api/fund/link`);
   });
@@ -179,17 +191,17 @@ describe('runFund', () => {
   it('normalizes a lowercase stored address to EIP-55 for the route and the envelope', async () => {
     const { provider, address } = fakeProvider('lower');
     const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
-    const res = await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
+    const res = await fund(makeCtx(), { provider, fetchImpl, wait: false, open: false });
 
     // The route parses this with strict EIP-55; the local store does not, so an
     // imported wallet file would otherwise earn an unactionable 400.
-    expect(calls[0]!.body).toEqual({ address });
+    expect(calls[0]!.body).toMatchObject({ address });
     expect(res.data).toMatchObject({ address });
   });
 
   it('prints the checkout link on stderr even when piped with --json, before any wait', async () => {
     const { provider, address } = fakeProvider();
-    mockedBalance.mockResolvedValueOnce(0n).mockResolvedValueOnce(5000n);
+    mockedBalance.mockResolvedValueOnce(0n).mockResolvedValueOnce(0n).mockResolvedValueOnce(5000n);
     // Snapshot stderr at the moment the poll first sleeps: the link must already
     // be out. Without it a piped caller learns the URL only from the envelope,
     // which is written after the poll and therefore after the ~5 min expiry.
@@ -197,7 +209,7 @@ describe('runFund', () => {
     const sleep = async (): Promise<void> => {
       if (printedBeforePoll === '') printedBeforePoll = stderr.join('');
     };
-    const res = await runFund(makeCtx({ isTTY: false, json: true }), {
+    const res = await fund(makeCtx({ isTTY: false, json: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
@@ -209,29 +221,28 @@ describe('runFund', () => {
 
     expect(res.data).toMatchObject({ pollStatus: 'arrived' });
     expect(printedBeforePoll).toContain(CHECKOUT);
-    expect(printedBeforePoll).toContain(address);
     expect(printedBeforePoll).toContain('expires in ~5 minutes');
-    // The close-the-tab notice rides arrival only: after the poll, not before.
-    expect(printedBeforePoll).not.toContain('close the checkout tab');
-    expect(stderr.join('')).toContain('USDC arrived - you can close the checkout tab.');
+    // Dollars and a link: the wallet address is not part of adding funds.
+    expect(stderr.join('')).not.toContain(address);
   });
 
   it('waits by default at a TTY and returns immediately when piped', async () => {
     const { provider } = fakeProvider();
     mockedBalance.mockResolvedValue(1000n);
 
-    // Piped: no baseline read at all, so nothing can block on a dead link.
-    const piped = await runFund(makeCtx({ isTTY: false }), {
+    // Piped: one baseline read, the one `balance --wait` measures from, and no wait.
+    const piped = await fund(makeCtx({ isTTY: false }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
     });
     expect(piped.data).toMatchObject({ funded: false, pollStatus: 'skipped' });
-    expect(mockedBalance).not.toHaveBeenCalled();
+    expect(mockedBalance).toHaveBeenCalledTimes(1);
+    mockedBalance.mockReset();
 
     // TTY: the baseline is read and the poll runs, with no explicit `wait`.
     mockedBalance.mockResolvedValueOnce(1000n).mockResolvedValueOnce(9000n);
-    const tty = await runFund(makeCtx({ isTTY: true }), {
+    const tty = await fund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
@@ -242,22 +253,41 @@ describe('runFund', () => {
     expect(tty.data).toMatchObject({ funded: true, pollStatus: 'arrived' });
   });
 
-  it('draws the address QR on stderr in human mode, after the checkout link', async () => {
-    const { provider, address } = fakeProvider('lower');
-    const res = await runFund(makeCtx({ isTTY: true, json: false, columns: 80 }), {
+  it('shows no wallet address or QR when a browser opens', async () => {
+    const { provider, address } = fakeProvider();
+    await fund(makeCtx({ isTTY: true, json: false, columns: 80 }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
-      open: false,
+      openUrl: async () => true,
       wait: false,
     });
-    const block = stderr.find((chunk) => chunk.startsWith('Or send USDC'));
-    expect(block?.split('\n')[0]).toBe(`Or send USDC from a phone wallet to ${address}:`);
-    expect(block?.trimEnd().split('\n')).toHaveLength(21);
-    expect(block?.trimEnd().endsWith('USDC on Base (eip155:8453)')).toBe(true);
-    expect(stderr.indexOf(block!)).toBeGreaterThan(
-      stderr.findIndex((chunk) => chunk.includes(CHECKOUT)),
-    );
-    expect(Object.keys(res.data as object)).not.toContain('qr');
+    const out = stderr.join('');
+    expect(out).toContain(CHECKOUT);
+    expect(out).not.toContain(address);
+    expect(out).not.toContain('█');
+  });
+
+  it('draws a QR of the checkout link, not the address, when no browser can open (SSH)', async () => {
+    const { provider, address } = fakeProvider();
+    const openUrl = vi.fn(async () => true);
+    await fund(makeCtx({ isTTY: true, json: false, columns: 80 }), {
+      provider,
+      fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
+      openUrl,
+      wait: false,
+      env: { SSH_CONNECTION: '10.0.0.2 51234 10.0.0.1 22' },
+    });
+    expect(openUrl).not.toHaveBeenCalled();
+    const lines = stderr.join('').split('\n');
+    const head = lines.findIndex((l) => l.includes('No browser on this machine'));
+    expect(head).toBeGreaterThan(-1);
+    // The code is the link: lean-qr decodes nothing here, so check its size
+    // matches the URL's QR and that the full link follows it.
+    const after = lines.slice(head + 1);
+    const codeRows = after.filter((l) => l.includes('█') || l.includes('▀'));
+    expect(codeRows.length).toBeGreaterThan(10);
+    expect(after.some((l) => l.includes(`or open  ${CHECKOUT}`))).toBe(true);
+    expect(lines.join('\n')).not.toContain(address);
   });
 
   it.each([
@@ -267,21 +297,23 @@ describe('runFund', () => {
     ['a 36-column terminal', { isTTY: true, json: false, columns: 36 }, {}],
   ])('draws no QR for %s', async (_label, ctxOpts, fundOpts) => {
     const { provider } = fakeProvider();
-    await runFund(makeCtx(ctxOpts), {
+    await fund(makeCtx(ctxOpts), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
-      open: false,
+      openUrl: async () => true,
       wait: false,
+      env: { SSH_CONNECTION: '10.0.0.2 51234 10.0.0.1 22' },
       ...fundOpts,
     });
-    expect(stderr.some((chunk) => chunk.includes('eip155:8453'))).toBe(false);
+    expect(stderr.join('')).not.toContain('Scan to pay');
+    expect(stderr.join('')).not.toContain('█');
   });
 
   it('maps a rejected proof (401) to a local fix, not "retry"', async () => {
     const { provider } = fakeProvider();
     const { fetchImpl } = stubFetch(401, { error: { code: 'unauthorized' } });
     const err = await catchCliError(
-      runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
+      fund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
     );
     expect(err.code).toBe('REFUSED');
     expect(err.fix).toContain('clock');
@@ -290,15 +322,15 @@ describe('runFund', () => {
   it('forwards a positive amount as presetAmount', async () => {
     const { provider, address } = fakeProvider();
     const { fetchImpl, calls } = stubFetch(200, { url: CHECKOUT });
-    await runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false, amountUsd: '5' });
-    expect(calls[0]!.body).toEqual({ address, presetAmount: 5 });
+    await fund(makeCtx(), { provider, fetchImpl, wait: false, open: false, amountUsd: '5' });
+    expect(calls[0]!.body).toMatchObject({ address, presetAmount: 5 });
   });
 
   it.each(['abc', '0', '-3', '100001'])('refuses amount %s as USAGE', async (amountUsd) => {
     const { provider } = fakeProvider();
     const { fetchImpl } = stubFetch(200, { url: CHECKOUT });
     const err = await catchCliError(
-      runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false, amountUsd }),
+      fund(makeCtx(), { provider, fetchImpl, wait: false, open: false, amountUsd }),
     );
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
@@ -306,7 +338,7 @@ describe('runFund', () => {
 
   it('accepts the hosted Coinbase checkout host', async () => {
     const { provider } = fakeProvider();
-    const res = await runFund(makeCtx(), {
+    const res = await fund(makeCtx(), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       wait: false,
@@ -324,7 +356,7 @@ describe('runFund', () => {
     const { fetchImpl } = stubFetch(200, { url });
     const openUrl = vi.fn(async () => true);
     const err = await catchCliError(
-      runFund(makeCtx({ isTTY: true }), { provider, fetchImpl, wait: false, openUrl }),
+      fund(makeCtx({ isTTY: true }), { provider, fetchImpl, wait: false, openUrl }),
     );
     expect(err.code).toBe('CONTRACT_MISMATCH');
     expect(openUrl).not.toHaveBeenCalled();
@@ -340,7 +372,7 @@ describe('runFund', () => {
     const { fetchImpl } = stubFetch(200, { url });
     const openUrl = vi.fn(async () => true);
     const err = await catchCliError(
-      runFund(makeCtx({ isTTY: true }), { provider, fetchImpl, wait: false, openUrl }),
+      fund(makeCtx({ isTTY: true }), { provider, fetchImpl, wait: false, openUrl }),
     );
     expect(err.code).toBe('CONTRACT_MISMATCH');
     expect(err.message).toContain(`${EXPECTED_FUND_HOST} or pay.coinbase.com`);
@@ -354,21 +386,21 @@ describe('runFund', () => {
     it('accepts the production host and sends the preset amount in the body', async () => {
       const { provider, address } = fakeProvider();
       const { fetchImpl, calls } = stubFetch(200, { url: PAGE });
-      const res = await runFund(makeCtx(), {
+      const res = await fund(makeCtx(), {
         provider,
         fetchImpl,
         wait: false,
         open: false,
         amountUsd: '20',
       });
-      expect(calls[0]!.body).toEqual({ address, presetAmount: 20 });
+      expect(calls[0]!.body).toMatchObject({ address, presetAmount: 20 });
       expect(res.data).toMatchObject({ checkoutUrl: PAGE, presetAmount: 20 });
     });
 
     it('opens the full URL with its fragment and prints it whole', async () => {
       const { provider } = fakeProvider();
       const openUrl = vi.fn(async () => true);
-      await runFund(makeCtx({ isTTY: true }), {
+      await fund(makeCtx({ isTTY: true }), {
         provider,
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         wait: false,
@@ -383,7 +415,7 @@ describe('runFund', () => {
     it('prints the whole link when it will not open it', async () => {
       const { provider } = fakeProvider();
       const piped = vi.fn(async () => true);
-      await runFund(makeCtx({ isTTY: false }), {
+      await fund(makeCtx({ isTTY: false }), {
         provider,
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         wait: false,
@@ -394,7 +426,7 @@ describe('runFund', () => {
       expect(stderr.join('')).toContain(PAGE);
 
       stderr.length = 0;
-      await runFund(makeCtx({ isTTY: true }), {
+      await fund(makeCtx({ isTTY: true }), {
         provider,
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         wait: false,
@@ -407,7 +439,7 @@ describe('runFund', () => {
       // An explicitly requested wallet fund command still opens the browser.
       const { provider } = fakeProvider();
       const openUrl = vi.fn(async () => true);
-      const res = await runFund(makeCtx({ isTTY: false }), {
+      const res = await fund(makeCtx({ isTTY: false }), {
         provider,
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         openUrl,
@@ -423,7 +455,7 @@ describe('runFund', () => {
       async (env) => {
         const { provider } = fakeProvider();
         const openUrl = vi.fn(async () => true);
-        const res = await runFund(makeCtx({ isTTY: false }), {
+        const res = await fund(makeCtx({ isTTY: false }), {
           provider,
           fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
           open: false,
@@ -445,7 +477,7 @@ describe('runFund', () => {
 
     it('prints the whole link when the browser could not be opened', async () => {
       const { provider } = fakeProvider();
-      await runFund(makeCtx({ isTTY: true }), {
+      await fund(makeCtx({ isTTY: true }), {
         provider,
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         wait: false,
@@ -461,7 +493,7 @@ describe('runFund', () => {
         .mockResolvedValueOnce(0n)
         .mockResolvedValueOnce(20_000_000n);
       const sleep = vi.fn(async () => {});
-      const res = await runFund(makeCtx({ isTTY: true }), {
+      const res = await fund(makeCtx({ isTTY: true }), {
         provider,
         fetchImpl: stubFetch(200, { url: PAGE }).fetchImpl,
         openUrl: async () => true,
@@ -484,7 +516,7 @@ describe('runFund', () => {
       error: { code: 'region_not_supported', message: 'no' },
     });
     const err = await catchCliError(
-      runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
+      fund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
     );
     expect(err.code).toBe('REFUSED');
     expect(err.exitCode).toBe(3);
@@ -493,7 +525,7 @@ describe('runFund', () => {
   it('maps 429 to RATE_LIMITED and 503 to API_UNREACHABLE', async () => {
     const { provider } = fakeProvider();
     const limited = await catchCliError(
-      runFund(makeCtx(), {
+      fund(makeCtx(), {
         provider,
         fetchImpl: stubFetch(429, { error: { code: 'rate_limited' } }).fetchImpl,
         wait: false,
@@ -503,7 +535,7 @@ describe('runFund', () => {
     expect(limited.code).toBe('RATE_LIMITED');
 
     const unconfigured = await catchCliError(
-      runFund(makeCtx(), {
+      fund(makeCtx(), {
         provider,
         fetchImpl: stubFetch(503, { error: { code: 'cdp_not_configured' } }).fetchImpl,
         wait: false,
@@ -520,7 +552,7 @@ describe('runFund', () => {
       throw new Error('socket down');
     }) as typeof fetch;
     const err = await catchCliError(
-      runFund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
+      fund(makeCtx(), { provider, fetchImpl, wait: false, open: false }),
     );
     expect(err.code).toBe('NETWORK_ERROR');
   });
@@ -528,7 +560,7 @@ describe('runFund', () => {
   it('opens the browser at a TTY and skips it when piped or --no-open', async () => {
     const { provider } = fakeProvider();
     const openUrl = vi.fn(async () => true);
-    await runFund(makeCtx({ isTTY: true }), {
+    await fund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       wait: false,
@@ -537,14 +569,14 @@ describe('runFund', () => {
     expect(openUrl).toHaveBeenCalledWith(CHECKOUT);
 
     openUrl.mockClear();
-    await runFund(makeCtx({ isTTY: false }), {
+    await fund(makeCtx({ isTTY: false }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       wait: false,
       openUrl,
       env: {},
     });
-    await runFund(makeCtx({ isTTY: true }), {
+    await fund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       wait: false,
@@ -555,18 +587,13 @@ describe('runFund', () => {
   });
 
   it('polls until the balance rises above the pre-mint baseline', async () => {
-    const { provider, address } = fakeProvider();
-    let onChain = 250_000n;
-    const read = rememberingBalanceReader(dataDir, { read: async () => onChain });
-    const check = () => read(address, 'https://rpc.example', { timeoutMs: 100 });
-    expect(await check()).toBe(250_000n);
-    onChain = 5_250_000n;
+    const { provider } = fakeProvider();
     mockedBalance
       .mockResolvedValueOnce(250000n) // baseline before mint
       .mockResolvedValueOnce(250000n) // first poll: nothing yet
       .mockResolvedValueOnce(5250000n); // second poll: landed
     const sleep = vi.fn(async () => {});
-    const res = await runFund(makeCtx({ isTTY: true }), {
+    const res = await fund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
@@ -581,7 +608,6 @@ describe('runFund', () => {
     });
     expect(sleep).toHaveBeenCalledTimes(2);
     expect(res.humanLines?.join(' ')).toContain('5.25');
-    expect(await check()).toBe(onChain);
     expect((res.data as { nextStep: string }).nextStep).toContain('Continue the original task');
   });
 
@@ -596,7 +622,7 @@ describe('runFund', () => {
       const sleep = vi.fn(async (ms: number) => {
         vi.advanceTimersByTime(ms);
       });
-      const res = await runFund(makeCtx({ isTTY: true }), {
+      const res = await fund(makeCtx({ isTTY: true }), {
         provider,
         fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
         open: false,
@@ -605,10 +631,10 @@ describe('runFund', () => {
         pollTimeoutMs: 30,
       });
       expect(sleep).toHaveBeenCalledTimes(3);
-      expect(mockedBalance).toHaveBeenCalledTimes(4); // one baseline + three polls
+      // One baseline, then every other round (the public RPC rate-limits).
+      expect(mockedBalance).toHaveBeenCalledTimes(3);
       expect(res.data).toMatchObject({ funded: false, pollStatus: 'timed-out' });
-      expect(res.humanLines?.join(' ')).toContain('`tenjin wallet balance`');
-      expect(res.humanLines?.join(' ')).toContain('before adding money again');
+      expect(res.humanLines?.join(' ')).toContain('`tenjin balance --wait`');
     } finally {
       vi.useRealTimers();
     }
@@ -617,7 +643,7 @@ describe('runFund', () => {
   it('skips polling when the baseline read fails, instead of blocking funding', async () => {
     const { provider } = fakeProvider();
     mockedBalance.mockRejectedValue(new Error('rpc down'));
-    const res = await runFund(makeCtx({ isTTY: true }), {
+    const res = await fund(makeCtx({ isTTY: true }), {
       provider,
       fetchImpl: stubFetch(200, { url: CHECKOUT }).fetchImpl,
       open: false,
@@ -629,7 +655,362 @@ describe('runFund', () => {
       pollStatus: 'unavailable',
       checkoutUrl: CHECKOUT,
     });
-    expect(res.humanLines?.join(' ')).toContain('Could not read the balance');
+    expect(res.humanLines?.join(' ')).toContain("Couldn't read your balance");
     expect(mockedBalance).toHaveBeenCalledTimes(1);
   });
+});
+
+/** A Tenjin /fund link whose token expires at `exp` (ms epoch). */
+function pageLink(exp: number): string {
+  const payload = Buffer.from(JSON.stringify({ address: '0xabc', exp })).toString('base64url');
+  return `${EXPECTED_FUND_ORIGIN}/fund?amount=5#${payload}.c2ln`;
+}
+
+/** The link route mints `links` in turn; the status route answers from `statuses`. */
+function fundServer(links: string[], statuses: [number, unknown][] = [[404, {}]]) {
+  const mints: Captured[] = [];
+  let statusCalls = 0;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith('/api/fund/link')) {
+      mints.push({
+        url,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      const link = links[Math.min(mints.length - 1, links.length - 1)]!;
+      return new Response(JSON.stringify({ url: link }), { status: 200 });
+    }
+    const [status, body] = statuses[Math.min(statusCalls, statuses.length - 1)]!;
+    statusCalls++;
+    return new Response(JSON.stringify(body), { status });
+  }) as typeof fetch;
+  return { fetchImpl, mints, statusCalls: () => statusCalls };
+}
+
+describe('runFund: the link, its context and its status', () => {
+  it('says where the link was asked for: the terminal, an agent, or install', async () => {
+    const { provider } = fakeProvider();
+    const server = fundServer([CHECKOUT]);
+    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, wait: false, open: false });
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      env: { CLAUDECODE: '1' },
+    });
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      env: { CLAUDECODE: '1' },
+      source: 'install',
+    });
+    expect(server.mints.map((m) => (m.body as { source: string }).source)).toEqual([
+      'terminal',
+      'agent',
+      'install',
+    ]);
+  });
+
+  it('sends the waiting call as `need`, and refuses --for without --price', async () => {
+    const { provider } = fakeProvider();
+    const server = fundServer([CHECKOUT]);
+    const res = await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      forLabel: 'X post read',
+      priceUsd: '0.006',
+    });
+    expect(server.mints[0]!.body).toMatchObject({
+      need: { label: 'X post read', priceUsd: 0.006 },
+    });
+    // The agent says what the money is for.
+    expect((res.data as { nextStep: string }).nextStep).toContain('X post read, $0.006 a call');
+    const err = await catchCliError(
+      fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, wait: false, forLabel: 'X' }),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(server.mints).toHaveLength(1);
+  });
+
+  it('never fails over the device name: none is sent when it cannot be read', async () => {
+    const { provider } = fakeProvider();
+    const server = fundServer([CHECKOUT]);
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      wait: false,
+      open: false,
+      deviceName: async () => {
+        throw new Error('scutil gone');
+      },
+    });
+    expect(server.mints[0]!.body).not.toHaveProperty('deviceName');
+  });
+
+  it('waits on a payment already on its way instead of opening a second checkout', async () => {
+    const { provider } = fakeProvider();
+    const link = pageLink(Date.now() + 600_000);
+    mockedBalance.mockResolvedValue(0n);
+    const first = fundServer([link]);
+    await fund(makeCtx(), { provider, fetchImpl: first.fetchImpl, wait: false, open: false });
+    expect(first.mints).toHaveLength(1);
+
+    // The page reported a payment in progress; the balance has not moved yet.
+    const again = fundServer(
+      [pageLink(Date.now() + 600_000)],
+      [[200, { state: 'paying', updatedAt: 'x' }]],
+    );
+    const openUrl = vi.fn(async () => true);
+    const res = await fund(makeCtx(), {
+      provider,
+      fetchImpl: again.fetchImpl,
+      wait: false,
+      openUrl,
+      env: { CLAUDECODE: '1' },
+    });
+    expect(again.mints).toHaveLength(0);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true, status: 'paying' });
+    expect((res.data as { nextStep: string }).nextStep).toContain('already on its way');
+
+    // Once that money is in the balance, a rerun is a new top-up.
+    mockedBalance.mockResolvedValue(5_000_000n);
+    const after = fundServer([CHECKOUT], [[200, { state: 'paid', updatedAt: 'x' }]]);
+    await fund(makeCtx(), { provider, fetchImpl: after.fetchImpl, wait: false, open: false });
+    expect(after.mints).toHaveLength(1);
+  });
+
+  it('offers a fresh link with r when one expires with nothing paid at a terminal', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    let clock = 1_000_000;
+    const server = fundServer(
+      [pageLink(clock + 4_000), pageLink(clock + 600_000)],
+      [[200, { state: 'opened', updatedAt: 'x' }]],
+    );
+    const keys = ['r', 'q'];
+    const readKey = vi.fn(async () => keys.shift() ?? null);
+    const res = await fund(makeCtx({ isTTY: true, json: false }), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      openUrl: async () => true,
+      readKey,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      pollTimeoutMs: 20_000,
+    });
+    expect(server.mints).toHaveLength(2);
+    expect(readKey).toHaveBeenCalledTimes(1);
+    expect(stderr.join('')).toContain('The checkout link expired. Nothing was charged.');
+    expect(res.data).toMatchObject({ funded: false, checkoutUrl: pageLink(1_000_000 + 600_000) });
+  });
+
+  it('install does not say the payment can still land after its link expired with nothing charged', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    let clock = 1_000_000;
+    const server = fundServer(
+      [pageLink(clock + 4_000)],
+      [[200, { state: 'opened', updatedAt: 'x' }]],
+    );
+    const offer = await fundStep(
+      { status: 'created', address, signing: { status: 'ready', source: 'file' } },
+      'unused',
+      {},
+      'tenjin fund 5',
+    );
+    const out = await finishTerminalFunding(
+      { data: { nextSteps: [offer!.step] }, humanLines: [] },
+      makeCtx({ isTTY: true, json: false }),
+      {
+        isInteractive: true,
+        ask: async () => 'fund',
+        // The person presses q at the expired link.
+        fund: (ctx, opts) =>
+          fund(ctx, {
+            ...opts,
+            provider,
+            fetchImpl: server.fetchImpl,
+            openUrl: async () => true,
+            readKey: async () => 'q',
+            now: () => clock,
+            sleep: async (ms) => {
+              clock += ms;
+            },
+          }),
+      },
+    );
+    expect(stderr.join('')).toContain('The checkout link expired. Nothing was charged.');
+    expect(out.humanLines).toEqual([]);
+  });
+
+  it('--usdc shows the address with its rule and watches the balance, minting nothing', async () => {
+    const { provider, address } = fakeProvider();
+    mockedBalance.mockResolvedValueOnce(210_000n).mockResolvedValueOnce(5_210_000n);
+    const server = fundServer([CHECKOUT]);
+    const res = await fund(makeCtx({ isTTY: true, json: false, columns: 80 }), {
+      provider,
+      fetchImpl: server.fetchImpl,
+      usdc: true,
+      sleep: async () => {},
+      pollIntervalMs: 1,
+    });
+    expect(server.mints).toHaveLength(0);
+    const out = stderr.join('');
+    expect(out).toContain('Only USDC, only on the Base network.');
+    // The address in one piece, and its two ends to check it by.
+    expect(out).toContain(address);
+    expect(out).toContain(`starts ${address.slice(0, 6)} · ends ${address.slice(-4)}`);
+    expect(out).toContain('USDC on Base (eip155:8453)');
+    expect(res.data).toMatchObject({ usdc: true, funded: true, added: { usd: '5' } });
+  });
+});
+
+describe('a hosted checkout, which has no payment status', () => {
+  // A Coinbase-hosted link carries no token, so nothing can report its
+  // payment; the balance it was issued at is what an arrival is measured from.
+  it('counts a payment that lands before `tenjin balance --wait` starts', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const server = fundServer([CHECKOUT]);
+    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, wait: false, open: false });
+
+    // Paid in the browser before the agent's background wait began.
+    mockedBalance.mockResolvedValue(5_000_000n);
+    let clock = Date.now();
+    const res = await runBalance(makeCtx(), {
+      provider,
+      wait: true,
+      waitMs: 10_000,
+      fetchImpl: server.fetchImpl,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    });
+    expect(res.data).toMatchObject({ arrived: true, added: { usd: '5' } });
+    // No status route is asked for a link without a token.
+    expect(server.statusCalls()).toBe(0);
+  });
+});
+
+describe('a --usdc handoff, which has no link', () => {
+  // Nothing reports a transfer, so the balance at the handoff is what an
+  // arrival is measured from, as for a hosted link.
+  it('counts a transfer that lands before `tenjin balance --wait` starts', async () => {
+    const { provider } = fakeProvider();
+    mockedBalance.mockResolvedValue(0n);
+    const server = fundServer([CHECKOUT]);
+    await fund(makeCtx(), { provider, fetchImpl: server.fetchImpl, usdc: true });
+
+    // Sent from a crypto wallet before the agent's background wait began.
+    mockedBalance.mockResolvedValue(5_000_000n);
+    let clock = Date.now();
+    const res = await runBalance(makeCtx(), {
+      provider,
+      wait: true,
+      waitMs: 10_000,
+      fetchImpl: server.fetchImpl,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    });
+    expect(res.data).toMatchObject({ arrived: true, added: { usd: '5' } });
+    expect(server.mints).toHaveLength(0);
+    expect(server.statusCalls()).toBe(0);
+  });
+
+  it('keeps a card payment on its way, so a later `tenjin fund` opens no second checkout', async () => {
+    const { provider } = fakeProvider();
+    const link = pageLink(Date.now() + 600_000);
+    mockedBalance.mockResolvedValue(0n);
+    const first = fundServer([link]);
+    await fund(makeCtx(), { provider, fetchImpl: first.fetchImpl, wait: false, open: false });
+
+    // The agent hands over the address too while the card payment is landing.
+    await fund(makeCtx(), {
+      provider,
+      fetchImpl: first.fetchImpl,
+      usdc: true,
+      env: { CLAUDECODE: '1' },
+    });
+
+    const again = fundServer(
+      [pageLink(Date.now() + 600_000)],
+      [[200, { state: 'paying', updatedAt: 'x' }]],
+    );
+    const res = await fund(makeCtx(), {
+      provider,
+      fetchImpl: again.fetchImpl,
+      wait: false,
+      open: false,
+      env: { CLAUDECODE: '1' },
+    });
+    expect(again.mints).toHaveLength(0);
+    expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true, status: 'paying' });
+  });
+
+  // The kept card link's start is lowered to the handoff's own reading, so a
+  // transfer that lands before `tenjin balance --wait` starts still counts.
+  it.each([
+    ['no start, its balance read having failed', undefined, 0n],
+    ['a higher start, money having been spent since', 10_000_000n, 4_000_000n],
+  ])(
+    'counts a transfer before the wait when the card link has %s',
+    async (_label, cardStart, usdcStart) => {
+      const { provider } = fakeProvider();
+      const link = pageLink(Date.now() + 600_000);
+      if (cardStart === undefined) mockedBalance.mockRejectedValue(new Error('rpc down'));
+      else mockedBalance.mockResolvedValue(cardStart);
+      const first = fundServer([link]);
+      await fund(makeCtx(), { provider, fetchImpl: first.fetchImpl, wait: false, open: false });
+
+      mockedBalance.mockResolvedValue(usdcStart);
+      await fund(makeCtx(), {
+        provider,
+        fetchImpl: first.fetchImpl,
+        usdc: true,
+        env: { CLAUDECODE: '1' },
+      });
+
+      // The card payment is still on its way: no second checkout.
+      const again = fundServer(
+        [pageLink(Date.now() + 600_000)],
+        [[200, { state: 'paying', updatedAt: 'x' }]],
+      );
+      const res = await fund(makeCtx(), {
+        provider,
+        fetchImpl: again.fetchImpl,
+        wait: false,
+        open: false,
+        env: { CLAUDECODE: '1' },
+      });
+      expect(again.mints).toHaveLength(0);
+      expect(res.data).toMatchObject({ checkoutUrl: link, paymentInFlight: true });
+
+      // The transfer lands before the agent's background wait began.
+      mockedBalance.mockResolvedValue(usdcStart + 5_000_000n);
+      let clock = Date.now();
+      const waited = await runBalance(makeCtx(), {
+        provider,
+        wait: true,
+        waitMs: 10_000,
+        fetchImpl: again.fetchImpl,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+      });
+      expect(waited.data).toMatchObject({ arrived: true, added: { usd: '5' } });
+    },
+  );
 });

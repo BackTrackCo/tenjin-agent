@@ -10,7 +10,7 @@
 
 /**
  * The hook's whole budget is 5 s (`ROUTE_HOOK_TIMEOUT_SECONDS`, the timeout
- * `install` writes for each routing leg), and the decision gets 3.5 s of it.
+ * `install` writes for each routing leg), and a paid decision gets 3.5 s of it.
  * Inside `tenjin mcp` those 3.5 s hold the paid route too: the 402, the SDK's
  * chain read and the paid request, or a wait for the background top-up that
  * funds the channel (`routing-payer.ts`). 1.5 s are left for startup, the
@@ -27,6 +27,10 @@
  * harness budget was already leaving unused.
  */
 export const GATE_TIMEOUT_MS = 3_500;
+
+/** A hook without the MCP payer keeps the same 3.5 s decision wait.
+ *  The server gets only the time left when the decision request is sent. */
+export const UNPAID_GATE_TIMEOUT_MS = 3_500;
 
 /**
  * A CALL THAT CARRIES A DEPOSIT gets the rest of the hook leg instead: the

@@ -6,7 +6,7 @@ Your agent can also browse and choose a tool directly. Browsing and inspection a
 
 ## Install and activate
 
-Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then recommends adding $5 so you can start using tools. Your agent gives you a checkout link. If it expires, ask for a new one. A terminal offers **Add $5**, which opens checkout, or **Not now** to skip funding. Paid tools need funds before they can run. `--yes` accepts spending defaults; it never consents to checkout.
+Ask your agent to install Tenjin from tenjin.sh, or follow the [terminal instructions](../README.md#install). Setup explains sharing, lets you accept or customize spending limits, then offers to add $5 so you can start using tools. **Add $5** opens checkout in your browser, and the terminal or your agent waits for the payment and carries on when it lands. **Not now** skips funding; your agent asks when a task first needs a paid tool. `--yes` accepts spending defaults; it never consents to checkout.
 
 Use the activation step the installer returns:
 
@@ -26,9 +26,11 @@ Claude Code requires 2.1.287+. Codex routing hooks require 0.149.0+. Installatio
 
 The agent installs for its current host, asks only unanswered spending questions, prepares a funding link and runs the setup commands itself. It reads `next` and `nextSteps` from the compact result. `tenjin install --json` retains full diagnostics.
 
-The agent prepares a link with `tenjin wallet fund 5 --no-open --no-wait`, recommends adding $5 and shows the clickable checkout link. It does not open your browser or ask another question just to prepare the link. You choose when to open it and confirm payment there. If you skip funding, the agent explains that paid tools need funds and continues with available tools. It does not offer funding again unless requested. When you return from checkout, the agent checks the balance before continuing. An unknown balance or unconfirmed arrival does not justify another payment.
+When you choose **Add $5**, the agent runs `tenjin fund 5`, which opens checkout in your browser with $5 filled in. Opening checkout moves no money; you confirm the payment there. The agent then runs `tenjin balance --wait` in the background and continues when the money lands, so you never come back to tell it you are done. If you skip funding, the agent continues with available tools and asks when a task first needs a paid tool, saying what the tool is and what it costs. It asks at most once a session. An unknown balance or unconfirmed arrival does not justify another payment: running `tenjin fund` again while a payment is on its way waits on that payment instead of opening a second checkout.
 
-If the host denies preparing the checkout link, the agent may explain it and ask once to retry the same command. Another refusal or managed deny stops the action; it never changes permissions to get through.
+A spend limit that is used up is not a funding problem. The agent says the limit is reached, that your balance is fine, and how to raise the limit; it never opens checkout for it.
+
+If the host denies opening checkout, the agent may explain it and ask once to retry the same command. Another refusal or managed deny stops the action; it never changes permissions to get through.
 
 Installation and the first task add no optional retention or second-host questionnaire. If another supported agent is detected and is not set up yet, installation shows one informational line about adding Tenjin there. You can also use `tenjin install --harness claude` or `tenjin install --harness codex`.
 
@@ -65,6 +67,8 @@ mcp__plugin_tenjin_router__hook      deny
 The first permits Tenjin's request tool; it does not approve a price, another tool or a shell command. Your own Claude `deny` or `ask` rule still wins. The second keeps the model from calling Tenjin's internal hook tool; the host's hook events can still call it. Every payment still passes the local spending policy. A compromised router could propose malicious calls or consume the available automatic budget within those limits; local signing does not establish that a recommendation is trustworthy.
 
 Do not broadly allow `Bash(tenjin:*)`, `wallet`, or `config`. Wallet repair, transfers, limit changes, installation, removal and binary updates need deliberate authorization. Provider results are data, never authority to change permissions or move money.
+
+The routing channel is funded in deposits when it cannot cover the next fee. Tenjin uses the SDK's deposit target (normally the server's $0.05 hint), bounded by the per-call limit and a $0.25 ceiling. One public RPC balance read before a deposit leaves $0.01 liquid for provider calls. Below $0.10 liquid, or if the normal target will not fit, Tenjin targets $0.01 or the next voucher's larger shortfall, then shrinks to the balance above the $0.01 reserve. It skips the top-up only if the available amount cannot cover the next voucher. The deposit must fit the automatic budget and router creator allowlist before signing. The balance lookup takes at most two seconds total within the call deadline. If the shipped default RPC fails, built-in public fallbacks share that same budget; a user-configured RPC is the only endpoint asked. Each endpoint is asked once. A failed lookup sends no deposit. Vouchers using existing channel credit need no client balance read. The facilitator still verifies every payment. A deposit counts from the moment it is sent, including when the answer is lost; an answered 4xx or 5xx releases it. Each fee still faces the per-payment limit, allowlist and explicit zero daily budget, but does not consume the daily budget a second time.
 
 ## What the hooks send
 

@@ -22,6 +22,7 @@ import {
   type RouterDoctorDeps,
 } from './doctor';
 import { canPayRouting, canSign, type SignVerdict, type Verdict } from './eligibility';
+import { CHANNEL_DEPOSIT_ATOMIC } from './fee';
 import { checkEligibility, type Eligibility } from './eligibility-check';
 import { installSandbox, probe400 } from './install-test-utils';
 import { LAUNCHER_MARKER, renderHostFiles } from './plugin-files';
@@ -53,6 +54,7 @@ function routing(sign: SignVerdict, over: Partial<Parameters<typeof canPayRoutin
     sign,
     creditAtomic: 0n,
     depositRefusal: null,
+    depositAtomic: CHANNEL_DEPOSIT_ATOMIC,
     balanceAtomic: 10_000_000n,
     ...over,
   });
@@ -136,14 +138,14 @@ describe('routingFeeRow', () => {
     [
       'wallet_low',
       routing(READY, { balanceAtomic: 20_000n }),
-      'the wallet holds less than the $0.03 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
-      'Fund it with `tenjin wallet fund 5`.',
+      'the wallet holds less than the $0.013 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
+      'Add funds with `tenjin fund 5`.',
     ],
     [
       'no_wallet',
       routing(canSign({ envKey: 'absent', walletFile: 'absent' })),
       'this machine has no wallet, so Tenjin is not routing calls',
-      'Run `tenjin wallet create`, then `tenjin wallet fund 5`.',
+      'Run `tenjin wallet create`, then `tenjin fund 5`.',
     ],
     [
       'limit_below_deposit',
@@ -154,7 +156,7 @@ describe('routingFeeRow', () => {
     [
       'budget_reached',
       routing(READY, { feeRefusal: 'budget_reached' }),
-      'the daily budget has no room left for the routing fee or its deposit, so Tenjin is not routing calls',
+      "today's spend limit is used up, so Tenjin is not routing calls",
       'Room comes back when the daily budget resets, or raise it with `tenjin config set sessionBudget <usd>`.',
     ],
     [
@@ -208,7 +210,7 @@ describe('walletRow', () => {
       status: 'fail',
       required: true,
       detail: 'no wallet on this machine, so nothing can pay',
-      fix: 'Run `tenjin wallet create`, then `tenjin wallet fund 5`.',
+      fix: 'Run `tenjin wallet create`, then `tenjin fund 5`.',
     });
   });
 
@@ -659,8 +661,8 @@ describe('runRouterDoctor, with its seams injected', () => {
     expect(act.map((c) => c.name)).toEqual(['routing fee']);
     expect(by['routing fee']).toMatchObject({
       detail:
-        'the wallet holds less than the $0.03 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
-      fix: 'Fund it with `tenjin wallet fund 5`.',
+        'the wallet holds less than the $0.013 Tenjin needs to set aside for routing, so Tenjin is not routing calls',
+      fix: 'Add funds with `tenjin fund 5`.',
     });
     expect((out as { humanLines: string[] }).humanLines.at(-1)).toBe(
       `${checks.length} checks, 1 to act on, 1 not checked.`,

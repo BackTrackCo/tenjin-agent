@@ -15,8 +15,7 @@ import { passphraseFilePathFor, passphraseRecordPath } from '../lib/paths';
 import { readPassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
 import { readUnlockRecord } from '../router/router-observation';
-import { payerDir } from '../router/fee';
-import { rememberingBalanceReader } from '../lib/usdc-balance';
+import { FUNDING_LINE, payerDir } from '../router/fee';
 
 // Balance is the only path that hits the chain; mock the RPC read so the whole
 // suite stays offline and deterministic. viem's key derivation stays real.
@@ -228,7 +227,7 @@ describe('runWalletCreate', () => {
 
   it('emits the exact funding line', async () => {
     const res = await runWalletCreate(makeCtx(), offline);
-    expect(res.humanLines).toContain('Fund it with `tenjin wallet fund 5`, or send USDC on Base.');
+    expect(res.humanLines).toContain(FUNDING_LINE);
   });
 
   it('reports that the key is stored encrypted', async () => {
@@ -1139,23 +1138,10 @@ describe('runWalletBalance', () => {
     mockedBalance.mockResolvedValue(0n);
     const res = await runWalletBalance(makeCtx(), { provider });
     expect(res.humanLines).toEqual([
-      'Balance: 0 USDC on Base',
-      'Set aside for routing: approximately $0.018 (local estimate).',
+      '  Balance   $0.00  low',
+      '  Limits    $0.25 a call · $5.00 a day',
+      '  Set aside about $0.018 for routing',
     ]);
-  });
-
-  it('refreshes routing eligibility after funds arrive without waiting for the cached zero to expire', async () => {
-    const address = privateKeyToAccount(generatePrivateKey()).address;
-    const { provider } = fakeRemoteProvider(address);
-    let onChain = 0n;
-    const read = rememberingBalanceReader(dataDir, { read: async () => onChain });
-    const check = () => read(address, 'https://rpc.example', { timeoutMs: 100 });
-    expect(await check()).toBe(0n);
-    onChain = 5_000_000n;
-    expect(await check()).toBe(0n);
-    mockedBalance.mockResolvedValue(onChain);
-    await runWalletBalance(makeCtx(), { provider });
-    expect(await check()).toBe(onChain);
   });
 
   it('returns dual-form money from the on-chain read', async () => {
@@ -1176,8 +1162,9 @@ describe('runWalletBalance', () => {
     const res = await runWalletBalance(makeCtx(), { provider });
     expect(res.data).toMatchObject({ routingCredit: { atomic: '241000', usd: '0.241' } });
     expect(res.humanLines).toEqual([
-      'Balance: 1.7 USDC on Base',
-      'Set aside for routing: approximately $0.241 (local estimate).',
+      '  Balance   $1.70',
+      '  Limits    $0.25 a call · $5.00 a day',
+      '  Set aside about $0.241 for routing',
     ]);
   });
 
@@ -1196,23 +1183,32 @@ describe('runWalletBalance', () => {
     mockedBalance.mockResolvedValue(1000000n);
     const res = await runWalletBalance(makeCtx(), { provider });
     expect((res.data as { balance: { usd: string } }).balance.usd).toBe('1');
-    expect(res.humanLines).toEqual(['Balance: 1 USDC on Base']);
+    expect(res.humanLines).toEqual(['  Balance   $1.00', '  Limits    $0.25 a call · $5.00 a day']);
     expect(getSigner).not.toHaveBeenCalled();
   });
 
-  it('says how to fund the wallet at exactly $0, and only then', async () => {
+  it('says how to add funds at exactly $0, and only then', async () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     const { provider } = fakeRemoteProvider(address);
     mockedBalance.mockResolvedValue(0n);
     const empty = await runWalletBalance(makeCtx(), { provider });
     expect(empty.humanLines).toEqual([
-      'Balance: 0 USDC on Base',
-      'Fund it with `tenjin wallet fund 5`.',
+      '  Balance   $0.00  low',
+      '  Limits    $0.25 a call · $5.00 a day',
+      '',
+      '  Add funds with `tenjin fund`, or ask your agent.',
     ]);
-    expect(empty.data).toMatchObject({ balance: { atomic: '0' } });
+    expect(empty.data).toMatchObject({ balance: { atomic: '0' }, low: true });
     mockedBalance.mockResolvedValue(5_000_000n);
     const funded = await runWalletBalance(makeCtx(), { provider });
-    expect(funded.humanLines).toEqual(['Balance: 5 USDC on Base']);
+    expect(funded.humanLines).toEqual([
+      '  Balance   $5.00',
+      '  Limits    $0.25 a call · $5.00 a day',
+    ]);
+    expect(funded.data).toMatchObject({
+      low: false,
+      limits: { maxAutoSpend: '0.25', sessionBudget: '5' },
+    });
   });
 });
 

@@ -1,15 +1,12 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MAX_AUTO_SPEND } from '../lib/config';
-import { configPath, walletPath } from '../lib/paths';
-import {
-  DEFAULT_RPC_URL,
-  readUsdcBalanceWithFallback,
-  rememberingBalanceReader,
-} from '../lib/usdc-balance';
+import { DEFAULT_MAX_AUTO_SPEND, loadRawConfig, type PartialConfig } from '../lib/config';
+import { walletPath } from '../lib/paths';
+import { DEFAULT_RPC_URL, readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { readWalletFacts } from '../lib/wallet-facts';
 import { noticeFor } from './notice-markers';
+import { routerSettings } from './settings';
 import { sessionStartMessage } from './wallet-reasons';
 
 /**
@@ -34,10 +31,14 @@ import { sessionStartMessage } from './wallet-reasons';
  * this session ({@link walletAtStart}). That is a file fact, not a verdict:
  * `alive` never unlocks, never execs, never reads a keychain and never replays
  * what a router saw (Q4). Everything else waits for the router's first notice.
+ * Its one network call is the balance read behind {@link walletNotice}, at
+ * most once a day and bounded at 2 s, through the env proxy it sets up then.
  */
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAMP = 'plugin-loaded.json';
+/** When the balance was last read for the notice ({@link walletNotice}). */
+const BALANCE_NOTICE_FILE = 'balance-notice.json';
 /** A session id names a file only through its hash, so any string is safe. */
 const MAX_SESSION_ID = 200;
 
@@ -169,13 +170,14 @@ export async function readAliveStamp(dataDir: string): Promise<AliveStamp | null
   }
 }
 
-/** `uninstall`: the markers and the stamp, and nothing else under the data dir. */
+/** `uninstall`: the markers, the stamp and the notice record, and nothing else under the data dir. */
 export async function removeAliveState(dataDir: string): Promise<boolean> {
   const dir = aliveDir(dataDir);
   const existed = (await stat(dir).catch(() => null)) !== null;
   if (!existed) return false;
   for (const name of await readdir(dir).catch(() => [] as string[])) {
-    if (name === STAMP || /^[0-9a-f]{32}$/.test(name)) await rm(join(dir, name), { force: true });
+    if (name === STAMP || name === BALANCE_NOTICE_FILE || /^[0-9a-f]{32}$/.test(name))
+      await rm(join(dir, name), { force: true });
   }
   // Only when empty: a file somebody else put there keeps the folder.
   await rmdir(dir).catch(() => undefined);
@@ -185,37 +187,85 @@ export async function removeAliveState(dataDir: string): Promise<boolean> {
 /** How long the leg waits on a balance read before it says nothing. */
 export const WALLET_READ_MS = 2_000;
 
+/** The balance is read for the notice at most once in this long, across sessions. */
+export const BALANCE_NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
+
 /**
- * THE WALLET, SAID TO THE PERSON AT THE START OF A SESSION while it cannot
- * pay: the leg's `systemMessage`, which Claude Code shows the user and never
- * the model, on every surface and without the mod. Null when there is no
- * wallet, the balance could not be read in time, or the wallet holds at least
- * the per-call limit.
+ * THE BALANCE, SAID TO THE PERSON AT THE START OF A SESSION while it is under
+ * the per-call limit: the leg's `systemMessage`, which Claude Code shows the
+ * user and never the model, on every surface and without the mod. The read
+ * behind it is one bounded balance read, at most once a day
+ * (`balance-notice.json`), so the notice is too: a reminder at every session
+ * start gets Tenjin uninstalled. Null when there is no wallet, a
+ * TENJIN_WALLET_KEY shadows wallet.json, the router is off, the balance was
+ * read in the last day, it could not be read in time, or it holds at least the
+ * per-call limit.
  */
 export async function walletNotice(
   dataDir: string,
-  opts: { read?: typeof readUsdcBalanceWithFallback; timeoutMs?: number } = {},
+  opts: {
+    /** The session's directory, whose project layers `router.enabled` reads too. */
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    read?: typeof readUsdcBalanceWithFallback;
+    timeoutMs?: number;
+    now?: () => number;
+  } = {},
 ): Promise<string | null> {
+  const env = opts.env ?? process.env;
+  // The env key, valid or not, shadows wallet.json as in {@link walletAtStart}:
+  // the file's address is not the wallet that pays, so it is never read for.
+  if ((env.TENJIN_WALLET_KEY?.trim() ?? '') !== '') return null;
+  const now = (opts.now ?? Date.now)();
+  const noticePath = join(aliveDir(dataDir), BALANCE_NOTICE_FILE);
+  const last = (await readJson(noticePath))?.at;
+  if (typeof last === 'number' && now >= last && now - last < BALANCE_NOTICE_EVERY_MS) return null;
   const wallet = await readJson(walletPath(dataDir));
   const address = typeof wallet?.address === 'string' ? wallet.address : undefined;
   if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
-  const config = await readJson(configPath(dataDir));
-  const rpcUrl = typeof config?.rpcUrl === 'string' ? config.rpcUrl : DEFAULT_RPC_URL;
+  // `router.enabled` as every hook reads it, for the session's directory: off,
+  // or a config that cannot be read, and nothing is read or said, nor recorded.
+  let config: PartialConfig;
+  try {
+    config = await loadRawConfig(dataDir);
+    const router = await routerSettings(
+      { cwd: opts.cwd ?? process.cwd(), dataDir, config },
+      { warn: () => undefined },
+    );
+    if (!router.enabled.value) return null;
+  } catch {
+    return null;
+  }
+  // A read that cannot record itself is not made: unrecorded, it would
+  // come back at every session start.
+  try {
+    await mkdir(aliveDir(dataDir), { recursive: true, mode: 0o700 });
+    await writeFile(noticePath, JSON.stringify({ at: now }), { mode: 0o600 });
+  } catch {
+    return null;
+  }
+  const rpcUrl = config.rpcUrl ?? DEFAULT_RPC_URL;
   const timeoutMs = opts.timeoutMs ?? WALLET_READ_MS;
-  const read = rememberingBalanceReader(dataDir, {
-    ...(opts.read !== undefined ? { read: opts.read } : {}),
-  });
+  const read = opts.read ?? readThroughEnvProxy(env);
   const balance = await read(address, rpcUrl, { timeoutMs });
   if (balance === null) return null;
   // The per-call limit as the spend policy reads it: the file's, else the default.
-  const cap = BigInt(
-    typeof config?.maxAutoSpend === 'string' && /^\d{1,30}$/.test(config.maxAutoSpend)
-      ? config.maxAutoSpend
-      : DEFAULT_MAX_AUTO_SPEND,
-  );
+  const cap = BigInt(config.maxAutoSpend ?? DEFAULT_MAX_AUTO_SPEND);
   if (balance > 0n && balance >= cap) return null;
-  // Only the person reads it, inside the session: they ask, the agent runs it.
-  return `Tenjin balance: $${dollars(balance)}. Ask your agent to add funds to Tenjin.`;
+  // Only the person reads it, inside the session: they say so, the agent runs it.
+  return `Tenjin balance $${dollars(balance)} · low. Say "add funds" when you're ready.`;
+}
+
+/**
+ * The balance read, through the proxy the environment names. The bin entry
+ * sets that proxy up only after this leg has exited, and here only a read that
+ * is due loads it, so a session start with nothing to read pays nothing for it.
+ */
+function readThroughEnvProxy(env: NodeJS.ProcessEnv): typeof readUsdcBalanceWithFallback {
+  return async (address, rpcUrl, opts) => {
+    (await import('../lib/env-proxy')).useEnvProxy(env);
+    return readUsdcBalanceWithFallback(address, rpcUrl, opts);
+  };
 }
 
 /** `$0.00`, `$0.10`, `$0.007`: whole cents keep two decimals. */
@@ -252,12 +302,20 @@ export async function aliveMain(opts: {
   stdout?: Pick<NodeJS.WritableStream, 'write'>;
 }): Promise<void> {
   const raw = await (opts.readEvent ?? (() => readStdin(1_000)))().catch(() => '');
-  const answer = await runAliveHook(parseEvent(raw), {
+  const event = parseEvent(raw);
+  const answer = await runAliveHook(event, {
     dataDir: opts.dataDir,
     version: opts.version,
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   });
-  const notice = answer === null ? await walletNotice(opts.dataDir).catch(() => null) : null;
+  const cwd = cwdOf(event);
+  const notice =
+    answer === null
+      ? await walletNotice(opts.dataDir, {
+          ...(cwd !== null ? { cwd } : {}),
+          ...(opts.env !== undefined ? { env: opts.env } : {}),
+        }).catch(() => null)
+      : null;
   const payload = answer ?? (notice !== null ? { systemMessage: notice } : null);
   if (payload === null) return;
   const out = opts.stdout ?? process.stdout;
@@ -276,6 +334,13 @@ function parseEvent(raw: string): unknown {
   } catch {
     return null;
   }
+}
+
+/** The session's directory, as the harness event names it. */
+function cwdOf(event: unknown): string | null {
+  if (event === null || typeof event !== 'object') return null;
+  const cwd = (event as { cwd?: unknown }).cwd;
+  return typeof cwd === 'string' && cwd.length > 0 ? cwd : null;
 }
 
 function readStdin(timeoutMs: number): Promise<string> {

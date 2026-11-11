@@ -707,6 +707,7 @@ export function buildHookBody(
     accepts?: readonly string[];
     harness?: Harness;
     improve?: boolean;
+    budgetMs?: number;
   } = {},
 ): Record<string, unknown> {
   return {
@@ -714,6 +715,7 @@ export function buildHookBody(
     ...(extras.sessionId !== undefined ? { sessionId: extras.sessionId } : {}),
     ...(extras.accepts !== undefined ? { accepts: [...extras.accepts] } : {}),
     ...(extras.harness !== undefined ? { harness: extras.harness } : {}),
+    ...(extras.budgetMs !== undefined ? { budgetMs: extras.budgetMs } : {}),
     packet,
     ...(extras.improve === true ? { improve: true } : {}),
   };
@@ -994,9 +996,10 @@ export async function requestDecision(
   deps: DecisionDeps,
 ): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
   const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
+  const timeoutMs = deps.timeoutMs ?? deps.ctx.flags.timeout;
   const options: HttpRequestOptions = {
     method: 'POST',
-    timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+    timeoutMs,
     blockRedirects: true,
     jsonBody:
       kind === 'hook'
@@ -1005,6 +1008,7 @@ export async function requestDecision(
             accepts: acceptsFor(deps.acceptsBazaar === true),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
+            budgetMs: Math.min(5_000, Math.max(0, timeoutMs)),
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),

@@ -379,24 +379,18 @@ describe('running every choice', () => {
     expect(await claims()).toEqual([]);
   });
 
-  /** EACH PAYMENT READS THE BALANCE FOR ITS OWN AMOUNT, so side by side a
-   *  wallet short of the total would sign every one; the set reads it once,
-   *  for the total, before any is signed. */
-  it('signs nothing, and keeps no claim, when the wallet holds less than the set costs', async () => {
+  it('admits the total against local policy without a balance RPC', async () => {
     const auth = authorizer();
-    const { fetchImpl, calls } = sellers();
-    const short = deps(fetchImpl, auth);
+    const { fetchImpl } = sellers();
+    const base = deps(fetchImpl, auth);
+    const readBalance = vi.fn(async () => 60_000n);
     const result = await runRequestTool(
       { id: ID, choice: 'all', input: INPUT },
-      { ...short, payDeps: { ...short.payDeps, readBalance: async () => 60_000n } },
+      { ...base, payDeps: { ...base.payDeps, readBalance } },
     );
-    expect(result.envelope).toMatchObject({ status: 'failed', cost: ['provider price 0 USD'] });
-    expect(String(result.envelope.reason)).toContain('insufficient USDC; no payment was signed');
-    expect(String(result.envelope.reason)).toContain('$0.085');
-    expect(String(result.envelope.reason)).toContain('$0.025 short');
-    await stoppedSet(calls, { status: 'unpaid', reason: 'wallet' });
-    expect(auth.authorize).not.toHaveBeenCalled();
-    expect(await claims()).toEqual([]);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(readBalance).not.toHaveBeenCalled();
+    expect(auth.authorize).toHaveBeenCalled();
   });
 
   it('takes only the fields every choice shares, and sends nothing for any other', async () => {

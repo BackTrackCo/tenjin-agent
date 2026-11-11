@@ -1,11 +1,11 @@
-import { setTimeout as delay } from 'node:timers/promises';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
-import { readUsdcBalanceWithFallback, type readUsdcBalance } from '../lib/usdc-balance';
+import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
+import { paymentShortOfFunds } from '../lib/payment-failure';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
 import type { FetchJsonFailure, HttpResponse } from '../lib/http';
@@ -16,7 +16,7 @@ import { isSameDeployment } from '../lib/production-origin';
 import { resolveContextSettings } from '../lib/settings';
 import { SIWX_HEADER, buildSiwxHeader } from '../lib/siwx';
 import { gateSpend } from '../lib/spend-gate';
-import { spendSlot, type PlanSlot } from '../lib/spend-plan';
+import { markShortOfFunds, spendSlot, type PlanSlot } from '../lib/spend-plan';
 import type { ResolvedSettings } from '../lib/settings';
 import {
   describeWallet,
@@ -34,6 +34,7 @@ import {
 } from '../lib/x402-pay';
 import type { x402Client } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
+import { appendPaidRecord, recordedSent } from '../router/paid';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -51,7 +52,7 @@ import type { CommandContext, CommandResult } from '../context';
  * Direct third-party payments require acknowledgement of registry warnings.
  * Router calls retain their advertised-price and supplied-term hard checks,
  * and each is signed only against its call's spend plan (`admit`).
- * Every positive payment checks the actual signer's balance before signing.
+ * Signing is offline; the facilitator verifies funds when the seller submits payment.
  */
 
 const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
@@ -61,6 +62,18 @@ const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
+
+/** A paid leg the seller refused as short of funds (`paymentShortOfFunds`). */
+const LOW_FUNDS_MESSAGE = 'The wallet does not hold enough USDC for this payment.';
+/** What a low-funds refusal says after its ask for funds: the `request` tool
+ *  keeps it behind its own ask, which names the call ({@link isLowFundsRefusal}). */
+export const LOW_FUNDS_TAIL =
+  'The signed authorization stays counted until it expires and is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization.';
+
+/** A `runPay` failure that is the seller refusing the payment as short of funds. */
+export function isLowFundsRefusal(err: CliError): boolean {
+  return err.code === 'PAYMENT_FAILED' && err.message === LOW_FUNDS_MESSAGE;
+}
 
 /**
  * What a caller was told this endpoint costs, BEFORE the live 402 is seen. It
@@ -178,6 +191,7 @@ export interface PaidLeg {
 
 export interface PayDeps {
   fetchImpl?: typeof fetch;
+  /** Legacy injection seam, no longer consulted: exact payment signing is offline. */
   readBalance?: typeof readUsdcBalance;
   provider?: WalletProvider;
   authorizer?: SpendAuthorizer;
@@ -536,7 +550,6 @@ async function executePay(
     // narrowed to the one selection everything above ran against, so a seller
     // advertising several chains cannot have one entry priced and another
     // signed. Without this the builder re-picked `accepts[0]`.
-    await assertBalanceCovers(signer.address, amountAtomic, settings.rpcUrl, ctx, deps);
     payment = await buildExactPayment(effectiveChallenge, signer, effectiveRequirement);
   } catch (err) {
     await authorizer.release(reservationId);
@@ -565,6 +578,25 @@ async function executePay(
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
   });
+  // A DIRECT PAY THAT MAY NOT HAVE SETTLED goes in the paid ledger as a
+  // `request` call does (a router leg is recorded by `request` itself), so the
+  // same reconcile pass gives its amount back to the daily budget once the
+  // chain is past its `validBefore` and shows the authorization unused.
+  const recordUnsettled = async (): Promise<void> => {
+    if (router) return;
+    await appendPaidRecord(ctx.dataDir, {
+      version: 1,
+      ts: new Date().toISOString(),
+      capabilityId: 'pay',
+      provider: host,
+      url,
+      sent: recordedSent(args.data ?? args.dataRaw ?? ''),
+      amountAtomic: payment.amountAtomic.toString(),
+      settlement: 'unknown',
+      savedFiles: [],
+      ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
+    });
+  };
   if (paid.ok || paid.header !== undefined) {
     args.onPaidLeg?.({
       ...(paid.status !== undefined ? { status: paid.status } : {}),
@@ -581,6 +613,7 @@ async function executePay(
     // working, so the agent is pointed there rather than told it failed.
     // Settlement is just as unknown as on any other timeout.
     const statusUrl = paid.kind === 'timeout' ? statusUrlOf(paid, url) : null;
+    await recordUnsettled();
     if (statusUrl !== null) {
       throw new CliError(
         'NETWORK_ERROR',
@@ -642,16 +675,22 @@ async function executePay(
   // from the payment-response header: its body can be an empty `{}`. The
   // authorization stays valid until it expires, so settlement is still unknown.
   const refusal = settlementRefusal(paid);
+  const lowFunds = paymentShortOfFunds(paid);
+  if (lowFunds) markShortOfFunds(slot);
+  await recordUnsettled();
   throw new CliError(
     'PAYMENT_FAILED',
-    refusal !== undefined
-      ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
-      : paid.status === 402
-        ? 'Payment was not accepted by the endpoint.'
-        : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
+    lowFunds
+      ? LOW_FUNDS_MESSAGE
+      : refusal !== undefined
+        ? `The endpoint did not settle the payment${refusal.reason !== undefined ? `: ${refusal.reason.replace(/\.+$/, '')}` : ''}.`
+        : paid.status === 402
+          ? 'Payment was not accepted by the endpoint.'
+          : `The endpoint answered ${paid.status} on the paid request; whether it settled is unknown.`,
     {
-      fix:
-        refusal !== undefined
+      fix: lowFunds
+        ? `Ask the person once to add funds; on yes, run \`tenjin fund\`. ${LOW_FUNDS_TAIL}`
+        : refusal !== undefined
           ? 'The seller reported that nothing settled, but the signed authorization stays valid until it expires, so it is recorded as transmitted exposure. Do not simply retry: each attempt signs a fresh authorization. Use a different service for this.'
           : 'The signed payment already left and is recorded as transmitted exposure; the endpoint may still settle it. Do not simply retry: each attempt signs a fresh authorization. Verify the endpoint (and this listing, if Bazaar) before paying again.',
       // The amount rides on the failure so a caller can report what is at risk
@@ -688,55 +727,6 @@ export function paidLegTimeoutMs(requirement: PaymentRequirements, cliTimeoutMs:
     return cliTimeoutMs;
   }
   return Math.max(cliTimeoutMs, Math.min(advertised * 1000, MAX_PAID_LEG_TIMEOUT_MS));
-}
-
-/**
- * THE WALLET HOLDS THE AMOUNT, read live, or a refusal before anything is
- * signed. Live, never the hooks' remembered balance: a minute-old read can
- * count funds the wallet has since spent. The default RPC's public fallbacks
- * are live reads too.
- */
-async function assertBalanceCovers(
-  address: string,
-  amountAtomic: bigint,
-  rpcUrl: string,
-  ctx: CommandContext,
-  deps: PayDeps,
-): Promise<void> {
-  if (amountAtomic <= 0n) return;
-  // One retry across a rate-limit interval, within the original read deadline.
-  const deadline = Date.now() + ctx.flags.timeout;
-  const readBalance = deps.readBalance ?? readUsdcBalanceWithFallback;
-  let balance = await readBalance(address, rpcUrl, {
-    timeoutMs: Math.max(1, Math.floor(ctx.flags.timeout / 2)),
-  });
-  if (balance === null && Date.now() < deadline) {
-    await delay(Math.min(1100, Math.floor((deadline - Date.now()) / 2)));
-    const remaining = deadline - Date.now();
-    if (remaining > 0) balance = await readBalance(address, rpcUrl, { timeoutMs: remaining });
-  }
-  if (balance === null) {
-    throw new CliError('REFUSED', 'The wallet balance could not be read; no payment was signed.', {
-      fix: 'Check the configured Base rpcUrl and retry when it is available.',
-      details: { reason: 'balance_unavailable', address },
-    });
-  }
-  if (balance < amountAtomic) {
-    const short = toMoney((amountAtomic - balance).toString()).usd;
-    throw new CliError(
-      'REFUSED',
-      `The wallet has insufficient USDC; no payment was signed. It holds ${toMoney(balance.toString()).usd} USD and this costs ${toMoney(amountAtomic.toString()).usd} USD: ${short} USD short.`,
-      {
-        fix: `Fund this wallet on Base with \`tenjin wallet fund\` (at least ${short} USD more) before paying.`,
-        details: {
-          reason: 'insufficient_funds',
-          address,
-          balanceAtomic: balance.toString(),
-          requiredAtomic: amountAtomic.toString(),
-        },
-      },
-    );
-  }
 }
 
 /**

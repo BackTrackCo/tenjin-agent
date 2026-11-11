@@ -5,15 +5,11 @@ import { CliError } from '../lib/errors';
 import { emitNotice } from '../lib/output';
 import { walletPath } from '../lib/paths';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
-import { loadRawConfig, resolveSettings } from '../lib/config';
-import { toMoney } from '../lib/money';
-import { getUsdcBalance } from '../lib/usdc';
-import { forgetRememberedBalance } from '../lib/usdc-balance';
 import { addressQrLines } from '../lib/qr';
 import { writePassphraseRecord } from '../lib/passphrase-record';
 import { NO_KEYRING_LINE, REPAIR_CLAUSE, REPAIR_IN_TERMINAL } from '../lib/wallet-unlock';
-import { channelCredit } from '../router/channel-credit';
-import { FUND_COMMAND_LINE, FUNDING_LINE, ROUTING_FEE_CEILING_ATOMIC } from '../router/fee';
+import { FUNDING_LINE } from '../router/fee';
+import { runBalance, type BalanceOptions } from './balance';
 import { markUnlockPending } from '../router/router-observation';
 import {
   commitLocalWallet,
@@ -620,49 +616,12 @@ export async function runWalletShow(
   };
 }
 
+/** `tenjin wallet balance`, the same command as `tenjin balance` (`./balance.ts`). */
 export async function runWalletBalance(
   ctx: CommandContext,
-  opts: ResolveWalletProviderOptions = {},
+  opts: BalanceOptions = {},
 ): Promise<CommandResult> {
-  const provider = resolveWalletProvider(ctx, opts);
-  const desc = await describeWallet(provider);
-
-  const config = await loadRawConfig(ctx.dataDir);
-  const rpcUrl = resolveSettings({
-    config,
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-  }).rpcUrl.value;
-
-  let atomic: bigint;
-  try {
-    atomic = await getUsdcBalance(desc.address, rpcUrl);
-  } catch (err) {
-    throw new CliError('RPC_ERROR', `Could not read the USDC balance from ${rpcUrl}.`, {
-      fix: 'Check your network, or set a working RPC with `tenjin config set rpcUrl <url>`.',
-      cause: err,
-    });
-  }
-
-  await forgetRememberedBalance(ctx.dataDir);
-
-  const balance = toMoney(atomic.toString());
-  // The routing balance is a local estimate, separate from on-chain funds.
-  const credit = toMoney(
-    (await channelCredit(ctx.dataDir, desc.address).catch(() => 0n)).toString(),
-  );
-  return {
-    data: { address: desc.address, balance, routingCredit: credit },
-    humanLines: [
-      `Balance: ${balance.usd} USDC on Base`,
-      ...(credit.atomic !== '0'
-        ? [`Set aside for routing: approximately $${credit.usd} (local estimate).`]
-        : []),
-      ...(atomic === 0n && BigInt(credit.atomic) < ROUTING_FEE_CEILING_ATOMIC
-        ? [FUND_COMMAND_LINE]
-        : []),
-    ],
-  };
+  return runBalance(ctx, opts);
 }
 
 function custodyWarnings(): string[] {

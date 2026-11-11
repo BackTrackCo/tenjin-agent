@@ -26,7 +26,8 @@ export type EnvProxyResult = 'none' | 'set' | 'unsupported' | 'invalid';
  * Node's `fetch` ignores HTTPS_PROXY, HTTP_PROXY and NO_PROXY unless
  * NODE_USE_ENV_PROXY=1, so on a network where the proxy is the only way out the
  * harness reaches the internet and Tenjin does not. Called once by the bin
- * entry, so the CLI, the hooks and `tenjin mcp` all get it. Never throws: a
+ * entry, so the CLI, the hooks and `tenjin mcp` all get it, and by the `alive`
+ * leg, which exits before that, for its balance read. Never throws: a
  * proxy URL Node cannot parse leaves the transport as it was.
  */
 export function useEnvProxy(
