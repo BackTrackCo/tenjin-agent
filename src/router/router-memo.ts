@@ -59,10 +59,18 @@ function memoPath(dataDir: string, kind: RouterMemoKind, baseUrl: string, scope?
   return join(dataDir, 'router-memo', `${kind}-${key}.json`);
 }
 
-/** The memo in the file, whatever its window, or null. Never throws. */
-async function readMemoFile(path: string): Promise<RouterMemo | null> {
+/** The memo in the file, whatever its window, or null. Never throws, not
+ *  even on a base URL that does not parse. */
+async function readMemoFile(
+  dataDir: string,
+  kind: RouterMemoKind,
+  baseUrl: string,
+  scope?: string,
+): Promise<RouterMemo | null> {
   try {
-    const raw = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    const raw = JSON.parse(
+      await readFile(memoPath(dataDir, kind, baseUrl, scope), 'utf8'),
+    ) as unknown;
     if (raw === null || typeof raw !== 'object') return null;
     const { at, until, detail } = raw as Record<string, unknown>;
     if (typeof at !== 'number' || typeof until !== 'number') return null;
@@ -80,7 +88,7 @@ export async function readRouterMemo(
   now: number,
   scope?: string,
 ): Promise<RouterMemo | null> {
-  const memo = await readMemoFile(memoPath(dataDir, kind, baseUrl, scope));
+  const memo = await readMemoFile(dataDir, kind, baseUrl, scope);
   return memo === null || memo.at > now || memo.until <= now ? null : memo;
 }
 
@@ -144,7 +152,7 @@ export async function claimRouterMemo(
     } catch (err) {
       if (!hasCode(err, 'EEXIST')) return token;
     }
-    const held = await readMemoFile(path);
+    const held = await readMemoFile(dataDir, kind, baseUrl, memo.scope);
     if (held !== null && held.until > memo.now && held.at <= memo.now + memo.ttlMs) return null;
     await rm(path, { force: true }).catch(() => undefined);
   }
