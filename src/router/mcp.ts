@@ -14,7 +14,7 @@ import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { resolveSpendAuthorizer, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import type { CommandContext, GlobalFlags } from '../context';
-import { ROUTING_FEE_CEILING_ATOMIC, usd, type RouteFor } from './fee';
+import { type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitCodexHookEvent, admitHookEvent } from './hook-session';
@@ -95,7 +95,7 @@ const INSTRUCTIONS =
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
   'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
   `${SCOPE_RULE} Call it alone and wait for its result. Paid routing costs a fee the router ` +
-  `quotes for each answer, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}; offers show no ` +
+  `quotes for each answer; offers show no ` +
   'fee. A wallet on THIS machine pays it and the provider under the local spend ' +
   'policy, and a routing deposit counts against that policy once, when it is sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +

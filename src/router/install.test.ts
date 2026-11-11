@@ -42,7 +42,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs a fee the router quotes for each answer, never more than $0.25; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits once, when it is sent. Either choice approves this.';
+  'Routing costs a fee the router quotes for each answer; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits once, when it is sent. Either choice approves this.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `How much can your agent spend from its balance? ${FEE_TERMS}`;
 const ASK_LINES = [

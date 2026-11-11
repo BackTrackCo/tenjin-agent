@@ -1,7 +1,6 @@
 import { mkdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hasCode } from '../lib/errno';
-import { ROUTING_FEE_CEILING_ATOMIC, usd } from './fee';
 import { PRIVATE } from './store-files';
 
 /**
@@ -15,14 +14,14 @@ import { PRIVATE } from './store-files';
  * One file per terms id under `<dataDir>/router/terms`, made with an exclusive
  * create, so two legs at once tell it once between them.
  *
- * Hook-safe: node, `lib/errno`, `./store-files` and `./fee`.
+ * Hook-safe: node, `lib/errno` and `./store-files`.
  */
 
 /** The terms this build states; new terms get a new id. */
 const TERMS_ID = 'per-answer-quote';
 
 /** What the person is told once. It names no rate and no command. */
-export const TERMS_CHANGED_SENTENCE = `Tenjin's routing fee is now quoted for each answer, never more than $${usd(ROUTING_FEE_CEILING_ATOMIC)}, and offers show no fee. Your spend limits have not changed.`;
+export const TERMS_CHANGED_SENTENCE = `Tenjin's routing fee is now quoted for each answer, and offers show no fee. Your spend limits have not changed.`;
 
 function marker(dataDir: string): string {
   return join(dataDir, 'router', 'terms', TERMS_ID);
