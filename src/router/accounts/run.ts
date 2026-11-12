@@ -521,12 +521,16 @@ export async function runAccountSpec(
     return refusal(at, boundary.reason, false);
   }
   await footer.calling(shownOf(at));
-  const run = await runAccountCall(
-    { id: account.id, label: account.label },
-    spec.mcp,
-    merged,
-    runDeps(deps),
-  );
+  const run = await runAccountCall({ id: account.id, label: account.label }, spec.mcp, merged, {
+    ...runDeps(deps),
+    // THE JOB IS KEPT AS SOON AS IT STARTED, with its ledger row: a process
+    // that exits mid-poll leaves a job `request({job})` picks up, never a
+    // paid result nobody can reach.
+    onStarted: async (started) => {
+      await keepJob(at, started);
+      await keepAccountRow(at);
+    },
+  });
   // THE CLAIM STAYS for anything the account may have run, its own error
   // answer included; arguments it would not take free the id for a retry
   // after the fix. A refusal of a call that never ran is settled by
@@ -565,15 +569,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       );
     }
     case 'running': {
-      const kept = await keepAccountJob(dataDir, {
-        version: 1,
-        offerId: id,
-        spec: stripKept(spec),
-        input: at.merged,
-        first: run.first,
-        firstAt: run.firstAt,
-        ...(at.fallbackId !== undefined ? { fallbackId: at.fallbackId } : {}),
-      });
+      const kept = await keepJob(at, run);
       await keepAccountRow(at);
       report(at, { status: 'running' });
       await footer.done('running', { ...shownOf(at), price: 'your account' });
@@ -614,6 +610,19 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
     case 'done':
       return delivered(run, at);
   }
+}
+
+/** Keep the run's job for `request({job})`, from its billing call's result. */
+function keepJob(at: Run, started: Resume): Promise<boolean> {
+  return keepAccountJob(at.deps.ctx.dataDir, {
+    version: 1,
+    offerId: at.id,
+    spec: stripKept(at.spec),
+    input: at.merged,
+    first: started.first,
+    firstAt: started.firstAt,
+    ...(at.fallbackId !== undefined ? { fallbackId: at.fallbackId } : {}),
+  });
 }
 
 /** A kept job's spec carries no offer id or hash of its own: the job's are. */

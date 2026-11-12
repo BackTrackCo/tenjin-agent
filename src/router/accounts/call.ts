@@ -244,6 +244,10 @@ export interface AccountRunDeps extends CredentialDeps {
   onPoll?: () => void | Promise<void>;
   /** When this tool call stops waiting on the account's job. */
   deadline: number;
+  /** Told once the billing call answered with a job its follow-up must
+   *  finish, before any status call: the caller keeps the job and its ledger
+   *  row then, so a process that exits mid-poll loses neither. */
+  onStarted?: (resume: Resume) => void | Promise<void>;
   /** Each request's own deadline. */
   callTimeoutMs?: number;
 }
@@ -461,6 +465,7 @@ export async function runAccountCall(
       if (next === undefined || (next.when !== undefined && !inState(read.value, next.when)))
         return { kind: 'done', ...read };
       first = read.value;
+      await deps.onStarted?.({ first, firstAt });
     }
     return await followUp(connection, call, input, first, firstAt, deps);
   } finally {
@@ -500,9 +505,9 @@ async function followUp(
     for (let n = 0; ; n += 1) {
       if (n > 0) {
         const at = now() + poll.everyS * 1_000;
-        if (at > end)
-          return { kind: 'failed', why: `its job didn't finish within ${poll.maxWaitS} seconds` };
-        if (at > deps.deadline) return running();
+        // PAST THE MAP'S OWN BOUND the job may still finish, and it is paid
+        // for: it is handed back running, for `request({job})`, never failed.
+        if (at > end || at > deps.deadline) return running();
         await sleep(poll.everyS * 1_000);
       }
       await deps.onPoll?.();

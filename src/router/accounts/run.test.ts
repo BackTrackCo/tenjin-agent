@@ -461,6 +461,73 @@ describe('a mapped job on the user’s own account', () => {
   });
 });
 
+describe('a long job on the account', () => {
+  const falJob = (polls: AccountCallResult[]) =>
+    account({
+      run_model: [text({ status: 'processing', request_id: 'req-1' })],
+      check_job: polls,
+      get_job_result: [text({ images: [] })],
+    });
+
+  async function falOffered(): Promise<void> {
+    await settings([FAL_ACCOUNT]);
+    await signedIn(FAL_ACCOUNT);
+    await offered(FAL_LEAD, undefined, { named: true });
+  }
+
+  it('keeps the job and its ledger row once the billing call answers, so a process that exits mid-poll loses nothing', async () => {
+    // A1igator review: the job was kept only after polling ended, so a
+    // process that exited mid-poll left a paid result nobody could reach.
+    await falOffered();
+    const session = falJob([text({ status: 'COMPLETED' })]);
+    const { fetchImpl } = network();
+    const exits = runRequestTool(
+      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl, session, {
+        onPoll: () => {
+          throw new Error('the process exited');
+        },
+      }),
+    );
+    await expect(exits).rejects.toThrow('the process exited');
+    expect(session.tools()).toEqual(['run_model']);
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { source: 'fal', settlement: 'account', charge: 'unknown' },
+    ]);
+    // A later process picks it up: only the follow-up runs.
+    const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
+    expect(done.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(session.tools()).toEqual(['run_model', 'check_job', 'get_job_result']);
+    expect(await readPaidRecords(dir)).toHaveLength(1);
+  });
+
+  it("hands back a job past its map's own bound as running, never failed", async () => {
+    // A1igator review: past maxWaitS the follow-up returned failed and the
+    // job was deleted, though it may still finish and is paid for.
+    await falOffered();
+    const session = falJob([text({ status: 'IN_QUEUE' })]);
+    const { fetchImpl } = network();
+    let clock = NOW;
+    const result = await runRequestTool(
+      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl, session, {
+        waitsForJobs: true,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+      }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    expect(String(result.envelope.nextStep)).toContain(`request({job: "${FAL_LEAD.id}"})`);
+    expect(session.tools().filter((tool) => tool === 'run_model')).toHaveLength(1);
+    const later = falJob([text({ status: 'COMPLETED' })]);
+    const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, later));
+    expect(done.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(later.tools()).toEqual(['check_job', 'get_job_result']);
+  });
+});
+
 describe('when the job fails after it started', () => {
   it('says the plan may have charged for it, keeps its row, and never reads as billed', async () => {
     // Review: a job that ended as FAILED read "billed to your Apify account",
