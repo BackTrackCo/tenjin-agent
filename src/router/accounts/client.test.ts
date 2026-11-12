@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { AccountBadInput, AccountLimited, AccountRefused, openAccountSession } from './client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  AccountBadInput,
+  AccountLimited,
+  AccountRefused,
+  CLOSE_TIMEOUT_MS,
+  openAccountSession,
+} from './client';
 
 /**
  * A SESSION WITH AN ACCOUNT'S MCP SERVER through the SDK's own client, against
@@ -10,8 +16,11 @@ import { AccountBadInput, AccountLimited, AccountRefused, openAccountSession } f
 
 const MCP = 'https://mcp.example.test/mcp';
 
-function scriptedServer(opts: { refuse?: boolean; status?: number; badArgs?: boolean } = {}) {
+function scriptedServer(
+  opts: { refuse?: boolean; status?: number; badArgs?: boolean; stallDelete?: boolean } = {},
+) {
   const seen: { method: string; rpc?: string; authorization?: string }[] = [];
+  const aborted: string[] = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const headers = new Headers(init?.headers);
@@ -27,6 +36,15 @@ function scriptedServer(opts: { refuse?: boolean; status?: number; badArgs?: boo
     });
     if (url !== MCP) return new Response(null, { status: 404 });
     if (opts.refuse === true) return new Response('{}', { status: 401 });
+    // A server that never answers the session's end: only an abort settles it.
+    if (method === 'DELETE' && opts.stallDelete === true) {
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          aborted.push(method);
+          reject(new Error('aborted'));
+        });
+      });
+    }
     if (method !== 'POST') return new Response(null, { status: 405 });
     const reply = (result: unknown) =>
       new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), {
@@ -73,8 +91,12 @@ function scriptedServer(opts: { refuse?: boolean; status?: number; badArgs?: boo
         return reply({});
     }
   }) as typeof fetch;
-  return { fetchImpl, seen };
+  return { fetchImpl, seen, aborted };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('a session with an account', () => {
   it('lists every page of tools and calls one, with the credential on each request', async () => {
@@ -133,5 +155,25 @@ describe('a session with an account', () => {
     const error = await session.callTool('call-actor', {}).catch((err: unknown) => err);
     expect(error).toBeInstanceOf(AccountBadInput);
     await session.close();
+  });
+
+  it('closes within its bound when the server never answers the end of the session', async () => {
+    // A1igator review: close() awaited the SDK's DELETE, which has no
+    // timeout, so a stalled server held a finished result past every deadline.
+    const server = scriptedServer({ stallDelete: true });
+    const session = await openAccountSession(MCP, {}, { fetchImpl: server.fetchImpl });
+    await session.listTools();
+    vi.useFakeTimers();
+    let closed = false;
+    const closing = session.close().then(() => {
+      closed = true;
+    });
+    await vi.advanceTimersByTimeAsync(CLOSE_TIMEOUT_MS - 1);
+    expect(closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
+    expect(closed).toBe(true);
+    // The stalled request is aborted, not left running.
+    expect(server.aborted).toEqual(['DELETE']);
   });
 });

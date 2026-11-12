@@ -84,6 +84,9 @@ export type OpenAccountSession = (
  *  read no further. */
 const MAX_TOOL_PAGES = 10;
 const DEFAULT_TIMEOUT_MS = 30_000;
+/** How long closing waits for the server to end the session: its DELETE has
+ *  no deadline of its own. */
+export const CLOSE_TIMEOUT_MS = 2_000;
 
 /** JSON-RPC's invalid params. */
 const INVALID_PARAMS = -32602;
@@ -161,7 +164,16 @@ export const openAccountSession: OpenAccountSession = async (mcpUrl, headers, de
       return result as AccountCallResult;
     },
     async close() {
-      await transport.terminateSession().catch(() => undefined);
+      // ENDING THE SESSION IS A COURTESY TO THE SERVER, bounded: the SDK's
+      // DELETE has no timeout, so a stalled server would hold a finished
+      // result past every deadline. Closing the client aborts it.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      await Promise.race([transport.terminateSession().catch(() => undefined), bound]);
+      clearTimeout(timer);
       await client.close().catch(() => undefined);
     },
   };
