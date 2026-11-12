@@ -18,6 +18,7 @@ import {
   type Identities,
 } from '../router/identities';
 import type { ReplacementSetting, RouterSettings } from '../router/settings';
+import type { SavedAccount } from '../router/accounts/saved';
 import { pidAlive, readObservations, type RouterObservation } from '../router/router-observation';
 
 /**
@@ -169,7 +170,15 @@ function coversLine(services: readonly { label: string }[]): string {
 export const TENJIN_TOOLS_OFF =
   "Tenjin's own tools are off, including free ones like the docs lookup, and saved or direct calls to them. Tenjin still picks among your connected accounts, and anything they can't do goes back to your agent's own tools.";
 
-export function describeBlock(target: Target, identities: Identities | undefined): RuleReadback {
+/**
+ * A BLOCK IN THE USER'S WORDS. `accounts` names the accounts connected here,
+ * which turning off Tenjin's own tools leaves to pick among.
+ */
+export function describeBlock(
+  target: Target,
+  identities: Identities | undefined,
+  accounts: readonly string[] = [],
+): RuleReadback {
   const label = labelOf(target, identities);
   const services = servicesNaming(target, identities);
   let text: string;
@@ -194,7 +203,9 @@ export function describeBlock(target: Target, identities: Identities | undefined
     case 'source':
       text =
         target.id === BUILT_IN_SOURCE
-          ? `${TENJIN_TOOLS_OFF} You have no connected accounts yet, so for now every job goes back to your agent's own tools.`
+          ? accounts.length > 0
+            ? `${TENJIN_TOOLS_OFF} Your connected ${accounts.length === 1 ? 'account is' : 'accounts are'} ${list.format(accounts)}.`
+            : `${TENJIN_TOOLS_OFF} You have no connected accounts yet, so for now every job goes back to your agent's own tools.`
           : `Your ${label} account is blocked: Tenjin won't use it.`;
       break;
   }
@@ -337,9 +348,10 @@ export function describeSpeed(identities: Identities | undefined): RuleReadback 
 export function describeRules(
   policy: SavedPolicy,
   identities: Identities | undefined,
+  accounts: readonly string[] = [],
 ): RuleReadback[] {
   return [
-    ...(policy.block ?? []).map((target) => describeBlock(target, identities)),
+    ...(policy.block ?? []).map((target) => describeBlock(target, identities, accounts)),
     ...(policy.only ?? []).map((rule) => describeOnly(rule, policy, identities)),
     ...(policy.prefer ?? []).map((rule) => describePrefer(rule, policy, identities)),
     ...(policy.preferSpeed === true ? [describeSpeed(identities)] : []),
@@ -477,6 +489,74 @@ export interface SettingsReadback {
   limits: LimitsReadback;
   /** Removes every saved routing rule, readable or not. */
   reset: string;
+  /** The saved accounts (plan 37), when there are any: their names, whether
+   *  this machine holds their sign-in, and what happens when one refuses. */
+  accounts?: AccountReadback[];
+}
+
+export interface AccountReadback {
+  id: string;
+  label: string;
+  connected: boolean;
+  /** In the account-wide preference: used first for the jobs it can do. */
+  preferred: boolean;
+  /** `tenjin`: Tenjin's own tool runs in its place; `ask`: the call stops
+   *  and offers it. */
+  onRefusal: 'tenjin' | 'ask';
+  text: string;
+  /** Turns the fallback off again, when it is on. */
+  reset?: string;
+  /** Signs out and forgets the account here. */
+  disconnect: string;
+}
+
+/** A connected account in the user's words: whether it comes first, that
+ *  its own plan pays outside the limits, and what it does when it refuses. */
+export function describeAccount(
+  account: SavedAccount,
+  connected: boolean,
+  preferred = false,
+): AccountReadback {
+  const { label, id } = account;
+  const here = connected ? '' : ` It isn't signed in on this machine: \`tenjin connect ${id}\`.`;
+  const who = `Your ${label} account${preferred ? ', used first for the jobs it can do' : ''}: its own plan pays, outside your limits on the Tenjin balance.`;
+  const common = { id, label, connected, preferred, disconnect: `tenjin disconnect ${id}` };
+  return account.onRefusal === 'tenjin'
+    ? {
+        ...common,
+        onRefusal: 'tenjin',
+        text: `${who} When your ${label} account refuses a call, Tenjin's own tool for that job runs in its place, from your Tenjin balance within your limits.${here}`,
+        reset: `tenjin config fallback off --source ${id}`,
+      }
+    : {
+        ...common,
+        onRefusal: 'ask',
+        text: `${who} When your ${label} account refuses a call, Tenjin stops and offers its own tool.${here}`,
+      };
+}
+
+/** Every saved account as readback names it. */
+export function describeAccounts(
+  router: Pick<RouterSettings, 'policy' | 'accounts'>,
+): AccountReadback[] {
+  const { policy, accounts } = router;
+  const first = new Set(
+    policy.status === 'ok'
+      ? (policy.saved.prefer ?? [])
+          .filter(({ scope }) => scope.kind === 'global')
+          .flatMap(({ targets }) => targets.filter(({ kind }) => kind === 'source'))
+          .map(({ id }) => id)
+      : [],
+  );
+  return accounts.saved.map((account) =>
+    describeAccount(account, accounts.connected.includes(account.id), first.has(account.id)),
+  );
+}
+
+/** The names of the accounts connected here, for the readback that names them. */
+export function connectedLabels(router: Pick<RouterSettings, 'accounts'>): string[] {
+  const { saved, connected } = router.accounts;
+  return saved.filter(({ id }) => connected.includes(id)).map(({ label }) => label);
 }
 
 /** Said wherever rules this build cannot read show. */
@@ -484,13 +564,15 @@ export const POLICY_INVALID_TEXT =
   "Your Tenjin settings can't be read, so Tenjin won't route or run anything until they're fixed.";
 
 export function settingsReadback(
-  router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement' | 'wire'>,
+  router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement' | 'wire' | 'accounts'>,
   identities: Identities | undefined,
   limits: LimitsReadback,
   support: ReplacementSupport,
 ): { data: SettingsReadback; lines: string[] } {
   const { policy, enabled } = router;
-  const rules = policy.status === 'ok' ? describeRules(policy.saved, identities) : [];
+  const rules =
+    policy.status === 'ok' ? describeRules(policy.saved, identities, connectedLabels(router)) : [];
+  const accounts = describeAccounts(router);
   const replacement = describeReplacement(router.nativeReplacement, identities, support);
   const data: SettingsReadback = {
     saved: SAVED_HERE,
@@ -505,6 +587,7 @@ export function settingsReadback(
     replacement,
     limits,
     reset: 'tenjin config reset --all',
+    ...(accounts.length > 0 ? { accounts } : {}),
   };
   const lines = ['Your settings (saved on this machine, not synced):'];
   if (!enabled.value) {
@@ -527,6 +610,12 @@ export function settingsReadback(
     const inactive = rule.inactive !== undefined ? ` (${rule.inactive})` : '';
     lines.push(`  - ${rule.text}${inactive} Undo: \`${rule.reset}\``);
   }
+  // EVERY CONNECTED ACCOUNT, with who pays and how to remove it: connecting
+  // is a setting like any other, and "What have I changed?" names it.
+  for (const account of accounts)
+    lines.push(
+      `  - ${account.text}${account.reset !== undefined ? ` Undo: \`${account.reset}\`;` : ''} Disconnect: \`${account.disconnect}\``,
+    );
   lines.push(`  ${replacement.text}`, `  ${limits.text}`);
   lines.push('  Change them with `tenjin config --help`.');
   return { data, lines };

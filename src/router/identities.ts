@@ -206,3 +206,14 @@ export function isListed(target: Target, identities: Identities | undefined): bo
   if (identities === undefined) return undefined;
   return entriesOf(identities, target.kind).some(({ id }) => id === target.id);
 }
+
+/** The jobs Tenjin maps on a connected account, by their task's label: its
+ *  services in the identities read, `<account>.<key>` sold by the account.
+ *  Display only: the server decides what runs where. */
+export function accountJobs(id: string, identities: Identities | undefined): string[] {
+  const tasks = new Map((identities?.tasks ?? []).map((task) => [task.id, task.label]));
+  const jobs = (identities?.services ?? [])
+    .filter((service) => service.seller === id && service.id.startsWith(`${id}.`))
+    .flatMap(({ task }) => (task !== undefined ? [tasks.get(task) ?? task] : []));
+  return [...new Set(jobs)].map((job) => job.charAt(0).toLowerCase() + job.slice(1));
+}

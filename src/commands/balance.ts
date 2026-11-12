@@ -43,15 +43,19 @@ export interface BalanceOptions extends ResolveWalletProviderOptions {
   live?: LiveLine;
 }
 
-export async function runBalance(
+/**
+ * THE BALANCE, READ THE ONE WAY: this wallet's address and the USDC it holds
+ * on Base, through the configured RPC. `tenjin balance` and `tenjin status`
+ * both read it here, so the two never disagree. Throws `RPC_ERROR` on a read
+ * that did not answer.
+ */
+export async function balanceReader(
   ctx: CommandContext,
-  opts: BalanceOptions = {},
-): Promise<CommandResult> {
+  opts: ResolveWalletProviderOptions = {},
+): Promise<{ address: `0x${string}`; read: () => Promise<bigint> }> {
   const provider = resolveWalletProvider(ctx, opts);
   const desc = await describeWallet(provider);
-  const settings = await resolveContextSettings(ctx);
-  const rpcUrl = settings.rpcUrl;
-
+  const { rpcUrl } = await resolveContextSettings(ctx);
   const read = async (): Promise<bigint> => {
     try {
       return await getUsdcBalance(desc.address, rpcUrl);
@@ -62,6 +66,16 @@ export async function runBalance(
       });
     }
   };
+  return { address: desc.address, read };
+}
+
+export async function runBalance(
+  ctx: CommandContext,
+  opts: BalanceOptions = {},
+): Promise<CommandResult> {
+  const { address, read } = await balanceReader(ctx, opts);
+  const desc = { address };
+  const settings = await resolveContextSettings(ctx);
 
   if (opts.wait === true) return waitForFunds(ctx, desc.address, read, opts);
 

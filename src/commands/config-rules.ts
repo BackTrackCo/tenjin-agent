@@ -31,6 +31,7 @@ import {
   type Named,
 } from '../router/identities';
 import { routerSettings, type RouterSettings } from '../router/settings';
+import { savedAccountsIn } from '../router/accounts/saved';
 import { persist } from './config';
 import {
   POLICY_INVALID_TEXT,
@@ -38,6 +39,7 @@ import {
   SAVED_HERE,
   SAVED_PREFIX,
   blockedBy,
+  connectedLabels,
   describeBlock,
   describeLimits,
   describeOnly,
@@ -287,9 +289,19 @@ async function replacementNote(router: RouterSettings, ctx: CommandContext): Pro
     : `${REPLACEMENT_NAME} is on. ${support.why}`;
 }
 
-type Operation = 'prefer' | 'only' | 'block' | 'unblock' | 'reset' | 'speed' | 'replacement';
+type Operation =
+  | 'prefer'
+  | 'only'
+  | 'block'
+  | 'unblock'
+  | 'reset'
+  | 'speed'
+  | 'replacement'
+  | 'fallback'
+  | 'connect'
+  | 'disconnect';
 
-interface Outcome {
+export interface Outcome {
   operation: Operation;
   changed: boolean;
   scope: SettingScope;
@@ -308,7 +320,7 @@ interface Outcome {
  * scope, what is in effect now, why, and how to undo it, from the file as it
  * reads back after the write rather than from what the operation meant.
  */
-async function answer(
+export async function answer(
   outcome: Outcome,
   ctx: CommandContext,
   deps: ConfigRulesDeps,
@@ -595,7 +607,10 @@ export async function runConfigBlock(
     checkSavable(after);
     return withPolicy(existing, after);
   });
-  const effective = targets.map((target) => describeBlock(target, identities));
+  const router = await readBack(ctx, deps);
+  const effective = targets.map((target) =>
+    describeBlock(target, identities, connectedLabels(router)),
+  );
   const wasActive = new Set(
     describeRules(before, identities)
       .filter(({ inactive }) => inactive === undefined)
@@ -1100,6 +1115,7 @@ export async function runConfigReplacement(
           `${SAVED_PREFIX} ${REPLACEMENT_NAME} is on${scope !== undefined ? `, only when Tenjin picks ${either.format(scope.map((target) => labelOf(target, identities)))}` : ' for any allowed provider'}.`,
           'When Tenjin picks a service for a web search or page fetch your agent is about to make, it runs that pick in place of the search or fetch instead of offering it first, so each one is a charge you are not asked about separately. Each one names the service, its price and the search or fetch it answered.',
           `Your limits still apply (${limits.perCall} a call, ${limits.daily === null ? 'no daily limit' : `${limits.daily} a day`}, Tenjin balance): a call over them is not run in place; it is offered as usual and asks first.`,
+          accountsNote(router, scope !== undefined),
           'This picks no provider ahead of another and changes nothing about what is allowed: add a preference or a rule for that.',
           support.why,
         ];
@@ -1126,5 +1142,98 @@ export async function runConfigReplacement(
     ctx,
     deps,
     identities,
+  );
+}
+
+/**
+ * WHAT AUTOMATIC USE DOES WITH THE USER'S CONNECTED ACCOUNTS (vraspar,
+ * 2026-10-23): it runs them too, for the jobs Tenjin has checked, and their
+ * own plans pay, outside the limits above. Named when some are connected; a
+ * provider choice applies to them as to any pick, which the router decides.
+ */
+function accountsNote(router: RouterSettings, narrowed: boolean): string {
+  const names = router.accounts.saved
+    .filter((account) => account.mapped === true && router.accounts.connected.includes(account.id))
+    .map(({ label }) => label);
+  const within = narrowed ? ' within the same provider choice' : '';
+  if (names.length === 0)
+    return `An account you connect with \`tenjin connect\` runs this way too${within}, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.`;
+  const yours = `your ${new Intl.ListFormat('en', { type: 'conjunction' }).format(names)} ${names.length === 1 ? 'account' : 'accounts'}`;
+  return `It also runs ${yours} this way${within}, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.`;
+}
+
+/* ---------------------------------------------------------------- fallback */
+
+/**
+ * `tenjin config fallback on|off --source <account>`: what happens when one
+ * of the user's connected accounts refuses a call (its sign-in expired, or its
+ * plan or rate limit ran out). Off, the default: the call stops and offers
+ * Tenjin's own tool for the job with its price, which runs only when the user
+ * picks it. On: that tool runs in its place, from the Tenjin balance within
+ * its limits, and the receipt says so. Saved on the account's own entry, so it
+ * stays across a reconnect and goes with a disconnect. Works offline.
+ */
+export async function runConfigFallback(
+  args: { state: string; source?: string[] },
+  ctx: CommandContext,
+  deps: ConfigRulesDeps = {},
+): Promise<CommandResult> {
+  if (args.state !== 'on' && args.state !== 'off')
+    usage(
+      `fallback takes on or off; got "${args.state}".`,
+      'tenjin config fallback on --source apify',
+    );
+  const names = (args.source ?? []).map((name) => name.trim()).filter((name) => name.length > 0);
+  if (names.length !== 1)
+    usage('Name one connected account with --source.', 'tenjin config fallback on --source apify');
+  const wanted = names[0]!.toLowerCase();
+  const find = (router: unknown) =>
+    savedAccountsIn(router).find(
+      (account) => account.id === wanted || account.label.toLowerCase() === wanted,
+    );
+  const before = find((await loadRawConfig(ctx.dataDir)).router);
+  if (before === undefined) {
+    usage(
+      `"${names[0]}" isn't one of your connected accounts, so nothing was saved.`,
+      'Connect it first with `tenjin connect <name>`.',
+    );
+  }
+  const on = args.state === 'on';
+  await persist(ctx.dataDir, (existing) => {
+    const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
+    const saved = Array.isArray(router.sources)
+      ? (router.sources as Record<string, unknown>[])
+      : [];
+    router.sources = saved.map((entry) => {
+      if (entry.id !== before.id) return entry;
+      const next = { ...entry };
+      if (on) next.onRefusal = 'tenjin';
+      else delete next.onRefusal;
+      return next;
+    });
+    return { ...existing, router };
+  });
+  const after = find((await loadRawConfig(ctx.dataDir)).router) ?? before;
+  const { label, id } = after;
+  const explanation = on
+    ? [
+        `${SAVED_PREFIX} when your ${label} account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin runs its own tool for the same job instead. It is paid from your Tenjin balance within your limits, and the receipt says so.`,
+        `A call your ${label} account ran and then failed is never run again on Tenjin's tool: your ${label} plan may already have paid for it.`,
+      ]
+    : [
+        `${SAVED_PREFIX} when your ${label} account refuses a call, Tenjin stops and offers its own tool for the job with its price, and runs it only when you say so.`,
+      ];
+  return answer(
+    {
+      operation: 'fallback',
+      changed: (before.onRefusal === 'tenjin') !== on,
+      scope: 'user',
+      explanation,
+      ...(on ? { reset: `tenjin config fallback off --source ${id}` } : {}),
+      extra: { account: { id, label, onRefusal: on ? 'tenjin' : 'ask' } },
+    },
+    ctx,
+    deps,
+    await cachedIdentities(ctx.dataDir),
   );
 }

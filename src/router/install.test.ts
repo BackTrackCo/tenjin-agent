@@ -976,8 +976,15 @@ describe('daily limit readouts', () => {
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
-      expect(receipt(result).join('\n')).toContain('automatic router up to');
-      expect(receipt(result).join('\n')).not.toContain('per call at most');
+      const today = receipt(result).find((line) => line.trim().startsWith('Today'));
+      expect(today?.replace(/\s+/g, ' ').trim()).toBe(
+        sessionBudget === 'none'
+          ? 'Today $0.00 spent automatically (Tenjin balance); no daily limit'
+          : sessionBudget === '0'
+            ? 'Today automatic payments are off: your daily limit is $0.00 (Tenjin balance)'
+            : 'Today $0.00 of your $2.00 daily limit (Tenjin balance)',
+      );
+      expect(receipt(result).join('\n')).toContain('Per call');
     },
   );
 });
@@ -1012,12 +1019,9 @@ it('status separates routing deposits in the spend window from the remaining rou
     },
     routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
   });
-  expect(receipt(result).slice(0, 4)).toEqual([
-    'lookups 0.05 USD',
-    'deposited for routing in the rolling 24h window: 0.25 USD',
-    'set aside for routing: approximately 0.24 USD (at least 80 calls; local estimate)',
-    'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
-  ]);
+  const shown = receipt(result).map((line) => line.replace(/\s+/g, ' ').trim());
+  expect(shown).toContain('Today $0.30 of your $5.00 daily limit (Tenjin balance)');
+  expect(shown).toContain('Set aside about $0.24 for routing');
 });
 
 it('status shows no funds set aside before any deposit', async () => {
@@ -1026,7 +1030,7 @@ it('status shows no funds set aside before any deposit', async () => {
     wallet: async () => null,
     routingCredit: async () => 0n,
   });
-  expect(receipt(result)[0]).toBe('lookups 0 USD');
+  expect(receipt(result).join('\n')).not.toContain('Set aside');
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {
