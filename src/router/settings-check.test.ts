@@ -317,7 +317,7 @@ describe('the check before every call', () => {
             reason: 'blocked by your settings',
             diagnostics: {
               reasonCode: 'settings_blocked',
-              stage: 'selection',
+              stage: 'capability',
               missing: [],
               nextAction,
             },

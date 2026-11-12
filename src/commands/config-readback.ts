@@ -9,7 +9,14 @@ import {
   type Target,
   type TargetKind,
 } from '../router/settings-wire';
-import { isListed, labelOf, servicesNaming, tasksOf, type Identities } from '../router/identities';
+import {
+  isListed,
+  labelOf,
+  servicesNaming,
+  speedTasks,
+  tasksOf,
+  type Identities,
+} from '../router/identities';
 import type { ReplacementSetting, RouterSettings } from '../router/settings';
 import { pidAlive, readObservations, type RouterObservation } from '../router/router-observation';
 
@@ -294,15 +301,34 @@ export function describePrefer(
   };
 }
 
-/** What `speed on` says, and readback repeats while it is on. */
-export const SPEED_ON_TEXT =
-  "Tenjin will also offer paid tools for jobs where a measured paid tool is as accurate as your agent's own tools and clearly faster. They cost more, and your limits still apply. This changes when Tenjin offers, never which service it picks, and it turns nothing on by itself.";
+/** What the speed preference costs and what it never does, said with every readback of it. */
+const SPEED_TERMS =
+  'They cost more, and your limits still apply. This changes when Tenjin offers, never which service it picks, and it turns nothing on by itself.';
 
-export function describeSpeed(): RuleReadback {
+/**
+ * WHAT `speed on` SAYS, and readback repeats while it is on: the kinds of job
+ * it changes, by the labels of the tasks the identities read marks `speed`
+ * (an own-tools eval found the paid route as accurate and clearly faster).
+ * None marked is said plainly: the setting changes nothing until one is. With
+ * no identities at hand, it says it could not tell which.
+ */
+export function describeSpeed(identities: Identities | undefined): RuleReadback {
+  const marked = speedTasks(identities);
+  const text =
+    marked === undefined
+      ? `Tenjin will also offer paid tools for the kinds of job marked as just as accurate as your agent's own tools and clearly faster; it couldn't look up which those are right now, and \`tenjin config\` names them once it can. ${SPEED_TERMS}`
+      : marked.length === 0
+        ? `No kinds of job are marked faster yet, so this changes nothing until one is. Then Tenjin will also offer paid tools for them, where a measured paid tool is as accurate as your agent's own tools and clearly faster. ${SPEED_TERMS}`
+        : `Tenjin will also offer paid tools for ${named(marked)}, where a measured paid tool is as accurate as your agent's own tools and clearly faster. ${SPEED_TERMS}`;
   return {
     kind: 'speed',
     rule: { preferSpeed: true },
-    text: SPEED_ON_TEXT,
+    text,
+    ...(identities !== undefined
+      ? {
+          covers: identities.tasks.filter(({ speed }) => speed === true).map(({ id }) => id),
+        }
+      : {}),
     reset: 'tenjin config speed off',
   };
 }
@@ -316,7 +342,7 @@ export function describeRules(
     ...(policy.block ?? []).map((target) => describeBlock(target, identities)),
     ...(policy.only ?? []).map((rule) => describeOnly(rule, policy, identities)),
     ...(policy.prefer ?? []).map((rule) => describePrefer(rule, policy, identities)),
-    ...(policy.preferSpeed === true ? [describeSpeed()] : []),
+    ...(policy.preferSpeed === true ? [describeSpeed(identities)] : []),
   ];
 }
 

@@ -215,7 +215,8 @@ client's swap runs it unchanged through the ordinary executor and its check.
 
 The free identities read is `{schemaVersion: 1, identities: true, accepts}`
 on `POST /api/x402-router`, answered with every id a setting can name and its
-label: `categories` (with their `tasks`), `tasks` (with their `category`),
+label: `categories` (with their `tasks`), `tasks` (with their `category`, and
+`speed: true` on a task the speed preference changes),
 `providers`, `sellers`, `services` (with `task`, `providers` and `seller`) and
 `sources`. No gate, no model and no payment. `tenjin config` resolves typed
 names against it and names saved rules by it.

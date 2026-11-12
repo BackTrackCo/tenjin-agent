@@ -12,6 +12,11 @@
       "id": "images",
       "label": "Images",
       "tasks": ["general image", "image edit"]
+    },
+    {
+      "id": "financial-data",
+      "label": "Financial data",
+      "tasks": ["sec filings"]
     }
   ],
   "tasks": [
@@ -39,6 +44,12 @@
       "id": "image edit",
       "label": "Image edit",
       "category": "images"
+    },
+    {
+      "id": "sec filings",
+      "label": "Sec filings",
+      "category": "financial-data",
+      "speed": true
     }
   ],
   "providers": [

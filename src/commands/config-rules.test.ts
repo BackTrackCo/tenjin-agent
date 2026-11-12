@@ -33,6 +33,7 @@ const IDENTITIES = JSON.parse(
 ) as Record<string, unknown> & {
   sources: { id: string; label: string }[];
   providers: { id: string; label: string }[];
+  tasks: { id: string; label: string; category: string; speed?: true }[];
 };
 /** The fixture, with an account the user connected and a look-alike provider. */
 const WITH_FAL = {
@@ -382,6 +383,26 @@ describe('tenjin config speed and replacement', () => {
     await runConfigSpeed({ state: 'off' }, ctx(), offline);
     expect((await saved()).policy).toBeUndefined();
     expect((await hash())?.hash).toBe(before?.hash);
+  });
+
+  it('names the kinds of job speed changes, and says plainly when none is marked yet', async () => {
+    const marked = await runConfigSpeed({ state: 'on' }, ctx(), online());
+    expect(data(marked).explanation).toContain(
+      'Tenjin will also offer paid tools for Sec filings, where a measured paid tool is as accurate',
+    );
+    expect(data(marked).effective).toMatchObject([{ kind: 'speed', covers: ['sec filings'] }]);
+    await runConfigSpeed({ state: 'off' }, ctx(), offline);
+    const unmarked = {
+      ...WITH_FAL,
+      tasks: WITH_FAL.tasks.map(({ id, label, category }) => ({ id, label, category })),
+    };
+    const none = await runConfigSpeed({ state: 'on' }, ctx(), online(unmarked));
+    expect(data(none).explanation).toContain(
+      'No kinds of job are marked faster yet, so this changes nothing until one is.',
+    );
+    // `tenjin config` repeats it from the copy last read, offline.
+    const shown = (await runConfigList(ctx())).humanLines ?? [];
+    expect(shown.join('\n')).toContain('No kinds of job are marked faster yet');
   });
 
   it('writes the mode and its provider scope in one write, and widens by removing the scope', async () => {

@@ -598,7 +598,16 @@ const IdentitiesResponseSchema = z.object({
   routerVersion: z.string().min(1).max(64),
   honored: HonoredSchema,
   categories: z.array(z.object({ ...Labelled, tasks: z.array(TargetIdSchema).max(256) })).max(256),
-  tasks: z.array(z.object({ ...Labelled, category: TargetIdSchema.optional() })).max(1_024),
+  /** `speed`: a task the speed preference changes (it has a speed criterion). */
+  tasks: z
+    .array(
+      z.object({
+        ...Labelled,
+        category: TargetIdSchema.optional(),
+        speed: z.literal(true).optional(),
+      }),
+    )
+    .max(1_024),
   providers: z.array(z.object(Labelled)).max(2_048),
   sellers: z.array(z.object(Labelled)).max(2_048),
   services: z

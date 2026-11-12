@@ -162,6 +162,12 @@ function matched(kind: TargetKind, entry: Named): Resolved {
   return { status: 'match', target: { kind, id: entry.id }, label: entry.label };
 }
 
+/** The tasks the speed preference changes, by label: those the identities
+ *  read marks `speed`. Undefined when no identities are known. */
+export function speedTasks(identities: Identities | undefined): string[] | undefined {
+  return identities?.tasks.filter(({ speed }) => speed === true).map(({ label }) => label);
+}
+
 /** The tasks a category holds, by label, from the identities read. */
 export function tasksOf(category: string, identities: Identities | undefined): string[] {
   const tasks = identities?.categories.find(({ id }) => id === category)?.tasks ?? [];

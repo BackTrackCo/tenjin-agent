@@ -37,7 +37,6 @@ import {
   REPLACEMENT_NAME,
   SAVED_HERE,
   SAVED_PREFIX,
-  SPEED_ON_TEXT,
   blockedBy,
   describeBlock,
   describeLimits,
@@ -160,6 +159,19 @@ async function liveIdentities(ctx: CommandContext, deps: ConfigRulesDeps): Promi
     );
   }
   return read.identities;
+}
+
+/** The router's identities now, or undefined when it does not answer: for a
+ *  readback only, so a write never waits on it. */
+async function freshIdentities(
+  ctx: CommandContext,
+  deps: ConfigRulesDeps,
+): Promise<Identities | undefined> {
+  try {
+    return await liveIdentities(ctx, deps);
+  } catch {
+    return undefined;
+  }
 }
 
 const shown = (entries: readonly Named[]) =>
@@ -967,8 +979,10 @@ function describeRemoved(
 /**
  * `tenjin config speed on|off`: whether Tenjin also offers paid tools for
  * jobs where a measured paid tool is as accurate as the agent's own and
- * clearly faster. One switch, offline; it changes when Tenjin offers, never
- * which service it picks, and raises no limit.
+ * clearly faster. One switch, written offline; it changes when Tenjin offers,
+ * never which service it picks, and raises no limit. `on` reads back the
+ * kinds of job it changes from a fresh identities read when the router
+ * answers, else from the copy last read.
  */
 export async function runConfigSpeed(
   args: { state: string },
@@ -988,9 +1002,12 @@ export async function runConfigSpeed(
     else delete next.preferSpeed;
     return withPolicy(existing, next);
   });
-  const identities = await cachedIdentities(ctx.dataDir);
+  const identities = on
+    ? ((await freshIdentities(ctx, deps)) ?? (await cachedIdentities(ctx.dataDir)))
+    : await cachedIdentities(ctx.dataDir);
+  const effective = describeSpeed(identities);
   const explanation = on
-    ? [`${SAVED_PREFIX} ${SPEED_ON_TEXT}`]
+    ? [`${SAVED_PREFIX} ${effective.text}`]
     : [
         `${SAVED_PREFIX} Tenjin offers a paid tool only when your agent's own tools can't do the job as well. Your other rules stay as they are.`,
       ];
@@ -1001,7 +1018,7 @@ export async function runConfigSpeed(
       scope: 'user',
       rule: { preferSpeed: on },
       explanation,
-      ...(on ? { effective: [describeSpeed()] } : {}),
+      ...(on ? { effective: [effective] } : {}),
       reset: on ? 'tenjin config speed off' : 'tenjin config speed on',
     },
     ctx,

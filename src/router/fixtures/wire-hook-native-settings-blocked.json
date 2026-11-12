@@ -8,7 +8,7 @@
     "reason": "Your Tenjin settings block crypto price quote, so no Tenjin tool may do this.",
     "diagnostics": {
       "reasonCode": "settings_blocked",
-      "stage": "selection",
+      "stage": "capability",
       "missing": [],
       "nextAction": "Your Tenjin settings block crypto price quote, so Tenjin did not offer a tool for this. The user can change that with `tenjin config`."
     }
