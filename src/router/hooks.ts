@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import { loadRawConfig, resolveExperimentalBazaar, resolveSettings } from '../lib/config';
-import type { PartialConfig } from '../lib/config';
+import type { PartialConfig, RouterSwitch } from '../lib/config';
 import { toMoney } from '../lib/money';
 import { evaluateSpendPolicy } from '../lib/policy';
 import { resolveContextSettings } from '../lib/settings';
@@ -43,6 +43,7 @@ import {
   type OfferedTerms,
   newCallId,
   claimNote,
+  markDelegated,
   markNoted,
   noteOf,
   noteSession,
@@ -65,7 +66,10 @@ import { ownHostsFor } from './own-urls';
  * A free offer on a search keeps its line on disk for after the search
  * (`markNoted`), and every shown offer is kept until it is taken, so one that
  * is ignored is reported once (`untaken.ts`); those are the only other things
- * they touch.
+ * they touch. A delegated task's offer line is kept for the mod to append
+ * (`markDelegated`), and with `router.subagents` or `router.effort` on the agent
+ * leg also keeps a local model and effort record for the mod
+ * (`agent-leg.ts`), which calls nothing.
  *
  * NOTHING ELSE IS IN REACH FROM HERE. No wallet module, no signer, no payment
  * SDK, no viem, no MCP server: a dist test asserts the chunk graph, because the
@@ -160,6 +164,11 @@ const DelegationEventSchema = z.object({
   /** `Task` is the tool's older name; the matcher `install` writes takes both. */
   tool_name: z.enum(['Agent', 'Task']),
   tool_input: z.record(z.string(), z.unknown()),
+  /** The Agent call's id, which the mod's `agent.spawn` carries too. */
+  tool_use_id: z.string().min(1).max(200).optional(),
+  /** Present when a subagent made the call. */
+  agent_id: z.string().min(1).max(200).optional(),
+  permission_mode: z.string().min(1).max(40).optional(),
   cwd: z.string().optional(),
 });
 
@@ -216,16 +225,19 @@ export type HookEvent =
       /** `tool_input.prompt`: the subagent's whole task. */
       task: string | null;
       subagentType: string;
-      /** The whole tool input, echoed back with the task changed. */
+      /** The whole tool input, read for the agent leg's record and decision. */
       toolInput: Record<string, unknown>;
       cwd?: string;
+      toolUseId?: string;
+      agentId?: string;
+      permissionMode?: string;
     };
 
 /**
  * THE ONLY READER OF A HARNESS FIELD. `session_id`, `transcript_path`,
  * `prompt`, `tool_name`, `tool_input` (its `query`, `url`, `prompt`,
  * `subagent_type` and `questions`), `tool_use_id`, `agent_id`, `agent_type`,
- * `cwd`, `tool_response` (and its `answers`) and `error` are Claude Code's names; everything past this
+ * `permission_mode`, `cwd`, `tool_response` (and its `answers`) and `error` are Claude Code's names; everything past this
  * function reads {@link HookEvent}, so a second harness is a second decoder
  * rather than a change to each arm. `null` is an event no arm handles.
  */
@@ -275,6 +287,9 @@ export function decodeEvent(raw: unknown): HookEvent | null {
         typeof input.subagent_type === 'string' ? input.subagent_type : 'general-purpose',
       toolInput: input,
       ...optional('cwd', delegation.data.cwd),
+      ...optional('toolUseId', delegation.data.tool_use_id),
+      ...optional('agentId', delegation.data.agent_id),
+      ...optional('permissionMode', delegation.data.permission_mode),
     };
   }
   const prompt = PromptEventSchema.safeParse(raw);
@@ -1442,18 +1457,29 @@ export interface DelegationHookOutcome {
   id?: string;
   withheld?: true;
   noRequestTool?: true;
+  /** The offer's line is kept for the mod to append to the task. */
+  delegated?: true;
 }
 
 /**
  * The agent leg (PreToolUse on `Agent|Task`), run by `tenjin mcp`'s `hook`
  * tool. The one moment a subagent's whole assignment is visible: its task
  * prompt IS the current message, and the parent's own turn is the history, so
- * the router decides on exactly what the subagent will do. On a clear offer, it
- * is appended to that task as one optional line, which reaches the subagent as
- * part of its instructions from its parent, before it starts. Anything else is
- * no output at all.
+ * the router decides on exactly what the subagent will do. On a clear offer,
+ * its one optional line is kept under the call's `tool_use_id`
+ * (`markDelegated`), and the plugin's mod appends it to that task in
+ * `agent.spawn`, so it reaches the subagent as part of its instructions from
+ * its parent, before it starts. The leg itself answers nothing: auto mode
+ * refuses a hook's `updatedInput` on the call.
  *
  * The subagent will be the payer, so the same auto-execute rule applies here.
+ *
+ * WITH `router.subagents` (the model) OR `router.effort` (the effort) ON, beside
+ * that and in parallel, the task's model and effort are decided locally and
+ * recorded for the mod (`agent-leg.ts`), each under its own switch: no call
+ * leaves the machine, and the paid decision, its fee and this answer are the
+ * same either way. The record is written before the leg answers, so it exists
+ * when `agent.spawn` fires.
  */
 export async function runDelegationHook(
   raw: unknown,
@@ -1465,6 +1491,50 @@ export async function runDelegationHook(
   if (task === null || task.trim().length === 0) return { response: null };
   const router = await routerFor(event.cwd, deps);
   if (router === null) return { response: null };
+  const switches = {
+    model: router.settings.subagents.value,
+    effort: router.settings.effort.value,
+    effortFloor: router.settings.effortFloor.value,
+  };
+  const decided =
+    (switches.model === 'off' && switches.effort === 'off') || event.toolUseId === undefined
+      ? undefined
+      : recordSpawn({ ...event, toolUseId: event.toolUseId }, switches, deps);
+  const outcome = await offerOnDelegation(event, task, router, deps);
+  await decided;
+  return outcome;
+}
+
+/** The agent leg's model and effort record, loaded only when `router.subagents`
+ *  or `router.effort` is on. */
+async function recordSpawn(
+  event: Extract<HookEvent, { kind: 'delegation' }> & { toolUseId: string },
+  switches: { model: RouterSwitch; effort: RouterSwitch; effortFloor: 'low' | 'medium' },
+  deps: HookDeps,
+): Promise<void> {
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  try {
+    const { recordAgentSpawn } = await import('./agent-leg');
+    await recordAgentSpawn(event, switches, {
+      dataDir: deps.dataDir,
+      homeDir: deps.homeDir ?? homedir(),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      warn,
+      ...(deps.env !== undefined ? { env: deps.env } : {}),
+    });
+  } catch (err) {
+    warn(
+      `tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the task runs as asked`,
+    );
+  }
+}
+
+async function offerOnDelegation(
+  event: Extract<HookEvent, { kind: 'delegation' }>,
+  task: string,
+  router: RouterHere,
+  deps: HookDeps,
+): Promise<DelegationHookOutcome> {
   await sweepUntaken(deps, router);
   // The subagent this task goes to is the one that would have to make the
   // call, so the same rule: only a type known to have the tool is offered. With
@@ -1509,19 +1579,22 @@ export async function runDelegationHook(
     return { response: null, action: outcome.action, withheld: true };
   }
   await footer.close(outcome);
+  // The line, for the mod to append in `agent.spawn`. A call with no id names
+  // no spawn to append it to, so it is not kept.
+  const kept =
+    event.toolUseId !== undefined &&
+    (await markDelegated(
+      deps.dataDir,
+      localSession(event.sessionId, deps),
+      event.toolUseId,
+      { offerId: outcome.id, line: delegationOffer(outcome.hint) },
+      deps.now?.() ?? Date.now(),
+    ));
   return {
-    response: {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        // The whole input, with one line appended: `updatedInput` replaces it.
-        updatedInput: {
-          ...event.toolInput,
-          prompt: `${task}\n\n${delegationOffer(outcome.hint)}`,
-        },
-      },
-    },
+    response: null,
     action: outcome.action,
     id: outcome.id,
+    ...(kept ? { delegated: true as const } : {}),
   };
 }
 

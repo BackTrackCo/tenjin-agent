@@ -29,6 +29,44 @@ export type TenjinHeld = {
   key: string;
 };
 
+/** A routed subagent's effort, by its agent id (`hooks/agent-effort.ts`). */
+export type TenjinAgentRun = { effort: string; toolUseId: string };
+
+/** One changed dimension of a delegated task: to what, from what, and whether it ran so. */
+export type TenjinAgentPart = {
+  to: string;
+  from?: string;
+  done: boolean;
+  /** The model the host resolved a changed tier to (`haiku` to its current Haiku). */
+  resolved?: string;
+};
+
+/** The facts of one Agent row's line, by the call's `tool_use_id` (`hooks/agents.tsx`). */
+export type TenjinAgentRow = {
+  holdout?: true;
+  /** Its Haiku run gave no usable answer, so it ran again as asked. */
+  respawned?: true;
+  /** A tier (`sonnet`), when the model changed or would. */
+  model?: TenjinAgentPart;
+  /** An effort level, when the effort changed or would. */
+  effort?: TenjinAgentPart;
+  reason?: string;
+  /** Estimated percent less usage. */
+  saving?: number;
+};
+
+/** This session's delegated tasks the agent leg recorded, for the status line. */
+export type TenjinAgentCounts = {
+  model: 'off' | 'shadow' | 'apply';
+  effort: 'off' | 'shadow' | 'apply';
+  spawns: number;
+  routed: number;
+  held: number;
+  would: number;
+  /** Haiku runs with no usable answer, run again as asked. */
+  respawned?: number;
+};
+
 declare module 'claude-code' {
   interface PluginState {
     tenjin: {
@@ -42,6 +80,9 @@ declare module 'claude-code' {
       prompts: StateFamily<string>;
       /** Start time of the latest root turn, used to reject an older offer. */
       lastTurnStart: number;
+      agentRuns: StateFamily<TenjinAgentRun>;
+      agentRows: StateFamily<TenjinAgentRow>;
+      agentCounts: TenjinAgentCounts;
     };
   }
 }

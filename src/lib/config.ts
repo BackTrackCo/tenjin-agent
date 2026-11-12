@@ -14,12 +14,42 @@ export const ROUTER_CONTEXTS = ['session', 'turn'] as const;
 export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
 
 /**
+ * A router switch, lowest first: `off`, `shadow` decides and records what it
+ * would do without doing it, `apply` does it. `router.subagents` and
+ * `router.effort` each take one, and neither turns the other on.
+ */
+export const ROUTER_SWITCHES = ['off', 'shadow', 'apply'] as const;
+export type RouterSwitch = (typeof ROUTER_SWITCHES)[number];
+/** The main-agent turn classes `router.effort` may change; `correction` is the one that raises. */
+export const EFFORT_CLASSES = ['notification', 'ack', 'correction'] as const;
+export type EffortClass = (typeof EFFORT_CLASSES)[number];
+/** The effort ladder, lowest first. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+/** The lowest level an effort lowering may reach: `medium` (the default) or
+ *  `low`, which an operator turns on (graded about 0.12 lower on reading). */
+export const EFFORT_FLOORS = ['low', 'medium'] as const;
+export type EffortFloor = (typeof EFFORT_FLOORS)[number];
+/** The main-agent classes that lower, each by its own number of steps. */
+export const LOWERING_CLASSES = ['notification', 'ack'] as const;
+export type LoweringClass = (typeof LOWERING_CLASSES)[number];
+/** How many steps one lowering class goes down: 1 (the default) to 4. */
+const EffortStepSchema = z.number().int().min(1).max(4);
+
+/**
  * The router's own block: `enabled` is the off switch every router hook and the
- * `request` tool honour, and `context` is how much conversation a hook packet
- * carries (`session`, up to six prior messages, or `turn`, none). THE ONE SCHEMA
- * for it: the global file validates it here, and a project's
- * `.tenjin/config.json` and `config.local.json` go through
- * {@link parseRouterLayer}. Both keys only ever tighten, which is why a
+ * `request` tool honour, `context` is how much conversation a hook packet
+ * carries (`session`, up to six prior messages, or `turn`, none), `subagents` is
+ * whether a delegated task's MODEL is decided, and `effort` whether EFFORT is:
+ * the main agent's turns (the Claude mod's `effort-rules.ts`, which
+ * `effortClasses` and `effortCap` shape) and a delegated task's effort at its
+ * spawn and on each of its steps; `effortSteps` and `effortFloor` say how far
+ * a lowering goes. THE ONE SCHEMA for it: the global
+ * file validates it here, and a project's `.tenjin/config.json` and
+ * `config.local.json` go through {@link parseRouterLayer}. Every key here is
+ * read from a project file only as a floor (`routerSettings`): a switch moves
+ * toward `off`, the cap toward `low`, the classes narrow, the steps shrink and
+ * the effort floor rises. That is why a
  * project file may carry them; a key that loosens (spend, allowlist, enabling,
  * base URL) must never join this object. `routerSettings` in
  * router/settings.ts is the one reader of the resolved values.
@@ -27,6 +57,14 @@ export type RouterContext = (typeof ROUTER_CONTEXTS)[number];
 export const RouterLayerSchema = z.object({
   enabled: z.boolean().optional(),
   context: z.enum(ROUTER_CONTEXTS).optional(),
+  subagents: z.enum(ROUTER_SWITCHES).optional(),
+  effort: z.enum(ROUTER_SWITCHES).optional(),
+  effortClasses: z.array(z.enum(EFFORT_CLASSES)).optional(),
+  effortCap: z.enum(EFFORT_LEVELS).optional(),
+  effortSteps: z
+    .strictObject({ notification: EffortStepSchema.optional(), ack: EffortStepSchema.optional() })
+    .optional(),
+  effortFloor: z.enum(EFFORT_FLOORS).optional(),
 });
 export type RouterLayer = z.infer<typeof RouterLayerSchema>;
 /**
@@ -56,10 +94,25 @@ export function parseRouterLayer(json: unknown, path: string): RouterLayer {
       details: parsed.error.issues,
     });
   }
-  const { enabled, context } = parsed.data;
+  const {
+    enabled,
+    context,
+    subagents,
+    effort,
+    effortClasses,
+    effortCap,
+    effortSteps,
+    effortFloor,
+  } = parsed.data;
   return {
     ...(enabled !== undefined ? { enabled } : {}),
     ...(context !== undefined ? { context } : {}),
+    ...(subagents !== undefined ? { subagents } : {}),
+    ...(effort !== undefined ? { effort } : {}),
+    ...(effortClasses !== undefined ? { effortClasses } : {}),
+    ...(effortCap !== undefined ? { effortCap } : {}),
+    ...(effortSteps !== undefined ? { effortSteps } : {}),
+    ...(effortFloor !== undefined ? { effortFloor } : {}),
   };
 }
 
@@ -237,7 +290,17 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   install: { routerProjects: [] },
   update: { mode: 'auto' },
-  router: { enabled: true, context: 'session', improve: false },
+  router: {
+    enabled: true,
+    context: 'session',
+    improve: false,
+    subagents: 'off',
+    effort: 'off',
+    effortClasses: ['notification', 'ack'],
+    effortCap: 'xhigh',
+    effortSteps: { notification: 1, ack: 1 },
+    effortFloor: 'medium',
+  },
   experimental: { bazaar: 'off' },
 };
 
@@ -270,7 +333,17 @@ export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
 export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the router block. */
-export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context', 'router.improve'] as const;
+export const ROUTER_CONFIG_KEYS = [
+  'router.enabled',
+  'router.context',
+  'router.improve',
+  'router.subagents',
+  'router.effort',
+  'router.effortClasses',
+  'router.effortCap',
+  'router.effortSteps',
+  'router.effortFloor',
+] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
 
 export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
@@ -336,6 +409,12 @@ export async function loadConfig(dir: string): Promise<Config> {
       enabled: raw.router?.enabled ?? CONFIG_DEFAULTS.router.enabled,
       context: raw.router?.context ?? CONFIG_DEFAULTS.router.context,
       improve: raw.router?.improve ?? CONFIG_DEFAULTS.router.improve,
+      subagents: raw.router?.subagents ?? CONFIG_DEFAULTS.router.subagents,
+      effort: raw.router?.effort ?? CONFIG_DEFAULTS.router.effort,
+      effortClasses: raw.router?.effortClasses ?? CONFIG_DEFAULTS.router.effortClasses,
+      effortCap: raw.router?.effortCap ?? CONFIG_DEFAULTS.router.effortCap,
+      effortSteps: { ...CONFIG_DEFAULTS.router.effortSteps, ...raw.router?.effortSteps },
+      effortFloor: raw.router?.effortFloor ?? CONFIG_DEFAULTS.router.effortFloor,
     },
     experimental: {
       bazaar: raw.experimental?.bazaar ?? CONFIG_DEFAULTS.experimental.bazaar,

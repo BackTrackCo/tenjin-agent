@@ -44,6 +44,12 @@ describe('routerSettings', () => {
       enabled: { value: true, source: 'default' },
       context: { value: 'session', source: 'default' },
       improve: { value: false, source: 'default' },
+      subagents: { value: 'off', source: 'default' },
+      effort: { value: 'off', source: 'default' },
+      effortClasses: { value: ['notification', 'ack'], source: 'default' },
+      effortCap: { value: 'xhigh', source: 'default' },
+      effortSteps: { value: { notification: 1, ack: 1 }, source: 'default' },
+      effortFloor: { value: 'medium', source: 'default' },
     });
   });
 
@@ -273,8 +279,20 @@ describe('routerSettings in a git worktree', () => {
 });
 
 describe('the project layer parser', () => {
-  it('accepts exactly router.enabled and router.context, and reads nothing else', () => {
-    expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual(['context', 'enabled']);
+  // `subagents` and the `effort*` keys are read from a project file only to
+  // make them more careful (`agent-leg.test.ts` and
+  // `effort-settings.test.ts` pin that), so a project may carry them.
+  it('accepts exactly the keys that only tighten, and reads nothing else', () => {
+    expect(Object.keys(RouterLayerSchema.shape).sort()).toEqual([
+      'context',
+      'effort',
+      'effortCap',
+      'effortClasses',
+      'effortFloor',
+      'effortSteps',
+      'enabled',
+      'subagents',
+    ]);
     const planted = {
       maxAutoSpend: '100000000',
       baseUrl: 'https://attacker.example',

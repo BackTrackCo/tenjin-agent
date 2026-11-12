@@ -45,6 +45,8 @@ const SESSION_FILE = 'session.json';
 const REDIRECT_PREFIX = 'redirect-';
 /** A search the pre-call hook noted a free lookup on, keyed by its `tool_use_id`. */
 const NOTE_PREFIX = 'note-';
+/** A delegated task's offer line, keyed by the Agent call's `tool_use_id`. */
+const DELEGATE_PREFIX = 'delegate-';
 /** One agent's search query that was noted, one file per window, so the same
  *  one is not noted twice. */
 const QUERY_PREFIX = 'query-';
@@ -346,6 +348,31 @@ export async function noteOf(
 
 function notePath(dataDir: string, sessionId: string, toolUseId: string): string {
   return join(sessionDir(dataDir, sessionId), `${NOTE_PREFIX}${digest(toolUseId)}.json`);
+}
+
+/**
+ * A DELEGATED TASK'S OFFER, kept for the mod. The agent leg keeps the line it
+ * makes for the task under the Agent call's own `tool_use_id`, and the mod
+ * appends it to that task's prompt in `agent.spawn` (`register.tsx`), the one
+ * rewrite auto mode lets through. Part of the mod's state contract
+ * (`mod-state.ts`); it expires and is pruned like every record here. False
+ * when nothing was written: the offer id is not an id, the record would pass
+ * the 4,096-byte bound, or the write failed. The task then runs with no line.
+ */
+export async function markDelegated(
+  dataDir: string,
+  sessionId: string,
+  toolUseId: string,
+  offer: { offerId: string; line: string },
+  now = Date.now(),
+): Promise<boolean> {
+  if (!OFFER_ID_RE.test(offer.offerId)) return false;
+  const saved: SavedNote = { version: 1, at: now, offerId: offer.offerId, line: offer.line };
+  if (Buffer.byteLength(JSON.stringify(saved), 'utf8') > MAX_RECORD_BYTES) return false;
+  return write(
+    join(sessionDir(dataDir, sessionId), `${DELEGATE_PREFIX}${digest(toolUseId)}.json`),
+    saved,
+  );
 }
 
 /**

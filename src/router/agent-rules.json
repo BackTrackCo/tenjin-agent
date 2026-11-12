@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "kinds": [
+    {
+      "id": "review",
+      "pattern": "review-tenjin|re-?review|review (pr|pull request|this pr|the pr|the diff)|code review|reviewer",
+      "resumed": 0.4
+    },
+    {
+      "id": "verify",
+      "pattern": "adversarial|verify (this|the|that|each)|double.?check|fact.?check|confirm whether|refute"
+    },
+    {
+      "id": "implement",
+      "pattern": "implement|fix (the|this)|address (the )?(review|feedback|findings)|loop-tenjin-implement|open a (draft )?pr|write the code",
+      "resumed": 0.64
+    },
+    {
+      "id": "research",
+      "pattern": "research|web ?search|look up|find out|sources|survey the",
+      "resumed": 0.06
+    },
+    {
+      "id": "plan",
+      "pattern": "plan-tenjin|write (a|the) plan|design (a|the)|architecture|spec\\b",
+      "resumed": 0.59
+    },
+    {
+      "id": "measure",
+      "pattern": "benchmark|measure|harness|grade|analy[sz]e|statistics|transcripts"
+    },
+    {
+      "id": "explore",
+      "pattern": "explore|where is|how does|find (the|all|where)|locate|read (the|through)",
+      "resumed": 0.06
+    }
+  ],
+  "criteria": {
+    "work": {
+      "keep": "Run it as the parent asked. Prefer this when the work is hard to check, touches money, security, signing, migrations or a public contract, or when unsure.",
+      "bounded-lookup": "A bounded lookup with a clear end: find files, definitions, usages or one fact and say where they are.",
+      "routine-analysis": "Follow a feature across modules, summarise or compare what code or docs say, run a written mechanical procedure or apply a fully specified change, or research a topic on the web and report sources.",
+      "hard-judgment": "Design, review, debugging with an unknown cause, or work where a wrong answer is costly and hard to check.",
+      "repo-question": "Answer one question about this repository by reading its files, with file references, changing nothing, with no follow-up expected."
+    },
+    "effort": {
+      "keep": "Run it at the effort the parent asked for. Prefer this when unsure.",
+      "low": "Mechanical and well specified.",
+      "medium": "Ordinary work in a known pattern.",
+      "high": "Planning across files, or subtle logic.",
+      "xhigh": "Hard design or debugging where a wrong answer is costly."
+    }
+  },
+  "destinations": {
+    "bounded-lookup": "claude/haiku",
+    "routine-analysis": "claude/sonnet",
+    "hard-judgment": "claude/opus",
+    "repo-question": "outside/deepseek/deepseek-v4.1-flash"
+  },
+  "settleBy": "label",
+  "context": "brief+parent",
+  "parentChars": 4000,
+  "parentMessages": 6,
+  "cost": "balanced",
+  "costs": {
+    "saver": {
+      "minProbability": 0.5,
+      "minMarginOverKeep": 0.1,
+      "outsideMinProbability": 0.6,
+      "outsideMaxChangesState": 0.3,
+      "outsideMaxResumed": 0.1,
+      "outsideMaxFollowUp": 0.3,
+      "userNamedKeeps": 0.5,
+      "maxEffortStepsDown": 3,
+      "costlyKeeps": 0.75,
+      "biggerHelpsKeeps": 0.75,
+      "lightMaxHard": 0.35,
+      "lightMinCheckable": 0.6,
+      "middleMaxHard": 0.7,
+      "effortHelpsKeeps": 0.75,
+      "lowEffortMaxHard": 0.35,
+      "mediumEffortMaxHard": 0.7
+    },
+    "balanced": {
+      "minProbability": 0.6,
+      "minMarginOverKeep": 0.2,
+      "outsideMinProbability": 0.7,
+      "outsideMaxChangesState": 0.2,
+      "outsideMaxResumed": 0.1,
+      "outsideMaxFollowUp": 0.2,
+      "userNamedKeeps": 0.5,
+      "maxEffortStepsDown": 2,
+      "costlyKeeps": 0.6,
+      "biggerHelpsKeeps": 0.6,
+      "lightMaxHard": 0.25,
+      "lightMinCheckable": 0.7,
+      "middleMaxHard": 0.55,
+      "effortHelpsKeeps": 0.6,
+      "lowEffortMaxHard": 0.25,
+      "mediumEffortMaxHard": 0.55
+    },
+    "quality": {
+      "minProbability": 0.75,
+      "minMarginOverKeep": 0.3,
+      "outsideMinProbability": 0.85,
+      "outsideMaxChangesState": 0.1,
+      "outsideMaxResumed": 0.1,
+      "outsideMaxFollowUp": 0.1,
+      "userNamedKeeps": 0.5,
+      "maxEffortStepsDown": 1,
+      "costlyKeeps": 0.45,
+      "biggerHelpsKeeps": 0.45,
+      "lightMaxHard": 0.15,
+      "lightMinCheckable": 0.8,
+      "middleMaxHard": 0.4,
+      "effortHelpsKeeps": 0.45,
+      "lowEffortMaxHard": 0.15,
+      "mediumEffortMaxHard": 0.4
+    }
+  },
+  "keyless": {
+    "apply": false,
+    "rules": [
+      {
+        "id": "explore-agent",
+        "types": ["Explore"],
+        "model": "sonnet",
+        "effort": "high"
+      },
+      {
+        "id": "web-fetch-agent",
+        "types": ["web-fetch"],
+        "model": "sonnet",
+        "effort": "high"
+      },
+      {
+        "id": "research-or-explore-brief",
+        "kinds": ["research", "explore"],
+        "model": "sonnet",
+        "effort": "high"
+      }
+    ]
+  },
+  "extraFloors": [],
+  "definitionPin": {
+    "protects": "none"
+  },
+  "allow": [],
+  "exclude": []
+}

@@ -44,7 +44,7 @@ const MAX_PENDING_CHARS = 4_000;
 /** The server's cap on a native outcome's error text. */
 const MAX_OUTCOME_ERROR_CHARS = 1_000;
 /** Scanned past each bound: longer than any secret shape the mask knows. */
-const MASK_MARGIN = 4_096;
+export const MASK_MARGIN = 4_096;
 
 export type PacketRole = 'user' | 'assistant';
 export interface PacketMessage {

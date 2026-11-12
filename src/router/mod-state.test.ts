@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { recordAgentSpawn } from './agent-leg';
 import type { OfferSpec } from './decision';
 import { MOD_STATE_FILES } from './mod-state';
-import { markOffered, promptOfferKey, sessionDir } from './progress';
+import { markDelegated, markOffered, promptOfferKey, sessionDir } from './progress';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
 
 /**
@@ -127,7 +128,57 @@ describe('the state contract between the CLI and the mod', () => {
     });
   });
 
-  it('names exactly these four files', () => {
-    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'label', 'offer']);
+  it("keeps a delegated task's offer line under the session, keyed by the Agent call's id", async () => {
+    await markDelegated(dir, 'sess-1', 'toolu_agent', { offerId: ID, line: 'the line' }, 1);
+    const path = join(sessionDir(dir, 'sess-1'), `delegate-${sha256('toolu_agent')}.json`);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({
+      version: 1,
+      at: 1,
+      offerId: ID,
+      line: 'the line',
+    });
+  });
+
+  it("keeps a delegated task's model and effort record keyed by the Agent call's id", async () => {
+    await mkdir(join(dir, '.git'));
+    const record = await recordAgentSpawn(
+      {
+        sessionId: 'sess-1',
+        cwd: dir,
+        toolUseId: 'toolu_agent',
+        toolInput: {
+          prompt: 'Explore where the config loader lives.',
+          subagent_type: 'Explore',
+          model: 'opus',
+          effort: 'xhigh',
+        },
+      },
+      { model: 'apply', effort: 'shadow' },
+      { dataDir: dir, homeDir: dir, now: () => 1, env: {} },
+    );
+    expect(record).not.toBeNull();
+    expect(await json(`agent-routes/${sha256('toolu_agent')}.json`)).toMatchObject({
+      version: 1,
+      at: 1,
+      session: sha256('sess-1'),
+      route: 'claude',
+      model: { setting: 'apply', decided: 'sonnet', apply: expect.any(Boolean) },
+      effort: { setting: 'shadow', decided: 'high', apply: false },
+      runsOn: { model: 'opus', effort: 'xhigh' },
+      holdout: expect.any(Boolean),
+      reason: expect.any(String),
+      saving: { model: expect.any(Number), effort: expect.any(Number), both: expect.any(Number) },
+    });
+  });
+
+  it('names exactly these six files', () => {
+    expect(MOD_STATE_FILES).toEqual([
+      'spec',
+      'choices',
+      'label',
+      'offer',
+      'delegate',
+      'agent-route',
+    ]);
   });
 });

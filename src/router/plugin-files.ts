@@ -316,6 +316,21 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 }
 
 /**
+ * The modules `hooks/register.tsx` imports, each before the ones that import
+ * it: what they share (`shared.ts`), main-agent effort (`effort*.ts`) and
+ * delegated tasks (`agent-effort.ts`, `agents.tsx`).
+ */
+const MOD_MODULES = [
+  'hooks/shared.ts',
+  'hooks/effort-rules.ts',
+  'hooks/effort-turn.ts',
+  'hooks/effort-step.ts',
+  'hooks/effort.ts',
+  'hooks/agent-effort.ts',
+  'hooks/agents.tsx',
+] as const;
+
+/**
  * EVERY FILE THE PLUGIN FOLDER HOLDS, relative to the plugin's root, and the
  * only paths install, update and uninstall ever write or unlink in a folder.
  * The manifest is last: a crash mid-write never leaves a manifest pointing at
@@ -324,6 +339,7 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 export const PLUGIN_FILES = [
   '.mcp.json',
   'types/index.d.ts',
+  ...MOD_MODULES,
   'hooks/register.tsx',
   'hooks/hooks.json',
   PAY_SKILL_PATH,
@@ -338,7 +354,7 @@ export const MOD_TYPES = 'types/index.d.ts';
  * fallback copies it from there. Claude Code compiles it at load (2.1.287 or
  * later); nothing here builds or imports it.
  */
-export const MOD_FILES = [MOD_TYPES, 'hooks/register.tsx'] as const;
+export const MOD_FILES = [MOD_TYPES, ...MOD_MODULES, 'hooks/register.tsx'] as const;
 export type ModSources = Record<(typeof MOD_FILES)[number], string>;
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
