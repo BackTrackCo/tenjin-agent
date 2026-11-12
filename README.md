@@ -129,16 +129,21 @@ A new chat does not reset the daily budget. Routing has a separate fee, quoted f
 
 ## Commands
 
-| Command            | What it does                                  |
-| ------------------ | --------------------------------------------- |
-| `tenjin fund 5`    | Open checkout to add $5, and watch it land    |
-| `tenjin balance`   | Show your balance and limits                  |
-| `tenjin status`    | Show spending and limits                      |
-| `tenjin doctor`    | Check setup, activation and payment readiness |
-| `tenjin update`    | Update Tenjin                                 |
-| `tenjin uninstall` | Remove the integration; keep your wallet      |
+| Command                   | What it does                                                    |
+| ------------------------- | --------------------------------------------------------------- |
+| `tenjin fund 5`           | Open checkout to add $5, and watch it land                      |
+| `tenjin balance`          | Show your balance and limits                                    |
+| `tenjin status`           | Show on or paused, balance, limits, accounts and settings       |
+| `tenjin usage`            | What lookups cost, by day and by account                        |
+| `tenjin connect apify`    | Use your own Apify, fal or Firecrawl account; its own plan pays |
+| `tenjin disconnect apify` | Sign out of a connected account and forget it here              |
+| `tenjin doctor`           | Check setup, activation and payment readiness                   |
+| `tenjin update`           | Update Tenjin                                                   |
+| `tenjin uninstall`        | Remove the integration; keep your wallet                        |
 
 `tenjin fund --usdc` shows the address to send USDC to from a crypto wallet instead. `tenjin wallet fund` and `tenjin wallet balance` still work.
+
+`tenjin connect` signs in in your browser; where no browser can open, run `tenjin connect <name> --paste` in your own terminal. Never paste a key into a chat. Calls on your account are billed to its own plan and don't count toward your Tenjin limits. [Your own accounts →](./docs/agent-permissions.md#your-own-accounts)
 
 ## Privacy and help
 

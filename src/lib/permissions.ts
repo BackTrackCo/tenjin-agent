@@ -26,3 +26,18 @@ export const SETTINGS_RULES = [
   'Bash(tenjin config block:*)',
   'Bash(tenjin config prefer:*)',
 ] as const;
+
+/**
+ * THE READ-ONLY RULES FOR YOUR BALANCE, SPEND AND ACCOUNTS (plan 37), listed
+ * in `docs/agent-permissions.md` beside {@link SETTINGS_RULES} and installed
+ * by nothing: `tenjin status` and `tenjin usage` only read this machine's
+ * files and the balance on the chain. `connect` and `disconnect` stay behind
+ * the host's own prompt, since each changes what can be called and who pays,
+ * and so does `config fallback`, which lets the balance pay where an account
+ * refused. `src/skills-text.test.ts` pins the page to this list.
+ */
+export const ACCOUNT_READ_RULES = [
+  'Bash(tenjin status)',
+  'Bash(tenjin status --json)',
+  'Bash(tenjin usage:*)',
+] as const;

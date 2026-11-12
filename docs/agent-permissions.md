@@ -91,6 +91,22 @@ Bash(tenjin config prefer:*)
 
 "Run Tenjin's picks automatically" (`tenjin config replacement on`) is off by default. With it on, in Claude Code with the Tenjin plugin, a WebSearch or WebFetch your main assistant is about to make can be answered in place by the service Tenjin's router picks for it, within your settings and spending limits; a call over a limit is offered as usual and asks you first. Each one is a charge you are not asked about separately, so it names the service, its price and the search or fetch it replaced, and the paid ledger marks it `via: "swap"`. Codex and other agents keep getting ordinary offers.
 
+## Your own accounts
+
+Ask your assistant to use your own Apify, fal or Firecrawl account, or any MCP server by its https address, and it runs `tenjin connect <name>`. You approve the sign-in in your browser; where no browser can open, run `tenjin connect <name> --paste` in your own terminal and type the key at its hidden prompt. Never paste a key into a chat. Tenjin checks the account's tools for free, keeps the sign-in encrypted on this machine with its key in your OS keychain, and puts the account first for its jobs unless you say `--no-prefer`. No token, key or code reaches Tenjin's server; the router only learns which of the accounts it lists are connected here. [Every command →](./router-reference.md#your-own-accounts)
+
+Your own plan pays for calls on your account: they don't count toward `maxAutoSpend` or the daily budget, which cap your Tenjin balance only. When the account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops with the reason and offers its own tool for the job with its price, and nothing is charged until you pick. `tenjin config fallback on --source <account>` makes that switch automatic for one account. Routing still costs its small fee from the balance.
+
+`tenjin status` and `tenjin usage` only read: your balance from the chain, this machine's files and your settings. These rules let your assistant read them without a prompt each time:
+
+```text
+Bash(tenjin status)
+Bash(tenjin status --json)
+Bash(tenjin usage:*)
+```
+
+`connect`, `disconnect` and `config fallback` stay behind your host's normal permission prompt, because each changes what can be called and who pays.
+
 ## What the hooks send
 
 Routing sends the current prompt and at most six earlier messages, bounded to 16 KiB after known-secret masking. It excludes tool-result bodies and harness metadata. Search terms, URLs, delegated tasks, questions and your answers can also be routed with that context. Shortfall reports include status, size or error, never the fetched page or search results. Pasted text may be marked separately, but still reaches the router. Known-secret masking reduces exposure; it cannot identify every secret.
