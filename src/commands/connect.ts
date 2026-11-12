@@ -472,7 +472,7 @@ function connectLines(
   );
   if (preference === 'blocked')
     lines.push(
-      `Tenjin won't offer your ${label} account on its own. You can still ask for it by name.`,
+      `Tenjin won't offer your ${label} account on its own. You or your agent can still pick it by name.`,
     );
   if (preference === 'unreadable')
     lines.push(`Your saved settings can't be read, so ${label} wasn't added to your preferences.`);

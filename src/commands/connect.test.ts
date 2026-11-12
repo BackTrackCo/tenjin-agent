@@ -311,7 +311,7 @@ describe('tenjin connect', () => {
     );
     expect(data(blocked)).toMatchObject({ account: { preference: 'blocked' } });
     expect(lines(blocked)).toContain(
-      "Tenjin won't offer your Firecrawl account on its own. You can still ask for it by name.",
+      "Tenjin won't offer your Firecrawl account on its own. You or your agent can still pick it by name.",
     );
     expect((await configJson()).router?.policy?.prefer).toBeUndefined();
 
