@@ -129,6 +129,29 @@ const textItems = (content: readonly unknown[] | undefined): string[] =>
     return entry?.type === 'text' && typeof entry.text === 'string' ? [entry.text] : [];
   });
 
+/**
+ * EVERY LINE A `content` ANSWER CARRIES, in order: its text items, an
+ * embedded resource's text, and a resource link's name and uri. A tool that
+ * answers with a resource or a link, and nothing else, is never read as an
+ * empty result.
+ */
+const contentLines = (content: readonly unknown[] | undefined): string[] =>
+  (content ?? []).flatMap((item) => {
+    const entry = item as {
+      type?: unknown;
+      text?: unknown;
+      resource?: { text?: unknown };
+      uri?: unknown;
+      name?: unknown;
+    };
+    if (entry?.type === 'text' && typeof entry.text === 'string') return [entry.text];
+    if (entry?.type === 'resource' && typeof entry.resource?.text === 'string')
+      return [entry.resource.text];
+    if (entry?.type === 'resource_link' && typeof entry.uri === 'string')
+      return [typeof entry.name === 'string' ? `${entry.name}: ${entry.uri}` : entry.uri];
+    return [];
+  });
+
 /** A tool's answer, read as `structured`, `json-text` or `content`. */
 export function readResult(result: AccountCallResult, mode: AccountCall['result']): ToolRead {
   if (mode === 'structured') {
@@ -147,7 +170,12 @@ export function readResult(result: AccountCallResult, mode: AccountCall['result'
   }
   const media: AccountMedia[] = [];
   for (const item of result.content ?? []) {
-    const entry = item as { type?: unknown; data?: unknown; mimeType?: unknown };
+    const entry = item as {
+      type?: unknown;
+      data?: unknown;
+      mimeType?: unknown;
+      resource?: { blob?: unknown; mimeType?: unknown };
+    };
     if (
       (entry?.type === 'image' || entry?.type === 'audio') &&
       typeof entry.data === 'string' &&
@@ -155,8 +183,19 @@ export function readResult(result: AccountCallResult, mode: AccountCall['result'
     ) {
       media.push({ bytes: Buffer.from(entry.data, 'base64'), contentType: entry.mimeType });
     }
+    // An embedded resource's bytes are a file like any other.
+    if (
+      entry?.type === 'resource' &&
+      typeof entry.resource?.blob === 'string' &&
+      typeof entry.resource.mimeType === 'string'
+    ) {
+      media.push({
+        bytes: Buffer.from(entry.resource.blob, 'base64'),
+        contentType: entry.resource.mimeType,
+      });
+    }
   }
-  const text = textItems(result.content).join('\n');
+  const text = contentLines(result.content).join('\n');
   let value: unknown = text;
   try {
     value = JSON.parse(text);
