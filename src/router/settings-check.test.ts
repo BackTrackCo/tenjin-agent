@@ -221,7 +221,12 @@ describe('the check before every call', () => {
       status: 'needs_input',
       reasonCode: 'settings_unreadable',
     });
-    expect(String(query.envelope.nextStep)).toContain('tenjin config');
+    expect(query.envelope.reason).toBe(
+      "Your saved Tenjin rules can't be read, so Tenjin offers nothing.",
+    );
+    expect(query.envelope.nextStep).toBe(
+      '`tenjin config` shows the problem and `tenjin config reset --all` clears them; run either if the user asks.',
+    );
     expect(calls).toEqual([]);
   });
 
