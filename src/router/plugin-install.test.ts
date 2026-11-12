@@ -97,9 +97,16 @@ async function exists(path: string): Promise<boolean> {
   return (await stat(path).catch(() => null)) !== null;
 }
 
-/** One settings-install leg, as alpha.26 wrote it. */
-const legacyLeg = (kind: HookKind, timeout = 5) => [
-  { type: 'mcp_tool', server: 'x402', tool: 'hook', input: hookToolInput(kind), timeout },
+/** One settings-install leg, as alpha.26 wrote it. Its `ask` leg, which no
+ *  build routes any more, sent the native leg's fields. */
+const legacyLeg = (kind: HookKind | 'ask', timeout = 5) => [
+  {
+    type: 'mcp_tool',
+    server: 'x402',
+    tool: 'hook',
+    input: kind === 'ask' ? { ...hookToolInput('native'), kind } : hookToolInput(kind),
+    timeout,
+  },
 ];
 
 /** A settings file as an alpha.26 install left it, with the user's own entries beside ours. */

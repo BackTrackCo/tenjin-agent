@@ -248,8 +248,10 @@ shape.
 
 The hook's `pendingCall` can also be `{tool: "AskUserQuestion", question}`:
 the question the host is about to put to the user, its option labels and
-descriptions joined. After the user answers, the client sends an ordinary
-prompt-shaped packet whose `current` is the user's answers.
+descriptions joined. Released clients send it before the question is asked;
+this client no longer does, and routes only the user's answers: after the user
+answers, it sends an ordinary prompt-shaped packet whose `current` is the
+user's answers.
 
 Anything that is neither form is refused at validation with a plain error:
 `{packet, id}`, `{id}` alone and an empty body all fail. A `query` with an id

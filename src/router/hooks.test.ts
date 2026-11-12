@@ -6,12 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+  decodeEvent,
   HINT_SOURCE,
   hookOutcome,
   NEAR_EMPTY_BYTES,
   promptSkipReason,
   runAnswerHook,
-  runAskHook,
   runDelegationHook,
   runNativeHook,
   runPromptHook,
@@ -22,6 +22,7 @@ import {
 } from './hooks';
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
+import { HOOK_KINDS } from './hook-tool';
 import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import { UNPAID_GATE_TIMEOUT_MS } from './gate';
@@ -172,9 +173,6 @@ const SEEN = HINT_SOURCE + ': ' + HINT.replace('request({', 'mcp__x402__request(
 /** The one sentence this client adds, to a pre-call redirect only. */
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
-/** The ask arm's form of it, about the question. */
-const ONE_BLOCK_QUESTION =
-  'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
 /** A pre-call redirect's reason: the line as the host sees it, then that sentence. */
 const DENIED = `${SEEN} ${ONE_BLOCK}`;
 
@@ -3361,9 +3359,8 @@ describe('a discovered service', () => {
 });
 
 /**
- * THE HOST'S QUESTION TO THE USER. Before it is asked, the questions and their
- * options ride as the pending call; after it, the user's answers are routed as
- * their own words.
+ * THE HOST'S QUESTION TO THE USER. Nothing is routed before it is asked; after
+ * it, the user's answers are routed as their own words.
  */
 describe('a question to the user', () => {
   const DISCOVERED = JSON.parse(
@@ -3424,119 +3421,20 @@ describe('a question to the user', () => {
     };
   }
 
-  it('sends the questions and their options as the pending call', async () => {
-    const { fetchImpl, calls } = router(NATIVE);
-    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
-    expect(out).toEqual({ response: null, action: 'native' });
-    const body = (calls[0] as { body: { packet: Record<string, unknown> } }).body;
-    expect(body.packet.pendingCall).toEqual({
-      tool: 'AskUserQuestion',
-      question:
-        'For the audio, which can you get? ' +
-        'ElevenLabs API key (Recommended): I generate the sound effects and a music bed through their API. ' +
-        'You pick a track: send me a licensed track.',
-    });
-    expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
-    expect(body).toMatchObject({
-      sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
-    });
-  });
-
-  it('leaves the offer record for the question it denied', async () => {
-    await runAskHook(await askEvent(), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: router(DISCOVERED).fetchImpl,
-    });
-    expect(await wasOffered(dir, 'sess-1', 'toolu_ask')).toBe(true);
-    expect(await offerRecord('sess-1', 'toolu_ask')).toMatchObject({
-      version: 1,
-      priceAtomic: (
-        DISCOVERED.decision as unknown as { candidate: { providerPriceAtomic: string } }
-      ).candidate.providerPriceAtomic,
-    });
-  });
-
-  it('denies the question once on an offer, then lets it be asked', async () => {
-    const first = await runAskHook(await askEvent(), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: router(DISCOVERED).fetchImpl,
-    });
-    expect(first.response).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: `${SEEN_LINE} ${ONE_BLOCK_QUESTION}`,
-      },
-    });
-    const second = await runAskHook(await askEvent(), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl: router(DISCOVERED).fetchImpl,
-    });
-    expect(second).toEqual({ response: null, alreadyRedirected: true });
-    // The claim is the question's own: a different question is its own target.
-    const other = await runAskHook(
-      await askEvent({
-        tool_input: { questions: [{ question: 'Which voice should narrate it?', options: [] }] },
-      }),
-      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
-    );
-    expect(other.response).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
-  });
-
-  it('denies it on a curated offer too, with the same wording', async () => {
-    const { fetchImpl } = router(EXECUTE);
-    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
-    expect(out.response).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: `${SEEN} ${ONE_BLOCK_QUESTION}`,
-      },
-    });
-  });
-
   /**
-   * AN OFFER IT COULD NOT PAY FOR NEVER TAKES THE QUESTION'S PLACE. A fresh
-   * install's empty wallet, or a price over the cap, would turn the deny into
-   * "ask the user", which the denied question already was: the question runs.
+   * THE QUESTION ITSELF IS NEVER ROUTED. Every routed question settled a
+   * routing fee whenever an offer came back, and the question waited on the
+   * router, while the router matched the person's earlier words rather than
+   * the question. So the plugin registers no leg before a question, and no leg
+   * the hook tool runs answers that event or asks the router about it.
    */
-  it.each([['a price over the cap', { config: { ...ROUTER_POLICY, maxAutoSpend: '50000' } }]])(
-    'lets the question run with %s',
-    async (_label, setup) => {
-      if ('config' in setup) {
-        const fs = await import('node:fs/promises');
-        await fs.writeFile(join(dir, 'config.json'), JSON.stringify(setup.config));
-      }
-      const out = await runAskHook(await askEvent(), {
-        dataDir: dir,
-        baseUrl: BASE,
-        fetchImpl: router(DISCOVERED).fetchImpl,
-      });
-      expect(out).toEqual({ response: null, action: 'discovered', withheld: true });
-    },
-  );
-
-  it('never denies it for a free offer', async () => {
-    const { fetchImpl } = router({
-      ...EXECUTE,
-      decision: { ...EXECUTE.decision, providerPriceAtomic: '0' },
-    });
-    const out = await runAskHook(await askEvent(), { dataDir: dir, baseUrl: BASE, fetchImpl });
-    expect(out).toMatchObject({ response: null, free: true });
-  });
-
-  it('asks nothing about a question with no text', async () => {
+  it('routes nothing before a question is asked, on any leg', async () => {
+    const event = await askEvent();
+    expect(decodeEvent(event)).toBeNull();
     const { fetchImpl, calls } = router(DISCOVERED);
-    const out = await runAskHook(await askEvent({ tool_input: { questions: [] } }), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
-    expect(out.response).toBeNull();
+    for (const kind of HOOK_KINDS) {
+      expect(await runHookKind(kind, event, { dataDir: dir, baseUrl: BASE, fetchImpl })).toBeNull();
+    }
     expect(calls).toHaveLength(0);
   });
 
@@ -3606,23 +3504,15 @@ describe('a question to the user', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('is what the hook tool answers for `ask` and `answer` legs', async () => {
-    for (const [kind, event, expected] of [
-      ['ask', await askEvent(), { hookEventName: 'PreToolUse', permissionDecision: 'deny' }],
-      [
-        'answer',
-        await answerEvent({ 'For the audio, which can you get?': 'use a paid service' }),
-        { hookEventName: 'PostToolUse', additionalContext: SEEN_LINE },
-      ],
-    ] as const) {
-      await rm(join(dir, 'progress'), { recursive: true, force: true });
-      const answer = await runHookKind(kind, event, {
-        dataDir: dir,
-        baseUrl: BASE,
-        fetchImpl: router(DISCOVERED).fetchImpl,
-      });
-      expect(answer).toMatchObject({ hookSpecificOutput: expected });
-    }
+  it('is what the hook tool answers for the `answer` leg', async () => {
+    const answer = await runHookKind(
+      'answer',
+      await answerEvent({ 'For the audio, which can you get?': 'use a paid service' }),
+      { dataDir: dir, baseUrl: BASE, fetchImpl: router(DISCOVERED).fetchImpl },
+    );
+    expect(answer).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: SEEN_LINE },
+    });
   });
 });
 

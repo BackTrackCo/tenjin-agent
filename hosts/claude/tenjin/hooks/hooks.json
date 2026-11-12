@@ -80,29 +80,6 @@
         ]
       },
       {
-        "matcher": "AskUserQuestion",
-        "hooks": [
-          {
-            "type": "mcp_tool",
-            "server": "plugin:tenjin:router",
-            "tool": "hook",
-            "input": {
-              "kind": "ask",
-              "hook_event_name": "${hook_event_name}",
-              "session_id": "${session_id}",
-              "transcript_path": "${transcript_path}",
-              "cwd": "${cwd}",
-              "tool_name": "${tool_name}",
-              "tool_input": "${tool_input}",
-              "tool_use_id": "${tool_use_id}",
-              "agent_id": "${agent_id}",
-              "agent_type": "${agent_type}"
-            },
-            "timeout": 5
-          }
-        ]
-      },
-      {
         "matcher": "mcp__plugin_tenjin_router__hook",
         "hooks": [
           {

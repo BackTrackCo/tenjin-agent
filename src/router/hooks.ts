@@ -135,13 +135,6 @@ const ShortfallEventSchema = z.object({
   is_interrupt: z.boolean().optional(),
 });
 
-/** Before the host asks the user: its questions and their options. */
-const AskEventSchema = z.object({
-  hook_event_name: z.literal('PreToolUse').optional(),
-  ...NativeCallFields,
-  tool_name: z.literal('AskUserQuestion'),
-});
-
 /** After the user answered: `tool_response` is `{questions, answers,
  *  annotations}`, `answers` keyed by each question's text. */
 const AnswerEventSchema = z.object({
@@ -185,11 +178,6 @@ export interface NativeCall {
 export type HookEvent =
   | { kind: 'prompt'; sessionId: string; transcriptPath?: string; prompt: string; cwd?: string }
   | ({ kind: 'native' } & NativeCall)
-  | ({
-      kind: 'ask';
-      /** The questions and their options, joined; null when there are none. */
-      pending: PendingCall | null;
-    } & Omit<NativeCall, 'tool' | 'pending'>)
   | {
       kind: 'answer';
       sessionId: string;
@@ -253,15 +241,6 @@ export function decodeEvent(raw: unknown): HookEvent | null {
       ...optional('cwd', answer.data.cwd),
     };
   }
-  const ask = AskEventSchema.safeParse(raw);
-  if (ask.success) {
-    const question = questionOf(ask.data.tool_input);
-    return {
-      kind: 'ask',
-      ...callFieldsOf(ask.data),
-      pending: question === null ? null : { tool: 'AskUserQuestion', question },
-    };
-  }
   const delegation = DelegationEventSchema.safeParse(raw);
   if (delegation.success) {
     const input = delegation.data.tool_input;
@@ -315,33 +294,6 @@ function callFieldsOf(event: {
     ...optional('agentType', event.agent_type),
     ...optional('cwd', event.cwd),
   };
-}
-
-/**
- * THE HOST'S OWN WORDS BEFORE IT ASKS: each question, then each option's label
- * and description, in the order the host wrote them. Not cut here: seal()
- * masks it first and bounds it after, as it does a search.
- */
-function questionOf(input: Record<string, unknown>): string | null {
-  const questions = Array.isArray(input.questions) ? input.questions : [];
-  const parts: string[] = [];
-  for (const entry of questions) {
-    if (entry === null || typeof entry !== 'object') continue;
-    const { question, options } = entry as { question?: unknown; options?: unknown };
-    if (typeof question === 'string' && question.trim().length > 0) parts.push(question.trim());
-    for (const option of Array.isArray(options) ? options : []) {
-      if (option === null || typeof option !== 'object') continue;
-      const { label, description } = option as { label?: unknown; description?: unknown };
-      if (typeof label !== 'string' || label.trim().length === 0) continue;
-      parts.push(
-        typeof description === 'string' && description.trim().length > 0
-          ? `${label.trim()}: ${description.trim()}`
-          : label.trim(),
-      );
-    }
-  }
-  const joined = parts.join(' ');
-  return joined.length > 0 ? joined : null;
 }
 
 /** The user's answers, one per line, from the tool's response, or from its
@@ -422,10 +374,6 @@ function attributed(hint: string, host: Harness): string {
 /** This client's one sentence on a redirect: the promise {@link runNativeHook} keeps. */
 const ONE_BLOCK =
   'If this does not cover it, make your own call again: you will not be redirected twice in a row for the same search or URL.';
-
-/** The same promise, for a question the ask arm redirected. */
-const ONE_BLOCK_QUESTION =
-  'If this does not cover it, ask your question again: you will not be redirected twice in a row for the same question.';
 
 /** The free line after WebFetch saved a PDF its summary could not read. */
 function savedPdfHint(path: string): string {
@@ -1003,10 +951,6 @@ async function routeNativeCall(
     repeated?: () => Promise<boolean>;
     redirected?: () => Promise<boolean>;
     passFree?: boolean;
-    operation?: 'prompt' | 'search';
-    /** False where a discovered offer must be affordable as it stands: the
-     *  call it would replace is the one way to reach the user. */
-    canAskUser?: boolean;
     /** The pre-call arm's: this is a native call, so an offer this agent was
      *  shown and has not taken was ignored for it. */
     native?: boolean;
@@ -1042,7 +986,7 @@ async function routeNativeCall(
   // 45% of an active session's rows. The claim after the decision still
   // settles two parallel copies of one call.
   if (opts.redirected !== undefined && (await opts.redirected())) {
-    const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
+    const footer = await openFooter(deps, event.sessionId, 'search', event);
     await footer.close(null, { withheld: 'already redirected once' });
     return { offer: null, outcome: { response: null, alreadyRedirected: true } };
   }
@@ -1082,7 +1026,7 @@ async function routeNativeCall(
     );
     return { offer: null, outcome: { response: null } };
   }
-  const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
+  const footer = await openFooter(deps, event.sessionId, 'search', event);
   const deadline = gateDeadline(deps);
   const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
   if (!isOffer(outcome)) {
@@ -1097,12 +1041,7 @@ async function routeNativeCall(
       footer.close(outcome, noted ? { noted: true } : { withheld: 'free lookup, call runs' });
     return { offer: outcome, free: true, close };
   }
-  const vetted = await vetOffer(
-    outcome,
-    deps,
-    deadline,
-    event.agentId === undefined && opts.canAskUser !== false,
-  );
+  const vetted = await vetOffer(outcome, deps, deadline, event.agentId === undefined);
   if (vetted.withheld !== undefined) {
     await footer.close(outcome, { withheld: vetted.withheld });
     return { offer: null, outcome: { response: null, action: outcome.action, withheld: true } };
@@ -1263,53 +1202,6 @@ function redirect(offer: OfferDecision, host: Harness, oneBlock = ONE_BLOCK): Na
     action: offer.action,
     id: offer.id,
   };
-}
-
-/**
- * The ask leg (PreToolUse on `AskUserQuestion`), run by `tenjin mcp`'s `hook`
- * tool. THE HOST IS ABOUT TO ASK THE USER FOR SOMETHING, often an API key or an
- * account for a one-off step, which is the moment a pay-per-call service could
- * answer instead. The questions and their options ride as the pending call, and
- * an offer denies the question once with the server's line: never twice for the
- * same question, and a free offer never denies anything. The host can ask
- * again, and that question runs.
- *
- * AN OFFER THE CALL COULD NOT MAKE GOOD ON ALONE NEVER TAKES THE QUESTION'S
- * PLACE. Elsewhere a discovered offer over the cap is shown
- * with a note that the call needs approval or funds; here the question IS
- * the asking, so denying it for a call that cannot run alone strands the
- * turn. Any shortfall, curated or discovered, withholds the offer and the
- * question runs.
- */
-export async function runAskHook(raw: unknown, deps: HookDeps): Promise<NativeHookOutcome> {
-  const event = eventOf(raw, deps);
-  if (event?.kind !== 'ask' || event.pending === null) return { response: null };
-  // The question itself is the target, claimed exactly as a search or a URL is.
-  const target = redirectTarget(event.pending);
-  const routed = await routeNativeCall(event, event.pending, deps, {
-    passFree: true,
-    operation: 'prompt',
-    canAskUser: false,
-    repeated: async () =>
-      !(await claimRedirect(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.())),
-    redirected: () =>
-      redirectClaimed(deps.dataDir, event.sessionId, event.agentId, target, deps.now?.()),
-  });
-  if (routed.offer === null) return routed.outcome;
-  if (routed.free === true) {
-    await routed.close(false);
-    return { response: null, action: routed.offer.action, id: routed.offer.id, free: true };
-  }
-  if (event.toolUseId !== undefined) {
-    await markOffered(
-      deps.dataDir,
-      localSession(event.sessionId, deps),
-      event.toolUseId,
-      offeredTerms(routed.offer),
-      deps.now?.(),
-    );
-  }
-  return redirect(routed.offer, hostOf(deps), ONE_BLOCK_QUESTION);
 }
 
 /**
