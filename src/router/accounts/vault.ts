@@ -331,6 +331,8 @@ export type HeaderInput = Omit<VaultHeader, 'version' | 'id' | 'store'>;
  * Seal `secret` as account `id`'s sign-in, with its key kept or made, and
  * write the vault in one atomic replace. `plainFile` says the key went to the
  * 0600 file because this machine has no OS store, which the caller announces.
+ * `previous`: the vault file this write replaced, as it was, or null when
+ * there was none, for {@link restoreVault}.
  */
 export async function writeVault(
   id: string,
@@ -338,8 +340,9 @@ export async function writeVault(
   input: HeaderInput,
   secret: VaultSecret,
   deps: VaultDeps,
-): Promise<{ header: VaultHeader; plainFile: boolean }> {
+): Promise<{ header: VaultHeader; plainFile: boolean; previous: string | null }> {
   return lockedFor(id, deps, 'saved', async () => {
+    const previous = await readFile(sourceVaultPath(id, deps.dataDir), 'utf8').catch(() => null);
     const existing = await readVaultFile(deps.dataDir, id).catch(() => null);
     const { key, store, plainFile } = await keyForWrite(id, label, deps, existing?.header.store);
     const header = HeaderSchema.parse({ version: VAULT_VERSION, id, store, ...input });
@@ -349,7 +352,23 @@ export async function writeVault(
       dirMode: 0o700,
     });
     keys.set(cacheKey(deps.dataDir, id), key);
-    return { header, plainFile };
+    return { header, plainFile, previous };
+  });
+}
+
+/**
+ * PUT BACK THE VAULT A {@link writeVault} REPLACED, as it was, under the
+ * account's lock: a reconnect whose settings could not be saved never leaves
+ * a sign-in that worked replaced or gone. Its key is the one it had, since a
+ * write keeps the key it finds.
+ */
+export async function restoreVault(id: string, previous: string, deps: VaultDeps): Promise<void> {
+  await lockedFor(id, deps, 'saved', async () => {
+    await writeFileAtomic(sourceVaultPath(id, deps.dataDir), previous, {
+      mode: 0o600,
+      dirMode: 0o700,
+    });
+    keys.delete(cacheKey(deps.dataDir, id));
   });
 }
 

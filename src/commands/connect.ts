@@ -41,6 +41,7 @@ import {
   deleteVault,
   readVault,
   readVaultHeader,
+  restoreVault,
   writeVault,
   type VaultSecret,
 } from '../router/accounts/vault';
@@ -575,7 +576,7 @@ export async function runConnect(
     interactive: ctx.io.isTTY,
     ...(deps.platform !== undefined ? { platform: deps.platform } : {}),
   };
-  const { plainFile } = await writeVault(
+  const { plainFile, previous } = await writeVault(
     account.id,
     account.label,
     {
@@ -624,8 +625,14 @@ export async function runConnect(
       return preferred.next;
     });
   } catch (err) {
-    // A sign-in with no descriptor is never used: take it back off this machine.
-    await deleteVault(account.id, vaultDeps).catch(() => undefined);
+    // THE SETTINGS COULD NOT BE SAVED (a stale config lock, say): the sign-in
+    // this connect replaced is put back as it was, so one that worked keeps
+    // working; one it made fresh has no descriptor, so it comes back off.
+    await (
+      previous !== null
+        ? restoreVault(account.id, previous, vaultDeps)
+        : deleteVault(account.id, vaultDeps)
+    ).catch(() => undefined);
     throw err;
   }
 

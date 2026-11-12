@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext, CommandResult } from '../context';
 import { CliError } from '../lib/errors';
 import { sourceVaultPath, sourcesDir } from '../lib/paths';
@@ -14,9 +14,16 @@ import {
 } from '../router/accounts/client';
 import { storeAccountFor } from '../router/accounts/ids';
 import { fakeAccountServer, fakeKeychain } from '../router/accounts/test-support';
-import { clearVaultKeyCache, readVaultHeader } from '../router/accounts/vault';
+import { clearVaultKeyCache, readVault, readVaultHeader } from '../router/accounts/vault';
+import { persist } from './config';
 import { runConfigFallback } from './config-rules';
 import { runConnect, runDisconnect, type ConnectDeps } from './connect';
+
+// THE SETTINGS WRITE, the real one unless a test makes it fail once.
+vi.mock('./config', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('./config')>();
+  return { ...orig, persist: vi.fn(orig.persist) };
+});
 
 /**
  * `tenjin connect` and `tenjin disconnect` end to end, on a real data dir,
@@ -321,6 +328,39 @@ describe('tenjin connect', () => {
     const settings = await routerSettings({ cwd: work, dataDir: dir });
     expect(settings.wire).toMatchObject({
       settings: { sources: ['tenjin', 'firecrawl', 'apify'] },
+    });
+  });
+
+  it('never costs a working sign-in when a reconnect cannot save its settings', async () => {
+    // Greptile: the save's catch deleted the vault even on a reconnect, so a
+    // stale config.json.lock wiped the sign-in that was working before it.
+    const mcp = sessions(SESSIONS);
+    const connect = (key: string) =>
+      runConnect(
+        'firecrawl',
+        { fromEnv: 'FC_KEY' },
+        makeCtx(),
+        deps({ fetchImpl: network(), openSession: mcp.open, env: { FC_KEY: key } }),
+      );
+    const stale = () =>
+      vi
+        .mocked(persist)
+        .mockRejectedValueOnce(new CliError('INTERNAL', 'Timed out waiting for lock'));
+    const vault = { dataDir: dir, platform: 'darwin' as const, exec: keychain.exec };
+    // A first connect that can't save: its fresh sign-in comes back off.
+    stale();
+    expect((await caught(() => connect('fc-1'))).code).toBe('INTERNAL');
+    expect(await readVault('firecrawl', 'Firecrawl', vault)).toEqual({ status: 'absent' });
+    // Connected, then a reconnect that can't save: the old sign-in stays, as it was.
+    await connect('fc-1');
+    const before = await readFile(sourceVaultPath('firecrawl', dir), 'utf8');
+    stale();
+    expect((await caught(() => connect('fc-2'))).code).toBe('INTERNAL');
+    expect(await readFile(sourceVaultPath('firecrawl', dir), 'utf8')).toBe(before);
+    clearVaultKeyCache();
+    expect(await readVault('firecrawl', 'Firecrawl', vault)).toMatchObject({
+      status: 'ok',
+      secret: { apiKey: 'fc-1' },
     });
   });
 
