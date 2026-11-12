@@ -72,6 +72,7 @@ describe('main', () => {
       '--all removes every saved routing rule, blocks included.',
     );
     for (const variant of [
+      '--category images --source fal',
       '--source tenjin',
       '--dimension',
       '--capabilities',
