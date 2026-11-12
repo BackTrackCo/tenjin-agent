@@ -548,6 +548,29 @@ describe('a long job on the account', () => {
     expect(await readPaidRecords(dir)).toHaveLength(1);
   });
 
+  it('keeps the job when the account errors on the fetch of its result, and request({job}) fetches it later', async () => {
+    // Greptile review: an error fetching a finished job's result ended it
+    // failed and deleted it, though the account may already have billed.
+    await falOffered();
+    const session = account({
+      run_model: [text({ status: 'processing', request_id: 'req-1' })],
+      check_job: [text({ status: 'COMPLETED' }), text({ status: 'COMPLETED' })],
+      get_job_result: [
+        { isError: true, content: [{ type: 'text', text: 'Rate limit exceeded' }] },
+        text({ images: [] }),
+      ],
+    });
+    const { fetchImpl } = network();
+    const first = await runRequestTool(
+      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl, session),
+    );
+    expect(first.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
+    expect(done.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(session.tools().filter((t) => t === 'run_model')).toHaveLength(1);
+  });
+
   it('sends no status call once the account is disconnected mid-job, and keeps the job for a reconnect', async () => {
     // A1igator review: the session this process opened kept polling with the
     // old credential after a disconnect in another terminal.

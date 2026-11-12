@@ -514,6 +514,23 @@ async function followUp(
     existsSync(sourceVaultPath(connection.accountId, deps.dataDir))
       ? undefined
       : running(new AccountRefusal('not_connected'));
+  // A HICCUP KEEPS THE JOB: no answer, or an error from the account, on a
+  // status call or on the fetch of the result, hands it back running for
+  // `request({job})`, which sends only these free reads again. Only an answer
+  // a retry would repeat ends it failed: the job reported failed, or one the
+  // map can't read or follow.
+  const ask = async (
+    tool: string,
+    args: Parameters<Connection['call']>[1],
+  ): Promise<{ result: AccountCallResult } | { stop: AccountRun }> => {
+    let result: AccountCallResult;
+    try {
+      result = await connection.call(tool, args);
+    } catch (err) {
+      return { stop: running(err) };
+    }
+    return result.isError === true ? { stop: running(errorText(result)) } : { result };
+  };
   const { poll } = next;
   if (poll !== undefined) {
     const end = firstAt + poll.maxWaitS * 1_000;
@@ -534,15 +551,9 @@ async function followUp(
           kind: 'failed',
           why: `its answer didn't name the job to follow (${args.missing})`,
         };
-      let result: AccountCallResult;
-      try {
-        result = await connection.call(poll.tool, args.value);
-      } catch (err) {
-        // The job runs on: what stopped is this process's view of it.
-        return running(err);
-      }
-      if (result.isError === true) return running(errorText(result));
-      const read = readResult(result, poll.result);
+      const asked = await ask(poll.tool, args.value);
+      if ('stop' in asked) return asked.stop;
+      const read = readResult(asked.result, poll.result);
       if ('problem' in read) return { kind: 'failed', why: read.problem };
       if (poll.failed !== undefined && inState(read.value, poll.failed))
         return {
@@ -557,15 +568,9 @@ async function followUp(
   const args = fillArgs(next.args, input, first);
   if ('missing' in args)
     return { kind: 'failed', why: `its answer didn't name the result to fetch (${args.missing})` };
-  let result: AccountCallResult;
-  try {
-    result = await connection.call(next.tool, args.value);
-  } catch (err) {
-    return running(err);
-  }
-  if (result.isError === true)
-    return { kind: 'failed', why: "it couldn't hand back the result", detail: errorText(result) };
-  const read = readResult(result, next.result);
+  const asked = await ask(next.tool, args.value);
+  if ('stop' in asked) return asked.stop;
+  const read = readResult(asked.result, next.result);
   if ('problem' in read) return { kind: 'failed', why: read.problem };
   return { kind: 'done', ...read };
 }
