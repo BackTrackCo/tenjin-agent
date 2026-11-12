@@ -50,7 +50,7 @@ If a spec declares output fields, the inline result contains those fields and `f
 | `speed on\|off`                                                          | Whether Tenjin also offers paid tools that are as accurate as the agent's own and faster; `on` names the kinds of job marked so.                         |
 | `replacement on --provider <p>\|--all-providers`, `replacement off`      | "Run Tenjin's picks automatically" and its provider scope, in one write. Off keeps a saved scope.                                                        |
 
-"Use my fal account for images" and "only use my account for images" both save `prefer --category images --source fal`. `block --source tenjin` stops Tenjin offering its own tools on its own, free ones too; jobs no connected account can do go back to the agent's own tools. The rules and automatic use are personal settings in the global config; `config set` cannot write them and a project file cannot carry them.
+`block --source tenjin` stops Tenjin offering its own tools on its own, free ones too; jobs no connected account can do go back to the agent's own tools. The rules and automatic use are personal settings in the global config; `config set` cannot write them and a project file cannot carry them.
 
 The rules govern only what Tenjin picks on its own: its hook offers and the service it picks for a `{query}`. A tool the agent asks for by name (`{browse}`, `{tool}`, `{tool, query}`, a spec by its id) runs whatever they say, and when they leave nothing to pick, the answer is the ordinary `native` one, with nothing said about them.
 
