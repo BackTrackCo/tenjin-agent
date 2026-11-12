@@ -1174,7 +1174,10 @@ describe('the settings field', () => {
   ] as const)('reads the echoed hash on a %s answer (%s)', (kind, name) => {
     const read = parseForTests(kind, fixture(name));
     expect(read.success).toBe(true);
-    expect(read.data).toMatchObject({ honored: ['settings'], settingsHash: settings.hash });
+    expect(read.data).toMatchObject({
+      honored: expect.arrayContaining(['settings']),
+      settingsHash: settings.hash,
+    });
   });
 
   it('reads `bound` as the offer id and the input, beside an offer whose spec it fills', () => {

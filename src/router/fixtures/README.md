@@ -485,7 +485,7 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-tool-request-by-id-settings.json`    | a browse row's id sent as `tool` with `settings`                                          |
 | `wire-lookup-spec-settings.json`           | tool answer for it: the row's spec with the echoed `settingsHash`                         |
 | `wire-browse-request-settings.json`        | a browse of the tool list with `settings`                                                 |
-| `wire-browse-settings.json`                | the browse answer filtered by them, with the echoed `settingsHash`                        |
+| `wire-browse-settings.json`                | the browse answer: every row the client can run, unfiltered by them, with the echoed hash |
 | `wire-identities-request.json`             | the free identities read                                                                  |
 | `wire-identities.json`                     | its answer: every id a setting can name, with its label                                   |
 
