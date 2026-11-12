@@ -476,7 +476,7 @@ export async function runConfigOnly(
 ): Promise<CommandResult> {
   if (flags.source?.length) {
     usage(
-      'There is no only for accounts. To stop Tenjin offering its own tools on its own: `tenjin config block --source tenjin`.',
+      'There is no only for accounts: "only use my account for X" is a preference, `tenjin config prefer --category <X> --source <account>`. To stop Tenjin offering its own tools on its own: `tenjin config block --source tenjin`.',
     );
   }
   const people = (['provider', 'seller', 'service'] as const).filter((kind) => flags[kind]?.length);

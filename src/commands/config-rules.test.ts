@@ -282,10 +282,10 @@ describe('tenjin config only', () => {
     );
   });
 
-  it('has no only for accounts', async () => {
+  it('has no only for accounts: that is a preference', async () => {
     const err = await refused(runConfigOnly({ global: true, source: ['fal'] }, ctx(), online()));
+    expect(err.message).toContain('`tenjin config prefer --category <X> --source <account>`');
     expect(err.message).toContain('`tenjin config block --source tenjin`');
-    expect(err.message).not.toContain('--source <account>');
     expect(fetched).toBe(0);
   });
 });
