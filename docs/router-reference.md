@@ -41,15 +41,24 @@ If a spec declares output fields, the inline result contains those fields and `f
 
 A general routing call goes to the configured router's paid route. `tenjin mcp` uses the x402 SDK to pay the quoted fee only in USDC on Base, under a $0.003 ceiling and the local spend policy. The provider's price is checked against its own spec, independently of this fee ceiling. A decision can charge a routing fee even when it suggests no tool.
 
-Routing uses a channel funded by deposits. When another fee cannot fit, the deposit is bounded by the server's current hint, available wallet balance and `maxAutoSpend`, with a floor of ten quoted fees and the SDK ceiling of $0.25. The server hint is live data, not a fixed amount in this document. Unused deposited funds remain in the routing channel and do not pay provider calls.
+No prompt carries a deposit: a prompt's routing call has about 3.5 seconds, and a deposit settles on chain in about 5. `tenjin mcp` makes the deposit in the background instead, when it starts on a balance that cannot cover a fee and after a paid call leaves it too low. One session per wallet tops up at a time. A routing call that meets a top-up in progress waits for it within its own time limit, then pays from the new balance. A router that does not support this background form (an older server) gets the deposit on the next paid call instead.
 
-No routing call carries a deposit. `tenjin mcp` funds the channel in the background when it starts and when the channel runs low, and a routing call that meets a top-up waits for it within its time limit.
+Routing fees are paid from a routing balance that Tenjin tops up from your wallet. A top-up is a deposit, and Tenjin sends one only when the balance cannot cover the next fee. It sizes the deposit in four steps:
 
-A deposit is reserved before signing and counts against automatic spending once. Fees drawn from it do not consume the daily budget again. Each fee still obeys the per-payment policy and creator allowlist; a zero daily budget stops automatic fees even from an already-funded channel. An uncertain response does not automatically release a deposit or prove that no money moved.
+1. **Target.** The amount the router suggests, normally $0.05, cut down to your per-call limit and to a $0.25 ceiling. The suggestion is live data from the router, not a fixed amount in this document. If the next fee alone is more than the ceiling or your per-call limit, Tenjin sends no deposit and skips the routing call.
+2. **Balance.** Tenjin reads your USDC balance once. If the wallet holds less than the next fee needs, it sends no deposit and skips the routing call.
+3. **Reserve.** Tenjin keeps $0.01 in the wallet for provider payments. If the wallet holds at least $0.10 and at least the target plus that $0.01, it deposits the target.
+4. **Small wallet.** Otherwise it deposits $0.01, or what the next fee needs if that is more (never above the target), and no more than the wallet holds above the $0.01 reserve. If that leaves nothing, or less than the next fee needs, it sends no deposit and skips the routing call.
+
+The balance lookup takes at most two seconds, inside the top-up's own 15-second limit. With the built-in default RPC, the lookup can fall back to two public RPCs (PublicNode, then dRPC) within the same two seconds; an RPC you configured is the only one asked. Each is asked once. A lookup that fails or runs late sends no deposit, reserves no spend and skips the routing call that waited on it, without a warning, since nothing failed and nothing was paid. A fee that the routing balance already covers is paid without any balance read.
+
+A deposit meets your automatic limits (per-call limit, daily budget, creator allowlist) before it is signed, and counts against automatic spending once. Fees drawn from it do not consume the daily budget again. Each fee still obeys the per-payment policy and creator allowlist; a zero daily budget stops automatic fees even from an already-funded balance. A deposit counts from the moment it is sent. An answered 4xx or 5xx response releases it, because the server settles nothing on those. An unanswered request does not release it or prove that no money moved. Unused routing funds stay yours and pay later routing fees, never provider calls.
+
+The facilitator checks the wallet's funds when it verifies the deposit. If it answers that the wallet holds less, that call gets no route and the wallet is reported as too low. The next top-up waits 30 seconds, then 2 minutes, so routing comes back within about 2 minutes of funding.
 
 ### Whole-call limits
 
-The CLI admits a plan for the whole call before signing: one automatic per-call total, remaining daily headroom and available balance. Multiple takes and comparison options cannot each claim a fresh per-call allowance. A payment must use its admitted slot, once, at no more than its planned amount. Reservations and duplicate guards are shared across processes.
+The CLI admits a plan for the whole call before signing: one automatic per-call total and the remaining daily headroom. Multiple takes and comparison options cannot each claim a fresh per-call allowance. A payment must use its admitted slot, once, at no more than its planned amount. Reservations and duplicate guards are shared across processes.
 
 `spend.json` separates automatic exposure, pending reservations and manual exposure. Manual payments remain in reporting but do not consume automatic headroom. Older records without that distinction count conservatively as automatic until their window expires. `none` removes only the daily ceiling, not duplicate protection or reservations.
 
@@ -67,7 +76,7 @@ Hosts without this facility, including Codex, refuse the over-limit call. A quot
 
 A routing payment that cannot be made is skipped without a second unpaid routing attempt. Native tools remain usable. Lasting wallet, balance and policy causes are reported once; temporary channel contention does not create another funding prompt.
 
-Known unusable wallets suppress paid offers. Hook-side balance reads are advisory: known insufficient funds suppress automatic offers, while an unknown read does not grant spending authority. Immediately before a positive provider payment, the actual signer's balance must be readable and sufficient. A failed check releases an unsigned reservation; a successful check cannot prevent a concurrent transfer or guarantee settlement.
+A wallet that cannot sign suppresses paid offers. Tenjin reads no balance when it offers a tool, admits a plan or signs a provider payment: the facilitator checks funds when it verifies each payment, and a payment it refuses as short of funds is reported as a low wallet, with a request to add funds and no retry. A balance check cannot prevent a concurrent transfer or guarantee settlement. `tenjin balance`, `tenjin status` and `tenjin doctor` read the balance when you run them, and a once-a-day session-start notice reads it too.
 
 Network-unreachable routing may be paused locally for 60 seconds to avoid delaying each hook. A timeout or an answered HTTP error does not establish that outage. Doctor can clear the pause after a successful reachability probe. Reachability alone proves neither an active chat nor paid execution.
 
