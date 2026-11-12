@@ -578,7 +578,10 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {},
         );
         if (event === null) return { content: [{ type: 'text', text: '' }] };
-        rememberSession(event);
+        // THE HOST'S OWN PATH, admitted again when the swap reads it: on a
+        // session's first prompt the transcript is not written yet, and the
+        // admitted event leaves it out, which would hand back its first search.
+        rememberSession(raw);
         response = await runHookKind(args.kind, event, {
           ...hookDeps(),
           ...(opts.observer !== undefined

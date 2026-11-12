@@ -626,6 +626,62 @@ describe('the hook tool', () => {
     }
   });
 
+  /** A session's first prompt fires before Claude Code writes its transcript:
+   *  the swap still reads it for that session's first search, once written. */
+  it('keeps the transcript path of a first prompt for the first search', async () => {
+    const homeDir = join(dir, 'home');
+    const project = join(homeDir, '.claude', 'projects', '-repo');
+    await mkdir(project, { recursive: true });
+    const transcript = join(await realpath(project), 'sess-first.jsonl');
+    const native = (async () =>
+      Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'native_sufficient',
+            stage: 'capability',
+            missing: [],
+            nextAction: '',
+          },
+        },
+      })) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir: await realpath(homeDir),
+      handlerDeps: { cwd: dir },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: native, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', transcript)),
+      });
+      await writeFile(transcript, '');
+      const decided = await client.callTool({
+        name: 'request',
+        arguments: {
+          decide: {
+            tool: 'WebSearch',
+            input: { query: 'eth price' },
+            tool_use_id: 'toolu_first',
+            session_id: 'sess-first',
+          },
+        },
+      });
+      // Read, and handed back for the switch being off, not for the transcript.
+      expect(envelopeOf(decided)).toMatchObject({
+        swap: 'handback',
+        reason: 'automatic use is off',
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('marks its own session when the plugin started it, and still routes there', async () => {
     const { homeDir, transcript } = await home('sess-plugin');
     const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
