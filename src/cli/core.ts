@@ -752,7 +752,7 @@ Examples:
   ])
     .summary('remove one saved rule, or all of them')
     .description(
-      'Remove exactly the rule named, offline. --preference removes a task or category preference (with --task or --category) or the account-wide one (--global), or with --source just that account from it. --restriction removes the only rules for a task or --global, or with --dimension just one. --capabilities removes the global task and category limit. --all removes every saved routing rule. Blocks, spending limits, automatic use and your accounts stay.',
+      'Remove exactly the rule named, offline. --preference removes a task or category preference (with --task or --category) or the account-wide one (--global), or with --source just that account from it. --restriction removes the only rules for a task or --global, or with --dimension just one. --capabilities removes the global task and category limit. --all removes every saved routing rule, blocks included. Otherwise blocks stay; spending limits, automatic use and your accounts always stay.',
     )
     .option('--global', 'the account-wide preference, or the global restrictions')
     .option('--preference', 'reset a preference')
