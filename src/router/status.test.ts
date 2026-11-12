@@ -172,7 +172,9 @@ describe('status, accounts and settings', () => {
     expect(shown).toContain('Apify does local business search and web research');
     expect(shown).toContain("fal isn't signed in on this machine: `tenjin connect fal`");
     expect(shown).toContain("when fal refuses a call, Tenjin's own tool runs in its place");
-    expect(shown.at(-1)).toBe('Your settings never use Firecrawl · your Apify first');
+    expect(shown.at(-1)).toBe(
+      'Your settings never offer Firecrawl unless asked · your Apify first',
+    );
     expect(JSON.stringify(result.humanLines)).not.toMatch(/x402|USDC|wallet|source/i);
     expect(result.data).toMatchObject({
       accounts: [

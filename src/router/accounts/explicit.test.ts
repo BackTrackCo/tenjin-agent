@@ -307,22 +307,24 @@ describe('an account the user names, with no map', () => {
     expect(JSON.parse(String(result.envelope.result))).toEqual({ answer: 42 });
   });
 
-  it("holds it to the user's settings: a block on the account, and rules it can't read", async () => {
+  it('runs under a block on the account, since the agent named it, and never under rules it can’t read', async () => {
+    // Owner decision (review round 1): a block stops only what Tenjin picks on
+    // its own; a call by name runs whatever the rules say.
     await connected({ version: 1, block: [{ kind: 'source', id: 'mcp-example-com' }] });
     const session = account();
-    const blocked = await runRequestTool(
+    const named = await runRequestTool(
       { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
       deps(session).run,
     );
-    expect(blocked.envelope).toMatchObject({ status: 'needs_input' });
-    expect(blocked.summary).toContain('your Tenjin settings block your mcp.example.com account');
+    expect(named.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(session.called).toEqual([{ tool: 'lookup', args: { query: 'x' } }]);
     await connected({ version: 99 });
     const unreadable = await runRequestTool(
       { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
       deps(session).run,
     );
     expect(unreadable.summary).toContain("Your Tenjin settings can't be read");
-    expect(session.opened).toEqual([]);
+    expect(session.called).toHaveLength(1);
   });
 
   it('runs under a block on an unrelated provider, which never names the account', async () => {

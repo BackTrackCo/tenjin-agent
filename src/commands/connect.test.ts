@@ -304,7 +304,7 @@ describe('tenjin connect', () => {
     );
     expect(data(blocked)).toMatchObject({ account: { preference: 'blocked' } });
     expect(lines(blocked)).toContain(
-      "Your settings block Firecrawl, so Tenjin won't use it until you unblock it.",
+      "Tenjin won't offer your Firecrawl account on its own. You can still ask for it by name.",
     );
     expect((await configJson()).router?.policy?.prefer).toBeUndefined();
 

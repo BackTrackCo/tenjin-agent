@@ -35,15 +35,16 @@ import { readVaultHeader } from './vault';
  *   warning: "Tenjin hasn't checked this service yet. Results may vary, and
  *   your <name> account pays."
  *
- * THE USER'S SETTINGS STILL HOLD. The router never sees such a call, so this
- * client applies none of its rules; it only refuses while the saved rules
- * can't be read, or while a saved block names this very account. Pausing
+ * THE AGENT IS ASKING BY NAME, so the user's rules, which govern only what
+ * Tenjin picks on its own, never stop it: a block on this very account
+ * included. It only refuses while the saved rules can't be read. Pausing
  * Tenjin stops it too, before anything here runs.
  *
  * THE STOP FOR A NAMED ACCOUNT IS `tenjin disconnect <id>`, which every
- * result here names as `stop`. A block can't be the one: `config block
- * --source` resolves names against the router's identities read, which never
- * lists an account connected by its address.
+ * result here names as `stop`. A block can't be the one: it stops only
+ * Tenjin's own picks, and `config block --source` resolves names against the
+ * router's identities read, which never lists an account connected by its
+ * address.
  *
  * ON AN ACCOUNT TENJIN MAPS, every tool its maps call (Apify's `call-actor`,
  * fal's `run_model`) runs only through a mapped job, which pins its cost: a
@@ -151,8 +152,9 @@ function jobsOnlyTools(
   return new Set([...(account.mappedTools ?? []), ...(listed?.expectTools ?? [])]);
 }
 
-/** Why the saved settings stop a named call on this account, or null. */
-async function settingsStop(dataDir: string, account: SavedAccount): Promise<string | null> {
+/** Why the saved settings stop a named call, or null: only rules that can't
+ *  be read, never a rule, since the agent is asking by name. */
+async function settingsStop(dataDir: string): Promise<string | null> {
   let router: unknown;
   try {
     router = (await loadRawConfig(dataDir)).router;
@@ -161,12 +163,6 @@ async function settingsStop(dataDir: string, account: SavedAccount): Promise<str
   }
   const policy = readPersonalRouter(router).policy;
   if (policy.status === 'invalid') return `your Tenjin settings can't be read (${policy.problem})`;
-  if (policy.status === 'ok') {
-    const blocked = (policy.saved.block ?? []).some(
-      (target) => target.kind === 'source' && target.id === account.id,
-    );
-    if (blocked) return `your Tenjin settings block your ${account.label} account`;
-  }
   return null;
 }
 
@@ -246,8 +242,8 @@ export async function runSourceRequest(
     );
   }
 
-  // THE USER'S SETTINGS: unreadable rules, or a block on this account.
-  const stop = await settingsStop(dataDir, account);
+  // THE USER'S SETTINGS: only rules that can't be read stop a named call.
+  const stop = await settingsStop(dataDir);
   if (stop !== null) {
     return fail('needs_input', `${stop}, so nothing was sent to it.`, {
       nextStep:

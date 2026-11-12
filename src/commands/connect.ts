@@ -470,7 +470,9 @@ function connectLines(
       : `Tenjin can act on your ${label} account, and only runs the jobs above and the ${label} services you ask for by name.`,
   );
   if (preference === 'blocked')
-    lines.push(`Your settings block ${label}, so Tenjin won't use it until you unblock it.`);
+    lines.push(
+      `Tenjin won't offer your ${label} account on its own. You can still ask for it by name.`,
+    );
   if (preference === 'unreadable')
     lines.push(`Your saved settings can't be read, so ${label} wasn't added to your preferences.`);
   if (preference === 'full')

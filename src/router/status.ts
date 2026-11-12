@@ -135,14 +135,13 @@ export function settingsPhrases(
   const phrases: string[] = [];
   if (policy.status === 'ok') {
     const { block = [], only = [], prefer = [], preferSpeed } = policy.saved;
+    // A block stops only what Tenjin offers on its own; asked by name, it runs.
     for (const target of block) {
-      phrases.push(
+      const named =
         target.kind === 'source' && target.id === BUILT_IN_SOURCE
-          ? "Tenjin's own tools off"
-          : target.kind === 'task' || target.kind === 'category'
-            ? `never handle ${name(target)}`
-            : `never use ${name(target)}`,
-      );
+          ? "Tenjin's own tools"
+          : name(target);
+      phrases.push(`never offer ${named} unless asked`);
     }
     for (const rule of only) {
       const names = either.format(rule.targets.map(name));
