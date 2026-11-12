@@ -1,9 +1,17 @@
 {
   "schemaVersion": 1,
-  "routerVersion": "2026-10-06.1",
-  "honored": ["settings"],
+  "routerVersion": "2026-11-04.2",
+  "honored": ["schemaVersion", "browse", "accepts", "harness", "settings"],
   "settingsHash": "sha256:7f55344dd648a7c08185b78bd2b7c1230d3bc704a3537eafc49bdd1b9097a618",
   "rows": [
+    {
+      "id": "cmc-quotes",
+      "label": "CoinMarketCap quotes",
+      "does": "Live crypto prices",
+      "price": "1¢",
+      "free": false,
+      "kind": "Live crypto prices"
+    },
     {
       "id": "stableenrich-exa-answer",
       "label": "Exa Answer",
@@ -11,6 +19,22 @@
       "price": "1¢",
       "free": false,
       "kind": "Web research"
+    },
+    {
+      "id": "aispace-hailuo-3-max",
+      "label": "MiniMax Hailuo 3 Max",
+      "does": "Cinematic 5-second clips with native audio from a prompt, at 768p: launch, product and social videos. $0.155 is AiSpace's promo price, half its $0.31 list.",
+      "price": "15.5¢",
+      "free": false,
+      "kind": "Text to video"
+    },
+    {
+      "id": "aispace-hailuo-3-max-i2v",
+      "label": "Hailuo 3 Max image to video",
+      "does": "Animates a still image into a 5-second clip with native audio at 768p, from the image's URL and a motion prompt. $0.155 is AiSpace's promo price, half its $0.31 list.",
+      "price": "15.5¢",
+      "free": false,
+      "kind": "Text to video"
     }
   ]
 }

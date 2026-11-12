@@ -3733,8 +3733,7 @@ describe('an offer the host ignored', () => {
 /**
  * THE USER'S SETTINGS ON EVERY HOOK (plan 36): the rules ride beside the
  * packet, read for each event; an offer is kept with the hash its answer
- * echoed; an answer decided under other rules offers nothing; and a
- * `settings_blocked` answer names the rule to the agent.
+ * echoed; and an answer decided under other rules offers nothing.
  */
 describe('the hooks and the user settings', () => {
   const fixtureOf = (name: string) =>
@@ -3802,19 +3801,6 @@ describe('the hooks and the user settings', () => {
       (await runPromptHook(promptEvent('research it'), hook(old.fetchImpl))).response,
     ).toBeNull();
     expect(await readSpec(dir, decision.id)).toBeNull();
-  });
-
-  it('names the rule a settings_blocked answer carries, on the prompt', async () => {
-    const hash = await saveRules({ policy: { version: 1, block: [BLOCK] } });
-    const answer = { ...fixtureOf('wire-hook-native-settings-blocked.json'), settingsHash: hash };
-    const { fetchImpl } = router(answer);
-    const out = await runPromptHook(promptEvent('check the BTC price'), hook(fetchImpl));
-    const said = (out.response as { hookSpecificOutput: { additionalContext: string } })
-      .hookSpecificOutput.additionalContext;
-    expect(said).toContain('Your Tenjin settings block crypto price quote');
-    expect(said).toContain('tenjin config');
-    expect(said.startsWith(HINT_SOURCE)).toBe(true);
-    expect(hookOutcome(answer.decision as never)).toBe('native tools (your settings)');
   });
 
   it('routes nothing while the saved rules cannot be read', async () => {

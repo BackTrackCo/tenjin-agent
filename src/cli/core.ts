@@ -240,9 +240,6 @@ Examples:
 
 What Tenjin may use (saved on this machine, not synced):
   $ tenjin config prefer --task "web research" --provider exa
-  $ tenjin config prefer --source apify
-  $ tenjin config prefer --task "local leads" --source apify
-  $ tenjin config prefer --category images --source fal
   $ tenjin config only --task "web research" --provider exa
   $ tenjin config only --global --category images
   $ tenjin config only --global --task "web research" --task "read an exact page"
@@ -254,7 +251,6 @@ What Tenjin may use (saved on this machine, not synced):
   $ tenjin config unblock --provider firecrawl
   $ tenjin config unblock --task "crypto price quote"
   $ tenjin config reset --task "web research" --preference
-  $ tenjin config reset --source apify --preference
   $ tenjin config reset --task "web research" --restriction
   $ tenjin config reset --task "web research" --restriction --dimension provider
   $ tenjin config reset --global --capabilities
@@ -266,14 +262,13 @@ What Tenjin may use (saved on this machine, not synced):
   $ tenjin config replacement off
   $ tenjin config fallback on --source apify
 
-"Use my fal account for images" and "only use my account for images" are the
-same preference: prefer --category images --source fal. "Turn off all of
-Tenjin's tools" is block --source tenjin. Speed: Tenjin also offers paid tools
-where they are as accurate as your agent's own and faster. Replacement is "Run
-Tenjin's picks automatically", off by default. A name is the catalog's name or
-id ("Exa" or exa); an unclear or unknown name saves nothing and lists what it
-could mean. Showing, unblocking, resetting and pausing work offline. To pause
-Tenjin:
+"Turn off all of Tenjin's tools" is block --source tenjin. A block or only rule
+governs what Tenjin offers and picks on its own; you or your agent can still ask
+for any tool by name. Speed: Tenjin also offers paid tools where they are as
+accurate as your agent's own and faster. Replacement is "Run Tenjin's picks
+automatically", off by default. A name is the catalog's name or id ("Exa" or
+exa); an unclear or unknown name saves nothing and lists what it could mean.
+Showing, unblocking, resetting and pausing work offline. To pause Tenjin:
   $ tenjin config set router.enabled false
 `,
   );
@@ -646,7 +641,7 @@ function registerConfigRules(config: Command, reg: Registration): void {
   ])
     .summary('set the order Tenjin tries allowed services in')
     .description(
-      'Prefer providers, services or your accounts, in order. With --task or --category the preference is for that scope; with --source alone it is account-wide, and a task or category preference comes first. Repeating it replaces the list at that scope. Other allowed services stay available when a preferred one cannot meet a request: use only to forbid them. "Use my fal account for images" and "only use my account for images" are both prefer --category images --source fal.',
+      'Prefer providers, services or your accounts, in order. With --task or --category the preference is for that scope; with --source alone it is account-wide, and a task or category preference comes first. Repeating it replaces the list at that scope. Other allowed services stay available when a preferred one cannot meet a request: use only to forbid them.',
     )
     .option('--global', 'the account-wide preference (with --source)')
     .addHelpText(
@@ -655,8 +650,6 @@ function registerConfigRules(config: Command, reg: Registration): void {
 Examples:
   $ tenjin config prefer --task "web research" --provider exa
   $ tenjin config prefer --task "web research" --provider exa --provider tavily
-  $ tenjin config prefer --category images --source fal
-  $ tenjin config prefer --source apify
 `,
     )
     .action(async function (this: Command) {
@@ -676,9 +669,9 @@ Examples:
     'seller',
     'service',
   ])
-    .summary('allow only the named services, providers or tasks')
+    .summary("limit Tenjin's own picks to what you name")
     .description(
-      'Allow only what you name. --global with --category or --task limits which tasks Tenjin does anywhere; --task with --provider, --seller or --service limits who does that one task and leaves other tasks alone. Repeating it replaces the set for that scope; blocks and other rules stay. A request no allowed service can meet is refused with the reason, never sent elsewhere.',
+      'Limit what Tenjin picks on its own to what you name. --global with --category or --task limits which tasks Tenjin offers tools for; --task with --provider, --seller or --service limits who it picks for that one task and leaves other tasks alone. Repeating it replaces the set for that scope; blocks and other rules stay. When nothing allowed fits, Tenjin offers nothing on its own; you or your agent can still ask for any tool by name.',
     )
     .option('--global', 'apply everywhere: with --category or --task, which tasks Tenjin does')
     .addHelpText(
@@ -701,9 +694,9 @@ Examples:
     });
 
   targetOptions(addGlobalFlags(config.command('block')), all)
-    .summary('never let Tenjin use what you name')
+    .summary('stop Tenjin offering what you name on its own')
     .description(
-      "Block a provider, seller, service, task, category or account. A provider block covers reviewed reseller routes through it. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. --source tenjin turns off all of Tenjin's own tools, free ones too; jobs no connected account can do go back to your agent's own tools.",
+      "Block a provider, seller, service, task, category or account from what Tenjin offers and picks on its own; you or your agent can still ask for it by name. A provider block covers reviewed reseller routes through it. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. --source tenjin stops Tenjin offering its own tools, free ones too; jobs no connected account can do go back to your agent's own tools.",
     )
     .addHelpText(
       'after',
@@ -751,7 +744,7 @@ Examples:
   ])
     .summary('remove one saved rule, or all of them')
     .description(
-      'Remove exactly the rule named, offline. --preference removes a task or category preference (with --task or --category) or the account-wide one (--global), or with --source just that account from it. --restriction removes the only rules for a task or --global, or with --dimension just one. --capabilities removes the global task and category limit. --all removes every saved routing rule. Blocks, spending limits, automatic use and your accounts stay.',
+      'Remove exactly the rule named, offline. --preference removes a task or category preference (with --task or --category) or the account-wide one (--global), or with --source just that account from it. --restriction removes the only rules for a task or --global, or with --dimension just one. --capabilities removes the global task and category limit. --all removes every saved routing rule, blocks included. Otherwise blocks stay; spending limits, automatic use and your accounts always stay.',
     )
     .option('--global', 'the account-wide preference, or the global restrictions')
     .option('--preference', 'reset a preference')
@@ -767,7 +760,6 @@ Examples:
       `
 Examples:
   $ tenjin config reset --task "web research" --preference
-  $ tenjin config reset --source apify --preference
   $ tenjin config reset --task "web research" --restriction
   $ tenjin config reset --task "web research" --restriction --dimension provider
   $ tenjin config reset --global --capabilities

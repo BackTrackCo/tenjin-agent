@@ -52,8 +52,7 @@ import {
   type KeptSpec,
 } from './specs';
 import { settingsRefusal, type SettingsRefusal } from './settings-check';
-import { hasRules, type WireSettings } from './settings-wire';
-import { SHOWN_REFUSALS, settingsBlockedLine } from './settings-blocked';
+import type { WireSettings } from './settings-wire';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   isAccountSpec,
@@ -929,15 +928,17 @@ async function requestTool(
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
-    // THE USER'S OWN SETTINGS LEFT NOTHING FOR THIS, or only an account map
-    // Tenjin has not checked: the server names the rule or the service in
-    // plain words, and the agent tells the user rather than change it.
-    if (decision.action === 'native' && SHOWN_REFUSALS.has(decision.diagnostics.reasonCode)) {
-      const result = fail('native', settingsBlockedLine(decision.diagnostics), {
-        diagnostics: decision.diagnostics,
-        ...(note !== undefined ? { note } : {}),
-      });
-      return result;
+    // ONLY AN ACCOUNT MAP TENJIN HAS NOT CHECKED fits this: the server names
+    // the service and the `request({tool})` that runs it when the user names
+    // it. The agent asked, so it is shown here; a hook never shows it.
+    if (decision.action === 'native' && decision.diagnostics.reasonCode === UNVERIFIED) {
+      const line = flat(decision.diagnostics.nextAction);
+      if (line.length > 0) {
+        return fail('native', line, {
+          diagnostics: decision.diagnostics,
+          ...(note !== undefined ? { note } : {}),
+        });
+      }
     }
     // Both non-execute arms carry diagnostics by construction now: an answer
     // without them does not parse, so there is nothing to fall back to here.
@@ -1019,13 +1020,9 @@ async function readToolList(
   if (args.browse !== undefined) {
     const listed = await requestBrowse(words, decisionDeps);
     if (listed.status !== 'decided') return listFailure(listed);
-    // A list is no offer, so it runs nothing to refuse; it only says when the
-    // router did not apply the user's rules to it.
-    const unfiltered =
-      sent !== undefined &&
-      listed.decision.settingsHash !== sent.hash &&
-      (hasRules(sent.policy) || listed.decision.settingsHash !== undefined);
-    return showRows(listed.decision.rows, unfiltered);
+    // THE AGENT IS ASKING, so every row it can run is listed: the user's rules
+    // govern only what Tenjin picks on its own.
+    return showRows(listed.decision.rows);
   }
   if (words.length === 0) {
     return fail('needs_input', '`tool` takes a row id from request({browse}).');
@@ -1076,23 +1073,26 @@ function listFailure(
 /** One plain line of the server's text, for a row shown to the model. */
 const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').trim();
 
+/**
+ * `unverified` (plan 37): every route for this step is a connected account's
+ * map Tenjin has not checked with a real call, which runs only when the user
+ * names it. Its `nextAction` names the service and the `request({tool})` that
+ * runs it.
+ */
+const UNVERIFIED = 'unverified';
+
 /** The rows as the model reads them: each tool's name, what it does, its
  *  price and the call that fetches its spec. */
-/** Said beside a list the router did not confirm it filtered by the user's rules. */
-export const UNFILTERED_LIST =
-  "Tenjin's router did not confirm it applied your Tenjin settings to this list, so it may name tools they rule out; any such tool is refused before it runs.";
-
-function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolResult {
+function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
     'Inspect a tool for free with request({tool: "<id>"}). ' +
     'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
-  const said = unfiltered ? { note: UNFILTERED_LIST } : {};
   if (rows.length === 0) {
     return {
       isError: false,
       summary:
         'No tool in the list fits those words. Browse with other words, or with "" for every tool by kind.',
-      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n), ...said },
+      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n) },
     };
   }
   const shown = rows.map((row) => ({
@@ -1106,7 +1106,6 @@ function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolRe
     isError: false,
     summary: [
       ...shown.map((row) => `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`),
-      ...(unfiltered ? [UNFILTERED_LIST] : []),
       nextStep,
     ].join('\n'),
     envelope: {
@@ -1114,7 +1113,6 @@ function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolRe
       rows: shown,
       nextStep,
       cost: costLines(0n),
-      ...said,
       providerContentUntrusted: true,
     },
   };

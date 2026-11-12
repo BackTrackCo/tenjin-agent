@@ -34,7 +34,6 @@ import {
 } from './decision';
 import { accountLacks } from './accounts/presence';
 import { keepDecided, takeDecided, type Decided } from './decided';
-import { settingsBlockedLine, SETTINGS_BLOCKED } from './settings-blocked';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -903,7 +902,7 @@ async function offerOnUserText(
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
-      ...injection(hookEventName, blockedLine(outcome, hostOf(deps))),
+      ...injection(hookEventName),
       ...(outcome !== null ? { action: outcome.action } : {}),
     };
   }
@@ -960,9 +959,6 @@ export interface NativeHookOutcome {
   free?: true;
   /** And its line is kept, for the after-call arm to show once the search ran. */
   noted?: true;
-  /** The user's settings left Tenjin nothing for this (`settings_blocked`):
-   *  the server's line naming the rule, for an arm that can show it. */
-  blocked?: string;
 }
 
 export interface ShortfallHookOutcome extends NativeHookOutcome {
@@ -1169,14 +1165,9 @@ async function routeNativeCall(
       : await servableHere(fromRecorded(recorded!, router, footer, deps), deps.dataDir);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
-    const blocked = blockedLine(outcome, hostOf(deps));
     return {
       offer: null,
-      outcome: {
-        response: null,
-        ...(outcome !== null ? { action: outcome.action } : {}),
-        ...(blocked !== undefined ? { blocked } : {}),
-      },
+      outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
     };
   }
   if (opts.passFree === true && isFree(outcome)) {
@@ -1709,13 +1700,7 @@ async function offerOnShortfall(
   }
   const routed = await routeNativeCall(event, pending, deps, { nativeOutcome });
   if (routed.offer === null) {
-    const { blocked } = routed.outcome;
-    if (blocked === undefined) return { ...routed.outcome, nativeOutcome };
-    return {
-      ...routed.outcome,
-      response: { hookSpecificOutput: { hookEventName: eventName, additionalContext: blocked } },
-      nativeOutcome,
-    };
+    return { ...routed.outcome, nativeOutcome };
   }
   return {
     response: {
@@ -1986,9 +1971,6 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
   if (decision.action === 'native' && decision.diagnostics.reasonCode === REQUIRES_UNMET) {
     return 'native tools (offer needs newer tenjin)';
   }
-  if (decision.action === 'native' && decision.diagnostics.reasonCode === SETTINGS_BLOCKED) {
-    return 'native tools (your settings)';
-  }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }
@@ -2109,17 +2091,6 @@ function decidedUnder(
     'tenjin hook: the router did not confirm it applied your Tenjin settings, so no lookup is offered',
   );
   return false;
-}
-
-/**
- * The line a `settings_blocked` answer is shown as, attributed, else nothing.
- * An `unverified` answer is never shown on a hook: the agent did not ask, so
- * it reads as plain native. Only a request-tool result shows it.
- */
-function blockedLine(decision: HookDecision | null, host: Harness): string | undefined {
-  if (decision?.action !== 'native' || decision.diagnostics.reasonCode !== SETTINGS_BLOCKED)
-    return undefined;
-  return attributed(settingsBlockedLine(decision.diagnostics), host);
 }
 
 /**

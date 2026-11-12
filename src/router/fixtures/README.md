@@ -197,15 +197,18 @@ true`, each omitted when empty or off. A scope is `{kind: "global"}`, a
 {version, policy, replacement, sources}))`, keys sorted at every depth, no
   whitespace, arrays in order. The server never recomputes it.
 
+The rules govern only what Tenjin picks on its own: hook offers and the
+service picked for a `{query}`. `{browse}`, `{tool}`, `{tool, query}` and a
+spec read by its id run whatever they say.
+
 An answer to a client that sends `settings` lists it in `honored` when the
 server applied them, and then carries the request's hash verbatim as
 top-level `settingsHash` (hook, lookup and browse answers). The client keeps
 it with every spec and quote, and refuses any call whose hash differs from
 the rules saved now, or that has none while a rule is saved, before provider
-HTTP or signing; it never routes again on its own. A recognized task the
-rules leave nothing for is `native` with `diagnostics.reasonCode`
-`settings_blocked`, `missing: []`, and a `nextAction` naming the rule, which
-the client shows the agent.
+HTTP or signing; it never routes again on its own. When the rules leave Tenjin
+nothing to pick on its own, the answer is the ordinary `native` one, with
+nothing said about them.
 
 `bound: {id, input}` rides a hook `execute` or `discovered` for a pending
 WebSearch or WebFetch only while `replacement.mode` is `when-routed`, the pick
@@ -514,11 +517,10 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-hook-request-settings.json`          | the native hook from a `settings` client: rules, automatic use, sources and their hash         |
 | `wire-hook-execute-settings.json`          | hook answer under those settings: `honored` and the echoed `settingsHash`                      |
 | `wire-hook-execute-bound.json`             | the same offer for a pending search with automatic use on: `bound`, the id and its input       |
-| `wire-hook-native-settings-blocked.json`   | hook answer when the rules leave nothing: `settings_blocked` and the rule in `nextAction`      |
 | `wire-tool-request-by-id-settings.json`    | a browse row's id sent as `tool` with `settings`                                               |
 | `wire-lookup-spec-settings.json`           | tool answer for it: the row's spec with the echoed `settingsHash`                              |
 | `wire-browse-request-settings.json`        | a browse of the tool list with `settings`                                                      |
-| `wire-browse-settings.json`                | the browse answer filtered by them, with the echoed `settingsHash`                             |
+| `wire-browse-settings.json`                | the browse answer: every row the client can run, unfiltered by them, with the echoed hash      |
 | `wire-identities-request.json`             | the free identities read                                                                       |
 | `wire-identities.json`                     | its answer: every id a setting can name, with its label                                        |
 | `wire-hook-request-account.json`           | the prompt hook from a machine with Apify, fal and Firecrawl connected: `mcp`, their `sources` |

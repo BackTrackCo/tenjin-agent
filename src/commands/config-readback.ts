@@ -32,6 +32,11 @@ import { pidAlive, readObservations, type RouterObservation } from '../router/ro
  * Display only. What a rule covers is named from the router's identities
  * read (`identities.ts`); the server decides what it covers each time it
  * decides. With no identities at hand (offline), a rule is named by its ids.
+ *
+ * A RULE GOVERNS WHAT TENJIN PICKS ON ITS OWN: its hook offers and the
+ * service it picks for a query. A tool the user or agent asks for by name
+ * runs whatever the rules say, and every readback of a block or an only rule
+ * says so.
  */
 
 /** Said beside every saved routing rule. */
@@ -124,7 +129,7 @@ function scopeRuledOut(
   const block = blockedBy({ kind: scope.kind, id: scope.id }, policy, identities);
   const where = labelOf({ kind: scope.kind, id: scope.id }, identities);
   if (block !== undefined)
-    return `inactive: ${labelOf(block, identities)} is blocked, so Tenjin doesn't handle ${where}`;
+    return `inactive: ${labelOf(block, identities)} is blocked, so Tenjin doesn't offer ${where} on its own`;
   if (scope.kind !== 'task') return undefined;
   const capability = (policy.only ?? []).find(
     (rule) => rule.scope.kind === 'global' && rule.dimension === 'capability',
@@ -138,7 +143,9 @@ function scopeRuledOut(
           ({ id, tasks }) => id === target.id && tasks.includes(scope.id),
         ) === true),
   );
-  return allowed ? undefined : `inactive: your settings don't let Tenjin handle ${where}`;
+  return allowed
+    ? undefined
+    : `inactive: your settings keep Tenjin from offering ${where} on its own`;
 }
 
 function goneNote(targets: readonly Target[], identities: Identities | undefined) {
@@ -168,7 +175,10 @@ function coversLine(services: readonly { label: string }[]): string {
 
 /** The warning `block --source tenjin` reads back with: what stops, and what is left. */
 export const TENJIN_TOOLS_OFF =
-  "Tenjin's own tools are off, including free ones like the docs lookup, and saved or direct calls to them. Tenjin still picks among your connected accounts, and anything they can't do goes back to your agent's own tools.";
+  "Tenjin won't offer its own tools on its own any more, free ones like the docs lookup included. It still picks among your connected accounts, and anything they can't do goes back to your agent's own tools. You can still ask for one of Tenjin's tools by name.";
+
+/** Said with every block: it stops Tenjin's own picks, never a call by name. */
+const BY_NAME = 'You can still ask for it by name.';
 
 /**
  * A BLOCK IN THE USER'S WORDS. `accounts` names the accounts connected here,
@@ -185,28 +195,28 @@ export function describeBlock(
   switch (target.kind) {
     case 'category': {
       const tasks = tasksOf(target.id, identities);
-      text = `Tenjin can't handle anything in ${label}${tasks.length > 0 ? ` (${named(tasks)})` : ''}, including tasks added there later. Your agent's own tools are outside this setting.`;
+      text = `Tenjin won't offer anything in ${label}${tasks.length > 0 ? ` (${named(tasks)})` : ''} on its own, including tasks added there later. You can still ask for one by name, and your agent's own tools are outside this setting.`;
       break;
     }
     case 'task':
-      text = `Tenjin can't handle ${label}, whichever service could. Your agent's own tools are outside this setting.`;
+      text = `Tenjin won't offer ${label} on its own, whichever service could do it. ${BY_NAME} Your agent's own tools are outside this setting.`;
       break;
     case 'provider':
-      text = `${label} is blocked, including reviewed reseller routes identified as using it.${coversLine(services)} A service whose provider Tenjin can't confirm is left out while this block stands.`;
+      text = `Tenjin won't offer ${label} on its own, including reviewed reseller routes identified as using it.${coversLine(services)} A service whose provider Tenjin can't confirm is left out of its own picks too. You can still ask for one by name.`;
       break;
     case 'seller':
-      text = `${label} is blocked as a seller; the same provider sold by someone else stays available.${coversLine(services)}`;
+      text = `Tenjin won't offer ${label} as a seller on its own; the same provider sold by someone else stays available.${coversLine(services)} ${BY_NAME}`;
       break;
     case 'service':
-      text = `${label} is blocked.`;
+      text = `Tenjin won't offer ${label} on its own. ${BY_NAME}`;
       break;
     case 'source':
       text =
         target.id === BUILT_IN_SOURCE
           ? accounts.length > 0
             ? `${TENJIN_TOOLS_OFF} Your connected ${accounts.length === 1 ? 'account is' : 'accounts are'} ${list.format(accounts)}.`
-            : `${TENJIN_TOOLS_OFF} You have no connected accounts yet, so for now every job goes back to your agent's own tools.`
-          : `Your ${label} account is blocked: Tenjin won't use it.`;
+            : `${TENJIN_TOOLS_OFF} You have no connected accounts yet, so for now Tenjin offers nothing on its own.`
+          : `Tenjin won't offer your ${label} account on its own. ${BY_NAME}`;
       break;
   }
   const gone = goneNote([target], identities);
@@ -243,12 +253,12 @@ export function describeOnly(
     const tasks = rule.targets.flatMap((target) =>
       target.kind === 'category' ? tasksOf(target.id, identities) : [labelOf(target, identities)],
     );
-    text = `Tenjin may handle ${names} only, including newly added reviewed services there.${tasks.length > 0 ? ` That covers ${named([...new Set(tasks)])}.` : ''} This limits which tasks Tenjin does anywhere; your other blocks and spending limits still apply.`;
+    text = `Tenjin offers tools on its own only for ${names}, including newly added reviewed services there.${tasks.length > 0 ? ` That covers ${named([...new Set(tasks)])}.` : ''} You can still ask for any other tool by name. Your other blocks and spending limits still apply.`;
   } else if (rule.scope.kind === 'global') {
-    text = `Tenjin may use only ${names} as its ${noun}, for every task. ${unmet} Tenjin explains rather than use another ${noun}.`;
+    text = `When Tenjin picks on its own, it picks only ${names} as its ${noun}, for every task. ${unmet} Tenjin offers nothing rather than another ${noun}. You can still ask for any ${noun} by name.`;
   } else {
     const where = labelOf({ kind: rule.scope.kind, id: rule.scope.id }, identities);
-    text = `When Tenjin handles ${where}, it can use only ${names}. ${unmet} Tenjin explains rather than use another ${noun}. Other tasks are unaffected.`;
+    text = `When Tenjin picks a service for ${where} on its own, it picks only ${names}. ${unmet} Tenjin offers nothing rather than another ${noun}. Other tasks are unaffected, and you can still ask for any service by name.`;
   }
   const blocked = rule.targets.filter(
     (target) => blockedBy(target, policy, identities) !== undefined,
@@ -257,7 +267,7 @@ export function describeOnly(
   const inactive =
     scopeRuledOut(rule.scope, policy, identities) ??
     (blocked.length === rule.targets.length
-      ? `unsatisfiable: everything it allows is blocked, so Tenjin refuses what it covers`
+      ? `unsatisfiable: everything it allows is blocked, so Tenjin offers nothing on its own for what it covers`
       : gone !== undefined
         ? `partly inactive: ${gone}`
         : undefined);
