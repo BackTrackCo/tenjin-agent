@@ -127,7 +127,30 @@ describe('the state contract between the CLI and the mod', () => {
     });
   });
 
-  it('names exactly these four files', () => {
-    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'label', 'offer']);
+  /** The swap's marks: answered in place, and handed back with no offer id,
+   *  which the mod reads as nothing of its own. */
+  it('marks a call the swap answered in place, and one it handed back', async () => {
+    const { markHandedBack } = await import('./progress');
+    await markOffered(
+      dir,
+      'sess-1',
+      'toolu_1',
+      { offerId: ID, priceAtomic: '7000', swap: true },
+      1,
+    );
+    const path = `progress/${sha256('sess-1')}/offer-${sha256('toolu_1')}.json`;
+    expect(await json(path)).toEqual({
+      version: 1,
+      at: 1,
+      offerId: ID,
+      priceAtomic: '7000',
+      swap: true,
+    });
+    await markHandedBack(dir, 'sess-1', 'toolu_1', 2);
+    expect(await json(path)).toEqual({ version: 1, at: 2 });
+  });
+
+  it('names exactly these five files', () => {
+    expect(MOD_STATE_FILES).toEqual(['spec', 'choices', 'label', 'offer', 'config']);
   });
 });

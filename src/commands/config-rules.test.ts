@@ -77,7 +77,9 @@ const online = (identities: unknown = WITH_FAL) => ({
   }) as typeof fetch,
 });
 const offline = {
-  cwd: dir,
+  get cwd() {
+    return dir;
+  },
   fetchImpl: (async () => {
     throw new TypeError('fetch failed');
   }) as unknown as typeof fetch,

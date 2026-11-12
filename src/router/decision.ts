@@ -615,6 +615,13 @@ const IdentitiesResponseSchema = z.object({
 });
 export type IdentitiesResponse = z.infer<typeof IdentitiesResponseSchema>;
 
+/** A hook answer reread from disk (`decided.ts`), held to the same schema as
+ *  the router's: anything else reads as absent. */
+export function parseHookResponse(value: unknown): HookResponse | undefined {
+  const parsed = HookResponseSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
 export type HookDecision = HookResponse['decision'];
