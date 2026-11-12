@@ -249,9 +249,10 @@ connecting or disconnecting refuses every offer decided before it.
   the hook offers nothing.
 - **The re-ask** follows an account's refusal, or a job of its that failed:
   the client's usual envelope with `refused`, the refused offer's id, and no
-  query, on the paid route. The router routes that offer's own turn again with
-  the account left out for this one answer, under the settings sent, and
-  answers as it answers a query: `wire-refused-offer.json` while the offer's
+  query, on the paid route. The router routes that offer's own turn again on
+  Tenjin's own tools alone (`settings.sources` is only `tenjin` for this one
+  answer, so no connected account answers it), under the rest of the settings
+  sent, and answers as it answers a query: `wire-refused-offer.json` while the offer's
   row is live (Tenjin's Firecrawl page read under a fresh id, with the hash the
   client sent), `wire-refused-native.json` after it is gone.
 - **`unverified`** is the `native` refusal for a step whose only routes the
