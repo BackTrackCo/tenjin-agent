@@ -154,6 +154,11 @@ describe('unpaidSentence', () => {
     }
   });
 
+  it('says nothing for a deposit the background top-up has not made yet', () => {
+    expect(unpaidSentence('topping_up')).toBeNull();
+    expect(unpaidSentence('deposit_deferred')).toBeNull();
+  });
+
   it('names the ceiling in the deposit line, the bound every later call keeps', () => {
     expect(depositSentence(CHANNEL_DEPOSIT_ATOMIC)).toBe(
       'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',

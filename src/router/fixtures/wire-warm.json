@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-29.2",
+  "warm": true,
+  "honored": ["schemaVersion", "warm", "accepts", "harness"]
+}
