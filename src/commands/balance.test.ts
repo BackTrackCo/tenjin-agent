@@ -13,7 +13,24 @@ vi.mock('../lib/usdc', () => ({
   getUsdcBalance: vi.fn(),
 }));
 
+// THE BALANCE IS READ THROUGH THE PUBLIC-RPC FALLBACK (`balanceReader`), which
+// here asks the one per-RPC reader mocked above, so no test reads a chain.
+vi.mock('../lib/usdc-balance', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../lib/usdc-balance')>();
+  const { getUsdcBalance: read } = await import('../lib/usdc');
+  return {
+    ...orig,
+    readUsdcBalanceWithFallback: vi.fn(async (address: string) =>
+      (read as unknown as (address: string, rpcUrl: string) => Promise<bigint>)(
+        address,
+        orig.DEFAULT_RPC_URL,
+      ).catch(() => null),
+    ),
+  };
+});
+
 import { getUsdcBalance } from '../lib/usdc';
+import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import { runBalance } from './balance';
 import { recallLink, rememberLink } from './fund-watch';
 
@@ -109,5 +126,52 @@ describe('tenjin balance --wait', () => {
     expect((err as CliError).exitCode).not.toBe(0);
     expect((err as CliError).message).toContain('No funds arrived in 1 minute. Nothing went wrong');
     expect((err as CliError).details).toMatchObject({ arrived: false });
+  });
+});
+
+describe('tenjin balance, read through the public-RPC fallback', () => {
+  /** An RPC answering `balanceOf`, or failing, by its URL. */
+  function rpcs(answers: Record<string, bigint | null>) {
+    const asked: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      asked.push(url);
+      const atomic = answers[url];
+      if (atomic === undefined || atomic === null) return new Response('{}', { status: 503 });
+      const word = `0x${atomic.toString(16).padStart(64, '0')}`;
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: word }));
+    }) as typeof fetch;
+    return { fetchImpl, asked };
+  }
+
+  it('retries a public Base RPC when the default one fails, and never past one the user set', async () => {
+    // Review round 1 (O1): status and balance read the configured RPC alone,
+    // so a busy default RPC made `tenjin balance` fail where a lookup's read
+    // would have answered.
+    const actual =
+      await vi.importActual<typeof import('../lib/usdc-balance')>('../lib/usdc-balance');
+    // The real fallback, for this test's two reads.
+    vi.mocked(readUsdcBalanceWithFallback)
+      .mockImplementationOnce(actual.readUsdcBalanceWithFallback)
+      .mockImplementationOnce(actual.readUsdcBalanceWithFallback);
+    const net = rpcs({
+      [actual.DEFAULT_RPC_URL]: null,
+      [actual.FALLBACK_RPC_URLS[0]!]: 5_000_000n,
+    });
+    const { balanceReader } = await import('./balance');
+    const reader = await balanceReader(ctx(), { provider, rpcFetchImpl: net.fetchImpl });
+    expect(await reader.read()).toBe(5_000_000n);
+    expect(net.asked).toEqual([actual.DEFAULT_RPC_URL, actual.FALLBACK_RPC_URLS[0]]);
+    // An RPC the user set is the only one asked.
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(
+      join(dataDir, 'config.json'),
+      JSON.stringify({ rpcUrl: 'https://rpc.example.test' }),
+    );
+    const own = rpcs({ [actual.FALLBACK_RPC_URLS[0]!]: 5_000_000n });
+    const mine = await balanceReader(ctx(), { provider, rpcFetchImpl: own.fetchImpl });
+    const err = await mine.read().catch((e: unknown) => e);
+    expect((err as CliError).code).toBe('RPC_ERROR');
+    expect(own.asked).toEqual(['https://rpc.example.test']);
   });
 });

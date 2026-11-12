@@ -16,6 +16,22 @@ vi.mock('../lib/usdc', () => ({
   getUsdcBalance: vi.fn(),
 }));
 
+// THE BALANCE IS READ THROUGH THE PUBLIC-RPC FALLBACK (`balanceReader`), which
+// here asks the one per-RPC reader mocked above, so no test reads a chain.
+vi.mock('../lib/usdc-balance', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../lib/usdc-balance')>();
+  const { getUsdcBalance: read } = await import('../lib/usdc');
+  return {
+    ...orig,
+    readUsdcBalanceWithFallback: vi.fn(async (address: string) =>
+      (read as unknown as (address: string, rpcUrl: string) => Promise<bigint>)(
+        address,
+        orig.DEFAULT_RPC_URL,
+      ).catch(() => null),
+    ),
+  };
+});
+
 import { getUsdcBalance } from '../lib/usdc';
 import { runFund, type FundOptions } from './fund';
 import { runBalance } from './balance';

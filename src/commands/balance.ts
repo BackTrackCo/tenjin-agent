@@ -3,7 +3,7 @@ import { liveLine, type LiveLine } from '../lib/live-line';
 import { toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
-import { getUsdcBalance } from '../lib/usdc';
+import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import {
   describeWallet,
   resolveWalletProvider,
@@ -43,28 +43,33 @@ export interface BalanceOptions extends ResolveWalletProviderOptions {
   live?: LiveLine;
 }
 
+/** How long one balance read may take, across the RPCs it may ask. */
+export const BALANCE_READ_MS = 5_000;
+
 /**
  * THE BALANCE, READ THE ONE WAY: this wallet's address and the USDC it holds
- * on Base, through the configured RPC. `tenjin balance` and `tenjin status`
- * both read it here, so the two never disagree. Throws `RPC_ERROR` on a read
- * that did not answer.
+ * on Base. `tenjin balance` and `tenjin status` both read it here, so the two
+ * never disagree. It reads the configured RPC and, only when that is the
+ * default one, retries the public Base RPCs a lookup falls back to
+ * (`readUsdcBalanceWithFallback`); an RPC the user set is the only one asked.
+ * Throws `RPC_ERROR` on a read none of them answered.
  */
 export async function balanceReader(
   ctx: CommandContext,
-  opts: ResolveWalletProviderOptions = {},
+  opts: ResolveWalletProviderOptions & { rpcFetchImpl?: typeof fetch } = {},
 ): Promise<{ address: `0x${string}`; read: () => Promise<bigint> }> {
   const provider = resolveWalletProvider(ctx, opts);
   const desc = await describeWallet(provider);
   const { rpcUrl } = await resolveContextSettings(ctx);
   const read = async (): Promise<bigint> => {
-    try {
-      return await getUsdcBalance(desc.address, rpcUrl);
-    } catch (err) {
-      throw new CliError('RPC_ERROR', `Could not read the USDC balance from ${rpcUrl}.`, {
-        fix: 'Check your network, or set a working RPC with `tenjin config set rpcUrl <url>`.',
-        cause: err,
-      });
-    }
+    const atomic = await readUsdcBalanceWithFallback(desc.address, rpcUrl, {
+      timeoutMs: BALANCE_READ_MS,
+      ...(opts.rpcFetchImpl !== undefined ? { fetchImpl: opts.rpcFetchImpl } : {}),
+    });
+    if (atomic !== null) return atomic;
+    throw new CliError('RPC_ERROR', `Could not read the USDC balance from ${rpcUrl}.`, {
+      fix: 'Check your network, or set a working RPC with `tenjin config set rpcUrl <url>`.',
+    });
   };
   return { address: desc.address, read };
 }
