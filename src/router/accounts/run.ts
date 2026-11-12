@@ -23,6 +23,7 @@ import {
 } from '../specs';
 import { openLookupFooter, type LookupFooter } from '../progress';
 import {
+  costLines,
   deliverResult,
   fail,
   paidRecord,
@@ -160,16 +161,18 @@ export function ranNothing({ envelope }: RequestToolResult): boolean {
  * reached the account's job with no result to show it billed (still running,
  * failed after the job started, or answered with the account's own error),
  * so its plan may have charged for it; "nothing charged" is only for a call
- * that never reached the account's job.
+ * that never reached the account's job. `routed`: a re-ask went to the paid
+ * route, so the cost line says what any routing answer says, and never that
+ * nothing was charged.
  */
 export function accountResult(
   status: FailStatus,
   summary: string,
   reason: string,
   label: string,
-  extras: FailExtras & { extra?: Json; ran?: 'maybe' },
+  extras: FailExtras & { extra?: Json; ran?: 'maybe'; routed?: boolean },
 ): RequestToolResult {
-  const { extra, ran, ...rest } = extras;
+  const { extra, ran, routed, ...rest } = extras;
   const base = fail(status, reason, rest);
   return {
     ...base,
@@ -178,8 +181,14 @@ export function accountResult(
       ...base.envelope,
       cost:
         ran === 'maybe'
-          ? [`your ${label} plan may have charged for this, not the Tenjin balance`]
-          : ['nothing charged'],
+          ? [
+              routed === true
+                ? `your ${label} plan may have charged for this`
+                : `your ${label} plan may have charged for this, not the Tenjin balance`,
+            ]
+          : routed === true
+            ? costLines(0n)
+            : ['nothing charged'],
       ...extra,
     },
   };
@@ -220,17 +229,19 @@ export type RouteDeps = ReportDeps & { acceptsBazaar?: boolean };
  * this one answer (`{refused}`, {@link requestRefused}), under the settings
  * saved now, on the paid route like any answer. An offer back is kept as the
  * one made in that offer's place ({@link runInPlaceOf}) and returned.
- * Anything else (native, a skip, a failure, another account's map) is null:
- * the refusal stands as the account's own error. Never throws.
+ * Anything else (native, a skip, a failure, another account's map) is no
+ * offer: the refusal stands as the account's own error. `routed`: the re-ask
+ * went out and was not skipped, so its routing fee may have been paid. Never
+ * throws.
  */
 async function reask(
   refused: string,
   deps: RequestToolDeps,
   routing: RouteDeps,
-): Promise<KeptSpec | null> {
+): Promise<{ offer: KeptSpec | null; routed: boolean }> {
   const { dataDir } = deps.ctx;
   const here = await personalSettingsAt(dataDir).catch(() => undefined);
-  if (here?.wire.status !== 'ok') return null;
+  if (here?.wire.status !== 'ok') return { offer: null, routed: false };
   const route = deps.route?.(routing.baseUrl);
   const answer = await requestRefused(refused, {
     ctx: deps.ctx,
@@ -241,12 +252,13 @@ async function reask(
     ...(routing.fetchImpl !== undefined ? { fetchImpl: routing.fetchImpl } : {}),
     ...(route !== undefined ? { route } : {}),
   }).catch(() => null);
-  if (answer?.status !== 'decided') return null;
+  const routed = answer?.status !== 'skipped';
+  if (answer?.status !== 'decided') return { offer: null, routed };
   const { decision, settingsHash } = answer.decision;
-  if (decision.action !== 'spec' || isAccountSpec(decision.spec)) return null;
+  if (decision.action !== 'spec' || isAccountSpec(decision.spec)) return { offer: null, routed };
   const offer: OfferSpec = { ...decision.spec, id: decision.id };
   await storeSpecs(dataDir, [offer], settingsHash, { replaces: refused });
-  return { ...offer, ...(settingsHash !== undefined ? { settingsHash } : {}) };
+  return { offer: { ...offer, ...(settingsHash !== undefined ? { settingsHash } : {}) }, routed };
 }
 
 /**
@@ -408,11 +420,12 @@ export async function offerAccountLead(
   }
   const account = await accountOf(lead, dataDir);
   const words = refusalWords('missing', account, undefined);
-  const offer = await reask(lead.id, deps, routing);
+  const { offer, routed } = await reask(lead.id, deps, routing);
   if (offer === null) {
     const reason = `${words.said} Nothing was sent.`;
     return accountResult('native', reason, reason, account.label, {
       nextStep: `Continue with your own tools. ${words.fix}`,
+      routed,
     });
   }
   const shown = showSpec(offer.id, offer);
@@ -644,9 +657,9 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       await footer.done('failed', { ...shownOf(at), price: 'your account' });
       // THE RE-ASK, offered for the user to pick, never run in its place:
       // the account may already have billed for this job.
-      const offered = await reask(id, at.deps, at.reportDeps);
+      const { offer: offered, routed } = await reask(id, at.deps, at.reportDeps);
       const offer = offered !== null ? offerWords(offered) : undefined;
-      const reason = `Your ${account.label} account ran this, but ${run.why}. It may have billed your ${account.label} plan; nothing was charged to your Tenjin balance.`;
+      const reason = `Your ${account.label} account ran this, but ${run.why}. It may have billed your ${account.label} plan.`;
       return accountResult(
         'failed',
         `${reason}${offer !== undefined ? ` ${offer.said}\n\n${specText(offered!.id, offered!)}` : ''}`,
@@ -657,6 +670,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
           nextStep: `Tell the user it may have run on their ${account.label} account; don't call it again for this.${offer !== undefined ? ` ${offer.next}` : ''}`,
           parameters: sentInput,
           ran: 'maybe',
+          routed,
           ...(offer !== undefined ? { extra: offer.envelope } : {}),
         },
       );
@@ -801,11 +815,11 @@ async function refusal(
     reason: reason === 'unreachable' ? 'unreachable' : reason === 'missing' ? 'terms' : 'provider',
   });
   const words = refusalWords(reason, account, detail);
-  const nothing = sent
-    ? 'Nothing was charged to your Tenjin balance.'
-    : `Nothing was sent to your ${account.label} account, and nothing was charged.`;
   const answered = opts.answered === true;
-  const offer = reason === 'not_connected' ? null : await reask(at.id, at.deps, at.reportDeps);
+  const { offer, routed } =
+    reason === 'not_connected'
+      ? { offer: null, routed: false }
+      : await reask(at.id, at.deps, at.reportDeps);
   const switchable =
     !answered &&
     at.deps.via === undefined &&
@@ -836,7 +850,11 @@ async function refusal(
   // Nothing ran on either: the id is free for a retry after the fix.
   await settleRefused(at, false);
   await footer.done('needs_input', shownOf(at));
-  const text = `${words.said} ${nothing}`;
+  // What the account said, and, when the call never reached it, that nothing
+  // was sent: never a claim about charges, since the re-ask may have paid.
+  const text = sent
+    ? words.said
+    : `${words.said} Nothing was sent to your ${account.label} account.`;
   const refused = { account: account.label, reason, reconnect: `tenjin connect ${account.id}` };
   if (switchable && fitted === undefined) {
     // OPTED IN, BUT THE OFFER TAKES OTHER INPUTS: the agent fills them from
@@ -850,6 +868,7 @@ async function refusal(
       {
         nextStep: `The user chose Tenjin's tool for when ${account.label} refuses: call request({id: ${fid}, input: {...}}) now with the inputs above, without asking. ${words.fix}`,
         parameters: at.sentInput,
+        routed,
         extra: { refused, ...offerWords(offer).envelope, switching: true },
       },
     );
@@ -868,6 +887,7 @@ async function refusal(
       parameters: at.sentInput,
       ...(answered && detail !== undefined ? { providerError: detail } : {}),
       ...(answered ? { ran: 'maybe' as const } : {}),
+      routed,
       extra: { refused, ...(named?.envelope ?? {}) },
     },
   );

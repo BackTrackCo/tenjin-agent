@@ -603,9 +603,10 @@ describe('when the job fails after it started', () => {
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(session.tools()).toEqual(['call-actor', 'get-actor-run']);
     expect(result.envelope).toMatchObject({ status: 'failed' });
-    expect(result.envelope.cost).toEqual([
-      'your Apify plan may have charged for this, not the Tenjin balance',
-    ]);
+    // Owner wording (A1igator round 2): it says what may have billed, and
+    // nothing about the Tenjin balance, which the re-ask's routing may draw on.
+    expect(result.summary).toMatch(/It may have billed your Apify plan\.$/);
+    expect(result.envelope.cost).toEqual(['your Apify plan may have charged for this']);
     expect(await readPaidRecords(dir)).toMatchObject([
       { source: 'apify', settlement: 'account', charge: 'unknown' },
     ]);
@@ -667,12 +668,14 @@ describe('when the account refuses', () => {
     expect(result.isError).toBe(false);
     expect(result.summary).toMatch(
       new RegExp(
-        `^Your Apify sign-in has expired\\. Nothing was sent to your Apify account, and nothing was charged\\. Reconnect with \`tenjin connect apify\`\\. Tenjin has Firecrawl page read for \\$0\\.015: request\\(\\{id: "${REPLACEMENT.id}", input\\}\\) to run it\\.\\n`,
+        `^Your Apify sign-in has expired\\. Nothing was sent to your Apify account\\. Reconnect with \`tenjin connect apify\`\\. Tenjin has Firecrawl page read for \\$0\\.015: request\\(\\{id: "${REPLACEMENT.id}", input\\}\\) to run it\\.\\n`,
       ),
     );
     expect(result.envelope).toMatchObject({
       status: 'needs_input',
-      cost: ['nothing charged'],
+      // The re-ask went to the paid route: its cost line is any routing
+      // answer's, never "nothing charged".
+      cost: ['provider price 0 USD'],
       refused: { account: 'Apify', reason: 'signin_expired', reconnect: 'tenjin connect apify' },
       offer: { id: REPLACEMENT.id, label: 'Firecrawl page read', price: '$0.015' },
     });
@@ -770,8 +773,9 @@ describe('when the account refuses', () => {
     const { fetchImpl } = network();
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(result.summary).toMatch(
-      /^Your Apify account's plan or credit has run out\. Nothing was charged to your Tenjin balance\./,
+      /^Your Apify account's plan or credit has run out\. Add credit or change the plan at Apify\./,
     );
+    expect(result.summary).not.toMatch(/charged/);
     expect(result.envelope).toMatchObject({ refused: { reason: 'credit' } });
     expect(session.tools()).toEqual(['call-actor']);
   });
@@ -790,9 +794,7 @@ describe('when the account refuses', () => {
     });
     // Review: an answer reached the account, so its charge is unknown, never
     // "nothing charged", and the call is on the ledger.
-    expect(result.envelope.cost).toEqual([
-      'your Apify plan may have charged for this, not the Tenjin balance',
-    ]);
+    expect(result.envelope.cost).toEqual(['your Apify plan may have charged for this']);
     expect(await readPaidRecords(dir)).toMatchObject([
       { source: 'apify', settlement: 'account', charge: 'unknown' },
     ]);
@@ -898,7 +900,7 @@ describe('when the account refuses', () => {
     expect(result.envelope).toMatchObject({ refused: { reason: 'signin_expired' } });
     expect(result.envelope).not.toHaveProperty('offer');
     expect(result.summary).toBe(
-      'Your Apify sign-in has expired. Nothing was sent to your Apify account, and nothing was charged. Reconnect with `tenjin connect apify`.',
+      'Your Apify sign-in has expired. Nothing was sent to your Apify account. Reconnect with `tenjin connect apify`.',
     );
   });
 
