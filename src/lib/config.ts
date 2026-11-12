@@ -5,6 +5,19 @@ import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
 import { DEFAULT_RPC_URL } from './usdc-balance';
+import {
+  OnlyRuleSchema,
+  POLICY_VERSION,
+  PreferRuleSchema,
+  REPLACEMENT_MODES,
+  ReplacementProvidersSchema,
+  SETTINGS_LIMITS,
+  TargetSchema,
+  policyProblems,
+  type ReplacementMode,
+  type SavedPolicy,
+  type Target,
+} from '../router/settings-wire';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
 const atomicString = z.string().regex(/^\d+$/, 'expected an atomic USDC integer string');
@@ -37,6 +50,86 @@ export type RouterLayer = z.infer<typeof RouterLayerSchema>;
  */
 const RouterGlobalSchema = RouterLayerSchema.extend({ improve: z.boolean().optional() });
 const RouterConfigSchema = RouterGlobalSchema.required();
+
+/**
+ * THE SAVED `router.policy` (plan 36): what Tenjin may use, what it tries
+ * first, and whether it offers paid tools that are only faster. The global
+ * file's alone, like `improve`: a project file never reads it, so a cloned
+ * repository cannot change what Tenjin may use on this machine. An emptied
+ * collection is allowed and means no rules (a reset can leave one); an empty
+ * target list is not. Every check beyond shape is {@link policyProblems}.
+ */
+export const SavedPolicyShapeSchema = z.strictObject({
+  version: z.number().int(),
+  block: z.array(TargetSchema).max(SETTINGS_LIMITS.block).optional(),
+  only: z.array(OnlyRuleSchema).max(SETTINGS_LIMITS.only).optional(),
+  prefer: z.array(PreferRuleSchema).max(SETTINGS_LIMITS.prefer).optional(),
+  preferSpeed: z.boolean().optional(),
+});
+export const SavedPolicySchema = SavedPolicyShapeSchema.superRefine((policy, ctx) => {
+  if (policy.version !== POLICY_VERSION) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['version'],
+      message: `version ${policy.version} is not one this build reads (${POLICY_VERSION})`,
+    });
+  }
+  for (const { message, path } of policyProblems(policy))
+    ctx.addIssue({ code: 'custom', message, path });
+});
+
+/**
+ * The global file's personal router keys, read one by one and never through
+ * {@link RawConfigSchema}: a hand edit this build cannot read fails only what
+ * reads rules (fail closed), while `tenjin config`, pause and reset keep
+ * working on the rest of the file.
+ */
+export interface PersonalRouter {
+  policy:
+    | { status: 'none' }
+    | { status: 'ok'; saved: SavedPolicy }
+    | { status: 'invalid'; problem: string };
+  /** An unreadable mode or scope reads as off: never on by accident. */
+  nativeReplacement: { mode: ReplacementMode; providers?: Target[]; problem?: string };
+}
+
+function firstProblem(key: string, error: z.ZodError): string {
+  const [issue] = error.issues;
+  const path = [key, ...(issue?.path ?? []).map(String)].join('.');
+  return `${path}: ${issue?.message ?? 'invalid'}`;
+}
+
+const ReplacementModeSchema = z.enum(REPLACEMENT_MODES).optional();
+
+export function readPersonalRouter(router: unknown): PersonalRouter {
+  const block =
+    router !== null && typeof router === 'object' ? (router as Record<string, unknown>) : {};
+  const policy = block.policy === undefined ? undefined : SavedPolicySchema.safeParse(block.policy);
+  const mode = ReplacementModeSchema.safeParse(block.nativeReplacement);
+  const providers = ReplacementProvidersSchema.optional().safeParse(
+    block.nativeReplacementProviders,
+  );
+  const problem = !mode.success
+    ? firstProblem('router.nativeReplacement', mode.error)
+    : !providers.success
+      ? firstProblem('router.nativeReplacementProviders', providers.error)
+      : undefined;
+  return {
+    policy:
+      policy === undefined
+        ? { status: 'none' }
+        : policy.success
+          ? { status: 'ok', saved: policy.data }
+          : { status: 'invalid', problem: firstProblem('router.policy', policy.error) },
+    nativeReplacement:
+      problem !== undefined
+        ? { mode: 'off', problem }
+        : {
+            mode: mode.data ?? 'off',
+            ...(providers.data !== undefined ? { providers: providers.data } : {}),
+          },
+  };
+}
 
 /**
  * The `router` block of one project file's parsed JSON, and nothing else: an
@@ -174,7 +267,16 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     install: InstallConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
-    router: RouterGlobalSchema.passthrough().optional(),
+    // The personal keys ride as data here and are read by
+    // `readPersonalRouter`, so one this build cannot read never makes the
+    // whole file unreadable.
+    router: RouterGlobalSchema.extend({
+      policy: z.unknown().optional(),
+      nativeReplacement: z.unknown().optional(),
+      nativeReplacementProviders: z.unknown().optional(),
+    })
+      .passthrough()
+      .optional(),
     experimental: ExperimentalConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
@@ -269,9 +371,39 @@ export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
 export const EXPERIMENTAL_CONFIG_KEYS = ['experimental.bazaar'] as const;
 export type ExperimentalConfigKey = (typeof EXPERIMENTAL_CONFIG_KEYS)[number];
 
-/** The dotted keys `config get/set` accept for the router block. */
+/** The dotted keys `config get/set` accept for the router block. The rules
+ *  and automatic use are not among them: they change only through their own
+ *  operations (`tenjin config prefer|only|block|unblock|reset|speed|
+ *  replacement`), which validate what they couple. */
 export const ROUTER_CONFIG_KEYS = ['router.enabled', 'router.context', 'router.improve'] as const;
 export type RouterConfigKey = (typeof ROUTER_CONFIG_KEYS)[number];
+
+/** The personal router keys that only their own operations write. */
+export const PERSONAL_ROUTER_KEYS = [
+  'router.policy',
+  'router.nativeReplacement',
+  'router.nativeReplacementProviders',
+] as const;
+
+/**
+ * WHERE A SETTING BELONGS, declared once rather than labelled on each saved
+ * value. Everything is local today: `user` is the person's intent, which a
+ * later sync could carry between machines (none exists; readback says "not
+ * synced"); `machine` is this machine's own; `project` is a repository's
+ * `.tenjin/config.json` or `config.local.json`, which only tightens.
+ */
+export type SettingScope = 'user' | 'machine' | 'project';
+
+export const SETTING_SCOPES = {
+  'router.policy': 'user',
+  'router.nativeReplacement': 'machine',
+  'router.nativeReplacementProviders': 'machine',
+  'router.enabled': 'machine',
+  'router.context': 'machine',
+  maxAutoSpend: 'machine',
+  sessionBudget: 'machine',
+  allowlistCreators: 'machine',
+} as const satisfies Record<string, SettingScope>;
 
 export const RETIRED_PAYMENT_KEYS = ['bazaarPay', 'confirm'] as const;
 export const RETIRED_PAYMENT_GUIDANCE =

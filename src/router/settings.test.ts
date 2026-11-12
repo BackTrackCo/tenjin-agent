@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RouterLayerSchema, parseRouterLayer } from '../lib/config';
 import { CliError } from '../lib/errors';
-import { projectRouterPath, routerSettings } from './settings';
+import { personalSettings, projectRouterPath, routerSettings } from './settings';
+
+/** sha256 of `{"policy":{},"sources":["tenjin"],"version":1}`: a user with no rules. */
+const DEFAULT_HASH = 'sha256:4e470b2e578b39c57a9df360011bba9316663a352baa05d458e3fcd618dd58ca';
 
 /**
  * `router.enabled` and `router.context` across the four layers: the default,
@@ -44,6 +47,18 @@ describe('routerSettings', () => {
       enabled: { value: true, source: 'default' },
       context: { value: 'session', source: 'default' },
       improve: { value: false, source: 'default' },
+      policy: { status: 'none' },
+      nativeReplacement: { mode: 'off' },
+      wire: {
+        status: 'ok',
+        hasRules: false,
+        settings: {
+          version: 1,
+          policy: {},
+          sources: ['tenjin'],
+          hash: DEFAULT_HASH,
+        },
+      },
     });
   });
 
@@ -313,5 +328,176 @@ describe('projectRouterPath', () => {
       (e: unknown) => e,
     );
     expect((err as CliError).code).toBe('USAGE');
+  });
+});
+
+/**
+ * THE PERSONAL SETTINGS (plan 36): the routing rules and automatic use, from
+ * the global file alone, sent on every routing call with their hash. A
+ * project file can never add a rule or turn automatic use on.
+ */
+describe('the personal settings', () => {
+  const global = () => join(data, 'config.json');
+  const rule = {
+    scope: { kind: 'task', id: 'web research' },
+    targets: [{ kind: 'provider', id: 'exa' }],
+  };
+
+  it('reads them from the global file and never from a project file', async () => {
+    const policy = { version: 1, block: [{ kind: 'provider', id: 'firecrawl' }] };
+    await put(project(repo), {
+      router: { policy, nativeReplacement: 'when-routed' },
+    });
+    await put(local(repo), { router: { policy, nativeReplacement: 'when-routed' } });
+    const fromProject = await resolve(repo);
+    expect(fromProject.policy).toEqual({ status: 'none' });
+    expect(fromProject.nativeReplacement).toEqual({ mode: 'off' });
+    expect(fromProject.wire).toMatchObject({ status: 'ok', hasRules: false });
+    await put(global(), { router: { policy } });
+    const fromGlobal = await resolve(repo);
+    expect(fromGlobal.policy).toEqual({ status: 'ok', saved: policy });
+    expect(fromGlobal.wire).toMatchObject({
+      status: 'ok',
+      hasRules: true,
+      settings: { policy: { block: [{ kind: 'provider', id: 'firecrawl' }] } },
+    });
+  });
+
+  it('drops emptied collections and a false speed switch from what is sent', () => {
+    const { wire } = personalSettings({
+      policy: { version: 1, block: [], only: [], prefer: [], preferSpeed: false },
+    });
+    expect(wire).toEqual({
+      status: 'ok',
+      hasRules: false,
+      settings: { version: 1, policy: {}, sources: ['tenjin'], hash: DEFAULT_HASH },
+    });
+  });
+
+  it('sends automatic use only when it is on, and hashes it with the rules', () => {
+    const off = personalSettings({
+      nativeReplacement: 'off',
+      nativeReplacementProviders: [{ kind: 'provider', id: 'exa' }],
+    });
+    const all = personalSettings({ nativeReplacement: 'when-routed' });
+    const exa = personalSettings({
+      nativeReplacement: 'when-routed',
+      nativeReplacementProviders: [{ kind: 'provider', id: 'exa' }],
+    });
+    const settings = (p: ReturnType<typeof personalSettings>) =>
+      p.wire.status === 'ok' ? p.wire.settings : undefined;
+    expect(settings(off)).toEqual(settings(personalSettings({})));
+    expect(off.nativeReplacement).toEqual({
+      mode: 'off',
+      providers: [{ kind: 'provider', id: 'exa' }],
+    });
+    expect(settings(all)?.replacement).toEqual({ mode: 'when-routed' });
+    expect(settings(exa)?.replacement).toEqual({
+      mode: 'when-routed',
+      providers: [{ kind: 'provider', id: 'exa' }],
+    });
+    const hashes = new Set([off, all, exa].map((p) => settings(p)?.hash));
+    expect(hashes.size).toBe(3);
+    // Automatic use is not a rule: it never makes a server's missing hash a refusal.
+    expect(all.wire).toMatchObject({ hasRules: false });
+  });
+
+  it('changes the hash when any rule changes, and never with key order', () => {
+    const a = personalSettings({ policy: { version: 1, prefer: [rule] } });
+    const b = personalSettings({
+      policy: { prefer: [{ targets: rule.targets, scope: rule.scope }], version: 1 },
+    });
+    const c = personalSettings({ policy: { version: 1, prefer: [rule], preferSpeed: true } });
+    const hash = (p: ReturnType<typeof personalSettings>) =>
+      p.wire.status === 'ok' ? p.wire.settings.hash : '';
+    expect(hash(a)).toBe(hash(b));
+    expect(hash(a)).not.toBe(hash(c));
+    expect(hash(a)).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it.each([
+    ['a version this build does not read', { version: 2 }],
+    ['an empty target list', { version: 1, prefer: [{ scope: { kind: 'global' }, targets: [] }] }],
+    [
+      'a block named twice',
+      {
+        version: 1,
+        block: [
+          { kind: 'provider', id: 'exa' },
+          { kind: 'provider', id: 'exa' },
+        ],
+      },
+    ],
+    ['two preferences for one scope', { version: 1, prefer: [rule, rule] }],
+    [
+      'two only rules for one scope and dimension',
+      {
+        version: 1,
+        only: [
+          {
+            scope: { kind: 'task', id: 'web research' },
+            dimension: 'provider',
+            targets: [{ kind: 'provider', id: 'exa' }],
+          },
+          {
+            scope: { kind: 'task', id: 'web research' },
+            dimension: 'provider',
+            targets: [{ kind: 'provider', id: 'tavily' }],
+          },
+        ],
+      },
+    ],
+    [
+      'an every-task preference for a provider',
+      {
+        version: 1,
+        prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'provider', id: 'exa' }] }],
+      },
+    ],
+    [
+      'a preference mixing kinds',
+      {
+        version: 1,
+        prefer: [
+          {
+            scope: { kind: 'task', id: 'web research' },
+            targets: [
+              { kind: 'provider', id: 'exa' },
+              { kind: 'service', id: 'exa-search' },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      'an only rule for accounts',
+      {
+        version: 1,
+        only: [
+          {
+            scope: { kind: 'global' },
+            dimension: 'provider',
+            targets: [{ kind: 'source', id: 'fal' }],
+          },
+        ],
+      },
+    ],
+    ['an unknown key', { version: 1, include: [] }],
+  ])('refuses %s, and sends nothing in its place', (_name, policy) => {
+    const read = personalSettings({ policy });
+    expect(read.policy.status).toBe('invalid');
+    expect(read.wire.status).toBe('invalid');
+  });
+
+  it('reads an unreadable automatic-use value as off, with why', () => {
+    const empty = personalSettings({
+      nativeReplacement: 'when-routed',
+      nativeReplacementProviders: [],
+    });
+    expect(empty.nativeReplacement.mode).toBe('off');
+    expect(empty.nativeReplacement.problem).toContain('router.nativeReplacementProviders');
+    const odd = personalSettings({ nativeReplacement: 'always' });
+    expect(odd.nativeReplacement).toMatchObject({ mode: 'off' });
+    expect(odd.wire).toMatchObject({ status: 'ok' });
   });
 });
