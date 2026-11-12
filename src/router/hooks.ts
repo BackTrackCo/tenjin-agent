@@ -1676,9 +1676,10 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
 
 /** The one routing call, its packet SEALED (masked and bounded): a path that
  *  skips the mask does not typecheck. It goes to the paid route, whose fee
- *  the payer in `tenjin mcp` pays; a call it cannot pay is skipped at once,
- *  the native tool runs, and the first such call in a session tells the user
- *  why and what fixes it.
+ *  the payer in `tenjin mcp` pays; a call it cannot pay is skipped (after
+ *  waiting for the background top-up when its channel needs a deposit), the
+ *  native tool runs, and the first such call in a session tells the user why
+ *  and what fixes it.
  *
  *  BACKOFF: a call that could not reach the router starts the machine's
  *  `unreachable` memo, and for its minute every leg skips the call and the
@@ -1723,7 +1724,9 @@ async function decide(
     );
   }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
-  const deposited = route?.deposited?.() ?? 0n;
+  // A background top-up's is said here alone, never in a tool's result, so the
+  // person reads it.
+  const deposited = (route?.deposited?.() ?? 0n) + (route?.toppedUp?.() ?? 0n);
   if (deposited > 0n) deps.notice?.(depositSentence(deposited));
   if (outcome.status === 'skipped') {
     // The router answered (its 402, say) before the skip: it is reachable.
