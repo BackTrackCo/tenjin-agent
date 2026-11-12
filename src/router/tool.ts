@@ -773,10 +773,7 @@ async function requestTool(
     return runAccountSpec(
       id!,
       kept.spec,
-      {
-        ...(kept.fallbackId !== undefined ? { fallbackId: kept.fallbackId } : {}),
-        ...(kept.named === true ? { named: true as const } : {}),
-      },
+      kept.named === true ? { named: true } : {},
       input,
       deps,
       footer,
@@ -790,10 +787,17 @@ async function requestTool(
   if (spec !== null && input !== undefined) {
     // SEVERAL TAKES: each its own claim and payment, after one spend check
     // for them all (`choices.ts`).
-    if (count !== undefined) {
-      return runCount(id!, spec, input, count, deps, footer, decisionDeps, settings);
+    const run = () =>
+      count !== undefined
+        ? runCount(id!, spec, input, count, deps, footer, decisionDeps, settings)
+        : runSpec(id!, spec, input, deps, footer, decisionDeps);
+    // OFFERED IN A REFUSED ACCOUNT OFFER'S PLACE (plan 37): that offer never
+    // runs too once this one has.
+    if (kept?.account !== true && kept?.replaces !== undefined) {
+      const { runInPlaceOf } = await import('./accounts/run');
+      return runInPlaceOf(kept.replaces, id!, run, deps.ctx.dataDir);
     }
-    return runSpec(id!, spec, input, deps, footer, decisionDeps);
+    return run();
   }
 
   // ONE CALL, ONE DECISION. The query the model wrote goes to the backend with
@@ -862,14 +866,13 @@ async function requestTool(
   // shown with the skeleton of the next call, `request({id, input})`. Nothing
   // is paid on this answer: only a filled spec pays.
   if (decision.action === 'spec') {
-    // A SERVICE ON THE USER'S OWN ACCOUNT, kept with Tenjin's own route for
-    // its job, which a refusal offers. A routed answer never runs a map
+    // A SERVICE ON THE USER'S OWN ACCOUNT. A routed answer never runs a map
     // Tenjin has not checked: only the user's naming it does.
     if (isAccountSpec(decision.spec)) {
       const lead = { ...decision.spec, id: decision.id };
       const shown = await (
         await import('./accounts/run')
-      ).offerAccountLead(lead, decision.fallback, settingsHash, deps.ctx.dataDir, decision.hint);
+      ).offerAccountLead(lead, settingsHash, deps, decisionDeps, decision.hint);
       await footer.done('service found');
       return shown;
     }
@@ -1037,9 +1040,9 @@ async function readToolList(
       const lead = { ...decision.spec, id: decision.id };
       return (await import('./accounts/run')).offerAccountLead(
         lead,
-        decision.fallback,
         settingsHash,
-        deps.ctx.dataDir,
+        deps,
+        decisionDeps,
         decision.hint,
         { named: true },
       );
@@ -2551,6 +2554,7 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
     return (await import('./accounts/run')).resumeAccountJob(accountJob, deps, {
       ctx: deps.ctx,
       baseUrl: settings.baseUrl,
+      acceptsBazaar: settings.experimentalBazaar,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
     });

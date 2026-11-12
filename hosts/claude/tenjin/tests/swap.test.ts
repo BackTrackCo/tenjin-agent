@@ -320,7 +320,7 @@ const ACCOUNT_REFUSED = envelope('needs_input', {
     reason: 'signin_expired',
     reconnect: 'tenjin connect firecrawl',
   },
-  fallback: { id: 'f-1', label: 'Firecrawl page read', price: '$0.015' },
+  offer: { id: 'f-1', label: 'Firecrawl page read', price: '$0.015' },
   via: 'swap',
 });
 

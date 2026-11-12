@@ -30,8 +30,6 @@ const AccountJobSchema = z.strictObject({
   input: z.record(z.string(), z.unknown()),
   first: z.unknown(),
   firstAt: z.number().int().nonnegative(),
-  /** Tenjin's own route for the job, offered if this one cannot finish. */
-  fallbackId: z.string().min(1).max(64).optional(),
 });
 export type AccountJob = z.infer<typeof AccountJobSchema>;
 

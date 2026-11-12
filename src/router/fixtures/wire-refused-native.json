@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-04.2",
+  "decision": {
+    "action": "native",
+    "reason": "The host assistant and its own tools are enough for this step.",
+    "diagnostics": {
+      "reasonCode": "native_sufficient",
+      "stage": "capability",
+      "missing": [],
+      "nextAction": "Answer with the host assistant and its own tools; no paid capability fits this step."
+    }
+  },
+  "jev": {
+    "calls": 0,
+    "latencyMs": 0
+  },
+  "honored": ["schemaVersion", "refused", "accepts", "harness", "settings"],
+  "settingsHash": "sha256:d3907a149dbce1dc8d7034363a0b3c1f2e7ea099005788a58f74cf5e06eb3a75"
+}

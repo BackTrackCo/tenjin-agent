@@ -10,6 +10,7 @@ import {
   buildToolBody,
   buildToolSpecBody,
   buildIdentitiesBody,
+  buildRefusedBody,
   acceptsFor,
   CLIENT_ACCEPTS,
   MAX_SPEC_TIMEOUT_S,
@@ -1217,9 +1218,9 @@ describe('the settings field', () => {
 /**
  * THE USER'S OWN ACCOUNTS ON THE WIRE (plan 37). `mcp` rides with `settings`;
  * an account the settings' `sources` names can lead an offer, carrying its
- * `source` and the MCP call in place of a price and a URL, with Tenjin's own
- * route beside it as `fallback`; and the identities read lists the accounts
- * this client can connect.
+ * `source` and the MCP call in place of a price and a URL; a refusal asks
+ * again with `{refused}`; and the identities read lists the accounts this
+ * client can connect.
  */
 describe('the accounts wire', () => {
   const settings = fixture('wire-hook-request-account.json').settings as WireSettings;
@@ -1261,7 +1262,7 @@ describe('the accounts wire', () => {
     }
   });
 
-  it('reads an account lead alone, with its source, its call and Tenjin’s route', () => {
+  it('reads an account lead alone, with its source and its call', () => {
     const read = parseForTests('hook', fixture('wire-hook-execute-account.json')) as {
       success: boolean;
       data?: { decision: Record<string, unknown> & { specs: Record<string, unknown>[] } };
@@ -1278,7 +1279,7 @@ describe('the accounts wire', () => {
       mcp: { tool: 'call-actor', next: { tool: 'get-dataset-items' } },
     });
     expect(decision.specs[0]).not.toHaveProperty('priceAtomic');
-    expect(decision.fallback).toMatchObject({ capabilityId: 'stableenrich-maps-text' });
+    expect(decision).not.toHaveProperty('fallback');
   });
 
   it.each([
@@ -1291,21 +1292,19 @@ describe('the accounts wire', () => {
     ],
     ['an account spec without requires mcp', (d: Json) => (spec(d).requires = [])],
     ['an account spec on tenjin', (d: Json) => (spec(d).source = 'tenjin')],
-    ['a fallback under the lead’s own id', (d: Json) => ((d.fallback as Json).id = d.id)],
   ])('refuses %s', (_, breakIt) => {
     const answer = structuredClone(fixture('wire-hook-execute-account.json'));
     breakIt(answer.decision as Json);
     expect(parseForTests('hook', answer).success).toBe(false);
   });
 
-  it('reads a spec on an account, checked or not, with its fallback', () => {
+  it('reads a spec on an account, checked or not', () => {
     const checked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
     expect(checked.success).toBe(true);
     expect(checked.data).toMatchObject({
       decision: {
         action: 'spec',
         spec: { source: 'fal', verified: true, requires: ['mcp'] },
-        fallback: { id: expect.any(String) },
       },
     });
     // Named by its id: a map Tenjin has not checked, which runs only so.
@@ -1316,10 +1315,45 @@ describe('the accounts wire', () => {
     expect(fixture('wire-tool-request-account-by-id.json')).toMatchObject({
       tool: 'fal.flux-pro-ultra',
     });
-    // A fallback rides only beside an account service's spec.
-    const paid = structuredClone(fixture('wire-lookup-spec.json')) as { decision: Json };
-    paid.decision.fallback = (fixture('wire-lookup-spec-account.json').decision as Json).fallback;
-    expect(parseForTests('tool', paid).success).toBe(false);
+  });
+
+  /**
+   * THE RE-ASK (review round 1): after an account refused an offer, the
+   * client's usual envelope with `refused` and no query, answered as a query
+   * is, with the settings hash the client sent.
+   */
+  it('builds the re-ask after a refusal byte for byte, and reads both its answers', () => {
+    const canonical = fixture('wire-refused-request.json');
+    const built = buildRefusedBody({
+      refused: canonical.refused as string,
+      accepts: canonical.accepts as string[],
+      harness: canonical.harness as 'claude',
+      settings: canonical.settings as WireSettings,
+    });
+    expect(JSON.stringify(built)).toBe(JSON.stringify(canonical));
+    expect(canonical).not.toHaveProperty('query');
+    expect(canonical.accepts).toContain('mcp');
+    const hash = (canonical.settings as WireSettings).hash;
+    const offer = parseForTests('tool', fixture('wire-refused-offer.json')) as {
+      success: boolean;
+      data?: { decision: Json & { spec: Json }; settingsHash?: string };
+    };
+    expect(offer.success).toBe(true);
+    expect(offer.data!.decision).toMatchObject({
+      action: 'spec',
+      spec: { capabilityId: 'munition-scrape', priceAtomic: '15000' },
+    });
+    expect(offer.data!.decision.id).not.toBe(canonical.refused);
+    expect(offer.data!.decision.spec).not.toHaveProperty('source');
+    expect(offer.data!.settingsHash).toBe(hash);
+    const native = parseForTests('tool', fixture('wire-refused-native.json')) as {
+      success: boolean;
+      data?: { decision: Json };
+    };
+    expect(native.data!.decision).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: 'native_sufficient' },
+    });
   });
 
   it('names the unchecked map and how the user runs it', () => {

@@ -21,7 +21,6 @@ import {
 import { storeAccountOffer, storeChoices, storeLabel, storeSpecs } from './specs';
 import {
   isAccountSpec,
-  parseHookDecision,
   requestDecision,
   REQUIRES_UNMET,
   ROUTE_PAID_PATH,
@@ -746,8 +745,7 @@ async function vetOffer<T extends OfferDecision>(
   // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend policy
   // or the wallet to check, and it is offered alone. One whose call this
   // account was found to lack when it was connected is left out, rather than
-  // leading its task and failing when called: by now it has no fallback to
-  // stand in for it ({@link servableHere}).
+  // leading its task and failing when called: the hook stays silent.
   if (isAccountOffer(offer)) {
     const lead = accountLeadOf(offer);
     if (lead === undefined) return { withheld: 'account lead unreadable' };
@@ -1030,59 +1028,6 @@ function isFree(offer: OfferDecision): offer is ExecuteDecision {
 }
 
 /**
- * AN ACCOUNT LEAD THIS MACHINE CANNOT RUN, SERVED BY TENJIN'S OWN ROUTE. The
- * connect-time check found the account lacks a tool the lead's call makes (a
- * higher plan, say), or there is no sign-in here to read, but the router
- * never learns that: the account-wide preference keeps putting the account
- * first for the task. So the fallback the server sends beside an account
- * lead becomes the offer: a paid `execute` on Tenjin's route, which the
- * settings check, the spend check and the footer then treat like any other,
- * and never `bound`, so it never runs in place of a native call. With no
- * fallback (the settings allow no Tenjin route for the task) the lead is
- * kept, and {@link vetOffer} withholds it.
- *
- * The line is this client's, since the server writes none for the fallback.
- * A decision that would not parse as an answer keeps the lead too.
- */
-async function servableHere(
-  decision: HookDecision | null,
-  dataDir: string,
-): Promise<HookDecision | null> {
-  if (!isAccountOffer(decision) || decision.fallback === undefined) return decision;
-  const lead = accountLeadOf(decision);
-  if (lead === undefined || !(await accountLacks(dataDir, lead))) return decision;
-  return parseHookDecision(fallbackOffer(decision, decision.fallback)) ?? decision;
-}
-
-/** Tenjin's own route for an account lead's task, as an offer of its own. */
-function fallbackOffer(lead: ExecuteDecision, fallback: OfferSpec): Record<string, unknown> {
-  const id = JSON.stringify(fallback.id);
-  const name = fallback.label ?? fallback.provider;
-  const price = fallback.priceVaries
-    ? `About $${toMoney(fallback.priceAtomic).usd} a call (up to $${toMoney(fallback.maxAmountAtomic).usd})`
-    : `$${toMoney(fallback.priceAtomic).usd} a call`;
-  const what = fallback.description.replace(/[\s.]+$/, '');
-  return {
-    action: 'execute',
-    id: fallback.id,
-    capabilityId: fallback.capabilityId,
-    category: lead.category,
-    provider: fallback.provider,
-    ...(fallback.label !== undefined ? { label: fallback.label } : {}),
-    capabilityDescription: fallback.description,
-    providerPriceAtomic: fallback.priceAtomic,
-    endpoint: fallback.request.url,
-    usage: lead.usage,
-    hint:
-      `${name} fits this, Tenjin's own tool: ${what}. ${price}, paid from the Tenjin balance. ` +
-      `Call request({id: ${id}}) for its inputs, then request({id: ${id}, input: {...}}) alone ` +
-      'and wait for its result; native tools stay allowed for anything else.',
-    specs: [fallback],
-    delivery: 'offer',
-  };
-}
-
-/**
  * THE ONE ROUTE BOTH NATIVE ARMS TAKE, before the call and after it: the
  * agent's tool list, the packet from the right transcript, one routing decision,
  * and the subagent spend rule. An `execute` that survives all of it comes back
@@ -1162,7 +1107,7 @@ async function routeNativeCall(
   const outcome =
     sealed !== undefined
       ? await decide(sealed, deps, router, event.sessionId, deadline, footer)
-      : await servableHere(fromRecorded(recorded!, router, footer, deps), deps.dataDir);
+      : fromRecorded(recorded!, router, footer, deps);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
@@ -1894,11 +1839,10 @@ async function openFooter(
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.
         // Each with the settings hash its answer echoed: what the check before
-        // every call holds the offer to. An account's lead is kept with
-        // Tenjin's own route for its job.
+        // every call holds the offer to.
         const lead = isAccountOffer(decision) ? accountLeadOf(decision) : undefined;
         if (lead !== undefined && decision.action === 'execute') {
-          await storeAccountOffer(deps.dataDir, lead, decision.fallback, settingsHash);
+          await storeAccountOffer(deps.dataDir, lead, settingsHash);
         } else {
           const specs: readonly AnyOfferSpec[] = decision.specs ?? [];
           await storeSpecs(
@@ -2069,7 +2013,7 @@ async function decide(
   }
   if (!decidedUnder(outcome.decision, router, warn)) return null;
   footer?.answered(outcome.decision);
-  return servableHere(outcome.decision.decision, deps.dataDir);
+  return outcome.decision.decision;
 }
 
 /**

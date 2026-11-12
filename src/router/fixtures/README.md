@@ -243,11 +243,16 @@ connecting or disconnecting refuses every offer decided before it.
   anything else is sent as written. The call that bills is sent once; only
   `poll` repeats. Each call is bounded at 8192 bytes.
 - **An `execute` led by one** has no `endpoint`, `providerPriceAtomic` `"0"`,
-  the lead alone in `specs`, never `augment`, and a checked map only. Tenjin's
-  own route for the job rides beside it as `fallback`, an ordinary spec under
-  its own id, which the line never names: the client offers it when the account
-  refuses, or where this machine's connect-time check found the account lacks a
-  tool the call makes. A `spec` answer may carry the same `fallback`.
+  the lead alone in `specs`, never `augment`, and a checked map only. Where this
+  machine's connect-time check found the account lacks a tool the call makes,
+  the hook offers nothing.
+- **The re-ask** follows an account's refusal, or a job of its that failed:
+  the client's usual envelope with `refused`, the refused offer's id, and no
+  query, on the paid route. The router routes that offer's own turn again with
+  the account left out for this one answer, under the settings sent, and
+  answers as it answers a query: `wire-refused-offer.json` while the offer's
+  row is live (Tenjin's Firecrawl page read under a fresh id, with the hash the
+  client sent), `wire-refused-native.json` after it is gone.
 - **`unverified`** is the `native` refusal for a step whose only routes the
   settings allow are maps Tenjin has not checked: its `nextAction` names the
   service and the `request({tool})` that runs it when the user names it. A hook
@@ -524,15 +529,18 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-identities-request.json`             | the free identities read                                                                       |
 | `wire-identities.json`                     | its answer: every id a setting can name, with its label                                        |
 | `wire-hook-request-account.json`           | the prompt hook from a machine with Apify, fal and Firecrawl connected: `mcp`, their `sources` |
-| `wire-hook-execute-account.json`           | hook answer: an Apify map leads alone, no endpoint, with Tenjin's route as `fallback`          |
+| `wire-hook-execute-account.json`           | hook answer: an Apify map leads alone, no endpoint                                             |
 | `wire-hook-request-account-fetch.json`     | the native hook before a WebFetch, Firecrawl connected and automatic use on                    |
-| `wire-hook-execute-account-bound.json`     | hook answer for it: the checked Firecrawl map with `bound`, and its `fallback`                 |
+| `wire-hook-execute-account-bound.json`     | hook answer for it: the checked Firecrawl map with `bound`                                     |
 | `wire-tool-request-account.json`           | a query from a machine whose images preference names fal                                       |
-| `wire-lookup-spec-account.json`            | tool answer for it: the fal map's spec and Tenjin's route for the job as `fallback`            |
+| `wire-lookup-spec-account.json`            | tool answer for it: the fal map's spec                                                         |
 | `wire-tool-request-account-by-id.json`     | a map Tenjin has not checked, named by its id as `tool`                                        |
 | `wire-lookup-spec-account-by-id.json`      | tool answer for it: the fal map's spec, `verified: false`                                      |
 | `wire-tool-request-only-accounts.json`     | a query with Tenjin's own tools turned off and only that unchecked map left                    |
 | `wire-lookup-account-unverified.json`      | tool answer for it: `native`, `unverified`, naming `request({tool})`                           |
+| `wire-refused-request.json`                | the re-ask after Firecrawl refused the bound offer: `refused`, no query                        |
+| `wire-refused-offer.json`                  | its answer while the offer's row is live: Tenjin's Firecrawl page read, a fresh id             |
+| `wire-refused-native.json`                 | its answer once the row is gone: the ordinary native, naming no rule                           |
 | `wire-identities-mcp.json`                 | the identities read for an `mcp` client: each account's `connectable` and its services         |
 | `oauth-client-metadata.json`               | Tenjin's client document a sign-in names, served at `tenjin.sh/oauth/client-metadata.json`     |
 

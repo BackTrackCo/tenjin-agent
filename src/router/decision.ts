@@ -524,27 +524,6 @@ export type AnyOfferSpec = OfferSpec | AccountOfferSpec;
 export const isAccountSpec = <T extends object>(spec: T): spec is T & AccountSpec =>
   'mcp' in spec && 'source' in spec;
 
-/**
- * TENJIN'S OWN ROUTE FOR AN ACCOUNT LEAD'S JOB, under its own offer id, with
- * its price. The line never names it: this client offers it when the account
- * refuses, and runs it only when the user picks it or has opted in for that
- * account.
- */
-const FallbackSchema = OfferSpecSchema.optional();
-
-function fallbackProblems(
-  fallback: OfferSpec | undefined,
-  id: string,
-  lead: AccountSpec | undefined,
-  ctx: z.RefinementCtx,
-): void {
-  if (!fallback) return;
-  const issue = (message: string, path: (string | number)[]) =>
-    ctx.addIssue({ code: 'custom', message, path });
-  if (!lead) return issue('a fallback rides only an account lead', ['fallback']);
-  if (fallback.id === id) issue('the fallback is an offer of its own', ['fallback', 'id']);
-}
-
 /** The specs on an `execute`, whose lead may be an account service's. */
 const ExecuteSpecsSchema = z
   .array(z.union([OfferSpecSchema, AccountOfferSpecSchema]))
@@ -673,7 +652,6 @@ function checkExecute(
     specs?: AnyOfferSpec[] | undefined;
     delivery?: 'offer' | 'augment' | 'note' | undefined;
     augmentUrl?: string | undefined;
-    fallback?: OfferSpec | undefined;
   },
   ctx: z.RefinementCtx,
 ): void {
@@ -685,7 +663,7 @@ function checkExecute(
     if (specs.some((spec) => isAccountSpec(spec)))
       issue('an account service is only ever the lead', ['specs']);
     if (decision.endpoint === undefined) issue('an execute names the URL it pays', ['endpoint']);
-    return fallbackProblems(decision.fallback, decision.id, undefined, ctx);
+    return;
   }
   if (specs.length > 1) issue('an account lead is offered alone', ['specs']);
   if (decision.endpoint !== undefined)
@@ -697,7 +675,6 @@ function checkExecute(
   if (!lead.verified) issue('the hook offers only a checked account service', ['specs']);
   if (decision.delivery === 'augment' || decision.augmentUrl !== undefined)
     issue('an account lead is an offer', ['delivery']);
-  fallbackProblems(decision.fallback, decision.id, lead, ctx);
 }
 
 const HookDecisionSchema = z.discriminatedUnion('action', [
@@ -732,8 +709,6 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
       delivery: z.enum(['offer', 'augment', 'note']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),
       bound: BoundSchema.optional(),
-      /** Beside an account lead only, for a build that lists `mcp`. */
-      fallback: FallbackSchema,
     })
     .superRefine(checkHint)
     .superRefine(checkExecute),
@@ -761,18 +736,8 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
       id: IdSchema,
       spec: z.union([ToolSpecSchema, AccountSpecSchema]),
       hint: z.string().min(1).max(2_000),
-      /** Beside an account service's spec only, for a build that lists `mcp`. */
-      fallback: FallbackSchema,
     })
-    .superRefine(checkHint)
-    .superRefine((decision, ctx) =>
-      fallbackProblems(
-        decision.fallback,
-        decision.id,
-        isAccountSpec(decision.spec) ? decision.spec : undefined,
-        ctx,
-      ),
-    ),
+    .superRefine(checkHint),
   DiscoveredSchema,
   RefusedSchema.extend({ action: z.literal('native') }),
   RefusedSchema.extend({ action: z.literal('needs_input') }),
@@ -940,14 +905,6 @@ const IdentitiesResponseSchema = z.object({
 });
 export type IdentitiesResponse = z.infer<typeof IdentitiesResponseSchema>;
 
-/** A hook decision this client composed itself (Tenjin's own route standing
- *  in for an account lead this machine cannot run, `hooks.ts`), held to the
- *  router's own schema: one that does not parse is never shown. */
-export function parseHookDecision(value: unknown): HookDecision | undefined {
-  const parsed = HookDecisionSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
-}
-
 /** A hook answer reread from disk (`decided.ts`), held to the same schema as
  *  the router's: anything else reads as absent. */
 export function parseHookResponse(value: unknown): HookResponse | undefined {
@@ -1101,8 +1058,8 @@ export function unmetRequires(requires: readonly string[] | undefined): string[]
  *  call on a connected account is offered only for an account the
  *  settings' `sources` names, so it means nothing without them. It takes a
  *  spec whose call is an MCP tool call on that account, the `execute` that
- *  offers one with no `endpoint`, the `fallback` beside it, and
- *  `connectable` on the identities read. */
+ *  offers one with no `endpoint`, `connectable` on the identities read, and
+ *  the `{refused}` re-ask ({@link requestRefused}). */
 export function acceptsFor(bazaar: boolean, settings = false): string[] {
   return [
     ...CLIENT_ACCEPTS,
@@ -1174,6 +1131,28 @@ export function buildToolBody(request: {
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
     ...(request.improve === true ? { improve: true } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
+  };
+}
+
+/**
+ * THE RE-ASK AFTER AN ACCOUNT REFUSED (plan 37, review round 1): the usual
+ * envelope with `refused`, the id of the offer the account refused, and no
+ * query. The server routes that offer's own turn again with the account left
+ * out for this one answer, under the settings sent, and answers as it answers
+ * a query: an offer, or native.
+ */
+export function buildRefusedBody(request: {
+  refused: string;
+  accepts: readonly string[];
+  harness?: Harness;
+  settings?: WireSettings;
+}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    refused: request.refused,
+    accepts: [...request.accepts],
+    ...(request.harness !== undefined ? { harness: request.harness } : {}),
     ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
 }
@@ -1404,7 +1383,45 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  const schema = kind === 'hook' ? HookResponseSchema : ToolResponseSchema;
+  return sendPaid(url, options, kind === 'hook' ? HookResponseSchema : ToolResponseSchema, deps);
+}
+
+/**
+ * `{refused}` ON THE PAID ROUTE, paid or skipped like a query
+ * ({@link requestDecision}), and answered the same way: an offer, or native.
+ * It needs `mcp`, which rides with the settings.
+ */
+export async function requestRefused(
+  refused: string,
+  deps: DecisionDeps,
+): Promise<DecisionOutcome<ToolResponse>> {
+  const url = new URL(ROUTE_PAID_PATH, deps.baseUrl).toString();
+  return sendPaid(
+    url,
+    {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildRefusedBody({
+        refused,
+        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+        harness: deps.harness ?? 'claude',
+        ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
+      }),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    },
+    ToolResponseSchema,
+    deps,
+  ) as Promise<DecisionOutcome<ToolResponse>>;
+}
+
+/** One request on the paid route: sent by the payer, or unpaid with none. */
+async function sendPaid(
+  url: string,
+  options: HttpRequestOptions,
+  schema: typeof HookResponseSchema | typeof ToolResponseSchema,
+  deps: Pick<DecisionDeps, 'route'>,
+): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
   let response: HttpResult;
   try {
     response = await (deps.route?.send ?? httpRequest)(url, options);

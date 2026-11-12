@@ -3824,10 +3824,8 @@ describe('the hooks and the user settings', () => {
 /**
  * A SERVICE ON A CONNECTED ACCOUNT (plan 37): its line is shown like any
  * offer's, with no spend check (the user's own plan pays), and its spec is
- * kept with Tenjin's own route for the job, which a refusal offers. Where
- * this machine can't run it (the account was found to lack a tool its call
- * makes), Tenjin's own route is offered in its place, under the settings and
- * spend checks any paid offer meets; with none, nothing is offered.
+ * kept. Where this machine can't run it (the account was found to lack a
+ * tool its call makes), nothing is offered: the hook stays silent.
  */
 describe('an offer led by a connected account', () => {
   const answer = JSON.parse(
@@ -3837,23 +3835,8 @@ describe('an offer led by a connected account', () => {
     ),
   ) as {
     settingsHash: string;
-    decision: { id: string; hint: string; fallback: { id: string } } & Record<string, unknown>;
+    decision: { id: string; hint: string } & Record<string, unknown>;
   };
-  /** The same answer with no Tenjin route beside the lead: the settings allow none. */
-  const alone = {
-    ...answer,
-    decision: Object.fromEntries(
-      Object.entries(answer.decision).filter(([key]) => key !== 'fallback'),
-    ),
-  };
-  const fallbackId = answer.decision.fallback.id;
-  /** Tenjin's own route, as the host reads the line this client writes for it. */
-  const FALLBACK_LINE =
-    `${HINT_SOURCE}: Google Maps Places fits this, Tenjin's own tool: Find local businesses ` +
-    'from a text query with Google Maps (name, address, rating). $0.02 a call, paid from the ' +
-    `Tenjin balance. Call mcp__x402__request({id: "${fallbackId}"}) for its inputs, then ` +
-    `mcp__x402__request({id: "${fallbackId}", input: {...}}) alone and wait for its result; ` +
-    'native tools stay allowed for anything else.';
 
   /** Apify, fal and Firecrawl connected here, with the preference connecting
    *  Apify writes: the settings the fixture's answer was decided under. */
@@ -3893,7 +3876,7 @@ describe('an offer led by a connected account', () => {
     }
   }
 
-  it('shows its line, with no spend check, and keeps its spec with the fallback beside it', async () => {
+  it('shows its line, with no spend check, and keeps its spec', async () => {
     // A wallet that cannot sign still shows it: the account's plan pays.
     await connectApify([], { maxAutoSpend: '0' });
     const { fetchImpl, calls } = router(answer);
@@ -3912,57 +3895,30 @@ describe('an offer led by a connected account', () => {
     const kept = await readKeptSpec(dir, answer.decision.id);
     expect(kept).toMatchObject({
       account: true,
-      fallbackId,
       spec: { source: 'apify', settingsHash: answer.settingsHash },
     });
     // Never a spec the balance pays, for a reader that runs only those.
     expect(await readSpec(dir, answer.decision.id)).toBeNull();
-    expect(await readSpec(dir, fallbackId)).toMatchObject({ settingsHash: answer.settingsHash });
     expect(await renderProgress(dir, 'sess-1')).toBe(
       'x402 · prompt: account lookup offered (Apify)',
     );
   });
 
-  it("offers Tenjin's own route in its place where the account lacks a tool its call makes", async () => {
-    await connectApify(['get-dataset-items']);
-    const { fetchImpl } = router(answer);
+  it('offers nothing, with nothing kept, where the account lacks a tool its call makes', async () => {
+    // A wallet that cannot sign: nothing else is offered in its place, and
+    // the hook asks the router nothing more.
+    await connectApify(['get-dataset-items'], { maxAutoSpend: '0' });
+    const { fetchImpl, calls } = router(answer);
     const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
       dataDir: dir,
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out).toEqual({
-      action: 'execute',
-      id: fallbackId,
-      response: {
-        hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: FALLBACK_LINE },
-      },
-    });
-    // The lead is never kept: the route `request` runs is Tenjin's own.
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(calls).toHaveLength(1);
     const { readKeptSpec } = await import('./specs');
     expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
-    expect(await readSpec(dir, fallbackId)).toMatchObject({ id: fallbackId, priceAtomic: '20000' });
   });
-
-  it.each([
-    ['the settings allow no Tenjin route', alone, {}],
-    ['its price is over the per-call limit', answer, { maxAutoSpend: '10000' }],
-  ])(
-    'offers nothing, with nothing kept, where the account lacks the job and %s',
-    async (_, body, over) => {
-      await connectApify(['call-actor'], over);
-      const { fetchImpl } = router(body);
-      const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
-        dataDir: dir,
-        baseUrl: BASE,
-        fetchImpl,
-      });
-      expect(out).toEqual({ response: null, action: 'execute', withheld: true });
-      const { readKeptSpec } = await import('./specs');
-      expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
-      expect(await readSpec(dir, fallbackId)).toBeNull();
-    },
-  );
 
   it('injects nothing for an unchecked map’s refusal on a hook, read as plain native', async () => {
     // Owner decision (review round 1): the agent did not ask, so a hook never

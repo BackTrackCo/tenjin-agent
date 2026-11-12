@@ -103,21 +103,32 @@ export function shownInput(
   return text.length > 0 && Array.from(text).length <= SHOWN_INPUT_MAX_CHARS ? text : undefined;
 }
 
+/** The field of a kept spec that names the account offer it was offered in
+ *  place of, after that account refused (`accounts/run.ts`). */
+const REPLACES_KEY = 'replaces';
+
 /**
  * Store each spec under its id, and drop expired ones. Never throws. Ages are
  * file mtimes, so they are read against the real clock, never a caller's.
+ * `replaces`: the account offer these were offered in place of, which a run of
+ * one of them settles, so that offer never runs too.
  */
 export async function storeSpecs(
   dataDir: string,
   specs: readonly OfferSpec[] | undefined,
   settingsHash?: string,
+  opts: { replaces?: string } = {},
 ): Promise<void> {
   if (specs === undefined || specs.length === 0) return;
   for (const spec of specs) {
     try {
       // `shown` rides beside the spec for the mod, and is dropped on read.
       // The answer's settings hash is this offer's own, never a later one.
-      const kept: Record<string, unknown> = { ...spec, [SHOWN_KEY]: shownInputField(spec) };
+      const kept: Record<string, unknown> = {
+        ...spec,
+        [SHOWN_KEY]: shownInputField(spec),
+        ...(opts.replaces !== undefined ? { [REPLACES_KEY]: opts.replaces } : {}),
+      };
       delete kept.settingsHash;
       if (settingsHash !== undefined) kept.settingsHash = settingsHash;
       await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
@@ -134,6 +145,14 @@ export async function storeSpecs(
 /** The spec stored for this id, with the settings hash it was decided under,
  *  or null: none, expired, damaged or not ours. */
 export async function readSpec(dataDir: string, id: string): Promise<KeptSpec | null> {
+  return (await readSpecFile(dataDir, id))?.spec ?? null;
+}
+
+/** {@link readSpec}, with the account offer it replaces, when it does. */
+async function readSpecFile(
+  dataDir: string,
+  id: string,
+): Promise<{ spec: KeptSpec; replaces?: string } | null> {
   const path = specPath(dataDir, id);
   // O_NOFOLLOW: the directory is the user's, and a planted symlink must not
   // turn this read into a read of something else.
@@ -143,9 +162,15 @@ export async function readSpec(dataDir: string, id: string): Promise<KeptSpec | 
     const stat = await file.stat();
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
     const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
+    const replaces = kept[REPLACES_KEY];
     delete kept[SHOWN_KEY];
+    delete kept[REPLACES_KEY];
     const parsed = KeptSpecSchema.safeParse(kept);
-    return parsed.success && parsed.data.id === id ? parsed.data : null;
+    if (!parsed.success || parsed.data.id !== id) return null;
+    return {
+      spec: parsed.data,
+      ...(typeof replaces === 'string' && replaces.length > 0 ? { replaces } : {}),
+    };
   } catch {
     return null;
   } finally {
@@ -153,9 +178,8 @@ export async function readSpec(dataDir: string, id: string): Promise<KeptSpec | 
   }
 }
 
-/** The fields of a kept account spec beside the spec itself: Tenjin's own
- *  route for its job, and whether the user named it. */
-const FALLBACK_KEY = 'fallback';
+/** The field of a kept account spec beside the spec itself: whether the
+ *  user named it. */
 const NAMED_KEY = 'named';
 
 /** An account spec as this machine keeps it: with the settings hash its
@@ -163,17 +187,14 @@ const NAMED_KEY = 'named';
 export type KeptAccountSpec = AccountOfferSpec & { settingsHash?: string };
 
 /**
- * KEEP AN OFFER LED BY THE USER'S OWN ACCOUNT (plan 37): its spec, the
- * settings hash its answer echoed, and Tenjin's own route for the same job
- * under that route's id, with the lead naming it. The line never names the
- * fallback: this client offers it when the account refuses. `named`: the
- * user asked for this service by its id (`request({tool})`), the one way a
- * map Tenjin has not checked may run. Never throws.
+ * KEEP AN OFFER LED BY THE USER'S OWN ACCOUNT (plan 37): its spec and the
+ * settings hash its answer echoed. `named`: the user asked for this service
+ * by its id (`request({tool})`), the one way a map Tenjin has not checked may
+ * run. Never throws.
  */
 export async function storeAccountOffer(
   dataDir: string,
   lead: AccountOfferSpec,
-  fallback: OfferSpec | undefined,
   settingsHash: string | undefined,
   opts: { named?: true } = {},
 ): Promise<void> {
@@ -181,7 +202,6 @@ export async function storeAccountOffer(
     const kept: Record<string, unknown> = {
       ...lead,
       [SHOWN_KEY]: shownInputField(lead),
-      ...(fallback !== undefined ? { [FALLBACK_KEY]: fallback.id } : {}),
       ...(opts.named === true ? { [NAMED_KEY]: true } : {}),
     };
     delete kept.settingsHash;
@@ -193,21 +213,20 @@ export async function storeAccountOffer(
   } catch {
     // `request({id})` says no spec is kept, and the agent asks again.
   }
-  await storeSpecs(dataDir, fallback !== undefined ? [fallback] : [], settingsHash);
   await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
 }
 
-/** What is kept for an id: a spec the balance pays, or one on the user's own
- *  account with the id of Tenjin's route for its job. */
+/** What is kept for an id: a spec the balance pays, with the account offer
+ *  it was offered in place of, or one on the user's own account. */
 export type KeptAny =
-  | { spec: KeptSpec; account?: undefined }
-  | { spec: KeptAccountSpec; account: true; fallbackId?: string; named?: true };
+  | { spec: KeptSpec; account?: undefined; replaces?: string }
+  | { spec: KeptAccountSpec; account: true; named?: true };
 
 /** Either kind of spec kept for this id, or null. Callers that run only a
  *  spec the balance pays read {@link readSpec}, which never returns the other. */
 export async function readKeptSpec(dataDir: string, id: string): Promise<KeptAny | null> {
-  const paid = await readSpec(dataDir, id);
-  if (paid !== null) return { spec: paid };
+  const paid = await readSpecFile(dataDir, id);
+  if (paid !== null) return paid;
   const file = await open(specPath(dataDir, id), constants.O_RDONLY | constants.O_NOFOLLOW).catch(
     () => undefined,
   );
@@ -216,16 +235,14 @@ export async function readKeptSpec(dataDir: string, id: string): Promise<KeptAny
     const stat = await file.stat();
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
     const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
-    const fallback = kept[FALLBACK_KEY];
     const named = kept[NAMED_KEY] === true;
     const hash = SettingsHashSchema.optional().safeParse(kept.settingsHash);
-    for (const key of [SHOWN_KEY, FALLBACK_KEY, NAMED_KEY, 'settingsHash']) delete kept[key];
+    for (const key of [SHOWN_KEY, NAMED_KEY, 'settingsHash']) delete kept[key];
     const account = AccountOfferSpecSchema.safeParse(kept);
     if (!account.success || account.data.id !== id || !hash.success) return null;
     return {
       spec: { ...account.data, ...(hash.data !== undefined ? { settingsHash: hash.data } : {}) },
       account: true,
-      ...(typeof fallback === 'string' && fallback.length > 0 ? { fallbackId: fallback } : {}),
       ...(named ? { named: true as const } : {}),
     };
   } catch {
@@ -328,8 +345,8 @@ export type EarlierPayment =
   | { state: 'running'; at?: string }
   /** It ran on the user's own account (plan 37), or may have. */
   | { state: 'account'; at: string }
-  /** The account refused before anything ran, and Tenjin's own route ran in
-   *  its place under the offer id `to`: this offer's job is that one's. */
+  /** The account refused, and the offer Tenjin made in its place ran under
+   *  the offer id `to`: this offer's job is that one's. */
   | { state: 'switched'; at: string; to: string }
   | { state: 'unrecorded' };
 
@@ -459,8 +476,8 @@ export async function releaseSpecClaim(dataDir: string, id: string, owner: strin
 /**
  * How a claimed call on the user's own account ended. One that ran, or may
  * have (its billing call went out), keeps the claim, so the same id never
- * sends it again; so does one whose job Tenjin's own route took over (`to`,
- * that route's offer id), which may have run and paid. One refused before
+ * sends it again; so does one whose job the offer made in its place took over
+ * (`to`, that offer's id), which may have run and paid. One refused before
  * anything ran on either frees the id for a retry after a reconnect or a fixed
  * input. Never throws.
  */

@@ -3,13 +3,18 @@ import { defaultExecFor } from '../../lib/os-store';
 import { validateResultBody } from '../../lib/request-schema';
 import { MAX_CALL_WAIT_MS } from '../jobs';
 import { maskDeep, recordAccountRow } from '../paid';
-import type { AccountOfferSpec, OfferSpec, SpecOutcome } from '../decision';
+import {
+  isAccountSpec,
+  requestRefused,
+  type AccountOfferSpec,
+  type OfferSpec,
+  type SpecOutcome,
+} from '../decision';
 import { settingsRefusal, type SettingsRefusal } from '../settings-check';
 import { personalSettingsAt } from '../settings';
 import { mergedInput, specInputProblems, specText, uncheckedWarning } from '../spec-call';
 import {
   claimSpecPayment,
-  readSpec,
   settleAccountRun,
   storeAccountOffer,
   storeSpecs,
@@ -60,10 +65,12 @@ import { readVaultHeader } from './vault';
  *    own plan pays.
  *
  * WHEN THE ACCOUNT REFUSES (its sign-in expired, its plan or rate limit ran
- * out), the call stops with the reason, how to fix it, and Tenjin's own tool
- * for the same job with its price, as the next step the user picks. Nothing
- * is charged until they pick. Only where the user opted in for that account
- * (`tenjin config fallback on --source <id>`) does Tenjin's tool run in its
+ * out), or its job fails, the call stops with the reason and how to fix it,
+ * and asks Tenjin again for the same job with that account left out
+ * (`{refused: <offer id>}`, on the paid route like any answer). An offer back
+ * is named with its price, as the next step the user picks; nothing is
+ * charged until they pick. Only where the user opted in for that account
+ * (`tenjin config fallback on --source <id>`) does it run in the account's
  * place, and the receipt says so. A call that ran and failed is never
  * switched: the account may already have billed for it.
  */
@@ -178,30 +185,93 @@ export function accountResult(
   };
 }
 
-/** Tenjin's own route for the job, as a refusal offers it. */
-function fallbackOffer(fallback: OfferSpec): { words: string; next: string; envelope: Json } {
-  const price = fallback.priceVaries
-    ? `up to $${toMoney(fallback.maxAmountAtomic).usd}`
-    : `$${toMoney(fallback.priceAtomic).usd}`;
-  const name = fallback.label ?? fallback.provider;
-  const id = JSON.stringify(fallback.id);
+/** The re-ask's offer, as a refusal names it, with its price. */
+function offerWords(offer: OfferSpec): { said: string; next: string; envelope: Json } {
+  const price = offer.priceVaries
+    ? `up to $${toMoney(offer.maxAmountAtomic).usd}`
+    : `$${toMoney(offer.priceAtomic).usd}`;
+  const name = offer.label ?? offer.provider;
+  const id = JSON.stringify(offer.id);
   return {
-    words: `Tenjin's own tool for this job (${name}) costs ${price} from the Tenjin balance.`,
-    next: `If the user picks Tenjin's tool, call request({id: ${id}}) for its inputs, then request({id: ${id}, input: {...}}).`,
-    envelope: { fallback: { id: fallback.id, label: name, price } },
+    said: `Tenjin has ${name} for ${price}: request({id: ${id}, input}) to run it.`,
+    next: `If the user picks Tenjin's tool, call request({id: ${id}, input: {...}}) with the inputs above.`,
+    envelope: { offer: { id: offer.id, label: name, price } },
   };
 }
 
-/** The agent's input, kept to the fields Tenjin's route takes, when that is
- *  an input it takes whole: what an automatic switch may send. */
-function fittedInput(input: Json, fallback: OfferSpec): Json | undefined {
-  const properties = fallback.input.properties;
+/** The agent's input, kept to the fields the offer takes, when that is an
+ *  input it takes whole: what an automatic switch may send. */
+function fittedInput(input: Json, offer: OfferSpec): Json | undefined {
+  const properties = offer.input.properties;
   if (properties === null || typeof properties !== 'object') return undefined;
   const kept = Object.fromEntries(
     Object.entries(input).filter(([name]) => Object.hasOwn(properties, name)),
   );
-  const problems = specInputProblems(fallback, mergedInput(fallback, kept));
+  const problems = specInputProblems(offer, mergedInput(offer, kept));
   return problems !== undefined && problems.length === 0 ? kept : undefined;
+}
+
+/** Where a run's outcome is told and its re-ask goes: the call's routing. */
+export type RouteDeps = ReportDeps & { acceptsBazaar?: boolean };
+
+/**
+ * THE RE-ASK (plan 37, review round 1): the account refused offer `refused`,
+ * so Tenjin is asked again for the same job with that account left out for
+ * this one answer (`{refused}`, {@link requestRefused}), under the settings
+ * saved now, on the paid route like any answer. An offer back is kept as the
+ * one made in that offer's place ({@link runInPlaceOf}) and returned.
+ * Anything else (native, a skip, a failure, another account's map) is null:
+ * the refusal stands as the account's own error. Never throws.
+ */
+async function reask(
+  refused: string,
+  deps: RequestToolDeps,
+  routing: RouteDeps,
+): Promise<KeptSpec | null> {
+  const { dataDir } = deps.ctx;
+  const here = await personalSettingsAt(dataDir).catch(() => undefined);
+  if (here?.wire.status !== 'ok') return null;
+  const route = deps.route?.(routing.baseUrl);
+  const answer = await requestRefused(refused, {
+    ctx: deps.ctx,
+    baseUrl: routing.baseUrl,
+    acceptsBazaar: routing.acceptsBazaar === true,
+    harness: routing.harness ?? 'claude',
+    settings: here.wire.settings,
+    ...(routing.fetchImpl !== undefined ? { fetchImpl: routing.fetchImpl } : {}),
+    ...(route !== undefined ? { route } : {}),
+  }).catch(() => null);
+  if (answer?.status !== 'decided') return null;
+  const { decision, settingsHash } = answer.decision;
+  if (decision.action !== 'spec' || isAccountSpec(decision.spec)) return null;
+  const offer: OfferSpec = { ...decision.spec, id: decision.id };
+  await storeSpecs(dataDir, [offer], settingsHash, { replaces: refused });
+  return { ...offer, ...(settingsHash !== undefined ? { settingsHash } : {}) };
+}
+
+/**
+ * `request({id, input})` FOR AN OFFER MADE IN A REFUSED ACCOUNT OFFER'S PLACE
+ * (the re-ask's). The refused offer is held while it runs and, once it may
+ * have run, settled as switched to it: the account's billing call for that
+ * job never goes out too (Greptile G1, adapted). A refused offer already
+ * claimed (running, or run) is left as it is.
+ */
+export async function runInPlaceOf(
+  refused: string,
+  id: string,
+  run: () => Promise<RequestToolResult>,
+  dataDir: string,
+): Promise<RequestToolResult> {
+  const held = (await claimSpecPayment(dataDir, refused)) === null;
+  let result: RequestToolResult;
+  try {
+    result = await run();
+  } catch (err) {
+    if (held) await settleAccountRun(dataDir, refused, false);
+    throw err;
+  }
+  if (held) await settleAccountRun(dataDir, refused, ranNothing(result) ? false : { to: id });
+  return result;
 }
 
 /** Where the account's own seams come from: the deps in tests, the platform
@@ -292,21 +362,6 @@ async function connection(
   return null;
 }
 
-/**
- * Tenjin's own route for the job, kept beside the lead, while the rules it
- * was decided under are still the ones saved: a refusal never offers what a
- * rule saved since rules out. Local, with no network.
- */
-async function allowedFallback(
-  dataDir: string,
-  fallbackId: string | undefined,
-): Promise<KeptSpec | null> {
-  if (fallbackId === undefined) return null;
-  const fallback = await readSpec(dataDir, fallbackId);
-  if (fallback === null) return null;
-  return (await settingsRefusal(dataDir, [fallback.settingsHash])) === null ? fallback : null;
-}
-
 /** `request({id})` for an account service: its spec, with who pays. */
 export async function showAccountSpec(
   id: string,
@@ -333,45 +388,44 @@ export async function showAccountSpec(
 /**
  * AN ACCOUNT SERVICE A QUERY OR A TOOL ID PICKED, kept and shown, unless the
  * connect-time check found this account lacks a tool its call makes: then it
- * is left out, and Tenjin's own route for the task, when the settings allowed
- * one, is kept and shown in its place, from the balance like any other.
- * Nothing is sent. `named`: the user asked for this service by its id, the one
- * way a map Tenjin has not checked may run.
+ * is left out, Tenjin is asked again with the account left out ({@link
+ * reask}), and an offer back is shown in its place, from the balance like any
+ * other. Nothing is sent to the account. `named`: the user asked for this
+ * service by its id, the one way a map Tenjin has not checked may run.
  */
 export async function offerAccountLead(
   lead: AccountOfferSpec,
-  fallback: OfferSpec | undefined,
   settingsHash: string | undefined,
-  dataDir: string,
+  deps: RequestToolDeps,
+  routing: RouteDeps,
   hint?: string,
   opts: { named?: true } = {},
 ): Promise<RequestToolResult> {
+  const { dataDir } = deps.ctx;
   if (!(await accountLacks(dataDir, lead))) {
-    await storeAccountOffer(dataDir, lead, fallback, settingsHash, opts);
+    await storeAccountOffer(dataDir, lead, settingsHash, opts);
     return showAccountSpec(lead.id, lead, dataDir, hint);
   }
   const account = await accountOf(lead, dataDir);
   const words = refusalWords('missing', account, undefined);
-  if (fallback === undefined) {
-    const reason = `${words.said} Nothing was sent, and your settings allow no other service for this.`;
+  const offer = await reask(lead.id, deps, routing);
+  if (offer === null) {
+    const reason = `${words.said} Nothing was sent.`;
     return accountResult('native', reason, reason, account.label, {
       nextStep: `Continue with your own tools. ${words.fix}`,
     });
   }
-  await storeSpecs(dataDir, [fallback], settingsHash);
-  const shown = showSpec(fallback.id, fallback);
+  const shown = showSpec(offer.id, offer);
   const note = `${words.said} Tenjin's own tool for this task is below, paid from the Tenjin balance.`;
   return { ...shown, summary: `${note}\n${shown.summary}`, envelope: { ...shown.envelope, note } };
 }
 
-/** What one run carries to the end of it: the offer, the account, Tenjin's
- *  route for the job, the input, and where its outcome is told. */
+/** What one run carries to the end of it: the offer, the account, the
+ *  input, and where its outcome is told and its re-ask goes. */
 interface Run {
   id: string;
   spec: KeptAccountSpec;
   account: Account;
-  fallback: KeptSpec | null;
-  fallbackId?: string;
   /** The agent's input, before the pins: what an automatic switch fits. */
   input: Json;
   /** The merged input: what the account's call is filled from. */
@@ -380,10 +434,10 @@ interface Run {
   sentInput: Json;
   deps: RequestToolDeps;
   footer: LookupFooter;
-  reportDeps: ReportDeps;
+  reportDeps: RouteDeps;
   startedAt: number;
   /** This call holds the offer's claim, not yet settled: a refusal settles
-   *  it once it knows whether Tenjin's own route ran in the account's place. */
+   *  it once it knows whether the re-ask's offer ran in the account's place. */
   claimed?: boolean;
 }
 
@@ -409,18 +463,17 @@ async function refusedBySettings(at: Run, refusal: SettingsRefusal): Promise<Req
 }
 
 /**
- * `request({id, input})` FROM AN ACCOUNT SERVICE'S SPEC. `kept.fallbackId`
- * names Tenjin's own route for the job, kept beside it; `kept.named` says the
- * user asked for the service by its id.
+ * `request({id, input})` FROM AN ACCOUNT SERVICE'S SPEC. `kept.named` says
+ * the user asked for the service by its id.
  */
 export async function runAccountSpec(
   id: string,
   spec: KeptAccountSpec,
-  kept: { fallbackId?: string; named?: true },
+  kept: { named?: true },
   input: Json,
   deps: RequestToolDeps,
   footer: LookupFooter,
-  reportDeps: ReportDeps,
+  reportDeps: RouteDeps,
 ): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
   const merged = mergedInput(spec, input);
@@ -428,8 +481,6 @@ export async function runAccountSpec(
     id,
     spec,
     account: await accountOf(spec, dataDir),
-    fallback: await allowedFallback(dataDir, kept.fallbackId),
-    ...(kept.fallbackId !== undefined ? { fallbackId: kept.fallbackId } : {}),
     input,
     merged,
     sentInput: maskDeep(merged) as Json,
@@ -534,7 +585,7 @@ export async function runAccountSpec(
   // THE CLAIM STAYS for anything the account may have run, its own error
   // answer included; arguments it would not take free the id for a retry
   // after the fix. A refusal of a call that never ran is settled by
-  // `refusal`, which knows whether Tenjin's own route ran in its place.
+  // `refusal`, which knows whether the re-ask's offer ran in its place.
   if (run.kind !== 'refused') {
     await settleAccountRun(dataDir, id, run.kind !== 'input');
     at.claimed = false;
@@ -544,7 +595,7 @@ export async function runAccountSpec(
 
 /** How a run ended, delivered: a result, a refusal, still running, or failed. */
 async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
-  const { id, spec, account, fallback, sentInput, footer } = at;
+  const { id, spec, account, sentInput, footer } = at;
   const { dataDir } = at.deps.ctx;
   switch (run.kind) {
     case 'refused':
@@ -591,11 +642,14 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       await keepAccountRow(at);
       report(at, { status: 'failed' });
       await footer.done('failed', { ...shownOf(at), price: 'your account' });
-      const offer = fallback !== null ? fallbackOffer(fallback) : undefined;
+      // THE RE-ASK, offered for the user to pick, never run in its place:
+      // the account may already have billed for this job.
+      const offered = await reask(id, at.deps, at.reportDeps);
+      const offer = offered !== null ? offerWords(offered) : undefined;
       const reason = `Your ${account.label} account ran this, but ${run.why}. It may have billed your ${account.label} plan; nothing was charged to your Tenjin balance.`;
       return accountResult(
         'failed',
-        `${reason}${offer !== undefined ? ` ${offer.words}` : ''}`,
+        `${reason}${offer !== undefined ? ` ${offer.said}\n\n${specText(offered!.id, offered!)}` : ''}`,
         reason,
         account.label,
         {
@@ -621,7 +675,6 @@ function keepJob(at: Run, started: Resume): Promise<boolean> {
     input: at.merged,
     first: started.first,
     firstAt: started.firstAt,
-    ...(at.fallbackId !== undefined ? { fallbackId: at.fallbackId } : {}),
   });
 }
 
@@ -719,18 +772,21 @@ async function delivered(
 }
 
 /**
- * THE ACCOUNT REFUSED. The call stops with the reason and the fix, and offers
- * Tenjin's own tool for the job with its price, which runs only when the user
- * picks it, or, for an account they opted in for, in its place now: through
- * the ordinary spec path, with the settings check, the limits and the claim,
- * and a receipt that says so. `sent`: the billing call went out. `answered`:
- * the account's own error answered it, so its job may have started; Tenjin's
- * tool then never stands in automatically, which could bill the job twice.
+ * THE ACCOUNT REFUSED. The call stops with the reason and the fix, and asks
+ * Tenjin again for the job with this account left out ({@link reask}). An
+ * offer back is named with its price and runs only when the user picks it,
+ * or, for an account they opted in for, in its place now: through the
+ * ordinary spec path, with the settings check, the limits and the claim, and
+ * a receipt that says so. `sent`: the billing call went out. `answered`: the
+ * account's own error answered it, so its job may have started; the offer
+ * then never runs in its place automatically, which could bill the job twice.
+ * Not for an account no longer connected here: the router answers that
+ * re-ask with nothing, so it is not paid for.
  *
- * IN A NATIVE CALL'S PLACE (`deps.via`, the swap), Tenjin's tool never stands
- * in automatically: the swap ran the account's pick under the automatic-use
- * checks, which Tenjin's tool has not met. The refusal and its offer are the
- * answer.
+ * IN A NATIVE CALL'S PLACE (`deps.via`, the swap), the offer never runs in
+ * its place automatically: the swap ran the account's pick under the
+ * automatic-use checks, which the offer has not met. The refusal and the
+ * offer are the answer.
  */
 async function refusal(
   at: Run,
@@ -739,7 +795,7 @@ async function refusal(
   detail?: string,
   opts: { answered?: boolean } = {},
 ): Promise<RequestToolResult> {
-  const { account, fallback, footer } = at;
+  const { account, footer } = at;
   report(at, {
     status: 'unpaid',
     reason: reason === 'unreachable' ? 'unreachable' : reason === 'missing' ? 'terms' : 'provider',
@@ -749,29 +805,30 @@ async function refusal(
     ? 'Nothing was charged to your Tenjin balance.'
     : `Nothing was sent to your ${account.label} account, and nothing was charged.`;
   const answered = opts.answered === true;
+  const offer = reason === 'not_connected' ? null : await reask(at.id, at.deps, at.reportDeps);
   const switchable =
     !answered &&
     at.deps.via === undefined &&
     SWITCHABLE.has(reason) &&
     account.onRefusal === 'tenjin' &&
-    fallback !== null;
-  const fitted = switchable ? fittedInput(at.input, fallback) : undefined;
+    offer !== null;
+  const fitted = switchable ? fittedInput(at.input, offer) : undefined;
   if (switchable && fitted !== undefined) {
-    // THE USER'S OWN CHOICE FOR THIS ACCOUNT: Tenjin's tool, in its place,
+    // THE USER'S OWN CHOICE FOR THIS ACCOUNT: the offer, in its place,
     // checked, limited and claimed on its own.
-    const switched = await runSpec(fallback.id, fallback, fitted, at.deps, footer, at.reportDeps);
-    // ONE JOB, ONE CLAIM: once Tenjin's route may have run it, this offer
-    // stays claimed and names that route, so a replay never sends the
+    const switched = await runSpec(offer.id, offer, fitted, at.deps, footer, at.reportDeps);
+    // ONE JOB, ONE CLAIM: once the offer may have run it, this offer stays
+    // claimed and names the one that ran, so a replay never sends the
     // account's billing call for a job already done and paid.
     const ran = !ranNothing(switched);
-    await settleRefused(at, ran ? { to: fallback.id } : false);
+    await settleRefused(at, ran ? { to: offer.id } : false);
     const note = `${words.said} Tenjin ran its own tool for this job instead, as you set for ${account.label}.`;
     return {
       ...switched,
       summary: `${note}\n${switched.summary}`,
       envelope: {
         ...switched.envelope,
-        switched: { from: account.label, to: fallback.label ?? fallback.provider, reason },
+        switched: { from: account.label, to: offer.label ?? offer.provider, reason },
         note,
       },
     };
@@ -779,39 +836,39 @@ async function refusal(
   // Nothing ran on either: the id is free for a retry after the fix.
   await settleRefused(at, false);
   await footer.done('needs_input', shownOf(at));
-  const offer = fallback !== null ? fallbackOffer(fallback) : undefined;
   const text = `${words.said} ${nothing}`;
   const refused = { account: account.label, reason, reconnect: `tenjin connect ${account.id}` };
   if (switchable && fitted === undefined) {
-    // OPTED IN, BUT TENJIN'S TOOL TAKES OTHER INPUTS: the agent fills them
-    // from its spec and runs it now, with no question for the user.
-    const fid = JSON.stringify(fallback.id);
+    // OPTED IN, BUT THE OFFER TAKES OTHER INPUTS: the agent fills them from
+    // its spec and runs it now, with no question for the user.
+    const fid = JSON.stringify(offer.id);
     return accountResult(
       'needs_input',
-      `${text} You set Tenjin's tool to stand in when ${account.label} refuses, and it takes other inputs:\n\n${specText(fallback.id, fallback)}`,
+      `${text} You set Tenjin's tool to stand in when ${account.label} refuses, and it takes other inputs:\n\n${specText(offer.id, offer)}`,
       text,
       account.label,
       {
         nextStep: `The user chose Tenjin's tool for when ${account.label} refuses: call request({id: ${fid}, input: {...}}) now with the inputs above, without asking. ${words.fix}`,
         parameters: at.sentInput,
-        extra: { refused, ...fallbackOffer(fallback).envelope, switching: true },
+        extra: { refused, ...offerWords(offer).envelope, switching: true },
       },
     );
   }
+  const named = offer !== null ? offerWords(offer) : undefined;
   return accountResult(
     'needs_input',
-    `${text} ${words.fix}${offer !== undefined ? ` ${offer.words}` : ''}`,
+    `${text} ${words.fix}${named !== undefined ? ` ${named.said}\n\n${specText(offer!.id, offer!)}` : ''}`,
     text,
     account.label,
     {
       nextStep:
-        offer !== undefined
-          ? `Ask the user whether to fix it (${words.fix.replace(/\.$/, '')}) or use Tenjin's tool instead. ${offer.next}`
+        named !== undefined
+          ? `Ask the user whether to fix it (${words.fix.replace(/\.$/, '')}) or use Tenjin's tool instead. ${named.next}`
           : `Tell the user: ${words.fix} Otherwise continue with your own tools.`,
       parameters: at.sentInput,
       ...(answered && detail !== undefined ? { providerError: detail } : {}),
       ...(answered ? { ran: 'maybe' as const } : {}),
-      extra: { refused, ...(offer?.envelope ?? {}) },
+      extra: { refused, ...(named?.envelope ?? {}) },
     },
   );
 }
@@ -839,7 +896,7 @@ async function settleRefused(at: Run, ran: false | { to: string }): Promise<void
 export async function resumeAccountJob(
   job: AccountJob,
   deps: RequestToolDeps,
-  reportDeps: ReportDeps,
+  reportDeps: RouteDeps,
 ): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
   const footer = await openLookupFooter(dataDir, { id: job.offerId });
@@ -849,8 +906,6 @@ export async function resumeAccountJob(
     id: job.offerId,
     spec,
     account: await accountOf(spec, dataDir),
-    fallback: await allowedFallback(dataDir, job.fallbackId),
-    ...(job.fallbackId !== undefined ? { fallbackId: job.fallbackId } : {}),
     input: job.input,
     merged: job.input,
     sentInput: maskDeep(job.input) as Json,

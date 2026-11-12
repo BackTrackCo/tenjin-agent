@@ -9,7 +9,7 @@ import type { SpendAuthorization, SpendAuthorizer } from '../../lib/wallet';
 import { sourceVaultPath } from '../../lib/paths';
 import { MAX_CALL_WAIT_MS } from '../jobs';
 import { readPaidRecords, type MediaTransport } from '../paid';
-import type { AccountOfferSpec, OfferSpec } from '../decision';
+import { acceptsFor, type AccountOfferSpec, type OfferSpec } from '../decision';
 import { personalSettingsAt } from '../settings';
 import { storeAccountOffer } from '../specs';
 import { runRequestTool, type RequestToolDeps } from '../tool';
@@ -22,17 +22,18 @@ import { clearVaultKeyCache, writeVault } from './vault';
  * end: the kept spec, the user's settings, the claim, the credential in the
  * headers (refreshed and retried once on a 401), the map's follow-up, the
  * result checked, cut and saved, the ledger row and the receipt; and when the
- * account refuses, the stop, the reason and Tenjin's own tool with its price.
- * The account is a scripted MCP session, the keychain a fake, and the only
- * fetch is the router's outcome report and, where a test refreshes, the
- * scripted sign-in server.
+ * account refuses, the stop, the reason, and the re-ask's offer with its
+ * price. The account is a scripted MCP session, the keychain a fake, and the
+ * only fetches are the router's (outcome reports, and the re-ask, answered
+ * from the shared fixtures) and, where a test refreshes, the scripted sign-in
+ * server.
  */
 
 const fixtures = new URL('../fixtures/', import.meta.url);
 const read = <T>(name: string): T => JSON.parse(readFileSync(new URL(name, fixtures), 'utf8')) as T;
 
 const APIFY = read<{
-  decision: { id: string; specs: AccountOfferSpec[]; fallback: OfferSpec };
+  decision: { id: string; specs: AccountOfferSpec[] };
 }>('wire-hook-execute-account.json').decision;
 const FAL = read<{
   decision: { id: string; spec: Omit<AccountOfferSpec, 'id'> };
@@ -116,12 +117,40 @@ async function hashNow(): Promise<string> {
 }
 
 /** An offer kept as the hook keeps one, under the settings saved now. */
-async function offered(
-  lead: AccountOfferSpec,
-  fallback: OfferSpec | undefined,
-  opts: { named?: true } = {},
-): Promise<void> {
-  await storeAccountOffer(dir, lead, fallback, await hashNow(), opts);
+async function offered(lead: AccountOfferSpec, opts: { named?: true } = {}): Promise<void> {
+  await storeAccountOffer(dir, lead, await hashNow(), opts);
+}
+
+/** The re-ask's answers, from the server's real route. */
+const REASK_OFFER = read<{ decision: { id: string; spec: Omit<OfferSpec, 'id'> } }>(
+  'wire-refused-offer.json',
+);
+const REASK_NATIVE = read<Record<string, unknown>>('wire-refused-native.json');
+/** The offer the re-ask makes in the account's place. */
+const REPLACEMENT: OfferSpec = { ...REASK_OFFER.decision.spec, id: REASK_OFFER.decision.id };
+
+/** Tenjin's offer for the job, taking the Apify map's own inputs, so an
+ *  automatic switch can run it as it stands. */
+const FITTING: OfferSpec = {
+  ...REPLACEMENT,
+  request: { ...REPLACEMENT.request, fields: { query: 'body', limit: 'body' } },
+  input: {
+    type: 'object',
+    properties: { query: { type: 'string' }, limit: { type: 'integer' } },
+    required: ['query'],
+  },
+  pinned: {},
+  output: 'json',
+};
+
+/** The re-ask's answer naming `offer`, under the settings saved now. */
+async function reaskOffering(offer: OfferSpec = REPLACEMENT): Promise<Record<string, unknown>> {
+  const { id, ...spec } = offer;
+  return {
+    ...REASK_OFFER,
+    decision: { ...REASK_OFFER.decision, id, spec },
+    settingsHash: await hashNow(),
+  };
 }
 
 /** A sign-in on this machine, sealed under the fake keychain. */
@@ -194,21 +223,38 @@ const text = (value: unknown): AccountCallResult => ({
   content: [{ type: 'text', text: JSON.stringify(value) }],
 });
 
-/** The router (outcome reports only), and the sign-in server when asked. */
-function network(signIn?: ReturnType<typeof fakeAccountServer>) {
+/**
+ * The router (outcome reports, the re-ask after a refusal, answered with
+ * `reask`: the ordinary native unless a test says otherwise, and a query,
+ * answered with `routed`), and the sign-in server when asked.
+ */
+function network(
+  signIn?: ReturnType<typeof fakeAccountServer>,
+  reask: Record<string, unknown> = REASK_NATIVE,
+  routed?: Record<string, unknown>,
+) {
   const outcomes: Record<string, unknown>[] = [];
+  const reasked: Record<string, unknown>[] = [];
   const other: string[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.startsWith(ROUTER)) {
-      outcomes.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (url === `${ROUTER}/api/x402-router/route` && ('refused' in body || routed)) {
+        if ('refused' in body) reasked.push(body);
+        return new Response(JSON.stringify('refused' in body ? reask : routed), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      outcomes.push(body);
       return new Response(null, { status: 204 });
     }
     other.push(url);
     if (signIn !== undefined) return signIn.fetchImpl(input, init);
     throw new Error(`unexpected request to ${url}`);
   }) as typeof fetch;
-  return { fetchImpl, outcomes, other };
+  return { fetchImpl, outcomes, reasked, other };
 }
 
 function authorizer(): SpendAuthorizer {
@@ -286,7 +332,7 @@ function apifyScript(over: Record<string, Answer[]> = {}) {
 async function apifyConnected(over: Partial<Saved> = {}, policy?: unknown): Promise<void> {
   await settings([{ ...APIFY_ACCOUNT, ...over }], policy);
   await signedIn(APIFY_ACCOUNT);
-  await offered(LEAD, APIFY.fallback);
+  await offered(LEAD);
 }
 
 const INPUT = { query: 'coffee shops', limit: 2 };
@@ -373,7 +419,7 @@ describe('a mapped job on the user’s own account', () => {
   it('polls a processing job and never sends the call that bills again', async () => {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, undefined, { named: true });
+    await offered(FAL_LEAD, { named: true });
     const session = account({
       run_model: [text({ status: 'processing', request_id: 'req-1' })],
       check_job: [text({ status: 'IN_PROGRESS' }), text({ status: 'COMPLETED' })],
@@ -415,7 +461,7 @@ describe('a mapped job on the user’s own account', () => {
   it('hands back a job it cannot wait out, on the ledger at once, and request({job}) finishes it without sending it again', async () => {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, undefined, { named: true });
+    await offered(FAL_LEAD, { named: true });
     const session = account({
       run_model: [text({ status: 'processing', request_id: 'req-1' })],
       check_job: [text({ status: 'IN_QUEUE' }), text({ status: 'COMPLETED' })],
@@ -473,7 +519,7 @@ describe('a long job on the account', () => {
   async function falOffered(): Promise<void> {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, undefined, { named: true });
+    await offered(FAL_LEAD, { named: true });
   }
 
   it('keeps the job and its ledger row once the billing call answers, so a process that exits mid-poll loses nothing', async () => {
@@ -564,32 +610,89 @@ describe('when the job fails after it started', () => {
       { source: 'apify', settlement: 'account', charge: 'unknown' },
     ]);
   });
+
+  it('names the re-ask’s offer for the user to pick, and never runs it in its place', async () => {
+    // Opted in, with an offer that fits: the account may already have billed
+    // for the job, so nothing runs on its own.
+    await apifyConnected({ onRefusal: 'tenjin' });
+    const session = apifyScript({ 'get-actor-run': [structured({ status: 'FAILED' })] });
+    const { fetchImpl, reasked } = network(undefined, await reaskOffering(FITTING));
+    const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(reasked).toMatchObject([{ refused: LEAD.id }]);
+    expect(result.envelope).toMatchObject({
+      status: 'failed',
+      offer: { id: FITTING.id, label: 'Firecrawl page read', price: '$0.015' },
+    });
+    expect(result.envelope).not.toHaveProperty('switched');
+    expect(result.summary).toContain(
+      `Tenjin has Firecrawl page read for $0.015: request({id: "${FITTING.id}", input}) to run it.`,
+    );
+    expect(String(result.envelope.nextStep)).toContain("don't call it again for this");
+  });
 });
 
 describe('when the account refuses', () => {
-  it('stops an expired sign-in with nothing sent, and offers Tenjin’s tool with its price', async () => {
+  /** A fetch that pays `offer`'s provider: its 402, then its answer. */
+  function paying(offer: OfferSpec, router: typeof fetch) {
+    const paid: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input) !== offer.request.url) return router(input, init);
+      paid.push(new Headers(init?.headers).get('payment-signature') !== null ? 'paid' : 'probe');
+      return paid.length % 2 === 1
+        ? new Response('{}', {
+            status: 402,
+            headers: {
+              'PAYMENT-REQUIRED': buildPaymentRequired({
+                amount: offer.priceAtomic,
+                payTo: offer.payTo,
+              }).header,
+            },
+          })
+        : new Response(JSON.stringify({ markdown: '# Cafe One' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+    }) as typeof fetch;
+    return { fetchImpl, paid };
+  }
+
+  it('stops an expired sign-in with nothing sent, asks Tenjin again, and names its offer with its price', async () => {
     // A sign-in whose refresh was refused: its token still reads fresh.
     await settings([APIFY_ACCOUNT]);
     await signedIn(APIFY_ACCOUNT, { state: 'expired' });
-    await offered(LEAD, APIFY.fallback);
+    await offered(LEAD);
     const session = apifyScript();
-    const { fetchImpl, outcomes, other } = network();
+    const { fetchImpl, outcomes, reasked, other } = network(undefined, await reaskOffering());
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(result.isError).toBe(false);
-    expect(result.summary).toBe(
-      "Your Apify sign-in has expired. Nothing was sent to your Apify account, and nothing was charged. Reconnect with `tenjin connect apify`. Tenjin's own tool for this job (Google Maps Places) costs $0.02 from the Tenjin balance.",
+    expect(result.summary).toMatch(
+      new RegExp(
+        `^Your Apify sign-in has expired\\. Nothing was sent to your Apify account, and nothing was charged\\. Reconnect with \`tenjin connect apify\`\\. Tenjin has Firecrawl page read for \\$0\\.015: request\\(\\{id: "${REPLACEMENT.id}", input\\}\\) to run it\\.\\n`,
+      ),
     );
     expect(result.envelope).toMatchObject({
       status: 'needs_input',
       cost: ['nothing charged'],
       refused: { account: 'Apify', reason: 'signin_expired', reconnect: 'tenjin connect apify' },
-      fallback: { id: APIFY.fallback.id, label: 'Google Maps Places', price: '$0.02' },
+      offer: { id: REPLACEMENT.id, label: 'Firecrawl page read', price: '$0.015' },
     });
     expect(String(result.envelope.nextStep)).toContain(
-      `request({id: "${APIFY.fallback.id}", input: {...}})`,
+      `request({id: "${REPLACEMENT.id}", input: {...}})`,
     );
+    // THE RE-ASK: the refused offer's id and the usual envelope, no query,
+    // under the settings saved now.
+    const now = await personalSettingsAt(dir);
+    expect(reasked).toEqual([
+      {
+        schemaVersion: 1,
+        refused: LEAD.id,
+        accepts: acceptsFor(false, true),
+        harness: 'claude',
+        settings: now.wire.status === 'ok' ? now.wire.settings : undefined,
+      },
+    ]);
     // NOTHING WENT TO THE ACCOUNT: no session, no sign-in server, and the
-    // only request is the router's unpaid outcome.
+    // only outcome is the router's unpaid one.
     expect(session.opened).toEqual([]);
     expect(other).toEqual([]);
     expect(outcomes).toEqual([
@@ -600,6 +703,31 @@ describe('when the account refuses', () => {
     clearVaultKeyCache();
     const after = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(after.envelope).toMatchObject({ status: 'fulfilled' });
+  });
+
+  it('never sends the refused offer once the user ran the offer made in its place', async () => {
+    // Greptile G1, adapted: the refusal frees the account offer's id for a
+    // retry after the fix, so the replacement's run must close it, or a
+    // reconnect and a replay would bill the account for a job already paid.
+    await settings([APIFY_ACCOUNT]);
+    await signedIn(APIFY_ACCOUNT, { state: 'expired' });
+    await offered(LEAD);
+    const session = apifyScript();
+    const { fetchImpl: router } = network(undefined, await reaskOffering());
+    const { fetchImpl, paid } = paying(REPLACEMENT, router);
+    const refused = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(refused.envelope).toMatchObject({ offer: { id: REPLACEMENT.id } });
+    const picked = await runRequestTool(
+      { id: REPLACEMENT.id, input: { url: 'https://cafe.example.test/' } },
+      deps(fetchImpl, session),
+    );
+    expect(picked.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(paid).toEqual(['probe', 'paid']);
+    await signedIn(APIFY_ACCOUNT);
+    clearVaultKeyCache();
+    const replay = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
+    expect(replay.summary).toContain("Tenjin's own tool already ran this job");
+    expect(session.opened).toEqual([]);
   });
 
   it('refreshes once on a 401 and sends the new token, and stops on a second', async () => {
@@ -626,7 +754,7 @@ describe('when the account refuses', () => {
     expect(signIn.refreshes).toEqual(['refresh-1']);
 
     // A second 401, after the refresh: refused, and the id stays free.
-    await offered({ ...LEAD, id: `${LEAD.id.slice(0, -2)}99` }, APIFY.fallback);
+    await offered({ ...LEAD, id: `${LEAD.id.slice(0, -2)}99` });
     const refusing = apifyScript({ 'call-actor': [new AccountRefused(401)] });
     const refused = await runRequestTool(
       { id: `${LEAD.id.slice(0, -2)}99`, input: INPUT },
@@ -648,17 +776,17 @@ describe('when the account refuses', () => {
     expect(session.tools()).toEqual(['call-actor']);
   });
 
-  it("passes the account's own error back without guessing, and offers Tenjin's tool", async () => {
+  it("passes the account's own error back without guessing, and names the re-ask's offer", async () => {
     await apifyConnected();
     const session = apifyScript({
       'call-actor': [{ isError: true, content: [{ type: 'text', text: 'Actor not found' }] }],
     });
-    const { fetchImpl } = network();
+    const { fetchImpl } = network(undefined, await reaskOffering());
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(result.envelope).toMatchObject({
       refused: { reason: 'declined' },
       providerError: 'Actor not found',
-      fallback: { id: APIFY.fallback.id },
+      offer: { id: REPLACEMENT.id },
     });
     // Review: an answer reached the account, so its charge is unknown, never
     // "nothing charged", and the call is on the ledger.
@@ -680,12 +808,12 @@ describe('when the account refuses', () => {
         { isError: true, content: [{ type: 'text', text: 'Monthly usage limit exceeded' }] },
       ],
     });
-    const { fetchImpl, other } = network();
+    const { fetchImpl, other } = network(undefined, await reaskOffering(FITTING));
     const first = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(first.envelope).toMatchObject({
       refused: { reason: 'credit' },
       providerError: 'Monthly usage limit exceeded',
-      fallback: { id: APIFY.fallback.id },
+      offer: { id: FITTING.id },
     });
     expect(first.envelope).not.toHaveProperty('switched');
     expect(first.envelope).not.toHaveProperty('switching');
@@ -695,71 +823,33 @@ describe('when the account refuses', () => {
     expect(other).toEqual([]);
   });
 
-  it('with the opt-in, runs Tenjin’s tool in its place and says so on the receipt', async () => {
-    // A fallback that takes the same inputs, so it can run as it stands.
-    const fallback: OfferSpec = {
-      ...APIFY.fallback,
-      request: { ...APIFY.fallback.request, fields: { query: 'body', limit: 'body' } },
-      input: {
-        type: 'object',
-        properties: { query: { type: 'string' }, limit: { type: 'integer' } },
-        required: ['query'],
-      },
-      output: 'json',
-    };
+  it('with the opt-in, runs the re-ask’s offer in its place and says so on the receipt', async () => {
     await settings([{ ...APIFY_ACCOUNT, onRefusal: 'tenjin' }]);
     await signedIn(APIFY_ACCOUNT, { state: 'expired' });
-    await offered(LEAD, fallback);
+    await offered(LEAD);
     const session = apifyScript();
-    const paid: string[] = [];
-    const { fetchImpl: router } = network();
-    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const url = String(input);
-      if (url !== fallback.request.url) return router(input, init);
-      paid.push(new Headers(init?.headers).get('payment-signature') !== null ? 'paid' : 'probe');
-      return paid.length === 1
-        ? new Response('{}', {
-            status: 402,
-            headers: {
-              'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '20000', payTo: fallback.payTo })
-                .header,
-            },
-          })
-        : new Response(JSON.stringify({ places: [{ name: 'Cafe One' }] }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          });
-    }) as typeof fetch;
+    const { fetchImpl: router } = network(undefined, await reaskOffering(FITTING));
+    const { fetchImpl, paid } = paying(FITTING, router);
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(session.opened).toEqual([]);
     expect(paid).toEqual(['probe', 'paid']);
     expect(result.envelope).toMatchObject({
       status: 'fulfilled',
-      cost: ['provider price 0.02 USD'],
-      switched: { from: 'Apify', to: 'Google Maps Places', reason: 'signin_expired' },
+      cost: ['provider price 0.015 USD'],
+      switched: { from: 'Apify', to: 'Firecrawl page read', reason: 'signin_expired' },
     });
     expect(result.summary).toMatch(
       /^Your Apify sign-in has expired\. Tenjin ran its own tool for this job instead, as you set for Apify\.\n/,
     );
   });
 
-  it('keeps the offer claimed once Tenjin’s tool ran in its place: a replay never reaches the account', async () => {
+  it('keeps the offer claimed once the re-ask’s offer ran in its place: a replay never reaches the account', async () => {
     // Review: a 429 freed the account offer's id before Tenjin's tool paid
     // under its own, so the same request after the limit cleared ran the
     // account's billing tool for a job already done and paid.
-    const fallback: OfferSpec = {
-      ...APIFY.fallback,
-      request: { ...APIFY.fallback.request, fields: { query: 'body', limit: 'body' } },
-      input: {
-        type: 'object',
-        properties: { query: { type: 'string' }, limit: { type: 'integer' } },
-        required: ['query'],
-      },
-      output: 'json',
-    };
     await settings([{ ...APIFY_ACCOUNT, onRefusal: 'tenjin' }]);
     await signedIn(APIFY_ACCOUNT);
-    await offered(LEAD, fallback);
+    await offered(LEAD);
     const session = apifyScript({
       'call-actor': [
         new AccountLimited(429),
@@ -771,24 +861,8 @@ describe('when the account refuses', () => {
       ],
       'get-actor-run': [structured({ status: 'SUCCEEDED' })],
     });
-    let calls = 0;
-    const { fetchImpl: router } = network();
-    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      if (String(input) !== fallback.request.url) return router(input, init);
-      calls += 1;
-      return calls === 1
-        ? new Response('{}', {
-            status: 402,
-            headers: {
-              'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '20000', payTo: fallback.payTo })
-                .header,
-            },
-          })
-        : new Response(JSON.stringify({ places: [{ name: 'Cafe One' }] }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          });
-    }) as typeof fetch;
+    const { fetchImpl: router } = network(undefined, await reaskOffering(FITTING));
+    const { fetchImpl } = paying(FITTING, router);
     const first = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(first.envelope).toMatchObject({
       status: 'fulfilled',
@@ -797,43 +871,66 @@ describe('when the account refuses', () => {
     const again = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(again.envelope).toMatchObject({ status: 'needs_input', cost: ['nothing charged'] });
     expect(again.summary).toContain("Tenjin's own tool already ran this job");
-    expect(String(again.envelope.nextStep)).toContain(`request({job: "${fallback.id}"})`);
+    expect(String(again.envelope.nextStep)).toContain(`request({job: "${FITTING.id}"})`);
     expect(session.tools()).toEqual(['call-actor']);
   });
 
-  it('with the opt-in and other inputs, hands the agent Tenjin’s spec to run now', async () => {
+  it('with the opt-in and other inputs, hands the agent the offer’s spec to run now', async () => {
     await apifyConnected({ onRefusal: 'tenjin' });
     const session = apifyScript({ 'call-actor': [new AccountLimited(429)] });
-    const { fetchImpl } = network();
+    const { fetchImpl } = network(undefined, await reaskOffering());
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(result.envelope).toMatchObject({ switching: true, refused: { reason: 'rate_limited' } });
-    expect(result.summary).toContain('textQuery');
+    expect(result.summary).toContain('Page to scrape.');
     expect(String(result.envelope.nextStep)).toContain('without asking');
   });
 
-  it("never offers Tenjin's tool where the router sent none for the settings", async () => {
-    // "Only use my accounts": the router sends no Tenjin route beside the lead.
-    await settings([APIFY_ACCOUNT], { version: 1, block: [{ kind: 'source', id: 'tenjin' }] });
+  it('names no offer when the re-ask finds nothing, and says only what the account said', async () => {
+    await settings([APIFY_ACCOUNT]);
     await signedIn(APIFY_ACCOUNT, { state: 'expired' });
-    await offered(LEAD, undefined);
-    const { fetchImpl } = network();
+    await offered(LEAD);
+    const { fetchImpl, reasked } = network();
     const result = await runRequestTool(
       { id: LEAD.id, input: INPUT },
       deps(fetchImpl, apifyScript()),
     );
+    expect(reasked).toHaveLength(1);
     expect(result.envelope).toMatchObject({ refused: { reason: 'signin_expired' } });
-    expect(result.envelope).not.toHaveProperty('fallback');
-    expect(result.summary).not.toContain("Tenjin's own tool");
+    expect(result.envelope).not.toHaveProperty('offer');
+    expect(result.summary).toBe(
+      'Your Apify sign-in has expired. Nothing was sent to your Apify account, and nothing was charged. Reconnect with `tenjin connect apify`.',
+    );
   });
 
   it('refuses a job this account was found to lack, with nothing sent', async () => {
     await settings([APIFY_ACCOUNT]);
     await signedIn(APIFY_ACCOUNT, { missingTools: ['get-dataset-items'] });
-    await offered(LEAD, APIFY.fallback);
+    await offered(LEAD);
     const session = apifyScript();
     const { fetchImpl } = network();
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(result.envelope).toMatchObject({ refused: { reason: 'missing' } });
+    expect(session.opened).toEqual([]);
+  });
+});
+
+describe('a query answered with a map this account lacks', () => {
+  it('asks Tenjin again and shows its offer in the map’s place, with nothing sent to the account', async () => {
+    await settings([FAL_ACCOUNT]);
+    await signedIn(FAL_ACCOUNT, { missingTools: ['run_model'] });
+    const answer = read<{ decision: { id: string } }>('wire-lookup-spec-account.json');
+    const { fetchImpl, reasked } = network(undefined, await reaskOffering(), {
+      ...answer,
+      settingsHash: await hashNow(),
+    });
+    const session = account({});
+    const result = await runRequestTool(
+      { query: 'a photo of a lighthouse at dusk' },
+      deps(fetchImpl, session),
+    );
+    expect(reasked).toMatchObject([{ refused: answer.decision.id }]);
+    expect(result.envelope).toMatchObject({ status: 'spec', id: REPLACEMENT.id });
+    expect(result.summary).toMatch(/^This fal account doesn't have what this job needs/);
     expect(session.opened).toEqual([]);
   });
 });
@@ -858,13 +955,16 @@ describe("the user's settings, before the account", () => {
     // A copied config names Apify, but this machine never signed in to it: the
     // router is never told of it, so its offer can only be a stale one.
     await settings([APIFY_ACCOUNT]);
-    await offered(LEAD, APIFY.fallback);
+    await offered(LEAD);
     const session = apifyScript();
-    const { fetchImpl, outcomes } = network();
+    const { fetchImpl, outcomes, reasked } = network();
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
     expect(result.envelope).toMatchObject({ refused: { reason: 'not_connected' } });
     expect(result.summary).toContain("Apify isn't connected on this machine");
     expect(session.opened).toEqual([]);
+    // The router answers a re-ask for an account not connected with nothing,
+    // so none is paid for.
+    expect(reasked).toEqual([]);
     expect(outcomes).toEqual([
       expect.objectContaining({ id: LEAD.id, status: 'unpaid', reason: 'provider' }),
     ]);
@@ -873,7 +973,7 @@ describe("the user's settings, before the account", () => {
   it('runs an offer only from an answer that echoed the settings it was decided under', async () => {
     await settings([APIFY_ACCOUNT]);
     await signedIn(APIFY_ACCOUNT);
-    await storeAccountOffer(dir, LEAD, APIFY.fallback, undefined);
+    await storeAccountOffer(dir, LEAD, undefined);
     const session = apifyScript();
     const { fetchImpl } = network();
     const result = await runRequestTool({ id: LEAD.id, input: INPUT }, deps(fetchImpl, session));
@@ -884,7 +984,7 @@ describe("the user's settings, before the account", () => {
   it('runs a map Tenjin has not checked only when the user named it', async () => {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, undefined);
+    await offered(FAL_LEAD);
     const session = account({ run_model: [text({ images: [] })] });
     const { fetchImpl } = network();
     const result = await runRequestTool(
@@ -901,7 +1001,7 @@ describe("the user's settings, before the account", () => {
   async function falJobRunning(session: ReturnType<typeof account>) {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, undefined, { named: true });
+    await offered(FAL_LEAD, { named: true });
     const { fetchImpl } = network();
     const first = await runRequestTool(
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },

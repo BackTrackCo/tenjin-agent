@@ -11,7 +11,7 @@ import { paidLedgerPath } from '../lib/paths';
 import { runSwap } from './swap';
 import { runNativeHook } from './hooks';
 import { personalSettingsAt } from './settings';
-import { ROUTER_PATH } from './decision';
+import { acceptsFor, ROUTER_PATH } from './decision';
 
 /**
  * THE SWAP (plan 36): with "Run Tenjin's picks automatically" on, a native
@@ -111,8 +111,11 @@ function authorizer(): SpendAuthorizer {
 }
 
 /** The router answers `answer` (and records reports apart); Exa answers 402 then 200. */
-function network(answer: unknown, onDecide?: () => Promise<void>) {
+/** The router: `answer` for a routing call, `reask` for the re-ask after an
+ *  account refused, outcome reports kept, and Exa's paid search. */
+function network(answer: unknown, onDecide?: () => Promise<void>, reask?: unknown) {
   const decisions: Record<string, unknown>[] = [];
+  const reasked: Record<string, unknown>[] = [];
   const reports: Record<string, unknown>[] = [];
   const provider: { url: string; body?: string }[] = [];
   let exa = 0;
@@ -139,6 +142,13 @@ function network(answer: unknown, onDecide?: () => Promise<void>) {
       reports.push(parsed);
       return new Response(null, { status: 204 });
     }
+    if (reask !== undefined && 'refused' in parsed) {
+      reasked.push(parsed);
+      return new Response(JSON.stringify(reask), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     decisions.push(parsed);
     await onDecide?.();
     return new Response(JSON.stringify(answer), {
@@ -146,7 +156,7 @@ function network(answer: unknown, onDecide?: () => Promise<void>) {
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  return { fetchImpl, decisions, reports, provider };
+  return { fetchImpl, decisions, reasked, reports, provider };
 }
 
 function depsFor(fetchImpl: typeof fetch) {
@@ -370,16 +380,28 @@ describe('the swap on a connected account', () => {
     });
   });
 
-  it('stops the call once with the refusal and Tenjin’s tool when the account refuses', async () => {
+  it('stops the call once with the refusal and the re-ask’s offer when the account refuses', async () => {
     const { accounts, called } = await firecrawl('expired');
-    const net = network({ ...BOUND, settingsHash: await hashNow() });
+    const fixture = (name: string) =>
+      JSON.parse(
+        readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'),
+      ) as Record<string, unknown>;
+    const net = network({ ...BOUND, settingsHash: await hashNow() }, undefined, {
+      ...fixture('wire-refused-offer.json'),
+      settingsHash: await hashNow(),
+    });
     const { hook, request } = depsFor(net.fetchImpl);
     const ran = await runSwap(fetchEvent(), hook, { ...request, accounts });
     expect(ran.envelope).toMatchObject({
       via: 'swap',
       refused: { account: 'Firecrawl', reason: 'signin_expired' },
-      fallback: { label: 'Firecrawl page read' },
+      offer: { label: 'Firecrawl page read', price: '$0.015' },
     });
+    // THE RE-ASK: the server's fixture is this very refusal (the bound
+    // Firecrawl read under these settings), field for field, with the
+    // accepts this build sends.
+    const sent = fixture('wire-refused-request.json');
+    expect(net.reasked).toEqual([{ ...sent, accepts: acceptsFor(false, true) }]);
     expect(ran.envelope).not.toHaveProperty('switched');
     expect(ran.summary).toContain('Your Firecrawl account refused Firecrawl scrape');
     expect(called).toEqual([]);

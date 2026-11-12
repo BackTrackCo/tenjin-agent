@@ -78,72 +78,7 @@
       "verified": false,
       "requires": ["mcp"]
     },
-    "hint": "Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"prompt\":\"<what the image shows>\"}}) alone and wait for its result.",
-    "fallback": {
-      "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41",
-      "capabilityId": "aispace-nano-banana-2.1",
-      "provider": "AiSpace (Venice) (Google Nano Banana 2.1)",
-      "label": "Google Nano Banana 2.1",
-      "holds": {},
-      "output": "media",
-      "description": "Photoreal images of scenes, products and people, keeping one subject consistent across images; Google's current image model (model=\"nano-banana-2-1\").",
-      "priceAtomic": "50000",
-      "priceVaries": false,
-      "maxAmountAtomic": "50000",
-      "payTo": "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689",
-      "network": "eip155:8453",
-      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      "request": {
-        "method": "POST",
-        "url": "https://x402.aispace.bot/api/v1/image/generate",
-        "fields": {
-          "model": "body",
-          "prompt": "body",
-          "resolution": "body",
-          "return_binary": "body"
-        },
-        "location": "body"
-      },
-      "input": {
-        "type": "object",
-        "properties": {
-          "model": {
-            "type": "string",
-            "example": "venice-sd35",
-            "description": "Venice image model id. See GET /api/v1/models?type=image (e.g. flux-2-pro, venice-sd35, gpt-image-2).",
-            "enum": ["nano-banana-2-1"],
-            "default": "nano-banana-2-1"
-          },
-          "prompt": {
-            "type": "string",
-            "description": "Image description. Up to ~2000 chars."
-          },
-          "resolution": {
-            "type": "string",
-            "description": "Output size, pinned to 1K: the price listed here. Unpinned, the seller quotes 4K.",
-            "enum": ["1K"]
-          },
-          "return_binary": {
-            "type": "boolean",
-            "description": "Gateway-owned. true = the image file as raw bytes instead of JSON { id, images: [base64] }. Stripped before Venice.",
-            "enum": [true]
-          }
-        },
-        "required": ["model", "prompt"]
-      },
-      "pinned": {
-        "model": "nano-banana-2-1",
-        "resolution": "1K",
-        "return_binary": true
-      },
-      "example": {
-        "prompt": "A storefront sign that reads \"OPEN LATE\" in warm neon letters"
-      },
-      "returns": "the image as raw bytes (WebP), saved to disk by the client",
-      "takes": {
-        "max": 5
-      }
-    }
+    "hint": "Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"prompt\":\"<what the image shows>\"}}) alone and wait for its result."
   },
   "jev": {
     "calls": 0,
