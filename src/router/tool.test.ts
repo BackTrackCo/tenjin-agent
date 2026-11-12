@@ -315,6 +315,26 @@ describe('routing outcomes that buy nothing', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('shows an unchecked map’s line in its result, since the agent asked Tenjin', async () => {
+    // Never on a hook (the agent did not ask), but here it tells the agent
+    // how to run the map when the user names it.
+    const unverified = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/wire-lookup-account-unverified.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    // No rules saved here, so an answer that echoed no hash is still read.
+    const body = { ...unverified, settingsHash: undefined, honored: undefined };
+    const { fetchImpl } = net([{ url: ROUTER, status: 200, body }]);
+    const result = await runRequestTool(
+      { query: 'a photo of a lighthouse at dusk' },
+      deps(fetchImpl),
+    );
+    expect(result.envelope).toMatchObject({ status: 'native' });
+    expect(JSON.stringify(result.envelope)).toContain('request({tool: \\"fal.flux-pro-ultra\\"})');
+  });
+
   /** ONE ROUTING PATH: a call with no payer goes to the paid route unpaid,
    *  and a 402 there is a skip, named, with no second request. */
   it('skips a call with no payer when the paid route asks for the fee, in one request', async () => {

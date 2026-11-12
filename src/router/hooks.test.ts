@@ -3978,7 +3978,9 @@ describe('an offer led by a connected account', () => {
     },
   );
 
-  it('shows an unchecked map’s refusal line, naming how the user runs it', async () => {
+  it('injects nothing for an unchecked map’s refusal on a hook, read as plain native', async () => {
+    // Owner decision (review round 1): the agent did not ask, so a hook never
+    // nags with the `unverified` line; only a request-tool result shows it.
     const unverified = JSON.parse(
       readFileSync(
         fileURLToPath(new URL('./fixtures/wire-lookup-account-unverified.json', import.meta.url)),
@@ -3992,9 +3994,10 @@ describe('an offer led by a connected account', () => {
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(JSON.stringify(out.response)).toContain('request({tool: \\"fal.flux-pro-ultra\\"})');
+    expect(out.response).toBeNull();
+    expect(JSON.stringify(out)).not.toContain('fal.flux-pro-ultra');
     expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · prompt: native tools (account not checked)',
+      'x402 · prompt: native tools (router chose native)',
     );
   });
 });

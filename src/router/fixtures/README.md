@@ -247,8 +247,10 @@ connecting or disconnecting refuses every offer decided before it.
   tool the call makes. A `spec` answer may carry the same `fallback`.
 - **`unverified`** is the `native` refusal for a step whose only routes the
   settings allow are maps Tenjin has not checked: its `nextAction` names the
-  service and the `request({tool})` that runs it when the user names it. Such a
-  map's spec comes only from that `{tool}` read, with `verified: false`.
+  service and the `request({tool})` that runs it when the user names it. A hook
+  shows nothing for it, as for any `native`; only a request-tool result shows the
+  line. Such a map's spec comes only from that `{tool}` read, with
+  `verified: false`.
 - **The identities read** gives an `mcp` client `connectable` on each account's
   `sources` row (`mcpUrl`, `signIn`, `keyScheme` for a key sign-in, and
   `expectTools`, every tool its maps call), and lists the account's services

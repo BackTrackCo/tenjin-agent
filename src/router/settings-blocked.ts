@@ -14,11 +14,12 @@ export const SETTINGS_BLOCKED = 'settings_blocked';
  * `unverified` (plan 37): every route the settings allow for this step is a
  * connected account's map Tenjin has not checked with a real call, which runs
  * only when the user names it. Its `nextAction` names the service and the
- * `request({tool})` that runs it, and is shown the same way.
+ * `request({tool})` that runs it, and is shown in a request-tool result only:
+ * never on a hook, where the agent did not ask.
  */
 export const UNVERIFIED = 'unverified';
 
-/** The refusals whose `nextAction` the agent is shown as written. */
+/** The refusals whose `nextAction` a request-tool result shows as written. */
 export const SHOWN_REFUSALS: ReadonlySet<string> = new Set([SETTINGS_BLOCKED, UNVERIFIED]);
 
 const FALLBACK =

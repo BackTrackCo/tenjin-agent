@@ -34,12 +34,7 @@ import {
 } from './decision';
 import { accountLacks } from './accounts/presence';
 import { keepDecided, takeDecided, type Decided } from './decided';
-import {
-  settingsBlockedLine,
-  SHOWN_REFUSALS,
-  UNVERIFIED,
-  SETTINGS_BLOCKED,
-} from './settings-blocked';
+import { settingsBlockedLine, SETTINGS_BLOCKED } from './settings-blocked';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -1994,9 +1989,6 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
   if (decision.action === 'native' && decision.diagnostics.reasonCode === SETTINGS_BLOCKED) {
     return 'native tools (your settings)';
   }
-  if (decision.action === 'native' && decision.diagnostics.reasonCode === UNVERIFIED) {
-    return 'native tools (account not checked)';
-  }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }
@@ -2119,9 +2111,13 @@ function decidedUnder(
   return false;
 }
 
-/** The line a `settings_blocked` answer is shown as, attributed, else nothing. */
+/**
+ * The line a `settings_blocked` answer is shown as, attributed, else nothing.
+ * An `unverified` answer is never shown on a hook: the agent did not ask, so
+ * it reads as plain native. Only a request-tool result shows it.
+ */
 function blockedLine(decision: HookDecision | null, host: Harness): string | undefined {
-  if (decision?.action !== 'native' || !SHOWN_REFUSALS.has(decision.diagnostics.reasonCode))
+  if (decision?.action !== 'native' || decision.diagnostics.reasonCode !== SETTINGS_BLOCKED)
     return undefined;
   return attributed(settingsBlockedLine(decision.diagnostics), host);
 }
