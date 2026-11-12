@@ -133,6 +133,22 @@ function deps(session: ReturnType<typeof account>) {
 }
 
 describe('an account the user names, with no map', () => {
+  it('names disconnect as the way to stop it, which works for an account connected by its address', async () => {
+    // A1igator review: the stop named was `config block --source <id>`, which
+    // can't resolve an account connected by its URL alone.
+    await connected();
+    const session = account();
+    const { run } = deps(session);
+    const listed = await runRequestTool({ source: 'mcp-example-com' }, run);
+    const ran = await runRequestTool(
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+      run,
+    );
+    for (const result of [listed, ran])
+      expect(result.envelope).toMatchObject({ stop: 'tenjin disconnect mcp-example-com' });
+    expect(JSON.stringify([listed, ran])).not.toContain('block --source');
+  });
+
   it('lists its tools for free, in their own words cut to one line and marked untrusted', async () => {
     await connected();
     const session = account();

@@ -37,9 +37,13 @@ import { readVaultHeader } from './vault';
  *
  * THE USER'S SETTINGS STILL HOLD. The router never sees such a call, so this
  * client applies none of its rules; it only refuses while the saved rules
- * can't be read, or while they block this very account by name (`tenjin
- * config block --source <id>`), the one rule that names it. Pausing Tenjin
- * stops it too, before anything here runs.
+ * can't be read, or while a saved block names this very account. Pausing
+ * Tenjin stops it too, before anything here runs.
+ *
+ * THE STOP FOR A NAMED ACCOUNT IS `tenjin disconnect <id>`, which every
+ * result here names as `stop`. A block can't be the one: `config block
+ * --source` resolves names against the router's identities read, which never
+ * lists an account connected by its address.
  *
  * ON AN ACCOUNT TENJIN MAPS, every tool its maps call (Apify's `call-actor`,
  * fal's `run_model`) runs only through a mapped job, which pins its cost: a
@@ -308,6 +312,7 @@ export async function runSourceRequest(
           ...row(found),
           ...(found.inputSchema !== undefined ? { inputSchema: schema } : {}),
           warning,
+          stop: `tenjin disconnect ${id}`,
           nextStep: next,
           cost: ['nothing charged'],
           providerContentUntrusted: true,
@@ -341,6 +346,7 @@ export async function runSourceRequest(
         tools: rows,
         ...(viaJobs.length > 0 ? { jobsOnly: viaJobs, jobForm: jobForm(jobs) } : {}),
         warning,
+        stop: `tenjin disconnect ${id}`,
         nextStep: next,
         cost: ['nothing charged'],
         providerContentUntrusted: true,
@@ -430,7 +436,7 @@ export async function runSourceRequest(
       return {
         ...done.result,
         summary: `${done.result.summary}\n${warning}`,
-        envelope: { ...done.result.envelope, warning },
+        envelope: { ...done.result.envelope, warning, stop: `tenjin disconnect ${id}` },
       };
     }
   }
