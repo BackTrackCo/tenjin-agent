@@ -323,7 +323,7 @@ describe('an account the user names, with no map', () => {
       { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
       deps(session).run,
     );
-    expect(unreadable.summary).toContain("Your Tenjin settings can't be read");
+    expect(unreadable.summary).toContain("Your saved Tenjin rules can't be read");
     expect(session.called).toHaveLength(1);
   });
 

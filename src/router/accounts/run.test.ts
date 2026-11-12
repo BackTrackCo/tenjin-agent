@@ -1048,7 +1048,7 @@ describe("the user's settings, before the account", () => {
     const fetchImpl = await falJobRunning(session);
     await settings([FAL_ACCOUNT], { version: 99 });
     const resumed = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
-    expect(resumed.summary).toContain("Your Tenjin settings can't be read");
+    expect(resumed.summary).toContain("Your saved Tenjin rules can't be read");
     expect(String(resumed.envelope.nextStep)).toContain(`request({job: "${FAL_LEAD.id}"})`);
     expect(session.tools()).toEqual(['run_model', 'check_job']);
   });
