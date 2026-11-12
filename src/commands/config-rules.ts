@@ -1080,6 +1080,15 @@ export async function runConfigReplacement(
     const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
     if (args.state === 'off') {
       router.nativeReplacement = 'off';
+      // A valid provider choice is kept for when it is turned on again; one
+      // the reader refuses (`[]`, say) goes, so this is the repair readback
+      // names for it.
+      if (
+        router.nativeReplacementProviders !== undefined &&
+        !ReplacementProvidersSchema.safeParse(router.nativeReplacementProviders).success
+      ) {
+        delete router.nativeReplacementProviders;
+      }
       return { ...existing, router };
     }
     if (scope !== undefined) {
