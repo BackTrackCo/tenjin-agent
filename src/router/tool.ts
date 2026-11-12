@@ -51,7 +51,7 @@ import {
   type KeptChoices,
   type KeptSpec,
 } from './specs';
-import { settingsRefusal, type SettingsRefusal } from './settings-check';
+import { settingsRefusal, UNREADABLE, type SettingsRefusal } from './settings-check';
 import type { WireSettings } from './settings-wire';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -554,14 +554,7 @@ async function requestTool(
   // RULES THIS BUILD CANNOT READ ARE NEVER GUESSED: nothing is asked, sent or
   // run until they are fixed. A job already paid for may still be polled.
   if (here.settings.wire.status === 'invalid' && (args.job === undefined || args.job === '')) {
-    const refusal = await settingsRefusal(deps.ctx.dataDir, []);
-    return settingsFail(
-      refusal ?? {
-        code: 'settings_unreadable',
-        reason: `Your Tenjin settings can't be read (${here.settings.wire.problem}). Nothing was sent or paid.`,
-        nextStep: 'Tell the user: `tenjin config` shows the problem.',
-      },
-    );
+    return settingsFail(UNREADABLE);
   }
   const sent = here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined;
   // AN ACCOUNT THE USER NAMED (plan 37): its own tools, never a lookup.

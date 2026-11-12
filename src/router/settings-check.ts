@@ -42,10 +42,10 @@ export async function settingsRefusal(
   let now: Awaited<ReturnType<typeof personalSettingsAt>>;
   try {
     now = await personalSettingsAt(dataDir);
-  } catch (err) {
-    return unreadable(err instanceof Error ? err.message : String(err));
+  } catch {
+    return UNREADABLE;
   }
-  if (now.wire.status === 'invalid') return unreadable(now.wire.problem);
+  if (now.wire.status === 'invalid') return UNREADABLE;
   const { settings, hasRules } = now.wire;
   for (const hash of decided) {
     if (hash === undefined) {
@@ -69,11 +69,10 @@ export async function settingsRefusal(
   return null;
 }
 
-function unreadable(problem: string): SettingsRefusal {
-  return {
-    code: 'settings_unreadable',
-    reason: `Your Tenjin settings can't be read (${problem}), so Tenjin runs nothing until they're fixed. Nothing was sent or paid.`,
-    nextStep:
-      'Tell the user: `tenjin config` shows the problem and `tenjin config reset --all` clears the saved rules. Use your own tools meanwhile.',
-  };
-}
+/** Rules this build cannot read: nothing runs, and `tenjin config` names why. */
+export const UNREADABLE: SettingsRefusal = {
+  code: 'settings_unreadable',
+  reason: "Your saved Tenjin rules can't be read, so Tenjin offers nothing.",
+  nextStep:
+    '`tenjin config` shows the problem and `tenjin config reset --all` clears them; run either if the user asks.',
+};

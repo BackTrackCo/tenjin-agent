@@ -263,7 +263,7 @@ describe('tenjin config only', () => {
       ],
     });
     expect(data(result).explanation).toContain(
-      'Tenjin offers tools on its own only for Images, including newly added reviewed services there. That covers General image and Image edit. You can still ask for any other tool by name.',
+      'Tenjin offers tools on its own only for Images, including newly added reviewed services there. That covers General image and Image edit. You or your agent can still pick any other tool by name.',
     );
     expect(data(result).reset).toBe('tenjin config reset --global --capabilities');
   });
@@ -278,13 +278,14 @@ describe('tenjin config only', () => {
       'When Tenjin picks a service for Web research on its own, it picks only Exa.',
     );
     expect(data(result).explanation).toContain(
-      'Other tasks are unaffected, and you can still ask for any service by name.',
+      'Other tasks are unaffected. You or your agent can still pick any service by name.',
     );
   });
 
-  it('has no only for accounts: that is a preference', async () => {
+  it('has no only for accounts', async () => {
     const err = await refused(runConfigOnly({ global: true, source: ['fal'] }, ctx(), online()));
-    expect(err.message).toContain('prefer --category');
+    expect(err.message).toContain('`tenjin config block --source tenjin`');
+    expect(err.message).not.toContain('--source <account>');
     expect(fetched).toBe(0);
   });
 });
@@ -300,7 +301,7 @@ describe('tenjin config block and unblock', () => {
     expect(said).toContain(
       "Tenjin won't offer its own tools on its own any more, free ones like the docs lookup included.",
     );
-    expect(said).toContain("You can still ask for one of Tenjin's tools by name.");
+    expect(said).toContain("You or your agent can still pick one of Tenjin's tools by name.");
     expect(said).toContain('It still picks among your connected accounts');
     expect(said).toContain("goes back to your agent's own tools");
     expect(data(result).reset).toBe('tenjin config unblock --source tenjin');
