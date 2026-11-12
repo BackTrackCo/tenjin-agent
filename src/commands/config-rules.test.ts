@@ -429,6 +429,46 @@ describe('tenjin config speed and replacement', () => {
     expect(await saved()).toEqual({ nativeReplacement: 'when-routed' });
   });
 
+  it('refuses a provider scope past the limit the reader takes, and saves nothing', async () => {
+    const many = Array.from({ length: 17 }, (_, n) => ({ id: `p${n}`, label: `Provider ${n}` }));
+    const err = await refused(
+      runConfigReplacement(
+        { state: 'on', provider: many.map(({ id }) => id) },
+        ctx(),
+        online({ ...WITH_FAL, providers: [...WITH_FAL.providers, ...many] }),
+      ),
+    );
+    expect(err.code).toBe('USAGE');
+    expect(err.message).toContain('at most 16 providers; that names 17. Nothing was saved.');
+    expect(err.fix).toContain('--all-providers');
+    expect(await saved()).toEqual({});
+    // Sixteen is the most it takes, and it reads back as on.
+    await runConfigReplacement(
+      { state: 'on', provider: many.slice(0, 16).map(({ id }) => id) },
+      ctx(),
+      online({ ...WITH_FAL, providers: [...WITH_FAL.providers, ...many] }),
+    );
+    const { nativeReplacement } = await personalSettingsAt(dir);
+    expect(nativeReplacement.mode).toBe('when-routed');
+    expect(nativeReplacement.providers).toHaveLength(16);
+  });
+
+  it('clears a provider choice the reader refuses when turned off, the repair readback names', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        router: { nativeReplacement: 'when-routed', nativeReplacementProviders: [] },
+      }),
+    );
+    const before = await personalSettingsAt(dir);
+    expect(before.nativeReplacement.problem).toContain('router.nativeReplacementProviders');
+    const shown = String((await runConfigList(ctx())).humanLines?.join('\n'));
+    expect(shown).toContain('Run `tenjin config replacement off` to clear it.');
+    await runConfigReplacement({ state: 'off' }, ctx(), offline);
+    expect(await saved()).toEqual({ nativeReplacement: 'off' });
+    expect((await personalSettingsAt(dir)).nativeReplacement).toEqual({ mode: 'off' });
+  });
+
   it('needs a provider scope or --all-providers to turn on', async () => {
     const err = await refused(runConfigReplacement({ state: 'on' }, ctx(), online()));
     expect(err.code).toBe('USAGE');

@@ -10,6 +10,8 @@ import type { CommandContext, CommandResult } from '../context';
 import {
   ONLY_DIMENSIONS,
   POLICY_VERSION,
+  ReplacementProvidersSchema,
+  SETTINGS_LIMITS,
   scopeKey,
   targetKey,
   type OnlyDimension,
@@ -1080,10 +1082,28 @@ export async function runConfigReplacement(
           providers.map((name) => ({ kind: 'provider' as const, name: name.trim() })),
         ).map(({ target }) => target)
       : undefined;
+  // THE SCOPE AS IT WILL BE READ BACK: a list the reader refuses would make
+  // automatic use read as off, so it is refused here and nothing is saved.
+  if (scope !== undefined && !ReplacementProvidersSchema.safeParse(scope).success) {
+    usage(
+      `Automatic use can be narrowed to at most ${SETTINGS_LIMITS.targets} providers; that names ${scope.length}. Nothing was saved.`,
+      'Name fewer providers, or use --all-providers for any allowed provider.',
+      { limit: SETTINGS_LIMITS.targets, providers: scope },
+    );
+  }
   await persist(ctx.dataDir, (existing) => {
     const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
     if (args.state === 'off') {
       router.nativeReplacement = 'off';
+      // A valid provider choice is kept for when it is turned on again; one
+      // the reader refuses (`[]`, say) goes, so this is the repair readback
+      // names for it.
+      if (
+        router.nativeReplacementProviders !== undefined &&
+        !ReplacementProvidersSchema.safeParse(router.nativeReplacementProviders).success
+      ) {
+        delete router.nativeReplacementProviders;
+      }
       return { ...existing, router };
     }
     if (scope !== undefined) {
