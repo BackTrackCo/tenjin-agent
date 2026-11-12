@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { sourceVaultPath } from '../../lib/paths';
 import { INPUT_PLACEHOLDER, RESULT_PLACEHOLDER, type AccountCall } from '../decision';
 import {
   AccountBadInput,
@@ -306,6 +308,11 @@ class Connection {
     private readonly deps: AccountRunDeps,
   ) {}
 
+  /** The account this connection is for. */
+  get accountId(): string {
+    return this.account.id;
+  }
+
   async open(): Promise<AccountSession> {
     for (;;) {
       try {
@@ -499,6 +506,14 @@ async function followUp(
         ? { detail: typeof stopped === 'string' ? stopped : said(stopped) }
         : {}),
   });
+  // STILL CONNECTED HERE, asked before every status call and the fetch of
+  // the result: the session this process opened keeps the credential it was
+  // opened with, so a disconnect in another terminal stops the next request,
+  // and the job waits for a reconnect.
+  const gone = () =>
+    existsSync(sourceVaultPath(connection.accountId, deps.dataDir))
+      ? undefined
+      : running(new AccountRefusal('not_connected'));
   const { poll } = next;
   if (poll !== undefined) {
     const end = firstAt + poll.maxWaitS * 1_000;
@@ -511,6 +526,8 @@ async function followUp(
         await sleep(poll.everyS * 1_000);
       }
       await deps.onPoll?.();
+      const stopped = gone();
+      if (stopped !== undefined) return stopped;
       const args = fillArgs(poll.args, input, first);
       if ('missing' in args)
         return {
@@ -535,6 +552,8 @@ async function followUp(
       if (!inState(read.value, poll.running)) break;
     }
   }
+  const stopped = gone();
+  if (stopped !== undefined) return stopped;
   const args = fillArgs(next.args, input, first);
   if ('missing' in args)
     return { kind: 'failed', why: `its answer didn't name the result to fetch (${args.missing})` };

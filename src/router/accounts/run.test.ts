@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../context';
 import { buildPaymentRequired, testWalletProvider } from '../../lib/read-test-utils';
 import type { SpendAuthorization, SpendAuthorizer } from '../../lib/wallet';
+import { sourceVaultPath } from '../../lib/paths';
 import { MAX_CALL_WAIT_MS } from '../jobs';
 import { readPaidRecords, type MediaTransport } from '../paid';
 import type { AccountOfferSpec, OfferSpec } from '../decision';
@@ -499,6 +500,24 @@ describe('a long job on the account', () => {
     expect(done.envelope).toMatchObject({ status: 'fulfilled' });
     expect(session.tools()).toEqual(['run_model', 'check_job', 'get_job_result']);
     expect(await readPaidRecords(dir)).toHaveLength(1);
+  });
+
+  it('sends no status call once the account is disconnected mid-job, and keeps the job for a reconnect', async () => {
+    // A1igator review: the session this process opened kept polling with the
+    // old credential after a disconnect in another terminal.
+    await falOffered();
+    const session = falJob([text({ status: 'COMPLETED' })]);
+    const { fetchImpl } = network();
+    const result = await runRequestTool(
+      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl, session, {
+        // Another terminal disconnects fal while this call starts polling.
+        onPoll: () => rm(sourceVaultPath('fal', dir), { force: true }),
+      }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    expect(result.summary).toContain("fal isn't connected on this machine");
+    expect(session.tools()).toEqual(['run_model']);
   });
 
   it("hands back a job past its map's own bound as running, never failed", async () => {
