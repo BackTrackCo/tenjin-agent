@@ -130,14 +130,24 @@ describe('the mod', () => {
     expect(JSON.parse(bare['.claude-plugin/plugin.json']!)).not.toHaveProperty('types');
   });
 
-  it('hooks our request tool by its plugin name and writes nothing under the data dir', async () => {
-    const source = (await checkedInMod())['hooks/register.tsx'];
-    expect(source).toContain(`const REQUEST_TOOL = '${REQUEST_TOOL}';`);
-    // Reads only: the module never calls a write, a process or a config change.
-    expect(source).not.toMatch(
-      /\$\.fs\.(write|mkdir|rm|unlink)|\$\.process\.|\$\.config\.set|\$\.settings/,
-    );
-    expect(source).not.toMatch(/on\('prompt\.(submit|compose)'/);
+  it('hooks our request tool by its plugin name and writes nothing under the data dir but effort records', async () => {
+    const mod = await checkedInMod();
+    expect(mod['hooks/register.tsx']).toContain(`const REQUEST_TOOL = '${REQUEST_TOOL}';`);
+    // Reads only: no module of it calls a write, a process or a config change,
+    // but main-agent effort's one record writer, `node` writing
+    // `effort/turn-*.json` (`effort-turn.ts`). Only main-agent effort observes
+    // a submission (`effort.ts`), and nothing composes one.
+    const RECORDS = 'hooks/effort-turn.ts';
+    const OBSERVES = 'hooks/effort.ts';
+    for (const path of MOD_FILES.filter((file) => file.startsWith('hooks/'))) {
+      expect(mod[path], path).not.toMatch(
+        /\$\.fs\.(write|mkdir|rm|unlink)|\$\.config\.set|\$\.settings/,
+      );
+      if (path !== RECORDS) expect(mod[path], path).not.toMatch(/\$\.process\./);
+      if (path !== OBSERVES) expect(mod[path], path).not.toMatch(/on\('prompt\.submit'/);
+      expect(mod[path], path).not.toMatch(/on\('prompt\.compose'/);
+    }
+    expect(mod[RECORDS]!.match(/\$\.process\.\w+/g)).toEqual(['$.process.run']);
   });
 });
 

@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { accessOf, agentsWithoutRequestTool, requestToolAccess } from './agent-tools';
+import {
+  accessOf,
+  agentsWithoutRequestTool,
+  definitionFacts,
+  factsOf,
+  requestToolAccess,
+} from './agent-tools';
 
 let root: string;
 let home: string;
@@ -163,5 +169,34 @@ describe('the agents doctor names', () => {
       'reader',
       'scout',
     ]);
+  });
+});
+
+describe('what a definition pins, for the agent decider', () => {
+  it.each([
+    [
+      'an inherited model and a pinned effort',
+      'model: inherit\neffort: high\ntools: Read, Edit\n',
+      { effort: 'high', edits: true },
+    ],
+    ['a pinned model, quoted', 'model: "sonnet"\n', { model: 'sonnet', edits: true }],
+    ['read-only tools with a shell', 'tools: Read, Grep, Bash\n', { edits: false }],
+    ['reading tools alone', 'tools: Read, Grep, Glob\n', { edits: false, readsOnly: true }],
+    [
+      'every tool, editing disallowed',
+      'tools: "*"\ndisallowedTools: Edit, Write, MultiEdit, NotebookEdit\n',
+      { edits: false },
+    ],
+  ] as const)('%s', (_label, frontmatter, expected) => {
+    expect(factsOf(agent('a', frontmatter))).toEqual(expected);
+  });
+
+  it('reads a user definition, knows the built-ins, and says nothing of an unknown type', async () => {
+    await define(join(home, '.claude', 'agents'), 'worker.md', agent('worker', 'effort: xhigh\n'));
+    const lookup = { cwd: project, homeDir: home };
+    expect(await definitionFacts('worker', lookup)).toEqual({ effort: 'xhigh', edits: true });
+    expect(await definitionFacts('Explore', lookup)).toEqual({ edits: false, readsOnly: true });
+    expect(await definitionFacts('general-purpose', lookup)).toEqual({ edits: true });
+    expect(await definitionFacts('nobody', lookup)).toBeNull();
   });
 });

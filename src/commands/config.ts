@@ -12,6 +12,11 @@ import {
   EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
+  ROUTER_SWITCHES,
+  EFFORT_CLASSES,
+  EFFORT_FLOORS,
+  EFFORT_LEVELS,
+  LOWERING_CLASSES,
   loadRawConfig,
   MAX_AUTO_SPEND_FLOOR_ATOMIC,
   MAX_AUTO_SPEND_FLOOR_WHY,
@@ -28,6 +33,7 @@ import type {
   ExperimentalConfigKey,
   RouterConfigKey,
   RouterContext,
+  RouterLayer,
 } from '../lib/config';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -46,7 +52,7 @@ import { style } from '../lib/output';
 
 /** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
-  value: Money | string | string[] | boolean | null;
+  value: Money | string | string[] | boolean | null | Record<string, number>;
 }
 interface RenderedSetting extends RenderedValue {
   source: Provenance;
@@ -92,6 +98,18 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'session=a hook packet carries up to six prior messages, turn=the current turn only; --project and --local as for router.enabled',
   'router.improve':
     'Help improve routing: true=Tenjin keeps the secret-masked text of turns the router sees, to grade its offers; false (the default) keeps none, and turning it off deletes what was kept; this machine only, never --project',
+  'router.subagents':
+    "off (the default)=a delegated task runs on the model it asked for, shadow=Tenjin records and shows the model it would pick, apply=Tenjin lowers a read-only search or research task's model; only this machine's config can raise it, --project and --local only lower it",
+  'router.effort':
+    "every effort decision, one switch: off (the default)=each turn and delegated task runs at the effort it asked for, shadow=Tenjin records and shows the effort it would pick, apply=Tenjin sends it: the main agent's turns (router.effortClasses) and a read-only search or research task's effort; set apart from router.subagents, raised and lowered the same way",
+  'router.effortClasses':
+    "the main agent's turns router.effort may change: notification and ack run one step lower, correction one step higher (off unless listed); comma-separated, or none; --project and --local only narrow it",
+  'router.effortCap':
+    'the highest level a main-agent correction turn is raised to: low, medium, high, xhigh (the default) or max; --project and --local only lower it',
+  'router.effortSteps':
+    'how many steps each main-agent lowering class goes down, as class=steps pairs: notification=1,ack=1 (the default) to 4, never under router.effortFloor; --project and --local only shrink it',
+  'router.effortFloor':
+    'the lowest level any effort lowering reaches, main agent and delegated task alike: medium (the default) or low; --project and --local only raise it',
   'experimental.bazaar':
     "EXPERIMENTAL. on=the router may also suggest unreviewed sellers from Coinbase's open x402 Bazaar, off=curated services and Tenjin's reviewed list only",
 };
@@ -116,14 +134,22 @@ function isRouterKey(key: string): key is RouterConfigKey {
   return (ROUTER_CONFIG_KEYS as readonly string[]).includes(key);
 }
 
+/** Each router key's field in the router block and in {@link RouterSettings}. */
+const ROUTER_FIELDS = {
+  'router.enabled': 'enabled',
+  'router.context': 'context',
+  'router.improve': 'improve',
+  'router.subagents': 'subagents',
+  'router.effort': 'effort',
+  'router.effortClasses': 'effortClasses',
+  'router.effortCap': 'effortCap',
+  'router.effortSteps': 'effortSteps',
+  'router.effortFloor': 'effortFloor',
+} as const satisfies Record<RouterConfigKey, keyof RouterSettings>;
+
 /** The list/get shape for a router key, with the file that set it. */
 function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): RenderedSetting {
-  const { value, source, path } =
-    key === 'router.enabled'
-      ? settings.enabled
-      : key === 'router.context'
-        ? settings.context
-        : settings.improve;
+  const { value, source, path } = settings[ROUTER_FIELDS[key]];
   return { value, source, ...(path !== undefined ? { path } : {}) };
 }
 
@@ -297,9 +323,18 @@ async function setExperimentalKey(
   };
 }
 
-/** The router keys a project file may carry: both only ever tighten. */
+/** The router keys a project file may carry: each is read there only to tighten. */
 type ProjectRouterKey = Exclude<RouterConfigKey, 'router.improve'>;
-const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = ['router.enabled', 'router.context'];
+const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = [
+  'router.enabled',
+  'router.context',
+  'router.subagents',
+  'router.effort',
+  'router.effortClasses',
+  'router.effortCap',
+  'router.effortSteps',
+  'router.effortFloor',
+];
 
 function isProjectRouterKey(key: string): key is ProjectRouterKey {
   return (PROJECT_ROUTER_KEYS as readonly string[]).includes(key);
@@ -357,8 +392,8 @@ async function setRouterKey(
   ctx: CommandContext,
   project: { local: boolean } | undefined,
 ): Promise<CommandResult> {
-  const field = key === 'router.enabled' ? 'enabled' : 'context';
-  const parsed = field === 'enabled' ? parseBoolean(value) : parseRouterContext(value);
+  const field = ROUTER_FIELDS[key];
+  const parsed = parseRouterValue(key, value);
   let written: RenderedSetting;
   if (project === undefined) {
     await persist(ctx.dataDir, (existing) => ({
@@ -373,15 +408,60 @@ async function setRouterKey(
   }
   const effective = renderRouterSetting(key, await resolveRouterFromContext(ctx));
   const humanLines = [formatLine(key, written)];
-  if (effective.value !== written.value) {
+  if (JSON.stringify(effective.value) !== JSON.stringify(written.value)) {
     humanLines.push(
-      `Still ${String(effective.value)} here: ${effective.path ?? 'the default'} is tighter, and a nearer file can only tighten an outer one.`,
+      `Still ${displayValue(effective)} here: ${effective.path ?? 'the default'} is tighter, and a nearer file can only tighten an outer one.`,
     );
   }
   if (project?.local === true) {
     humanLines.push('Keep .tenjin/config.local.json out of git: add it to .gitignore.');
   }
   return { data: { key, ...written, effective }, humanLines };
+}
+
+type EffortSteps = Partial<Record<(typeof LOWERING_CLASSES)[number], number>>;
+type ProjectRouterValue = boolean | RouterContext | string | string[] | EffortSteps;
+
+function parseRouterValue(key: ProjectRouterKey, value: string): ProjectRouterValue {
+  if (key === 'router.enabled') return parseBoolean(value);
+  if (key === 'router.context') return parseRouterContext(value);
+  if (key === 'router.effortClasses') return parseChoices(key, value, EFFORT_CLASSES);
+  if (key === 'router.effortCap') return parseChoice(key, value, EFFORT_LEVELS);
+  if (key === 'router.effortFloor') return parseChoice(key, value, EFFORT_FLOORS);
+  if (key === 'router.effortSteps') return parseSteps(key, value);
+  return parseChoice(key, value, ROUTER_SWITCHES);
+}
+
+/** `notification=2,ack=1`: each lowering class at most once, 1 to 4 steps. */
+function parseSteps(key: string, value: string): EffortSteps {
+  const steps: EffortSteps = {};
+  for (const pair of value.split(',').map((item) => item.trim())) {
+    const [name, count, extra] = pair.split('=').map((part) => part.trim());
+    const known = LOWERING_CLASSES.find((c) => c === name);
+    const n = count !== undefined && /^[1-4]$/.test(count) ? Number(count) : undefined;
+    if (known === undefined || n === undefined || extra !== undefined || known in steps) {
+      throw new CliError('USAGE', `Invalid ${key}: ${JSON.stringify(value)}`, {
+        fix: `Use class=steps pairs, each class once and 1 to 4 steps: ${LOWERING_CLASSES.join('=2,')}=1.`,
+      });
+    }
+    steps[known] = n;
+  }
+  return steps;
+}
+
+function parseChoice(key: string, value: string, choices: readonly string[]): string {
+  if (choices.includes(value)) return value;
+  throw new CliError('USAGE', `Invalid ${key}: ${JSON.stringify(value)}`, {
+    fix: `Use one of: ${choices.join(', ')}.`,
+  });
+}
+
+/** A comma-separated list of choices; `none` or an empty value is the empty list. */
+function parseChoices(key: string, value: string, choices: readonly string[]): string[] {
+  const items = value.trim() === 'none' ? [] : value.split(',').map((item) => item.trim());
+  return [...new Set(items.filter((item) => item.length > 0))].map((item) =>
+    parseChoice(key, item, choices),
+  );
 }
 
 function parseRouterContext(value: string): RouterContext {
@@ -401,8 +481,8 @@ function parseRouterContext(value: string): RouterContext {
  */
 async function persistProjectRouter(
   path: string,
-  field: 'enabled' | 'context',
-  value: boolean | RouterContext,
+  field: keyof RouterLayer,
+  value: ProjectRouterValue,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o755 });
   const lockPath = `${path}.lock`;
@@ -421,8 +501,8 @@ async function persistProjectRouter(
 
 async function mergeProjectRouter(
   path: string,
-  field: 'enabled' | 'context',
-  value: boolean | RouterContext,
+  field: keyof RouterLayer,
+  value: ProjectRouterValue,
 ): Promise<void> {
   // Through the one parser: a file that is not an object, or whose block is
   // invalid, is refused rather than replaced. A router subkey this build does
@@ -699,6 +779,12 @@ function displayValue(entry: RenderedSetting): string {
   if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '(empty)';
   if (typeof value === 'boolean') return value ? 'true' : 'false'; // router.enabled
   if (value === null) return 'none (no limit)';
+  if (typeof value === 'object' && !('usd' in value)) {
+    // router.effortSteps
+    return Object.entries(value)
+      .map(([name, steps]) => `${name}=${steps}`)
+      .join(', ');
+  }
   if (typeof value === 'object') return `${value.usd} USD`; // Money (spend keys)
   return value; // 'always', baseUrl, rpcUrl
 }

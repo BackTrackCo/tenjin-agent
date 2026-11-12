@@ -1,6 +1,19 @@
 import type { EngineInterface, Register } from 'claude-code';
 
 import type { TenjinHeld, TenjinRow } from '../types';
+import { subagentStepEffort } from './agent-effort';
+import { registerAgents } from './agents';
+import { createEffort, effortStepLevel, effortTurnStarted, registerEffort } from './effort';
+import {
+  asRecord,
+  clean,
+  createStatus,
+  parseJson,
+  readJson,
+  sha256Hex,
+  tenjinDataDir,
+  type Json,
+} from './shared';
 
 /**
  * THE TENJIN MOD: one line per paid lookup, drawn from documented props only.
@@ -31,7 +44,18 @@ import type { TenjinHeld, TenjinRow } from '../types';
  * READ ONLY: the spec file, the choice set, the free label and the offer
  * record (`src/router/mod-state.ts`), and the request tool's own envelope.
  * The mod writes nothing under the data dir and decides nothing about routing
- * or payment.
+ * or payment, with two exceptions, each off by default. DELEGATED TASKS
+ * (`agents.tsx`): it appends the offer line the CLI's record names to a
+ * delegated task's prompt, and sets the model (`router.subagents apply`) and
+ * the effort (`router.effort apply`) the CLI's agent record names. MAIN-AGENT
+ * EFFORT (`effort.ts`, `router.effort` too): it sends a main-loop turn at one
+ * level lower, or for a listed correction one higher, and keeps its own
+ * records under `effort/`, its one write.
+ *
+ * ONE HOOK PER EVENT: a module registers each event once without a matcher,
+ * so `turn.start` and `turn.step` here serve every feature, and `agent.spawn`
+ * (`agents.tsx`), `prompt.submit` and `turn.complete` (`effort.ts`) have one
+ * owner each. The plugin's one status entry is shared (`shared.ts`).
  */
 
 const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
@@ -77,7 +101,6 @@ const ERRORS = new Set(['failed', 'interrupted', 'partial']);
 const FREE = 'free';
 
 type Dollar = EngineInterface;
-type Json = Record<string, unknown>;
 type Shape = {
   state: 'running' | 'done' | 'error';
   name: string;
@@ -87,6 +110,21 @@ type Shape = {
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
 export const register: Register = (on) => {
+  const status = createStatus();
+  const effort = createEffort(status);
+  registerAgents(on, status);
+  registerEffort(on, effort);
+
+  // EVERY MODEL REQUEST, ONE HOOK: a subagent's step (it carries an `agentId`)
+  // takes the effort its agent record named (`agent-effort.ts`), a main-loop
+  // step its turn's decision (`effort.ts`). Only `effort` ever changes, and
+  // undefined sends the request as the engine would.
+  on('turn.step', async function* ($, e, next) {
+    const level =
+      e.agentId !== undefined ? await subagentStepEffort($, e) : effortStepLevel($, effort, e);
+    return yield* next(level === undefined ? e : { ...e, effort: level });
+  });
+
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {
     const row = await describeCall($, e);
     const ref = { ...ROWS, id: e.tool_use_id };
@@ -159,6 +197,7 @@ export const register: Register = (on) => {
 
   // The CLI's prompt hook keeps the record before this existing turn surface.
   on('turn.start', async ($, e, next) => {
+    await effortTurnStarted($, effort, e);
     if (e.agentId === undefined) {
       const now = await $.clock.now();
       const previous = (await $.state.get(LAST_TURN_START)).value;
@@ -606,16 +645,6 @@ function shortKey(value: string): string | undefined {
   return text.length > 0 && Array.from(text).length <= SHOWN_MAX_CHARS ? text : undefined;
 }
 
-/** Outside text is hostile on a terminal: control and format characters go. */
-function clean(value: string, limit: number): string {
-  const text = value
-    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const chars = Array.from(text);
-  return chars.length <= limit ? text : `${chars.slice(0, limit - 1).join('')}…`;
-}
-
 /** A call whose result says money left the wallet, and that nothing names. */
 async function unnamedCharge($: Dollar, id: string, output: unknown): Promise<boolean> {
   const envelope = envelopeOf(textOf(output));
@@ -665,39 +694,4 @@ function usd(atomic: bigint): string {
 
 function atomicOf(value: unknown): string | undefined {
   return typeof value === 'string' && /^\d{1,30}$/.test(value) ? value : undefined;
-}
-
-async function tenjinDataDir($: Dollar): Promise<string | null> {
-  const override = await $.env.get('TENJIN_DATA_DIR');
-  if (override !== undefined && override.length > 0) return override;
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'));
-  return home !== undefined && home.length > 0 ? `${home}/.tenjin` : null;
-}
-
-async function readJson($: Dollar, path: string): Promise<Json | null> {
-  try {
-    return asRecord(parseJson(await $.fs.read(path))) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function parseJson(text: unknown): unknown {
-  if (typeof text !== 'string') return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
-function asRecord(value: unknown): Json | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Json)
-    : undefined;
-}
-
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

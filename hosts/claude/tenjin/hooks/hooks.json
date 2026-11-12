@@ -73,7 +73,8 @@
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",
               "agent_id": "${agent_id}",
-              "agent_type": "${agent_type}"
+              "agent_type": "${agent_type}",
+              "permission_mode": "${permission_mode}"
             },
             "timeout": 5
           }

@@ -106,6 +106,89 @@ function namesLegacyTool(entry: string): boolean {
 }
 
 /**
+ * What a definition pins, for the agent leg's model decision: a model other
+ * than `inherit`, an effort, and whether its tools can edit files. A pin is the
+ * definition author's choice, so the decider keeps it.
+ */
+export interface DefinitionFacts {
+  model?: string;
+  effort?: string;
+  /** Absent when the tools are not known. */
+  edits?: boolean;
+  /**
+   * Present only when nothing the agent can call changes state: a built-in
+   * read-only type, or a definition whose every tool is a reading one (no
+   * edit, write, shell or other tool). What lets a rule send it to Haiku.
+   */
+  readsOnly?: true;
+}
+
+const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+/** The tools that only read; a definition naming any other is not `readsOnly`. */
+const READING_TOOLS = new Set([
+  'Read',
+  'Grep',
+  'Glob',
+  'LS',
+  'WebFetch',
+  'WebSearch',
+  'NotebookRead',
+  'ToolSearch',
+]);
+
+/** Built-ins with no definition file, from Claude Code's own Agent tool
+ *  listing: whether their fixed tools include an editing one. */
+const BUILTIN_EDITS: Readonly<Record<string, boolean>> = {
+  'general-purpose': true,
+  Explore: false,
+  Plan: false,
+  'claude-code-guide': false,
+  'statusline-setup': true,
+};
+/** The built-ins Claude Code lists as read-only agents. */
+const BUILTIN_READS_ONLY = new Set(['Explore', 'Plan', 'claude-code-guide']);
+
+/** The facts for an agent type, found where {@link requestToolAccess} finds
+ *  its definition; null for a type with no definition this can read. */
+export async function definitionFacts(
+  agentType: string | undefined,
+  lookup: AgentLookup,
+): Promise<DefinitionFacts | null> {
+  if (agentType === undefined || !TYPE_RE.test(agentType)) return null;
+  try {
+    const text = await findDefinition(agentType, lookup);
+    if (text !== null) return factsOf(text);
+    if (!Object.hasOwn(BUILTIN_EDITS, agentType)) return null;
+    return {
+      edits: BUILTIN_EDITS[agentType]!,
+      ...(BUILTIN_READS_ONLY.has(agentType) ? { readsOnly: true as const } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function factsOf(definition: string): DefinitionFacts | null {
+  const frontmatter = frontmatterOf(definition);
+  if (frontmatter === null) return null;
+  const model = scalarField(frontmatter, 'model');
+  const effort = scalarField(frontmatter, 'effort');
+  const tools = listField(frontmatter, 'tools');
+  const disallowed = listField(frontmatter, 'disallowedTools') ?? [];
+  const allowed = (tool: string): boolean =>
+    (tools === undefined || tools.includes(tool) || tools.includes('*')) &&
+    !disallowed.includes(tool);
+  const reads =
+    tools !== undefined && tools.length > 0 && tools.every((tool) => READING_TOOLS.has(tool));
+  return {
+    ...(model !== undefined && model !== 'inherit' ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
+    edits: EDIT_TOOLS.some(allowed),
+    ...(reads ? { readsOnly: true as const } : {}),
+  };
+}
+
+/**
  * Every custom agent this project and this user define whose tools leave the
  * request tool out, for `doctor` to name. Plugin agents are not listed: their
  * files are not the user's to edit.
@@ -220,10 +303,14 @@ function frontmatterOf(text: string): string[] | null {
 
 function nameOf(text: string): string | null {
   const frontmatter = frontmatterOf(text);
-  if (frontmatter === null) return null;
-  const line = frontmatter.find((l) => /^name\s*:/.test(l));
+  return frontmatter === null ? null : (scalarField(frontmatter, 'name') ?? null);
+}
+
+/** A top-level `key: value` line's value, unquoted; undefined when absent or empty. */
+function scalarField(frontmatter: string[], key: string): string | undefined {
+  const line = frontmatter.find((l) => new RegExp(`^${key}\\s*:`).test(l));
   const value = line === undefined ? '' : unquote(line.slice(line.indexOf(':') + 1).trim());
-  return value.length > 0 ? value : null;
+  return value.length > 0 ? value : undefined;
 }
 
 /**

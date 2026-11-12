@@ -1183,6 +1183,13 @@ describe('setupRuntime', () => {
     async () => {
       const mod = {
         'types/index.d.ts': 'export interface State {}\n',
+        'hooks/shared.ts': 'export {}\n',
+        'hooks/effort-rules.ts': 'export {}\n',
+        'hooks/effort-turn.ts': 'export {}\n',
+        'hooks/effort-step.ts': 'export {}\n',
+        'hooks/effort.ts': 'export {}\n',
+        'hooks/agent-effort.ts': 'export {}\n',
+        'hooks/agents.tsx': 'export {}\n',
         'hooks/register.tsx': 'export default function register() {}\n',
       };
       const pkg = npmPackage(

@@ -59,6 +59,13 @@ async function offerRecord(sessionId: string, toolUseId: string): Promise<unknow
   return JSON.parse(await readFile(join(sessionDir(dir, sessionId), `offer-${key}.json`), 'utf8'));
 }
 
+/** The line the agent leg keeps for the mod to append to a delegated task. */
+async function delegatedRecord(sessionId: string, toolUseId: string): Promise<unknown> {
+  const key = createHash('sha256').update(toolUseId).digest('hex');
+  const path = join(sessionDir(dir, sessionId), `delegate-${key}.json`);
+  return JSON.parse(await readFile(path, 'utf8'));
+}
+
 /** What `tenjin install` writes (`ROUTER_DEFAULTS`): 0.25 a call, auto, and
  *  that it asked Help improve routing, so a prompt carries only its offer. */
 const ROUTER_POLICY = {
@@ -1452,6 +1459,7 @@ describe('a wallet that cannot sign', () => {
         cwd: dir,
         transcript_path: path,
         tool_name: 'Agent',
+        tool_use_id: 'toolu_task',
         tool_input: {
           description: 'read the spec',
           prompt: 'Read https://example.test/spec and summarize the auth section.',
@@ -1466,8 +1474,7 @@ describe('a wallet that cannot sign', () => {
         signer: () => blocked,
       },
     );
-    expect(task).toMatchObject({ action: 'execute', id: EXECUTE.decision.id });
-    expect(task.response).not.toBeNull();
+    expect(task).toMatchObject({ action: 'execute', id: EXECUTE.decision.id, delegated: true });
   });
 
   /** The note rides in a hook's `additionalContext`, so its reader is the
@@ -2373,6 +2380,7 @@ describe('the delegation hook', () => {
       transcript_path: path,
       tool_name: toolName,
       tool_input: toolInput,
+      tool_use_id: 'toolu_delegate',
     };
   }
 
@@ -2396,8 +2404,10 @@ describe('the delegation hook', () => {
     expect(calls).toHaveLength(0);
   });
 
+  // Auto mode refuses a hook's `updatedInput` on the call, so the leg answers
+  // nothing and keeps the line, by the call's id, for the mod to append.
   it.each(['Agent', 'Task'])(
-    'appends the offer to the %s task and keeps every other field',
+    'keeps the offer line for the %s task under its call id, and answers nothing on the call',
     async (tool) => {
       const { fetchImpl, calls } = router(EXECUTE);
       const out = await runDelegationHook(await delegation(undefined, tool), {
@@ -2405,22 +2415,12 @@ describe('the delegation hook', () => {
         baseUrl: BASE,
         fetchImpl,
       });
-      expect(out).toMatchObject({ action: 'execute', id: 'k3f9-abcd' });
-      const output = (
-        out.response as {
-          hookSpecificOutput: {
-            hookEventName: string;
-            permissionDecision?: string;
-            updatedInput: Record<string, unknown>;
-          };
-        }
-      ).hookSpecificOutput;
-      expect(output.hookEventName).toBe('PreToolUse');
-      expect(output.permissionDecision).toBeUndefined();
-      expect(output.updatedInput).toEqual({
-        description: 'read the spec',
-        subagent_type: 'general-purpose',
-        prompt: `${TASK}\n\n${HINT_SOURCE}, optional if your own tools fall short: ${SEEN.slice(HINT_SOURCE.length + 2)} Your own tools are fine when they are enough.`,
+      expect(out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd', delegated: true });
+      expect(await delegatedRecord('sess-1', 'toolu_delegate')).toEqual({
+        version: 1,
+        at: expect.any(Number),
+        offerId: 'k3f9-abcd',
+        line: `${HINT_SOURCE}, optional if your own tools fall short: ${SEEN.slice(HINT_SOURCE.length + 2)} Your own tools are fine when they are enough.`,
       });
       // The task is the current message, the parent's turn is history, and
       // it is the ordinary hook body: no pending call, nothing new on the wire.
@@ -2492,7 +2492,14 @@ describe('the delegation hook', () => {
       homeDir: dir,
     });
     expect(calls).toHaveLength(asked);
-    expect(out.response === null).toBe(asked === 0);
+    expect(out.delegated === true).toBe(asked === 1);
+  });
+
+  it('keeps no line for a call with no id, which names no spawn to append it to', async () => {
+    const { fetchImpl } = router(EXECUTE);
+    const event = { ...((await delegation()) as object), tool_use_id: undefined };
+    const out = await runDelegationHook(event, { dataDir: dir, baseUrl: BASE, fetchImpl });
+    expect(out).toEqual({ response: null, action: 'execute', id: 'k3f9-abcd' });
   });
 
   it('withholds an offer the subagent could not pay for alone', async () => {
@@ -2518,7 +2525,7 @@ describe('the delegation hook', () => {
       baseUrl: BASE,
       fetchImpl,
     });
-    expect(out.response).not.toBeNull();
+    expect(out.delegated).toBe(true);
     expect(rpcCalls).toHaveLength(0);
   });
 });
@@ -3209,14 +3216,14 @@ describe('a discovered service', () => {
         cwd: dir,
         transcript_path: path,
         tool_name: 'Agent',
+        tool_use_id: 'toolu_promo',
         tool_input: { prompt: 'Add sound effects to the promo', subagent_type: 'general-purpose' },
       },
       { dataDir: dir, baseUrl: BASE, fetchImpl },
     );
-    expect(out).toMatchObject({ action: 'discovered', id: ID });
-    const prompt = (out.response as { hookSpecificOutput: { updatedInput: { prompt: string } } })
-      .hookSpecificOutput.updatedInput.prompt;
-    expect(prompt).toContain(SEEN_LINE.slice(HINT_SOURCE.length + 2));
+    expect(out).toMatchObject({ action: 'discovered', id: ID, delegated: true });
+    const { line } = (await delegatedRecord('sess-1', 'toolu_promo')) as { line: string };
+    expect(line).toContain(SEEN_LINE.slice(HINT_SOURCE.length + 2));
   });
 
   /**

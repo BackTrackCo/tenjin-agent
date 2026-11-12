@@ -22,7 +22,9 @@ const CALL = ['tool_name', 'tool_input', 'tool_use_id', 'agent_id', 'agent_type'
 const FIELDS: Record<HookKind, readonly string[]> = {
   prompt: [...COMMON, 'prompt'],
   native: [...COMMON, ...CALL],
-  agent: [...COMMON, ...CALL],
+  // The parent's permission mode, which its subagent inherits: kept in the
+  // agent leg's record (`agent-leg.ts`), never read for a decision.
+  agent: [...COMMON, ...CALL, 'permission_mode'],
   ask: [...COMMON, ...CALL],
   answer: [...COMMON, ...CALL, 'tool_response'],
   shortfall: [...COMMON, ...CALL, 'tool_response', 'error', 'is_interrupt'],

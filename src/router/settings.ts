@@ -3,11 +3,19 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   CONFIG_DEFAULTS,
+  EFFORT_LEVELS,
   loadRawConfig,
+  type EffortClass,
+  type EffortFloor,
+  type EffortLevel,
+  LOWERING_CLASSES,
+  type LoweringClass,
   parseRouterLayer,
+  ROUTER_SWITCHES,
   type PartialConfig,
   type RouterContext,
   type RouterLayer,
+  type RouterSwitch,
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
@@ -22,7 +30,8 @@ import {
 
 /**
  * THE ONE READER OF THE ROUTER'S OWN KEYS, `router.enabled`,
- * `router.context` and `router.improve`. Both hooks, the `request` tool, doctor, the status line and
+ * `router.context`, `router.improve`, `router.subagents` and the `router.effort`
+ * keys. Both hooks, the `request` tool, doctor, the status line and
  * `tenjin config` call {@link routerSettings} first, and nothing reads a router
  * key any other way.
  *
@@ -47,6 +56,20 @@ import {
  * router to keep the masked text of the turns it sees, so no project layer is
  * read for it: a repository cannot opt anyone in, and turning it off is the
  * one switch in `~/.tenjin/config.json`.
+ *
+ * `subagents`, `effort`, `effortClasses` AND `effortCap` ARE RAISED BY THE
+ * GLOBAL FILE ALONE. `subagents` (`off`, `shadow`, `apply`) decides a delegated
+ * task's model; `effort` (the same three) decides effort everywhere: the main
+ * agent's turns, and a delegated task's effort at its spawn and on each step.
+ * Neither turns the other on. `effortClasses`, `effortCap` and `effortSteps`
+ * shape the main agent's turns only; `effortFloor`, the lowest level a lowering
+ * reaches, holds for both. A project layer is read for each as a floor like
+ * the others: a switch moves toward `off`, the cap toward `low`, the classes
+ * narrow, the steps shrink, the effort floor rises toward `medium`, so a
+ * repository can make any of them more careful for itself, never less. The
+ * Claude mod cannot run this code, so its `effort-rules.ts` reads the same files
+ * by the same rule for the main agent's turns; `effort-settings.test.ts` holds
+ * the two to the same answers.
  */
 
 /** The committed project file and the personal one beside it. */
@@ -67,6 +90,18 @@ export interface RouterSettings {
   context: RouterSetting<RouterContext>;
   /** "Help improve routing": the global file's, or the default, off. */
   improve: RouterSetting<boolean>;
+  /** A delegated task's model decision: `off` (the default), `shadow` or `apply`. */
+  subagents: RouterSetting<RouterSwitch>;
+  /** Every effort decision, the main agent's turns and a delegated task's alike. */
+  effort: RouterSetting<RouterSwitch>;
+  /** The main-agent turn classes it may change: the two that lower, unless a file says. */
+  effortClasses: RouterSetting<EffortClass[]>;
+  /** The highest level a main-agent `correction` turn may be raised to. */
+  effortCap: RouterSetting<EffortLevel>;
+  /** How many steps each main-agent lowering class goes down: 1 each unless a file says. */
+  effortSteps: RouterSetting<Record<LoweringClass, number>>;
+  /** The lowest level any effort lowering reaches, main agent and delegated task alike. */
+  effortFloor: RouterSetting<EffortFloor>;
 }
 
 export interface RouterSettingsInput {
@@ -102,6 +137,34 @@ export async function routerSettings(
     global?.improve !== undefined
       ? { value: global.improve, source: 'file', path: globalPath }
       : { value: CONFIG_DEFAULTS.router.improve, source: 'default' };
+  let subagents: RouterSetting<RouterSwitch> =
+    global?.subagents !== undefined
+      ? { value: global.subagents, source: 'file', path: globalPath }
+      : { value: CONFIG_DEFAULTS.router.subagents, source: 'default' };
+  let effort: RouterSetting<RouterSwitch> =
+    global?.effort !== undefined
+      ? { value: global.effort, source: 'file', path: globalPath }
+      : { value: CONFIG_DEFAULTS.router.effort, source: 'default' };
+  let effortClasses: RouterSetting<EffortClass[]> =
+    global?.effortClasses !== undefined
+      ? { value: global.effortClasses, source: 'file', path: globalPath }
+      : { value: [...CONFIG_DEFAULTS.router.effortClasses], source: 'default' };
+  let effortCap: RouterSetting<EffortLevel> =
+    global?.effortCap !== undefined
+      ? { value: global.effortCap, source: 'file', path: globalPath }
+      : { value: CONFIG_DEFAULTS.router.effortCap, source: 'default' };
+  const stepsOf = (given: Partial<Record<LoweringClass, number>> | undefined) =>
+    Object.fromEntries(
+      LOWERING_CLASSES.map((c) => [c, given?.[c] ?? CONFIG_DEFAULTS.router.effortSteps[c] ?? 1]),
+    ) as Record<LoweringClass, number>;
+  let effortSteps: RouterSetting<Record<LoweringClass, number>> =
+    global?.effortSteps !== undefined
+      ? { value: stepsOf(global.effortSteps), source: 'file', path: globalPath }
+      : { value: stepsOf(undefined), source: 'default' };
+  let effortFloor: RouterSetting<EffortFloor> =
+    global?.effortFloor !== undefined
+      ? { value: global.effortFloor, source: 'file', path: globalPath }
+      : { value: CONFIG_DEFAULTS.router.effortFloor, source: 'default' };
 
   for (const { source, path, layer } of await projectLayers(input, deps)) {
     // Every layer is a floor: a value looser than the one so far is not read.
@@ -111,8 +174,56 @@ export async function routerSettings(
     if (layer.context !== undefined && (layer.context === 'turn' || context.value === 'session')) {
       context = { value: layer.context, source, path };
     }
+    if (layer.subagents !== undefined && lower(ROUTER_SWITCHES, layer.subagents, subagents.value)) {
+      subagents = { value: layer.subagents, source, path };
+    }
+    if (layer.effort !== undefined && lower(ROUTER_SWITCHES, layer.effort, effort.value)) {
+      effort = { value: layer.effort, source, path };
+    }
+    if (layer.effortClasses !== undefined) {
+      const only = layer.effortClasses;
+      effortClasses = {
+        value: effortClasses.value.filter((c) => only.includes(c)),
+        source,
+        path,
+      };
+    }
+    if (layer.effortCap !== undefined && lower(EFFORT_LEVELS, layer.effortCap, effortCap.value)) {
+      effortCap = { value: layer.effortCap, source, path };
+    }
+    if (layer.effortSteps !== undefined) {
+      const fewer = layer.effortSteps;
+      const value = stepsOf(
+        Object.fromEntries(
+          LOWERING_CLASSES.map((c) => [c, Math.min(effortSteps.value[c], fewer[c] ?? Infinity)]),
+        ),
+      );
+      effortSteps = { value, source, path };
+    }
+    // The floor is careful upward: a layer is read where it is at or above the one so far.
+    if (
+      layer.effortFloor !== undefined &&
+      lower(EFFORT_LEVELS, effortFloor.value, layer.effortFloor)
+    ) {
+      effortFloor = { value: layer.effortFloor, source, path };
+    }
   }
-  return { enabled, context, improve };
+  return {
+    enabled,
+    context,
+    improve,
+    subagents,
+    effort,
+    effortClasses,
+    effortCap,
+    effortSteps,
+    effortFloor,
+  };
+}
+
+/** A project value is read only where it is at or below the one so far, on that ladder. */
+function lower<T extends string>(ladder: readonly T[], value: T, current: T): boolean {
+  return ladder.indexOf(value) <= ladder.indexOf(current);
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];

@@ -85,10 +85,22 @@ describe('runConfigList', () => {
     expect(d['router.enabled']).toEqual({ value: true, source: 'default' });
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     expect(d['router.improve']).toEqual({ value: false, source: 'default' });
+    expect(d['router.subagents']).toEqual({ value: 'off', source: 'default' });
+    expect(d['router.effort']).toEqual({ value: 'off', source: 'default' });
+    expect(d['router.effortClasses']).toEqual({
+      value: ['notification', 'ack'],
+      source: 'default',
+    });
+    expect(d['router.effortCap']).toEqual({ value: 'xhigh', source: 'default' });
+    expect(d['router.effortSteps']).toEqual({
+      value: { notification: 1, ack: 1 },
+      source: 'default',
+    });
+    expect(d['router.effortFloor']).toEqual({ value: 'medium', source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
-    // The human listing: 6 scalar keys + update.mode + 3 router.* +
+    // The human listing: 6 scalar keys + update.mode + 9 router.* +
     // experimental.bazaar. allowlistCreators stays in `data` only.
-    expect(humanLines).toHaveLength(11);
+    expect(humanLines).toHaveLength(17);
     expect((humanLines ?? []).join('\n')).not.toMatch(/allowlistCreators/);
   });
 
@@ -482,12 +494,62 @@ describe('config set router.* at each scope', () => {
     });
   });
 
+  it('sets router.subagents and router.effort apart; a project file cannot raise either', async () => {
+    await runConfigSet({ key: 'router.subagents', value: 'apply' }, makeCtx());
+    expect((await readRawFile()) as Record<string, unknown>).toMatchObject({
+      router: { subagents: 'apply' },
+    });
+    expect((await runConfigGet({ key: 'router.effort' }, makeCtx())).data).toMatchObject({
+      value: 'off',
+    });
+    await inRepo(async () => {
+      const out = await runConfigSet(
+        { key: 'router.effort', value: 'apply', project: true },
+        makeCtx(),
+      );
+      expect(out.data).toMatchObject({ effective: { value: 'off' } });
+    });
+  });
+
   it.each([
     ['router.enabled', 'maybe'],
     ['router.context', 'all'],
+    ['router.subagents', 'on'],
+    ['router.effort', 'on'],
+    ['router.effort', 'auto'],
+    ['router.effortClasses', 'ack,question'],
+    ['router.effortCap', 'ultra'],
+    ['router.effortFloor', 'high'],
+    ['router.effortSteps', 'notification=0'],
+    ['router.effortSteps', 'notification=5'],
+    ['router.effortSteps', 'correction=2'],
+    ['router.effortSteps', 'ack=1,ack=2'],
   ])('rejects %s %s as USAGE', async (key, value) => {
     const err = await caught(() => runConfigSet({ key, value }, makeCtx()));
     expect(err.code).toBe('USAGE');
+  });
+
+  it('sets the lowering depth and the effort floor; a project file only shrinks the one and raises the other', async () => {
+    await runConfigSet({ key: 'router.effortSteps', value: 'notification=2' }, makeCtx());
+    await runConfigSet({ key: 'router.effortFloor', value: 'low' }, makeCtx());
+    expect(((await readRawFile()) as { router: unknown }).router).toEqual({
+      effortSteps: { notification: 2 },
+      effortFloor: 'low',
+    });
+    const listed = (await runConfigList(makeCtx())).data as Record<string, unknown>;
+    expect(listed['router.effortSteps']).toMatchObject({ value: { notification: 2, ack: 1 } });
+    await inRepo(async () => {
+      const deeper = await runConfigSet(
+        { key: 'router.effortSteps', value: 'notification=4,ack=3', project: true },
+        makeCtx(),
+      );
+      expect(deeper.data).toMatchObject({ effective: { value: { notification: 2, ack: 1 } } });
+      const careful = await runConfigSet(
+        { key: 'router.effortFloor', value: 'medium', project: true },
+        makeCtx(),
+      );
+      expect(careful.data).toMatchObject({ effective: { value: 'medium', source: 'project' } });
+    });
   });
 
   it('writes the project file with --project and the personal one with --local', async () => {
@@ -512,6 +574,34 @@ describe('config set router.* at each scope', () => {
       const listed = (await runConfigList(makeCtx())).data as Record<string, unknown>;
       expect(listed['router.enabled']).toMatchObject({ value: false, source: 'project' });
       expect(listed['router.context']).toMatchObject({ value: 'turn', source: 'local' });
+    });
+  });
+
+  it('sets router.effort, its classes and its cap globally; a project file cannot raise them', async () => {
+    await inRepo(async (repo) => {
+      const raised = await runConfigSet(
+        { key: 'router.effort', value: 'apply', project: true },
+        makeCtx(),
+      );
+      expect(await readJson(join(repo, '.tenjin', 'config.json'))).toEqual({
+        router: { effort: 'apply' },
+      });
+      expect(raised.data).toMatchObject({ effective: { value: 'off', source: 'default' } });
+      expect((raised.humanLines ?? []).join('\n')).toContain('Still off here');
+
+      await runConfigSet({ key: 'router.effort', value: 'shadow' }, makeCtx());
+      await runConfigSet({ key: 'router.effortClasses', value: 'ack, correction' }, makeCtx());
+      await runConfigSet({ key: 'router.effortCap', value: 'max' }, makeCtx());
+      expect(((await readRawFile()) as { router: unknown }).router).toMatchObject({
+        effortCap: 'max',
+      });
+      await runConfigSet({ key: 'router.effortCap', value: 'high' }, makeCtx());
+      expect((await readRawFile()) as Record<string, unknown>).toMatchObject({
+        router: { effort: 'shadow', effortClasses: ['ack', 'correction'], effortCap: 'high' },
+      });
+      const listed = (await runConfigList(makeCtx())).data as Record<string, unknown>;
+      expect(listed['router.effort']).toMatchObject({ value: 'shadow', source: 'file' });
+      expect(listed['router.effortClasses']).toMatchObject({ value: ['ack', 'correction'] });
     });
   });
 

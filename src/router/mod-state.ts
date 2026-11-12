@@ -11,10 +11,19 @@
  * | `progress/specs/<sha256(id)>.label.json` | `specs.ts` `storeLabel` | none: `{id, label}`, `id` must be the call's | `label`: a free lookup's name, which has no spec |
  * | `progress/<sha256(session)>/offer-<sha256(tool_use_id)>.json` | `progress.ts` `markOffered` | `version: 1` | `offerId`, `label` |
  * | `progress/<sha256(session)>/offer-<sha256("prompt:" + prompt)>.json` | `progress.ts` `markOffered` | `version: 1` | `offerId`, `label`, `at`, `priceAtomic` |
+ * | `progress/<sha256(session)>/delegate-<sha256(tool_use_id)>.json` | `progress.ts` `markDelegated` | `version: 1` | `at`, `offerId`, `line`: appended to the Agent call's prompt (`agents.tsx`) |
+ * | `agent-routes/<sha256(tool_use_id)>.json` | `agent-leg.ts` `recordAgentSpawn` | `version: 1` | `at`, `session`, `route`, `model` and `effort` (`setting`, `decided`, `apply`), `runsOn.effort`, `holdout`, `reason`, `saving` (`agents.tsx`) |
  *
  * It also reads the request tool's result envelope (`tool.ts`) in the
  * transcript: `status`, `label`, `cost`, `reason`, and, for the expanded row,
  * `savedFiles` and `result` where `fullResultPath` says the CLI cut it to the
  * spec's fields. `mod-state.test.ts` pins the fields through each writer.
  */
-export const MOD_STATE_FILES = ['spec', 'choices', 'label', 'offer'] as const;
+export const MOD_STATE_FILES = [
+  'spec',
+  'choices',
+  'label',
+  'offer',
+  'delegate',
+  'agent-route',
+] as const;
