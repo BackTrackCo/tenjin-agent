@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CliError } from '../../lib/errors';
 import { REDIRECT_PORTS } from './loopback';
 import { CLIENT_METADATA_URL, revokeSignIn, signIn, type SignInDeps } from './oauth';
@@ -33,6 +33,10 @@ function depsFor(
     ...over,
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("Tenjin's client document", () => {
   it('lists exactly the redirects a sign-in by it can use, under the id it is sent as', () => {
@@ -146,14 +150,26 @@ describe('signing in to an account', () => {
 
   it('never takes a redirect with another state', async () => {
     const server = fakeAccountServer({ mcpUrl: MCP });
+    // The forged redirect lands, and is answered, before the wait starts.
     const forged = async (url: string) => {
       const redirect = new URL(url).searchParams.get('redirect_uri');
-      void fetch(`${redirect}?code=code-1&state=forged`).catch(() => undefined);
+      const res = await fetch(`${redirect}?code=code-1&state=forged`);
+      await res.text();
+      expect(res.status).toBe(400);
       return true;
     };
-    const error = await signIn(ACCOUNT, depsFor(server, { open: forged, waitMs: 300 })).catch(
+    // The wait runs on fake time, moved past it once the sign-in is waiting.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let done = false;
+    const signing = signIn(ACCOUNT, depsFor(server, { open: forged, waitMs: 60_000 })).catch(
       (err: unknown) => err,
     );
+    void signing.then(() => (done = true));
+    for (let i = 0; i < 200 && !done; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    const error = await signing;
     expect((error as CliError).message).toBe(
       'The sign-in was not finished in time. Nothing was saved.',
     );

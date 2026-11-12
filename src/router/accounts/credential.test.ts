@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withFileLock } from '../../lib/lock';
 import { sourceVaultPath } from '../../lib/paths';
 import { AccountRefusal, accountCredential, type CredentialDeps } from './credential';
@@ -33,6 +33,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -95,6 +96,26 @@ const server = (
 
 const refusal = (err: unknown) => (err instanceof AccountRefusal ? err.reason : String(err));
 
+/** Every pending file and socket operation, landed, with no clock: what parks
+ *  a lock waiter on its next (fake) retry. */
+async function drainIo(ticks = 20): Promise<void> {
+  for (let i = 0; i < ticks; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Fake time advanced a lock retry at a time until `promise` settles. */
+async function settled<T>(promise: Promise<T>): Promise<T> {
+  let done = false;
+  void promise.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  for (let i = 0; i < 400 && !done; i += 1) {
+    await vi.advanceTimersByTimeAsync(25);
+    await drainIo(2);
+  }
+  return promise;
+}
+
 describe("a connected account's credential", () => {
   it('sends a fresh token as it is, with no request', async () => {
     const vault = await connected('2026-10-23T13:00:00.000Z');
@@ -153,15 +174,18 @@ describe("a connected account's credential", () => {
     const vault = await connected('2026-10-23T12:00:10.000Z');
     const account = server({});
     const lock = `${sourceVaultPath('firecrawl', dir)}.lock`;
-    let settled = false;
+    let finished = false;
+    // The lock's retries run on fake time: the waiter parks until it moves.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const waiting = await withFileLock(lock, async () => {
       // Another process holds the lock, mid-refresh: this call reads the old
       // token, sees it expiring, and waits.
       const call = accountCredential('firecrawl', 'Firecrawl', deps(vault, account)).finally(() => {
-        settled = true;
+        finished = true;
       });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(settled).toBe(false);
+      await drainIo();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(finished).toBe(false);
       // The other process rotates the single-use refresh token and lets go.
       const header = (await readVaultHeader(dir, 'firecrawl'))!;
       await rewriteVault(
@@ -177,7 +201,7 @@ describe("a connected account's credential", () => {
       // Handed out unawaited: it can only finish once this lock is let go.
       return { call };
     });
-    expect((await waiting.call).headers).toEqual({ authorization: 'Bearer rotated' });
+    expect((await settled(waiting.call)).headers).toEqual({ authorization: 'Bearer rotated' });
     expect(account.refreshes).toEqual([]);
   });
 
@@ -234,10 +258,12 @@ describe("a connected account's credential", () => {
     // refresh's late answer brought the previous account back.
     const vault = await connected('2026-10-23T12:00:10.000Z');
     const { refreshing, release, reconnect } = await refreshInFlight(vault);
+    // The reconnect waits on the refresh's lock, on fake time.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const saved = reconnect();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await drainIo();
     release();
-    await Promise.all([refreshing, saved]);
+    await settled(Promise.all([refreshing, saved]));
     expect(await savedToken(vault)).toBe('new-account');
   });
 

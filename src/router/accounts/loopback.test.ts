@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CliError } from '../../lib/errors';
 import { openRedirect } from './loopback';
 
@@ -16,6 +16,10 @@ async function get(url: string): Promise<{ status: number; body: string }> {
   const res = await fetch(url);
   return { status: res.status, body: await res.text() };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('the sign-in redirect', () => {
   it('takes the redirect with this state, and nothing else, then closes', async () => {
@@ -54,8 +58,17 @@ describe('the sign-in redirect', () => {
   });
 
   it('gives up after its time, and closes', async () => {
-    const redirect = await openRedirect({ state: STATE, timeoutMs: 50 });
-    const error = await redirect.wait().catch((err: unknown) => err);
+    const redirect = await openRedirect({ state: STATE, timeoutMs: 280_000 });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let given = false;
+    const waiting = redirect.wait().catch((err: unknown) => {
+      given = true;
+      return err;
+    });
+    await vi.advanceTimersByTimeAsync(279_999);
+    expect(given).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await waiting;
     expect(error).toBeInstanceOf(CliError);
     expect((error as CliError).message).toBe(
       'The sign-in was not finished in time. Nothing was saved.',
