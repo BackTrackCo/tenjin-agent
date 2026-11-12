@@ -49,7 +49,7 @@ import {
   type KeptSpec,
 } from './specs';
 import { settingsRefusal, type SettingsRefusal } from './settings-check';
-import { hasRules, type WireSettings } from './settings-wire';
+import type { WireSettings } from './settings-wire';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   reportSpecOutcome,
@@ -925,13 +925,9 @@ async function readToolList(
   if (args.browse !== undefined) {
     const listed = await requestBrowse(words, decisionDeps);
     if (listed.status !== 'decided') return listFailure(listed);
-    // A list is no offer, so it runs nothing to refuse; it only says when the
-    // router did not apply the user's rules to it.
-    const unfiltered =
-      sent !== undefined &&
-      listed.decision.settingsHash !== sent.hash &&
-      (hasRules(sent.policy) || listed.decision.settingsHash !== undefined);
-    return showRows(listed.decision.rows, unfiltered);
+    // THE AGENT IS ASKING, so every row it can run is listed: the user's rules
+    // govern only what Tenjin picks on its own.
+    return showRows(listed.decision.rows);
   }
   if (words.length === 0) {
     return fail('needs_input', '`tool` takes a row id from request({browse}).');
@@ -971,21 +967,16 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
 
 /** The rows as the model reads them: each tool's name, what it does, its
  *  price and the call that fetches its spec. */
-/** Said beside a list the router did not confirm it filtered by the user's rules. */
-export const UNFILTERED_LIST =
-  "Tenjin's router did not confirm it applied your Tenjin settings to this list, so it may name tools they rule out; any such tool is refused before it runs.";
-
-function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolResult {
+function showRows(rows: readonly BrowseRow[]): RequestToolResult {
   const nextStep =
     'Inspect a tool for free with request({tool: "<id>"}). ' +
     'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
-  const said = unfiltered ? { note: UNFILTERED_LIST } : {};
   if (rows.length === 0) {
     return {
       isError: false,
       summary:
         'No tool in the list fits those words. Browse with other words, or with "" for every tool by kind.',
-      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n), ...said },
+      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n) },
     };
   }
   const shown = rows.map((row) => ({
@@ -999,7 +990,6 @@ function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolRe
     isError: false,
     summary: [
       ...shown.map((row) => `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`),
-      ...(unfiltered ? [UNFILTERED_LIST] : []),
       nextStep,
     ].join('\n'),
     envelope: {
@@ -1007,7 +997,6 @@ function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolRe
       rows: shown,
       nextStep,
       cost: costLines(0n),
-      ...said,
       providerContentUntrusted: true,
     },
   };

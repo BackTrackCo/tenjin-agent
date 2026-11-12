@@ -75,14 +75,14 @@ export const SCOPE_RULE =
  * WHERE THE USER'S SETTINGS ARE CHANGED, said in the server instructions and
  * not only in a tool description: a host that defers tool descriptions behind
  * a search still shows these, so a fresh session finds `tenjin config` when
- * the user asks for a change. A refusal names the setting that stopped it;
- * the agent tells the user and never changes the settings to get past it.
+ * the user asks for a change. The rules govern only what Tenjin offers on
+ * its own, so a tool the user names still runs by its id.
  */
 export const CONFIG_RULE =
   'When the user asks to prefer, block, limit, reset, choose speed over cost or configure ' +
   'automatic Tenjin use, run `tenjin config --help`, perform the requested operation and ' +
-  "report its readback. When a result says the user's Tenjin settings stopped a call, tell " +
-  "the user which setting it was; never change Tenjin's settings yourself to get past it.";
+  'report its readback. Those settings only change what Tenjin offers on its own: a tool the ' +
+  "user asks for by name still runs through `{tool}`. Never change Tenjin's settings yourself.";
 
 /**
  * ONE SENTENCE, AND THE SERVER OWNS THE REST. Naming the services here, or

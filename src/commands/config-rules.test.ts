@@ -235,7 +235,7 @@ describe('tenjin config only', () => {
       ],
     });
     expect(data(result).explanation).toContain(
-      'Tenjin may handle Images only, including newly added reviewed services there. That covers General image and Image edit.',
+      'Tenjin offers tools on its own only for Images, including newly added reviewed services there. That covers General image and Image edit. You can still ask for any other tool by name.',
     );
     expect(data(result).reset).toBe('tenjin config reset --global --capabilities');
   });
@@ -247,9 +247,11 @@ describe('tenjin config only', () => {
       online(),
     );
     expect(data(result).explanation).toContain(
-      'When Tenjin handles Web research, it can use only Exa.',
+      'When Tenjin picks a service for Web research on its own, it picks only Exa.',
     );
-    expect(data(result).explanation).toContain('Other tasks are unaffected.');
+    expect(data(result).explanation).toContain(
+      'Other tasks are unaffected, and you can still ask for any service by name.',
+    );
   });
 
   it('has no only for accounts: that is a preference', async () => {
@@ -267,8 +269,11 @@ describe('tenjin config block and unblock', () => {
       block: [{ kind: 'source', id: 'tenjin' }],
     });
     const said = String(data(result).explanation);
-    expect(said).toContain("Tenjin's own tools are off, including free ones like the docs lookup");
-    expect(said).toContain('Tenjin still picks among your connected accounts');
+    expect(said).toContain(
+      "Tenjin won't offer its own tools on its own any more, free ones like the docs lookup included.",
+    );
+    expect(said).toContain("You can still ask for one of Tenjin's tools by name.");
+    expect(said).toContain('It still picks among your connected accounts');
     expect(said).toContain("goes back to your agent's own tools");
     expect(data(result).reset).toBe('tenjin config unblock --source tenjin');
   });
@@ -281,7 +286,7 @@ describe('tenjin config block and unblock', () => {
     expect(policy.block).toEqual([{ kind: 'provider', id: 'exa' }]);
     const said = String(data(result).explanation);
     expect(said).toContain(
-      'Exa is blocked, including reviewed reseller routes identified as using it. That covers Exa search, Exa Answer, and Exa contents.',
+      "Tenjin won't offer Exa on its own, including reviewed reseller routes identified as using it. That covers Exa search, Exa Answer, and Exa contents.",
     );
     expect(said).toContain('This leaves a saved rule unusable, kept as it is');
     expect(said).toContain('inactive: Exa is blocked');
@@ -499,7 +504,7 @@ describe('tenjin config, shown', () => {
       .join('\n')
       .replace(/`[^`]*`/g, '');
     expect(lines).toContain('Prefer Exa when Tenjin handles Web research.');
-    expect(lines).toContain("Tenjin's own tools are off");
+    expect(lines).toContain("Tenjin won't offer its own tools on its own");
     expect(lines).not.toMatch(/\bsource\b|x402|USDC|wallet|Jev|sha256/);
     const settings = (
       shown.data as { settings: { rules: { rule: unknown }[]; settingsHash: string } }

@@ -197,6 +197,10 @@ true`, each omitted when empty or off. A scope is `{kind: "global"}`, a
 {version, policy, replacement, sources}))`, keys sorted at every depth, no
   whitespace, arrays in order. The server never recomputes it.
 
+The rules govern only what Tenjin picks on its own: hook offers and the
+service picked for a `{query}`. `{browse}`, `{tool}`, `{tool, query}` and a
+spec read by its id run whatever they say.
+
 An answer to a client that sends `settings` lists it in `honored` when the
 server applied them, and then carries the request's hash verbatim as
 top-level `settingsHash` (hook, lookup and browse answers). The client keeps

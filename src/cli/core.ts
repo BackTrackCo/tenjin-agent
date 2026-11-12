@@ -267,7 +267,9 @@ What Tenjin may use (saved on this machine, not synced):
 
 "Use my fal account for images" and "only use my account for images" are the
 same preference: prefer --category images --source fal. "Turn off all of
-Tenjin's tools" is block --source tenjin. Speed: Tenjin also offers paid tools
+Tenjin's tools" is block --source tenjin. A block or only rule governs what
+Tenjin offers and picks on its own; you or your agent can still ask for any
+tool by name. Speed: Tenjin also offers paid tools
 where they are as accurate as your agent's own and faster. Replacement is "Run
 Tenjin's picks automatically", off by default. A name is the catalog's name or
 id ("Exa" or exa); an unclear or unknown name saves nothing and lists what it
@@ -675,9 +677,9 @@ Examples:
     'seller',
     'service',
   ])
-    .summary('allow only the named services, providers or tasks')
+    .summary("limit Tenjin's own picks to what you name")
     .description(
-      'Allow only what you name. --global with --category or --task limits which tasks Tenjin does anywhere; --task with --provider, --seller or --service limits who does that one task and leaves other tasks alone. Repeating it replaces the set for that scope; blocks and other rules stay. A request no allowed service can meet is refused with the reason, never sent elsewhere.',
+      'Limit what Tenjin picks on its own to what you name. --global with --category or --task limits which tasks Tenjin offers tools for; --task with --provider, --seller or --service limits who it picks for that one task and leaves other tasks alone. Repeating it replaces the set for that scope; blocks and other rules stay. When nothing allowed fits, Tenjin offers nothing on its own; you or your agent can still ask for any tool by name.',
     )
     .option('--global', 'apply everywhere: with --category or --task, which tasks Tenjin does')
     .addHelpText(
@@ -700,9 +702,9 @@ Examples:
     });
 
   targetOptions(addGlobalFlags(config.command('block')), all)
-    .summary('never let Tenjin use what you name')
+    .summary('stop Tenjin offering what you name on its own')
     .description(
-      "Block a provider, seller, service, task, category or account. A provider block covers reviewed reseller routes through it. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. --source tenjin turns off all of Tenjin's own tools, free ones too; jobs no connected account can do go back to your agent's own tools.",
+      "Block a provider, seller, service, task, category or account from what Tenjin offers and picks on its own; you or your agent can still ask for it by name. A provider block covers reviewed reseller routes through it. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. --source tenjin stops Tenjin offering its own tools, free ones too; jobs no connected account can do go back to your agent's own tools.",
     )
     .addHelpText(
       'after',
