@@ -555,7 +555,7 @@ export async function runAccountSpec(
     const job = await readAccountJob(dataDir, id);
     const reason =
       job !== null
-        ? `This offer is still running on your ${account.label} account, so nothing was sent again.`
+        ? `This offer already went to your ${account.label} account, and its job is kept on this machine, so nothing was sent again.`
         : earlier.state === 'account'
           ? `This offer was already sent to your ${account.label} account at ${earlier.at}, so nothing was sent again. Its answer is in the earlier request result for this id.`
           : earlier.state === 'switched'
@@ -637,16 +637,39 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       await keepAccountRow(at);
       report(at, { status: 'running' });
       await footer.done('running', { ...shownOf(at), price: 'your account' });
+      // SAID AS IT HAPPENED: done but its result didn't come back, not
+      // checked on, or still running once the wait ran out.
+      const { label } = account;
       const stopped =
         run.reason !== undefined ? refusalWords(run.reason, account, run.detail) : undefined;
-      const next = kept
-        ? `${stopped !== undefined ? `${stopped.fix} Then call` : 'Call'} request({job: ${JSON.stringify(id)}}) for its result; nothing is sent to the account again.`
-        : `This machine could not keep the job, so it can't be picked up here. Don't call again for this: it would run on your ${account.label} account again.`;
-      const summary = `Still running on your ${account.label} account.${stopped !== undefined ? ` ${stopped.said}` : ''} ${next}`;
-      return accountResult('needs_input', summary, summary, account.label, {
+      const lead =
+        run.finished === true
+          ? `Your ${label} job finished, but its result didn't come back.`
+          : stopped !== undefined || run.providerError !== undefined
+            ? `Tenjin couldn't check on your ${label} job.`
+            : `Still running on your ${label} account.`;
+      // "Couldn't reach" would only repeat "couldn't check on".
+      const repeats = run.finished !== true && run.reason === 'unreachable';
+      const why =
+        (repeats ? undefined : stopped?.said) ??
+        (run.providerError !== undefined && run.reason === undefined
+          ? `Your ${label} account answered with an error; it's in providerError.`
+          : undefined);
+      const pickUp = `request({job: ${JSON.stringify(id)}}) for its result; nothing is sent to the account again.`;
+      const soon = stopped?.fix.match(/^Try again in a (minute|moment)\.$/);
+      const next = !kept
+        ? `This machine could not keep the job, so it can't be picked up here. Don't call again for this: it would run on your ${label} account again.`
+        : soon !== null && soon !== undefined
+          ? `In a ${soon[1]}, call ${pickUp}`
+          : stopped !== undefined
+            ? `${stopped.fix} Then call ${pickUp}`
+            : `Call ${pickUp}`;
+      const summary = [lead, why, next].filter((s) => s !== undefined).join(' ');
+      return accountResult('needs_input', summary, summary, label, {
         nextStep: next,
         parameters: sentInput,
         ran: 'maybe',
+        ...(run.providerError !== undefined ? { providerError: run.providerError } : {}),
         extra: { status: 'running', ...(kept ? { job: id } : {}) },
       });
     }

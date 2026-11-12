@@ -491,7 +491,7 @@ describe('a mapped job on the user’s own account', () => {
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
       deps(fetchImpl, session),
     );
-    expect(again.summary).toContain('still running on your fal account');
+    expect(again.summary).toContain('its job is kept on this machine');
     expect(session.tools()).toEqual(['run_model', 'check_job']);
     // Picked up: only the follow-up runs.
     const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
@@ -565,10 +565,31 @@ describe('a long job on the account', () => {
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
       deps(fetchImpl, session),
     );
-    expect(first.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    expect(first.envelope).toMatchObject({
+      status: 'running',
+      job: FAL_LEAD.id,
+      providerError: 'Rate limit exceeded',
+    });
+    expect(first.summary).toBe(
+      `Your fal job finished, but its result didn't come back. Your fal account is over its rate limit right now. In a minute, call request({job: "${FAL_LEAD.id}"}) for its result; nothing is sent to the account again.`,
+    );
     const done = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
     expect(done.envelope).toMatchObject({ status: 'fulfilled' });
     expect(session.tools().filter((t) => t === 'run_model')).toHaveLength(1);
+  });
+
+  it("says Tenjin couldn't check on a job when a status call errors, never that it is still running", async () => {
+    await falOffered();
+    const session = falJob([{ isError: true, content: [{ type: 'text', text: 'Upstream 502' }] }]);
+    const { fetchImpl } = network();
+    const result = await runRequestTool(
+      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl, session),
+    );
+    expect(result.envelope).toMatchObject({ status: 'running', providerError: 'Upstream 502' });
+    expect(result.summary).toBe(
+      `Tenjin couldn't check on your fal job. Your fal account answered with an error; it's in providerError. Call request({job: "${FAL_LEAD.id}"}) for its result; nothing is sent to the account again.`,
+    );
   });
 
   it('sends no status call once the account is disconnected mid-job, and keeps the job for a reconnect', async () => {

@@ -272,13 +272,18 @@ export type AccountRun =
   /** It ran, or may have, and ended without a result. */
   | { kind: 'failed'; why: string; detail?: string }
   /** It ran and is still working, or this process lost sight of it (the
-   *  refusal or error that stopped the follow-up): the follow-up needs `first`. */
+   *  refusal or error that stopped the follow-up): the follow-up needs `first`.
+   *  `finished`: a status call said the job was done, and only the fetch of
+   *  its result stopped. `providerError`: the account's own error, when it
+   *  answered with one. */
   | {
       kind: 'running';
       first: unknown;
       firstAt: number;
       reason?: RefusalReason;
       detail?: string;
+      finished?: true;
+      providerError?: string;
     };
 
 /** What a resumed run starts from: the billing call's result, and when. */
@@ -493,10 +498,12 @@ async function followUp(
   const now = () => deps.now?.() ?? Date.now();
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const next = call.next!;
-  const running = (stopped?: unknown): AccountRun => ({
+  const running = (stopped?: unknown, finished = false, providerError?: string): AccountRun => ({
     kind: 'running',
     first,
     firstAt,
+    ...(finished ? { finished: true as const } : {}),
+    ...(providerError !== undefined ? { providerError } : {}),
     ...(stopped instanceof AccountRefusal
       ? {
           reason: stopped.reason,
@@ -510,26 +517,37 @@ async function followUp(
   // the result: the session this process opened keeps the credential it was
   // opened with, so a disconnect in another terminal stops the next request,
   // and the job waits for a reconnect.
-  const gone = () =>
+  const gone = (finished = false) =>
     existsSync(sourceVaultPath(connection.accountId, deps.dataDir))
       ? undefined
-      : running(new AccountRefusal('not_connected'));
+      : running(new AccountRefusal('not_connected'), finished);
   // A HICCUP KEEPS THE JOB: no answer, or an error from the account, on a
   // status call or on the fetch of the result, hands it back running for
   // `request({job})`, which sends only these free reads again. Only an answer
   // a retry would repeat ends it failed: the job reported failed, or one the
-  // map can't read or follow.
+  // map can't read or follow. What stopped it is named: a refusal as its
+  // reason, no answer as `unreachable`, and the account's own error as what
+  // its words say, with its text in `providerError`.
   const ask = async (
     tool: string,
     args: Parameters<Connection['call']>[1],
+    finished: boolean,
   ): Promise<{ result: AccountCallResult } | { stop: AccountRun }> => {
     let result: AccountCallResult;
     try {
       result = await connection.call(tool, args);
     } catch (err) {
-      return { stop: running(err) };
+      const stopped = err instanceof AccountRefusal ? err : new AccountRefusal('unreachable');
+      return {
+        stop: running(stopped, finished, err instanceof AccountRefusal ? undefined : said(err)),
+      };
     }
-    return result.isError === true ? { stop: running(errorText(result)) } : { result };
+    if (result.isError !== true) return { result };
+    const text = errorText(result);
+    const reason = refusalIn(text);
+    return {
+      stop: running(reason !== undefined ? new AccountRefusal(reason) : undefined, finished, text),
+    };
   };
   const { poll } = next;
   if (poll !== undefined) {
@@ -551,7 +569,7 @@ async function followUp(
           kind: 'failed',
           why: `its answer didn't name the job to follow (${args.missing})`,
         };
-      const asked = await ask(poll.tool, args.value);
+      const asked = await ask(poll.tool, args.value, false);
       if ('stop' in asked) return asked.stop;
       const read = readResult(asked.result, poll.result);
       if ('problem' in read) return { kind: 'failed', why: read.problem };
@@ -563,12 +581,15 @@ async function followUp(
       if (!inState(read.value, poll.running)) break;
     }
   }
-  const stopped = gone();
+  // FINISHED once a status call said so; with no status call, only the fetch
+  // tells.
+  const finished = poll !== undefined;
+  const stopped = gone(finished);
   if (stopped !== undefined) return stopped;
   const args = fillArgs(next.args, input, first);
   if ('missing' in args)
     return { kind: 'failed', why: `its answer didn't name the result to fetch (${args.missing})` };
-  const asked = await ask(next.tool, args.value);
+  const asked = await ask(next.tool, args.value, finished);
   if ('stop' in asked) return asked.stop;
   const read = readResult(asked.result, next.result);
   if ('problem' in read) return { kind: 'failed', why: read.problem };
