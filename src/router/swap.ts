@@ -1,4 +1,6 @@
 import { toMoney } from '../lib/money';
+import { savedAccount } from './accounts/saved';
+import { isAccountSpec } from './decision';
 import { decideSwap, type HookDeps } from './hooks';
 import { personalSettingsAt } from './settings';
 import { costLines, runRequestTool, type RequestToolDeps, type RequestToolResult } from './tool';
@@ -32,6 +34,14 @@ import { costLines, runRequestTool, type RequestToolDeps, type RequestToolResult
  * call run, and its mark no longer says it was answered in place; once the
  * provider call has started, its result or error is the answer, with its real
  * payment state, and nothing is replayed.
+ *
+ * A PICK ON THE USER'S CONNECTED ACCOUNT runs the same way (plan 37): only a
+ * map Tenjin has checked comes with `bound`, the account's plan pays, and the
+ * map's own caps hold where the Tenjin limits do not. An account that refuses
+ * before anything ran (its sign-in expired, its plan ran out) stops this one
+ * call with the reason and Tenjin's own tool for the job and its price, and
+ * the agent's retry runs natively; Tenjin's tool never runs in its place here,
+ * since it has not met the automatic-use checks.
  */
 
 /** A hand-back: the native call runs its ordinary route. Nothing was run here. */
@@ -84,14 +94,24 @@ export async function runSwap(
   }
   const { envelope } = ran;
   const status = String(envelope.status);
-  if (NOT_STARTED.has(status)) {
+  if (NOT_STARTED.has(status) && envelope.refused === undefined) {
     await decided.unmark();
     return handBack(`it stopped before anything was sent (${String(envelope.reason ?? status)})`);
   }
-  // THE VISIBLE LINE: the service, its price and the native tool it answered.
+  // THE VISIBLE LINE: the service, its price or the account that pays, and
+  // the native tool it answered.
   const label = spec.label ?? spec.provider;
-  const price = `$${toMoney(spec.priceVaries ? spec.maxAmountAtomic : spec.priceAtomic).usd}`;
-  const line = `Tenjin ran ${label} (${spec.priceVaries ? 'up to ' : ''}${price}) in place of this ${NATIVE_NAMES[tool]}, because the user turned on "Run Tenjin's picks automatically".`;
+  let line: string;
+  if (isAccountSpec(spec)) {
+    const account = (await savedAccount(hookDeps.dataDir, spec.source))?.label ?? spec.provider;
+    line =
+      envelope.refused !== undefined
+        ? `Your ${account} account refused ${label}, which Tenjin picked in place of this ${NATIVE_NAMES[tool]}, so the ${NATIVE_NAMES[tool]} did not run this time; the user's next one runs as usual.`
+        : `${account} · your account · instead of ${tool}: Tenjin ran ${label} on the user's own ${account} account in place of this ${NATIVE_NAMES[tool]}, because the user turned on "Run Tenjin's picks automatically". Their ${account} plan pays, not the Tenjin balance.`;
+  } else {
+    const price = `$${toMoney(spec.priceVaries ? spec.maxAmountAtomic : spec.priceAtomic).usd}`;
+    line = `Tenjin ran ${label} (${spec.priceVaries ? 'up to ' : ''}${price}) in place of this ${NATIVE_NAMES[tool]}, because the user turned on "Run Tenjin's picks automatically".`;
+  }
   return {
     ...ran,
     summary: [line, ran.summary, ...notices].join('\n'),

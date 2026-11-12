@@ -18,18 +18,28 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
-import { storeChoices, storeLabel, storeSpecs } from './specs';
+import { storeAccountOffer, storeChoices, storeLabel, storeSpecs } from './specs';
 import {
+  isAccountSpec,
+  parseHookDecision,
   requestDecision,
   REQUIRES_UNMET,
   ROUTE_PAID_PATH,
+  type AccountOfferSpec,
+  type AnyOfferSpec,
   type Bound,
   type HookDecision,
   type HookResponse,
   type OfferSpec,
 } from './decision';
+import { accountLacks } from './accounts/presence';
 import { keepDecided, takeDecided, type Decided } from './decided';
-import { SETTINGS_BLOCKED, settingsBlockedLine } from './settings-blocked';
+import {
+  settingsBlockedLine,
+  SHOWN_REFUSALS,
+  UNVERIFIED,
+  SETTINGS_BLOCKED,
+} from './settings-blocked';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -739,7 +749,20 @@ async function vetOffer<T extends OfferDecision>(
   deadline: number,
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
-  const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
+  // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend policy
+  // or the wallet to check, and it is offered alone. One whose call this
+  // account was found to lack when it was connected is left out, rather than
+  // leading its task and failing when called: by now it has no fallback to
+  // stand in for it ({@link servableHere}).
+  if (isAccountOffer(offer)) {
+    const lead = accountLeadOf(offer);
+    if (lead === undefined) return { withheld: 'account lead unreadable' };
+    if (await accountLacks(deps.dataDir, lead)) return { withheld: 'account lacks this job' };
+    return { offer };
+  }
+  const terms = termsOf(offer);
+  if (terms.endpoint === undefined) return { withheld: 'no endpoint to pay' };
+  const shortfall = await spendShortfall({ ...terms, endpoint: terms.endpoint }, deps, deadline);
   if (shortfall === null) {
     const note = await overCapNote(offer, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
@@ -758,7 +781,7 @@ async function vetOffer<T extends OfferDecision>(
 function listedPrices(offer: OfferDecision): bigint[] {
   return (offer.specs ?? [])
     .filter((spec) => spec.id !== offer.id)
-    .map((spec) => BigInt(spec.priceAtomic));
+    .flatMap((spec) => (isAccountSpec(spec) ? [] : [BigInt(spec.priceAtomic)]));
 }
 
 /** A listed price as a line quotes one: dollars with at least two decimals. */
@@ -963,10 +986,12 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
 type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
 
 /**
- * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), or a
+ * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), a
+ * service on the user's own account (an `execute` led by one), or a
  * pay-per-call service the server found for a step nothing curated serves
- * (`discovered`). Both carry an id and a finished line, and every hook shows
- * them in the same place, under the same spend and one-block rules.
+ * (`discovered`). Each carries an id and a finished line, and every hook
+ * shows them in the same place, under the same rules; only one the balance
+ * pays meets the spend check.
  */
 type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' }>;
 
@@ -974,11 +999,29 @@ function isOffer(decision: HookDecision | null): decision is OfferDecision {
   return decision?.action === 'execute' || decision?.action === 'discovered';
 }
 
-/** What the spend check and the footer read, for either kind of offer. */
+/**
+ * AN OFFER LED BY A SERVICE ON THE USER'S CONNECTED ACCOUNT (plan 37): no
+ * URL, nothing the balance pays, and Tenjin's own route for the job beside
+ * it, which a refusal offers. The server sends one only for an account this
+ * machine's settings name, alone and checked, with `bound` when it can run in
+ * place of the native call it holds.
+ */
+function isAccountOffer(decision: HookDecision | null): decision is ExecuteDecision {
+  return decision?.action === 'execute' && (decision.specs ?? []).some(isAccountSpec);
+}
+
+/** The account lead's own spec. */
+function accountLeadOf(offer: ExecuteDecision): AccountOfferSpec | undefined {
+  const lead = (offer.specs ?? []).find(({ id }) => id === offer.id);
+  return lead !== undefined && isAccountSpec(lead) ? lead : undefined;
+}
+
+/** What the spend check and the footer read, for any kind of offer. An
+ *  account's has no URL, and costs the balance nothing. */
 function termsOf(offer: OfferDecision): {
   provider: string;
   providerPriceAtomic: string;
-  endpoint: string;
+  endpoint?: string;
 } {
   if (offer.action === 'execute') return offer;
   const { candidate } = offer;
@@ -992,7 +1035,60 @@ function termsOf(offer: OfferDecision): {
 /** A free curated offer: nothing to pay, so nothing for the spend policy or
  *  the wallet. A discovered service is never one: it is always a sale. */
 function isFree(offer: OfferDecision): offer is ExecuteDecision {
-  return offer.action === 'execute' && offer.providerPriceAtomic === '0';
+  return offer.action === 'execute' && offer.providerPriceAtomic === '0' && !isAccountOffer(offer);
+}
+
+/**
+ * AN ACCOUNT LEAD THIS MACHINE CANNOT RUN, SERVED BY TENJIN'S OWN ROUTE. The
+ * connect-time check found the account lacks a tool the lead's call makes (a
+ * higher plan, say), or there is no sign-in here to read, but the router
+ * never learns that: the account-wide preference keeps putting the account
+ * first for the task. So the fallback the server sends beside an account
+ * lead becomes the offer: a paid `execute` on Tenjin's route, which the
+ * settings check, the spend check and the footer then treat like any other,
+ * and never `bound`, so it never runs in place of a native call. With no
+ * fallback (the settings allow no Tenjin route for the task) the lead is
+ * kept, and {@link vetOffer} withholds it.
+ *
+ * The line is this client's, since the server writes none for the fallback.
+ * A decision that would not parse as an answer keeps the lead too.
+ */
+async function servableHere(
+  decision: HookDecision | null,
+  dataDir: string,
+): Promise<HookDecision | null> {
+  if (!isAccountOffer(decision) || decision.fallback === undefined) return decision;
+  const lead = accountLeadOf(decision);
+  if (lead === undefined || !(await accountLacks(dataDir, lead))) return decision;
+  return parseHookDecision(fallbackOffer(decision, decision.fallback)) ?? decision;
+}
+
+/** Tenjin's own route for an account lead's task, as an offer of its own. */
+function fallbackOffer(lead: ExecuteDecision, fallback: OfferSpec): Record<string, unknown> {
+  const id = JSON.stringify(fallback.id);
+  const name = fallback.label ?? fallback.provider;
+  const price = fallback.priceVaries
+    ? `About $${toMoney(fallback.priceAtomic).usd} a call (up to $${toMoney(fallback.maxAmountAtomic).usd})`
+    : `$${toMoney(fallback.priceAtomic).usd} a call`;
+  const what = fallback.description.replace(/[\s.]+$/, '');
+  return {
+    action: 'execute',
+    id: fallback.id,
+    capabilityId: fallback.capabilityId,
+    category: lead.category,
+    provider: fallback.provider,
+    ...(fallback.label !== undefined ? { label: fallback.label } : {}),
+    capabilityDescription: fallback.description,
+    providerPriceAtomic: fallback.priceAtomic,
+    endpoint: fallback.request.url,
+    usage: lead.usage,
+    hint:
+      `${name} fits this, Tenjin's own tool: ${what}. ${price}, paid from the Tenjin balance. ` +
+      `Call request({id: ${id}}) for its inputs, then request({id: ${id}, input: {...}}) alone ` +
+      'and wait for its result; native tools stay allowed for anything else.',
+    specs: [fallback],
+    delivery: 'offer',
+  };
 }
 
 /**
@@ -1075,7 +1171,7 @@ async function routeNativeCall(
   const outcome =
     sealed !== undefined
       ? await decide(sealed, deps, router, event.sessionId, deadline, footer)
-      : fromRecorded(recorded!, router, footer, deps);
+      : await servableHere(fromRecorded(recorded!, router, footer, deps), deps.dataDir);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     const blocked = blockedLine(outcome, hostOf(deps));
@@ -1188,8 +1284,9 @@ export type SwapDecision =
       offer: OfferDecision;
       /** The offer id and complete input the router built, run unchanged. */
       bound: Bound;
-      /** The spec `bound` fills, as the hook keeps it. */
-      spec: OfferSpec;
+      /** The spec `bound` fills, as the hook keeps it: a paid one, or a
+       *  service on the user's connected account. */
+      spec: AnyOfferSpec;
       tool: 'WebSearch' | 'WebFetch';
       /**
        * Claims every search or URL of the call for the main agent, as a
@@ -1435,7 +1532,8 @@ function offeredTerms(offer: OfferDecision): OfferedTerms {
   return {
     offerId: offer.id,
     ...(label !== undefined ? { label } : {}),
-    priceAtomic: termsOf(offer).providerPriceAtomic,
+    // An account's call costs the balance nothing: no price to show.
+    ...(isAccountOffer(offer) ? {} : { priceAtomic: termsOf(offer).providerPriceAtomic }),
   };
 }
 
@@ -1816,8 +1914,19 @@ async function openFooter(
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.
         // Each with the settings hash its answer echoed: what the check before
-        // every call holds the offer to.
-        await storeSpecs(deps.dataDir, decision.specs, settingsHash);
+        // every call holds the offer to. An account's lead is kept with
+        // Tenjin's own route for its job.
+        const lead = isAccountOffer(decision) ? accountLeadOf(decision) : undefined;
+        if (lead !== undefined && decision.action === 'execute') {
+          await storeAccountOffer(deps.dataDir, lead, decision.fallback, settingsHash);
+        } else {
+          const specs: readonly AnyOfferSpec[] = decision.specs ?? [];
+          await storeSpecs(
+            deps.dataDir,
+            specs.filter((spec): spec is OfferSpec => !isAccountSpec(spec)),
+            settingsHash,
+          );
+        }
         // A free lookup has no spec to name its row: its label is kept instead.
         if (isFree(decision) && decision.label !== undefined) {
           await storeLabel(deps.dataDir, decision.id, decision.label);
@@ -1871,6 +1980,7 @@ async function sweepUntaken(
  *  routing fee that was not paid (`wallet_low`, `no_payer` and the rest) is
  *  named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
+  if (isAccountOffer(decision)) return `account lookup offered (${decision.provider})`;
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
     // `fee unpaid: <reason>` fits the record's 40 characters for every reason.
@@ -1883,6 +1993,9 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
   }
   if (decision.action === 'native' && decision.diagnostics.reasonCode === SETTINGS_BLOCKED) {
     return 'native tools (your settings)';
+  }
+  if (decision.action === 'native' && decision.diagnostics.reasonCode === UNVERIFIED) {
+    return 'native tools (account not checked)';
   }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
@@ -1982,7 +2095,7 @@ async function decide(
   }
   if (!decidedUnder(outcome.decision, router, warn)) return null;
   footer?.answered(outcome.decision);
-  return outcome.decision.decision;
+  return servableHere(outcome.decision.decision, deps.dataDir);
 }
 
 /**
@@ -2008,7 +2121,7 @@ function decidedUnder(
 
 /** The line a `settings_blocked` answer is shown as, attributed, else nothing. */
 function blockedLine(decision: HookDecision | null, host: Harness): string | undefined {
-  if (decision?.action !== 'native' || decision.diagnostics.reasonCode !== SETTINGS_BLOCKED)
+  if (decision?.action !== 'native' || !SHOWN_REFUSALS.has(decision.diagnostics.reasonCode))
     return undefined;
   return attributed(settingsBlockedLine(decision.diagnostics), host);
 }
