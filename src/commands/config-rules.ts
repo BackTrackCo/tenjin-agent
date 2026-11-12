@@ -439,7 +439,8 @@ export async function runConfigPrefer(
       explanation: [`${SAVED_PREFIX} ${said(effective)}`, await replacementNote(router, ctx)],
       effective: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
-      reset: preferResetCommand(scope),
+      // A replaced list comes back as it was; a new one is removed.
+      reset: replaced !== undefined ? recreate(replaced) : preferResetCommand(scope),
     },
     ctx,
     deps,
@@ -553,7 +554,7 @@ export async function runConfigOnly(
       explanation: [`${SAVED_PREFIX} ${said(effective)}`, await replacementNote(router, ctx)],
       effective: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
-      reset: onlyResetCommand(rule),
+      reset: replaced !== undefined ? recreate(replaced) : onlyResetCommand(rule),
     },
     ctx,
     deps,

@@ -164,6 +164,34 @@ describe('tenjin config prefer', () => {
       },
     ]);
     expect(data(result).removed).toHaveLength(1);
+    // Undo puts the replaced list back, rather than removing the preference.
+    expect(data(result).reset).toBe('tenjin config prefer --task "web research" --provider exa');
+  });
+
+  it('undoes a repeated only rule by saving the one it replaced', async () => {
+    const first = await runConfigOnly(
+      { task: ['web research'], provider: ['exa'] },
+      ctx(),
+      online(),
+    );
+    expect(data(first).reset).toBe(
+      'tenjin config reset --task "web research" --restriction --dimension provider',
+    );
+    const again = await runConfigOnly(
+      { task: ['web research'], service: ['exa-search'] },
+      ctx(),
+      online(),
+    );
+    // Another dimension is its own rule: nothing was replaced.
+    expect(data(again).reset).toBe(
+      'tenjin config reset --task "web research" --restriction --dimension service',
+    );
+    const replaced = await runConfigOnly(
+      { task: ['web research'], provider: ['coinmarketcap'] },
+      ctx(),
+      online(),
+    );
+    expect(data(replaced).reset).toBe('tenjin config only --task "web research" --provider exa');
   });
 
   it('writes nothing for an ambiguous or unknown name, and lists candidates', async () => {
