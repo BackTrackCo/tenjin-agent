@@ -229,7 +229,11 @@ function accountLines(accounts: readonly AccountStatus[]): string[] {
   const first = labels(({ preferred }) => preferred);
   const rest = labels(({ preferred }) => !preferred);
   const named = [
-    ...(first.length > 0 ? [`${list.format(first)} (used first for jobs they can do)`] : []),
+    // Set, not used: only a map Tenjin has checked comes first, and the
+    // identities read doesn't say which those are.
+    ...(first.length > 0
+      ? [`${list.format(first)} (set to come first for the jobs Tenjin has checked)`]
+      : []),
     ...(rest.length > 0 ? [`${list.format(rest)} (not put first)`] : []),
   ];
   return [

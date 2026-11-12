@@ -167,7 +167,7 @@ describe('status, accounts and settings', () => {
     const result = await status(5_000_000n);
     const shown = lines(result);
     expect(shown).toContain(
-      'Your accounts Apify (used first for jobs they can do); fal (not put first): billed to your own plans, not counted in the limit',
+      'Your accounts Apify (set to come first for the jobs Tenjin has checked); fal (not put first): billed to your own plans, not counted in the limit',
     );
     expect(shown).toContain('Apify does local business search and web research');
     expect(shown).toContain("fal isn't signed in on this machine: `tenjin connect fal`");

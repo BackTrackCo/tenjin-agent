@@ -498,7 +498,7 @@ export interface AccountReadback {
   id: string;
   label: string;
   connected: boolean;
-  /** In the account-wide preference: used first for the jobs it can do. */
+  /** In the account-wide preference: set to come first for the jobs Tenjin has checked. */
   preferred: boolean;
   /** `tenjin`: Tenjin's own tool runs in its place; `ask`: the call stops
    *  and offers it. */
@@ -519,7 +519,7 @@ export function describeAccount(
 ): AccountReadback {
   const { label, id } = account;
   const here = connected ? '' : ` It isn't signed in on this machine: \`tenjin connect ${id}\`.`;
-  const who = `Your ${label} account${preferred ? ', used first for the jobs it can do' : ''}: its own plan pays, outside your limits on the Tenjin balance.`;
+  const who = `Your ${label} account${preferred ? ', set to come first for the jobs Tenjin has checked' : ''}: its own plan pays, outside your limits on the Tenjin balance.`;
   const common = { id, label, connected, preferred, disconnect: `tenjin disconnect ${id}` };
   return account.onRefusal === 'tenjin'
     ? {
