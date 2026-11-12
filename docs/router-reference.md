@@ -38,7 +38,7 @@ If a spec declares output fields, the inline result contains those fields and `f
 
 ## Your settings
 
-`tenjin config` operations change what Tenjin may use. Names are the catalog's labels or ids, resolved against the router's free identities read before anything is written; an ambiguous or unknown name lists candidates and writes nothing. Each write merges under the config lock and answers with the changed rule, its scope, what is now in effect, an explanation and the command that undoes it. `--json` carries the typed ids.
+`tenjin config` operations change what Tenjin offers and picks on its own. Names are the catalog's labels or ids, resolved against the router's free identities read before anything is written; an ambiguous or unknown name lists candidates and writes nothing. Each write merges under the config lock and answers with the changed rule, its scope, what is now in effect, an explanation and the command that undoes it. `--json` carries the typed ids.
 
 | Operation                                                                | Saves                                                                                                                                                    |
 | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |

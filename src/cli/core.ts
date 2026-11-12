@@ -222,7 +222,7 @@ Examples:
     });
 
   const config = leaf(SETUP, 'config', 'read and set config values, and your settings').description(
-    "Print every effective config value and your settings, read and write one value, or change what Tenjin may use: prefer, only, block, unblock, reset, speed, and whether Tenjin's picks run automatically. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved, what it covers and the command that undoes it. " +
+    "Print every effective config value and your settings, read and write one value, or change what Tenjin offers and picks on its own: prefer, only, block, unblock, reset, speed, and whether Tenjin's picks run automatically. A tool you or your agent picks by name still runs. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved, what it covers and the command that undoes it. " +
       'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
       'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends. ' +
       'router.improve is "Help improve routing", off by default: true lets Tenjin keep the secret-masked text of the turns the router sees, to grade its offers, and false turns it off and deletes what was kept.',
@@ -238,7 +238,7 @@ Examples:
   $ tenjin config set --project router.enabled false
   $ tenjin config set router.improve false
 
-What Tenjin may use (saved on this machine, not synced):
+What Tenjin offers and picks on its own (saved on this machine, not synced):
   $ tenjin config prefer --task "web research" --provider exa
   $ tenjin config only --task "web research" --provider exa
   $ tenjin config only --global --category images
