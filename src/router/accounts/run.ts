@@ -259,8 +259,8 @@ const UNCONFIRMED: SettingsRefusal = {
 /**
  * THE CHECK BEFORE AN ACCOUNT'S CALL, read now from local state alone: the
  * rules the offer was decided under are the ones saved, it was decided under
- * them at all, and the account is still connected here, named to the router
- * in the settings saved now. A refusal sends nothing to the account.
+ * them at all, and the account is still connected here ({@link connection}).
+ * A refusal sends nothing to the account.
  */
 async function accountCheck(
   spec: { source: string; settingsHash?: string },
@@ -270,6 +270,21 @@ async function accountCheck(
   const stale = await settingsRefusal(dataDir, [spec.settingsHash]);
   if (stale !== null) return { settings: stale };
   if (spec.settingsHash === undefined) return { settings: UNCONFIRMED };
+  return connection(spec, account, dataDir);
+}
+
+/**
+ * WHETHER THE ACCOUNT IS STILL CONNECTED HERE: its descriptor saved, its
+ * sign-in on this machine, and named to the router in the settings saved now.
+ * Settings that can't be read refuse too: nothing is guessed. Local only.
+ */
+async function connection(
+  spec: { source: string },
+  account: Account,
+  dataDir: string,
+): Promise<{ settings: SettingsRefusal } | { reason: 'not_connected' } | null> {
+  const unreadable = await settingsRefusal(dataDir, []);
+  if (unreadable !== null) return { settings: unreadable };
   if (!account.saved || account.mcpUrl === undefined) return { reason: 'not_connected' };
   const now = await personalSettingsAt(dataDir).catch(() => undefined);
   if (now?.wire.status !== 'ok' || !now.wire.settings.sources.includes(spec.source))
@@ -558,7 +573,6 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
         first: run.first,
         firstAt: run.firstAt,
         ...(at.fallbackId !== undefined ? { fallbackId: at.fallbackId } : {}),
-        ...(spec.settingsHash !== undefined ? { settingsHash: spec.settingsHash } : {}),
       });
       await keepAccountRow(at);
       report(at, { status: 'running' });
@@ -802,10 +816,16 @@ async function settleRefused(at: Run, ran: false | { to: string }): Promise<void
 
 /**
  * `request({job})` FOR A JOB ON THE USER'S ACCOUNT: only its follow-up runs,
- * from the billing call's kept result. Nothing that bills is sent again, and
- * nothing at all once the account is disconnected or the rules saved now are
- * not the ones the offer was decided under: the account's credential goes out
- * only under the same check as any call.
+ * from the billing call's kept result. Nothing that bills is sent again.
+ *
+ * A CALL ALREADY SENT CAN'T BE UNSENT (plan 36): the restriction applies to
+ * calls that have not started. This job's billing call went out, and the
+ * user's plan may already have paid for it, so a rule saved since (a changed
+ * settings hash) does not stop the free reads that fetch its result:
+ * refusing them would only lose what was paid for. What still stops them is
+ * what makes sending the credential wrong: the account is no longer connected
+ * here ({@link connection}; the job is kept for a reconnect), or the settings
+ * can't be read.
  */
 export async function resumeAccountJob(
   job: AccountJob,
@@ -815,11 +835,7 @@ export async function resumeAccountJob(
   const { dataDir } = deps.ctx;
   const footer = await openLookupFooter(dataDir, { id: job.offerId });
   await footer.routing();
-  const spec: KeptAccountSpec = {
-    ...job.spec,
-    id: job.offerId,
-    ...(job.settingsHash !== undefined ? { settingsHash: job.settingsHash } : {}),
-  };
+  const spec: KeptAccountSpec = { ...job.spec, id: job.offerId };
   const at: Run = {
     id: job.offerId,
     spec,
@@ -835,16 +851,14 @@ export async function resumeAccountJob(
     startedAt: Date.now(),
   };
   const resume: Resume = { first: job.first, firstAt: job.firstAt };
-  const checked = await accountCheck(spec, at.account, dataDir);
+  const checked = await connection(spec, at.account, dataDir);
   if (checked !== null && 'settings' in checked) {
+    // The job stays kept: once the settings are fixed, the same call picks it up.
     await footer.done('needs_input');
     const { label } = at.account;
-    const reason =
-      checked.settings.code === 'settings_changed'
-        ? `Your Tenjin settings changed after this job started on your ${label} account, so Tenjin did not check it again. Its result stays on your ${label} account.`
-        : `${checked.settings.reason} Tenjin did not check the job on your ${label} account again; its result stays there.`;
+    const reason = `${checked.settings.reason} Tenjin did not check the job on your ${label} account again.`;
     return accountResult('needs_input', reason, reason, label, {
-      nextStep: `Tell the user the job may have finished on their ${label} account, where its result is. Don't call it again for this.`,
+      nextStep: `${checked.settings.nextStep} Once they're fixed, call request({job: ${JSON.stringify(job.offerId)}}) for its result; nothing is sent to the account again.`,
       ran: 'maybe',
     });
   }

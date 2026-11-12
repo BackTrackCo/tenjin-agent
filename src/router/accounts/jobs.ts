@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic } from '../../lib/atomic-json';
 import { AccountSpecSchema } from '../decision';
-import { SettingsHashSchema } from '../settings-wire';
 
 /**
  * A JOB ON THE USER'S ACCOUNT THAT OUTLASTED ITS CALL, kept by the offer's id
@@ -13,7 +12,9 @@ import { SettingsHashSchema } from '../settings-wire';
  * billing call's own result, which is what its follow-up reads. Resuming sends
  * only the follow-up (its status calls and the fetch of the result); the call
  * that bills is never sent again. No credential is kept here: a resume reads
- * the account's sign-in like any call.
+ * the account's sign-in like any call, and only while the account is still
+ * connected here; a rule saved since does not stop it, since its billing call
+ * already went out (`run.ts`).
  */
 
 const DIR = join('progress', 'account-jobs');
@@ -31,9 +32,6 @@ const AccountJobSchema = z.strictObject({
   firstAt: z.number().int().nonnegative(),
   /** Tenjin's own route for the job, offered if this one cannot finish. */
   fallbackId: z.string().min(1).max(64).optional(),
-  /** The settings hash the offer was decided under: a resume sends nothing
-   *  once the rules saved now are others. */
-  settingsHash: SettingsHashSchema.optional(),
 });
 export type AccountJob = z.infer<typeof AccountJobSchema>;
 

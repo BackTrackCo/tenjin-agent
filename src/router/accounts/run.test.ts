@@ -810,26 +810,60 @@ describe("the user's settings, before the account", () => {
     expect(session.opened).toEqual([]);
   });
 
-  it('never resumes a job once the rules it was decided under changed', async () => {
-    // tenjin-agent#507 review: a resumed job sent its follow-up with the
-    // account's credential after a block the user saved while it ran.
+  /** A fal job this call could not wait out: its billing call sent, its
+   *  follow-up kept for `request({job})`. */
+  async function falJobRunning(session: ReturnType<typeof account>) {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
     await offered(FAL_LEAD, undefined, { named: true });
-    const session = account({
-      run_model: [text({ status: 'processing', request_id: 'req-1' })],
-      check_job: [text({ status: 'IN_QUEUE' })],
-      get_job_result: [text({ images: [] })],
-    });
     const { fetchImpl } = network();
     const first = await runRequestTool(
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
       deps(fetchImpl, session, { startedAt: Date.now() - MAX_CALL_WAIT_MS }),
     );
     expect(first.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    expect(session.tools()).toEqual(['run_model', 'check_job']);
+    return fetchImpl;
+  }
+
+  const falScript = () =>
+    account({
+      run_model: [text({ status: 'processing', request_id: 'req-1' })],
+      check_job: [text({ status: 'IN_QUEUE' }), text({ status: 'COMPLETED' })],
+      get_job_result: [text({ images: [] })],
+    });
+
+  it('resumes a job after a rule saved since: its billing call already went out', async () => {
+    // Plan 36: a call already sent can't be unsent, and the user's plan may
+    // already have paid; refusing the free reads that fetch the result would
+    // only lose it. The billing call is still never sent again.
+    const session = falScript();
+    const fetchImpl = await falJobRunning(session);
     await settings([FAL_ACCOUNT], { version: 1, block: [{ kind: 'source', id: 'fal' }] });
     const resumed = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
-    expect(resumed.summary).toContain('Your Tenjin settings changed after this job started');
+    expect(resumed.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(session.tools()).toEqual(['run_model', 'check_job', 'check_job', 'get_job_result']);
+  });
+
+  it('sends nothing for a job once its account is disconnected, and keeps it for a reconnect', async () => {
+    // tenjin-agent#507 review: a resumed job sent its follow-up with the
+    // account's credential after the account was gone.
+    const session = falScript();
+    const fetchImpl = await falJobRunning(session);
+    await settings([]);
+    const resumed = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
+    expect(resumed.envelope).toMatchObject({ status: 'running', job: FAL_LEAD.id });
+    expect(resumed.summary).toContain("fal isn't connected on this machine");
+    expect(session.tools()).toEqual(['run_model', 'check_job']);
+  });
+
+  it('sends nothing for a job while the settings cannot be read', async () => {
+    const session = falScript();
+    const fetchImpl = await falJobRunning(session);
+    await settings([FAL_ACCOUNT], { version: 99 });
+    const resumed = await runRequestTool({ job: FAL_LEAD.id }, deps(fetchImpl, session));
+    expect(resumed.summary).toContain("Your Tenjin settings can't be read");
+    expect(String(resumed.envelope.nextStep)).toContain(`request({job: "${FAL_LEAD.id}"})`);
     expect(session.tools()).toEqual(['run_model', 'check_job']);
   });
 });
