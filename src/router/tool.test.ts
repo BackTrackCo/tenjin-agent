@@ -205,6 +205,14 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
   ];
 }
 
+/** The settings field a user with no rules sends on every routing call. */
+const NO_RULES = {
+  version: 1,
+  policy: {},
+  sources: ['tenjin'],
+  hash: 'sha256:4e470b2e578b39c57a9df360011bba9316663a352baa05d458e3fcd618dd58ca',
+};
+
 describe('the request tool, one decision and one payment per lookup', () => {
   it('sends the query and the turn id, and pays the provider once', async () => {
     const { fetchImpl, calls } = net([
@@ -1027,7 +1035,17 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+      ],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -2051,8 +2069,19 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+      ],
       harness: 'claude',
+      settings: NO_RULES,
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -2138,8 +2167,19 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+      ],
       harness: 'claude',
+      settings: NO_RULES,
     });
   });
 });
@@ -2505,7 +2545,17 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'];
+  const ACCEPTS = [
+    'catalog',
+    'spec',
+    'label',
+    'fields',
+    'jobs',
+    'headers',
+    'note',
+    'tolerant',
+    'settings',
+  ];
   /** A paid routing path that must never be asked. */
   const route = vi.fn((): never => {
     throw new Error('the paid routing path was asked');
@@ -2735,6 +2785,7 @@ describe('the tool list, read for free', () => {
       browse: 'live crypto prices',
       accepts: ACCEPTS,
       harness: 'claude',
+      settings: NO_RULES,
     });
     expect(route).not.toHaveBeenCalled();
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -2854,6 +2905,7 @@ describe('the tool list, read for free', () => {
         tool: 'cmc-quotes',
         accepts: [...ACCEPTS, 'free-query'],
         harness,
+        settings: NO_RULES,
       });
       expect(route).not.toHaveBeenCalled();
 

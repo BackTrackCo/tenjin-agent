@@ -4,8 +4,9 @@ import { policyFix } from '../lib/spend-gate';
 import type { PlanAdmission, PlannedPayment } from '../lib/spend-plan';
 import { createQuote, type Quote } from '../lib/spend-quotes';
 import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
-import { OfferSpecSchema, type OfferSpec, type SpecOutcome } from './decision';
-import { KeptChoicesSchema, type KeptChoices } from './specs';
+import type { SpecOutcome } from './decision';
+import { KeptChoicesSchema, KeptSpecSchema, type KeptChoices, type KeptSpec } from './specs';
+import { SettingsHashSchema } from './settings-wire';
 import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './tool';
 
 /**
@@ -26,11 +27,11 @@ import type { FailExtras, FailStatus, ProviderCall, RequestToolDeps } from './to
  *  a choice set's options, or a server-built call. Nothing about it changes
  *  after the quote: the agent cannot send a different input to approve. */
 export type QuotedCall =
-  | { kind: 'spec'; id: string; spec: OfferSpec; input: Record<string, unknown> }
+  | { kind: 'spec'; id: string; spec: KeptSpec; input: Record<string, unknown> }
   | {
       kind: 'count';
       id: string;
-      spec: OfferSpec;
+      spec: KeptSpec;
       input: Record<string, unknown>;
       count: number;
     }
@@ -39,7 +40,7 @@ export type QuotedCall =
       id: string;
       kept: KeptChoices;
       /** Each option's spec, in the set's order. */
-      specs: OfferSpec[];
+      specs: KeptSpec[];
       /** The options the quote runs: those its seller quoted. */
       keys: string[];
       input: Record<string, unknown>;
@@ -53,13 +54,13 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('spec'),
     id: z.string().min(1),
-    spec: OfferSpecSchema,
+    spec: KeptSpecSchema,
     input: Input,
   }),
   z.strictObject({
     kind: z.literal('count'),
     id: z.string().min(1),
-    spec: OfferSpecSchema,
+    spec: KeptSpecSchema,
     input: Input,
     count: z.number().int().min(2).max(5),
   }),
@@ -67,7 +68,7 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
     kind: z.literal('choices'),
     id: z.string().min(1),
     kept: KeptChoicesSchema,
-    specs: z.array(OfferSpecSchema).min(2).max(4),
+    specs: z.array(KeptSpecSchema).min(2).max(4),
     keys: z.array(z.string().min(1).max(64)).min(1).max(4),
     input: Input,
   }),
@@ -96,6 +97,8 @@ const QuotedCallSchema = z.discriminatedUnion('kind', [
       parameters: z.unknown(),
       sent: z.string().max(16_384),
       note: z.string().max(2_000).optional(),
+      settingsHash: SettingsHashSchema.optional(),
+      via: z.literal('swap').optional(),
     }),
   }),
 ]);
@@ -232,4 +235,18 @@ export async function planStop(
  *  provider, the test seam's, or this machine's own. */
 export function paymentProvider(deps: RequestToolDeps): WalletProvider {
   return deps.provider ?? deps.payDeps?.provider ?? resolveWalletProvider(deps.ctx);
+}
+
+/** The settings hash each offer a quote runs was decided under, for the
+ *  check before every call: one per spec, or the server-built call's own. */
+export function quotedHashes(call: QuotedCall): (string | undefined)[] {
+  switch (call.kind) {
+    case 'spec':
+    case 'count':
+      return [call.spec.settingsHash];
+    case 'choices':
+      return call.specs.map((spec) => spec.settingsHash);
+    case 'call':
+      return [call.call.settingsHash];
+  }
 }

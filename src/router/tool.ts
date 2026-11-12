@@ -46,7 +46,11 @@ import {
   storeSpecs,
   type EarlierPayment,
   type KeptChoices,
+  type KeptSpec,
 } from './specs';
+import { settingsRefusal, type SettingsRefusal } from './settings-check';
+import { hasRules, type WireSettings } from './settings-wire';
+import { SETTINGS_BLOCKED, settingsBlockedLine } from './settings-blocked';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   reportSpecOutcome,
@@ -68,6 +72,7 @@ import { pickChoice, runChoiceSet, runCount, showChoices, takesResult } from './
 import {
   approveCall,
   oneCall,
+  quotedHashes,
   paymentProvider,
   planStop,
   quotedCall,
@@ -239,6 +244,9 @@ export interface RequestToolDeps {
   waitsForJobs?: boolean;
   /** The host that launched this server; absent is Claude Code. */
   harness?: Harness;
+  /** `swap`: this call answers a native search or fetch in place
+   *  (`swap.ts`), so its ledger record and outcome report say so. */
+  via?: 'swap';
 }
 
 /** What one tool call may save to disk, across every take and file. */
@@ -364,6 +372,10 @@ export async function runApproveTool(
       { quote: quoteView(quote), nextStep: `Call ${approveCall(quote)}.` },
     );
   }
+  // THE RULES THE QUOTED OFFERS WERE DECIDED UNDER, before the quote is used
+  // up: settings changed since leave it unused, and the agent asks again.
+  const stale = await settingsRefusal(dataDir, quotedHashes(call));
+  if (stale !== null) return settingsFail(stale);
   // THE WALLET OPENS BEFORE THE QUOTE IS USED UP. `admitQuote` spends the
   // quote's one run, so a wallet that will not sign (a passphrase gone or
   // wrong) must stop here, with the quote still open for a yes after the
@@ -520,8 +532,21 @@ async function requestTool(
   // user marked private: nothing is sent and nothing is paid.
   const here = await routerHere(deps);
   if ('off' in here) return fail('needs_input', here.off, { nextStep: ROUTER_OFF_NEXT_STEP });
+  // RULES THIS BUILD CANNOT READ ARE NEVER GUESSED: nothing is asked, sent or
+  // run until they are fixed. A job already paid for may still be polled.
+  if (here.settings.wire.status === 'invalid' && (args.job === undefined || args.job === '')) {
+    const refusal = await settingsRefusal(deps.ctx.dataDir, []);
+    return settingsFail(
+      refusal ?? {
+        code: 'settings_unreadable',
+        reason: `Your Tenjin settings can't be read (${here.settings.wire.problem}). Nothing was sent or paid.`,
+        nextStep: 'Tell the user: `tenjin config` shows the problem.',
+      },
+    );
+  }
+  const sent = here.settings.wire.status === 'ok' ? here.settings.wire.settings : undefined;
   if (args.browse !== undefined || (args.tool !== undefined && args.query === undefined))
-    return readToolList(args, deps);
+    return readToolList(args, deps, sent);
   if (args.tool !== undefined) {
     if (args.tool.trim().length === 0 || args.tool.trim().length > 200)
       return fail('needs_input', '`tool` takes a row id from request({browse}).');
@@ -676,6 +701,9 @@ async function requestTool(
     acceptsBazaar: settings.experimentalBazaar,
     harness: deps.harness ?? 'claude',
     improve: here.settings.improve.value,
+    // Read from the global file for this call, never cached: a change made
+    // in another process reaches the next call with no restart.
+    ...(sent !== undefined ? { settings: sent } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
 
@@ -737,7 +765,7 @@ async function requestTool(
       ...(fresh.errorCode !== undefined ? { errorCode: fresh.errorCode } : {}),
     });
   }
-  const { decision, note } = fresh.decision;
+  const { decision, note, settingsHash } = fresh.decision;
 
   if (args.tool !== undefined) {
     if (
@@ -764,7 +792,7 @@ async function requestTool(
   // is paid on this answer: only a filled spec pays.
   if (decision.action === 'spec') {
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
-    await storeSpecs(deps.ctx.dataDir, [picked]);
+    await storeSpecs(deps.ctx.dataDir, [picked], settingsHash);
     await footer.done('service found');
     return showSpec(picked.id, picked, [], decision.hint);
   }
@@ -775,7 +803,7 @@ async function requestTool(
   // to call it, with the id it minted and the input the host builds, and that
   // second call pays through the execute path below like any other.
   if (decision.action === 'discovered') {
-    await storeSpecs(deps.ctx.dataDir, decision.specs);
+    await storeSpecs(deps.ctx.dataDir, decision.specs, settingsHash);
     // A CHOICE SET is kept like the hook's, and its line, which names every
     // option and the call, is the next step in place of an "also offered"
     // line per option.
@@ -818,6 +846,15 @@ async function requestTool(
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
+    // THE USER'S OWN SETTINGS LEFT NOTHING FOR THIS: the server names the
+    // rule in plain words, and the agent tells the user rather than change it.
+    if (decision.action === 'native' && decision.diagnostics.reasonCode === SETTINGS_BLOCKED) {
+      const result = fail('native', settingsBlockedLine(decision.diagnostics), {
+        diagnostics: decision.diagnostics,
+        ...(note !== undefined ? { note } : {}),
+      });
+      return result;
+    }
     // Both non-execute arms carry diagnostics by construction now: an answer
     // without them does not parse, so there is nothing to fall back to here.
     return fail(
@@ -854,6 +891,7 @@ async function requestTool(
     // What the ledger records as sent: the host's input, or its query.
     sent: input !== undefined ? JSON.stringify(maskDeep(input)) : query,
     ...(note !== undefined ? { note } : {}),
+    ...(settingsHash !== undefined ? { settingsHash } : {}),
   };
   return (await payAndDeliver(call, { alone: { kind: 'call', call } }, deps, footer)).result;
 }
@@ -870,6 +908,7 @@ async function requestTool(
 async function readToolList(
   args: RequestToolArgs,
   deps: RequestToolDeps,
+  sent: WireSettings | undefined,
 ): Promise<RequestToolResult> {
   const others = (['query', 'id', 'input', 'choice', 'count', 'job'] as const).filter(
     (key) => args[key] !== undefined,
@@ -890,22 +929,29 @@ async function readToolList(
     baseUrl: settings.baseUrl,
     acceptsBazaar: settings.experimentalBazaar,
     harness: deps.harness ?? 'claude',
+    ...(sent !== undefined ? { settings: sent } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
   if (args.browse !== undefined) {
     const listed = await requestBrowse(words, decisionDeps);
     if (listed.status !== 'decided') return listFailure(listed);
-    return showRows(listed.decision.rows);
+    // A list is no offer, so it runs nothing to refuse; it only says when the
+    // router did not apply the user's rules to it.
+    const unfiltered =
+      sent !== undefined &&
+      listed.decision.settingsHash !== sent.hash &&
+      (hasRules(sent.policy) || listed.decision.settingsHash !== undefined);
+    return showRows(listed.decision.rows, unfiltered);
   }
   if (words.length === 0) {
     return fail('needs_input', '`tool` takes a row id from request({browse}).');
   }
   const fetched = await requestToolSpec(words, decisionDeps);
   if (fetched.status !== 'decided') return listFailure(fetched);
-  const { decision } = fetched.decision;
+  const { decision, settingsHash } = fetched.decision;
   if (decision.action === 'spec') {
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
-    await storeSpecs(deps.ctx.dataDir, [picked]);
+    await storeSpecs(deps.ctx.dataDir, [picked], settingsHash);
     return showSpec(picked.id, picked, [], decision.hint);
   }
   if (decision.action === 'native' || decision.action === 'needs_input') {
@@ -935,16 +981,21 @@ const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').tr
 
 /** The rows as the model reads them: each tool's name, what it does, its
  *  price and the call that fetches its spec. */
-function showRows(rows: readonly BrowseRow[]): RequestToolResult {
+/** Said beside a list the router did not confirm it filtered by the user's rules. */
+export const UNFILTERED_LIST =
+  "Tenjin's router did not confirm it applied your Tenjin settings to this list, so it may name tools they rule out; any such tool is refused before it runs.";
+
+function showRows(rows: readonly BrowseRow[], unfiltered = false): RequestToolResult {
   const nextStep =
     'Inspect a tool for free with request({tool: "<id>"}). ' +
     'Run a free tool with request({tool: "<id>", query: "<what to look up>"}).';
+  const said = unfiltered ? { note: UNFILTERED_LIST } : {};
   if (rows.length === 0) {
     return {
       isError: false,
       summary:
         'No tool in the list fits those words. Browse with other words, or with "" for every tool by kind.',
-      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n) },
+      envelope: { status: 'browse', rows: [], nextStep, cost: costLines(0n), ...said },
     };
   }
   const shown = rows.map((row) => ({
@@ -958,6 +1009,7 @@ function showRows(rows: readonly BrowseRow[]): RequestToolResult {
     isError: false,
     summary: [
       ...shown.map((row) => `${row.label} (id ${row.id}, ${row.price}, ${row.kind}): ${row.does}`),
+      ...(unfiltered ? [UNFILTERED_LIST] : []),
       nextStep,
     ].join('\n'),
     envelope: {
@@ -965,6 +1017,7 @@ function showRows(rows: readonly BrowseRow[]): RequestToolResult {
       rows: shown,
       nextStep,
       cost: costLines(0n),
+      ...said,
       providerContentUntrusted: true,
     },
   };
@@ -1045,13 +1098,20 @@ export function alreadyPaid(
  */
 async function runSpec(
   id: string,
-  spec: OfferSpec,
+  spec: KeptSpec,
   input: Record<string, unknown>,
   deps: RequestToolDeps,
   footer: LookupFooter,
   reportDeps: ReportDeps,
   approved?: PlanSlot[],
 ): Promise<RequestToolResult> {
+  // THE RULES THIS OFFER WAS DECIDED UNDER ARE STILL THE ONES SAVED, or
+  // nothing about it runs: no claim, no probe, no signature.
+  const stale = await settingsRefusal(deps.ctx.dataDir, [spec.settingsHash]);
+  if (stale !== null) {
+    await footer.done('needs_input');
+    return settingsFail(stale);
+  }
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
   // ONE PAYMENT PER OFFER, claimed before anything is signed: a retry of this
@@ -1102,7 +1162,7 @@ export function reportOutcome(
 /** A spec's call, checked and built: what is claimed and then paid. */
 export interface PreparedSpec {
   id: string;
-  spec: OfferSpec;
+  spec: KeptSpec;
   merged: Record<string, unknown>;
   /** The merged input, masked: what is shown and recorded as sent. */
   sentInput: Record<string, unknown>;
@@ -1117,7 +1177,7 @@ export interface PreparedSpec {
  */
 export async function prepareSpec(
   id: string,
-  spec: OfferSpec,
+  spec: KeptSpec,
   input: Record<string, unknown>,
   footer: LookupFooter,
   reportDeps: ReportDeps,
@@ -1222,6 +1282,8 @@ export async function paySpec(
         : {}),
       ...(spec.timeoutS !== undefined ? { timeoutMs: spec.timeoutS * 1000 } : {}),
       ...(spec.maxBytes !== undefined ? { maxBytes: spec.maxBytes } : {}),
+      ...(spec.settingsHash !== undefined ? { settingsHash: spec.settingsHash } : {}),
+      ...(deps.via !== undefined ? { via: deps.via } : {}),
     },
     admission,
     deps,
@@ -1241,7 +1303,12 @@ export async function paySpec(
   // moved money, keeps its own status. Null is a failure this build cannot
   // place, which says nothing rather than guess.
   if (outcome !== null && (take === undefined || take.report)) {
-    reportOutcome(reportDeps, id, outcome, startedAt);
+    reportOutcome(
+      reportDeps,
+      id,
+      deps.via !== undefined ? { ...outcome, via: deps.via } : outcome,
+      startedAt,
+    );
   }
   return paid;
 }
@@ -1313,6 +1380,12 @@ export interface ProviderCall {
    *  in place of the CLI's. */
   timeoutMs?: number;
   maxBytes?: number;
+  /** The settings hash the answer that offered this call echoed; absent when
+   *  it echoed none. Checked against the rules saved now at this call's own
+   *  boundary, before anything is sent ({@link settingsRefusal}). */
+  settingsHash?: string;
+  /** `swap`: this call answers a native search or fetch in place. */
+  via?: 'swap';
 }
 
 interface CallJob {
@@ -1385,6 +1458,17 @@ async function payAndDeliver(
    *  payment may have been signed, even where the amount is unknown. */
   left: { amountAtomic: bigint; txHash?: string; signed: boolean };
 }> {
+  // EVERY CALL'S OWN BOUNDARY: a later take, option or quoted payment meets
+  // the rules saved now, as the first did, before any probe or signature.
+  const stale = await settingsRefusal(deps.ctx.dataDir, [call.settingsHash]);
+  if (stale !== null) {
+    await footer.done('needs_input');
+    return {
+      result: settingsFail(stale),
+      outcome: null,
+      left: { amountAtomic: 0n, signed: false },
+    };
+  }
   const built = call.request;
   const parameters = call.parameters !== undefined ? { parameters: call.parameters } : {};
   const named = call.label !== undefined ? { label: call.label } : {};
@@ -2513,7 +2597,7 @@ export function failureOutcome(
 
 /** One ledger line for a paid call; the settlement is known only with a tx. */
 function paidRecord(
-  decision: { capabilityId: string; provider: string; label?: string },
+  decision: { capabilityId: string; provider: string; label?: string; via?: 'swap' },
   url: string,
   sent: string,
   amountAtomic: bigint,
@@ -2530,6 +2614,7 @@ function paidRecord(
     capabilityId: decision.capabilityId,
     provider: decision.provider,
     ...(decision.label !== undefined ? { label: decision.label } : {}),
+    ...(decision.via !== undefined ? { via: decision.via } : {}),
     url,
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
@@ -2793,6 +2878,22 @@ function nextStepFor(status: FailStatus, diagnostics: DecisionDiagnostics | unde
   const byReason =
     diagnostics !== undefined ? NEXT_STEP_BY_REASON[diagnostics.reasonCode] : undefined;
   return byReason ?? NEXT_STEP[status] ?? '';
+}
+
+/**
+ * AN OFFER REFUSED BY THE CHECK BEFORE EVERY CALL: nothing was sent, signed
+ * or paid, and the agent is told to ask again. Routine (`needs_input`), with
+ * the refusal's own code in `reasonCode`.
+ */
+export function settingsFail(refusal: SettingsRefusal): RequestToolResult {
+  return fail('needs_input', refusal.reason, {
+    diagnostics: {
+      reasonCode: refusal.code,
+      stage: 'client',
+      missing: [],
+      nextAction: refusal.nextStep,
+    },
+  });
 }
 
 export function fail(

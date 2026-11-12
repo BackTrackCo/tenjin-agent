@@ -20,6 +20,7 @@ import {
 } from './context';
 import { storeChoices, storeLabel, storeSpecs } from './specs';
 import { requestDecision, REQUIRES_UNMET, ROUTE_PAID_PATH, type HookDecision } from './decision';
+import { SETTINGS_BLOCKED, settingsBlockedLine } from './settings-blocked';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
 import { noticeCleared, noticeFor } from './notice-markers';
@@ -870,11 +871,11 @@ async function offerOnUserText(
   );
   const footer = await openFooter(deps, event.sessionId, 'prompt', {});
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return {
-      ...injection(hookEventName),
+      ...injection(hookEventName, blockedLine(outcome, hostOf(deps))),
       ...(outcome !== null ? { action: outcome.action } : {}),
     };
   }
@@ -931,6 +932,9 @@ export interface NativeHookOutcome {
   free?: true;
   /** And its line is kept, for the after-call arm to show once the search ran. */
   noted?: true;
+  /** The user's settings left Tenjin nothing for this (`settings_blocked`):
+   *  the server's line naming the rule, for an arm that can show it. */
+  blocked?: string;
 }
 
 export interface ShortfallHookOutcome extends NativeHookOutcome {
@@ -1084,12 +1088,17 @@ async function routeNativeCall(
   }
   const footer = await openFooter(deps, event.sessionId, opts.operation ?? 'search', event);
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
+    const blocked = blockedLine(outcome, hostOf(deps));
     return {
       offer: null,
-      outcome: { response: null, ...(outcome !== null ? { action: outcome.action } : {}) },
+      outcome: {
+        response: null,
+        ...(outcome !== null ? { action: outcome.action } : {}),
+        ...(blocked !== undefined ? { blocked } : {}),
+      },
     };
   }
   if (opts.passFree === true && isFree(outcome)) {
@@ -1420,7 +1429,15 @@ async function offerOnShortfall(
     return { response: null, nativeOutcome, alreadyOffered: true };
   }
   const routed = await routeNativeCall(event, pending, deps, { nativeOutcome });
-  if (routed.offer === null) return { ...routed.outcome, nativeOutcome };
+  if (routed.offer === null) {
+    const { blocked } = routed.outcome;
+    if (blocked === undefined) return { ...routed.outcome, nativeOutcome };
+    return {
+      ...routed.outcome,
+      response: { hookSpecificOutput: { hookEventName: eventName, additionalContext: blocked } },
+      nativeOutcome,
+    };
+  }
   return {
     response: {
       hookSpecificOutput: {
@@ -1496,7 +1513,7 @@ export async function runDelegationHook(
   // Only the subagent could take this offer, so no native call here ignores it.
   const footer = await openFooter(deps, event.sessionId, 'delegate', null);
   const deadline = gateDeadline(deps);
-  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer.unpaid);
+  const outcome = await decide(sealed, deps, router, event.sessionId, deadline, footer);
   if (!isOffer(outcome)) {
     await footer.close(outcome);
     return { response: null, ...(outcome !== null ? { action: outcome.action } : {}) };
@@ -1549,6 +1566,8 @@ async function openFooter(
 ): Promise<{
   /** Why this call's routing fee was not paid, when it was not. */
   unpaid: (why: string) => void;
+  /** The settings hash the router's answer echoed, kept with its specs. */
+  answered: (settingsHash: string | undefined) => void;
   /** `withheld` is why an `execute` was not shown, in the footer's words;
    *  `noted` is a free line the after-call arm shows once the search has run. */
   close: (
@@ -1572,9 +1591,13 @@ async function openFooter(
   // eventually be more than the resolver can scan.
   await pruneSessions(deps.dataDir, now());
   let unpaid: string | undefined;
+  let settingsHash: string | undefined;
   return {
     unpaid: (why) => {
       unpaid = why;
+    },
+    answered: (hash) => {
+      settingsHash = hash;
     },
     close: async (decision, opts) => {
       const withheld = opts?.withheld;
@@ -1606,7 +1629,9 @@ async function openFooter(
         // The line is shown, so the specs of the services it names are what
         // `request({id, input})` runs and `request({id})` shows, and its
         // choice set is what `request({id, choice})` picks from.
-        await storeSpecs(deps.dataDir, decision.specs);
+        // Each with the settings hash its answer echoed: what the check before
+        // every call holds the offer to.
+        await storeSpecs(deps.dataDir, decision.specs, settingsHash);
         // A free lookup has no spec to name its row: its label is kept instead.
         if (isFree(decision) && decision.label !== undefined) {
           await storeLabel(deps.dataDir, decision.id, decision.label);
@@ -1670,6 +1695,9 @@ export function hookOutcome(decision: HookDecision | null, unpaid?: string): str
   if (decision.action === 'native' && decision.diagnostics.reasonCode === REQUIRES_UNMET) {
     return 'native tools (offer needs newer tenjin)';
   }
+  if (decision.action === 'native' && decision.diagnostics.reasonCode === SETTINGS_BLOCKED) {
+    return 'native tools (your settings)';
+  }
   if (decision.action === 'native') return 'native tools (router chose native)';
   return 'needs input';
 }
@@ -1690,9 +1718,16 @@ async function decide(
   router: RouterHere,
   sessionId: string,
   deadline: number,
-  unpaid?: (why: string) => void,
+  footer?: {
+    unpaid: (why: string) => void;
+    answered: (settingsHash: string | undefined) => void;
+  },
 ): Promise<HookDecision | null> {
   const { config } = router;
+  const unpaid = footer?.unpaid;
+  // THE SAVED RULES RIDE BESIDE THE PACKET on every call, read for this
+  // event: `routerFor` already refused rules this build cannot read.
+  const sent = router.settings.wire.status === 'ok' ? router.settings.wire : undefined;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1713,6 +1748,7 @@ async function decide(
       harness: hostOf(deps),
       improve: router.settings.improve.value,
       timeoutMs: Math.max(0, deadline - now),
+      ...(sent !== undefined ? { settings: sent.settings } : {}),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== undefined ? { route } : {}),
     },
@@ -1758,7 +1794,29 @@ async function decide(
     warn(`tenjin hook: ${baseUrl}${ROUTE_PAID_PATH} ${outcome.reason}`);
     return null;
   }
+  // AN ANSWER DECIDED UNDER OTHER RULES OFFERS NOTHING: one that echoed no
+  // hash while the user has rules came from a router that did not apply
+  // them, and its offer would only be refused when it ran.
+  const echoed = outcome.decision.settingsHash;
+  if (
+    sent !== undefined &&
+    echoed !== sent.settings.hash &&
+    (sent.hasRules || echoed !== undefined)
+  ) {
+    warn(
+      'tenjin hook: the router did not confirm it applied your Tenjin settings, so no lookup is offered',
+    );
+    return null;
+  }
+  footer?.answered(echoed);
   return outcome.decision.decision;
+}
+
+/** The line a `settings_blocked` answer is shown as, attributed, else nothing. */
+function blockedLine(decision: HookDecision | null, host: Harness): string | undefined {
+  if (decision?.action !== 'native' || decision.diagnostics.reasonCode !== SETTINGS_BLOCKED)
+    return undefined;
+  return attributed(settingsBlockedLine(decision.diagnostics), host);
 }
 
 /**
@@ -1838,7 +1896,16 @@ async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<Route
       { cwd: cwd ?? process.cwd(), dataDir: deps.dataDir, config },
       { warn: (line) => warn(`tenjin hook: ${line}`) },
     );
-    return settings.enabled.value ? { settings, config } : null;
+    if (!settings.enabled.value) return null;
+    // RULES THIS BUILD CANNOT READ ROUTE NOTHING: no rule is guessed, and no
+    // turn is routed without them. `tenjin config` shows the problem.
+    if (settings.wire.status === 'invalid') {
+      warn(
+        `tenjin hook: your Tenjin settings can't be read (${settings.wire.problem}), so nothing is routed`,
+      );
+      return null;
+    }
+    return { settings, config };
   } catch (err) {
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-10-06.1",
+  "honored": ["settings"],
+  "settingsHash": "sha256:7f55344dd648a7c08185b78bd2b7c1230d3bc704a3537eafc49bdd1b9097a618",
+  "rows": [
+    {
+      "id": "stableenrich-exa-answer",
+      "label": "Exa Answer",
+      "does": "A short answer to a question grounded in live web search, with citations.",
+      "price": "1¢",
+      "free": false,
+      "kind": "Web research"
+    }
+  ]
+}
