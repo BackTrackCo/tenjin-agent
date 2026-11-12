@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-11.1",
+  "honored": ["settings"],
+  "categories": [
+    {
+      "id": "lookups",
+      "label": "Everyday lookups",
+      "tasks": ["web research", "read an exact page", "crypto price quote"]
+    },
+    {
+      "id": "images",
+      "label": "Images",
+      "tasks": ["general image", "image edit", "photoreal image"]
+    },
+    {
+      "id": "financial-data",
+      "label": "Financial data",
+      "tasks": ["sec filings"]
+    },
+    {
+      "id": "social-and-local",
+      "label": "Social and local",
+      "tasks": ["local business search"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "web research",
+      "label": "Web research",
+      "category": "lookups"
+    },
+    {
+      "id": "read an exact page",
+      "label": "Read an exact page",
+      "category": "lookups"
+    },
+    {
+      "id": "crypto price quote",
+      "label": "Crypto price quote",
+      "category": "lookups"
+    },
+    {
+      "id": "general image",
+      "label": "General image",
+      "category": "images"
+    },
+    {
+      "id": "image edit",
+      "label": "Image edit",
+      "category": "images"
+    },
+    {
+      "id": "sec filings",
+      "label": "Sec filings",
+      "category": "financial-data",
+      "speed": true
+    },
+    {
+      "id": "local business search",
+      "label": "Local business search",
+      "category": "social-and-local"
+    },
+    {
+      "id": "photoreal image",
+      "label": "Photoreal image",
+      "category": "images"
+    }
+  ],
+  "providers": [
+    {
+      "id": "exa",
+      "label": "Exa"
+    },
+    {
+      "id": "coinmarketcap",
+      "label": "CoinMarketCap"
+    },
+    {
+      "id": "apify",
+      "label": "Apify"
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl"
+    },
+    {
+      "id": "black-forest-labs",
+      "label": "Black Forest Labs"
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI"
+    },
+    {
+      "id": "google",
+      "label": "Google"
+    }
+  ],
+  "sellers": [
+    {
+      "id": "exa",
+      "label": "Exa"
+    },
+    {
+      "id": "stableenrich",
+      "label": "StableEnrich"
+    },
+    {
+      "id": "apify",
+      "label": "Apify"
+    },
+    {
+      "id": "fal",
+      "label": "fal"
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl"
+    }
+  ],
+  "services": [
+    {
+      "id": "exa-search",
+      "label": "Exa search",
+      "task": "web research",
+      "providers": ["exa"],
+      "seller": "exa"
+    },
+    {
+      "id": "stableenrich-exa-answer",
+      "label": "Exa Answer",
+      "task": "web research",
+      "providers": ["exa"],
+      "seller": "stableenrich"
+    },
+    {
+      "id": "exa-contents",
+      "label": "Exa contents",
+      "task": "read an exact page",
+      "providers": ["exa"],
+      "seller": "exa"
+    },
+    {
+      "id": "cmc-quotes",
+      "label": "CoinMarketCap quotes",
+      "task": "crypto price quote",
+      "providers": ["coinmarketcap"],
+      "seller": "coinmarketcap"
+    },
+    {
+      "id": "apify.google-maps-places",
+      "label": "Apify Google Maps",
+      "task": "local business search",
+      "providers": ["apify"],
+      "seller": "apify"
+    },
+    {
+      "id": "apify.web-search",
+      "label": "Apify web search",
+      "task": "web research",
+      "providers": ["apify"],
+      "seller": "apify"
+    },
+    {
+      "id": "fal.flux-pro-ultra",
+      "label": "fal FLUX1.1 Pro Ultra",
+      "task": "photoreal image",
+      "providers": ["black-forest-labs"],
+      "seller": "fal"
+    },
+    {
+      "id": "fal.gpt-image",
+      "label": "fal GPT Image 2.5",
+      "task": "general image",
+      "providers": ["openai"],
+      "seller": "fal"
+    },
+    {
+      "id": "firecrawl.scrape",
+      "label": "Firecrawl scrape",
+      "task": "read an exact page",
+      "providers": ["firecrawl"],
+      "seller": "firecrawl"
+    }
+  ],
+  "sources": [
+    {
+      "id": "tenjin",
+      "label": "Tenjin's tools"
+    },
+    {
+      "id": "apify",
+      "label": "Apify",
+      "connectable": {
+        "mcpUrl": "https://mcp.apify.com",
+        "signIn": ["oauth", "key"],
+        "keyScheme": "Bearer",
+        "expectTools": ["call-actor", "get-actor-run", "get-dataset-items"]
+      }
+    },
+    {
+      "id": "fal",
+      "label": "fal",
+      "connectable": {
+        "mcpUrl": "https://mcp.fal.ai/mcp-relay",
+        "signIn": ["oauth", "key"],
+        "keyScheme": "Key",
+        "expectTools": ["run_model", "check_job", "get_job_result"]
+      }
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl",
+      "connectable": {
+        "mcpUrl": "https://mcp.firecrawl.dev/v2/mcp-oauth",
+        "signIn": ["oauth", "key"],
+        "keyScheme": "Bearer",
+        "expectTools": ["firecrawl_scrape"]
+      }
+    }
+  ]
+}

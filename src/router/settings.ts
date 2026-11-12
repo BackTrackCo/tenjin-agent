@@ -12,7 +12,9 @@ import {
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
+import { routedSourceIds } from './accounts/presence';
 import {
+  BUILT_IN_SOURCE,
   hasRules,
   wireSettings,
   type ReplacementMode,
@@ -120,16 +122,24 @@ export interface RouterSettings extends PersonalSettings {
 
 /**
  * The personal settings from the global file's router block. The sources are
- * Tenjin's own until accounts land: nothing is connected on this machine.
+ * Tenjin's own and, with `dataDir`, every account connected on this machine
+ * that the router has jobs for (`accounts/presence.ts`): a saved descriptor
+ * with a vault here. The hash covers them, so connecting or disconnecting an
+ * account refuses every offer decided before it. A saved list this build
+ * cannot read names no account.
  */
-export function personalSettings(router: unknown): PersonalSettings {
+export function personalSettings(router: unknown, dataDir?: string): PersonalSettings {
   const personal = readPersonalRouter(router);
   const { policy, nativeReplacement } = personal;
   if (policy.status === 'invalid') {
     return { policy, nativeReplacement, wire: { status: 'invalid', problem: policy.problem } };
   }
   const saved = policy.status === 'ok' ? policy.saved : undefined;
-  const settings = wireSettings(saved, nativeReplacement);
+  const accounts =
+    dataDir !== undefined && personal.sources.status === 'ok'
+      ? routedSourceIds(dataDir, personal.sources.saved)
+      : [];
+  const settings = wireSettings(saved, nativeReplacement, [BUILT_IN_SOURCE, ...accounts]);
   return {
     policy,
     nativeReplacement,
@@ -140,7 +150,7 @@ export function personalSettings(router: unknown): PersonalSettings {
 /** {@link personalSettings} straight from the global file in `dataDir`: what
  *  the check before every call compares an offer against. */
 export async function personalSettingsAt(dataDir: string): Promise<PersonalSettings> {
-  return personalSettings((await loadRawConfig(dataDir)).router);
+  return personalSettings((await loadRawConfig(dataDir)).router, dataDir);
 }
 
 export interface RouterSettingsInput {
@@ -186,7 +196,7 @@ export async function routerSettings(
       context = { value: layer.context, source, path };
     }
   }
-  return { enabled, context, improve, ...personalSettings(global) };
+  return { enabled, context, improve, ...personalSettings(global, input.dataDir) };
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];

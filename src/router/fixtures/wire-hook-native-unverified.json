@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-11.1",
+  "honored": ["settings"],
+  "settingsHash": "sha256:44bad99c593f1a44fed71ffab7823adce00eca84b88a90d8cf136ec31c36c2da",
+  "decision": {
+    "action": "native",
+    "reason": "Every route the user's settings allow for this is a connected account's map Tenjin has not checked.",
+    "diagnostics": {
+      "reasonCode": "unverified",
+      "stage": "capability",
+      "missing": [],
+      "nextAction": "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it runs only when the user asks for it by name: `request({tool: \"fal.flux-pro-ultra\"})`. Otherwise continue with your own tools."
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 655
+  }
+}

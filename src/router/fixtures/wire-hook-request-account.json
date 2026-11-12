@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a2c",
+  "accepts": [
+    "catalog",
+    "spec",
+    "label",
+    "fields",
+    "jobs",
+    "headers",
+    "note",
+    "tolerant",
+    "settings",
+    "mcp"
+  ],
+  "harness": "claude",
+  "budgetMs": 3500,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Find 20 coffee shops in Austin, TX with their phone numbers and websites."
+    },
+    "history": [],
+    "literalUrls": [],
+    "historyStatus": "ok"
+  },
+  "settings": {
+    "version": 1,
+    "hash": "sha256:e21445afb1b900bb6e1ff8e4b6d555ab17fff61964d37c9420463d4cf0e61dec",
+    "policy": {
+      "prefer": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "targets": [
+            {
+              "kind": "source",
+              "id": "apify"
+            }
+          ]
+        }
+      ]
+    },
+    "sources": ["tenjin", "apify"]
+  }
+}

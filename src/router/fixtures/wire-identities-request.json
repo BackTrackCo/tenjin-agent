@@ -10,6 +10,7 @@
     "headers",
     "note",
     "tolerant",
-    "settings"
+    "settings",
+    "mcp"
   ]
 }

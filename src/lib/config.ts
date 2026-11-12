@@ -6,12 +6,14 @@ import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
 import { DEFAULT_RPC_URL } from './usdc-balance';
 import {
+  BUILT_IN_SOURCE,
   OnlyRuleSchema,
   POLICY_VERSION,
   PreferRuleSchema,
   REPLACEMENT_MODES,
   ReplacementProvidersSchema,
   SETTINGS_LIMITS,
+  TargetIdSchema,
   TargetSchema,
   policyProblems,
   type ReplacementMode,
@@ -79,6 +81,31 @@ export const SavedPolicySchema = SavedPolicyShapeSchema.superRefine((policy, ctx
 });
 
 /**
+ * ONE SAVED ACCOUNT DESCRIPTOR (`router.sources`, plan 37): a safe id, and
+ * whatever else `tenjin connect` wrote beside it (its name, its server, how
+ * it signs in), read leniently by `accounts/saved.ts`. Never a credential: a
+ * descriptor alone connects nothing, and whether an account is connected is
+ * this machine's own state, its vault (`accounts/presence.ts`). User scope,
+ * like the rules.
+ */
+export const SourceDescriptorSchema = z.looseObject({ id: TargetIdSchema });
+export type SourceDescriptor = z.infer<typeof SourceDescriptorSchema>;
+
+const SourcesSchema = z
+  .array(SourceDescriptorSchema)
+  .max(SETTINGS_LIMITS.sources)
+  .superRefine((sources, ctx) => {
+    const seen = new Set<string>();
+    sources.forEach(({ id }, at) => {
+      if (id === BUILT_IN_SOURCE)
+        ctx.addIssue({ code: 'custom', path: [at, 'id'], message: `${id} is built in` });
+      if (seen.has(id))
+        ctx.addIssue({ code: 'custom', path: [at, 'id'], message: 'an account is saved twice' });
+      seen.add(id);
+    });
+  });
+
+/**
  * The global file's personal router keys, read one by one and never through
  * {@link RawConfigSchema}: a hand edit this build cannot read fails only what
  * reads rules (fail closed), while `tenjin config`, pause and reset keep
@@ -91,6 +118,9 @@ export interface PersonalRouter {
     | { status: 'invalid'; problem: string };
   /** An unreadable mode or scope reads as off: never on by accident. */
   nativeReplacement: { mode: ReplacementMode; providers?: Target[]; problem?: string };
+  /** The saved account descriptors. A list this build cannot read is
+   *  `invalid`: no account is named to the router from it (fail closed). */
+  sources: { status: 'ok'; saved: SourceDescriptor[] } | { status: 'invalid'; problem: string };
 }
 
 function firstProblem(key: string, error: z.ZodError): string {
@@ -109,6 +139,7 @@ export function readPersonalRouter(router: unknown): PersonalRouter {
   const providers = ReplacementProvidersSchema.optional().safeParse(
     block.nativeReplacementProviders,
   );
+  const sources = SourcesSchema.optional().safeParse(block.sources);
   const problem = !mode.success
     ? firstProblem('router.nativeReplacement', mode.error)
     : !providers.success
@@ -128,6 +159,9 @@ export function readPersonalRouter(router: unknown): PersonalRouter {
             mode: mode.data ?? 'off',
             ...(providers.data !== undefined ? { providers: providers.data } : {}),
           },
+    sources: sources.success
+      ? { status: 'ok', saved: sources.data ?? [] }
+      : { status: 'invalid', problem: firstProblem('router.sources', sources.error) },
   };
 }
 
@@ -274,6 +308,7 @@ export const RawConfigSchema = ConfigSchema.partial()
       policy: z.unknown().optional(),
       nativeReplacement: z.unknown().optional(),
       nativeReplacementProviders: z.unknown().optional(),
+      sources: z.unknown().optional(),
     })
       .passthrough()
       .optional(),
@@ -383,6 +418,7 @@ export const PERSONAL_ROUTER_KEYS = [
   'router.policy',
   'router.nativeReplacement',
   'router.nativeReplacementProviders',
+  'router.sources',
 ] as const;
 
 /**
@@ -396,6 +432,7 @@ export type SettingScope = 'user' | 'machine' | 'project';
 
 export const SETTING_SCOPES = {
   'router.policy': 'user',
+  'router.sources': 'user',
   'router.nativeReplacement': 'machine',
   'router.nativeReplacementProviders': 'machine',
   'router.enabled': 'machine',

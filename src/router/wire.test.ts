@@ -1214,3 +1214,128 @@ describe('the settings field', () => {
     });
   });
 });
+
+/**
+ * THE USER'S OWN ACCOUNTS ON THE WIRE (plan 37). `mcp` rides with `settings`;
+ * an account the settings' `sources` names can lead an offer, carrying its
+ * `source` and the MCP call in place of a price and a URL, with Tenjin's own
+ * route beside it as `fallback`; and the identities read lists the accounts
+ * this client can connect.
+ */
+describe('the accounts wire', () => {
+  const settings = fixture('wire-hook-request-account.json').settings as WireSettings;
+
+  it('sends mcp beside settings, and the connected accounts in their sources', async () => {
+    expect(acceptsFor(false, true)).toEqual([...CLIENT_ACCEPTS, 'settings', 'mcp']);
+    expect(acceptsFor(false)).not.toContain('mcp');
+    expect(unmetRequires(['mcp'])).toEqual([]);
+    // The fixture's settings are what a machine with Apify connected sends:
+    // its descriptor saved and its vault here, and the preference connect wrote.
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const data = await mkdtemp(join(tmpdir(), 'tenjin-wire-accounts-'));
+    try {
+      await mkdir(join(data, 'sources'));
+      await writeFile(join(data, 'sources', 'apify.json'), '{}');
+      const router = {
+        policy: { version: 1, ...settings.policy },
+        sources: [{ id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true }],
+      };
+      expect(personalSettings(router, data).wire).toMatchObject({ status: 'ok', settings });
+      // Without its vault, the same descriptor connects nothing.
+      await rm(join(data, 'sources', 'apify.json'));
+      const bare = personalSettings(router, data).wire;
+      expect(bare.status === 'ok' && bare.settings.sources).toEqual(['tenjin']);
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an account lead alone, with its source, its call and Tenjin’s route', () => {
+    const read = parseForTests('hook', fixture('wire-hook-execute-account.json')) as {
+      success: boolean;
+      data?: { decision: Record<string, unknown> & { specs: Record<string, unknown>[] } };
+    };
+    expect(read.success).toBe(true);
+    const decision = read.data!.decision;
+    expect(decision.endpoint).toBeUndefined();
+    expect(decision.providerPriceAtomic).toBe('0');
+    expect(decision.specs).toHaveLength(1);
+    expect(decision.specs[0]).toMatchObject({
+      source: 'apify',
+      verified: true,
+      requires: ['mcp'],
+      mcp: { tool: 'call-actor', next: { tool: 'get-dataset-items' } },
+    });
+    expect(decision.specs[0]).not.toHaveProperty('priceAtomic');
+    expect(decision.fallback).toMatchObject({ capabilityId: 'stableenrich-maps-text' });
+  });
+
+  it.each([
+    ['an unchecked map in a routed offer', (d: Json) => (spec(d).verified = false)],
+    ['an endpoint on an account lead', (d: Json) => (d.endpoint = 'https://mcp.apify.com')],
+    ['a balance price on an account lead', (d: Json) => (d.providerPriceAtomic = '1000')],
+    [
+      'a poll that repeats the call that bills',
+      (d: Json) => ((((spec(d).mcp as Json).next as Json).poll as Json).tool = 'call-actor'),
+    ],
+    ['an account spec without requires mcp', (d: Json) => (spec(d).requires = [])],
+    ['an account spec on tenjin', (d: Json) => (spec(d).source = 'tenjin')],
+    ['a fallback under the lead’s own id', (d: Json) => ((d.fallback as Json).id = d.id)],
+  ])('refuses %s', (_, breakIt) => {
+    const answer = structuredClone(fixture('wire-hook-execute-account.json'));
+    breakIt(answer.decision as Json);
+    expect(parseForTests('hook', answer).success).toBe(false);
+  });
+
+  it('reads a spec on an account, checked or not, with its fallback', () => {
+    const checked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
+    expect(checked.success).toBe(true);
+    expect(checked.data).toMatchObject({
+      decision: { action: 'spec', spec: { source: 'apify' }, fallback: { id: expect.any(String) } },
+    });
+    const unchecked = parseForTests('tool', fixture('wire-lookup-spec-account-unverified.json'));
+    expect(unchecked.data).toMatchObject({
+      decision: { spec: { source: 'fal', verified: false } },
+    });
+    // A fallback rides only beside an account service's spec.
+    const paid = structuredClone(fixture('wire-lookup-spec.json')) as { decision: Json };
+    paid.decision.fallback = (fixture('wire-lookup-spec-account.json').decision as Json).fallback;
+    expect(parseForTests('tool', paid).success).toBe(false);
+  });
+
+  it('names the unchecked map and how the user runs it', () => {
+    const decision = fixture('wire-hook-native-unverified.json').decision as {
+      diagnostics: { reasonCode: string; nextAction: string };
+    };
+    expect(decision.diagnostics.reasonCode).toBe('unverified');
+    expect(decision.diagnostics.nextAction).toContain('request({tool: "fal.flux-pro-ultra"})');
+  });
+
+  it('reads the accounts this client can connect from the identities read', () => {
+    const read = parseForTests('identities', fixture('wire-identities-mcp.json')) as {
+      success: boolean;
+      data?: { sources: { id: string; connectable?: Record<string, unknown> }[] };
+    };
+    expect(read.success).toBe(true);
+    const sources = read.data!.sources;
+    expect(sources.find(({ id }) => id === 'tenjin')?.connectable).toBeUndefined();
+    expect(sources.find(({ id }) => id === 'apify')?.connectable).toMatchObject({
+      mcpUrl: 'https://mcp.apify.com',
+      signIn: ['oauth', 'key'],
+      keyScheme: 'Bearer',
+      expectTools: ['call-actor', 'get-actor-run', 'get-dataset-items'],
+    });
+    const broken = structuredClone(fixture('wire-identities-mcp.json')) as {
+      sources: Json[];
+    };
+    broken.sources[0]!.connectable = sources.find(({ id }) => id === 'apify')!.connectable;
+    expect(parseForTests('identities', broken).success).toBe(false);
+  });
+});
+
+type Json = Record<string, unknown>;
+
+function spec(decision: Json): Json {
+  return (decision.specs as Json[])[0]!;
+}

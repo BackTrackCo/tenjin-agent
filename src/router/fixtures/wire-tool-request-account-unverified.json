@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "tool": "fal.flux-pro-ultra",
+  "accepts": [
+    "catalog",
+    "spec",
+    "label",
+    "fields",
+    "jobs",
+    "headers",
+    "note",
+    "tolerant",
+    "settings",
+    "mcp",
+    "free-query"
+  ],
+  "harness": "claude",
+  "settings": {
+    "version": 1,
+    "hash": "sha256:44bad99c593f1a44fed71ffab7823adce00eca84b88a90d8cf136ec31c36c2da",
+    "policy": {
+      "prefer": [
+        {
+          "scope": {
+            "kind": "category",
+            "id": "images"
+          },
+          "targets": [
+            {
+              "kind": "source",
+              "id": "fal"
+            }
+          ]
+        }
+      ]
+    },
+    "sources": ["tenjin", "fal"]
+  }
+}
