@@ -298,39 +298,4 @@ describe('the check before every call', () => {
     // The routing call, and nothing to the provider.
     expect(calls).toHaveLength(1);
   });
-
-  it('shows the rule a settings_blocked answer names, and pays nothing', async () => {
-    await save({ policy: { version: 1, block: [{ kind: 'task', id: 'crypto price quote' }] } });
-    const hash = await hashNow();
-    const nextAction =
-      'Your Tenjin settings block crypto price quote, so Tenjin did not offer a tool for this. The user can change that with `tenjin config`.';
-    const { fetchImpl } = net([
-      {
-        status: 200,
-        body: {
-          schemaVersion: 1,
-          routerVersion: 'v',
-          honored: ['settings'],
-          settingsHash: hash,
-          decision: {
-            action: 'native',
-            reason: 'blocked by your settings',
-            diagnostics: {
-              reasonCode: 'settings_blocked',
-              stage: 'capability',
-              missing: [],
-              nextAction,
-            },
-          },
-        },
-      },
-    ]);
-    const result = await runRequestTool({ query: 'BTC price' }, deps(fetchImpl));
-    expect(result.summary).toContain(nextAction);
-    expect(result.envelope).toMatchObject({
-      status: 'native',
-      reasonCode: 'settings_blocked',
-      nextStep: nextAction,
-    });
-  });
 });

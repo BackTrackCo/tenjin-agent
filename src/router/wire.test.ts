@@ -1169,7 +1169,6 @@ describe('the settings field', () => {
   it.each([
     ['hook', 'wire-hook-execute-settings.json'],
     ['hook', 'wire-hook-execute-bound.json'],
-    ['hook', 'wire-hook-native-settings-blocked.json'],
     ['tool', 'wire-lookup-spec-settings.json'],
     ['browse', 'wire-browse-settings.json'],
   ] as const)('reads the echoed hash on a %s answer (%s)', (kind, name) => {
@@ -1194,16 +1193,6 @@ describe('the settings field', () => {
     const broken = structuredClone(answer) as { decision: { bound: unknown } };
     broken.decision.bound = { id: decision.id, input: 'btc' };
     expect(parseForTests('hook', broken).success).toBe(false);
-  });
-
-  it('names the rule in plain words on a settings_blocked answer', () => {
-    const decision = fixture('wire-hook-native-settings-blocked.json').decision as {
-      diagnostics: { reasonCode: string; nextAction: string; missing: string[] };
-    };
-    expect(decision.diagnostics.reasonCode).toBe('settings_blocked');
-    expect(decision.diagnostics.missing).toEqual([]);
-    expect(decision.diagnostics.nextAction).toContain('tenjin config');
-    expect(decision.diagnostics.nextAction).not.toMatch(/x402|USDC|wallet|Jev/);
   });
 
   it('reports the path a swapped call took as `via`', () => {

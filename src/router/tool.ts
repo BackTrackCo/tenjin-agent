@@ -50,7 +50,6 @@ import {
 } from './specs';
 import { settingsRefusal, type SettingsRefusal } from './settings-check';
 import { hasRules, type WireSettings } from './settings-wire';
-import { SETTINGS_BLOCKED, settingsBlockedLine } from './settings-blocked';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   reportSpecOutcome,
@@ -846,15 +845,6 @@ async function requestTool(
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
-    // THE USER'S OWN SETTINGS LEFT NOTHING FOR THIS: the server names the
-    // rule in plain words, and the agent tells the user rather than change it.
-    if (decision.action === 'native' && decision.diagnostics.reasonCode === SETTINGS_BLOCKED) {
-      const result = fail('native', settingsBlockedLine(decision.diagnostics), {
-        diagnostics: decision.diagnostics,
-        ...(note !== undefined ? { note } : {}),
-      });
-      return result;
-    }
     // Both non-execute arms carry diagnostics by construction now: an answer
     // without them does not parse, so there is nothing to fall back to here.
     return fail(
