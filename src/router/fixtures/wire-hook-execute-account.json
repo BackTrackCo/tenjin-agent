@@ -1,8 +1,6 @@
 {
   "schemaVersion": 1,
-  "routerVersion": "2026-11-11.1",
-  "honored": ["settings"],
-  "settingsHash": "sha256:e21445afb1b900bb6e1ff8e4b6d555ab17fff61964d37c9420463d4cf0e61dec",
+  "routerVersion": "2026-11-04.2",
   "decision": {
     "action": "execute",
     "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
@@ -13,7 +11,7 @@
     "capabilityDescription": "Google Maps places for a search, each with its name, address, phone, website and rating",
     "providerPriceAtomic": "0",
     "usage": "the place search",
-    "hint": "Apify Google Maps, your Apify account: Google Maps places for a search, each with its name, address, phone, website and rating. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"query\":\"coffee shops\",\"location\":\"Austin, TX\",\"limit\":20}}) alone and wait for its result.",
+    "hint": "Apify Google Maps, your Apify account: Google Maps places for a search, each with its name, address, phone, website and rating. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"query\":\"<what to search for>\",\"limit\":\"<how many places, e.g. 20>\"}}) alone and wait for its result.",
     "specs": [
       {
         "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
@@ -241,6 +239,8 @@
   },
   "jev": {
     "calls": 1,
-    "latencyMs": 640
-  }
+    "latencyMs": 655
+  },
+  "honored": ["schemaVersion", "packet", "sessionId", "accepts", "harness", "settings"],
+  "settingsHash": "sha256:44b9ea82595254e4decdff8c1dad72d5fd393082ce7e8749ef2932f8111c5565"
 }

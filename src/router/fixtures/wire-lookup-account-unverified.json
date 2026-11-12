@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-04.2",
+  "decision": {
+    "action": "native",
+    "reason": "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it does not offer it on its own. If the user asks for it by name, call `request({tool: \"fal.flux-pro-ultra\"})`; otherwise continue with your own tools.",
+    "diagnostics": {
+      "reasonCode": "unverified",
+      "stage": "capability",
+      "missing": [],
+      "nextAction": "Tenjin hasn't checked fal FLUX1.1 Pro Ultra yet, so it does not offer it on its own. If the user asks for it by name, call `request({tool: \"fal.flux-pro-ultra\"})`; otherwise continue with your own tools."
+    }
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 655
+  },
+  "honored": ["schemaVersion", "query", "accepts", "harness", "settings"],
+  "settingsHash": "sha256:b7b57e207ed91eca59cb0398ebfd634bd651e532d5648e014bae0c963f7b5a1a"
+}

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "current": {
+      "role": "user",
+      "text": "Read https://docs.example.com/pricing with Firecrawl and list each plan's price."
+    },
+    "history": [],
+    "literalUrls": ["https://docs.example.com/pricing"],
+    "historyStatus": "ok",
+    "pendingCall": {
+      "tool": "WebFetch",
+      "url": "https://docs.example.com/pricing"
+    }
+  },
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a3d",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "tolerant", "settings", "mcp"],
+  "harness": "claude",
+  "settings": {
+    "version": 1,
+    "hash": "sha256:d3907a149dbce1dc8d7034363a0b3c1f2e7ea099005788a58f74cf5e06eb3a75",
+    "policy": {
+      "prefer": [
+        {
+          "scope": {
+            "kind": "global"
+          },
+          "targets": [
+            {
+              "kind": "source",
+              "id": "firecrawl"
+            }
+          ]
+        }
+      ]
+    },
+    "replacement": {
+      "mode": "when-routed"
+    },
+    "sources": ["tenjin", "firecrawl"]
+  }
+}

@@ -413,7 +413,14 @@ describe('the request bodies', () => {
                 ? { settings: canonical.settings as WireSettings }
                 : {}),
             })
-          : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
+          : buildToolBody({
+              query: canonical.query as string,
+              accepts,
+              harness: 'claude',
+              ...(canonical.settings !== undefined
+                ? { settings: canonical.settings as WireSettings }
+                : {}),
+            });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
     const browse = fixture('wire-browse-request.json');
@@ -1229,21 +1236,32 @@ describe('the accounts wire', () => {
     expect(acceptsFor(false, true)).toEqual([...CLIENT_ACCEPTS, 'settings', 'mcp']);
     expect(acceptsFor(false)).not.toContain('mcp');
     expect(unmetRequires(['mcp'])).toEqual([]);
-    // The fixture's settings are what a machine with Apify connected sends:
-    // its descriptor saved and its vault here, and the preference connect wrote.
+    // The fixture's settings are what a machine with Apify, fal and Firecrawl
+    // connected sends: each descriptor saved and its vault here, and the
+    // preference connecting Apify wrote.
     const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');
     const data = await mkdtemp(join(tmpdir(), 'tenjin-wire-accounts-'));
+    const accounts = [
+      { id: 'apify', mcpUrl: 'https://mcp.apify.com' },
+      { id: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay' },
+      { id: 'firecrawl', mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth' },
+    ];
     try {
       await mkdir(join(data, 'sources'));
-      await writeFile(join(data, 'sources', 'apify.json'), '{}');
+      for (const { id } of accounts) await writeFile(join(data, 'sources', `${id}.json`), '{}');
       const router = {
         policy: { version: 1, ...settings.policy },
-        sources: [{ id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true }],
+        sources: [
+          ...accounts.map((account) => ({ ...account, label: account.id, mapped: true })),
+          // An address connected by its URL alone is never named to the router.
+          { id: 'mcp-example-test', mcpUrl: 'https://mcp.example.test/mcp' },
+        ],
       };
+      await writeFile(join(data, 'sources', 'mcp-example-test.json'), '{}');
       expect(personalSettings(router, data).wire).toMatchObject({ status: 'ok', settings });
-      // Without its vault, the same descriptor connects nothing.
-      await rm(join(data, 'sources', 'apify.json'));
+      // Without their vaults, the same descriptors connect nothing.
+      for (const { id } of accounts) await rm(join(data, 'sources', `${id}.json`));
       const bare = personalSettings(router, data).wire;
       expect(bare.status === 'ok' && bare.settings.sources).toEqual(['tenjin']);
     } finally {
@@ -1292,11 +1310,19 @@ describe('the accounts wire', () => {
     const checked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
     expect(checked.success).toBe(true);
     expect(checked.data).toMatchObject({
-      decision: { action: 'spec', spec: { source: 'apify' }, fallback: { id: expect.any(String) } },
+      decision: {
+        action: 'spec',
+        spec: { source: 'fal', verified: true, requires: ['mcp'] },
+        fallback: { id: expect.any(String) },
+      },
     });
-    const unchecked = parseForTests('tool', fixture('wire-lookup-spec-account-unverified.json'));
-    expect(unchecked.data).toMatchObject({
-      decision: { spec: { source: 'fal', verified: false } },
+    // Named by its id: a map Tenjin has not checked, which runs only so.
+    const named = parseForTests('tool', fixture('wire-lookup-spec-account-by-id.json'));
+    expect(named.data).toMatchObject({
+      decision: { spec: { capabilityId: 'fal.flux-pro-ultra', verified: false } },
+    });
+    expect(fixture('wire-tool-request-account-by-id.json')).toMatchObject({
+      tool: 'fal.flux-pro-ultra',
     });
     // A fallback rides only beside an account service's spec.
     const paid = structuredClone(fixture('wire-lookup-spec.json')) as { decision: Json };
@@ -1305,7 +1331,7 @@ describe('the accounts wire', () => {
   });
 
   it('names the unchecked map and how the user runs it', () => {
-    const decision = fixture('wire-hook-native-unverified.json').decision as {
+    const decision = fixture('wire-lookup-account-unverified.json').decision as {
       diagnostics: { reasonCode: string; nextAction: string };
     };
     expect(decision.diagnostics.reasonCode).toBe('unverified');

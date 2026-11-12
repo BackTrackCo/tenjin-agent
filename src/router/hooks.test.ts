@@ -3869,8 +3869,8 @@ describe('an offer led by a connected account', () => {
     `mcp__x402__request({id: "${fallbackId}", input: {...}}) alone and wait for its result; ` +
     'native tools stay allowed for anything else.';
 
-  /** Apify connected here, with the preference connect writes: the settings
-   *  the fixture's answer was decided under. */
+  /** Apify, fal and Firecrawl connected here, with the preference connecting
+   *  Apify writes: the settings the fixture's answer was decided under. */
   async function connectApify(missingTools: string[] = [], over: Record<string, unknown> = {}) {
     const { mkdir, writeFile } = await import('node:fs/promises');
     await writeFile(
@@ -3884,11 +3884,12 @@ describe('an offer led by a connected account', () => {
             prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] }],
           },
           sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
             {
-              id: 'apify',
-              label: 'Apify',
-              mcpUrl: 'https://mcp.apify.com',
-              signIn: 'oauth',
+              id: 'firecrawl',
+              label: 'Firecrawl',
+              mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
               mapped: true,
             },
           ],
@@ -3896,12 +3897,14 @@ describe('an offer led by a connected account', () => {
       }),
     );
     await mkdir(join(dir, 'sources'), { recursive: true });
-    // The sign-in's plaintext header: the tools the connect-time check found
-    // this account lacks.
-    await writeFile(
-      join(dir, 'sources', 'apify.json'),
-      JSON.stringify({ header: { id: 'apify', missingTools } }),
-    );
+    // Each sign-in's plaintext header: the tools the connect-time check found
+    // the account lacks.
+    for (const id of ['apify', 'fal', 'firecrawl']) {
+      await writeFile(
+        join(dir, 'sources', `${id}.json`),
+        JSON.stringify({ header: { id, missingTools: id === 'apify' ? missingTools : [] } }),
+      );
+    }
   }
 
   it('shows its line, with no spend check, and keeps its spec with the fallback beside it', async () => {
@@ -3916,7 +3919,7 @@ describe('an offer led by a connected account', () => {
     expect(calls).toHaveLength(1);
     expect(
       (calls[0] as { body: { settings: { sources: string[] } } }).body.settings.sources,
-    ).toEqual(['tenjin', 'apify']);
+    ).toEqual(['tenjin', 'apify', 'fal', 'firecrawl']);
     expect(out).toMatchObject({ action: 'execute', id: answer.decision.id });
     expect(JSON.stringify(out.response)).toContain('your Apify account');
     const { readKeptSpec } = await import('./specs');
@@ -3978,7 +3981,7 @@ describe('an offer led by a connected account', () => {
   it('shows an unchecked map’s refusal line, naming how the user runs it', async () => {
     const unverified = JSON.parse(
       readFileSync(
-        fileURLToPath(new URL('./fixtures/wire-hook-native-unverified.json', import.meta.url)),
+        fileURLToPath(new URL('./fixtures/wire-lookup-account-unverified.json', import.meta.url)),
         'utf8',
       ),
     ) as { settingsHash: string; decision: { diagnostics: { nextAction: string } } };

@@ -35,7 +35,7 @@ const APIFY = read<{
 }>('wire-hook-execute-account.json').decision;
 const FAL = read<{
   decision: { id: string; spec: Omit<AccountOfferSpec, 'id'> };
-}>('wire-lookup-spec-account-unverified.json').decision;
+}>('wire-lookup-spec-account-by-id.json').decision;
 
 /** The Apify lead, promising only each place's name and address: the agent
  *  gets those, and the whole answer is saved. */

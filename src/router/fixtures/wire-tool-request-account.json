@@ -1,19 +1,7 @@
 {
   "schemaVersion": 1,
-  "tool": "fal.flux-pro-ultra",
-  "accepts": [
-    "catalog",
-    "spec",
-    "label",
-    "fields",
-    "jobs",
-    "headers",
-    "note",
-    "tolerant",
-    "settings",
-    "mcp",
-    "free-query"
-  ],
+  "query": "a cozy reading nook with a cat, warm light",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "tolerant", "settings", "mcp"],
   "harness": "claude",
   "settings": {
     "version": 1,

@@ -1,32 +1,20 @@
 {
   "schemaVersion": 1,
-  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a2c",
-  "accepts": [
-    "catalog",
-    "spec",
-    "label",
-    "fields",
-    "jobs",
-    "headers",
-    "note",
-    "tolerant",
-    "settings",
-    "mcp"
-  ],
-  "harness": "claude",
-  "budgetMs": 3500,
   "packet": {
     "current": {
       "role": "user",
-      "text": "Find 20 coffee shops in Austin, TX with their phone numbers and websites."
+      "text": "Find coffee shops in Austin with their phone numbers."
     },
     "history": [],
     "literalUrls": [],
     "historyStatus": "ok"
   },
+  "sessionId": "6f1c2a9e-3b7d-4e58-9a10-2c4d6e8f0a3d",
+  "accepts": ["catalog", "spec", "label", "fields", "jobs", "tolerant", "settings", "mcp"],
+  "harness": "claude",
   "settings": {
     "version": 1,
-    "hash": "sha256:e21445afb1b900bb6e1ff8e4b6d555ab17fff61964d37c9420463d4cf0e61dec",
+    "hash": "sha256:44b9ea82595254e4decdff8c1dad72d5fd393082ce7e8749ef2932f8111c5565",
     "policy": {
       "prefer": [
         {
@@ -42,6 +30,6 @@
         }
       ]
     },
-    "sources": ["tenjin", "apify"]
+    "sources": ["tenjin", "apify", "fal", "firecrawl"]
   }
 }

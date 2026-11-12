@@ -465,69 +465,72 @@ payment and reports each outcome under that option's id. Without `catalog` or
 
 ## The set
 
-| file                                        | what it pins                                                                               |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `wire-hook-execute.json`                    | hook answer for the free docs lookup: no spec, the `request({query, id})` line             |
-| `wire-hook-native.json`                     | hook answer: the host's own tools are enough                                               |
-| `wire-hook-needs-input.json`                | hook answer: the turn names no task a capability serves                                    |
-| `wire-lookup-native.json`                   | tool answer: native, with diagnostics                                                      |
-| `wire-lookup-needs-input.json`              | tool answer: a named missing argument                                                      |
-| `wire-lookup-expired-id.json`               | tool answer after a dead id, carrying the plain `note`: the free docs lookup's `execute`   |
-| `wire-hook-request-native-shortfall.json`   | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`        |
-| `wire-hook-request-native-no-content.json`  | the native hook after WebFetch answered 200 with only the page shell: `reason`             |
-| `wire-hook-request-ask.json`                | the hook before a question to the user, with `sessionId` and `accepts`                     |
-| `wire-hook-discovered.json`                 | hook answer: an open-Bazaar service, its candidate, its spec and the `hint`                |
-| `wire-lookup-discovered.json`               | tool fallback answer: the same `discovered` shape with a fresh id                          |
-| `wire-hook-execute-spec.json`               | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec  |
-| `wire-hook-execute-headers.json`            | the same for a `headers` client: the Exa spec with its `Exa-Beta` header (tenjin#988)      |
-| `wire-hook-discovered-spec.json`            | the same for a list service: the call with its skeleton, the spec rides along              |
-| `wire-outcome-request.json`                 | the outcome report a client sends after running a spec                                     |
-| `wire-outcome-result.json`                  | the same report with the caller's verdict, `result`                                        |
-| `wire-outcome-chose-other.json`             | a report that the caller used another service, named by `host`                             |
-| `wire-outcome-unpaid.json`                  | a call stopped before anything was signed, with its `reason`                               |
-| `wire-tool-request-spec.json`               | the tool call from a spec client: a query, no id                                           |
-| `wire-lookup-spec.json`                     | tool answer for it: Wolfram's spec under a fresh id and its skeleton line, no `input`      |
-| `wire-lookup-spec-skeleton.json`            | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`           |
-| `wire-hook-request-choices.json`            | the hook from a client that accepts `choices`                                              |
-| `wire-hook-discovered-choices.json`         | hook answer: a compare group's options, each under its own id and spec, and the one line   |
-| `wire-lookup-discovered-choices.json`       | tool fallback answer: the same `choices` shape with fresh ids                              |
-| `wire-hook-execute-labelled.json`           | hook answer for a `label` and `fields` client: the label, the short line, the fields       |
-| `wire-hook-execute-augment.json`            | the free docs lookup before a search, for a `fields` client: `augment` and `augmentUrl`    |
-| `wire-hook-execute-note.json`               | the same for a `fields` and `note` client: `note`, the after-search line, no `augmentUrl`  |
-| `wire-browse-request.json`                  | a browse of the tool list                                                                  |
-| `wire-browse.json`                          | the browse answer: its rows                                                                |
-| `wire-tool-request-by-id.json`              | a browse row's id sent as `tool`                                                           |
-| `wire-lookup-spec-by-id.json`               | tool answer for it: the row's spec under a fresh id, labelled, with the fields             |
-| `wire-outcome-via.json`                     | an outcome report naming the path that made the call, `via`                                |
-| `wire-hook-request-catalog.json`            | the hook from a client that sends `catalog` (and `bazaar`)                                 |
-| `wire-hook-discovered-catalog.json`         | hook answer: a former list service as `discovered` under its catalog id, with its fields   |
-| `wire-hook-request-harness.json`            | the native hook from a Codex client: `harness`, before a Reddit thread fetch               |
-| `wire-tool-request-catalog.json`            | the tool call from a `catalog` client: a query, no id                                      |
-| `wire-lookup-discovered-catalog.json`       | tool answer for it: two former list services as `discovered`, under their catalog ids      |
-| `wire-lookup-spec-job.json`                 | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`    |
-| `wire-hook-request-improve.json`            | the hook from an install that turned on "Help improve routing": `improve`                  |
-| `wire-hook-request-quoted.json`             | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`      |
-| `wire-forget-request.json`                  | the `forget` form, sent once when "Help improve routing" is turned off                     |
-| `wire-outcome-ignored.json`                 | an offer shown and never taken: `ignored`, with its `reason`                               |
-| `wire-hook-request-settings.json`           | the native hook from a `settings` client: rules, automatic use, sources and their hash     |
-| `wire-hook-execute-settings.json`           | hook answer under those settings: `honored` and the echoed `settingsHash`                  |
-| `wire-hook-execute-bound.json`              | the same offer for a pending search with automatic use on: `bound`, the id and its input   |
-| `wire-hook-native-settings-blocked.json`    | hook answer when the rules leave nothing: `settings_blocked` and the rule in `nextAction`  |
-| `wire-tool-request-by-id-settings.json`     | a browse row's id sent as `tool` with `settings`                                           |
-| `wire-lookup-spec-settings.json`            | tool answer for it: the row's spec with the echoed `settingsHash`                          |
-| `wire-browse-request-settings.json`         | a browse of the tool list with `settings`                                                  |
-| `wire-browse-settings.json`                 | the browse answer filtered by them, with the echoed `settingsHash`                         |
-| `wire-identities-request.json`              | the free identities read                                                                   |
-| `wire-identities.json`                      | its answer: every id a setting can name, with its label                                    |
-| `wire-hook-request-account.json`            | the prompt hook from a machine with Apify connected: `mcp`, and `sources` naming it        |
-| `wire-hook-execute-account.json`            | hook answer: an Apify map leads alone, no endpoint, with Tenjin's route as `fallback`      |
-| `wire-hook-execute-account-bound.json`      | a checked Firecrawl map for a pending WebFetch with automatic use on: `bound`, `fallback`  |
-| `wire-lookup-spec-account.json`             | tool answer: the account service's spec and Tenjin's route for the job as `fallback`       |
-| `wire-tool-request-account-unverified.json` | a map Tenjin has not checked, named by its id as `tool`                                    |
-| `wire-lookup-spec-account-unverified.json`  | tool answer for it: the fal map's spec, `verified: false`                                  |
-| `wire-hook-native-unverified.json`          | hook answer when only unchecked maps fit: `unverified`, naming `request({tool})`           |
-| `wire-identities-mcp.json`                  | the identities read for an `mcp` client: each account's `connectable` and its services     |
-| `oauth-client-metadata.json`                | Tenjin's client document a sign-in names, served at `tenjin.sh/oauth/client-metadata.json` |
+| file                                       | what it pins                                                                                   |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `wire-hook-execute.json`                   | hook answer for the free docs lookup: no spec, the `request({query, id})` line                 |
+| `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                                   |
+| `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                                        |
+| `wire-lookup-native.json`                  | tool answer: native, with diagnostics                                                          |
+| `wire-lookup-needs-input.json`             | tool answer: a named missing argument                                                          |
+| `wire-lookup-expired-id.json`              | tool answer after a dead id, carrying the plain `note`: the free docs lookup's `execute`       |
+| `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`            |
+| `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`                 |
+| `wire-hook-request-ask.json`               | the hook before a question to the user, with `sessionId` and `accepts`                         |
+| `wire-hook-discovered.json`                | hook answer: an open-Bazaar service, its candidate, its spec and the `hint`                    |
+| `wire-lookup-discovered.json`              | tool fallback answer: the same `discovered` shape with a fresh id                              |
+| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec      |
+| `wire-hook-execute-headers.json`           | the same for a `headers` client: the Exa spec with its `Exa-Beta` header (tenjin#988)          |
+| `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along                  |
+| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                         |
+| `wire-outcome-result.json`                 | the same report with the caller's verdict, `result`                                            |
+| `wire-outcome-chose-other.json`            | a report that the caller used another service, named by `host`                                 |
+| `wire-outcome-unpaid.json`                 | a call stopped before anything was signed, with its `reason`                                   |
+| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                               |
+| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id and its skeleton line, no `input`          |
+| `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`               |
+| `wire-hook-request-choices.json`           | the hook from a client that accepts `choices`                                                  |
+| `wire-hook-discovered-choices.json`        | hook answer: a compare group's options, each under its own id and spec, and the one line       |
+| `wire-lookup-discovered-choices.json`      | tool fallback answer: the same `choices` shape with fresh ids                                  |
+| `wire-hook-execute-labelled.json`          | hook answer for a `label` and `fields` client: the label, the short line, the fields           |
+| `wire-hook-execute-augment.json`           | the free docs lookup before a search, for a `fields` client: `augment` and `augmentUrl`        |
+| `wire-hook-execute-note.json`              | the same for a `fields` and `note` client: `note`, the after-search line, no `augmentUrl`      |
+| `wire-browse-request.json`                 | a browse of the tool list                                                                      |
+| `wire-browse.json`                         | the browse answer: its rows                                                                    |
+| `wire-tool-request-by-id.json`             | a browse row's id sent as `tool`                                                               |
+| `wire-lookup-spec-by-id.json`              | tool answer for it: the row's spec under a fresh id, labelled, with the fields                 |
+| `wire-outcome-via.json`                    | an outcome report naming the path that made the call, `via`                                    |
+| `wire-hook-request-catalog.json`           | the hook from a client that sends `catalog` (and `bazaar`)                                     |
+| `wire-hook-discovered-catalog.json`        | hook answer: a former list service as `discovered` under its catalog id, with its fields       |
+| `wire-hook-request-harness.json`           | the native hook from a Codex client: `harness`, before a Reddit thread fetch                   |
+| `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                          |
+| `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids          |
+| `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`        |
+| `wire-hook-request-improve.json`           | the hook from an install that turned on "Help improve routing": `improve`                      |
+| `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`          |
+| `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                         |
+| `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                                   |
+| `wire-hook-request-settings.json`          | the native hook from a `settings` client: rules, automatic use, sources and their hash         |
+| `wire-hook-execute-settings.json`          | hook answer under those settings: `honored` and the echoed `settingsHash`                      |
+| `wire-hook-execute-bound.json`             | the same offer for a pending search with automatic use on: `bound`, the id and its input       |
+| `wire-hook-native-settings-blocked.json`   | hook answer when the rules leave nothing: `settings_blocked` and the rule in `nextAction`      |
+| `wire-tool-request-by-id-settings.json`    | a browse row's id sent as `tool` with `settings`                                               |
+| `wire-lookup-spec-settings.json`           | tool answer for it: the row's spec with the echoed `settingsHash`                              |
+| `wire-browse-request-settings.json`        | a browse of the tool list with `settings`                                                      |
+| `wire-browse-settings.json`                | the browse answer filtered by them, with the echoed `settingsHash`                             |
+| `wire-identities-request.json`             | the free identities read                                                                       |
+| `wire-identities.json`                     | its answer: every id a setting can name, with its label                                        |
+| `wire-hook-request-account.json`           | the prompt hook from a machine with Apify, fal and Firecrawl connected: `mcp`, their `sources` |
+| `wire-hook-execute-account.json`           | hook answer: an Apify map leads alone, no endpoint, with Tenjin's route as `fallback`          |
+| `wire-hook-request-account-fetch.json`     | the native hook before a WebFetch, Firecrawl connected and automatic use on                    |
+| `wire-hook-execute-account-bound.json`     | hook answer for it: the checked Firecrawl map with `bound`, and its `fallback`                 |
+| `wire-tool-request-account.json`           | a query from a machine whose images preference names fal                                       |
+| `wire-lookup-spec-account.json`            | tool answer for it: the fal map's spec and Tenjin's route for the job as `fallback`            |
+| `wire-tool-request-account-by-id.json`     | a map Tenjin has not checked, named by its id as `tool`                                        |
+| `wire-lookup-spec-account-by-id.json`      | tool answer for it: the fal map's spec, `verified: false`                                      |
+| `wire-tool-request-only-accounts.json`     | a query with Tenjin's own tools turned off and only that unchecked map left                    |
+| `wire-lookup-account-unverified.json`      | tool answer for it: `native`, `unverified`, naming `request({tool})`                           |
+| `wire-identities-mcp.json`                 | the identities read for an `mcp` client: each account's `connectable` and its services         |
+| `oauth-client-metadata.json`               | Tenjin's client document a sign-in names, served at `tenjin.sh/oauth/client-metadata.json`     |
 
 Two rules the fixtures exist to hold:
 
