@@ -137,8 +137,9 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // Doctor has no live SDK quote; estimate the announced target and the
-  // known fee ceiling using the same liquidity policy as the deposit strategy.
+  // The deposit the payer's top-up would sign for this balance. Doctor has no
+  // live SDK quote: it estimates from the announced target and the known fee
+  // ceiling, with the same liquidity policy as the deposit strategy.
   const depositAtomic = routingDepositAtomic({
     suggestedAtomic: CHANNEL_DEPOSIT_ATOMIC,
     neededAtomic: ROUTING_FEE_CEILING_ATOMIC,
