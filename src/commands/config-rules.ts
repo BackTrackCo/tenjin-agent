@@ -1,5 +1,5 @@
 import { CliError } from '../lib/errors';
-import type { PartialConfig, SettingScope } from '../lib/config';
+import { readPersonalRouter, type PartialConfig, type SettingScope } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 import {
   ONLY_DIMENSIONS,
@@ -32,7 +32,7 @@ import {
   type Identities,
   type Named,
 } from '../router/identities';
-import { routerSettings, type RouterSettings } from '../router/settings';
+import { routerSettings, type ReplacementSetting, type RouterSettings } from '../router/settings';
 import { persist, resolveFromContext } from './config';
 import {
   POLICY_INVALID_TEXT,
@@ -979,16 +979,18 @@ export async function runConfigSpeed(
   if (args.state !== 'on' && args.state !== 'off')
     usage(`speed takes on or off; got "${args.state}".`, 'tenjin config speed on');
   const on = args.state === 'on';
-  let changed = false;
+  /** The switch as this write found it, read inside the lock. */
+  let was = false;
   await persist(ctx.dataDir, (existing) => {
     const policy = savedPolicyOf(existing);
-    changed = (policy.preferSpeed === true) !== on;
-    if (!changed) return existing;
+    was = policy.preferSpeed === true;
+    if (was === on) return existing;
     const next: SavedPolicy = { ...policy };
     if (on) next.preferSpeed = true;
     else delete next.preferSpeed;
     return withPolicy(existing, next);
   });
+  const changed = was !== on;
   const identities = on
     ? ((await freshIdentities(ctx, deps)) ?? (await cachedIdentities(ctx.dataDir)))
     : await cachedIdentities(ctx.dataDir);
@@ -1006,7 +1008,8 @@ export async function runConfigSpeed(
       rule: { preferSpeed: on },
       explanation,
       ...(on ? { effective: [effective] } : {}),
-      reset: on ? 'tenjin config speed off' : 'tenjin config speed on',
+      // Only a change has an undo, and it puts the switch back as it was.
+      ...(changed ? { reset: `tenjin config speed ${was ? 'on' : 'off'}` } : {}),
     },
     ctx,
     deps,
@@ -1015,6 +1018,15 @@ export async function runConfigSpeed(
 }
 
 /* ------------------------------------------------------------- replacement */
+
+/** The command that puts automatic use back as `before` had it. A scope kept
+ *  while it is off is not put back: turning it on always names one. */
+function restoreReplacement(before: ReplacementSetting): string {
+  if (before.mode === 'off') return 'tenjin config replacement off';
+  return before.providers !== undefined
+    ? `tenjin config replacement on ${before.providers.map((target) => flagFor(target)).join(' ')}`
+    : 'tenjin config replacement on --all-providers';
+}
 
 /**
  * `tenjin config replacement on|off`: "Run Tenjin's picks automatically",
@@ -1061,8 +1073,12 @@ export async function runConfigReplacement(
       { limit: SETTINGS_LIMITS.targets, providers: scope },
     );
   }
+  /** Automatic use as this write found it and left it, read inside the lock. */
+  let before: ReplacementSetting = { mode: 'off' };
+  let after: ReplacementSetting = { mode: 'off' };
   await persist(ctx.dataDir, (existing) => {
     const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
+    before = readPersonalRouter(router).nativeReplacement;
     if (args.state === 'off') {
       router.nativeReplacement = 'off';
       // A valid provider choice is kept for when it is turned on again; one
@@ -1074,19 +1090,22 @@ export async function runConfigReplacement(
       ) {
         delete router.nativeReplacementProviders;
       }
-      return { ...existing, router };
-    }
-    if (scope !== undefined) {
-      // A blocked provider never runs, so naming it here is a conflict.
-      const policy = SavedPolicySchema.safeParse(router.policy);
-      refuseBlocked(scope, policy.success ? policy.data : {}, identities);
-      router.nativeReplacementProviders = scope;
     } else {
-      delete router.nativeReplacementProviders;
+      if (scope !== undefined) {
+        // A blocked provider never runs, so naming it here is a conflict.
+        const policy = SavedPolicySchema.safeParse(router.policy);
+        refuseBlocked(scope, policy.success ? policy.data : {}, identities);
+        router.nativeReplacementProviders = scope;
+      } else {
+        delete router.nativeReplacementProviders;
+      }
+      router.nativeReplacement = 'when-routed';
     }
-    router.nativeReplacement = 'when-routed';
-    return { ...existing, router };
+    after = readPersonalRouter(router).nativeReplacement;
+    // What reads back the same is not written again.
+    return JSON.stringify(after) === JSON.stringify(before) ? existing : { ...existing, router };
   });
+  const changed = JSON.stringify(after) !== JSON.stringify(before);
   const read = await readBack(ctx, deps);
   const { router, support, limits } = read;
   const effective = describeReplacement(router.nativeReplacement, identities, support);
@@ -1105,7 +1124,7 @@ export async function runConfigReplacement(
   return answer(
     {
       operation: 'replacement',
-      changed: true,
+      changed,
       scope: 'machine',
       rule: {
         mode: router.nativeReplacement.mode,
@@ -1114,12 +1133,11 @@ export async function runConfigReplacement(
           : {}),
       },
       explanation,
-      reset:
-        args.state === 'on'
-          ? 'tenjin config replacement off'
-          : router.nativeReplacement.providers !== undefined
-            ? `tenjin config replacement on ${router.nativeReplacement.providers.map((target) => flagFor(target)).join(' ')}`
-            : 'tenjin config replacement on --all-providers',
+      // Off before and after is the same behaviour (a repair of an unreadable
+      // value, say): there is nothing to put back.
+      ...(changed && (before.mode !== 'off' || after.mode !== 'off')
+        ? { reset: restoreReplacement(before) }
+        : {}),
       extra: { replacement: effective },
     },
     ctx,
