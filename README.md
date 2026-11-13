@@ -136,6 +136,7 @@ A new chat does not reset the daily budget. Routing has a separate fee, quoted f
 | `tenjin status`           | On or paused, balance, accounts and settings      |
 | `tenjin usage`            | What lookups cost, by day                         |
 | `tenjin config`           | Your rules: block, prefer or limit tools          |
+| `tenjin config names exa` | Every name a rule can use, such as Exa            |
 | `tenjin connect apify`    | Use your own Apify, fal, Firecrawl or Exa account |
 | `tenjin disconnect apify` | Forget a connected account here                   |
 | `tenjin doctor`           | Check setup and payment readiness                 |

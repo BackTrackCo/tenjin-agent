@@ -72,17 +72,18 @@ The routing channel is funded in deposits when it cannot cover the next fee. Ten
 
 ## Your settings: what Tenjin offers on its own
 
-Ask your assistant to prefer, block, limit or reset what Tenjin uses, or to run its picks automatically, and it changes your settings with `tenjin config` operations. Each answers with what it saved, what it covers and the command that undoes it; `tenjin config --help` lists them with an example each, and the request tool's server instructions point a fresh session there. The settings live in `~/.tenjin/config.json` on this machine and are not synced; a project's `.tenjin/config.json` cannot add a rule or turn on automatic use. Showing, unblocking, resetting and pausing work offline. [Every operation →](./router-reference.md#your-settings)
+Ask your assistant to prefer, block, limit or reset what Tenjin uses, or to run its picks automatically, and it changes your settings with `tenjin config` operations. Each answers with what it saved, what it covers and the command that undoes it; `tenjin config --help` lists them, `tenjin config names <word>` finds the exact name a rule takes, and the request tool's server instructions point a fresh session there. The settings live in `~/.tenjin/config.json` on this machine and are not synced; a project's `.tenjin/config.json` cannot add a rule or turn on automatic use. Showing, unblocking, resetting and pausing work offline. [Every operation →](./router-reference.md#your-settings)
 
 Every routing call carries the saved rules, and Tenjin's router applies them to what it offers and picks on its own: a blocked tool is never offered, and nothing says so. You or your assistant can still ask for any tool by name, and it runs whatever the rules say. Before any call runs, this CLI checks that the offer was decided under the rules saved now; a rule changed since, in any terminal, refuses the call before any provider request or signature, and your assistant asks again.
 
-These narrow rules let your assistant read your settings, block something, or reorder what is already allowed, without a prompt each time:
+These narrow rules let your assistant read your settings, look up the names a rule takes, block something, or reorder what is already allowed, without a prompt each time:
 
 ```text
 Bash(tenjin config)
 Bash(tenjin config --json)
 Bash(tenjin config --help)
 Bash(tenjin config get:*)
+Bash(tenjin config names:*)
 Bash(tenjin config block:*)
 Bash(tenjin config prefer:*)
 ```

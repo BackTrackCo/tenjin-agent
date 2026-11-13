@@ -82,14 +82,18 @@ export const SCOPE_RULE =
  * WHERE THE USER'S SETTINGS ARE CHANGED, said in the server instructions and
  * not only in a tool description: a host that defers tool descriptions behind
  * a search still shows these, so a fresh session finds `tenjin config` when
- * the user asks for a change. The rules govern only what Tenjin offers on
- * its own, so a tool the user names still runs by its id.
+ * the user asks for a change. One sentence of flow: the exact name from
+ * `config names`, the operation's flags from its own --help, and the
+ * readback said back; an unknown name's error carries its own fix. The rules
+ * govern only what Tenjin offers on its own, so a tool the user names still
+ * runs by its id.
  */
 const CONFIG_RULE =
-  'When the user asks to prefer, block, limit, reset, choose speed over cost or configure ' +
-  'automatic Tenjin use, run `tenjin config --help`, perform the requested operation and ' +
-  'report its readback. Those settings only change what Tenjin offers on its own: a tool the ' +
-  "user asks for by name still runs through `{tool}`. Never change Tenjin's settings yourself.";
+  'When the user asks to block, prefer, limit, reset or switch what Tenjin uses, find the ' +
+  'exact name with `tenjin config names <word>`, run the operation (`tenjin config <command> ' +
+  '--help` shows its flags) and tell the user its readback. A name error suggests the fix. ' +
+  'Those settings only change what Tenjin offers on its own: a tool the user asks for by name ' +
+  "still runs through `{tool}`. Never change Tenjin's settings yourself.";
 
 /**
  * WHERE THE USER'S OWN ACCOUNTS ARE CONNECTED (plan 37), in the server
@@ -399,7 +403,8 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
           .optional()
           .describe(
             'Sent alone: a few words for a need, or "" for every tool by kind. Lists the tools ' +
-              'available, each with its id, name, what it does and its price. Free.',
+              'available to run, each with its id, name, what it does and its price. Free. The ' +
+              'names a settings rule takes come from `tenjin config names` instead.',
           ),
         tool: z
           .string()

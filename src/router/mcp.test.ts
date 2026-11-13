@@ -1276,9 +1276,10 @@ describe('a free answer on a machine with no wallet', () => {
 
 /**
  * DISCOVERY AND THE SWAP'S OWN FORM (plan 36). The server instructions name
- * `tenjin config --help` for settings changes, independent of whether a host
- * defers tool descriptions; the plugin's `decide` form runs only for a
- * session this router's hook legs served, and only alone.
+ * `tenjin config names <word>` and `tenjin config <command> --help` for
+ * settings changes, independent of whether a host defers tool descriptions;
+ * the plugin's `decide` form runs only for a session this router's hook legs
+ * served, and only alone.
  */
 describe('settings discovery and the decide form', () => {
   it('names tenjin config in the server instructions and the tool description', async () => {
@@ -1288,11 +1289,13 @@ describe('settings discovery and the decide form', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const said =
-        'run `tenjin config --help`, perform the requested operation and report its readback';
+        'find the exact name with `tenjin config names <word>`, run the operation ' +
+        '(`tenjin config <command> --help` shows its flags) and tell the user its readback';
       expect(client.getInstructions()).toContain(said);
       expect(client.getInstructions()).toContain(
-        'prefer, block, limit, reset, choose speed over cost or configure automatic Tenjin use',
+        'block, prefer, limit, reset or switch what Tenjin uses',
       );
+      expect(client.getInstructions()).toContain("Never change Tenjin's settings yourself.");
       const tools = await client.listTools();
       expect(tools.tools.find((t) => t.name === 'request')?.description).toContain(said);
       const alone = await client.callTool({

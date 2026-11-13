@@ -26,10 +26,12 @@ describe('the permissions doc matches the product this release ships', () => {
 
   it('names the plugin install registers, its two permission answers and its server', async () => {
     const { PLUGIN_HOOK_TOOL, PLUGIN_ID, REQUEST_TOOL } = await import('./router/names');
-    // Reading the settings and the two operations that only narrow or reorder
-    // (`block`, `prefer`). `unblock`, `only`, `reset`, `set`, `speed on` and
-    // `replacement` can widen what Tenjin may use, spend or run, so they stay
-    // behind the host's own prompt, and so does the blanket rule covering them.
+    // Reading the settings and the names a rule takes (`config names` only
+    // reads the router's free identities), and the two operations that only
+    // narrow or reorder (`block`, `prefer`). `unblock`, `only`, `reset`, `set`,
+    // `speed on` and `replacement` can widen what Tenjin may use, spend or
+    // run, so they stay behind the host's own prompt, and so does the blanket
+    // rule covering them.
     // Then the reads of balance, spend and accounts: `tenjin status` and
     // `tenjin usage` only read this machine's files and the balance on the
     // chain. `connect`, `disconnect` and `config fallback` stay behind the
@@ -39,6 +41,7 @@ describe('the permissions doc matches the product this release ships', () => {
       'Bash(tenjin config --json)',
       'Bash(tenjin config --help)',
       'Bash(tenjin config get:*)',
+      'Bash(tenjin config names:*)',
       'Bash(tenjin config block:*)',
       'Bash(tenjin config prefer:*)',
       'Bash(tenjin status)',
