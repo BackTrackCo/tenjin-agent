@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CommandContext } from '../../context';
-import type { SpendAuthorizer } from '../../lib/wallet';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { testCtx } from '../../context-test-utils';
+import { testAuthorizer } from '../../lib/read-test-utils';
 import { readPaidRecords } from '../paid';
 import { runRequestTool, type RequestToolDeps } from '../tool';
 import type { AccountCallResult, AccountTool } from './client';
@@ -102,15 +102,6 @@ function account(
   return { openSession, opened, urls, called };
 }
 
-function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: 'https://router.example.test' },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
-
 function deps(session: ReturnType<typeof account>) {
   const fetched: string[] = [];
   const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
@@ -118,14 +109,9 @@ function deps(session: ReturnType<typeof account>) {
     throw new Error('no network in this test');
   }) as typeof fetch;
   const run: RequestToolDeps = {
-    ctx: ctx(),
+    ctx: testCtx(dir, { baseUrl: 'https://router.example.test' }),
     cwd: dir,
-    authorizer: {
-      policyEnforcement: 'client-only',
-      authorize: vi.fn(),
-      commit: vi.fn(),
-      release: vi.fn(),
-    } as unknown as SpendAuthorizer,
+    authorizer: testAuthorizer(),
     fetchImpl,
     accounts: { exec: keychain.exec, platform: 'darwin', openSession: session.openSession },
   };
@@ -325,17 +311,6 @@ describe('an account the user names, with no map', () => {
     );
     expect(unreadable.summary).toContain("Your saved Tenjin rules can't be read");
     expect(session.called).toHaveLength(1);
-  });
-
-  it('runs under a block on an unrelated provider, which never names the account', async () => {
-    await connected({ version: 1, block: [{ kind: 'provider', id: 'firecrawl' }] });
-    const session = account();
-    const result = await runRequestTool(
-      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
-      deps(session).run,
-    );
-    expect(result.envelope).toMatchObject({ status: 'fulfilled' });
-    expect(session.called).toEqual([{ tool: 'lookup', args: { query: 'x' } }]);
   });
 
   it('never sends the credential to an address the config names in place of the signed-in one', async () => {

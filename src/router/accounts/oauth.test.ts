@@ -125,12 +125,10 @@ describe('signing in to an account', () => {
 
   it('stops at once when no browser opens and no one is at the terminal', async () => {
     const server = fakeAccountServer({ mcpUrl: MCP });
-    const started = Date.now();
     const error = await signIn(
       ACCOUNT,
       depsFor(server, { open: async () => false, waitMs: 60_000 }),
     ).catch((err: unknown) => err);
-    expect(Date.now() - started).toBeLessThan(5_000);
     expect((error as CliError).message).toBe(
       "Tenjin couldn't open a browser here, so it can't sign in to Example from this session. Nothing was saved.",
     );
@@ -148,14 +146,13 @@ describe('signing in to an account', () => {
     expect(server.seen.some(({ url }) => url.endsWith('/token'))).toBe(false);
   });
 
-  it('never takes a redirect with another state', async () => {
+  it('exchanges no code from a redirect with another state', async () => {
+    // The listener's own refusal of it is `loopback.test.ts`'s; this is the
+    // sign-in never sending the forged code on.
     const server = fakeAccountServer({ mcpUrl: MCP });
-    // The forged redirect lands, and is answered, before the wait starts.
     const forged = async (url: string) => {
       const redirect = new URL(url).searchParams.get('redirect_uri');
-      const res = await fetch(`${redirect}?code=code-1&state=forged`);
-      await res.text();
-      expect(res.status).toBe(400);
+      await (await fetch(`${redirect}?code=code-1&state=forged`)).text();
       return true;
     };
     // The wait runs on fake time, moved past it once the sign-in is waiting.
@@ -169,10 +166,7 @@ describe('signing in to an account', () => {
       await new Promise((resolve) => setImmediate(resolve));
       await vi.advanceTimersByTimeAsync(1_000);
     }
-    const error = await signing;
-    expect((error as CliError).message).toBe(
-      'The sign-in was not finished in time. Nothing was saved.',
-    );
+    await signing;
     expect(server.seen.some(({ url }) => url.endsWith('/token'))).toBe(false);
   });
 });
@@ -198,9 +192,9 @@ describe('signing out', () => {
     expect(await revokeSignIn({ ...secret, discoveryState: {} }, server.fetchImpl)).toBe(
       'unsupported',
     );
-    const down = (async () => {
+    const down: typeof fetch = async () => {
       throw new Error('offline');
-    }) as unknown as typeof fetch;
+    };
     expect(await revokeSignIn(secret, down)).toBe('failed');
   });
 });

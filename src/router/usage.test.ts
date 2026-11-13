@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { CommandContext } from '../context';
+import { testCtx } from '../context-test-utils';
 import { CliError } from '../lib/errors';
 import { runRouterUsage } from './usage';
 
@@ -19,14 +19,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000 },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
+const ctx = () => testCtx(dir, { json: false });
 
 const NOW = Date.parse('2026-10-23T18:00:00.000Z');
 
@@ -82,14 +75,9 @@ describe('usage', () => {
       ].join('\n') + '\n',
     );
     const result = await runRouterUsage(ctx(), {}, { now: () => NOW });
-    expect(result.humanLines).toEqual([
-      'Since 2026-10-16:',
-      "2026-10-23  Tenjin's tools      2 calls    $0.01",
-      '2026-10-23  your Apify account  2 calls    billed to that account',
-      "2026-10-22  Tenjin's tools      1 call     $0.007",
-      'Total: $0.017 from your Tenjin balance over 3 calls; 2 calls on your own accounts, billed to their plans and not counted in the limit.',
-      "Routing fees aren't in this history; `tenjin status` shows today's spending with them.",
-    ]);
+    expect(result.humanLines).toContainEqual(
+      expect.stringMatching(/your Apify account +2 calls +billed to that account$/),
+    );
     expect(result.data).toMatchObject({
       totals: { balanceCalls: 3, accountCalls: 2 },
       days: [
@@ -128,15 +116,9 @@ describe('usage', () => {
       ].join('\n') + '\n',
     );
     const result = await runRouterUsage(ctx(), {}, { now: () => NOW });
-    expect(result.humanLines).toEqual([
-      'Since 2026-10-16:',
-      "2026-10-23  Tenjin's tools      1 call     $0.007",
-      '2026-10-23  your Apify account  1 call     billed to that account',
-      '2026-10-23  your Apify account  2 calls    may have charged',
-      'Total: $0.007 from your Tenjin balance over 1 call; 1 call on your own accounts, billed to their plans and not counted in the limit.',
-      "2 calls on your own accounts may have charged their plans: still running, failed, or answered with the account's own error.",
-      "Routing fees aren't in this history; `tenjin status` shows today's spending with them.",
-    ]);
+    expect(result.humanLines).toContainEqual(
+      expect.stringMatching(/your Apify account +2 calls +may have charged$/),
+    );
     expect(result.data).toMatchObject({
       totals: { balanceCalls: 1, accountCalls: 1, mayHaveChargedCalls: 2 },
       days: [

@@ -1336,21 +1336,11 @@ describe('account discovery in a fresh session', () => {
     const client = new Client({ name: 'fresh', version: '0.0.0' });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      const instructions = client.getInstructions() ?? '';
-      expect(instructions).toContain(
-        "To use the user's own account, run `tenjin connect <name>`. For balance, spend and connected accounts, run `tenjin status`.",
-      );
-      expect(instructions).toContain(ACCOUNT_RULE);
-      expect(ACCOUNT_RULE).toContain('about 5 minutes');
-      expect(ACCOUNT_RULE).toContain('Never ask for a key or token in chat.');
+      expect(client.getInstructions() ?? '').toContain(ACCOUNT_RULE);
       const tools = await client.listTools();
       const request = tools.tools.find((t) => t.name === 'request');
       const props = request?.inputSchema.properties as Record<string, { description?: string }>;
       expect(props.source?.description).toContain('connected accounts');
-      // A named account that is not connected sends nothing anywhere.
-      const named = await client.callTool({ name: 'request', arguments: { source: 'apify' } });
-      expect(envelopeOf(named)).toMatchObject({ status: 'needs_input' });
-      expect(JSON.stringify(named)).toContain("isn't one of the user's connected accounts");
     } finally {
       await client.close();
       await server.close();

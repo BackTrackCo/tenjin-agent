@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext, CommandResult } from '../context';
+import { captureCtx } from '../context-test-utils';
 import { CliError } from '../lib/errors';
 import { sourceVaultPath, sourcesDir } from '../lib/paths';
 import { routerSettings } from '../router/settings';
@@ -64,14 +65,14 @@ const SESSIONS = {
 
 let dir: string;
 let work: string;
-let stderr: string[];
+let out: ReturnType<typeof captureCtx>;
 let keychain: ReturnType<typeof fakeKeychain>;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-connect-'));
   work = join(dir, 'work');
   await mkdir(join(work, '.git'), { recursive: true });
-  stderr = [];
+  out = captureCtx(dir, { json: false, timeout: 10_000, baseUrl: ROUTER });
   keychain = fakeKeychain();
   clearVaultKeyCache();
 });
@@ -80,21 +81,9 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+/** The test's one context: what every command in it wrote to stderr is kept. */
 function makeCtx(): CommandContext {
-  return {
-    flags: { json: false, timeout: 10_000, baseUrl: ROUTER },
-    dataDir: dir,
-    io: {
-      stdout: { write: () => true } as unknown as NodeJS.WritableStream,
-      stderr: {
-        write: (chunk: string) => {
-          stderr.push(chunk);
-          return true;
-        },
-      } as unknown as NodeJS.WritableStream,
-      isTTY: false,
-    },
-  };
+  return out.ctx;
 }
 
 /** The router's free identities read, and the account server for everything else. */
@@ -288,7 +277,7 @@ describe('tenjin connect', () => {
     expect(await readFile(sourceVaultPath('firecrawl', dir), 'utf8')).not.toContain(
       'fc-secret-123',
     );
-    expect(stderr.join('')).not.toContain('fc-secret-123');
+    expect(out.stderr()).not.toContain('fc-secret-123');
     expect(lines(result)).toContain(
       'Tenjin can act on your Firecrawl account, and only runs the jobs above and the Firecrawl services you ask for by name.',
     );

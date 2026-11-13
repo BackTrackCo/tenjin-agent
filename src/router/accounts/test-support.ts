@@ -70,8 +70,6 @@ export interface FakeAccountServerOptions {
   metadataInChallenge?: boolean;
   /** The approval page the metadata names. */
   authorizationEndpoint?: string;
-  /** Lists a revocation endpoint. Default true. */
-  revocation?: boolean;
   /** The `initialize` with no credential answers this instead of 401. */
   openStatus?: number;
   /** How a refresh grant is answered: new tokens (the default), a grant the
@@ -138,7 +136,7 @@ export function fakeAccountServer(opts: FakeAccountServerOptions): {
         authorization_endpoint: opts.authorizationEndpoint ?? `${issuer}/authorize`,
         token_endpoint: `${issuer}/token`,
         ...(opts.dcr !== false ? { registration_endpoint: `${issuer}/register` } : {}),
-        ...(opts.revocation !== false ? { revocation_endpoint: `${issuer}/revoke` } : {}),
+        revocation_endpoint: `${issuer}/revoke`,
         response_types_supported: ['code'],
         grant_types_supported: ['authorization_code', 'refresh_token'],
         code_challenge_methods_supported: ['S256'],

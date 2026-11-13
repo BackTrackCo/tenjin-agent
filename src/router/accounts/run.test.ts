@@ -2,10 +2,13 @@ import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CommandContext } from '../../context';
-import { buildPaymentRequired, testWalletProvider } from '../../lib/read-test-utils';
-import type { SpendAuthorization, SpendAuthorizer } from '../../lib/wallet';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { testCtx } from '../../context-test-utils';
+import {
+  buildPaymentRequired,
+  testAuthorizer,
+  testWalletProvider,
+} from '../../lib/read-test-utils';
 import { sourceVaultPath } from '../../lib/paths';
 import { MAX_CALL_WAIT_MS } from '../jobs';
 import { readPaidRecords, type MediaTransport } from '../paid';
@@ -74,15 +77,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
-
-function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: ROUTER },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
 
 interface Saved {
   id: string;
@@ -257,24 +251,6 @@ function network(
   return { fetchImpl, outcomes, reasked, other };
 }
 
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: 'allow',
-      reason: 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
-}
-
 const PUBLIC = { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] };
 const noMedia: MediaTransport = async (target) => {
   throw new Error(`no network in tests: ${target.url.toString()}`);
@@ -285,9 +261,9 @@ function deps(
   session: ReturnType<typeof account>,
   over: Partial<RequestToolDeps> = {},
 ): RequestToolDeps {
-  const auth = authorizer();
+  const auth = testAuthorizer();
   return {
-    ctx: ctx(),
+    ctx: testCtx(dir, { baseUrl: ROUTER }),
     cwd: dir,
     authorizer: auth,
     fetchImpl,
@@ -982,7 +958,7 @@ describe('a query answered with a map this account lacks', () => {
 });
 
 describe("the user's settings, before the account", () => {
-  it('stops an offer decided before a rule was saved, before anything is claimed or sent', async () => {
+  it('stops an offer decided before a rule was saved, before anything is sent', async () => {
     await apifyConnected();
     await settings([APIFY_ACCOUNT], { version: 1, block: [{ kind: 'source', id: 'apify' }] });
     const session = apifyScript();
@@ -994,7 +970,6 @@ describe("the user's settings, before the account", () => {
     });
     expect(session.opened).toEqual([]);
     expect(other).toEqual([]);
-    // Nothing was claimed: an offer under the rules saved now runs.
   });
 
   it('stops an offer once the account is disconnected, even with its hash unchanged', async () => {

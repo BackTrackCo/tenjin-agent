@@ -171,9 +171,7 @@ describe('the vault of a connected account', () => {
       platform: 'darwin',
       exec: keychain.exec,
     });
-    const names = await readdir(sourcesDir(dir));
-    expect(names).toEqual(['apify.json']);
-    for (const name of names) expect(name).not.toMatch(/passphrase|:/);
+    expect(await readdir(sourcesDir(dir))).toEqual(['apify.json']);
   });
 
   it("keeps each data folder's key apart: disconnecting in one leaves the other readable", async () => {

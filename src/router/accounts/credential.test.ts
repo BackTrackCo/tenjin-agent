@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withFileLock } from '../../lib/lock';
 import { sourceVaultPath } from '../../lib/paths';
 import { AccountRefusal, accountCredential, type CredentialDeps } from './credential';
-import { fakeAccountServer, fakeKeychain } from './test-support';
+import { fakeAccountServer, fakeKeychain, type FakeAccountServerOptions } from './test-support';
 import {
   clearVaultKeyCache,
   readVault,
@@ -89,9 +89,7 @@ function deps(
   return { ...vault, fetchImpl: server.fetchImpl, now: () => NOW, ...over };
 }
 
-const server = (
-  over: Parameters<typeof fakeAccountServer>[0] extends infer T ? Partial<T> : never,
-) =>
+const server = (over: Partial<FakeAccountServerOptions>) =>
   fakeAccountServer({ mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth', issuer: ISSUER, ...over });
 
 const refusal = (err: unknown) => (err instanceof AccountRefusal ? err.reason : String(err));
