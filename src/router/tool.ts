@@ -2475,14 +2475,36 @@ function unsavedResult(
     kept,
     `The seller finished it and the payment went through, but it could not be saved here (${why}).`,
   );
-  const nextStep = kept
-    ? `Tell the user why it was not saved, then call request({job: ${JSON.stringify(take.offerId)}}) to fetch it again; nothing more is paid.`
-    : String(running.envelope.nextStep);
+  const words = unsavedWords(
+    `Paid; ${supplierOf(take.call.url)} finished it`,
+    why,
+    kept ? { job: take.offerId } : { otherwise: String(running.envelope.nextStep) },
+  );
   return {
     ...running,
-    summary: `Paid; ${supplierOf(take.call.url)} finished it, but it could not be saved here (${why}). ${nextStep}`,
-    envelope: { ...running.envelope, nextStep },
+    summary: words.summary,
+    envelope: { ...running.envelope, nextStep: words.nextStep },
   };
+}
+
+/**
+ * WHAT A FINISHED RESULT THIS MACHINE COULD NOT SAVE SAYS (`deliverResult`'s
+ * `unsaved`), one wording for a paid take and a call on the user's own
+ * account: who finished it, why it was not saved here, and the way to it.
+ * With a kept `job`, a resume fetches it again and nothing more is paid;
+ * without one, `otherwise` is the next step.
+ */
+export function unsavedWords(
+  finished: string,
+  why: string,
+  next: { job: string } | { otherwise: string },
+): { said: string; nextStep: string; summary: string } {
+  const said = `${finished}, but it could not be saved here (${why}).`;
+  const nextStep =
+    'job' in next
+      ? `Tell the user why it was not saved, then call request({job: ${JSON.stringify(next.job)}}) to fetch it again; nothing more is paid.`
+      : next.otherwise;
+  return { said, nextStep, summary: `${said} ${nextStep}` };
 }
 
 /** A take that had already ended when its job was resumed, from its record;

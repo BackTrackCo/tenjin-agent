@@ -37,6 +37,7 @@ import {
   runSpec,
   settingsFail,
   showSpec,
+  unsavedWords,
   type DeliverCall,
   type FailExtras,
   type FailStatus,
@@ -218,6 +219,44 @@ export function accountResult(
             : ['nothing charged'],
       ...extra,
     },
+  };
+}
+
+/** What a call on the account would do if the agent sent it again. */
+const runsAgain = (label: string) =>
+  `Don't call again for this: it would run on your ${label} account again.`;
+
+/**
+ * A RESULT THE ACCOUNT FINISHED THAT THIS MACHINE COULD NOT SAVE, in the words
+ * a paid take's is ({@link unsavedWords}). With its `job` kept, nothing
+ * ended: the answer is the job, running, and a pick-up sends only the free
+ * reads that fetch it again. With none (a call with no follow-up, a tool the
+ * user named, a job this machine could not keep), the result as it came,
+ * saying so.
+ */
+export function unsavedAnswer(
+  label: string,
+  delivered: RequestToolResult,
+  why: string,
+  job?: { id: string; parameters: unknown },
+): RequestToolResult {
+  const finished = `Your ${label} account finished it`;
+  if (job !== undefined) {
+    const words = unsavedWords(finished, why, { job: job.id });
+    return accountResult('needs_input', words.summary, words.summary, label, {
+      nextStep: words.nextStep,
+      parameters: job.parameters,
+      ran: 'maybe',
+      extra: { status: 'running', job: job.id },
+    });
+  }
+  const words = unsavedWords(finished, why, {
+    otherwise: `Tell the user why it was not saved. ${runsAgain(label)}`,
+  });
+  return {
+    ...delivered,
+    summary: `${delivered.summary}\n${words.summary}`,
+    envelope: { ...delivered.envelope, note: words.said, nextStep: words.nextStep },
   };
 }
 
@@ -690,7 +729,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       const pickUp = `request({job: ${JSON.stringify(id)}}) for its result; nothing is sent to the account again.`;
       const soon = stopped?.retryIn;
       const next = !kept
-        ? `This machine could not keep the job, so it can't be picked up here. Don't call again for this: it would run on your ${label} account again.`
+        ? `This machine could not keep the job, so it can't be picked up here. ${runsAgain(label)}`
         : soon !== undefined
           ? `In a ${soon}, call ${pickUp}`
           : stopped !== undefined
@@ -797,7 +836,7 @@ async function delivered(
   at: Run,
 ): Promise<RequestToolResult> {
   const { id, spec, account } = at;
-  await endAccountJob(at.deps.ctx.dataDir, id);
+  const { dataDir } = at.deps.ctx;
   // THE SUCCESS RULE runs on the whole result; a file is its own proof.
   const check =
     spec.resultSchema !== undefined && run.media.length === 0
@@ -829,14 +868,31 @@ async function delivered(
       },
     },
   );
+  // A RESULT NOT SAVED HERE IS NOT AN ENDING, as a paid take's is not
+  // (`finishTake`): the account still holds it, so its job stays kept and a
+  // pick-up fetches it again with the free reads alone. Ended only once its
+  // files are saved.
+  if (done.unsaved !== undefined && (await readAccountJob(dataDir, id)) !== null) {
+    report(at, { status: 'running' });
+    await at.footer.done('running', { ...shownOf(at), price: 'your account' });
+    return unsavedAnswer(account.label, done.result, done.unsaved, {
+      id,
+      parameters: at.sentInput,
+    });
+  }
+  await endAccountJob(dataDir, id);
   report(at, done.outcome);
-  if (spec.verified) return done.result;
+  const result =
+    done.unsaved !== undefined
+      ? unsavedAnswer(account.label, done.result, done.unsaved)
+      : done.result;
+  if (spec.verified) return result;
   // A SERVICE TENJIN HASN'T CHECKED, run because the user named it.
   const warning = uncheckedWarning(account.label);
   return {
-    ...done.result,
-    summary: `${done.result.summary}\n${warning}`,
-    envelope: { ...done.result.envelope, warning },
+    ...result,
+    summary: `${result.summary}\n${warning}`,
+    envelope: { ...result.envelope, warning },
   };
 }
 

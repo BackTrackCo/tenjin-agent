@@ -280,6 +280,28 @@ describe('an account the user names, with no map', () => {
     ]);
   });
 
+  it('says so when a file it answered with could not be saved, rather than dropping it', async () => {
+    // Greptile review: a full disk answered fulfilled with neither the file
+    // nor a word about it.
+    await connected();
+    const session = account({
+      content: [
+        { type: 'text', text: 'here it is' },
+        { type: 'image', data: Buffer.from([1, 2, 3]).toString('base64'), mimeType: 'image/png' },
+      ],
+    });
+    // The downloads directory cannot be made: every save fails.
+    await writeFile(join(dir, 'downloads'), 'not a directory');
+    const result = await runRequestTool(
+      { source: 'mcp-example-com', tool: 'lookup', input: { query: 'x' } },
+      deps(session).run,
+    );
+    expect(result.envelope).not.toHaveProperty('savedFiles');
+    expect(String(result.envelope.note)).toContain('could not be saved here');
+    expect(result.summary).toContain('could not be saved here');
+    expect(result.envelope.nextStep).toBeDefined();
+  });
+
   it('hands back a structured-only answer', async () => {
     // Review: a named tool was read as content alone, so a valid answer that
     // only carried structuredContent came back fulfilled and empty.

@@ -14,7 +14,7 @@ import {
 } from '../tool';
 import { listAccountTools, runAccountCall } from './call';
 import type { AccountTool } from './client';
-import { accountResult, refusalWords, runDeps, type StopReason } from './run';
+import { accountResult, refusalWords, runDeps, unsavedAnswer, type StopReason } from './run';
 import { savedAccounts, type SavedAccount } from './saved';
 import { readVaultHeader } from './vault';
 
@@ -421,10 +421,13 @@ export async function runSourceRequest(
         { bodyText: run.text, ...(run.media.length > 0 ? { files: run.media } : {}) },
         { providerAtomic: 0n, ledger: 'append', account: { label, source: id } },
       );
+      // No job to keep: a file not saved here is said, never dropped.
+      const result =
+        done.unsaved !== undefined ? unsavedAnswer(label, done.result, done.unsaved) : done.result;
       return {
-        ...done.result,
-        summary: `${done.result.summary}\n${warning}`,
-        envelope: { ...done.result.envelope, warning, stop: `tenjin disconnect ${id}` },
+        ...result,
+        summary: `${result.summary}\n${warning}`,
+        envelope: { ...result.envelope, warning, stop: `tenjin disconnect ${id}` },
       };
     }
   }

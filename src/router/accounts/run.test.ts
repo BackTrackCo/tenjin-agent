@@ -554,6 +554,49 @@ describe('a long job on the account', () => {
     expect(session.tools().filter((t) => t === 'run_model')).toHaveLength(1);
   });
 
+  it('keeps a job whose file could not be saved, and request({job}) fetches it again', async () => {
+    // Greptile review: the job ended before its file was saved, so a full
+    // disk answered fulfilled with no file, no warning and no job to pick up.
+    await falOffered();
+    const session = account({
+      run_model: [text({ status: 'processing', request_id: 'req-1' })],
+      check_job: [text({ status: 'COMPLETED' })],
+      get_job_result: [text({ images: [{ url: 'https://fal.media/files/a.jpg' }] })],
+    });
+    const image = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+    const mediaTransport: MediaTransport = async () => ({
+      status: 200,
+      body: (async function* () {
+        yield image;
+      })(),
+      discard: () => undefined,
+    });
+    // The downloads directory cannot be made: every save fails.
+    await writeFile(join(dir, 'downloads'), 'not a directory');
+    const { fetchImpl } = network();
+    const first = await runRequestTool(
+      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
+      deps(fetchImpl, session, { mediaTransport }),
+    );
+    expect(first.envelope).toMatchObject({
+      status: 'running',
+      job: FAL_LEAD.id,
+      nextStep: expect.stringContaining(`request({job: "${FAL_LEAD.id}"})`) as string,
+    });
+    expect(first.summary).toContain('could not be saved here');
+
+    await rm(join(dir, 'downloads'));
+    const done = await runRequestTool(
+      { job: FAL_LEAD.id },
+      deps(fetchImpl, session, { mediaTransport }),
+    );
+    expect(done.envelope).toMatchObject({ status: 'fulfilled' });
+    const saved = done.envelope.savedFiles as string[];
+    expect(new Uint8Array(await readFile(saved[0]!))).toEqual(image);
+    // Picked up with the free reads alone: the call that bills went once.
+    expect(session.tools().filter((t) => t === 'run_model')).toHaveLength(1);
+  });
+
   it("says Tenjin couldn't check on a job when a status call errors, never that it is still running", async () => {
     await falOffered();
     const session = falJob([{ isError: true, content: [{ type: 'text', text: 'Upstream 502' }] }]);
