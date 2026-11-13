@@ -281,8 +281,12 @@ describe('Codex automatic hooks', () => {
       expect(native).toMatchObject({
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
       });
-      // Every routing call went to the paid route: one deposit, then a voucher.
+      // Every routing call went to the paid route, and no leg carried the
+      // deposit: the background top-up did, then each leg paid a voucher.
       expect(fake.log.filter((line) => line.includes('/route'))).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route warm unpaid',
+        'POST /api/x402-router/route warm paid',
         'POST /api/x402-router/route unpaid',
         'POST /api/x402-router/route paid',
         'POST /api/x402-router/route unpaid',
@@ -292,7 +296,7 @@ describe('Codex automatic hooks', () => {
       expect(fake.log.filter((line) => !line.includes('/route'))).toEqual([
         'POST /api/x402-router unpaid',
       ]);
-      expect(fake.deposits).toBe(1);
+      expect(fake.depositedOn).toEqual(['warm']);
       // The deposit counts against the daily budget, as an MCP lookup's does.
       expect((await readSpendSummary(dir))?.committedAtomic).toBe('50000');
     } finally {
@@ -309,8 +313,13 @@ describe('Codex automatic hooks', () => {
     try {
       const out = await server.run(await handler('UserPromptSubmit'), codexEvent('prompt'));
       expect(out).toEqual({ systemMessage: expect.stringContaining('could not pay') });
-      expect(fake.log).toEqual(['POST /api/x402-router/route unpaid']);
+      // The leg's 402, and the top-up's, which read the balance and stopped.
+      expect(fake.log).toEqual([
+        'POST /api/x402-router/route unpaid',
+        'POST /api/x402-router/route warm unpaid',
+      ]);
       expect(fake.deposits).toBe(0);
+      expect(out?.systemMessage).toContain('Routing answers that need no payment can still work.');
       expect(out?.systemMessage).toContain('Your usual tools still work.');
       expect(out?.systemMessage).not.toContain('tenjin fund');
       expect(await renderProgress(dir, `codex:${SESSION}`, { columns: 200 })).toContain(
@@ -349,7 +358,7 @@ describe('Codex automatic hooks', () => {
         codexEvent('prompt', { transcript_path: null }),
       );
       expect(out).toMatchObject({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit' } });
-      expect(fake.paidRequests()).toBe(1);
+      expect(fake.settledFees).toBe(1);
     } finally {
       await server.close();
     }

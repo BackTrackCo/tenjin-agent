@@ -2,7 +2,13 @@ import { join } from 'node:path';
 import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { atomicToUsd, formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
-import { NO_PAYER, type DecisionRoute } from './decision';
+import {
+  DEPOSIT_DEFERRED,
+  NO_PAYER,
+  TOP_UP_UNAVAILABLE,
+  TOPPING_UP,
+  type DecisionRoute,
+} from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
 /**
@@ -38,9 +44,8 @@ export const ROUTING_FEE_CEILING_ATOMIC = 250_000n;
 export const LEGACY_ROUTING_QUOTE_ATOMIC = 3_000n;
 /** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
 export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
-/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`, and the
- *  one doctor sizes from with no 402. Production announces $0.03, the SDK's
- *  ten-quote default, until the router's update makes it $0.05. */
+/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`: the
+ *  production server's own, and the one doctor sizes from with no 402. */
 export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
 /** Tenjin's maximum deposit per top-up ($0.25), independent of the SDK's larger bound. */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
@@ -181,7 +186,8 @@ export type RouteFor = (baseUrl: string) => DecisionRoute;
  * budget ran out (it finishes in the background), or an unlock that did not
  * finish inside the call's budget (it keeps running, and the next call gets
  * its answer), or a balance read before a deposit that failed or ran out of
- * time (nothing was signed or sent).
+ * time (nothing was signed or sent), or a deposit the background top-up has
+ * not made yet.
  *
  * THE WALLET'S OWN REASONS ARE `WALLET_REASONS`, spread in rather than written
  * twice, so a notice names the same cause in the same words as doctor. They
@@ -236,6 +242,9 @@ const NO_FAULT = new Set([
   'deadline_after_payment_sent',
   'unlock_timeout',
   'balance_unreadable',
+  TOPPING_UP,
+  DEPOSIT_DEFERRED,
+  TOP_UP_UNAVAILABLE,
 ]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */
@@ -245,11 +254,9 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 }
 
 /**
- * The one line said when a routing call's deposit went through: the money is
- * funds set aside for the next routing fees, not a lookup it bought. It names
- * no fee: each one is the router's quote for its own answer, and the ceiling
- * is a limit, not a price. The deposit counted toward the spend limits once,
- * when it was sent ({@link feeRefusal}).
+ * The deposit notice, on the next hook after a background top-up or on the
+ * routing call that carried it. Each fee is the router's own quote, and the
+ * deposit counts toward spend limits once, when it is sent ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
   return `Tenjin set aside $${usd(amountAtomic)} for routing fees. It counts toward your spend limits once.`;

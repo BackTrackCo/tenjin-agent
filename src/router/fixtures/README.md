@@ -12,7 +12,7 @@ no copy.
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
-`2026-10-24.1`.
+`2026-10-29.2`.
 
 The service ids these fixtures name (`capabilityId`, a browse row's `id`,
 `tool`, a `discovered:tenjin:` id) resolve against `tenjin`'s test catalog,
@@ -38,6 +38,7 @@ below). Selected `{tool, query}` bypasses that fee gate and makes no model decis
 | free tool | `{schemaVersion, tool, query, accepts}`                                        | `execute` for the selected free service, or `needs_input`; no routing decision or payment                                   |
 | outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`                 | an empty 204                                                                                                                |
 | forget    | `{schemaVersion, forget: "samples"}`                                           | an empty 204                                                                                                                |
+| warm      | `{schemaVersion, warm: true, accepts, harness?}`                               | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
 
 `improve: true` rides the hook and tool forms only while the person has turned
 on "Help improve routing" (`router.improve`, off by default, enabled explicitly
@@ -137,11 +138,11 @@ gate is offered only the tasks whose capabilities a client runs.
 - `headers` (client side only, until tenjin#988 lands): a spec carries
   `request.headers`, fixed headers the catalog sets on a service's call (a
   provider's beta opt-in), and the pins those headers unlock.
-- `tolerant` (client side only, until the server reads it): the client reads
-  answers as below (Reading an answer): it drops a field it does not know and
-  honors `requires`. Every field added after it, `requires` included, goes
-  only to a client that sends it; any other client, every release before it
-  among them, reads strictly and gets today's shape.
+- `tolerant`: the client reads answers as below (Reading an answer): it drops
+  a field it does not know and honors `requires`. Every field added after it
+  goes only to a client that sends it (see The warm and tolerant exchanges);
+  any other client, every release before it among them, reads strictly and
+  gets today's shape.
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above.
@@ -196,7 +197,7 @@ clients without it get `spec_missing`, pointing at `request({query})`.
 
 ## The paid path
 
-`POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms,
+`POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms and `warm`,
 behind x402
 `batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). A 402 can
 also carry the answer's own quote as a first offer, with 3000 as the second.
@@ -204,10 +205,11 @@ The 402 is the only price: this client pays the answer's own quote ahead of
 3000, at or below its ceiling of 250000 atomic USDC (`ROUTING_FEE_CEILING_ATOMIC`
 in `fee.ts`) inside the user's spend limits, pays nothing above it, and pins no
 payee. With the fee `off`, the route answers with no 402. An answer from
-a completed Jev gate settles that fee; any other answer settles at 0, which
+a completed Jev gate settles that fee; `warm` and any other answer settle at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an
-`{id, input}` there is a 400. A new channel's deposit rides its first paid
-call. The free route answers `{packet}` and `{query}` with `native` and the
+`{id, input}` there is a 400. Ordinary routing fees are funded through `warm` (below); a dear per-answer quote can carry its own inline deposit. The free route
+answers
+`{packet}` and `{query}` with `native` and the
 `fee_required` diagnostic, telling the agent to update tenjin-cli. Outcome
 reports, `browse` and `tool` stay on the free route.
 
@@ -384,6 +386,20 @@ default. The client runs each chosen option from its own spec as its own
 payment and reports each outcome under that option's id. Without `catalog` or
 `"choices"` the answer is unchanged: no `choices`, and at most four specs.
 
+## The warm and tolerant exchanges
+
+- **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the client's
+  background top-up that normally carries deposits. A quote above $0.003 can carry its own inline deposit. The server
+  answers it with no gate, so it settles at 0. Its payment is a deposit, or a
+  voucher when another process already funded the channel, so the server takes
+  either. A server without the form answers 400, and the client lets the
+  deposit ride its next paid call for an hour.
+- **`tolerant`** (`wire-tool-request-by-id-tolerant.json`,
+  `wire-lookup-spec-tolerant.json`): a client whose `accepts` lists `tolerant`
+  also gets `honored` (the request fields the answer used) and, on a spec,
+  `requires`, `timeoutS` and `maxBytes` where the service sets them. Other
+  clients get the same answer without them.
+
 ## The set
 
 | file                                       | what it pins                                                                              |
@@ -430,13 +446,17 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`     |
 | `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                    |
 | `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                              |
+| `wire-warm-request.json`                   | the paid route's `warm` call; its payment is a deposit when one is due, else a voucher    |
+| `wire-warm.json`                           | the `warm` answer: no decision                                                            |
+| `wire-tool-request-by-id-tolerant.json`    | a browse row's id from a `tolerant` client (and `jobs`, `label`, `fields`)                |
+| `wire-lookup-spec-tolerant.json`           | tool answer for it: `honored`, and the row's spec with its `job` and `requires: ["jobs"]` |
 
 Two rules the fixtures exist to hold:
 
 - **In an offer, the line and its `specs` name the same ids.** A caller cannot
   approve one service and run another. A compare choice's line names the
   decision's id and `choices` names the rest, each with its spec.
-- **Every non-execute answer carries `diagnostics`, nested inside `decision`.**
+- **Every non-execute decision carries `diagnostics`, nested inside it.**
   That is the intended shape: they sit on the union's non-execute arms so a
   contractless outcome without diagnostics does not typecheck.
 

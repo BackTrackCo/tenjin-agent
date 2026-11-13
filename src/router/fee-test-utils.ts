@@ -20,7 +20,10 @@ import type { RoutingPayerDeps } from './routing-payer';
  * charged amount, and the channel state the client no longer copies), and a
  * stale voucher with a corrective 402 carrying the last voucher the wallet
  * signed, which the SDK's recovery checks. It serves one pending request per
- * channel, as the real server does. No money moves and no network is touched.
+ * channel, as the real server does. It answers the `warm` form the way a
+ * router with the form does (its answer, settled at $0, with any deposit on
+ * it), or, as a router from before the form, with a 400 and nothing settled.
+ * No money moves and no network is touched.
  */
 
 export const NETWORK = 'eip155:84532';
@@ -48,17 +51,27 @@ interface Channel {
   pending: boolean;
 }
 
+/** The `warm` answer, as a router with the form sends it. */
+export const WARM = { schemaVersion: 1, routerVersion: 'test', warm: true };
+
 export class FakeRouter {
   readonly channels = new Map<string, Channel>();
   deposits = 0;
   settledFees = 0;
-  /** Every request, as `METHOD path paid|unpaid`. */
+  /** Paid `warm` calls answered, each settled at $0. */
+  warms = 0;
+  /** What carried each settled deposit: the top-up's `warm` call, or a routing call. */
+  readonly depositedOn: ('warm' | 'call')[] = [];
+  /** Every request, as `METHOD path [warm] paid|unpaid`. */
   readonly log: string[] = [];
   /** Settle the next paid answer, then drop the connection before it is read. */
   abortAfterSettle = false;
   /** How long each paid request holds its channel. */
   delayMs = 0;
-  /** Called as a paid request starts holding its channel, just before the delay timer is armed. */
+  /** Holds each paid request's channel until it resolves, with no clock: the
+   *  test decides when the settle happens. */
+  hold: Promise<void> | null = null;
+  /** Called as a paid request starts holding its channel, by `delayMs` or `hold`. */
   onDelayArmed?: () => void;
   /** The body a settled paid call answers with. */
   body: unknown = NATIVE;
@@ -88,6 +101,10 @@ export class FakeRouter {
       minDeposit?: string | null;
       /** Also offer the router's fixed quote, second. */
       legacy?: boolean;
+      /** False: a router from before the `warm` form, which 400s it. */
+      warm?: boolean;
+      /** A background quote independent of the routing answer, as on the live router. */
+      warmAmount?: string;
     } = {},
   ) {
     this.charge = opts.charge === undefined ? null : BigInt(opts.charge);
@@ -99,7 +116,7 @@ export class FakeRouter {
       payTo: privateKeyToAccount(generatePrivateKey()).address,
       maxTimeoutSeconds: 15,
       extra: {
-        // The $0.05 hint the router's update announces, whatever it quotes.
+        // The hint the production server announces explicitly, whatever it quotes.
         ...(opts.minDeposit === null
           ? {}
           : { minDeposit: opts.minDeposit ?? CHANNEL_DEPOSIT_ATOMIC.toString() }),
@@ -128,12 +145,23 @@ export class FakeRouter {
     const request = new Request(input, init);
     const url = new URL(request.url);
     const signature = request.headers.get('payment-signature');
-    this.log.push(`${request.method} ${url.pathname} ${signature ? 'paid' : 'unpaid'}`);
+    const warm = await isWarm(request);
+    const requirement =
+      warm && this.opts.warmAmount !== undefined
+        ? { ...this.requirement, amount: this.opts.warmAmount }
+        : this.requirement;
+    this.log.push(
+      `${request.method} ${url.pathname}${warm ? ' warm' : ''} ${signature ? 'paid' : 'unpaid'}`,
+    );
+    // A router from before the form: its strict request schema refuses the
+    // field, after verify and before settle, so nothing is charged.
+    const refusesWarm = warm && this.opts.warm === false;
     // The fee off (development): the paid route answers with no 402.
     if (url.pathname !== ROUTE_PAID_PATH || this.opts.paid === false) {
-      return json(this.body, 200);
+      if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
+      return json(warm ? WARM : this.body, 200);
     }
-    if (signature === null) return this.required(url.toString());
+    if (signature === null) return this.required(url.toString(), requirement);
     const decoded = decodePaymentSignatureHeader(signature);
     // The offer the voucher was signed for; the server charges at most it.
     const matched = BigInt(decoded.accepted?.amount ?? this.requirement.amount);
@@ -147,17 +175,24 @@ export class FakeRouter {
     this.channels.set(id, channel);
     if (channel.pending) return this.error(url.toString(), BUSY);
     if (BigInt(payload.voucher.maxClaimableAmount) !== channel.charged + matched) {
-      return this.corrective(url.toString(), id, channel);
+      return this.corrective(url.toString(), id, channel, requirement);
     }
+    if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
     if (payload.type === 'deposit') {
       if (this.depositError !== null) return this.error(url.toString(), this.depositError);
       if (this.walletAtomic !== null && BigInt(payload.deposit!.amount) > this.walletAtomic) {
         return this.error(url.toString(), this.insufficientError);
       }
     }
+    // `warm` is answered in code, with no gate, and settles at $0.
+    const charge = warm ? 0n : this.charged(matched);
     channel.pending = true;
     try {
-      if (this.delayMs > 0) {
+      if (this.hold !== null) {
+        const held = this.hold;
+        this.onDelayArmed?.();
+        await held;
+      } else if (this.delayMs > 0) {
         const held = new Promise((r) => setTimeout(r, this.delayMs));
         this.onDelayArmed?.();
         await held;
@@ -165,14 +200,18 @@ export class FakeRouter {
       if (payload.type === 'deposit') {
         channel.balance += BigInt(payload.deposit!.amount);
         this.deposits += 1;
+        this.depositedOn.push(warm ? 'warm' : 'call');
       }
       channel.last = {
         maxClaimableAmount: payload.voucher.maxClaimableAmount,
         signature: payload.voucher.signature,
       };
-      channel.charged += this.charged(matched);
-      this.paidAmounts.push(matched);
-      this.settledFees += 1;
+      channel.charged += charge;
+      if (warm) this.warms += 1;
+      else {
+        this.paidAmounts.push(matched);
+        this.settledFees += 1;
+      }
     } finally {
       channel.pending = false;
     }
@@ -180,15 +219,12 @@ export class FakeRouter {
       this.abortAfterSettle = false;
       throw new DOMException('The operation was aborted.', 'AbortError');
     }
-    return json(this.body, 200, {
+    return json(warm ? WARM : this.body, 200, {
       'PAYMENT-RESPONSE': encodePaymentResponseHeader({
         success: true,
         transaction: '0x',
         network: NETWORK,
-        extra: {
-          chargedAmount: this.charged(matched).toString(),
-          channelState: this.state(id, channel),
-        },
+        extra: { chargedAmount: charge.toString(), channelState: this.state(id, channel) },
       }),
     });
   };
@@ -212,12 +248,12 @@ export class FakeRouter {
     };
   }
 
-  private required(url: string): Response {
+  private required(url: string, requirement: PaymentRequirements = this.requirement): Response {
     return json({}, 402, {
       'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
         x402Version: 2,
         resource: { url, description: 'routing', mimeType: 'application/json' },
-        accepts: this.accepts(),
+        accepts: this.accepts(requirement),
       }),
     });
   }
@@ -233,16 +269,21 @@ export class FakeRouter {
     });
   }
 
-  private corrective(url: string, id: string, channel: Channel): Response {
+  private corrective(
+    url: string,
+    id: string,
+    channel: Channel,
+    requirement: PaymentRequirements = this.requirement,
+  ): Response {
     return json({}, 402, {
       'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
         x402Version: 2,
         error: MISMATCH,
         resource: { url, description: 'routing', mimeType: 'application/json' },
         accepts: this.accepts({
-          ...this.requirement,
+          ...requirement,
           extra: {
-            ...this.requirement.extra,
+            ...requirement.extra,
             channelState: this.state(id, channel),
             ...(channel.last !== undefined
               ? {
@@ -256,6 +297,16 @@ export class FakeRouter {
         }),
       }),
     });
+  }
+}
+
+/** Whether a request's JSON body is the `warm` form. */
+async function isWarm(request: Request): Promise<boolean> {
+  if (request.method !== 'POST') return false;
+  try {
+    return ((await request.clone().json()) as { warm?: unknown }).warm === true;
+  } catch {
+    return false;
   }
 }
 

@@ -14,13 +14,20 @@ import { paymentShortOfFunds, reasonCode } from '../lib/payment-failure';
 import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/spend';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
+import { channelCredit } from './channel-credit';
 import {
+  acceptsFor,
+  buildWarmBody,
   CHANNEL_BUSY,
+  DEPOSIT_DEFERRED,
   isUnreachable,
+  isWarmAnswer,
   PAYMENT_FAILED,
   DEADLINE_AFTER_PAYMENT_SENT,
   ROUTE_PAID_PATH,
   RouteSkipped,
+  TOP_UP_UNAVAILABLE,
+  TOPPING_UP,
   type DecisionRoute,
 } from './decision';
 import { isDefiniteBlock, type SignVerdict } from './eligibility';
@@ -29,12 +36,22 @@ import {
   FEE_ABOVE_CEILING,
   feeRefusal,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
+  LEGACY_ROUTING_QUOTE_ATOMIC,
   payerDir,
   refusedWhy,
   ROUTING_DEPOSIT_KEY,
   ROUTING_FEE_CEILING_ATOMIC,
   routingDepositAtomic,
 } from './fee';
+import type { Harness } from './names';
+import {
+  claimRouterMemo,
+  readRouterMemo,
+  releaseRouterMemo,
+  TOPPING_UP_MEMO_MS,
+  WARM_ABSENT_MS,
+  writeRouterMemo,
+} from './router-memo';
 import type { RouterObservation } from './router-observation';
 import { chosenOffer, quoteOf, routingOffers } from './routing-quote';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
@@ -76,6 +93,21 @@ export { reasonCode } from '../lib/payment-failure';
  *   second payment in flight on one channel (`channel_busy`): that call is
  *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
+ * - ORDINARY FEES ARE FUNDED IN THE BACKGROUND. A prompt's hook leg
+ *   has 3.5 s and a deposit settles on chain in about 5, so the channel is
+ *   funded in the background instead ({@link RoutingPayer.topUpIfLow}): one
+ *   `warm` call to the paid route, which the server answers in code and
+ *   settles at $0, carries the deposit the stock SDK adds to it. The top-up
+ *   starts when `tenjin mcp` starts on a channel that cannot cover a fee (a
+ *   new one included), after a paid call leaves it so, and when a call's
+ *   SDK asks for a deposit anyway. A call that meets one in flight in this
+ *   process waits for it inside its own budget, since the fee is required and
+ *   then pays a voucher. A per-answer quote above the fixed $0.003 fee can
+ *   need more credit than a `warm` call replenishes, so it deposits inline
+ *   on its own call. A router that answers
+ *   `warm` with anything but its answer (an older server) has no form: for
+ *   {@link WARM_ABSENT_MS} a deposit rides the next paid call, as it did
+ *   before, and that call gets {@link DEPOSIT_GATE_TIMEOUT_MS}.
  * - A DEPOSIT IS AN AUTOMATIC PAYMENT. The SDK's `depositStrategy` sizes it
  *   (the SDK target, bounded by {@link routingDepositAtomic} using a
  *   deposit-only balance read, a $0.01 target below $0.10 liquid and a $0.01
@@ -87,17 +119,18 @@ export { reasonCode } from '../lib/payment-failure';
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
  * - A DEPOSIT MAKES ONE BALANCE LOOKUP, bounded by the call deadline.
- *   Ordinary vouchers make no balance read. The facilitator still checks
+ *   Ordinary vouchers make no balance read. An inline deposit for a dear
+ *   quote or a router without `warm` does. The facilitator still checks
  *   funds. A 402 that `paymentShortOfFunds` reads as low funds (a reason
  *   code of `insufficient_funds`, `invalid_exact_evm_insufficient_funds`, or
  *   one ending in `insufficient_balance`) skips the call as `wallet_low`,
  *   with no retry.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads are each cut at what is left of it,
- *   so a leg returns inside the hook's 5 s. A call that carries a deposit
- *   gets {@link DEPOSIT_GATE_TIMEOUT_MS} in place of the gate's 3.5 s. A
- *   payment already sent when the time runs out is not cut: the call
- *   returns, and the request finishes in the background
+ *   so a leg returns inside the hook's 5 s. An inline deposit gets
+ *   {@link DEPOSIT_GATE_TIMEOUT_MS}. The top-up has its own
+ *   {@link TOP_UP_TIMEOUT_MS}. A payment already sent when the time runs out
+ *   is not cut: the call returns, and the request finishes in the background
  *   ({@link DETACHED_CEILING_MS} at most) so the SDK's channel records it; a
  *   deposit in it was counted in the spend ledger when it was sent.
  * - A CALL THIS CANNOT PAY (a refusal above, a failed or refused payment, a
@@ -111,8 +144,8 @@ export { reasonCode } from '../lib/payment-failure';
  *   answer, an unlock still running at the call's deadline, an unclassified
  *   failure). A definite block is remembered for {@link SIGNER_RECHECK_MS}, or
  *   until `wallet.json` or the passphrase sidecar changes, so a known-wrong
- *   passphrase costs no scrypt on every prompt; once this process has seen
- *   the server ask for the fee, the call is not even sent. An unknown answer
+ *   passphrase costs no scrypt on every prompt. Every call still reaches the
+ *   router, allowing a later free answer without a wallet. An unknown answer
  *   is never remembered as a block: the next call tries again.
  * - THE UNLOCK IS ONE FLIGHT, BOUNDED IN ITS WAIT, NEVER IN ITS READ. Every
  *   caller (and the prewarm) awaits the same unlock, each only up to its own
@@ -144,10 +177,29 @@ export const ROUTING_SPEND_CAP = '$0.25';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
 export const DEPOSIT_MULTIPLIER = 5;
 
-/** A deposit call's budget past the caller's: the hook leg's rest. */
+/** An inline deposit call's budget past the caller's: the hook leg's rest.
+ *  A dear quote or a router with no `warm` form gets an inline deposit. */
 const DEPOSIT_EXTRA_MS = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS;
 /** How long a paid request still out at its call's deadline may run on. */
 export const DETACHED_CEILING_MS = 15_000;
+/**
+ * THE BACKGROUND TOP-UP'S OWN BUDGET: the 402, the wallet read and the `warm`
+ * call, whose deposit waits on verify and the on-chain settle (5.0 s
+ * measured on Base), with room. It is no prompt's: nothing waits on it but a
+ * call that meets it, and that call only inside its own budget.
+ */
+export const TOP_UP_TIMEOUT_MS = 15_000;
+/** How long a refused or failed top-up holds off the next, by how many in a
+ *  row have failed; the last repeats. Contention backs off nothing. */
+export const TOP_UP_BACKOFF_MS: readonly number[] = [30_000, 120_000, 600_000];
+/**
+ * A WALLET TOO LOW stops at 2 minutes: a new user funds it in the browser and
+ * comes back in the same sitting. Each retry is a top-up (its 402 and the
+ * balance read, and the deposit once funded), started by the first prompt
+ * that needs a deposit once the wait ends, so routing resumes within about
+ * 2 minutes of funding, not 10.
+ */
+export const WALLET_LOW_BACKOFF_MS: readonly number[] = [30_000, 120_000];
 
 /**
  * HOW LONG A DEFINITE SIGN BLOCK IS BELIEVED without unlocking again, unless
@@ -208,6 +260,8 @@ export interface RoutingPayerDeps {
   observe?: (u: PayerObservation) => void;
   /** wallet.json + sidecar mtimes (`unlockStamp(readWalletFacts(...))`); a change re-checks a memoized block at once. */
   unlockStamp?: () => Promise<string>;
+  /** The host this `tenjin mcp` serves, named on the top-up's `warm` call; absent is Claude Code. */
+  harness?: Harness;
 }
 
 /**
@@ -240,8 +294,20 @@ const ROUTING_BLOCKED: ReadonlySet<string> = new Set([
 ]);
 
 /** Skips that say nothing about whether routing can pay: contention, a
- *  payment already out, a callback outside a call. */
+ *  payment already out, a callback outside a call, a deposit on its way. */
 const ROUTING_SILENT: ReadonlySet<string> = new Set([
+  CHANNEL_BUSY,
+  'busy',
+  DEADLINE_AFTER_PAYMENT_SENT,
+  'no_call',
+  TOPPING_UP,
+  DEPOSIT_DEFERRED,
+  TOP_UP_UNAVAILABLE,
+]);
+
+/** Top-up refusals that back the next one off nothing: contention, a
+ *  payment still out, a callback outside a call. */
+const NO_BACKOFF: ReadonlySet<string> = new Set([
   CHANNEL_BUSY,
   'busy',
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -266,9 +332,13 @@ interface Deposit {
 /** What the call in progress brings to the SDK's callbacks. */
 interface Call {
   host: string;
-  /** When the caller's budget ends; later once the SDK sizes a deposit. */
+  /** The router's paid route, which a top-up this call starts goes to. */
+  router: string;
+  /** The background top-up's `warm` call; ordinary fees defer deposits to it. */
+  carrier?: boolean;
+  /** When the caller's budget ends; later once the SDK sizes an inline deposit. */
   until: number;
-  /** The SDK sized a deposit for this call. */
+  /** The SDK asked for a deposit on this call, made or deferred. */
   deposit?: boolean;
   /** Its payment was out when its budget ended: it finishes in the background. */
   detached?: boolean;
@@ -288,6 +358,18 @@ interface Call {
   channel?: Channel;
   deposits: Deposit[];
 }
+
+/** How a background top-up ended. */
+type TopUp =
+  /** The router answered `warm`: the channel holds what the next fee needs,
+   *  a deposit carried on it or none needed. */
+  | { status: 'done' }
+  /** The router has no `warm` form: a deposit rides the next paid call. */
+  | { status: 'absent' }
+  /** Another process on this machine is topping the channel up. */
+  | { status: 'elsewhere' }
+  /** It was not paid, and why. */
+  | { status: 'refused'; skip: RouteSkipped };
 
 /**
  * THE PAYMENT POLICY, the guide's check of the requirement before signing:
@@ -329,6 +411,22 @@ export class RoutingPayer {
   private memo: SignMemo | null = null;
   /** The sign and routing verdicts last reported to `observe`, as status:reason. */
   private reported: { sign?: string; routing?: string } = {};
+  /** The background top-up in flight, which a call that meets it waits for. */
+  private topping: Promise<TopUp> | null = null;
+  /** The last top-up started, settled or not: what a call that deferred its
+   *  deposit waits on. */
+  private lastTopUp: Promise<TopUp> | null = null;
+  /** The last top-up's refusal, which holds the next off until `until`. */
+  private failed: {
+    skip: RouteSkipped;
+    steps: readonly number[];
+    count: number;
+    until: number;
+  } | null = null;
+  /** What settled top-ups deposited that no leg has said yet. */
+  private toppedUp = 0n;
+  /** Background work a test or a shutdown can wait out ({@link idle}). */
+  private pending: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: RoutingPayerDeps) {}
 
@@ -377,26 +475,89 @@ export class RoutingPayer {
     const calls: Call[] = [];
     const route = new URL(ROUTE_PAID_PATH, baseUrl);
     return {
-      send: (url, options) => {
+      send: async (url, options) => {
         const target = new URL(url);
         if (target.origin !== route.origin || target.pathname !== route.pathname) {
-          return Promise.reject(new RouteSkipped(NOT_ROUTE));
+          throw new RouteSkipped(NOT_ROUTE);
         }
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
-        return this.turn(
-          () => this.noted(sent, () => this.pay(url, options, until, calls)),
-          until,
-          sent,
-        );
+        const once = () =>
+          this.turn(
+            () => this.noted(sent, () => this.pay(url, options, until, calls)),
+            until,
+            sent,
+          );
+        // A TOP-UP IN FLIGHT IN THIS PROCESS: the call waits for it inside its
+        // own budget instead of skipping. The fee is required, so there is no
+        // free path to fall back to.
+        if (
+          this.topping !== null &&
+          (await this.waitForTopUp(this.topping, until, sent)) === null
+        ) {
+          throw new RouteSkipped(TOPPING_UP);
+        }
+        try {
+          return await once();
+        } catch (err) {
+          // ITS OWN SDK ASKED FOR A DEPOSIT, which only the top-up makes: once
+          // that lands, the call is made once more, as a voucher. The top-up's
+          // refusal is this call's reason too (a low wallet, a failed payment;
+          // contention or an unavailable router, no fault), as a skip of its
+          // own: never the top-up's transport failure, since this call reached
+          // the router (its 402 asked for the deposit), which each skip says.
+          // A payment still out is on its way, and stays deferred.
+          const flight = this.lastTopUp;
+          if (!(err instanceof RouteSkipped) || err.why !== DEPOSIT_DEFERRED || flight === null) {
+            throw err;
+          }
+          const answered = { answered: err.answered };
+          const outcome = await this.waitForTopUp(flight, until, sent);
+          if (outcome === null) throw new RouteSkipped(TOPPING_UP, answered);
+          if (outcome.status === 'refused' && outcome.skip.why !== DEADLINE_AFTER_PAYMENT_SENT) {
+            const { quotedAtomic } = outcome.skip;
+            throw new RouteSkipped(outcome.skip.why, {
+              ...answered,
+              ...(quotedAtomic !== undefined ? { quotedAtomic } : {}),
+            });
+          }
+          if (outcome.status !== 'done' && outcome.status !== 'absent') throw err;
+          return await once();
+        }
       },
-      deposited: () =>
-        calls
-          .flatMap((call) => call.deposits)
-          .filter((d) => d.state === 'settled')
-          .reduce((sum, d) => sum + d.amountAtomic, 0n),
+      deposited: () => settledIn(calls),
+      toppedUp: () => this.takeToppedUp(),
     };
+  }
+
+  /**
+   * THE SESSION'S FIRST TOP-UP. `tenjin mcp` calls this as it starts, after
+   * the prewarm, so a new channel, or one that cannot cover the next fee, is
+   * funded before the first prompt needs it. The channel is read from the
+   * SDK's own files, with no request. The fixed routing quote is the low-credit
+   * threshold; a dear answer funds its own larger shortfall inline. Never rejects.
+   */
+  async topUpIfLow(baseUrl: string): Promise<void> {
+    await this.unlocking?.catch(() => undefined);
+    const memo = this.memo;
+    if (memo?.verdict.status !== 'ready' || memo.address === undefined) return;
+    const credit = await channelCredit(this.deps.dataDir, memo.address).catch(() => null);
+    if (credit === null || credit >= LEGACY_ROUTING_QUOTE_ATOMIC) return;
+    await this.topUpWhenDue(new URL(ROUTE_PAID_PATH, baseUrl).toString(), memo.address);
+  }
+
+  /** Resolves once no top-up is in flight or about to start, and no payment
+   *  is still finishing in the background: for `tenjin mcp`'s exit and the
+   *  tests, anything that must not end the process mid-deposit. */
+  async idle(): Promise<void> {
+    for (;;) {
+      const pending = this.pending;
+      await pending;
+      await this.topping;
+      await this.tail;
+      if (pending === this.pending && this.topping === null) return;
+    }
   }
 
   private get timers(): Pick<typeof globalThis, 'setTimeout' | 'clearTimeout'> {
@@ -418,7 +579,7 @@ export class RoutingPayer {
    *  call gives up at its own deadline (`busy`) rather than wait out the
    *  call ahead of it, and then never starts. The deadline covers the wait
    *  only: once a call runs, its own budget applies. */
-  private turn<T>(run: () => Promise<T>, until: number, sent: number): Promise<T> {
+  private turn<T>(run: () => Promise<T>, until: number, sent: number, carrier = false): Promise<T> {
     let gaveUp = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const go = () => {
@@ -434,7 +595,7 @@ export class RoutingPayer {
         () => {
           gaveUp = true;
           // It never ran, so `noted` cannot say it: its one line is here.
-          this.note('busy', null, sent);
+          this.note('busy', null, sent, undefined, carrier);
           reject(new RouteSkipped('busy'));
         },
         Math.max(0, until - this.now()),
@@ -444,21 +605,27 @@ export class RoutingPayer {
   }
 
   /** One stderr line for a call the paid path did not answer; a detached
-   *  one says it when its request ends. */
-  private async noted(sent: number, run: () => Promise<HttpResult>): Promise<HttpResult> {
+   *  one says it when its request ends. `carrier`: the top-up's own call. */
+  private async noted(
+    sent: number,
+    run: () => Promise<HttpResult>,
+    carrier = false,
+  ): Promise<HttpResult> {
     this.last = null;
     try {
       return await run();
     } catch (err) {
       // Set by `run`, which the narrowing above cannot see.
       const call = this.last as Call | null;
-      if (err instanceof RouteSkipped && call?.detached !== true) this.note(err.why, call, sent);
+      if (err instanceof RouteSkipped && call?.detached !== true) {
+        this.note(err.why, call, sent, undefined, carrier);
+      }
       if (err instanceof RouteSkipped) this.reportRouting(err.why);
       throw err;
     }
   }
 
-  private note(why: string, call: Call | null, sent: number, late?: string): void {
+  private note(why: string, call: Call | null, sent: number, late?: string, carrier = false): void {
     const result = call?.result;
     const cause =
       late ??
@@ -483,7 +650,8 @@ export class RoutingPayer {
           : result?.ok === true
             ? 'answer'
             : 'challenge';
-    this.warn(`${why} (cause ${cause}, ${this.now() - sent}ms, stage ${stage})`);
+    const what = carrier || call?.carrier === true ? `top-up ${why}` : why;
+    this.warn(`${what} (cause ${cause}, ${this.now() - sent}ms, stage ${stage})`);
   }
 
   /**
@@ -572,10 +740,13 @@ export class RoutingPayer {
     options: HttpRequestOptions,
     until: number,
     calls: Call[],
+    carrier = false,
   ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
       host: new URL(url).host,
+      router: url,
+      ...(carrier ? { carrier } : {}),
       until,
       paid: false,
       answered: false,
@@ -704,8 +875,10 @@ export class RoutingPayer {
     }
     if (response.status >= 500) throw new RouteSkipped(PAYMENT_FAILED, answered);
     // A fee paid and answered: routing works, whatever was said before.
-    if (call.paid && response.status < 400)
+    if (call.paid && response.status < 400) {
       this.report({ routing: { status: 'ready', at: this.now() } });
+      if (!carrier) this.track(this.afterPaid(call));
+    }
     return response;
   }
 
@@ -746,11 +919,241 @@ export class RoutingPayer {
     throw new RouteSkipped(why);
   }
 
-  /** Use the SDK's target and voucher deficit, with local liquidity bounds.
-   * The balance read happens only for a deposit; vouchers use channel credit. */
+  /**
+   * A ROUTING CALL'S DEPOSIT, NOT MADE: the top-up starts in its place, and
+   * the call skips with `deposit_deferred` for `send` to wait out. While a
+   * refused top-up holds the next off, its refusal (a low wallet, with its
+   * balance, or a failed payment) is the call's own reason, which the hook
+   * says once per session, and nothing is sent for it.
+   */
+  private deferral(call: Call): never {
+    const failed = this.backedOff();
+    if (failed !== null) {
+      // A refusal said again names the fee it was quoted.
+      if (failed.quotedAtomic !== undefined) call.quoted = failed.quotedAtomic;
+      this.refuse(failed.why);
+    }
+    void this.topUp(call.router, this.channel!.payer);
+    this.refuse(DEPOSIT_DEFERRED);
+  }
+
+  /** Whether the router at `router` is known to have no `warm` form. */
+  private async warmAbsent(router: string): Promise<boolean> {
+    return (await readRouterMemo(this.deps.dataDir, 'warm-absent', router, this.now())) !== null;
+  }
+
+  /** `payer`'s top-up, unless one is in flight, a refused one holds it off,
+   *  or the router has no `warm` form (the next paid call deposits instead). */
+  private async topUpWhenDue(router: string, payer: string): Promise<void> {
+    if (this.topping !== null || this.backedOff() !== null) return;
+    if (await this.warmAbsent(router)) return;
+    await this.topUp(router, payer);
+  }
+
+  /** The one top-up in flight, joined or started. Never rejects. */
+  private topUp(router: string, payer: string): Promise<TopUp> {
+    if (this.topping !== null) return this.topping;
+    const flight: Promise<TopUp> = this.runTopUp(router, payer)
+      .catch(() => this.refusedTopUp(new RouteSkipped(PAYMENT_FAILED)))
+      .finally(() => {
+        if (this.topping === flight) this.topping = null;
+      });
+    this.topping = this.lastTopUp = flight;
+    this.track(flight);
+    return flight;
+  }
+
+  /**
+   * THE BACKGROUND TOP-UP: one `warm` call to the paid route, through the
+   * same turns, payment checks, spend ledger and detach as any call, on its
+   * own {@link TOP_UP_TIMEOUT_MS}. The stock SDK adds the deposit the channel
+   * needs to it ({@link deposit} sizes it), and the server answers in code and
+   * charges $0. ONE PROCESS ON THIS MACHINE TOPS UP A WALLET'S CHANNEL AT A
+   * TIME: it claims the wallet's `topping-up` memo and holds it until a
+   * deposit still out at the budget has its answer. The SDK reads the channel
+   * file as it builds the payment, after the claim, so a top-up another
+   * process just made is in it and is not made twice.
+   * A refusal prints its one routing-fee line and backs the next off
+   * ({@link TOP_UP_BACKOFF_MS}). A router that answers with
+   * anything but the `warm` answer has no form, and the `warm-absent` memo
+   * says so for {@link WARM_ABSENT_MS}.
+   */
+  private async runTopUp(router: string, payer: string): Promise<TopUp> {
+    const { dataDir } = this.deps;
+    const scope = payer.toLowerCase();
+    const token = await claimRouterMemo(dataDir, 'topping-up', router, {
+      now: this.now(),
+      ttlMs: TOPPING_UP_MEMO_MS,
+      scope,
+    });
+    if (token === null) return { status: 'elsewhere' };
+    let landing: Promise<void> | null = null;
+    try {
+      const calls: Call[] = [];
+      const sent = this.now();
+      const until = sent + TOP_UP_TIMEOUT_MS;
+      const options: HttpRequestOptions = {
+        method: 'POST',
+        timeoutMs: TOP_UP_TIMEOUT_MS,
+        blockRedirects: true,
+        jsonBody: buildWarmBody({
+          accepts: acceptsFor(false),
+          harness: this.deps.harness ?? 'claude',
+        }),
+      };
+      let response: HttpResult;
+      try {
+        response = await this.turn(
+          () => this.noted(sent, () => this.pay(router, options, until, calls, true), true),
+          until,
+          sent,
+          true,
+        );
+      } catch (err) {
+        if (!(err instanceof RouteSkipped)) throw err;
+        // No connection reached the router: no fault, as on any call.
+        if (err.unreached !== undefined) {
+          return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE));
+        }
+        // A DEPOSIT STILL OUT at the budget finishes in the background (the
+        // detached request is `tail`): it is said once its answer lands.
+        if (err.why === DEADLINE_AFTER_PAYMENT_SENT) {
+          landing = this.tail.then(() => void (this.toppedUp += settledIn(calls)));
+        }
+        return this.refusedTopUp(err);
+      }
+      this.toppedUp += settledIn(calls);
+      const status = response.ok ? response.status : 0;
+      if (status >= 200 && status < 300 && response.ok && isWarmAnswer(response.json)) {
+        this.failed = null;
+        return { status: 'done' };
+      }
+      // A rate limit is no answer about the form: it backs off, and is no
+      // fault, as on any call.
+      if (status === 429) {
+        this.note(TOP_UP_UNAVAILABLE, calls.at(-1) ?? null, sent, undefined, true);
+        return this.refusedTopUp(new RouteSkipped(TOP_UP_UNAVAILABLE, { answered: true }));
+      }
+      await writeRouterMemo(dataDir, 'warm-absent', router, {
+        now: this.now(),
+        ttlMs: WARM_ABSENT_MS,
+        detail: `http ${status}`,
+      });
+      this.warn(
+        `top-up: the router has no warm form (http ${status}), so a deposit rides the next paid call`,
+      );
+      return { status: 'absent' };
+    } finally {
+      const release = () =>
+        releaseRouterMemo(dataDir, 'topping-up', router, { token, now: this.now(), scope });
+      if (landing === null) await release();
+      else this.track(landing.then(release));
+    }
+  }
+
+  /** A top-up not paid: the next one waits out the backoff, unless the cause
+   *  was contention or a payment still out, which back off nothing. A wallet
+   *  too low has the shorter schedule ({@link WALLET_LOW_BACKOFF_MS}); a
+   *  refusal on the other schedule starts it from its first step, so a server
+   *  error just after a funded wallet waits 30 s, not 10 min. */
+  private refusedTopUp(skip: RouteSkipped): TopUp {
+    if (!NO_BACKOFF.has(skip.why)) {
+      const steps = skip.why === 'wallet_low' ? WALLET_LOW_BACKOFF_MS : TOP_UP_BACKOFF_MS;
+      const count = this.failed?.steps === steps ? this.failed.count + 1 : 1;
+      const wait = steps[Math.min(count, steps.length) - 1]!;
+      this.failed = { skip, steps, count, until: this.now() + wait };
+    }
+    return { status: 'refused', skip };
+  }
+
+  /** The last top-up's refusal while it still holds the next off; else null. */
+  private backedOff(): RouteSkipped | null {
+    return this.failed !== null && this.now() < this.failed.until ? this.failed.skip : null;
+  }
+
+  /**
+   * A CHANNEL RUNNING LOW: after a paid call, the SDK's record (one small file
+   * read, no request) says whether the next fee would need a deposit, and if
+   * so the top-up starts now rather than on the prompt that would need it.
+   * The mark is the fixed quote, which a `warm` call can replenish. A dear
+   * answer's larger shortfall is funded inline on that answer's call.
+   */
+  private async afterPaid(call: Call): Promise<void> {
+    const payer = call.channel?.payer;
+    if (payer === undefined) return;
+    const credit = await channelCredit(this.deps.dataDir, payer).catch(() => null);
+    if (credit === null || credit >= LEGACY_ROUTING_QUOTE_ATOMIC) return;
+    await this.topUpWhenDue(call.router, payer);
+  }
+
+  /** `flight` raced against the call's budget less the paid call's reserve:
+   *  its outcome, or null, with the call's one line, when time ran out first. */
+  private async waitForTopUp(
+    flight: Promise<TopUp>,
+    until: number,
+    sent: number,
+  ): Promise<TopUp | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<null>((resolve) => {
+      timer = this.timers.setTimeout(
+        () => resolve(null),
+        Math.max(0, until - PAID_CALL_RESERVE_MS - this.now()),
+      );
+    });
+    try {
+      const outcome = await Promise.race([flight, deadline]);
+      if (outcome === null) this.note(TOPPING_UP, null, sent, 'top-up in flight');
+      return outcome;
+    } finally {
+      this.timers.clearTimeout(timer);
+    }
+  }
+
+  /** What settled top-ups deposited since a leg last said it, now said. */
+  private takeToppedUp(): bigint {
+    const amount = this.toppedUp;
+    this.toppedUp = 0n;
+    return amount;
+  }
+
+  /** Work that runs on after its caller returns, for {@link idle}. */
+  private track(work: Promise<unknown>): void {
+    // Settled to undefined, so no result is kept alive by the next one.
+    this.pending = Promise.all([this.pending, work.catch(() => undefined)]).then(() => undefined);
+  }
+
+  /**
+   * THE SDK'S `depositStrategy`, called right before it signs a deposit.
+   *
+   * ORDINARY FEES USE THE TOP-UP'S `warm` CALL. The top-up starts instead
+   * ({@link deferral}), and the routing call waits for it in `send`. A quote
+   * above the fixed fee can need credit that `warm` would not replenish, so
+   * it deposits inline. A router without `warm` also deposits inline, with
+   * the longer budget.
+   *
+   * THE SIZE is the SDK's target and voucher deficit, with local liquidity
+   * bounds ({@link routingDepositAtomic}). The balance read happens only for a
+   * deposit; vouchers use channel credit. A wallet too low is `wallet_low`,
+   * with its balance; a spend the authorizer denies (the per-call limit, the
+   * daily budget, the creator allowlist) refuses it too, and nothing is paid.
+   */
   private async deposit(ctx: BatchSettlementDepositStrategyContext): Promise<bigint> {
     const call = this.call;
     if (call === null) this.refuse('no_call');
+    if (call.deposit !== true) {
+      call.deposit = true;
+      // AN INLINE DEPOSIT GETS THE LONGER BUDGET, once per call, before the
+      // memo read below, so the call's deadline cannot pass during it. A
+      // deferred call ends at once, whatever its budget says.
+      if (call.carrier !== true) call.until += DEPOSIT_EXTRA_MS;
+    }
+    if (
+      call.carrier !== true &&
+      (call.quoted ?? 0n) <= LEGACY_ROUTING_QUOTE_ATOMIC &&
+      !(await this.warmAbsent(call.router))
+    ) {
+      this.deferral(call);
+    }
     const policy = await this.deps.policy();
     const needed = BigInt(ctx.minimumDepositAmount);
     const sdkMax =
@@ -1015,14 +1418,7 @@ export class RoutingPayer {
     const scheme = new BatchSettlementEvmScheme(signer, {
       storage: new FileClientChannelStorage({ directory: dir }),
       depositPolicy: { depositMultiplier: DEPOSIT_MULTIPLIER },
-      depositStrategy: (ctx) => {
-        // A DEPOSIT GETS THE LONGER BUDGET, once per call.
-        if (this.call !== null && this.call.deposit !== true) {
-          this.call.deposit = true;
-          this.call.until += DEPOSIT_EXTRA_MS;
-        }
-        return this.deposit(ctx);
-      },
+      depositStrategy: (ctx) => this.deposit(ctx),
     });
     const client = new x402Client()
       .register('eip155:*', scheme)
@@ -1031,6 +1427,14 @@ export class RoutingPayer {
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
   }
+}
+
+/** What the deposits of `calls` that settled put into the channel. */
+function settledIn(calls: Call[]): bigint {
+  return calls
+    .flatMap((call) => call.deposits)
+    .filter((d) => d.state === 'settled')
+    .reduce((sum, d) => sum + d.amountAtomic, 0n);
 }
 
 /**

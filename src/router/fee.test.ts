@@ -158,6 +158,11 @@ describe('unpaidSentence', () => {
     }
   });
 
+  it('says nothing for a deposit the background top-up has not made yet', () => {
+    expect(unpaidSentence('topping_up')).toBeNull();
+    expect(unpaidSentence('deposit_deferred')).toBeNull();
+  });
+
   it('names the deposit and no fee in the deposit line', () => {
     expect(depositSentence(CHANNEL_DEPOSIT_ATOMIC)).toBe(
       'Tenjin set aside $0.05 for routing fees. It counts toward your spend limits once.',

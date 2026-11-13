@@ -260,7 +260,8 @@ export async function runRequestTool(
 ): Promise<RequestToolResult> {
   // A ROUTING DEPOSIT IS SAID WHERE THE AGENT READS IT: once, in the result of
   // the call that took it, beside whatever that call answered. A hook leg says
-  // it in its `systemMessage` instead.
+  // it in its `systemMessage` instead, and a background top-up's is the hook
+  // leg's alone (`toppedUp`), so the person is the one told.
   const routes: DecisionRoute[] = [];
   const { route } = deps;
   const call: RequestToolDeps = {
@@ -721,7 +722,8 @@ async function requestTool(
   if (fresh.status === 'skipped') {
     await footer.done('native');
     // A reason that lasts (money, the wallet, a limit, the fee's price) is
-    // the user's to hear once; a busy channel or a slow unlock is not.
+    // the user's to hear once; a busy channel, a slow unlock or a top-up still
+    // on its way is not.
     const lasting = unpaidSentence(fresh.why, 'agent', fresh.quotedAtomic);
     return fail(
       'native',
