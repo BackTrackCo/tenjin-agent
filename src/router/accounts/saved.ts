@@ -38,10 +38,6 @@ const MAX_MAPPED_TOOLS = 64;
 const isKeyScheme = (value: unknown): value is KeyScheme =>
   (KEY_SCHEMES as readonly unknown[]).includes(value);
 
-/** Whether a saved descriptor, as the config holds it, is a mapped account. */
-export const isMappedDescriptor = (entry: unknown): boolean =>
-  entry !== null && typeof entry === 'object' && (entry as { mapped?: unknown }).mapped === true;
-
 /** One saved descriptor, or undefined when this build cannot use it. */
 export function savedAccountOf(entry: unknown): SavedAccount | undefined {
   if (entry === null || typeof entry !== 'object') return undefined;

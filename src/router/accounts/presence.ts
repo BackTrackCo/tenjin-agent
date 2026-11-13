@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { sourceVaultPath } from '../../lib/paths';
 import type { AccountCall } from '../decision';
 import { isAccountId } from './ids';
-import { isMappedDescriptor } from './saved';
 
 /**
  * WHICH SAVED ACCOUNTS ARE CONNECTED ON THIS MACHINE: a descriptor in
@@ -18,19 +17,6 @@ import { isMappedDescriptor } from './saved';
  */
 export function connectedSourceIds(dataDir: string, descriptorIds: readonly string[]): string[] {
   return descriptorIds.filter((id) => isAccountId(id) && existsSync(sourceVaultPath(id, dataDir)));
-}
-
-/**
- * THE ACCOUNTS NAMED TO THE ROUTER in `settings.sources`: connected here and
- * mapped, in the order they were saved. One connected by its address alone is
- * never named: its id comes from a private host name, and the router has
- * nothing for it.
- */
-export function routedSourceIds(dataDir: string, saved: readonly unknown[]): string[] {
-  const mapped = saved.flatMap((entry) =>
-    isMappedDescriptor(entry) ? [String((entry as { id: unknown }).id)] : [],
-  );
-  return connectedSourceIds(dataDir, mapped);
 }
 
 /** Every tool a call makes: the call, its poll and its follow-up. */

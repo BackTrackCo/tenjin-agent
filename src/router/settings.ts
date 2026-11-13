@@ -13,7 +13,7 @@ import {
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
-import { connectedSourceIds, routedSourceIds } from './accounts/presence';
+import { connectedSourceIds } from './accounts/presence';
 import { savedAccountOf, type SavedAccount } from './accounts/saved';
 import { BUILT_IN_SOURCE, hasRules, wireSettings, type WireSettings } from './settings-wire';
 import {
@@ -147,7 +147,12 @@ export function personalSettings(router: unknown, dataDir?: string): PersonalSet
     };
   }
   const rules = policy.status === 'ok' ? policy.saved : undefined;
-  const routed = dataDir !== undefined ? routedSourceIds(dataDir, listed) : [];
+  // NAMED TO THE ROUTER: a saved account that is connected here and mapped,
+  // in the order saved. One connected by its address alone never is: its id
+  // comes from a private host name, and the router has nothing for it.
+  const routed = saved
+    .filter((account) => account.mapped === true && accounts.connected.includes(account.id))
+    .map(({ id }) => id);
   const settings = wireSettings(rules, nativeReplacement, [BUILT_IN_SOURCE, ...routed]);
   return {
     policy,
