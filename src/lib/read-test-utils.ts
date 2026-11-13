@@ -124,3 +124,43 @@ export function withBuilderCode(
       : { ...declared, info: { ...declared.info, s: sellerServiceCodes } };
   return { extensions: { 'builder-code': entry } };
 }
+
+/**
+ * A SELLER'S OWN SIGN-IN CHALLENGE, as Monid answers a poll of a run it was
+ * paid for (live shape, 2026-11-09): a 402 with no payment option, the
+ * seller's nonce and a five-minute expiry, bound to the URL that sent it
+ * unless `over` names another domain or uri.
+ */
+export function buildSignInChallenge(
+  url: string,
+  over: { domain?: string; uri?: string; nonce?: string } = {},
+): { header: string; nonce: string } {
+  const target = new URL(url);
+  const nonce = over.nonce ?? '7c157f3a8a126770b0fe965097045e0b';
+  const issuedAt = new Date();
+  const resource = `${target.origin}/x402${target.pathname}`;
+  const paymentRequired: PaymentRequired = {
+    x402Version: 2,
+    resource: { url, description: '', mimeType: '' },
+    accepts: [],
+    extensions: {
+      'sign-in-with-x': {
+        info: {
+          domain: over.domain ?? target.host,
+          uri: over.uri ?? resource,
+          version: '1',
+          nonce,
+          issuedAt: issuedAt.toISOString(),
+          expirationTime: new Date(issuedAt.getTime() + 300_000).toISOString(),
+          statement: 'Sign in to access your run results',
+          resources: [resource],
+        },
+        supportedChains: [
+          { chainId: 'eip155:8453', type: 'eip191' },
+          { chainId: 'eip155:143', type: 'eip191' },
+        ],
+      },
+    },
+  };
+  return { header: encodePaymentRequiredHeader(paymentRequired), nonce };
+}

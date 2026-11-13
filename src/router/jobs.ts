@@ -1,6 +1,6 @@
 import { request as httpsRequest } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
-import { sellerLine } from '../commands/pay';
+import { sellerLine, signInOnlyHeader } from '../commands/pay';
 import { composeUserAgent } from '../lib/client-meta';
 import {
   assertPublicHttpsUrl,
@@ -20,15 +20,23 @@ import { MAX_MEDIA_BYTES, pinnedLookup, type PinnedTarget } from './paid';
  * (`tool.ts`) owns the money, the record and what the agent is told.
  *
  * A POLL NEVER CARRIES A PAYMENT. The take's cost is its one payment, made at
- * the submit; no header from it is kept or re-sent, and nothing is signed for
- * a poll, a status or a complete URL. A seller that asks for a payment there
- * ends the take failed.
+ * the submit; no header from it is kept or re-sent, and no payment is signed
+ * for a poll, a status or a complete URL. A seller that asks for a payment
+ * there ends the take failed.
+ *
+ * A GET POLL MAY SIGN IN. A seller that answers a poll 402 with no way to pay
+ * and its own sign-in-with-x challenge (Monid's runs) is asked again once,
+ * with that challenge signed, through `deps.signIn`: the same rules as a
+ * direct pay's sign-in (a GET, the URL that sent it, the wallet that paid,
+ * nothing paid). A POST poll's challenge is refused unsigned, and the take
+ * fails.
  *
  * WHAT A POLL MAY TOUCH. The URL is the submit's own host, over HTTPS; it is
  * checked when the job starts and again before every poll, resolved to a
  * public address and connected to that address, with no redirect followed.
- * A poll carries `accept`, the CLI's user agent and `content-type` on a POST.
- * Its body is the seller's: untrusted, and capped.
+ * A poll carries `accept`, the CLI's user agent, `content-type` on a POST and,
+ * on the poll that answers a seller's challenge, its sign-in. Its body is the
+ * seller's: untrusted, and capped.
  */
 
 /** How long one call waits for a job before it answers `running`. */
@@ -210,6 +218,20 @@ export type PollAnswer =
     }
   | { state: 'expired'; status: number };
 
+/**
+ * Answers a seller's sign-in challenge on a poll: handed the 402's
+ * PAYMENT-REQUIRED header and the poll URL, it returns the headers that
+ * answer it, why it was not signed (`refused`, which ends the take), why the
+ * wallet could not sign this time (`error`, a poll error the take survives),
+ * or undefined when the 402 is not a sign-in challenge. It never pays.
+ */
+export type PollSignIn = (
+  paymentRequiredHeader: string,
+  url: string,
+) => Promise<
+  { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
+>;
+
 export interface PollDeps {
   transport?: PollTransport;
   destination?: DestinationOptions;
@@ -217,6 +239,10 @@ export interface PollDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Told before each poll; a failure here never stops one. */
   onPoll?: () => Promise<void> | void;
+  /** A seller's sign-in challenge on a GET poll, answered; never asked for a
+   *  POST. Absent, a poll's 402 ends the take as a request for another
+   *  payment. */
+  signIn?: PollSignIn;
 }
 
 /** What polling needs of a take. */
@@ -229,8 +255,12 @@ export interface PolledTake {
  * POLL ONE TAKE UNTIL IT ENDS OR THE DEADLINE PASSES. The first poll waits
  * `firstWaitMs` (the job's interval after a submit, none on a resume), each
  * later one half as long again as the last, up to {@link MAX_POLL_INTERVAL_MS}.
- * A 402 is a seller asking to be paid again for a result already paid for:
- * nothing is signed, and the take fails. A 404 or 410 is a job the seller no
+ * A 402 with a sign-in challenge and no way to pay is answered with a
+ * sign-in, once per GET poll, and a wallet that could not sign counts as a
+ * poll error; on a POST poll it is refused unsigned and the take fails. Any
+ * other 402, or one after a sign-in, is a seller asking to be paid
+ * again for a result already paid for: no payment is signed, and the take
+ * fails. A 404 or 410 is a job the seller no
  * longer has. Any other 4xx ends the job failed, in the seller's words: AiSpace
  * answers a refused prompt's retrieve with a 422, and every later one the
  * same. {@link MAX_POLL_ERRORS} 5xx, 429 or transport failures in a row stop
@@ -256,7 +286,7 @@ export async function pollUntil(
     await Promise.resolve()
       .then(() => deps.onPoll?.())
       .catch(() => undefined);
-    const answer = await pollOnce(take, deps);
+    const answer = await pollSignedIn(take, deps);
     wait = interval;
     interval = Math.min(Math.round(interval * BACKOFF), MAX_POLL_INTERVAL_MS);
     if (answer.kind === 'refused') return { state: 'failed', reason: answer.reason };
@@ -286,7 +316,12 @@ export async function pollUntil(
       return {
         state: 'failed',
         status: 402,
-        reason: 'the seller asked for another payment to return the result; none was sent',
+        reason:
+          answer.signIn === 'refused'
+            ? `the seller asks the wallet that paid it to sign in, and nothing was signed: ${answer.signInRefusal ?? 'no reason given'}`
+            : answer.signIn === 'sent'
+              ? "the seller did not accept this wallet's sign-in"
+              : 'the seller asked for another payment to return the result; none was sent',
       };
     }
     if (answer.status === 404 || answer.status === 410) {
@@ -393,11 +428,62 @@ type Attempt =
       json: unknown;
       bytes?: Uint8Array;
       tooLarge?: true;
+      /** This answer came to a poll that carried a sign-in (`sent`), or the
+       *  seller's challenge was not signed (`refused`). */
+      signIn?: 'sent' | 'refused';
+      signInRefusal?: string;
     }
   | { kind: 'error'; reason: string }
   | { kind: 'refused'; reason: string };
 
-async function pollOnce(take: PolledTake, deps: PollDeps): Promise<Attempt> {
+/**
+ * ONE POLL, SIGNED IN WHEN THE SELLER ASKS: a 402 to a GET that carries a
+ * sign-in challenge and no way to pay is answered once, at once, with the
+ * challenge signed. Its own answer stands, a second 402 included; any other
+ * 402 is handed back as it came. A wallet that could not sign this time (locked, a
+ * keychain that did not answer) is a poll error, never an ending: the seller
+ * still holds a result already paid for.
+ */
+async function pollSignedIn(take: PolledTake, deps: PollDeps): Promise<Attempt> {
+  const first = await pollOnce(take, deps);
+  if (first.kind !== 'answer' || first.status !== 402 || deps.signIn === undefined) return first;
+  const challenge = first.header('PAYMENT-REQUIRED');
+  if (challenge === undefined) return first;
+  // A sign-in answers only a GET, as a direct pay's does: a signed POST resends
+  // its body as the wallet, a write that could spend credit the seller holds
+  // for it. Its challenge is refused unsigned, and the take ends as any
+  // refused sign-in does; no wallet is opened for it.
+  if (take.poll.method !== 'GET') {
+    return signInOnlyHeader(challenge) !== undefined
+      ? {
+          ...first,
+          signIn: 'refused',
+          signInRefusal: `a sign-in answers only a GET, and this poll is a ${take.poll.method}`,
+        }
+      : first;
+  }
+  const answer = await deps
+    .signIn(challenge, take.poll.url)
+    .catch((err: unknown) => ({ error: `the sign-in failed (${errorText(err)})` }));
+  if (answer === undefined) return first;
+  if ('error' in answer) {
+    return {
+      kind: 'error',
+      reason: `the seller asks the wallet that paid it to sign in, and ${sellerLine(answer.error)}`,
+    };
+  }
+  if ('refused' in answer) {
+    return { ...first, signIn: 'refused', signInRefusal: sellerLine(answer.refused) };
+  }
+  const signed = await pollOnce(take, deps, answer.headers);
+  return signed.kind === 'answer' ? { ...signed, signIn: 'sent' } : signed;
+}
+
+async function pollOnce(
+  take: PolledTake,
+  deps: PollDeps,
+  signIn: Record<string, string> = {},
+): Promise<Attempt> {
   try {
     assertPublicHttpsUrl(take.poll.url);
   } catch {
@@ -420,6 +506,7 @@ async function pollOnce(take: PolledTake, deps: PollDeps): Promise<Attempt> {
     accept: 'application/json, */*;q=0.8',
     'user-agent': composeUserAgent(),
     ...(take.poll.body !== undefined ? { 'content-type': 'application/json' } : {}),
+    ...signIn,
   };
   const signal = AbortSignal.timeout(POLL_REQUEST_TIMEOUT_MS);
   let res: PollResponse;

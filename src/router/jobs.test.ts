@@ -2,7 +2,15 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
+import { privateKeyToAccount } from 'viem/accounts';
+import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
+import {
+  buildPaymentRequired,
+  buildSignInChallenge,
+  testAuthorizer,
+  testSigner,
+  testWalletProvider,
+} from '../lib/read-test-utils';
 import type { SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
@@ -382,6 +390,82 @@ describe("Treza's paid leg cut off after it named its status URL", () => {
     });
     const take = await readTake(dir, ID, 1);
     expect(take).toMatchObject({ state: 'done', statusUrl: 'https://treza.example/jobs/42' });
+  });
+
+  /** The submit is cut off after its headers, the chain shows its payment
+   *  taken, and the status URL answers `answers`. */
+  async function cutOffTaken(answers: Answer[]) {
+    await storeSpecs(dir, [TREZA]);
+    const { fetchImpl } = submit(
+      TREZA,
+      (init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              init?.signal?.addEventListener('abort', () =>
+                controller.error(new DOMException('The operation was aborted', 'AbortError')),
+              );
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'X-Status-Url': '/jobs/42', 'content-type': 'application/json' },
+          },
+        ),
+      { maxTimeoutSeconds: 0 },
+    );
+    const { transport } = polls(answers);
+    const used = (async () =>
+      json(200, { jsonrpc: '2.0', id: 1, result: `0x${'1'.padStart(64, '0')}` })) as typeof fetch;
+    const run = deps(fetchImpl, transport, { timeout: 50 });
+    // The paid leg's own timer is the test's: it runs out when moved, never
+    // by waiting.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let result: Awaited<ReturnType<typeof runRequestTool>> | undefined;
+    try {
+      const pending = runRequestTool(
+        { id: ID, input: INPUT },
+        { ...run, payDeps: { ...run.payDeps, chainFetch: used } },
+      ).then((done) => (result = done));
+      while (result === undefined) {
+        await vi.advanceTimersByTimeAsync(50);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+    return { result, fetchImpl };
+  }
+
+  // A seller that settles before it works: the chain read on the cut-off leg
+  // showed the payment taken, and the submit's row still said unknown.
+  it('records the submit settled when the chain shows the cut-off payment taken', async () => {
+    const { result } = await cutOffTaken([
+      { status: 200, body: { status: 'done', audio_url: 'https://treza.example/out/clip.mp3' } },
+    ]);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(await ledger()).toMatchObject([{ amountAtomic: '60000', settlement: 'settled' }]);
+  });
+
+  // The take kept only a tx: a failed or resumed ending said the settlement
+  // was unknown while the ledger said settled.
+  it('says a failed take was charged when the chain shows the cut-off payment taken', async () => {
+    const { result, fetchImpl } = await cutOffTaken([
+      { status: 422, body: { error: 'bad prompt' } },
+    ]);
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, settlement: 'settled' });
+    expect(String(result.envelope.reason)).toContain('the chain shows the payment taken');
+    expect(String(result.envelope.nextStep)).toContain('paid and nothing came back');
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'failed', settled: true });
+    expect(await ledger()).toMatchObject([{ amountAtomic: '60000', settlement: 'settled' }]);
+
+    // Resumed, it answers from its record, settled still.
+    const again = polls([]);
+    const resumed = await runRequestTool({ job: ID }, deps(fetchImpl, again.transport));
+    expect(again.seen).toEqual([]);
+    expect(resumed.envelope).toMatchObject({ status: 'failed', settlement: 'settled' });
+    expect(String(resumed.envelope.nextStep)).toContain('paid and nothing came back');
   });
 
   it('answers a finished take that missed its success rule unverified, resumed too', async () => {
@@ -820,6 +904,180 @@ describe('several takes, each its own job', () => {
   });
 });
 
+/**
+ * MONID'S ASYNC RUNS: the submit answers 202 with a `pollUrl` on its own host,
+ * and every poll answers 402 with no way to pay and Monid's own sign-in
+ * challenge, until the wallet that paid signs it (tenjin#977).
+ */
+describe('a poll the seller answers with a sign-in challenge', () => {
+  const RUN_URL = 'https://x402.monid.ai/v1/runs/R1';
+  const MONID = spec({
+    capabilityId: 'monid-crunchbase-rounds',
+    provider: 'Monid (Crunchbase)',
+    output: 'json',
+    priceAtomic: '20000',
+    maxAmountAtomic: '20000',
+    request: { method: 'POST', url: 'https://x402.monid.ai/v1/run', fields: {}, location: 'body' },
+    pinned: {},
+    job: {
+      pollUrl: { field: 'pollUrl' },
+      pollMethod: 'GET',
+      running: { field: 'status', values: ['RUNNING'] },
+      failed: { field: 'status', values: ['FAILED'] },
+      everyS: 3,
+      maxWaitS: 300,
+      keepH: 24,
+    },
+  });
+  const started = () => json(202, { runId: 'R1', status: 'RUNNING', pollUrl: RUN_URL });
+
+  it('signs in with the wallet that paid, and pays nothing for the poll', async () => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const challenge = buildSignInChallenge(RUN_URL);
+    const { transport, seen } = polls([
+      { status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge.header } },
+      { status: 200, body: { runId: 'R1', status: 'COMPLETED', output: { rounds: 3 } } },
+    ]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]!.request.headers['sign-in-with-x']).toBeUndefined();
+    expect(parseSIWxHeader(seen[1]!.request.headers['sign-in-with-x']!)).toMatchObject({
+      domain: 'x402.monid.ai',
+      nonce: challenge.nonce,
+      address: testSigner().address,
+    });
+    for (const poll of seen) expect(paymentOf(poll.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it('signs nothing for a challenge bound to another host, and fails the take', async () => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: {
+          'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL, { domain: 'evil.example' }).header,
+        },
+      },
+    ]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(String(result.envelope.reason)).toContain('evil.example');
+    expect(seen).toHaveLength(1);
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
+  /** The sign-in header each poll carried, in order. */
+  const signIns = (seen: { request: PollRequest }[]) =>
+    seen.map((poll) => poll.request.headers['sign-in-with-x']);
+
+  // One signature per poll, and never a payment: a seller that answers the
+  // signed poll with a price is not paid a second time for the run.
+  it('fails the take after one signature when the seller answers it with a price', async () => {
+    await storeSpecs(dir, [MONID]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+      },
+      { status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': buildPaymentRequired().header } },
+    ]);
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(seen).toHaveLength(2);
+    expect(signIns(seen).filter((header) => header !== undefined)).toHaveLength(1);
+    for (const poll of seen) expect(paymentOf(poll.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
+  });
+
+  // A locked wallet or a keychain that did not answer once ended a paid take
+  // for good, while the seller still held its result.
+  it('keeps the take through a wallet that would not open, and signs on the next poll', async () => {
+    await storeSpecs(dir, [MONID]);
+    const { fetchImpl } = submit(MONID, started);
+    const challenge = {
+      status: 402,
+      body: {},
+      headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+    };
+    const { transport, seen } = polls([
+      challenge,
+      challenge,
+      { status: 200, body: { runId: 'R1', status: 'COMPLETED', output: { rounds: 3 } } },
+    ]);
+    let lockOnce = false;
+    const wallet = testWalletProvider();
+    const run = deps(fetchImpl, async (target, request, signal) => {
+      if (seen.length === 0) lockOnce = true;
+      return transport(target, request, signal);
+    });
+    run.payDeps.provider = {
+      ...wallet,
+      getSigner: async () => {
+        if (lockOnce) {
+          lockOnce = false;
+          throw new Error('the keychain did not answer');
+        }
+        return wallet.getSigner();
+      },
+    };
+    const result = await runRequestTool({ id: ID, input: INPUT }, run);
+    expect(result.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(signIns(seen).map((header) => header !== undefined)).toEqual([false, false, true]);
+  });
+
+  // The take is the proof of payment: a wallet switched since the submit is
+  // not the one that paid, and signs nothing.
+  it('signs nothing with a wallet other than the one that paid the take', async () => {
+    await storeSpecs(dir, [MONID]);
+    const { fetchImpl } = submit(MONID, started);
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+      },
+    ]);
+    const other = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`));
+    let current = testSigner();
+    const opened: string[] = [];
+    const run = deps(fetchImpl, async (target, request, signal) => {
+      current = other;
+      return transport(target, request, signal);
+    });
+    run.payDeps.provider = {
+      ...testWalletProvider(),
+      describe: () => testWalletProvider(current).describe(),
+      getSigner: async () => {
+        opened.push(current.address);
+        return current;
+      },
+    };
+    const result = await runRequestTool({ id: ID, input: INPUT }, run);
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(seen).toHaveLength(1);
+    expect(opened).not.toContain(other.address);
+  });
+});
+
 describe("AiSpace's queue, polled free with the queue id", () => {
   /** The submit settles at once, as AiSpace's real queue does. */
   const TX = `0x${'cd'.repeat(32)}`;
@@ -874,6 +1132,59 @@ describe("AiSpace's queue, polled free with the queue id", () => {
     expect(await ledger()).toEqual([
       expect.objectContaining({ txHash: TX, settlement: 'settled', savedFiles: [saved] }),
     ]);
+  });
+
+  // A sign-in answers only a GET, as a direct pay's does: a signed POST would
+  // resend the retrieve's body as the wallet, a write that could spend credit
+  // the seller holds for it. The challenge is refused unsigned and the take
+  // fails, with no second poll and no wallet asked to sign.
+  it('signs nothing when a POST retrieve answers with a sign-in challenge', async () => {
+    await storeSpecs(dir, [AISPACE]);
+    const auth = testAuthorizer();
+    const { fetchImpl } = submit(AISPACE, queued);
+    const retrieve = 'https://x402.aispace.bot/api/v1/video/retrieve';
+    const { transport, seen } = polls([
+      {
+        status: 402,
+        body: {},
+        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(retrieve).header },
+      },
+    ]);
+    const signIn = vi.fn(async () => undefined);
+    const direct = await pollUntil(
+      {
+        poll: { url: retrieve, method: 'POST', body: '{"queue_id":"q-77"}' },
+        job: AISPACE_JOB,
+      },
+      { deadline: clock + 60_000, firstWaitMs: 0 },
+      {
+        transport: polls([
+          {
+            status: 402,
+            body: {},
+            headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(retrieve).header },
+          },
+        ]).transport,
+        now: () => clock,
+        destination: { resolveHostname: async () => [{ address: '93.184.216.34', family: 4 }] },
+        signIn,
+      },
+    );
+    expect(signIn).not.toHaveBeenCalled();
+    expect(direct).toMatchObject({ state: 'failed', status: 402 });
+
+    const result = await runRequestTool(
+      { id: ID, input: INPUT },
+      deps(fetchImpl, transport, { auth }),
+    );
+    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(String(result.envelope.reason)).toContain(
+      'nothing was signed: a sign-in answers only a GET, and this poll is a POST',
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.request.headers['sign-in-with-x']).toBeUndefined();
+    expect(paymentOf(seen[0]!.request.headers)).toBeUndefined();
+    expect(auth.authorize).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a clip that could not be saved resumable, and fetches it again unpaid', async () => {

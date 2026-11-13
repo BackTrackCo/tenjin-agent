@@ -3,6 +3,7 @@ import {
   LOW_FUNDS_TAIL,
   runPay,
   settlementTx,
+  signInForPoll,
   type AdvertisedTerms,
   type PaidLeg,
   type PayDeps,
@@ -86,6 +87,7 @@ import { openLookupFooter, SILENT_FOOTER, type LookupFooter } from './progress';
 import { saveInlineMedia } from './inline-media';
 import {
   appendPaidRecord,
+  extensionFor,
   MAX_MEDIA_FILES,
   mediaUrlsIn,
   reconcilePayments,
@@ -1582,6 +1584,8 @@ async function payAndDeliver(
       providerError?: string;
       /** The seller's reason for not settling, from its payment-response header. */
       settlementError?: string;
+      /** The seller's reason for refusing the payment, from its PAYMENT-REQUIRED header. */
+      paymentError?: string;
       /** Where a long job's result will be, named by the seller before the paid
        *  leg timed out. */
       statusUrl?: string;
@@ -1621,6 +1625,7 @@ async function payAndDeliver(
         header: cutHeader,
         providerAtomic: leftAtomic,
         ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+        ...(detail.settlement === 'settled' ? { settled: true } : {}),
       });
       return { ...job, left: { amountAtomic: leftAtomic, signed: true } };
     }
@@ -1659,11 +1664,14 @@ async function payAndDeliver(
     });
     // An authorization that left is a paid call whatever came back: recorded
     // with its settlement unknown, for `tenjin payments reconcile` to resolve.
+    // A failure the chain already shows was charged (`runPay` read it) is
+    // recorded settled.
     if (leftAtomic > 0n) {
       await appendPaidRecord(
         deps.ctx.dataDir,
         paidRecord(call, built.url, call.sent, leftAtomic, {
           ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
+          ...(detail.settlement === 'settled' ? { settled: true } : {}),
           savedFiles: [],
           ...(deps.now !== undefined ? { now: deps.now } : {}),
         }),
@@ -1696,6 +1704,9 @@ async function payAndDeliver(
         ...(typeof detail.settlementError === 'string'
           ? { settlementError: detail.settlementError }
           : {}),
+        // THE SELLER'S REASON FOR REFUSING THE PAYMENT, from its 402's own
+        // PAYMENT-REQUIRED header, which the body may not repeat.
+        ...(typeof detail.paymentError === 'string' ? { paymentError: detail.paymentError } : {}),
         // WHAT WAS SENT, on a failure too: the agent cannot match a 400 to a
         // field it cannot see.
         request: { method: built.method, url: built.url },
@@ -1934,6 +1945,9 @@ interface SubmitSeen {
   providerAtomic: bigint;
   /** The submit's settlement, when its payment-response header named it. */
   txHash?: string;
+  /** The chain already showed the submit's authorization used (`runPay`
+   *  read it when the paid leg was cut off). */
+  settled?: boolean;
   authorization?: SignedAuthorization;
 }
 
@@ -1970,6 +1984,7 @@ async function startJob(
       paidRecord(call, built.url, call.sent, providerAtomic, {
         ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
         ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
+        ...(submit.settled === true ? { settled: true } : {}),
         savedFiles: [],
         now,
       }),
@@ -1984,13 +1999,13 @@ async function startJob(
     await footer.done('failed', shown);
     return {
       outcome: { status: 'failed', ...httpStatus },
-      result: fail('failed', `${reason} ${paidNothing(providerAtomic, submit.txHash)}`, {
+      result: fail('failed', `${reason} ${paidNothing(providerAtomic, submit)}`, {
         providerAtomic,
-        settlement: submit.txHash !== undefined ? 'settled' : 'unknown',
+        settlement: settledOf(submit) ? 'settled' : 'unknown',
         ...(submit.status !== undefined ? { providerStatus: submit.status } : {}),
         request: { method: built.method, url: built.url },
         ...parameters,
-        nextStep: failedNextStep(submit.txHash),
+        nextStep: failedNextStep(settledOf(submit)),
         ...extras,
       }),
     };
@@ -2044,6 +2059,7 @@ async function startJob(
     amountAtomic: providerAtomic.toString(),
     ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
     ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
+    ...(submit.settled === true ? { settled: true } : {}),
     ...httpStatus,
     state: 'running',
     savedFiles: [],
@@ -2063,39 +2079,66 @@ async function startJob(
   const answer = await pollUntil(
     take,
     { deadline, firstWaitMs: job.spec.everyS * 1000 },
-    pollDeps(deps),
+    pollDeps(deps, take),
   );
   return finishTake(take, answer, deps, footer, { kept, parameters: call.parameters });
+}
+
+/** What is known of a submit's money: the tx its payment-response named, or
+ *  that the chain showed its authorization used. */
+interface SubmitMoney {
+  txHash?: string;
+  settled?: boolean;
+}
+
+/** The submit's payment was taken for certain. */
+function settledOf(money: SubmitMoney): boolean {
+  return money.txHash !== undefined || money.settled === true;
 }
 
 /**
  * THAT A FAILED JOB WAS PAID AND BROUGHT NOTHING BACK, and what is known of
  * the money: settled when the submit's payment-response named the
  * transaction (AiSpace settles at submit, so a refused prompt is still a paid
- * one), else unknown until the authorization expires.
+ * one) or the chain showed a cut-off submit's payment taken, else unknown
+ * until the authorization expires.
  */
-function paidNothing(amountAtomic: bigint, txHash: string | undefined): string {
+function paidNothing(amountAtomic: bigint, money: SubmitMoney): string {
   const usd = `$${toMoney(amountAtomic.toString()).usd}`;
-  return txHash !== undefined
-    ? `It was paid (${usd}, settled in tx ${txHash}) and nothing came back.`
+  if (money.txHash !== undefined) {
+    return `It was paid (${usd}, settled in tx ${money.txHash}) and nothing came back.`;
+  }
+  return money.settled === true
+    ? `It was paid (${usd}; the chain shows the payment taken) and nothing came back.`
     : `It was paid (${usd}) and nothing came back; whether that payment settles is unknown until its authorization expires.`;
 }
 
 /** What the agent does after a job failed: the money is already accounted. */
-function failedNextStep(txHash: string | undefined): string {
-  return txHash !== undefined
+function failedNextStep(settled: boolean): string {
+  return settled
     ? 'Tell the user it was paid and nothing came back; the payment is in `tenjin payments`. A new call pays again.'
     : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
 }
 
-/** The poll's seams, and who is told of each poll. */
-function pollDeps(deps: RequestToolDeps): PollDeps {
+/** The poll's seams, who is told of each poll, and the wallet a seller's
+ *  sign-in challenge is answered with: the one the provider leg pays with,
+ *  and only when it is the one that signed this take's submit. */
+function pollDeps(deps: RequestToolDeps, take?: JobTake): PollDeps {
+  const provider = deps.provider ?? deps.payDeps?.provider;
+  const from = take?.authorization?.from;
   return {
     ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     ...(deps.onPoll !== undefined ? { onPoll: deps.onPoll } : {}),
+    signIn: (challenge, url) =>
+      signInForPoll(challenge, url, deps.ctx, {
+        ...(provider !== undefined ? { provider } : {}),
+        ...(take !== undefined && from !== undefined
+          ? { paidBy: { from, url: take.call.url } }
+          : {}),
+      }),
   };
 }
 
@@ -2226,7 +2269,7 @@ async function finishTake(
     answer.state === 'expired'
       ? `${take.call.provider} no longer has this job (HTTP ${answer.status}).`
       : `${take.call.provider}: ${answer.reason}.`
-  } ${paidNothing(providerAtomic, take.txHash)}`;
+  } ${paidNothing(providerAtomic, take)}`;
   const said = answer.state === 'failed' ? answer.said : undefined;
   const ended = await end({
     state: answer.state,
@@ -2255,12 +2298,12 @@ function failedResult(
 ): RequestToolResult {
   return fail('failed', reason, {
     providerAtomic: BigInt(take.amountAtomic),
-    settlement: take.txHash !== undefined ? 'settled' : 'unknown',
+    settlement: settledOf(take) ? 'settled' : 'unknown',
     ...(status !== undefined ? { providerStatus: status } : {}),
     ...(said !== undefined ? { providerError: said } : {}),
     request: { method: take.poll.method, url: take.poll.url },
     ...(parameters !== undefined ? { parameters } : {}),
-    nextStep: failedNextStep(take.txHash),
+    nextStep: failedNextStep(settledOf(take)),
   });
 }
 
@@ -2365,7 +2408,7 @@ function endedResult(take: JobTake, opts: { raced?: boolean } = {}): RequestTool
     failedResult(
       take,
       take.reason ??
-        `${take.call.provider}: the job ended without a result. ${paidNothing(BigInt(take.amountAtomic), take.txHash)}`,
+        `${take.call.provider}: the job ended without a result. ${paidNothing(BigInt(take.amountAtomic), take)}`,
       undefined,
       take.said,
     ),
@@ -2411,7 +2454,7 @@ async function resumeJob(offerId: string, deps: RequestToolDeps): Promise<Reques
           : waited,
         Date.parse(take.expiresAt),
       );
-      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps));
+      const answer = await pollUntil(take, { deadline, firstWaitMs: 0 }, pollDeps(deps, take));
       const done = await finishTake(take, answer, deps, SILENT_FOOTER, { kept: true });
       return { take, result: done.result, outcome: done.outcome };
     }),
@@ -2567,7 +2610,8 @@ export function failureOutcome(
   }
 }
 
-/** One ledger line for a paid call; the settlement is known only with a tx. */
+/** One ledger line for a paid call; the settlement is known only with a tx,
+ *  or once the chain shows the authorization used (`settled`). */
 function paidRecord(
   decision: { capabilityId: string; provider: string; label?: string; via?: 'swap' },
   url: string,
@@ -2576,6 +2620,7 @@ function paidRecord(
   opts: {
     txHash?: string;
     authorization?: SignedAuthorization;
+    settled?: boolean;
     savedFiles: string[];
     now?: () => number;
   },
@@ -2591,43 +2636,10 @@ function paidRecord(
     sent: recordedSent(sent),
     amountAtomic: amountAtomic.toString(),
     ...(opts.txHash !== undefined ? { txHash: opts.txHash } : {}),
-    settlement: opts.txHash !== undefined ? 'settled' : 'unknown',
+    settlement: opts.txHash !== undefined || opts.settled === true ? 'settled' : 'unknown',
     savedFiles: opts.savedFiles,
     ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
   };
-}
-
-/** Extensions for the media types a paid lookup plausibly returns; any other
- *  type, `text/html` from a seller included, is saved as `.bin`. */
-const EXTENSIONS: Record<string, string> = {
-  'audio/mpeg': 'mp3',
-  'audio/mp3': 'mp3',
-  'audio/wav': 'wav',
-  'audio/x-wav': 'wav',
-  'audio/wave': 'wav',
-  'audio/ogg': 'ogg',
-  'audio/aac': 'aac',
-  'audio/flac': 'flac',
-  'audio/webm': 'webm',
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'image/svg+xml': 'svg',
-  'image/avif': 'avif',
-  'audio/mp4': 'm4a',
-  'audio/x-m4a': 'm4a',
-  'video/quicktime': 'mov',
-  'video/mp4': 'mp4',
-  'video/webm': 'webm',
-  'application/pdf': 'pdf',
-  'application/zip': 'zip',
-  'application/octet-stream': 'bin',
-};
-
-export function extensionFor(contentType: string): string {
-  const type = contentType.split(';')[0]!.trim().toLowerCase();
-  return EXTENSIONS[type] ?? 'bin';
 }
 
 /**
@@ -2815,6 +2827,9 @@ export interface FailExtras {
   /** Why the seller says it did not settle a signed payment, bounded and
    *  redacted. Provider content. */
   settlementError?: string;
+  /** Why the seller refused a payment, from its 402's PAYMENT-REQUIRED
+   *  header, bounded and redacted. Provider content. */
+  paymentError?: string;
   /** Where a long job's result will be, as the seller named it. Provider content. */
   statusUrl?: string;
   /** The backend's own stable error code, from a typed non-2xx body. */
@@ -2905,6 +2920,7 @@ export function fail(
       ...(extras.providerStatus !== undefined ? { providerStatus: extras.providerStatus } : {}),
       ...(extras.providerError !== undefined ? { providerError: extras.providerError } : {}),
       ...(extras.settlementError !== undefined ? { settlementError: extras.settlementError } : {}),
+      ...(extras.paymentError !== undefined ? { paymentError: extras.paymentError } : {}),
       ...(extras.statusUrl !== undefined ? { statusUrl: extras.statusUrl } : {}),
       ...(extras.request !== undefined ? { request: extras.request } : {}),
       ...(extras.parameters !== undefined ? { parameters: extras.parameters } : {}),

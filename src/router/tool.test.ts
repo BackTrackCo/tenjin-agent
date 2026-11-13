@@ -12,8 +12,8 @@ import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
 import type { CommandContext } from '../context';
 import { runPay } from '../commands/pay';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
-import { extensionFor, failureOutcome, runRequestTool } from './tool';
-import type { MediaTransport } from './paid';
+import { failureOutcome, runRequestTool } from './tool';
+import { extensionFor, readPaidRecords, type MediaTransport } from './paid';
 import { readSpec, SPEC_TTL_MS, storeChoices, storeSpecs } from './specs';
 import { wireSettings } from './settings-wire';
 import { claimIgnored, noteShown } from './untaken';
@@ -533,18 +533,30 @@ describe('a provider that refuses the lookup', () => {
 describe('a paid call the provider refused', () => {
   const REASON = 'This website is no longer supported, please reach out to support.';
 
-  /** The paid leg answers 403 with `answer`, after a 402 and one signature. */
+  /** The paid leg answers 403 with `answer`, after a 402 and one signature.
+   *  The chain read that follows answers `used` for the authorization. */
   async function refused(
     answer: Partial<Leg>,
+    used = false,
   ): Promise<Awaited<ReturnType<typeof runRequestTool>>> {
     const { fetchImpl, calls } = net([
       { url: ROUTER, status: 200, body: decision() },
       { url: PROVIDER, status: 402, body: {}, headers: { 'PAYMENT-REQUIRED': challenge() } },
       { url: PROVIDER, status: 403, body: null, ...answer },
     ]);
+    const chainFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: `0x${(used ? 1 : 0).toString(16).padStart(64, '0')}`,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
+    const base = deps(fetchImpl);
     const result = await runRequestTool(
       { query: 'https://www.linkedin.com/in/someone', id: 'k3f9-abcd' },
-      deps(fetchImpl),
+      { ...base, payDeps: { ...base.payDeps, chainFetch } },
     );
     expect(calls.filter((call) => call.paid)).toHaveLength(1);
     return result;
@@ -602,6 +614,29 @@ describe('a paid call the provider refused', () => {
   it('carries no settlementError when the seller sent no payment-response header', async () => {
     const result = await refused({ body: { success: false, error: REASON } });
     expect(result.envelope).not.toHaveProperty('settlementError');
+  });
+
+  it("hands the agent the seller's reason from its 402's PAYMENT-REQUIRED header", async () => {
+    const said = 'payment settlement failed; please retry';
+    const result = await refused({
+      status: 402,
+      body: {},
+      headers: {
+        'PAYMENT-REQUIRED': buildPaymentRequired({ amount: '10000' }, { error: said }).header,
+      },
+    });
+    expect(result.envelope).toMatchObject({ providerStatus: 402, paymentError: said });
+    expect(String(result.envelope.reason)).toContain(said);
+  });
+
+  // AiSpace settled a call and then refused its input: the router said the
+  // settlement was unknown for money the chain already showed taken.
+  it('says a call the chain shows used was charged, and records it settled', async () => {
+    const result = await refused({ body: { success: false, error: REASON } }, true);
+    expect(result.envelope).toMatchObject({ providerStatus: 403, settlement: 'settled' });
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { settlement: 'settled', amountAtomic: '10000' },
+    ]);
   });
 });
 

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  appendPaidRecord,
   createUniqueFile,
   maskDeep,
   MAX_SENT_CHARS,
@@ -12,8 +13,10 @@ import {
   reconcilePayments,
   recordedSent,
   saveMedia,
+  walletPaidHost,
   writeAll,
   type MediaTransport,
+  type PaidRecord,
 } from './paid';
 import { runPaymentsList, runPaymentsReconcile } from './payments';
 import { readSpendSummary } from '../lib/spend-ledger';
@@ -35,6 +38,64 @@ describe('what the ledger records as sent', () => {
     const sent = recordedSent(`use ${secret} ${'x'.repeat(10_000)}`);
     expect(sent).not.toContain(secret);
     expect(sent).toHaveLength(MAX_SENT_CHARS);
+  });
+});
+
+describe("whether this wallet paid a seller's host", () => {
+  const WALLET = '0x65eDa17cCEb66844EfE862D4062D664b33960888';
+  const NOW = Date.parse('2026-11-09T08:00:00Z');
+
+  function row(over: Partial<PaidRecord> = {}): PaidRecord {
+    return {
+      version: 1,
+      ts: new Date(NOW - 60_000).toISOString(),
+      capabilityId: 'pay',
+      provider: 'x402.monid.ai',
+      url: 'https://x402.monid.ai/v1/run',
+      sent: '',
+      amountAtomic: '20000',
+      settlement: 'unknown',
+      savedFiles: [],
+      authorization: { from: WALLET.toLowerCase(), nonce: `0x${'1'.repeat(64)}`, validBefore: '1' },
+      ...over,
+    };
+  }
+
+  // The rule a seller's sign-in challenge is signed under without asking: a
+  // payment to that host, from this wallet, at any time, that the chain has not
+  // shown went unused.
+  it.each([
+    { name: 'a payment a minute ago', over: {}, expected: true },
+    {
+      name: 'a payment a year ago',
+      over: { ts: new Date(NOW - 365 * 86_400_000).toISOString() },
+      expected: true,
+    },
+    {
+      name: 'one the chain showed unused',
+      over: { settlement: 'not_charged' as const },
+      expected: false,
+    },
+    {
+      name: 'one from another wallet',
+      over: {
+        authorization: {
+          from: `0x${'2'.repeat(40)}`,
+          nonce: `0x${'1'.repeat(64)}`,
+          validBefore: '1',
+        },
+      },
+      expected: false,
+    },
+    { name: 'one to another host', over: { url: 'https://monid.ai/v1/run' }, expected: false },
+    {
+      name: 'one with no authorization on record',
+      over: { authorization: undefined },
+      expected: false,
+    },
+  ])('counts $name: $expected', async ({ over, expected }) => {
+    await appendPaidRecord(dir, row(over));
+    expect(await walletPaidHost(dir, 'x402.monid.ai', WALLET)).toBe(expected);
   });
 });
 

@@ -78,6 +78,9 @@ const TakeSchema = z.strictObject({
     .string()
     .regex(/^0x[0-9a-fA-F]{64}$/)
     .optional(),
+  /** The chain showed the submit's authorization used when its paid leg was
+   *  cut off: paid for certain, with no tx named. */
+  settled: z.boolean().optional(),
   /** The submit's HTTP status. */
   httpStatus: z.number().int().optional(),
   state: z.enum(['running', 'done', 'failed', 'expired']),

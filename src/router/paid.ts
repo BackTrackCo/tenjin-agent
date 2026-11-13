@@ -15,8 +15,8 @@ import { releaseUnchargedExposure } from '../lib/wallet/spend';
 /**
  * WHAT A PAID ROUTER CALL BOUGHT, KEPT ON THIS MACHINE. One JSON line per paid
  * call in `~/.tenjin/paid/ledger.jsonl`: who was paid, for what, how much, the
- * settlement it carried and the files it saved. A direct `tenjin pay` the
- * seller did not deliver on is a line too. It is the user's own record
+ * settlement it carried and the files it saved. Every direct `tenjin pay`
+ * that signed is a line too, delivered or not. It is the user's own record
  * and the receipt `tenjin payments reconcile` resolves an unknown settlement
  * against. Nothing here can fail a lookup: every write swallows its own error.
  */
@@ -323,6 +323,47 @@ export async function reconcilePayments(
   };
 }
 
+/**
+ * WHAT THE CHAIN SAYS OF A PAID CALL THAT FAILED, read the moment it failed:
+ * `settled` once USDC on Base shows the authorization used, so a seller that
+ * took the money and returned an error shows as charged. Anything else stays
+ * `unknown`: an unused authorization can still be settled until its
+ * `validBefore`, so only {@link reconcilePayments}, past that, may call it
+ * not charged.
+ */
+export async function chargedOnChain(
+  authorization: SignedAuthorization | undefined,
+  rpcUrl: string,
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<'settled' | 'unknown'> {
+  if (authorization === undefined) return 'unknown';
+  return (await authorizationUsed(authorization, rpcUrl, opts)) === true ? 'settled' : 'unknown';
+}
+
+/**
+ * WHETHER THIS WALLET PAID THIS HOST, by the paid ledger: a row for the same
+ * host (with its port) whose authorization this address signed, that the
+ * chain has not shown went unused. There is no time limit. It is what lets a
+ * seller's sign-in challenge be signed without asking: that seller already
+ * holds this address.
+ */
+export async function walletPaidHost(
+  dataDir: string,
+  host: string,
+  address: string,
+): Promise<boolean> {
+  const from = address.toLowerCase();
+  return (await readPaidRecords(dataDir)).some((record) => {
+    if (record.settlement === 'not_charged') return false;
+    if (record.authorization?.from.toLowerCase() !== from) return false;
+    try {
+      return new URL(record.url).host === host;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** Every paid record in the ledger, oldest first; a line that is not one is skipped. */
 export async function readPaidRecords(dataDir: string): Promise<PaidRecord[]> {
   const raw = await readFile(paidLedgerPath(dataDir), 'utf8').catch(() => '');
@@ -360,6 +401,39 @@ const MEDIA_EXTENSIONS = new Set([
   'webm',
   'mov',
 ]);
+/** Extensions for the media types a paid call plausibly returns; any other
+ *  type, `text/html` from a seller included, is saved as `.bin`. */
+const EXTENSIONS: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/webm': 'webm',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'video/quicktime': 'mov',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/octet-stream': 'bin',
+};
+
+export function extensionFor(contentType: string): string {
+  const type = contentType.split(';')[0]!.trim().toLowerCase();
+  return EXTENSIONS[type] ?? 'bin';
+}
+
 export const MAX_MEDIA_FILES = 5;
 export const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 export const MEDIA_TIMEOUT_MS = 60_000;
