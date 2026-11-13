@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, rm, type FileHandle } from 'node:fs/promises';
+import type { IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -484,30 +485,45 @@ export interface MediaDeps {
  * that hands back the one validated address closes that: the socket goes to
  * it, and TLS still verifies the certificate against the URL's own host name.
  */
-export const pinnedGet: MediaTransport = (target, signal) =>
-  new Promise((resolve, reject) => {
+export const pinnedGet: MediaTransport = async (target, signal) => {
+  const res = await pinnedHttps(target, { method: 'GET' }, signal);
+  const length = Number(res.headers['content-length']);
+  const location = res.headers.location;
+  return {
+    status: res.statusCode ?? 0,
+    ...(typeof location === 'string' ? { location } : {}),
+    ...(Number.isFinite(length) ? { contentLength: length } : {}),
+    body: res,
+    discard: () => res.destroy(),
+  };
+};
+
+/**
+ * ONE REQUEST ON THE PINNED SOCKET, the one every request to a host this CLI
+ * checked goes out on: a media download (above), a job's poll (`jobs.ts`)
+ * and every request to a connected account (`accounts/fetch.ts`). No
+ * redirect is followed; the caller sees the 3xx and checks the next hop.
+ */
+export function pinnedHttps(
+  target: PinnedTarget,
+  request: { method: string; headers?: Record<string, string>; body?: string | Uint8Array },
+  signal: AbortSignal,
+): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
     const req = httpsRequest(
       target.url,
       {
-        method: 'GET',
+        method: request.method,
+        ...(request.headers !== undefined ? { headers: request.headers } : {}),
         signal,
         lookup: pinnedLookup(target),
       },
-      (res) => {
-        const length = Number(res.headers['content-length']);
-        const location = res.headers.location;
-        resolve({
-          status: res.statusCode ?? 0,
-          ...(typeof location === 'string' ? { location } : {}),
-          ...(Number.isFinite(length) ? { contentLength: length } : {}),
-          body: res,
-          discard: () => res.destroy(),
-        });
-      },
+      resolve,
     );
     req.on('error', reject);
-    req.end();
+    req.end(request.body);
   });
+}
 
 /** A `lookup` that answers every name with the one validated address. */
 export function pinnedLookup(target: Pick<PinnedTarget, 'address' | 'family'>): LookupFunction {

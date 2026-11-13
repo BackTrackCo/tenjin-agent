@@ -1,4 +1,5 @@
 import pkg from '../../../package.json';
+import { accountFetch } from './fetch';
 
 /**
  * ONE SESSION WITH A CONNECTED ACCOUNT'S MCP SERVER, over the SDK's
@@ -68,7 +69,8 @@ export class AccountBadInput extends Error {
 }
 
 export interface SessionDeps {
-  /** The transport's fetch; tests pass a scripted one. */
+  /** The transport's fetch; tests pass a scripted one. Production sends on
+   *  {@link accountFetch}, checked and pinned. */
   fetchImpl?: typeof fetch;
   /** Each request's own deadline. */
   timeoutMs?: number;
@@ -120,7 +122,7 @@ export const openAccountSession: OpenAccountSession = async (mcpUrl, headers, de
   const timeout = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
     requestInit: { headers },
-    ...(deps.fetchImpl !== undefined ? { fetch: deps.fetchImpl } : {}),
+    fetch: deps.fetchImpl ?? accountFetch,
   });
   const client = new Client({ name: 'tenjin', version: pkg.version }, { capabilities: {} });
   try {

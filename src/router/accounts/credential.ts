@@ -1,5 +1,6 @@
 import { LockTimeoutError } from '../../lib/lock';
 import type { KeyScheme, SignIn } from '../decision';
+import { accountFetch } from './fetch';
 import { said } from './said';
 import {
   readVault,
@@ -238,7 +239,7 @@ async function refreshed(
   if (refreshToken === undefined || typeof serverUrl !== 'string' || client === undefined)
     return expire();
   const resource = (discovery.resourceMetadata as { resource?: unknown } | undefined)?.resource;
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = deps.fetchImpl ?? accountFetch;
   const timeout = deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const sdk = await import('@modelcontextprotocol/sdk/client/auth.js');
   let tokens: Record<string, unknown>;

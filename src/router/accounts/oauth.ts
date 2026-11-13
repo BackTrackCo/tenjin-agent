@@ -11,6 +11,7 @@ import type {
 import pkg from '../../../package.json';
 import { CliError } from '../../lib/errors';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
+import { accountFetch } from './fetch';
 import { openRedirect, REDIRECT_PORTS } from './loopback';
 import { said } from './said';
 
@@ -144,7 +145,8 @@ export class ConnectProvider implements OAuthClientProvider {
 }
 
 export interface SignInDeps {
-  fetchImpl: typeof fetch;
+  /** Test seam; production sends on {@link accountFetch}, checked and pinned. */
+  fetchImpl?: typeof fetch;
   /** Opens the approval page; false when no browser could open. */
   open: (url: string) => Promise<boolean>;
   /** One line to the person, on stderr. */
@@ -220,14 +222,15 @@ export async function signIn(
   deps: SignInDeps,
 ): Promise<SignedIn> {
   const { id, label, mcpUrl } = account;
+  const fetchImpl = deps.fetchImpl ?? accountFetch;
   const fetchFn = (input: string | URL | Request, init?: RequestInit) =>
-    deps.fetchImpl(input, {
+    fetchImpl(input, {
       ...init,
       signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   let first: Challenge;
   try {
-    first = await challenge(mcpUrl, deps.fetchImpl);
+    first = await challenge(mcpUrl, fetchImpl);
   } catch (err) {
     throw new CliError(
       'NETWORK_ERROR',
@@ -361,7 +364,7 @@ export async function revokeSignIn(
     clientInformation?: Record<string, unknown>;
     discoveryState?: Record<string, unknown>;
   },
-  fetchImpl: typeof fetch,
+  fetchImpl: typeof fetch = accountFetch,
 ): Promise<'revoked' | 'unsupported' | 'failed'> {
   const metadata = (secret.discoveryState?.authorizationServerMetadata ?? {}) as {
     revocation_endpoint?: unknown;

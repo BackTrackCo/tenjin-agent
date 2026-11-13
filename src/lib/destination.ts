@@ -19,8 +19,10 @@ import { CliError } from './errors';
  * transport that connects to the address it validated (`node:https` with a
  * `lookup` override, as the draft experiment's `safeHttpsTransport` did), which
  * the plan for this release left unported for the paid leg. The router's media
- * download does connect that way: it pins its socket to the address
- * {@link resolvePublicDestination} validated (`router/paid.ts`). What this does remove
+ * download, a job's poll and every request to a connected account do connect
+ * that way: each pins its socket to the address
+ * {@link resolvePublicDestination} validated (`router/paid.ts`'s
+ * `pinnedHttps`). What this does remove
  * is the easy local target: `http://`, credentials, a custom port, a literal
  * private address, a `.localhost`/`.internal` name, and a public name whose
  * only answers are private. Documented in docs/safety-model.md as a bound.

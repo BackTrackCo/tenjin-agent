@@ -532,7 +532,7 @@ export async function runConnect(
       );
     }
     const signInDeps: SignInDeps = {
-      fetchImpl: deps.fetchImpl ?? fetch,
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       open: deps.openUrl ?? ((url) => openInBrowser(url)),
       notice: (line) => emitWriteNotice(ctx.io, line),
       interactive: ctx.io.isTTY && (deps.stdinIsTTY ?? Boolean(process.stdin.isTTY)),
@@ -726,7 +726,7 @@ export async function runDisconnect(
     else {
       const read = await readVault(id, label, vaultDeps).catch(() => null);
       signedOut =
-        read?.status === 'ok' ? await revokeSignIn(read.secret, deps.fetchImpl ?? fetch) : 'failed';
+        read?.status === 'ok' ? await revokeSignIn(read.secret, deps.fetchImpl) : 'failed';
     }
   }
   await deleteVault(id, vaultDeps);

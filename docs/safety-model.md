@@ -25,7 +25,7 @@ A routing decision can cost the server's quoted fee, at most $0.003, even when i
 
 For a spec-backed call, the live challenge must match the spec's recipient, network, asset and price ceiling. An older lookup without a spec checks the quote's price and does **not** provide complete endpoint/payee binding.
 
-The paid request checks that its destination resolves publicly, but the payment transport resolves it again. DNS changing between those steps can bypass that check. Media downloads and job polls instead connect to the validated public address; downloads validate every redirect hop, while polls follow no redirects and carry no payment.
+The paid request checks that its destination resolves publicly, but the payment transport resolves it again. DNS changing between those steps can bypass that check. Media downloads, job polls and every request to a connected account's servers (connecting, signing in, a token refresh, signing out and the MCP session) instead connect to the validated public address. Downloads validate every redirect hop, account requests validate each same-origin hop the MCP SDK follows, and polls follow no redirects and carry no payment. An account address must pass the same check, so one on a private network or a port other than 443 cannot be connected.
 
 The provider controls its response. Schema and success-rule checks can detect contract failures; they cannot prove the content is correct, safe or useful. Results remain untrusted even after a successful payment.
 
