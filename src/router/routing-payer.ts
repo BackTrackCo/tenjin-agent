@@ -880,7 +880,7 @@ export class RoutingPayer {
       throw new RouteSkipped(
         error === CHANNEL_BUSY_ERROR
           ? CHANNEL_BUSY
-          : paymentShortOfFunds(response)
+          : paymentShortOfFunds(response, call.channel?.http)
             ? 'wallet_low'
             : PAYMENT_FAILED,
         answered,

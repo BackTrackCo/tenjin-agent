@@ -7,6 +7,7 @@ import {
   paidLegTimeoutMs,
   quoteRouterCall,
   runPay,
+  settlementTx,
   type PaidLeg,
 } from './pay';
 import { admitPlan, admitQuote, type PlanSlot } from '../lib/spend-plan';
@@ -16,7 +17,7 @@ import { CliError } from '../lib/errors';
 import lowFundsFixtures from '../lib/fixtures/low-funds.json';
 import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { knownDeploymentOrigins } from '../lib/production-origin';
-import { encodePaymentRequiredHeader } from '@x402/core/http';
+import { encodePaymentRequiredHeader, encodePaymentResponseHeader } from '@x402/core/http';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../lib/read-test-utils';
@@ -390,6 +391,36 @@ describe('runPay, tenjin lane', () => {
     await expect(
       runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  // The SDK's reader accepts a v1 challenge from the body when the header is
+  // absent. This command pays only a v2 header, so it never hands it the body.
+  it('refuses a v1 challenge in the body as a 402 with no PAYMENT-REQUIRED header', async () => {
+    const v1 = { x402Version: 1, accepts: buildPaymentRequired().paymentRequired.accepts };
+    const { fetch, calls } = scriptedFetch([json(402, v1)]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: `The 402 from ${TENJIN_URL} carried no PAYMENT-REQUIRED header.`,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  // The SDK throws one error for an absent header and an empty one; an empty
+  // header was sent, so it is the undecodable one.
+  it.each([
+    ['empty', ''],
+    ['not base64 JSON', 'not base64 json'],
+  ])('a 402 whose PAYMENT-REQUIRED header is %s cannot be decoded', async (_label, value) => {
+    const { fetch, calls } = scriptedFetch([json(402, {}, { 'PAYMENT-REQUIRED': value })]);
+    await expect(
+      runPay({ url: TENJIN_URL }, makeCtx(), { ...PUBLIC_DNS, fetchImpl: fetch }),
+    ).rejects.toMatchObject({
+      code: 'CONTRACT_MISMATCH',
+      message: 'Could not decode the PAYMENT-REQUIRED header.',
+    });
+    expect(calls).toHaveLength(1);
   });
 });
 
@@ -1398,6 +1429,7 @@ describe('runPay, bazaar lane', () => {
     ['one that says it settled', { success: true, transaction: `0x${'ab'.repeat(32)}` }],
     ['one that cannot be read', 'not base64 json'],
     ['one that is not an object', Buffer.from('false').toString('base64')],
+    ['one that is JSON null', Buffer.from('null').toString('base64')],
   ])('keeps the unknown-settlement failure for %s', async (_label, settle) => {
     const err = await rejectedWith(settle);
     expect(err.message).toBe('Payment was not accepted by the endpoint.');
@@ -2777,5 +2809,40 @@ describe('a direct pay the seller refused', () => {
       }),
     ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
     expect(await readPaidRecords(dir)).toEqual([]);
+  });
+});
+
+// The SDK's settlement reader, called directly: it throws on an absent or
+// unreadable header, and the read treats that as no settlement.
+describe('settlementTx', () => {
+  const TX = `0x${'ab'.repeat(32)}`;
+  const settle = (transaction: string) =>
+    encodePaymentResponseHeader({ success: true, transaction, network: 'eip155:8453' });
+  const res = (headers: Record<string, string>) => ({
+    header: (name: string) => headers[name],
+  });
+
+  it.each([
+    ['PAYMENT-RESPONSE', { 'PAYMENT-RESPONSE': settle(TX) }],
+    ['X-PAYMENT-RESPONSE alone', { 'X-PAYMENT-RESPONSE': settle(TX) }],
+    [
+      'PAYMENT-RESPONSE over X-PAYMENT-RESPONSE',
+      { 'PAYMENT-RESPONSE': settle(TX), 'X-PAYMENT-RESPONSE': settle(`0x${'cd'.repeat(32)}`) },
+    ],
+    // The SDK's own fall-through: an empty PAYMENT-RESPONSE is no header.
+    [
+      'X-PAYMENT-RESPONSE beside an empty PAYMENT-RESPONSE',
+      { 'PAYMENT-RESPONSE': '', 'X-PAYMENT-RESPONSE': settle(TX) },
+    ],
+  ])('reads %s', (_label, headers) => {
+    expect(settlementTx(res(headers))).toBe(TX);
+  });
+
+  it.each([
+    ['absent', {}],
+    ['not base64 JSON', { 'PAYMENT-RESPONSE': 'not base64 json' }],
+    ['JSON null', { 'PAYMENT-RESPONSE': Buffer.from('null').toString('base64') }],
+  ])('is undefined, and never throws, when the header is %s', (_label, headers) => {
+    expect(settlementTx(res(headers))).toBeUndefined();
   });
 });

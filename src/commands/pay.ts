@@ -1,6 +1,5 @@
-import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
-import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
+import type { PaymentRequired, PaymentRequirements, SettleResponse } from '@x402/core/types';
 import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaar';
 import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
@@ -28,11 +27,12 @@ import {
 import {
   buildExactPayment,
   createPayerClient,
+  headerReader,
   isCanonicalUsdc,
   noPayableRequirement,
   selectPayableRequirement,
 } from '../lib/x402-pay';
-import type { x402Client } from '@x402/core/client';
+import type { x402Client, x402HTTPClient } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { appendPaidRecord, recordedSent } from '../router/paid';
 import type { CommandContext, CommandResult } from '../context';
@@ -54,11 +54,6 @@ import type { CommandContext, CommandResult } from '../context';
  * and each is signed only against its call's spend plan (`admit`).
  * Signing is offline; the facilitator verifies funds when the seller submits payment.
  */
-
-const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED';
-const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE';
-/** x402 v1's name for the same header. */
-const PAYMENT_RESPONSE_HEADER_V1 = 'X-PAYMENT-RESPONSE';
 
 /** Terminal preview cap; `--print-body` lifts it. The machine body is never cut. */
 const BODY_PREVIEW_CHARS = 1200;
@@ -351,11 +346,11 @@ async function executePay(
     );
   }
 
-  const paymentRequired = decodeChallenge(probe, url);
   // The client is built BEFORE the wallet is opened on purpose: selection needs
   // only the registered networks and the policies, never a key, so an
   // unpayable or unverifiable deal is refused before a signer exists.
   const payer = createPayerClient(() => signerOrThrow(openedSigner));
+  const paymentRequired = decodeChallenge(probe, url, payer.http);
   const requirement = selectRequirement(payer.core, paymentRequired, args.terms);
   // `--quote` is a READ: the 402 is reported as it came, with the entry the
   // paid path would sign marked by the same selection. Nothing below this line
@@ -444,7 +439,7 @@ async function executePay(
         },
       );
     }
-    effectiveChallenge = decodeChallenge(recheck, url);
+    effectiveChallenge = decodeChallenge(recheck, url, payer.http);
     const fresh = selectRequirement(payer.core, effectiveChallenge, args.terms);
     if (fresh === undefined) {
       throw noMatchingEntry(effectiveChallenge, args.terms);
@@ -659,6 +654,7 @@ async function executePay(
     }
     return deliver(url, lane, paid, {
       paid: true,
+      http: payer.http,
       warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
@@ -674,8 +670,8 @@ async function executePay(
   // A SELLER THAT SAYS IT DID NOT SETTLE is named as saying so, with its reason
   // from the payment-response header: its body can be an empty `{}`. The
   // authorization stays valid until it expires, so settlement is still unknown.
-  const refusal = settlementRefusal(paid);
-  const lowFunds = paymentShortOfFunds(paid);
+  const refusal = settlementRefusal(paid, payer.http);
+  const lowFunds = paymentShortOfFunds(paid, payer.http);
   if (lowFunds) markShortOfFunds(slot);
   await recordUnsettled();
   throw new CliError(
@@ -779,8 +775,8 @@ export async function quoteRouterCall(
       },
     );
   }
-  const challenge = decodeChallenge(probe, url);
   const payer = createPayerClient(() => signerOrThrow({}));
+  const challenge = decodeChallenge(probe, url, payer.http);
   const requirement = selectRequirement(payer.core, challenge, args.terms);
   if (requirement === undefined) throw noMatchingEntry(challenge, args.terms);
   assertWithinTerms(args.terms, requirement);
@@ -815,7 +811,7 @@ export async function quoteRouterCall(
       },
     );
   }
-  const fresh = decodeChallenge(recheck, url);
+  const fresh = decodeChallenge(recheck, url, payer.http);
   const owed = selectRequirement(payer.core, fresh, args.terms);
   if (owed === undefined) throw noMatchingEntry(fresh, args.terms);
   assertWithinTerms(args.terms, owed);
@@ -1008,20 +1004,31 @@ function parseBody(data: string | undefined): unknown {
   }
 }
 
-function decodeChallenge(res: HttpResponse, url: string): PaymentRequired {
-  const encoded = res.header(PAYMENT_REQUIRED_HEADER);
-  if (encoded === undefined) {
-    throw new CliError(
-      'CONTRACT_MISMATCH',
-      `The 402 from ${url} carried no PAYMENT-REQUIRED header.`,
-      {
-        fix: 'The endpoint does not speak x402 v2; nothing was paid.',
-      },
-    );
-  }
+/**
+ * The 402's challenge, read by the payer client's SDK reader. The body is not
+ * passed: the SDK would accept a v1 challenge from it, and this command pays
+ * only a v2 header. The SDK throws one error for an absent header and an
+ * unreadable one, so the lookup notes which it was, and each keeps its own
+ * refusal.
+ */
+function decodeChallenge(res: HttpResponse, url: string, http: x402HTTPClient): PaymentRequired {
+  let carried = false;
   try {
-    return decodePaymentRequiredHeader(encoded);
+    return http.getPaymentRequiredResponse((name) => {
+      const value = res.header(name);
+      if (value !== undefined) carried = true;
+      return value;
+    });
   } catch (err) {
+    if (!carried) {
+      throw new CliError(
+        'CONTRACT_MISMATCH',
+        `The 402 from ${url} carried no PAYMENT-REQUIRED header.`,
+        {
+          fix: 'The endpoint does not speak x402 v2; nothing was paid.',
+        },
+      );
+    }
     throw new CliError('CONTRACT_MISMATCH', 'Could not decode the PAYMENT-REQUIRED header.', {
       cause: err,
     });
@@ -1286,6 +1293,8 @@ type DeliverOpts = {
     }
   | {
       paid: true;
+      /** The payer client's reader, for the settlement header. */
+      http: x402HTTPClient;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
       authorization?: { from: string; nonce: string; validBefore: string };
@@ -1367,7 +1376,7 @@ function sameDeal(a: PaymentRequirements, b: PaymentRequirements): boolean {
 }
 
 function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts): CommandResult {
-  const settlementTxHash = opts.paid ? settlementTx(res) : undefined;
+  const settlementTxHash = opts.paid ? settlementTx(res, opts.http) : undefined;
   const data = {
     url,
     lane,
@@ -1428,9 +1437,19 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
  * The settlement transaction the payment-response header names (v2's
  * `PAYMENT-RESPONSE`, or v1's `X-PAYMENT-RESPONSE`): base64 JSON carrying
  * `transaction`. Read from the protocol header only, never the seller's body.
+ * A caller with no payer client (a job's answer, read in a later call) gets
+ * the shared reader.
  */
-export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefined {
-  const tx = paymentResponse(res)?.transaction;
+export function settlementTx(
+  res: Pick<HttpResponse, 'header'>,
+  http: x402HTTPClient = headerReader,
+): string | undefined {
+  let tx: unknown;
+  try {
+    tx = http.getPaymentSettleResponse(res.header).transaction;
+  } catch {
+    return undefined; // No readable payment-response header.
+  }
   return typeof tx === 'string' && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx : undefined;
 }
 
@@ -1440,29 +1459,23 @@ export function settlementTx(res: Pick<HttpResponse, 'header'>): string | undefi
  * one bounded redacted line. Seller text, never instructions. `undefined` when
  * the header is absent, unreadable or says it settled.
  */
-function settlementRefusal(res: Pick<HttpResponse, 'header'>): { reason?: string } | undefined {
-  const settle = paymentResponse(res);
+function settlementRefusal(
+  res: Pick<HttpResponse, 'header'>,
+  http: x402HTTPClient,
+): { reason?: string } | undefined {
+  let settle: SettleResponse | null;
+  try {
+    settle = http.getPaymentSettleResponse(res.header);
+  } catch {
+    return undefined; // No readable payment-response header.
+  }
+  // The decoded JSON is the seller's: it can be `null` or not an object.
   if (settle?.success !== false) return undefined;
   const said = [settle.errorReason, settle.errorMessage].find(
     (value): value is string => typeof value === 'string' && value.trim().length > 0,
   );
   const reason = said !== undefined ? sellerLine(said) : '';
   return reason.length > 0 ? { reason } : {};
-}
-
-/** The decoded payment-response header (v2's `PAYMENT-RESPONSE`, or v1's
- *  `X-PAYMENT-RESPONSE`) when it is a JSON object, else `undefined`. */
-function paymentResponse(res: Pick<HttpResponse, 'header'>): Record<string, unknown> | undefined {
-  const header = res.header(PAYMENT_RESPONSE_HEADER) ?? res.header(PAYMENT_RESPONSE_HEADER_V1);
-  if (header === undefined) return undefined;
-  try {
-    const settle: unknown = decodePaymentResponseHeader(header);
-    return typeof settle === 'object' && settle !== null
-      ? (settle as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /**

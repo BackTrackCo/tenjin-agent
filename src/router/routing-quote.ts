@@ -1,6 +1,5 @@
-import { decodePaymentRequiredHeader } from '@x402/core/http';
 import type { PaymentRequirements } from '@x402/core/types';
-import { canonicalUsdcOnly } from '../lib/x402-pay';
+import { canonicalUsdcOnly, headerReader } from '../lib/x402-pay';
 import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 
 /**
@@ -26,10 +25,9 @@ export function routingOffers(
  * SDK then refuses as it always did.
  */
 export function quoteOf(header: (name: string) => string | null | undefined): bigint | null {
-  const value = header('PAYMENT-REQUIRED');
-  if (value === null || value === undefined) return null;
   try {
-    const required = decodePaymentRequiredHeader(value);
+    // No payer client exists yet: the quote is read before the wallet opens.
+    const required = headerReader.getPaymentRequiredResponse(header);
     const amounts = routingOffers(required.x402Version, required.accepts).map((r) =>
       BigInt(r.amount),
     );

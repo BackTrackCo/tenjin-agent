@@ -1,5 +1,7 @@
-import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
+import type { x402HTTPClient } from '@x402/core/client';
+import type { PaymentRequired, SettleResponse } from '@x402/core/types';
 import type { HttpResponse } from './http';
+import { headerReader } from './x402-pay';
 
 /** Bound parsing of seller-controlled headers and embedded JSON details. */
 const MAX_ERROR_CHARS = 16_384;
@@ -41,18 +43,6 @@ function isShortOfFunds(value: unknown): boolean {
   }
 }
 
-function headerObject(
-  header: string | undefined,
-  decode: (header: string) => unknown,
-): Record<string, unknown> | undefined {
-  if (header === undefined || header.length > MAX_ERROR_CHARS) return undefined;
-  try {
-    return record(decode(header));
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Seller-reported low funds: for failure messaging, and to keep an approved
  * quote open for the person's next yes (`spend-plan.ts`). Never evidence to
@@ -60,14 +50,29 @@ function headerObject(
  */
 export function paymentShortOfFunds(
   res: Pick<HttpResponse, 'status' | 'header' | 'json'>,
+  http: x402HTTPClient = headerReader,
 ): boolean {
-  const settled = headerObject(
-    res.header('PAYMENT-RESPONSE') ?? res.header('X-PAYMENT-RESPONSE'),
-    decodePaymentResponseHeader,
-  );
+  // A header over the bound reads as absent, so the SDK's own fall-through applies.
+  const bounded = (name: string) => {
+    const value = res.header(name);
+    return value !== undefined && value.length > MAX_ERROR_CHARS ? undefined : value;
+  };
+  // The SDK throws when a header is absent or unreadable; the decoded JSON is
+  // the seller's, so it can also be `null` or not an object.
+  let settled: SettleResponse | null | undefined;
+  try {
+    settled = http.getPaymentSettleResponse(bounded);
+  } catch {
+    settled = undefined;
+  }
   if ([settled?.errorReason, settled?.errorMessage].some(isShortOfFunds)) return true;
   if (res.status !== 402) return false;
-  const required = headerObject(res.header('PAYMENT-REQUIRED'), decodePaymentRequiredHeader);
+  let required: PaymentRequired | null | undefined;
+  try {
+    required = http.getPaymentRequiredResponse(bounded);
+  } catch {
+    required = undefined;
+  }
   const body = record(res.json);
   return [required?.error, body?.error, body?.reason].some(isShortOfFunds);
 }
