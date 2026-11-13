@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { payerDir } from './fee';
+import { modelChannelDir } from './model-channel';
 
 /**
  * What the wallet's routing channel still holds for fees, from the SDK's own
@@ -14,10 +15,20 @@ import { payerDir } from './fee';
 export async function channelCredit(
   dataDir: string,
   address: string,
-  lane: 'tool' | 'model' = 'tool',
+  lane: 'tool' | 'model' | 'model-routing' = 'tool',
+  origin?: string,
 ): Promise<bigint> {
   const base = payerDir(dataDir, address);
-  const dir = lane === 'model' ? join(base, 'model-inference') : base;
+  if (lane !== 'tool' && !origin) throw new Error('Model credit requires its server origin');
+  const dir =
+    lane === 'tool'
+      ? base
+      : modelChannelDir(
+          dataDir,
+          address,
+          lane === 'model' ? 'model-inference' : 'model-routing',
+          origin!,
+        );
   const storage = new FileClientChannelStorage({ directory: dir });
   let best = 0n;
   for (const name of await readdir(join(dir, 'client')).catch(() => [] as string[])) {

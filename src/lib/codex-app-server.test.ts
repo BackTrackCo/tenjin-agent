@@ -10,6 +10,8 @@ it.each([
 
 it.each([
   'Codex Desktop/0.157.1 (tenjin/0.163.0)',
+  'Codex Desktop/0.157.1-dev (tenjin/0.163.0)',
+  'Codex Desktop/0.157.1-dev tenjin/0.163.0',
   'Codex Desktop/0.163.0-dev',
   'missing version',
   undefined,

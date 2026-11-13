@@ -5,13 +5,14 @@ import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { withFileLock } from '../lib/lock';
-import type { RoutingPayer, RoutingPayerDeps } from './routing-payer';
+import type { RoutingPayerDeps } from './routing-payer';
 import { RoutingPayer as Payer } from './routing-payer';
 import { readJsonFile, writePrivate } from './store-files';
 import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import type { ModelJob } from './model-job';
+import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
 
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
@@ -67,20 +68,29 @@ function boundedResponse(response: Response): Response {
 
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
 export class ModelTransport {
+  private routing: Payer;
   constructor(
     private options: {
       dataDir: string;
       baseUrl: string;
-      routing: RoutingPayer;
       payerDeps: RoutingPayerDeps;
     },
-  ) {}
+  ) {
+    this.routing = new Payer({
+      ...options.payerDeps,
+      modelLane: {
+        path: '/api/model-router/route',
+        ceilingAtomic: ROUTING_FEE_CEILING_ATOMIC,
+        origin: this.origin,
+      },
+    });
+  }
   get origin() {
     return new URL(this.options.baseUrl).origin;
   }
   async route(body: unknown, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    const route = this.options.routing.routeFor(this.options.baseUrl, 'model_route');
+    const route = this.routing.routeFor(this.options.baseUrl);
     let result;
     try {
       const fetchFn = this.options.payerDeps.fetchImpl ?? fetch;
@@ -107,7 +117,7 @@ export class ModelTransport {
       signal?.throwIfAborted();
     } finally {
       // Lifecycle fences wait until any already signed accounting is drained.
-      await this.options.routing.idle();
+      await this.routing.idle();
     }
     if (!result.ok || result.status !== 200)
       throw new Error('Model router unavailable; keep native');
@@ -226,7 +236,7 @@ export class ModelTransport {
       };
       const payer = new Payer({
         ...payerDeps,
-        modelLane: { path: '/api/model-proxy/messages', ceilingAtomic: quote },
+        modelLane: { path: '/api/model-proxy/messages', ceilingAtomic: quote, origin: this.origin },
         fetchImpl: cachedFetch,
       });
       let result;

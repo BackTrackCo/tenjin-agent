@@ -21,7 +21,7 @@ export interface CodexAppOptions {
 /** Originator names vary by host; the first product/version identifies the server. */
 export function codexAppServerVersion(userAgent: unknown): string | null {
   return typeof userAgent === 'string'
-    ? (/^.+?\/([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)/.exec(userAgent)?.[1] ?? null)
+    ? (/^[^/]+\/([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)/.exec(userAgent)?.[1] ?? null)
     : null;
 }
 

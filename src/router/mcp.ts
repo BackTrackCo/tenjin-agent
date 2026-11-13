@@ -318,11 +318,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     session: () => modelSession,
     transport: async () => {
       const settings = await resolveContextSettings(ctx);
-      if (!opts.payer) throw new Error('Model payment unavailable');
       return new ModelTransport({
         dataDir: ctx.dataDir,
         baseUrl: settings.baseUrl,
-        routing: opts.payer,
         payerDeps: {
           dataDir: ctx.dataDir,
           getSigner: () => provider.getSigner(),

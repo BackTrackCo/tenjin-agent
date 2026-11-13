@@ -64,6 +64,23 @@ describe('status, the balance line', () => {
     expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
   });
 
+  it('shows model-routing and inference credit separately from funds for tool routing', async () => {
+    const result = await runRouterStatus(ctx(), {
+      cwd: dir,
+      routingCredit: async () => 21000n,
+      modelCredit: async () => 977000n,
+      modelRoutingCredit: async () => 47000n,
+      wallet: async () => ({ address: ADDRESS, atomic: 5000000n }),
+    });
+    expect(result.data).toMatchObject({
+      routingCredit: { remaining: { atomic: '21000' } },
+      modelCredit: { remaining: { atomic: '977000' } },
+      modelRoutingCredit: { remaining: { atomic: '47000' } },
+    });
+    expect(lines(result)).toContain('Subagents $0.977 set aside for model calls');
+    expect(lines(result)).toContain('Model fee $0.047 set aside for model routing');
+  });
+
   it('says the balance is low below the per-call limit, as `tenjin balance` does, and how to fund it', async () => {
     for (const atomic of [0n, 249_999n]) {
       const result = await status(atomic);

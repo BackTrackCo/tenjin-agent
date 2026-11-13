@@ -6,7 +6,6 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { afterEach, expect, it } from 'vitest';
 import { SIWX_HEADER } from '../lib/siwx';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
-import { RoutingPayer } from './routing-payer';
 import { ModelTransport } from './model-transport';
 import type { ModelJob } from './model-job';
 
@@ -98,7 +97,6 @@ async function fixture(options: { drop?: boolean; cap?: string } = {}) {
     new ModelTransport({
       dataDir: dir,
       baseUrl: BASE,
-      routing: new RoutingPayer(deps),
       payerDeps: deps,
     });
   return {
@@ -199,7 +197,6 @@ it('does not transmit a routing authorization after cancellation while the signe
   const transport = new ModelTransport({
     dataDir: dir,
     baseUrl: BASE,
-    routing: new RoutingPayer(deps),
     payerDeps: deps,
   });
   const abort = new AbortController();

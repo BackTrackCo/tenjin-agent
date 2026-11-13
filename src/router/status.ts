@@ -53,6 +53,7 @@ export interface StatusDeps {
   /** Seam for funds set aside for routing; production reads local channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
   modelCredit?: (ctx: CommandContext) => Promise<bigint>;
+  modelRoutingCredit?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
    *  null with no wallet. Production reads it as `tenjin balance` does. */
   wallet?: (ctx: CommandContext) => Promise<{ address: string; atomic: bigint | null } | null>;
@@ -77,11 +78,12 @@ async function walletBalance(
  *  this cannot read without a prompt. */
 async function walletRoutingCredit(
   ctx: CommandContext,
-  lane: 'tool' | 'model' = 'tool',
+  lane: 'tool' | 'model' | 'model-routing' = 'tool',
+  origin?: string,
 ): Promise<bigint> {
   try {
     const { address } = await describeWallet(resolveWalletProvider(ctx));
-    return await channelCredit(ctx.dataDir, address, lane);
+    return await channelCredit(ctx.dataDir, address, lane, origin);
   } catch {
     return 0n;
   }
@@ -359,10 +361,13 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const [creditAtomic, wallet, modelCreditAtomic] = await Promise.all([
+  const [creditAtomic, wallet, modelCreditAtomic, modelRoutingCreditAtomic] = await Promise.all([
     (deps.routingCredit ?? walletRoutingCredit)(ctx),
     (deps.wallet ?? walletBalance)(ctx).catch(() => null),
-    deps.modelCredit ? deps.modelCredit(ctx) : walletRoutingCredit(ctx, 'model'),
+    deps.modelCredit ? deps.modelCredit(ctx) : walletRoutingCredit(ctx, 'model', settings.baseUrl),
+    deps.modelRoutingCredit
+      ? deps.modelRoutingCredit(ctx)
+      : walletRoutingCredit(ctx, 'model-routing', settings.baseUrl),
   ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const capAtomic = settings.policy.maxAutoSpendAtomic;
@@ -393,6 +398,7 @@ export async function runRouterStatus(
       calls: Number(creditAtomic / ROUTING_FEE_CEILING_ATOMIC),
     },
     modelCredit: { remaining: toMoney(modelCreditAtomic.toString()) },
+    modelRoutingCredit: { remaining: toMoney(modelRoutingCreditAtomic.toString()) },
     caps: { maxAutoSpend: toMoney(capAtomic.toString()) },
     accounts,
     settings: saved,
@@ -458,6 +464,14 @@ export async function runRouterStatus(
               {
                 label: 'Subagents',
                 value: `${dollars(modelCreditAtomic)} set aside for model calls`,
+              },
+            ]
+          : []),
+        ...(modelRoutingCreditAtomic > 0n
+          ? [
+              {
+                label: 'Model fee',
+                value: `${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
               },
             ]
           : []),
