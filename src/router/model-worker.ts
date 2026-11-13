@@ -85,6 +85,7 @@ export async function runModelWorker(
     options.signal.throwIfAborted();
     if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325'))
       throw new Error('Maintained worker binary is unavailable; keep native');
+    let workerFailure: { error: unknown } | undefined;
     const result = await withCodexModelGates(
       {
         cwd: job.root,
@@ -93,8 +94,19 @@ export async function runModelWorker(
         ask: options.permission,
         dataDir: options.dataDir,
       },
-      (gates) => runQualifiedWorker(job, options, state.binary!, gates),
+      async (gates) => {
+        try {
+          return await runQualifiedWorker(job, options, state.binary!, gates);
+        } catch (error) {
+          // The generic app-server helper deliberately returns null on errors.
+          // Once the worker started, preserve its failure instead of reporting
+          // that native policy qualification failed.
+          workerFailure = { error };
+          throw error;
+        }
+      },
     );
+    if (workerFailure) throw workerFailure.error;
     if (result === null) throw new Error('Codex tool policy is not qualified; keep native');
     return result;
   }
@@ -127,6 +139,8 @@ async function runQualifiedWorker(
   const codexServer = codexTools ? nativeGateServer(codexTools) : undefined;
   const token = randomBytes(32).toString('hex');
   const pending = new Set<Promise<void>>();
+  let worker: ReturnType<typeof query> | undefined;
+  let proxyFailure: { error: unknown } | undefined;
   const bridge = createServer((req, res) => {
     const handle = async () => {
       try {
@@ -157,7 +171,14 @@ async function runQualifiedWorker(
             .end(completedMessageSse(message));
         else
           res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(message));
-      } catch {
+      } catch (error) {
+        proxyFailure ??= { error };
+        const stop = () => {
+          // Transport has already drained any signed accounting before it
+          // throws. Stop the model loop rather than retrying a failed turn.
+          controller.abort(error);
+          worker?.close();
+        };
         if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
         if (!res.destroyed)
           res.end(
@@ -168,7 +189,9 @@ async function runQualifiedWorker(
                 message: 'Tenjin worker request stopped; inspect receipts before retrying',
               },
             }),
+            stop,
           );
+        else stop();
       }
     };
     const done = handle();
@@ -196,7 +219,6 @@ async function runQualifiedWorker(
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     ...(gates ? { ENABLE_TOOL_SEARCH: 'false' } : {}),
   };
-  let worker: ReturnType<typeof query> | undefined;
   let result: string | undefined;
   try {
     options.signal.throwIfAborted();
@@ -298,10 +320,14 @@ async function runQualifiedWorker(
         result = message.result;
       }
     }
+    if (proxyFailure) throw proxyFailure.error;
     if (!result) throw new Error('DeepSeek worker returned no completed result');
     if (Buffer.byteLength(result, 'utf8') > 256_000)
       throw new Error('Worker handback exceeds size limit; inspect receipts before retrying');
     return result;
+  } catch (error) {
+    if (proxyFailure) throw proxyFailure.error;
+    throw error;
   } finally {
     controller.abort();
     worker?.close();
