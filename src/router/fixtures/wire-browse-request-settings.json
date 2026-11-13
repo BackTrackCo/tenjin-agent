@@ -10,7 +10,8 @@
     "headers",
     "note",
     "tolerant",
-    "settings"
+    "settings",
+    "mcp"
   ],
   "harness": "claude",
   "settings": {

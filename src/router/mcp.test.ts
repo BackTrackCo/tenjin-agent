@@ -1224,7 +1224,7 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // The router quotes the fee; the only amount written here is this CLI's ceiling.
       expect(request.description).toContain(
-        'Routing fees and tool charges are separate. Both follow the user’s spend limits.',
+        'Routing fees and tool charges are separate. Charges to the Tenjin balance follow the user’s spend limits; tool charges on a connected account follow that account’s plan.',
       );
     } finally {
       await client.close();
@@ -1276,9 +1276,10 @@ describe('a free answer on a machine with no wallet', () => {
 
 /**
  * DISCOVERY AND THE SWAP'S OWN FORM (plan 36). The server instructions name
- * `tenjin config --help` for settings changes, independent of whether a host
- * defers tool descriptions; the plugin's `decide` form runs only for a
- * session this router's hook legs served, and only alone.
+ * `tenjin config names <word>` and `tenjin config <command> --help` for
+ * settings changes, independent of whether a host defers tool descriptions;
+ * the plugin's `decide` form runs only for a session this router's hook legs
+ * served, and only alone.
  */
 describe('settings discovery and the decide form', () => {
   it('names tenjin config in the server instructions and the tool description', async () => {
@@ -1288,11 +1289,13 @@ describe('settings discovery and the decide form', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const said =
-        'run `tenjin config --help`, perform the requested operation and report its readback';
+        'find the exact name with `tenjin config names <word>`, run the operation ' +
+        '(`tenjin config <command> --help` shows its flags) and tell the user its readback';
       expect(client.getInstructions()).toContain(said);
       expect(client.getInstructions()).toContain(
-        'prefer, block, limit, reset, choose speed over cost or configure automatic Tenjin use',
+        'block, prefer, limit, reset or switch what Tenjin uses',
       );
+      expect(client.getInstructions()).toContain("Never change Tenjin's settings yourself.");
       const tools = await client.listTools();
       expect(tools.tools.find((t) => t.name === 'request')?.description).toContain(said);
       const alone = await client.callTool({
@@ -1314,6 +1317,33 @@ describe('settings discovery and the decide form', () => {
         swap: 'handback',
         reason: 'this session has not been seen by Tenjin yet',
       });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * THE FRESH-SESSION ACCEPTANCE CASE FOR YOUR OWN ACCOUNTS (plan 37): a new
+ * session's MCP client, before any tool description is loaded, is told where
+ * the user's own accounts are connected and where balance, spend and accounts
+ * are read, how long a sign-in may take, and never to ask for a key in chat;
+ * and the request tool takes the account the user names.
+ */
+describe('account discovery in a fresh session', () => {
+  it('names tenjin connect and tenjin status in the server instructions', async () => {
+    const { ACCOUNT_RULE } = await import('./mcp');
+    const server = buildRouterMcpServer({ dataDir: dir, handlerDeps: { cwd: dir } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'fresh', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      expect(client.getInstructions() ?? '').toContain(ACCOUNT_RULE);
+      const tools = await client.listTools();
+      const request = tools.tools.find((t) => t.name === 'request');
+      const props = request?.inputSchema.properties as Record<string, { description?: string }>;
+      expect(props.source?.description).toContain('connected accounts');
     } finally {
       await client.close();
       await server.close();

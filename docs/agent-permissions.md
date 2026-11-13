@@ -70,17 +70,18 @@ Do not broadly allow `Bash(tenjin:*)`, `wallet`, or `config`. Wallet repair, tra
 
 ## Your settings: what Tenjin offers on its own
 
-Ask your assistant to prefer, block, limit or reset what Tenjin uses, or to run its picks automatically, and it changes your settings with `tenjin config` operations. Each answers with what it saved, what it covers and the command that undoes it; `tenjin config --help` lists them with an example each, and the request tool's server instructions point a fresh session there. The settings live in `~/.tenjin/config.json` on this machine and are not synced; a project's `.tenjin/config.json` cannot add a rule or turn on automatic use. Showing, unblocking, resetting and pausing work offline. [Every operation →](./router-reference.md#your-settings)
+Ask your assistant to prefer, block, limit or reset what Tenjin uses, or to run its picks automatically, and it changes your settings with `tenjin config` operations. Each answers with what it saved, what it covers and the command that undoes it; `tenjin config --help` lists them, `tenjin config names <word>` finds the exact name a rule takes, and the request tool's server instructions point a fresh session there. The settings live in `~/.tenjin/config.json` on this machine and are not synced; a project's `.tenjin/config.json` cannot add a rule or turn on automatic use. Showing, unblocking, resetting and pausing work offline. [Every operation →](./router-reference.md#your-settings)
 
 Every routing call carries the saved rules, and Tenjin's router applies them to what it offers and picks on its own: a blocked tool is never offered, and nothing says so. You or your assistant can still ask for any tool by name, and it runs whatever the rules say. Before any call runs, this CLI checks that the offer was decided under the rules saved now; a rule changed since, in any terminal, refuses the call before any provider request or signature, and your assistant asks again.
 
-These narrow rules let your assistant read your settings, block something, or reorder what is already allowed, without a prompt each time:
+These narrow rules let your assistant read your settings, look up the names a rule takes, block something, or reorder what is already allowed, without a prompt each time:
 
 ```text
 Bash(tenjin config)
 Bash(tenjin config --json)
 Bash(tenjin config --help)
 Bash(tenjin config get:*)
+Bash(tenjin config names:*)
 Bash(tenjin config block:*)
 Bash(tenjin config prefer:*)
 ```
@@ -88,6 +89,22 @@ Bash(tenjin config prefer:*)
 `block` only ever takes something away from what Tenjin offers on its own, and `prefer` only reorders services you already allow. `unblock`, `only`, `reset`, `set`, `speed` and `replacement` stay behind your host's normal permission prompt, because each can widen what Tenjin offers on its own or what it runs without asking. Do not add `Bash(tenjin config:*)`: it covers all of them. When you ask for a change yourself, Tenjin asks no second question; your host's prompt is the only one, and when you decline it nothing is saved. Tenjin installs none of these rules.
 
 "Run Tenjin's picks automatically" (`tenjin config replacement on`) is off by default. With it on, in Claude Code with the Tenjin plugin, a WebSearch or WebFetch your main assistant is about to make can be answered in place by the service Tenjin's router picks for it, within your settings and spending limits; a call over a limit is offered as usual and asks you first. Each one is a charge you are not asked about separately, so it names the service, its price and the search or fetch it replaced, and the paid ledger marks it `via: "swap"`. Codex and other agents keep getting ordinary offers.
+
+## Your own accounts
+
+Ask your assistant to use your own Apify, fal, Firecrawl or Exa account, or any MCP server by its https address, and it runs `tenjin connect <name>`. You approve the sign-in in your browser; where no browser can open, run `tenjin connect <name> --paste` in your own terminal and type the key at its hidden prompt. Never paste a key into a chat. Tenjin checks the account's tools for free, keeps the sign-in encrypted on this machine with its key in your OS keychain, and puts the account first for its jobs unless you say `--no-prefer`. No token, key or code reaches Tenjin's server; the router only learns which of the accounts it lists are connected here. [Every command →](./router-reference.md#your-own-accounts)
+
+Your own plan pays for calls on your account: they don't count toward `maxAutoSpend` or the daily budget, which cap your Tenjin balance only. When the account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops with the reason and offers its own tool for the job with its price, and nothing is charged until you pick. `tenjin config fallback on --source <account>` makes that switch automatic for one account. Routing still costs its small fee from the balance.
+
+`tenjin status` and `tenjin usage` only read: your balance from the chain, this machine's files and your settings. These rules let your assistant read them without a prompt each time:
+
+```text
+Bash(tenjin status)
+Bash(tenjin status --json)
+Bash(tenjin usage:*)
+```
+
+`connect`, `disconnect` and `config fallback` stay behind your host's normal permission prompt, because each changes what can be called and who pays.
 
 ## What the hooks send
 

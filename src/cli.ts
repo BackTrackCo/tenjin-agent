@@ -261,7 +261,7 @@ Examples:
   $ tenjin status
 
 Learn more:
-  Run \`tenjin <command> --help\` for one command.
+  Run tenjin <command> --help for details.
   Permissions: ${PERMISSIONS_DOC_URL}
   Issues: ${pkg.bugs}
 `,

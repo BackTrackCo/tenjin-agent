@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-04.2",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40",
+    "spec": {
+      "capabilityId": "fal.gpt-image",
+      "provider": "fal",
+      "label": "fal GPT Image 2.5",
+      "holds": {},
+      "output": "media",
+      "description": "one image from a text prompt, made by OpenAI GPT Image 2.5 at high quality",
+      "source": "fal",
+      "mcp": {
+        "tool": "run_model",
+        "args": {
+          "endpoint_id": "openai/gpt-image-2.5/sunburst/text-to-image",
+          "input": {
+            "prompt": "{prompt}",
+            "image_size": "{size}",
+            "quality": "high",
+            "num_images": 1,
+            "output_format": "png"
+          }
+        },
+        "result": "json-text",
+        "next": {
+          "when": {
+            "path": "status",
+            "values": ["processing"]
+          },
+          "poll": {
+            "tool": "check_job",
+            "args": {
+              "endpoint_id": "openai/gpt-image-2.5/sunburst/text-to-image",
+              "request_id": "{result.request_id}"
+            },
+            "result": "json-text",
+            "running": {
+              "path": "status",
+              "values": ["IN_QUEUE", "IN_PROGRESS"]
+            },
+            "everyS": 3,
+            "maxWaitS": 180
+          },
+          "tool": "get_job_result",
+          "args": {
+            "endpoint_id": "openai/gpt-image-2.5/sunburst/text-to-image",
+            "request_id": "{result.request_id}"
+          },
+          "result": "json-text"
+        }
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "What the image shows."
+          },
+          "size": {
+            "type": "string",
+            "enum": [
+              "square_hd",
+              "portrait_4_3",
+              "portrait_16_9",
+              "landscape_4_3",
+              "landscape_16_9"
+            ],
+            "description": "The shape of the image."
+          }
+        },
+        "required": ["prompt"],
+        "additionalProperties": false
+      },
+      "pinned": {},
+      "example": {
+        "prompt": "a cozy reading nook with a cat, warm light",
+        "size": "landscape_4_3"
+      },
+      "returns": "one image, saved to a file",
+      "resultSchema": {
+        "type": "object",
+        "required": ["images"]
+      },
+      "requires": ["mcp"]
+    },
+    "hint": "fal GPT Image 2.5, your fal account: one image from a text prompt, made by OpenAI GPT Image 2.5 at high quality. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"prompt\":\"<what the image shows>\"}}) alone and wait for its result."
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 655
+  },
+  "honored": ["schemaVersion", "query", "accepts", "harness", "settings"],
+  "settingsHash": "sha256:44bad99c593f1a44fed71ffab7823adce00eca84b88a90d8cf136ec31c36c2da"
+}

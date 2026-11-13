@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, rm, type FileHandle } from 'node:fs/promises';
+import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -21,7 +22,9 @@ import { releaseUnchargedExposure } from '../lib/wallet/spend';
  * against. Nothing here can fail a lookup: every write swallows its own error.
  */
 
-export type Settlement = 'settled' | 'unknown' | 'not_charged';
+/** `account`: run on the user's own connected account, which their plan
+ *  pays; nothing left the balance, so there is nothing to settle. */
+export type Settlement = 'settled' | 'unknown' | 'not_charged' | 'account';
 
 /** The EIP-3009 authorization that was signed, enough to ask the token later
  *  whether it was used. */
@@ -39,6 +42,10 @@ export interface PaidRecord {
   provider: string;
   /** The service's display name, when its decision or spec carried one. */
   label?: string;
+  /** Who the call ran through: `tenjin` for Tenjin's own tools, or the id of
+   *  the connected account that ran it (plan 37). Rows from before have none
+   *  and read as `tenjin`. */
+  source?: string;
   /** `swap`: the call answered a native search or fetch in place, which
    *  nobody was asked about separately. */
   via?: 'swap';
@@ -53,6 +60,15 @@ export interface PaidRecord {
   /** When reconcile last asked the chain about it, so a slow or rate-limited
    *  RPC is not asked about the same record on every lookup. */
   lastCheckedAt?: string;
+  /** The offer id of a job on the user's own account: its one row, kept from
+   *  when its billing call may have billed and finished in place. */
+  job?: string;
+  /** `unknown`: a call on the user's own account that may have billed it,
+   *  with no result to show it did: still running, failed after the
+   *  account's job started, or answered with the account's own error. Usage
+   *  and payments say it may have charged, and never count it as billed.
+   *  Absent: the account ran it. */
+  charge?: 'unknown';
 }
 
 export const MAX_SENT_CHARS = 4_096;
@@ -126,6 +142,50 @@ export async function updatePaidRecord(
       if (found) {
         await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
       }
+    });
+  } catch {
+    // The record is the user's convenience; the lookup already happened.
+  }
+}
+
+/**
+ * A JOB ON THE USER'S OWN ACCOUNT, ONE ROW (plan 37). It is written once its
+ * billing call may have billed (still running, failed, or answered with the
+ * account's own error), its charge `unknown`, so usage and payments show it
+ * as may have charged; a later write for the same job that delivered (the
+ * resumed job) finishes that row in place, with the files it saved and its
+ * charge no longer unknown, under the lock reconcile rewrites with. Never
+ * throws.
+ */
+export async function recordAccountRow(
+  dataDir: string,
+  record: PaidRecord & { job: string },
+): Promise<void> {
+  try {
+    const path = paidLedgerPath(dataDir);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await withFileLock(`${path}.lock`, async () => {
+      const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
+      const kept = current
+        .map(({ record: row }) => row)
+        .find((row): row is PaidRecord => row?.job === record.job);
+      if (kept === undefined) {
+        await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        return;
+      }
+      // Still unknown, or already finished with nothing to add: unchanged.
+      if (record.charge !== undefined) return;
+      if (kept.charge === undefined && record.savedFiles.length === 0) return;
+      const lines = current.map(({ line, record: row }) => {
+        if (row?.job !== record.job) return line;
+        const finished: PaidRecord = {
+          ...row,
+          ...(record.savedFiles.length > 0 ? { savedFiles: record.savedFiles } : {}),
+        };
+        delete finished.charge;
+        return JSON.stringify(finished);
+      });
+      await writeFileAtomic(path, lines.map((line) => `${line}\n`).join(''), { mode: 0o600 });
     });
   } catch {
     // The record is the user's convenience; the lookup already happened.
@@ -425,30 +485,48 @@ export interface MediaDeps {
  * that hands back the one validated address closes that: the socket goes to
  * it, and TLS still verifies the certificate against the URL's own host name.
  */
-export const pinnedGet: MediaTransport = (target, signal) =>
-  new Promise((resolve, reject) => {
-    const req = httpsRequest(
+export const pinnedGet: MediaTransport = async (target, signal) => {
+  const res = await pinnedHttp(target, { method: 'GET' }, signal);
+  const length = Number(res.headers['content-length']);
+  const location = res.headers.location;
+  return {
+    status: res.statusCode ?? 0,
+    ...(typeof location === 'string' ? { location } : {}),
+    ...(Number.isFinite(length) ? { contentLength: length } : {}),
+    body: res,
+    discard: () => res.destroy(),
+  };
+};
+
+/**
+ * ONE REQUEST ON THE PINNED SOCKET, the one every request to a host this CLI
+ * checked goes out on: a media download (above), a job's poll (`jobs.ts`)
+ * and every connected-account request to a host the router or a server named
+ * (`accounts/fetch.ts`). HTTPS, but for the plain `http` the account check
+ * takes to a loopback address alone. No redirect is followed; the caller sees
+ * the 3xx and checks the next hop.
+ */
+export function pinnedHttp(
+  target: PinnedTarget,
+  request: { method: string; headers?: Record<string, string>; body?: string | Uint8Array },
+  signal: AbortSignal,
+): Promise<IncomingMessage> {
+  const send = target.url.protocol === 'http:' ? httpRequest : httpsRequest;
+  return new Promise((resolve, reject) => {
+    const req = send(
       target.url,
       {
-        method: 'GET',
+        method: request.method,
+        ...(request.headers !== undefined ? { headers: request.headers } : {}),
         signal,
         lookup: pinnedLookup(target),
       },
-      (res) => {
-        const length = Number(res.headers['content-length']);
-        const location = res.headers.location;
-        resolve({
-          status: res.statusCode ?? 0,
-          ...(typeof location === 'string' ? { location } : {}),
-          ...(Number.isFinite(length) ? { contentLength: length } : {}),
-          body: res,
-          discard: () => res.destroy(),
-        });
-      },
+      resolve,
     );
     req.on('error', reject);
-    req.end();
+    req.end(request.body);
   });
+}
 
 /** A `lookup` that answers every name with the one validated address. */
 export function pinnedLookup(target: Pick<PinnedTarget, 'address' | 'family'>): LookupFunction {

@@ -835,6 +835,77 @@ describe('RoutingPayer', () => {
     expect(router.log).toEqual([]);
   });
 
+  it.each([
+    ['active five-second top-up', 5_000, 0],
+    ['top-up still settling after its own deadline', TOP_UP_TIMEOUT_MS + 5_000, TOP_UP_TIMEOUT_MS],
+  ])(
+    'returns the first free answer inside the hook budget during %s',
+    async (_label, delayMs, elapsedMs) => {
+      const router = new FakeRouter();
+      let freeRequests = 0;
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const request = new Request(input, init);
+        const body = (await request.clone().json()) as { warm?: boolean };
+        if (body.warm === true) return router.fetch(request);
+        expect(request.headers.has('payment-signature')).toBe(false);
+        freeRequests += 1;
+        return new Response(JSON.stringify(router.body), {
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+      const signer = testSigner(wallet);
+      const signTypedData = vi.fn(signer.signTypedData);
+      const getSigner = vi.fn(async () => ({ ...signer, signTypedData }));
+      const walletBalance = vi.fn(async () => 5_000_000n);
+      const p = payer(router, { now: () => Date.now(), fetchImpl, getSigner, walletBalance });
+      await p.prewarm();
+      holdTime();
+      router.delayMs = delayMs;
+      const held = delayArmed(router);
+      const topping = p.topUpIfLow(BASE);
+      await held;
+      if (elapsedMs > 0) {
+        await vi.advanceTimersByTimeAsync(elapsedMs);
+        await topping;
+      }
+      const signatures = signTypedData.mock.calls.length;
+      const unlocks = getSigner.mock.calls.length;
+      const balanceReads = walletBalance.mock.calls.length;
+      try {
+        const started = Date.now();
+        let resolvedAt = Infinity;
+        const pending = requestDecision(
+          'tool',
+          { query: 'q' },
+          {
+            ctx: ctx(),
+            baseUrl: BASE,
+            fetchImpl,
+            timeoutMs: GATE_TIMEOUT_MS,
+            route: p.routeFor(BASE),
+          },
+        ).then((outcome) => {
+          resolvedAt = Date.now();
+          return outcome;
+        });
+        await vi.advanceTimersByTimeAsync(GATE_TIMEOUT_MS);
+        expect((await pending).status).toBe('decided');
+        expect(resolvedAt - started).toBeLessThan(GATE_TIMEOUT_MS);
+        expect(freeRequests).toBe(1);
+        expect(router.deposits).toBe(0);
+        expect(router.settledFees).toBe(0);
+        expect(getSigner).toHaveBeenCalledTimes(unlocks);
+        expect(signTypedData).toHaveBeenCalledTimes(signatures);
+        expect(walletBalance).toHaveBeenCalledTimes(balanceReads);
+      } finally {
+        await vi.advanceTimersByTimeAsync(delayMs);
+        await topping;
+        await p.idle();
+      }
+      expect(router.depositedOn).toEqual(['warm']);
+    },
+  );
+
   it('waits for a top-up in flight inside its budget, then pays a voucher', async () => {
     const router = new FakeRouter();
     router.delayMs = 300;
@@ -846,7 +917,7 @@ describe('RoutingPayer', () => {
     const outcome = await routeOnce(p, router);
     expect(outcome.status).toBe('decided');
     await topping;
-    // It waited: no deposit of its own, and no 402 sent before the top-up landed.
+    // The unsigned request passed the top-up; only its signed voucher waited.
     expect(router.deposits).toBe(1);
     expect(router.log).toEqual([
       'POST /api/x402-router/route warm unpaid',
@@ -901,13 +972,15 @@ describe('RoutingPayer', () => {
         route: p.routeFor(BASE),
       },
     );
-    expect(outcome).toEqual({ status: 'skipped', why: 'topping_up' });
-    // It stopped waiting with the paid call's reserve left, and sent nothing.
+    expect(outcome).toMatchObject({ status: 'skipped', why: 'topping_up', answered: true });
+    // It stopped with the paid call's reserve left, after one unsigned challenge.
     expect(Date.now() - started).toBeLessThan(PAID_CALL_RESERVE_MS);
     expect(warned.join('\n')).toMatch(/topping_up \(cause top-up in flight, \d+ms, stage queue\)/);
     expect(unpaidSentence('topping_up')).toBeNull();
     await topping;
-    expect(router.log.filter((l) => !l.includes(' warm '))).toEqual([]);
+    expect(router.log.filter((l) => !l.includes(' warm '))).toEqual([
+      'POST /api/x402-router/route unpaid',
+    ]);
   });
 
   it('sends one top-up for two processes on one wallet: the other skips, then pays from it', async () => {

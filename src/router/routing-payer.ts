@@ -101,8 +101,8 @@ export { reasonCode } from '../lib/payment-failure';
  *   starts when `tenjin mcp` starts on a channel that cannot cover a fee (a
  *   new one included), after a paid call leaves it so, and when a call's
  *   SDK asks for a deposit anyway. A call that meets one in flight in this
- *   process waits for it inside its own budget, since the fee is required and
- *   then pays a voucher. A per-answer quote above the fixed $0.003 fee can
+ *   process asks the router without a payment first: a free answer returns
+ *   at once, while a 402 waits inside its own budget and then pays a voucher. A per-answer quote above the fixed $0.003 fee can
  *   need more credit than a `warm` call replenishes, so it deposits inline
  *   on its own call. A router that answers
  *   `warm` with anything but its answer (an older server) has no form: for
@@ -400,6 +400,8 @@ export class RoutingPayer {
   private queue: Promise<unknown> = Promise.resolve();
   /** A detached request still finishing; the next call waits for it. */
   private tail: Promise<void> = Promise.resolve();
+  /** A sent payment still settling after its caller returned. Only unsigned requests bypass it. */
+  private settling = false;
   /** The one unlock in flight, which every caller and the prewarm await. */
   private unlocking: Promise<TenjinSigner> | null = null;
   /** Calls waiting on `unlocking` right now (the prewarm is not one). */
@@ -483,20 +485,66 @@ export class RoutingPayer {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
+        let firstChallenge: Response | undefined;
+        if (this.topping !== null || this.settling) {
+          // ONLY THE UNSIGNED REQUEST MAY PASS A TOP-UP. It cannot touch the
+          // SDK, signer or this.call: that shared state belongs to the queued
+          // payment still settling. A free answer needs none of that state.
+          const call: Call = {
+            host: target.host,
+            router: url,
+            until,
+            paid: false,
+            answered: false,
+            deposits: [],
+          };
+          calls.push(call);
+          let headers: Headers | undefined;
+          const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
+          const response = (call.result = await httpRequest(url, {
+            ...options,
+            timeoutMs: Math.max(0, until - this.now()),
+            fetchImpl: async (input, init) => {
+              const answer = await base(input, init);
+              call.answered = true;
+              headers = new Headers(answer.headers);
+              return answer;
+            },
+          }));
+          if (!response.ok || response.status >= 500) {
+            this.note(PAYMENT_FAILED, call, sent);
+            this.reportRouting(PAYMENT_FAILED);
+            throw new RouteSkipped(PAYMENT_FAILED, {
+              answered: call.answered,
+              ...(!response.ok && !call.answered && isUnreachable(response)
+                ? { unreached: response }
+                : {}),
+            });
+          }
+          if (response.status !== 402) return response;
+          // Its bounded body and exact headers become the SDK's first answer
+          // after the top-up, without asking or charging this prompt twice.
+          firstChallenge = new Response(response.text, { status: 402, headers });
+        }
         const once = () =>
           this.turn(
-            () => this.noted(sent, () => this.pay(url, options, until, calls)),
+            () => {
+              const first = firstChallenge;
+              firstChallenge = undefined;
+              return this.noted(sent, () => this.pay(url, options, until, calls, false, first));
+            },
             until,
             sent,
           );
-        // A TOP-UP IN FLIGHT IN THIS PROCESS: the call waits for it inside its
-        // own budget instead of skipping. The fee is required, so there is no
-        // free path to fall back to.
+        // ONLY THE PAYMENT RETRY WAITS for the top-up inside its budget. A
+        // router answer that needs no payment has already returned above.
         if (
           this.topping !== null &&
           (await this.waitForTopUp(this.topping, until, sent)) === null
         ) {
-          throw new RouteSkipped(TOPPING_UP);
+          throw new RouteSkipped(TOPPING_UP, {
+            ...(firstChallenge !== undefined ? { answered: true } : {}),
+          });
         }
         try {
           return await once();
@@ -677,6 +725,7 @@ export class RoutingPayer {
           settle();
           if (!call.paid) return own.abort(reason);
           call.detached = true;
+          this.settling = true;
           this.tail = this.finishDetached(call, sent, work, own);
           reject(reason);
         };
@@ -727,6 +776,7 @@ export class RoutingPayer {
       this.note(PAYMENT_FAILED, call, sent, own.signal.aborted ? 'late ceiling' : 'late network');
     } finally {
       this.timers.clearTimeout(ceiling);
+      this.settling = false;
     }
   }
 
@@ -741,6 +791,7 @@ export class RoutingPayer {
     until: number,
     calls: Call[],
     carrier = false,
+    firstChallenge?: Response,
   ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
@@ -775,7 +826,8 @@ export class RoutingPayer {
       // only follows it through copied Requests stops following once a copy is
       // garbage collected, and the call then outlives the hook's budget.
       const signal = init?.signal ?? request.signal;
-      let asked: Response | undefined = await base(request.clone(), { signal });
+      let asked: Response | undefined = firstChallenge ?? (await base(request.clone(), { signal }));
+      firstChallenge = undefined;
       call.answered = true;
       if (asked.status !== 402) return asked;
       try {

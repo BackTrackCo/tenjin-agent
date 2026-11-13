@@ -13,7 +13,9 @@ import {
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
-import { hasRules, wireSettings, type WireSettings } from './settings-wire';
+import { connectedSourceIds } from './accounts/presence';
+import { savedAccountOf, type SavedAccount } from './accounts/saved';
+import { BUILT_IN_SOURCE, hasRules, wireSettings, type WireSettings } from './settings-wire';
 import {
   findAllProjectFiles,
   findNearestProjectFiles,
@@ -91,11 +93,19 @@ export type WireState =
   | { status: 'ok'; settings: WireSettings; hasRules: boolean }
   | { status: 'invalid'; problem: string };
 
+/** The accounts saved in `router.sources` (plan 37), and which of them this
+ *  machine holds a sign-in for. A descriptor alone connects nothing. */
+export interface AccountsSetting {
+  saved: SavedAccount[];
+  connected: string[];
+}
+
 /** The personal settings, from the global file alone. */
 export interface PersonalSettings {
   policy: PolicySetting;
   nativeReplacement: ReplacementSetting;
   wire: WireState;
+  accounts: AccountsSetting;
 }
 
 export interface RouterSettings extends PersonalSettings {
@@ -107,27 +117,55 @@ export interface RouterSettings extends PersonalSettings {
 
 /**
  * The personal settings from the global file's router block. The sources are
- * Tenjin's own until accounts land: nothing is connected on this machine.
+ * Tenjin's own and, with `dataDir`, every account connected on this machine
+ * that the router has jobs for (`accounts/presence.ts`): a saved descriptor
+ * with a vault here. The hash covers them, so connecting or disconnecting an
+ * account refuses every offer decided before it. A saved list this build
+ * cannot read names no account.
  */
-export function personalSettings(router: unknown): PersonalSettings {
+export function personalSettings(router: unknown, dataDir?: string): PersonalSettings {
   const personal = readPersonalRouter(router);
   const { policy, nativeReplacement } = personal;
+  const listed = personal.sources.status === 'ok' ? personal.sources.saved : [];
+  const saved = listed.flatMap((entry) => savedAccountOf(entry) ?? []);
+  const accounts: AccountsSetting = {
+    saved,
+    connected:
+      dataDir !== undefined
+        ? connectedSourceIds(
+            dataDir,
+            saved.map(({ id }) => id),
+          )
+        : [],
+  };
   if (policy.status === 'invalid') {
-    return { policy, nativeReplacement, wire: { status: 'invalid', problem: policy.problem } };
+    return {
+      policy,
+      nativeReplacement,
+      wire: { status: 'invalid', problem: policy.problem },
+      accounts,
+    };
   }
-  const saved = policy.status === 'ok' ? policy.saved : undefined;
-  const settings = wireSettings(saved, nativeReplacement);
+  const rules = policy.status === 'ok' ? policy.saved : undefined;
+  // NAMED TO THE ROUTER: a saved account that is connected here and mapped,
+  // in the order saved. One connected by its address alone never is: its id
+  // comes from a private host name, and the router has nothing for it.
+  const routed = saved
+    .filter((account) => account.mapped === true && accounts.connected.includes(account.id))
+    .map(({ id }) => id);
+  const settings = wireSettings(rules, nativeReplacement, [BUILT_IN_SOURCE, ...routed]);
   return {
     policy,
     nativeReplacement,
     wire: { status: 'ok', settings, hasRules: hasRules(settings.policy) },
+    accounts,
   };
 }
 
 /** {@link personalSettings} straight from the global file in `dataDir`: what
  *  the check before every call compares an offer against. */
 export async function personalSettingsAt(dataDir: string): Promise<PersonalSettings> {
-  return personalSettings((await loadRawConfig(dataDir)).router);
+  return personalSettings((await loadRawConfig(dataDir)).router, dataDir);
 }
 
 export interface RouterSettingsInput {
@@ -173,7 +211,7 @@ export async function routerSettings(
       context = { value: layer.context, source, path };
     }
   }
-  return { enabled, context, improve, ...personalSettings(global) };
+  return { enabled, context, improve, ...personalSettings(global, input.dataDir) };
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];

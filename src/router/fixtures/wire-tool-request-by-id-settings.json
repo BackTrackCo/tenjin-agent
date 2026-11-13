@@ -11,6 +11,7 @@
     "note",
     "tolerant",
     "settings",
+    "mcp",
     "free-query"
   ],
   "harness": "claude",

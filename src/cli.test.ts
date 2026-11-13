@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { main } from './cli';
+import { buildProgram, main } from './cli';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { captureIo } from './context-test-utils';
 
@@ -44,29 +44,67 @@ afterAll(async () => {
 describe('main', () => {
   /**
    * `tenjin config --help` IS HOW AN AGENT FINDS THE SETTINGS OPERATIONS: the
-   * MCP instructions send it there when a user asks to change what Tenjin may
-   * use. Every operation is listed with an example and is a real subcommand.
+   * MCP instructions send it to `tenjin config <command> --help` for the
+   * flags and `tenjin config names <word>` for the names. The group's help is
+   * written by hand, so a command registered under it and missing from it is
+   * one an agent never finds; each operation's own help carries examples, and
+   * those that take a name point at where the names are.
    */
-  it('lists every settings operation with an example in `tenjin config --help`', async () => {
+  it('lists every config command in `tenjin config --help`, each with its own help', async () => {
     const cap = captureIo();
     expect(await main(['config', '--help'], cap.io)).toBe(0);
     const help = cap.stdout();
-    for (const operation of [
-      'prefer',
-      'only',
-      'block',
-      'unblock',
-      'reset',
-      'speed',
-      'replacement',
-    ]) {
-      expect(help).toMatch(new RegExp(`^  \\$ tenjin config ${operation} `, 'm'));
+    const config = buildProgram(captureIo().io, () => {}).commands.find(
+      (command) => command.name() === 'config',
+    );
+    const operations = config?.commands.map((command) => command.name()) ?? [];
+    expect(operations).toEqual(
+      expect.arrayContaining(['names', 'block', 'unblock', 'prefer', 'only', 'reset', 'speed']),
+    );
+    for (const operation of operations) {
+      // A row of its own: "  block / unblock", "  tenjin config names [word]".
+      expect(help, operation).toMatch(
+        new RegExp(`^  (?:tenjin config )?(?:[^/\\n]+ / )?${operation}\\b`, 'm'),
+      );
       const leaf = captureIo();
       expect(await main(['config', operation, '--help'], leaf.io)).toBe(0);
-      expect(leaf.stdout()).toContain(`$ tenjin config ${operation} `);
+      expect(leaf.stdout(), operation).toContain(`$ tenjin config ${operation}`);
     }
-    for (const variant of ['--source tenjin', '--dimension', '--capabilities', '--all-providers'])
-      expect(help.replace(/\s+/g, ' ')).toContain(variant);
+    for (const operation of ['prefer', 'only', 'block', 'unblock', 'reset', 'replacement']) {
+      const leaf = captureIo();
+      await main(['config', operation, '--help'], leaf.io);
+      expect(leaf.stdout(), operation).toContain('Find names: tenjin config names <word>');
+    }
+  });
+
+  // commander reads `config blok` as an operand of `config`, which would
+  // fail as "too many arguments" with nothing to go on.
+  it('answers a mistyped config command with the one it could mean', async () => {
+    const cap = captureIo();
+    expect(await main(['config', 'blok'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error).toMatchObject({
+      code: 'USAGE',
+      fix: 'Did you mean: block? See tenjin config --help.',
+    });
+  });
+
+  // `config --all` is the listing's own flag, and commander hands a parent its
+  // flag wherever it is placed: `config reset --all` must still reach reset.
+  it('still resets every rule with `config reset --all`', async () => {
+    const work = join(sandbox, 'work');
+    await mkdir(join(work, '.git'), { recursive: true });
+    const prev = process.cwd();
+    process.chdir(work);
+    try {
+      const reset = captureIo();
+      expect(await main(['config', 'reset', '--all', '--json'], reset.io)).toBe(0);
+      expect(JSON.parse(reset.stdout())).toMatchObject({
+        ok: true,
+        data: { operation: 'reset', changed: false },
+      });
+    } finally {
+      process.chdir(prev);
+    }
   });
 
   it('unknown command exits 2 with exactly one JSON error object', async () => {

@@ -40,6 +40,14 @@ vi.mock('../lib/passphrase-record', async (importOriginal) => {
   };
 });
 
+// THE BALANCE IS READ THROUGH THE PUBLIC-RPC FALLBACK (`balanceReader`), which
+// here asks the one per-RPC reader mocked above, so no test reads a chain.
+vi.mock('../lib/usdc-balance', async (importOriginal) =>
+  (await import('../lib/usdc-test-utils')).bridgedUsdcBalance(
+    await importOriginal<typeof import('../lib/usdc-balance')>(),
+  ),
+);
+
 import { getUsdcBalance } from '../lib/usdc';
 import {
   REPAIR_DONE_LINE,

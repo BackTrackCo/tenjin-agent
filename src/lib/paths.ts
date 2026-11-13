@@ -188,3 +188,29 @@ export function jobsDir(dir: string = dataDir()): string {
 export function quotesDir(dir: string = dataDir()): string {
   return join(dir, 'quotes');
 }
+
+/**
+ * Connected accounts (plan 37): one folder, 0700, holding each account's vault
+ * (`<id>.json`, its sign-in encrypted with a key kept in the OS store) and,
+ * where the key cannot go to an OS store, that key's DPAPI blob or plain file.
+ * Its own names, never the passphrase helpers': `passphrase.source:<id>.dpapi`
+ * would be an NTFS alternate data stream on Windows.
+ */
+export function sourcesDir(dir: string = dataDir()): string {
+  return join(dir, 'sources');
+}
+
+/** One connected account's vault. `id` is a checked account id (`ids.ts`). */
+export function sourceVaultPath(id: string, dir: string = dataDir()): string {
+  return join(sourcesDir(dir), `${id}.json`);
+}
+
+/** The DPAPI blob of one account's vault key, on Windows. */
+export function sourceKeyBlobPath(id: string, dir: string = dataDir()): string {
+  return join(sourcesDir(dir), `${id}.key.dpapi`);
+}
+
+/** One account's vault key in plain text, 0600, where no OS store exists. */
+export function sourceKeyFilePath(id: string, dir: string = dataDir()): string {
+  return join(sourcesDir(dir), `${id}.key.plain`);
+}

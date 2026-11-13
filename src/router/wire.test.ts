@@ -10,6 +10,7 @@ import {
   buildToolBody,
   buildToolSpecBody,
   buildIdentitiesBody,
+  buildRefusedBody,
   buildWarmBody,
   acceptsFor,
   CLIENT_ACCEPTS,
@@ -464,7 +465,14 @@ describe('the request bodies', () => {
                 ? { settings: canonical.settings as WireSettings }
                 : {}),
             })
-          : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
+          : buildToolBody({
+              query: canonical.query as string,
+              accepts,
+              harness: 'claude',
+              ...(canonical.settings !== undefined
+                ? { settings: canonical.settings as WireSettings }
+                : {}),
+            });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
     const browse = fixture('wire-browse-request.json');
@@ -1242,3 +1250,170 @@ describe('the settings field', () => {
     expect(parseForTests('hook', broken).success).toBe(false);
   });
 });
+
+/**
+ * THE USER'S OWN ACCOUNTS ON THE WIRE (plan 37). `mcp` rides with `settings`;
+ * an account the settings' `sources` names can lead an offer, carrying its
+ * `source` and the MCP call in place of a price and a URL; a refusal asks
+ * again with `{refused}`; and the identities read lists the accounts this
+ * client can connect.
+ */
+describe('the accounts wire', () => {
+  const settings = fixture('wire-hook-request-account.json').settings as WireSettings;
+
+  it('sends mcp beside settings, and the connected accounts in their sources', async () => {
+    expect(unmetRequires(['mcp'])).toEqual([]);
+    // The fixture's settings are what a machine with Apify, fal and Firecrawl
+    // connected sends: each descriptor saved and its vault here, and the
+    // preference connecting Apify wrote.
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const data = await mkdtemp(join(tmpdir(), 'tenjin-wire-accounts-'));
+    const accounts = [
+      { id: 'apify', mcpUrl: 'https://mcp.apify.com' },
+      { id: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay' },
+      { id: 'firecrawl', mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth' },
+    ];
+    try {
+      await mkdir(join(data, 'sources'));
+      for (const { id } of accounts) await writeFile(join(data, 'sources', `${id}.json`), '{}');
+      const router = {
+        policy: { version: 1, ...settings.policy },
+        sources: [
+          ...accounts.map((account) => ({ ...account, label: account.id, mapped: true })),
+          // An address connected by its URL alone is never named to the router.
+          { id: 'mcp-example-test', mcpUrl: 'https://mcp.example.test/mcp' },
+        ],
+      };
+      await writeFile(join(data, 'sources', 'mcp-example-test.json'), '{}');
+      expect(personalSettings(router, data).wire).toMatchObject({ status: 'ok', settings });
+      // Without their vaults, the same descriptors connect nothing.
+      for (const { id } of accounts) await rm(join(data, 'sources', `${id}.json`));
+      const bare = personalSettings(router, data).wire;
+      expect(bare.status === 'ok' && bare.settings.sources).toEqual(['tenjin']);
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an account lead alone, with its source and its call', () => {
+    const read = parseForTests('hook', fixture('wire-hook-execute-account.json')) as {
+      success: boolean;
+      data?: { decision: Record<string, unknown> & { specs: Record<string, unknown>[] } };
+    };
+    expect(read.success).toBe(true);
+    const decision = read.data!.decision;
+    expect(decision.endpoint).toBeUndefined();
+    expect(decision.providerPriceAtomic).toBe('0');
+    expect(decision.specs).toHaveLength(1);
+    expect(decision.specs[0]).toMatchObject({
+      source: 'apify',
+      requires: ['mcp'],
+      mcp: { tool: 'call-actor', next: { tool: 'get-dataset-items' } },
+    });
+    expect(decision.specs[0]).not.toHaveProperty('priceAtomic');
+    expect(decision).not.toHaveProperty('fallback');
+  });
+
+  it('reads an account lead from a server that still marks it verified, either way', () => {
+    // The check is gone (owner, 2026-11-13): connected is used. A server
+    // that still sends the old field must not lose the offer.
+    for (const verified of [true, false]) {
+      const answer = structuredClone(fixture('wire-hook-execute-account.json'));
+      spec(answer.decision as Json).verified = verified;
+      const read = parseForTests('hook', answer) as {
+        success: boolean;
+        data?: { decision: { specs: Record<string, unknown>[] } };
+      };
+      expect(read.success).toBe(true);
+      expect(read.data!.decision.specs[0]).not.toHaveProperty('verified');
+    }
+  });
+
+  it.each([
+    ['an endpoint on an account lead', (d: Json) => (d.endpoint = 'https://mcp.apify.com')],
+    ['a balance price on an account lead', (d: Json) => (d.providerPriceAtomic = '1000')],
+    [
+      'a poll that repeats the call that bills',
+      (d: Json) => ((((spec(d).mcp as Json).next as Json).poll as Json).tool = 'call-actor'),
+    ],
+    ['an account spec without requires mcp', (d: Json) => (spec(d).requires = [])],
+    ['an account spec on tenjin', (d: Json) => (spec(d).source = 'tenjin')],
+  ])('refuses %s', (_, breakIt) => {
+    const answer = structuredClone(fixture('wire-hook-execute-account.json'));
+    breakIt(answer.decision as Json);
+    expect(parseForTests('hook', answer).success).toBe(false);
+  });
+
+  it('reads a spec on an account, picked for a query or named by its id', () => {
+    const picked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
+    expect(picked.success).toBe(true);
+    expect(picked.data).toMatchObject({
+      decision: { action: 'spec', spec: { source: 'fal', requires: ['mcp'] } },
+    });
+    const named = parseForTests('tool', fixture('wire-lookup-spec-account-by-id.json'));
+    expect(named.data).toMatchObject({
+      decision: { spec: { capabilityId: 'fal.flux-pro-ultra' } },
+    });
+  });
+
+  /**
+   * THE RE-ASK (review round 1): after an account refused an offer, the
+   * client's usual envelope with `refused` and no query, answered as a query
+   * is, with the settings hash the client sent.
+   */
+  it('builds the re-ask after a refusal byte for byte, and reads both its answers', () => {
+    const canonical = fixture('wire-refused-request.json');
+    const built = buildRefusedBody({
+      refused: canonical.refused as string,
+      accepts: canonical.accepts as string[],
+      harness: canonical.harness as 'claude',
+      settings: canonical.settings as WireSettings,
+    });
+    expect(JSON.stringify(built)).toBe(JSON.stringify(canonical));
+    const hash = (canonical.settings as WireSettings).hash;
+    const offer = parseForTests('tool', fixture('wire-refused-offer.json')) as {
+      success: boolean;
+      data?: { decision: Json & { spec: Json }; settingsHash?: string };
+    };
+    expect(offer.success).toBe(true);
+    expect(offer.data!.decision).toMatchObject({
+      action: 'spec',
+      spec: { capabilityId: 'munition-scrape', priceAtomic: '15000' },
+    });
+    expect(offer.data!.decision.spec).not.toHaveProperty('source');
+    expect(offer.data!.settingsHash).toBe(hash);
+    const native = parseForTests('tool', fixture('wire-refused-native.json')) as {
+      success: boolean;
+      data?: { decision: Json };
+    };
+    expect(native.data!.decision).toMatchObject({
+      action: 'native',
+      diagnostics: { reasonCode: 'native_sufficient' },
+    });
+  });
+
+  it('reads the accounts this client can connect from the identities read', () => {
+    const read = parseIdentities(fixture('wire-identities-mcp.json'));
+    expect(read).toBeDefined();
+    const sources = read!.sources;
+    expect(sources.find(({ id }) => id === 'tenjin')?.connectable).toBeUndefined();
+    expect(sources.find(({ id }) => id === 'apify')?.connectable).toMatchObject({
+      mcpUrl: 'https://mcp.apify.com',
+      signIn: ['oauth', 'key'],
+      keyScheme: 'Bearer',
+      expectTools: ['call-actor', 'get-actor-run', 'get-dataset-items'],
+    });
+    const broken = structuredClone(fixture('wire-identities-mcp.json')) as {
+      sources: Json[];
+    };
+    broken.sources[0]!.connectable = sources.find(({ id }) => id === 'apify')!.connectable;
+    expect(parseIdentities(broken)).toBeUndefined();
+  });
+});
+
+type Json = Record<string, unknown>;
+
+function spec(decision: Json): Json {
+  return (decision.specs as Json[])[0]!;
+}
