@@ -1,5 +1,5 @@
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, constants, statSync } from 'node:fs';
+import { join, posix, win32 } from 'node:path';
 
 /**
  * WHAT TO START TO RUN `codex`, WITH NO SHELL. The PATH walk tries the PATHEXT
@@ -24,13 +24,29 @@ function isFile(path: string): boolean {
   }
 }
 
-/** The `codex` this machine runs, or null when PATH holds none that can start. */
+/** The host's Codex executable, otherwise the first runnable Codex on PATH. */
 export function resolveCodex(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
   execPath: string = process.execPath,
 ): CodexCommand | null {
   const win = platform === 'win32';
+  // Desktop can run a newer bundled Codex than the user's terminal PATH.
+  // This is only a host hint: callers still qualify the initialized version.
+  const runtime = env.CODEX_APP_RUNTIME_CLI_PATH;
+  if (
+    runtime &&
+    (win ? win32 : posix).isAbsolute(runtime) &&
+    !/\.(cmd|bat)$/i.test(runtime) &&
+    isFile(runtime)
+  ) {
+    try {
+      accessSync(runtime, win ? constants.F_OK : constants.X_OK);
+      return { cmd: runtime, prefix: [] };
+    } catch {
+      // An invalid host hint must not prevent ordinary CLI discovery.
+    }
+  }
   const exts = win
     ? (env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e.length > 0)
     : [''];

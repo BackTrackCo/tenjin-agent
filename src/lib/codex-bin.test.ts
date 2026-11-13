@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveCodex } from './codex-bin';
 
@@ -15,6 +15,57 @@ afterEach(async () => {
 const NODE = '/usr/bin/node';
 
 describe('resolveCodex', () => {
+  it('prefers the executable provided by the desktop host over terminal PATH', async () => {
+    const runtime = join(dir, 'desktop codex');
+    await writeFile(runtime, '#!/bin/sh\n');
+    await chmod(runtime, 0o700);
+    await writeFile(join(dir, 'codex'), '');
+    expect(resolveCodex({ PATH: dir, CODEX_APP_RUNTIME_CLI_PATH: runtime }, 'darwin')).toEqual({
+      cmd: runtime,
+      prefix: [],
+    });
+  });
+
+  it('never selects an existing executable through a relative host hint', async () => {
+    const runtime = join(dir, 'desktop-codex');
+    await writeFile(runtime, '#!/bin/sh\n');
+    await chmod(runtime, 0o700);
+    expect(
+      resolveCodex(
+        { PATH: '', CODEX_APP_RUNTIME_CLI_PATH: relative(process.cwd(), runtime) },
+        'darwin',
+      ),
+    ).toBeNull();
+  });
+
+  it.each(['relative/codex', 'codex --dangerous', '/missing/desktop-codex'])(
+    'ignores an invalid host executable hint: %s',
+    async (runtime) => {
+      const fallback = join(dir, 'codex');
+      await writeFile(fallback, '');
+      expect(resolveCodex({ PATH: dir, CODEX_APP_RUNTIME_CLI_PATH: runtime }, 'darwin')).toEqual({
+        cmd: fallback,
+        prefix: [],
+      });
+    },
+  );
+
+  it('ignores a directory, non-executable file, or shell shim from the host', async () => {
+    const fallback = join(dir, 'codex');
+    const nonExecutable = join(dir, 'not-executable');
+    const shim = join(dir, 'desktop.cmd');
+    await writeFile(fallback, '');
+    await writeFile(nonExecutable, '', { mode: 0o600 });
+    await writeFile(shim, '');
+    await chmod(shim, 0o700);
+    for (const runtime of [dir, nonExecutable, shim]) {
+      expect(resolveCodex({ PATH: dir, CODEX_APP_RUNTIME_CLI_PATH: runtime }, 'darwin')).toEqual({
+        cmd: fallback,
+        prefix: [],
+      });
+    }
+  });
+
   it('runs the script behind npm’s codex.cmd under Node on win32, never the shim', async () => {
     const npm = join(dir, 'npm');
     await mkdir(join(npm, 'node_modules', '@openai', 'codex', 'bin'), { recursive: true });
