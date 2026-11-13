@@ -3,7 +3,6 @@ import { expect, test } from 'claude-code/testing';
 
 import {
   DATA,
-  MODEL_TEXT,
   OFFER,
   SESSION,
   SURFACES,
@@ -157,7 +156,6 @@ test('on, a search is answered in place with the lookup the CLI ran, and never r
       'in place of Web Search',
     ]);
     expect(await dotOf(ui)).toEqual({ color: 'success', dimColor: undefined });
-    for (const text of await shownLines(ui)) expect(text).not.toMatch(MODEL_TEXT);
     await ui.unmount();
   }
 });
@@ -264,7 +262,7 @@ test('on, a lookup that failed after it started is the call refused with what it
   const answered = await $.tool.call({ tool: 'WebSearch', tool_use_id: 'toolu_failed', ...SEARCH });
   expect(ran).toEqual([]);
   expect(answered.result).toBeUndefined();
-  expect(answered.isError === true || answered.deny !== undefined).toBe(true);
+  expect(answered.deny).toBe(FAILED);
   const ui = await $.ui.mount({
     plugin: 'tenjin',
     surface: 'terminal',

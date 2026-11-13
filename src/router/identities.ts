@@ -1,10 +1,8 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
 import type { CommandContext } from '../context';
-import { parseForTests, requestIdentities, type IdentitiesResponse } from './decision';
+import { parseIdentities, requestIdentities, type IdentitiesResponse } from './decision';
 import { BUILT_IN_SOURCE, type Target, type TargetKind } from './settings-wire';
+import { readJsonFile, writePrivate } from './store-files';
 
 /**
  * EVERY ID A SETTING CAN NAME, for `tenjin config` (plan 36). A typed name
@@ -42,7 +40,7 @@ export const KIND_NOUN: Record<TargetKind, string> = {
 };
 
 /** Tenjin's own catalog, by the one name a person sees. */
-export const BUILT_IN_LABEL = "Tenjin's tools";
+const BUILT_IN_LABEL = "Tenjin's tools";
 
 /** The router's identities now, kept for offline use, or why not. */
 export async function fetchIdentities(
@@ -65,10 +63,7 @@ export async function fetchIdentities(
     };
   }
   try {
-    await writeFileAtomic(join(ctx.dataDir, CACHE_FILE), JSON.stringify(read.decision), {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writePrivate(join(ctx.dataDir, CACHE_FILE), JSON.stringify(read.decision));
   } catch {
     // Offline labels are a convenience: a lost copy names saved rules by id.
   }
@@ -77,20 +72,7 @@ export async function fetchIdentities(
 
 /** The identities last fetched, or undefined: none kept, damaged or unreadable. */
 export async function cachedIdentities(dataDir: string): Promise<Identities | undefined> {
-  const file = await open(
-    join(dataDir, CACHE_FILE),
-    constants.O_RDONLY | constants.O_NOFOLLOW,
-  ).catch(() => undefined);
-  if (file === undefined) return undefined;
-  try {
-    if ((await file.stat()).size > MAX_CACHE_BYTES) return undefined;
-    const parsed = parseForTests('identities', JSON.parse(await file.readFile('utf8')));
-    return parsed.success ? (parsed.data as Identities) : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    await file.close().catch(() => undefined);
-  }
+  return parseIdentities(await readJsonFile(join(dataDir, CACHE_FILE), MAX_CACHE_BYTES));
 }
 
 /** Every entry of one kind, labelled. */
@@ -122,7 +104,8 @@ export function labelOf(target: Target, identities: Identities | undefined): str
   return entriesOf(identities, target.kind).find(({ id }) => id === target.id)?.label ?? target.id;
 }
 
-const folded = (text: string): string => text.trim().toLowerCase();
+/** A typed name or label as names compare: trimmed, in one case. */
+export const folded = (text: string): string => text.trim().toLowerCase();
 
 export type Resolved =
   | { status: 'match'; target: Target; label: string }

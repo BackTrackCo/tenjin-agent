@@ -47,8 +47,9 @@ export const SAVED_PREFIX = 'Saved on this machine (not synced):';
 /** The automatic-use switch, by the one name a person sees. */
 export const REPLACEMENT_NAME = "Run Tenjin's picks automatically";
 
-const list = new Intl.ListFormat('en', { type: 'conjunction' });
-const either = new Intl.ListFormat('en', { type: 'disjunction' });
+/** "A, B, and C" and "A, B, or C", for every sentence `tenjin config` says. */
+export const list = new Intl.ListFormat('en', { type: 'conjunction' });
+export const either = new Intl.ListFormat('en', { type: 'disjunction' });
 
 /** A shell word for a typed id: one in quotes unless it is a plain token. */
 export const shellWord = (id: string): string =>
@@ -323,7 +324,7 @@ export function describePrefer(
 }
 
 /** What the speed preference costs and what it never does, said with every readback of it. */
-const SPEED_TERMS =
+export const SPEED_TERMS =
   'They cost more, and your limits still apply. This changes when Tenjin offers, never which service it picks, and it turns nothing on by itself.';
 
 /**
@@ -401,9 +402,7 @@ export interface ReplacementSupport {
 const WHERE_IT_WORKS =
   'It works in Claude Code with the Tenjin plugin; other agents, Codex included, keep getting ordinary offers.';
 
-export function replacementSupportOf(
-  observations: readonly RouterObservation[],
-): ReplacementSupport {
+function replacementSupportOf(observations: readonly RouterObservation[]): ReplacementSupport {
   const newest = [...observations].sort((a, b) => b.at - a.at);
   const claude = newest.find((o) => o.harness === 'claude' && o.servedSession);
   if (claude !== undefined) {
@@ -480,14 +479,10 @@ export function describeReplacement(
   };
 }
 
-/** Where each personal setting lives, from the one registry. */
-export function scopesOf(): Record<string, SettingScope> {
-  return { ...SETTING_SCOPES };
-}
-
 /** The whole readback `tenjin config` shows and its `--json` carries. */
 export interface SettingsReadback {
   saved: string;
+  /** Where each personal setting lives, from the one registry. */
   scopes: Record<string, SettingScope>;
   /** False while Tenjin is paused, here or by a project file. */
   enabled: boolean;
@@ -586,7 +581,7 @@ export function settingsReadback(
   const replacement = describeReplacement(router.nativeReplacement, identities, support);
   const data: SettingsReadback = {
     saved: SAVED_HERE,
-    scopes: scopesOf(),
+    scopes: { ...SETTING_SCOPES },
     enabled: enabled.value,
     policy: {
       status: policy.status,

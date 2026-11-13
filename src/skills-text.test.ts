@@ -26,13 +26,26 @@ describe('the permissions doc matches the product this release ships', () => {
 
   it('names the plugin install registers, its two permission answers and its server', async () => {
     const { PLUGIN_HOOK_TOOL, PLUGIN_ID, REQUEST_TOOL } = await import('./router/names');
-    const { ACCOUNT_READ_RULES, SETTINGS_RULES } = await import('./lib/permissions');
+    // Reading the settings and the two operations that only narrow or reorder
+    // (`block`, `prefer`). `unblock`, `only`, `reset`, `set`, `speed on` and
+    // `replacement` can widen what Tenjin may use, spend or run, so they stay
+    // behind the host's own prompt, and so does the blanket rule covering them.
+    // Then the reads of balance, spend and accounts: `tenjin status` and
+    // `tenjin usage` only read this machine's files and the balance on the
+    // chain. `connect`, `disconnect` and `config fallback` stay behind the
+    // prompt, since each changes what can be called and who pays.
     expect(fencedRules(PERMISSIONS_DOC)).toEqual([
-      ...SETTINGS_RULES,
-      ...ACCOUNT_READ_RULES,
+      'Bash(tenjin config)',
+      'Bash(tenjin config --json)',
+      'Bash(tenjin config --help)',
+      'Bash(tenjin config get:*)',
+      'Bash(tenjin config block:*)',
+      'Bash(tenjin config prefer:*)',
+      'Bash(tenjin status)',
+      'Bash(tenjin status --json)',
+      'Bash(tenjin usage:*)',
       'Bash(tenjin pay:*)',
     ]);
-    // Never the blanket rule that would cover unblock, only, reset and replacement.
     expect(fencedRules(PERMISSIONS_DOC)).not.toContain('Bash(tenjin config:*)');
     // Connecting or disconnecting an account is never pre-allowed.
     expect(fencedRules(PERMISSIONS_DOC).join('\n')).not.toMatch(/connect/);

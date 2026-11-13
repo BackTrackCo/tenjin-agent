@@ -1,4 +1,4 @@
-import { McpToolSchema } from '../decision';
+import { MAX_INPUT_BYTES, McpToolSchema } from '../decision';
 import { cachedIdentities, type Identities } from '../identities';
 import { appendPaidRecord, maskDeep } from '../paid';
 import { openLookupFooter } from '../progress';
@@ -7,7 +7,6 @@ import { uncheckedWarning } from '../spec-call';
 import {
   deliverResult,
   fail,
-  MAX_INPUT_BYTES,
   paidRecord,
   type DeliverCall,
   type RequestToolDeps,

@@ -56,6 +56,7 @@ import type { WireSettings } from './settings-wire';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
   isAccountSpec,
+  MAX_INPUT_BYTES,
   reportSpecOutcome,
   requestBrowse,
   requestDecision,
@@ -203,9 +204,6 @@ export interface RequestToolArgs {
    *  (`accounts/explicit.ts`). Never routed, never from the balance. */
   source?: string;
 }
-
-/** The server's own cap on `input`, serialized. */
-export const MAX_INPUT_BYTES = 16 * 1024;
 
 export interface RequestToolDeps {
   ctx: CommandContext;

@@ -23,6 +23,7 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
 import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
+import { hashNow } from './settings-test-utils';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import { UNPAID_GATE_TIMEOUT_MS } from './gate';
 import {
@@ -3747,10 +3748,7 @@ describe('the hooks and the user settings', () => {
   async function saveRules(router: Record<string, unknown>): Promise<string> {
     const fs = await import('node:fs/promises');
     await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ ...ROUTER_POLICY, router }));
-    const { personalSettingsAt } = await import('./settings');
-    const { wire } = await personalSettingsAt(dir);
-    if (wire.status !== 'ok') throw new Error('unreadable');
-    return wire.settings.hash;
+    return hashNow(dir);
   }
   const hook = (fetchImpl: typeof fetch, warn: (line: string) => void = () => undefined) => ({
     dataDir: dir,

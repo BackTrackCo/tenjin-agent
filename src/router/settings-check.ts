@@ -1,4 +1,4 @@
-import { personalSettingsAt } from './settings';
+import { personalSettingsAt, type WireState } from './settings';
 
 /**
  * THE CHECK BEFORE EVERY CALL (plan 36). An offer runs only under the rules
@@ -46,25 +46,39 @@ export async function settingsRefusal(
     return UNREADABLE;
   }
   if (now.wire.status === 'invalid') return UNREADABLE;
-  const { settings, hasRules } = now.wire;
   for (const hash of decided) {
-    if (hash === undefined) {
-      if (!hasRules) continue;
-      return {
-        code: 'settings_unconfirmed',
-        reason:
-          "Tenjin's router did not confirm it applied your Tenjin settings to this offer, so it was not run and nothing was sent or paid.",
-        nextStep: `${ASK_AGAIN} If Tenjin keeps answering without your settings, use your own tools for this.`,
-      };
-    }
-    if (hash !== settings.hash) {
-      return {
-        code: 'settings_changed',
-        reason:
-          'Your Tenjin settings changed after this offer was made, so it was not run and nothing was sent or paid.',
-        nextStep: ASK_AGAIN,
-      };
-    }
+    const refusal = hashRefusal(now.wire, hash);
+    if (refusal !== null) return refusal;
+  }
+  return null;
+}
+
+/**
+ * THE RULE ITSELF, for one hash an answer echoed (`undefined` for none) against
+ * the rules saved now: null when it names them, or when it is absent and no
+ * rule is saved; else why not. Pure, so the hooks hold an answer to the same
+ * rule before they offer from it.
+ */
+export function hashRefusal(
+  wire: Extract<WireState, { status: 'ok' }>,
+  hash: string | undefined,
+): SettingsRefusal | null {
+  if (hash === undefined) {
+    if (!wire.hasRules) return null;
+    return {
+      code: 'settings_unconfirmed',
+      reason:
+        "Tenjin's router did not confirm it applied your Tenjin settings to this offer, so it was not run and nothing was sent or paid.",
+      nextStep: `${ASK_AGAIN} If Tenjin keeps answering without your settings, use your own tools for this.`,
+    };
+  }
+  if (hash !== wire.settings.hash) {
+    return {
+      code: 'settings_changed',
+      reason:
+        'Your Tenjin settings changed after this offer was made, so it was not run and nothing was sent or paid.',
+      nextStep: ASK_AGAIN,
+    };
   }
   return null;
 }

@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { sha256Hex } from '../lib/hash';
 
 /**
  * THE USER'S SETTINGS AS THE ROUTER READS THEM (plan 36). What Tenjin may use
@@ -17,7 +17,7 @@ import { z } from 'zod';
  * `only` rule is scoped globally or to one task, and a capability rule only
  * globally, because no command writes anything else.
  *
- * Hook-safe: node and zod only.
+ * Hook-safe: node (through `lib/hash`) and zod only.
  */
 
 /** The `accepts` token for this feature, and the field's own version. */
@@ -55,7 +55,7 @@ export const SETTINGS_LIMITS = {
 } as const;
 
 /** The hash the CLI computes and the server echoes, never recomputes. */
-export const SETTINGS_HASH = /^sha256:[0-9a-f]{64}$/;
+const SETTINGS_HASH = /^sha256:[0-9a-f]{64}$/;
 export const SettingsHashSchema = z.string().regex(SETTINGS_HASH);
 
 /** A canonical id: 1 to 120 characters, one plain line. Task ids carry spaces. */
@@ -115,6 +115,9 @@ export interface WireSettings {
 export const targetKey = (target: Target): string => `${target.kind}:${target.id}`;
 export const scopeKey = (scope: Scope): string =>
   scope.kind === 'global' ? 'global' : `${scope.kind}:${scope.id}`;
+/** An only rule's slot: one per scope and dimension. */
+export const onlyKey = (rule: Pick<OnlyRule, 'scope' | 'dimension'>): string =>
+  `${scopeKey(rule.scope)}|${rule.dimension}`;
 
 /** A problem a check found, at its path inside the policy. */
 export interface Problem {
@@ -130,7 +133,8 @@ const DIMENSION_KINDS: Record<OnlyDimension, readonly TargetKind[]> = {
   service: ['service'],
 };
 
-/** The kinds a preference may list, and which ones a global preference may. */
+/** The kinds a preference may list. A global one lists sources alone, which
+ *  {@link policyProblems} checks on its own. */
 const PREFER_KINDS: readonly TargetKind[] = ['provider', 'service', 'source'];
 
 function duplicates<T>(values: readonly T[], key: (value: T) => string): number[] {
@@ -154,24 +158,14 @@ function duplicates<T>(values: readonly T[], key: (value: T) => string): number[
  * preference holds sources only. There is no source `only`: "only use my
  * account for X" is a preference.
  */
-export function policyProblems(policy: {
-  block?: readonly Target[] | undefined;
-  only?: readonly OnlyRule[] | undefined;
-  prefer?: readonly PreferRule[] | undefined;
-}): Problem[] {
+export function policyProblems(policy: Pick<SavedPolicy, 'block' | 'only' | 'prefer'>): Problem[] {
   const problems: Problem[] = [];
   const block = policy.block ?? [];
   const only = policy.only ?? [];
   const prefer = policy.prefer ?? [];
-  if (block.length > SETTINGS_LIMITS.block)
-    problems.push({ path: ['block'], message: `at most ${SETTINGS_LIMITS.block} blocks` });
-  if (only.length > SETTINGS_LIMITS.only)
-    problems.push({ path: ['only'], message: `at most ${SETTINGS_LIMITS.only} only rules` });
-  if (prefer.length > SETTINGS_LIMITS.prefer)
-    problems.push({ path: ['prefer'], message: `at most ${SETTINGS_LIMITS.prefer} preferences` });
   for (const index of duplicates(block, targetKey))
     problems.push({ path: ['block', index], message: 'this target is already blocked' });
-  for (const index of duplicates(only, (rule) => `${scopeKey(rule.scope)}|${rule.dimension}`))
+  for (const index of duplicates(only, onlyKey))
     problems.push({
       path: ['only', index],
       message: 'a second only rule for the same scope and dimension',
@@ -259,17 +253,37 @@ export function canonicalJson(value: unknown): string {
 export function settingsHash(fields: Omit<WireSettings, 'hash'>): string {
   const { version, policy, replacement, sources } = fields;
   const canonical = canonicalJson({ version, policy, replacement, sources });
-  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+  return `sha256:${sha256Hex(canonical)}`;
 }
 
+/**
+ * THE SAVED `router.policy` (plan 36): what Tenjin may use, what it tries
+ * first, and whether it offers paid tools that are only faster. The global
+ * file's alone, like `improve`: a project file never reads it, so a cloned
+ * repository cannot change what Tenjin may use on this machine. An emptied
+ * collection is allowed and means no rules (a reset can leave one); an empty
+ * target list is not. Every check beyond shape is {@link policyProblems}.
+ */
+export const SavedPolicyShapeSchema = z.strictObject({
+  version: z.number().int(),
+  block: z.array(TargetSchema).max(SETTINGS_LIMITS.block).optional(),
+  only: z.array(OnlyRuleSchema).max(SETTINGS_LIMITS.only).optional(),
+  prefer: z.array(PreferRuleSchema).max(SETTINGS_LIMITS.prefer).optional(),
+  preferSpeed: z.boolean().optional(),
+});
+export const SavedPolicySchema = SavedPolicyShapeSchema.superRefine((policy, ctx) => {
+  if (policy.version !== POLICY_VERSION) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['version'],
+      message: `version ${policy.version} is not one this build reads (${POLICY_VERSION})`,
+    });
+  }
+  for (const { message, path } of policyProblems(policy))
+    ctx.addIssue({ code: 'custom', message, path });
+});
 /** The saved rules, as `router.policy` holds them. */
-export interface SavedPolicy {
-  version: number;
-  block?: Target[];
-  only?: OnlyRule[];
-  prefer?: PreferRule[];
-  preferSpeed?: boolean;
-}
+export type SavedPolicy = z.infer<typeof SavedPolicyShapeSchema>;
 
 /** Automatic use as it is saved: the mode and, when narrowed, its providers. */
 export interface SavedReplacement {

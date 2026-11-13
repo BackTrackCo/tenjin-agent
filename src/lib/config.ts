@@ -7,15 +7,11 @@ import { configPath } from './paths';
 import { DEFAULT_RPC_URL } from './usdc-balance';
 import {
   BUILT_IN_SOURCE,
-  OnlyRuleSchema,
-  POLICY_VERSION,
-  PreferRuleSchema,
   REPLACEMENT_MODES,
   ReplacementProvidersSchema,
   SETTINGS_LIMITS,
+  SavedPolicySchema,
   TargetIdSchema,
-  TargetSchema,
-  policyProblems,
   type ReplacementMode,
   type SavedPolicy,
   type Target,
@@ -52,33 +48,6 @@ export type RouterLayer = z.infer<typeof RouterLayerSchema>;
  */
 const RouterGlobalSchema = RouterLayerSchema.extend({ improve: z.boolean().optional() });
 const RouterConfigSchema = RouterGlobalSchema.required();
-
-/**
- * THE SAVED `router.policy` (plan 36): what Tenjin may use, what it tries
- * first, and whether it offers paid tools that are only faster. The global
- * file's alone, like `improve`: a project file never reads it, so a cloned
- * repository cannot change what Tenjin may use on this machine. An emptied
- * collection is allowed and means no rules (a reset can leave one); an empty
- * target list is not. Every check beyond shape is {@link policyProblems}.
- */
-export const SavedPolicyShapeSchema = z.strictObject({
-  version: z.number().int(),
-  block: z.array(TargetSchema).max(SETTINGS_LIMITS.block).optional(),
-  only: z.array(OnlyRuleSchema).max(SETTINGS_LIMITS.only).optional(),
-  prefer: z.array(PreferRuleSchema).max(SETTINGS_LIMITS.prefer).optional(),
-  preferSpeed: z.boolean().optional(),
-});
-export const SavedPolicySchema = SavedPolicyShapeSchema.superRefine((policy, ctx) => {
-  if (policy.version !== POLICY_VERSION) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['version'],
-      message: `version ${policy.version} is not one this build reads (${POLICY_VERSION})`,
-    });
-  }
-  for (const { message, path } of policyProblems(policy))
-    ctx.addIssue({ code: 'custom', message, path });
-});
 
 /**
  * ONE SAVED ACCOUNT DESCRIPTOR (`router.sources`, plan 37): a safe id, and

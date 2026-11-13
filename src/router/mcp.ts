@@ -85,7 +85,7 @@ export const SCOPE_RULE =
  * the user asks for a change. The rules govern only what Tenjin offers on
  * its own, so a tool the user names still runs by its id.
  */
-export const CONFIG_RULE =
+const CONFIG_RULE =
   'When the user asks to prefer, block, limit, reset, choose speed over cost or configure ' +
   'automatic Tenjin use, run `tenjin config --help`, perform the requested operation and ' +
   'report its readback. Those settings only change what Tenjin offers on its own: a tool the ' +
@@ -296,17 +296,6 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     { name: MCP_SERVER_NAME, version: pkg.version },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
-  const hookDeps = (): HookDeps => ({
-    dataDir: ctx.dataDir,
-    ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
-    ...(opts.payer !== undefined
-      ? {
-          route: opts.payer.routeFor.bind(opts.payer),
-          signer: opts.payer.signVerdict.bind(opts.payer),
-        }
-      : {}),
-    ...opts.hookDeps,
-  });
   /**
    * THE SESSIONS THIS PROCESS'S HOOK LEGS SERVED: their transcript path and
    * directory, as the host gave them to a leg (which the model cannot call).
@@ -350,7 +339,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     );
     if (event === null) return handBack("this session's transcript cannot be read");
     try {
-      return await runSwap(event, hookDeps(), requestDeps);
+      return await runSwap(event, hookDepsOf(ctx, opts), requestDeps);
     } catch {
       return handBack('Tenjin could not decide in time');
     }
@@ -619,7 +608,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         // admitted event leaves it out, which would hand back its first search.
         rememberSession(raw);
         response = await runHookKind(args.kind, event, {
-          ...hookDeps(),
+          ...hookDepsOf(ctx, opts),
           ...(opts.observer !== undefined
             ? { walletNews: opts.observer.takeNews.bind(opts.observer) }
             : {}),
@@ -637,6 +626,23 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
     },
   );
   return server;
+}
+
+/** What every hook leg and the swap run with: this server's data dir, host,
+ *  base URL and payer, then the test seams. */
+function hookDepsOf(ctx: CommandContext, opts: RouterMcpOptions): HookDeps {
+  return {
+    dataDir: ctx.dataDir,
+    ...(opts.harness !== undefined ? { harness: opts.harness } : {}),
+    ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
+    ...(opts.payer !== undefined
+      ? {
+          route: opts.payer.routeFor.bind(opts.payer),
+          signer: opts.payer.signVerdict.bind(opts.payer),
+        }
+      : {}),
+    ...opts.hookDeps,
+  };
 }
 
 /**
@@ -677,15 +683,7 @@ function registerCodexHookTool(
           const { codexResponse } = await import('./codex-event');
           response = codexResponse(
             await runHookKind(args.kind, event, {
-              dataDir: ctx.dataDir,
-              harness: 'codex',
-              ...(ctx.flags.baseUrl !== undefined ? { baseUrl: ctx.flags.baseUrl } : {}),
-              ...(opts.payer !== undefined
-                ? {
-                    route: opts.payer.routeFor.bind(opts.payer),
-                    signer: opts.payer.signVerdict.bind(opts.payer),
-                  }
-                : {}),
+              ...hookDepsOf(ctx, opts),
               ...(opts.observer !== undefined
                 ? { walletNews: opts.observer.takeNews.bind(opts.observer) }
                 : {}),

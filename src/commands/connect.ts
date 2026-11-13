@@ -3,8 +3,6 @@ import {
   loadRawConfig,
   readPersonalRouter,
   resolveSettings,
-  SavedPolicySchema,
-  SavedPolicyShapeSchema,
   type PartialConfig,
   type SourceDescriptor,
 } from '../lib/config';
@@ -16,6 +14,8 @@ import type { CommandContext, CommandResult } from '../context';
 import {
   POLICY_VERSION,
   SETTINGS_LIMITS,
+  SavedPolicySchema,
+  SavedPolicyShapeSchema,
   scopeKey,
   type PreferRule,
   type SavedPolicy,

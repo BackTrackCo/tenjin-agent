@@ -1,10 +1,9 @@
-import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { open, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../lib/atomic-json';
+import { sha256Hex } from '../lib/hash';
 import { parseHookResponse, type HookResponse } from './decision';
 import { DECIDED_PREFIX, sessionDir } from './progress';
+import { readJsonFile, writePrivate } from './store-files';
 
 /**
  * ONE SEARCH, ONE DECISION. With automatic use on, the swap asks the router
@@ -16,21 +15,19 @@ import { DECIDED_PREFIX, sessionDir } from './progress';
  * search or URL it was made for, its settings hash included; a different
  * target, a stale record or one that does not parse is read as absent.
  *
- * Hook-safe: node, zod (through `decision.ts`) and `lib/atomic-json` only.
+ * Hook-safe: node, zod (through `decision.ts`) and `store-files.ts` only.
  * Every failure is "absent": a lost record costs one more decision, never a
  * wrong one.
  */
 
 /** Long enough for the host to run its pre-call hook after the swap answered. */
-export const DECIDED_TTL_MS = 60_000;
+const DECIDED_TTL_MS = 60_000;
 
 /** The router's answer runs to a few hundred kilobytes at most. */
 const MAX_DECIDED_BYTES = 1024 * 1024;
 
-const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
-
 function decidedPath(dataDir: string, sessionId: string, toolUseId: string): string {
-  return join(sessionDir(dataDir, sessionId), `${DECIDED_PREFIX}${digest(toolUseId)}.json`);
+  return join(sessionDir(dataDir, sessionId), `${DECIDED_PREFIX}${sha256Hex(toolUseId)}.json`);
 }
 
 /** What the swap decided for one call. */
@@ -51,10 +48,9 @@ export async function keepDecided(
   now = Date.now(),
 ): Promise<void> {
   try {
-    await writeFileAtomic(
+    await writePrivate(
       decidedPath(dataDir, sessionId, toolUseId),
       JSON.stringify({ version: 1, at: now, target, answer, unpaid }),
-      { mode: 0o600, dirMode: 0o700 },
     );
   } catch {
     // Lost: the pre-call hook decides again.
@@ -74,8 +70,8 @@ export async function takeDecided(
   now = Date.now(),
 ): Promise<Decided | undefined> {
   const path = decidedPath(dataDir, sessionId, toolUseId);
-  const row = await readBounded(path);
-  if (row === undefined) return undefined;
+  const row = await readJsonFile(path, MAX_DECIDED_BYTES);
+  if (row === null) return undefined;
   await rm(path, { force: true }).catch(() => undefined);
   if (row.version !== 1 || typeof row.at !== 'number' || row.target !== target) return undefined;
   if (now - row.at > DECIDED_TTL_MS || row.at > now + DECIDED_TTL_MS) return undefined;
@@ -83,21 +79,4 @@ export async function takeDecided(
   if (row.answer === null) return { answer: null, ...unpaid };
   const answer = parseHookResponse(row.answer);
   return answer === undefined ? undefined : { answer, ...unpaid };
-}
-
-/** One bounded JSON object, never through a symlink planted under the data dir. */
-async function readBounded(path: string): Promise<Record<string, unknown> | undefined> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
-  if (file === undefined) return undefined;
-  try {
-    if ((await file.stat()).size > MAX_DECIDED_BYTES) return undefined;
-    const parsed: unknown = JSON.parse(await file.readFile('utf8'));
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    await file.close().catch(() => undefined);
-  }
 }
