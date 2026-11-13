@@ -4,7 +4,14 @@ import { lstat, open, opendir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
-import { ChoicesSchema, OfferSpecSchema, type Choices, type OfferSpec } from './decision';
+import {
+  AccountOfferSpecSchema,
+  ChoicesSchema,
+  OfferSpecSchema,
+  type AccountOfferSpec,
+  type Choices,
+  type OfferSpec,
+} from './decision';
 import { SettingsHashSchema } from './settings-wire';
 
 /**
@@ -63,7 +70,9 @@ export const SHOWN_INPUT_MAX_CHARS = 80;
  * catalog marks as producing media (`output: "media"`: image, video, audio,
  * music, speech), whose input is a prompt.
  */
-export function shownInputField(spec: OfferSpec): string | null {
+export function shownInputField(
+  spec: Pick<OfferSpec, 'output' | 'holds' | 'input'>,
+): string | null {
   if (spec.output === 'media') return null;
   const held = spec.holds?.WebSearch ?? spec.holds?.WebFetch;
   if (held !== undefined) return held;
@@ -82,7 +91,10 @@ export function shownInputField(spec: OfferSpec): string | null {
  * {@link shownInputField} names, when its value is a short single key. The
  * mod applies the same cap to the value it reads.
  */
-export function shownInput(spec: OfferSpec, input: Record<string, unknown>): string | undefined {
+export function shownInput(
+  spec: Pick<OfferSpec, 'output' | 'holds' | 'input'>,
+  input: Record<string, unknown>,
+): string | undefined {
   const field = shownInputField(spec);
   if (field === null) return undefined;
   const value = input[field];
@@ -91,27 +103,31 @@ export function shownInput(spec: OfferSpec, input: Record<string, unknown>): str
   return text.length > 0 && Array.from(text).length <= SHOWN_INPUT_MAX_CHARS ? text : undefined;
 }
 
+/** The field of a kept spec that names the account offer it was offered in
+ *  place of, after that account refused (`accounts/run.ts`). */
+const REPLACES_KEY = 'replaces';
+
 /**
  * Store each spec under its id, and drop expired ones. Never throws. Ages are
  * file mtimes, so they are read against the real clock, never a caller's.
+ * `replaces`: the account offer these were offered in place of, which a run of
+ * one of them settles, so that offer never runs too.
  */
 export async function storeSpecs(
   dataDir: string,
   specs: readonly OfferSpec[] | undefined,
   settingsHash?: string,
+  opts: { replaces?: string } = {},
 ): Promise<void> {
   if (specs === undefined || specs.length === 0) return;
   for (const spec of specs) {
     try {
-      // `shown` rides beside the spec for the mod, and is dropped on read.
-      // The answer's settings hash is this offer's own, never a later one.
-      const kept: Record<string, unknown> = { ...spec, [SHOWN_KEY]: shownInputField(spec) };
-      delete kept.settingsHash;
-      if (settingsHash !== undefined) kept.settingsHash = settingsHash;
-      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
-        mode: 0o600,
-        dirMode: 0o700,
-      });
+      await writeKept(
+        dataDir,
+        spec,
+        settingsHash,
+        opts.replaces !== undefined ? { [REPLACES_KEY]: opts.replaces } : {},
+      );
     } catch {
       // The tool falls back to the server for this id; a row shows no input.
     }
@@ -119,26 +135,130 @@ export async function storeSpecs(
   await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
 }
 
+/**
+ * Write one kept spec under its id. `shown` rides beside it for the mod, with
+ * `beside` (what a kind of spec keeps of its own), and both are dropped on
+ * read; the answer's settings hash is this offer's own, never a later one.
+ * Throws.
+ */
+async function writeKept(
+  dataDir: string,
+  spec: OfferSpec | AccountOfferSpec,
+  settingsHash: string | undefined,
+  beside: Record<string, unknown>,
+): Promise<void> {
+  const kept: Record<string, unknown> = {
+    ...spec,
+    [SHOWN_KEY]: shownInputField(spec),
+    ...beside,
+  };
+  delete kept.settingsHash;
+  if (settingsHash !== undefined) kept.settingsHash = settingsHash;
+  await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
+    mode: 0o600,
+    dirMode: 0o700,
+  });
+}
+
 /** The spec stored for this id, with the settings hash it was decided under,
  *  or null: none, expired, damaged or not ours. */
 export async function readSpec(dataDir: string, id: string): Promise<KeptSpec | null> {
-  const path = specPath(dataDir, id);
-  // O_NOFOLLOW: the directory is the user's, and a planted symlink must not
-  // turn this read into a read of something else.
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  return (await readKept(dataDir, id, (kept) => paidSpecOf(kept, id)))?.spec ?? null;
+}
+
+/**
+ * The file kept for this id, read once and handed to `read`, or null: none,
+ * expired, over its bound or damaged. O_NOFOLLOW: the directory is the
+ * user's, and a planted symlink must not turn this read into a read of
+ * something else. Never throws.
+ */
+async function readKept<T>(
+  dataDir: string,
+  id: string,
+  read: (kept: Record<string, unknown>) => T | null,
+): Promise<T | null> {
+  const file = await open(specPath(dataDir, id), constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+    () => undefined,
+  );
   if (file === undefined) return null;
   try {
     const stat = await file.stat();
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
-    const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
-    delete kept[SHOWN_KEY];
-    const parsed = KeptSpecSchema.safeParse(kept);
-    return parsed.success && parsed.data.id === id ? parsed.data : null;
+    const kept: unknown = JSON.parse(await file.readFile('utf8'));
+    if (kept === null || typeof kept !== 'object' || Array.isArray(kept)) return null;
+    return read(kept as Record<string, unknown>);
   } catch {
     return null;
   } finally {
     await file.close().catch(() => undefined);
   }
+}
+
+/** A kept file as a spec the balance pays, with the account offer it
+ *  replaces, when it does; null when it is not one. */
+function paidSpecOf(
+  kept: Record<string, unknown>,
+  id: string,
+): { spec: KeptSpec; replaces?: string } | null {
+  const replaces = kept[REPLACES_KEY];
+  const fields = { ...kept };
+  delete fields[SHOWN_KEY];
+  delete fields[REPLACES_KEY];
+  const parsed = KeptSpecSchema.safeParse(fields);
+  if (!parsed.success || parsed.data.id !== id) return null;
+  return {
+    spec: parsed.data,
+    ...(typeof replaces === 'string' && replaces.length > 0 ? { replaces } : {}),
+  };
+}
+
+/** An account spec as this machine keeps it: with the settings hash its
+ *  answer echoed, as every kept spec has. */
+export type KeptAccountSpec = AccountOfferSpec & { settingsHash?: string };
+
+/**
+ * KEEP AN OFFER LED BY THE USER'S OWN ACCOUNT (plan 37): its spec and the
+ * settings hash its answer echoed. Never throws.
+ */
+export async function storeAccountOffer(
+  dataDir: string,
+  lead: AccountOfferSpec,
+  settingsHash: string | undefined,
+): Promise<void> {
+  try {
+    await writeKept(dataDir, lead, settingsHash, {});
+  } catch {
+    // `request({id})` says no spec is kept, and the agent asks again.
+  }
+  await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
+}
+
+/** What is kept for an id: a spec the balance pays, with the account offer
+ *  it was offered in place of, or one on the user's own account. */
+export type KeptAny =
+  | { spec: KeptSpec; account?: undefined; replaces?: string }
+  | { spec: KeptAccountSpec; account: true };
+
+/** Either kind of spec kept for this id, or null. Callers that run only a
+ *  spec the balance pays read {@link readSpec}, which never returns the other. */
+export async function readKeptSpec(dataDir: string, id: string): Promise<KeptAny | null> {
+  return readKept(dataDir, id, (kept) => paidSpecOf(kept, id) ?? accountSpecOf(kept, id));
+}
+
+/** A kept file as a spec on the user's own account, or null. */
+function accountSpecOf(
+  kept: Record<string, unknown>,
+  id: string,
+): Extract<KeptAny, { account: true }> | null {
+  const hash = SettingsHashSchema.optional().safeParse(kept.settingsHash);
+  const fields = { ...kept };
+  for (const key of [SHOWN_KEY, 'settingsHash']) delete fields[key];
+  const account = AccountOfferSpecSchema.safeParse(fields);
+  if (!account.success || account.data.id !== id || !hash.success) return null;
+  return {
+    spec: { ...account.data, ...(hash.data !== undefined ? { settingsHash: hash.data } : {}) },
+    account: true,
+  };
 }
 
 /** What the hook kept of a choice set: the set, and the line it came with. */
@@ -232,6 +352,11 @@ export type EarlierPayment =
   | { state: 'paid'; at: string; amountAtomic: string; txHash?: string }
   | { state: 'possibly_paid'; at: string }
   | { state: 'running'; at?: string }
+  /** It ran on the user's own account (plan 37), or may have. */
+  | { state: 'account'; at: string }
+  /** The account refused, and the offer Tenjin made in its place ran under
+   *  the offer id `to`: this offer's job is that one's. */
+  | { state: 'switched'; at: string; to: string }
   | { state: 'unrecorded' };
 
 const PaymentSchema = z.discriminatedUnion('state', [
@@ -248,6 +373,12 @@ const PaymentSchema = z.discriminatedUnion('state', [
     owner: z.string().max(64).optional(),
   }),
   z.strictObject({ state: z.literal('running'), at: z.string().max(40) }),
+  z.strictObject({ state: z.literal('account'), at: z.string().max(40) }),
+  z.strictObject({
+    state: z.literal('switched'),
+    at: z.string().max(40),
+    to: z.string().max(200),
+  }),
 ]);
 
 function paymentPath(dataDir: string, id: string): string {
@@ -349,6 +480,32 @@ export async function releaseSpecClaim(dataDir: string, id: string, owner: strin
     await file.close().catch(() => undefined);
   }
   if (mine) await rm(path, { force: true }).catch(() => undefined);
+}
+
+/**
+ * How a claimed call on the user's own account ended. One that ran, or may
+ * have (its billing call went out), keeps the claim, so the same id never
+ * sends it again; so does one whose job the offer made in its place took over
+ * (`to`, that offer's id), which may have run and paid. One refused before
+ * anything ran on either frees the id for a retry after a reconnect or a fixed
+ * input. Never throws.
+ */
+export async function settleAccountRun(
+  dataDir: string,
+  id: string,
+  ran: boolean | { to: string },
+  now: number = Date.now(),
+): Promise<void> {
+  const path = paymentPath(dataDir, id);
+  if (ran === false) {
+    await rm(path, { force: true }).catch(() => undefined);
+    return;
+  }
+  const at = new Date(now).toISOString();
+  const record = ran === true ? { state: 'account', at } : { state: 'switched', at, to: ran.to };
+  await writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, dirMode: 0o700 }).catch(
+    () => undefined,
+  );
 }
 
 /**

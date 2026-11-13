@@ -839,3 +839,48 @@ test('an over-limit lookup is one row: the needs_approval answer draws nothing, 
     'Called Exa search · $0.775 (ctrl+o to expand)',
   );
 });
+
+test("a call on the user's own account says their plan pays, never a balance price", async ($, on) => {
+  const { files, clock } = machine(on);
+  // An account spec as the CLI keeps it: the MCP call in place of a price.
+  await keepSpec(files, OFFER, {
+    label: 'Apify Google Maps',
+    provider: 'Apify',
+    source: 'apify',
+    mcp: { tool: 'call-actor', args: {}, result: 'structured' },
+  });
+  let release = (): void => undefined;
+  const running = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const done = envelope('fulfilled', {
+    label: 'Apify Google Maps',
+    cost: ['billed to your Apify account, not the Tenjin balance'],
+    receipt: 'Apify · your account · 2 places',
+    result: '{"items":[]}',
+  });
+  on('tool.call', { tool: TOOL }, async () => {
+    await running;
+    return { result: done, text: done };
+  });
+  const call = toolRow('toolu_account', TOOL, { id: OFFER, input: INPUT });
+  const pending = $.tool.call({
+    tool: TOOL,
+    tool_use_id: 'toolu_account',
+    id: OFFER,
+    input: INPUT,
+  });
+  await clock.settle();
+  const ui = await $.ui.mount({
+    plugin: 'tenjin',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    props: groupOf([call]),
+  });
+  expect(await rowText(ui)).toBe(
+    '⏺ Calling Apify Google Maps… · your account  ⎿  "rust async runtimes"',
+  );
+  await ui.unmount();
+  release();
+  await pending;
+});

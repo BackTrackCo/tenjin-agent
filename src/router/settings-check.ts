@@ -39,18 +39,34 @@ export async function settingsRefusal(
   dataDir: string,
   decided: readonly (string | undefined)[],
 ): Promise<SettingsRefusal | null> {
-  let now: Awaited<ReturnType<typeof personalSettingsAt>>;
-  try {
-    now = await personalSettingsAt(dataDir);
-  } catch {
-    return UNREADABLE;
-  }
-  if (now.wire.status === 'invalid') return UNREADABLE;
+  const now = await rulesNow(dataDir);
+  if ('problem' in now) return UNREADABLE;
   for (const hash of decided) {
     const refusal = hashRefusal(now.wire, hash);
     if (refusal !== null) return refusal;
   }
   return null;
+}
+
+/** The rules saved now as every call sends them, the `settings` field. */
+export type ReadableWire = Extract<WireState, { status: 'ok' }>;
+
+/**
+ * The rules saved now, read once, for a caller that checks more than one
+ * thing against them: as every call sends them, or why they can't be read
+ * (the read's own error, or the problem `tenjin config` names). A caller
+ * refuses the second with {@link UNREADABLE}, or in its own words.
+ */
+export async function rulesNow(
+  dataDir: string,
+): Promise<{ wire: ReadableWire } | { problem: string }> {
+  let now: Awaited<ReturnType<typeof personalSettingsAt>>;
+  try {
+    now = await personalSettingsAt(dataDir);
+  } catch (err) {
+    return { problem: err instanceof Error ? err.message : String(err) };
+  }
+  return now.wire.status === 'invalid' ? { problem: now.wire.problem } : { wire: now.wire };
 }
 
 /**
@@ -59,10 +75,7 @@ export async function settingsRefusal(
  * rule is saved; else why not. Pure, so the hooks hold an answer to the same
  * rule before they offer from it.
  */
-export function hashRefusal(
-  wire: Extract<WireState, { status: 'ok' }>,
-  hash: string | undefined,
-): SettingsRefusal | null {
+export function hashRefusal(wire: ReadableWire, hash: string | undefined): SettingsRefusal | null {
   if (hash === undefined) {
     if (!wire.hasRules) return null;
     return {

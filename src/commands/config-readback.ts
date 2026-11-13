@@ -18,6 +18,7 @@ import {
   type Identities,
 } from '../router/identities';
 import type { ReplacementSetting, RouterSettings } from '../router/settings';
+import type { SavedAccount } from '../router/accounts/saved';
 import { pidAlive, readObservations, type RouterObservation } from '../router/router-observation';
 
 /**
@@ -54,7 +55,10 @@ export const either = new Intl.ListFormat('en', { type: 'disjunction' });
 export const shellWord = (id: string): string =>
   /^[A-Za-z0-9._:-]+$/.test(id) ? id : JSON.stringify(id);
 
-const KIND_FLAG: Record<TargetKind, string> = {
+/** The command that lists every name near a typed one. */
+export const namesCommand = (word: string): string => `tenjin config names ${shellWord(word)}`;
+
+export const KIND_FLAG: Record<TargetKind, string> = {
   category: '--category',
   task: '--task',
   provider: '--provider',
@@ -180,7 +184,15 @@ export const TENJIN_TOOLS_OFF =
 /** Said with every block: it stops Tenjin's own picks, never a call by name. */
 const BY_NAME = 'You or your agent can still pick it by name.';
 
-export function describeBlock(target: Target, identities: Identities | undefined): RuleReadback {
+/**
+ * A BLOCK IN THE USER'S WORDS. `accounts` names the accounts connected here,
+ * which turning off Tenjin's own tools leaves to pick among.
+ */
+export function describeBlock(
+  target: Target,
+  identities: Identities | undefined,
+  accounts: readonly string[] = [],
+): RuleReadback {
   const label = labelOf(target, identities);
   const services = servicesNaming(target, identities);
   let text: string;
@@ -205,7 +217,9 @@ export function describeBlock(target: Target, identities: Identities | undefined
     case 'source':
       text =
         target.id === BUILT_IN_SOURCE
-          ? `${TENJIN_TOOLS_OFF} You have no connected accounts yet, so for now Tenjin offers nothing on its own.`
+          ? accounts.length > 0
+            ? `${TENJIN_TOOLS_OFF} Your connected ${accounts.length === 1 ? 'account is' : 'accounts are'} ${list.format(accounts)}.`
+            : `${TENJIN_TOOLS_OFF} You have no connected accounts yet, so for now Tenjin offers nothing on its own.`
           : `Tenjin won't offer your ${label} account on its own. ${BY_NAME}`;
       break;
   }
@@ -348,13 +362,125 @@ export function describeSpeed(identities: Identities | undefined): RuleReadback 
 export function describeRules(
   policy: SavedPolicy,
   identities: Identities | undefined,
+  accounts: readonly string[] = [],
 ): RuleReadback[] {
   return [
-    ...(policy.block ?? []).map((target) => describeBlock(target, identities)),
+    ...(policy.block ?? []).map((target) => describeBlock(target, identities, accounts)),
     ...(policy.only ?? []).map((rule) => describeOnly(rule, policy, identities)),
     ...(policy.prefer ?? []).map((rule) => describePrefer(rule, policy, identities)),
     ...(policy.preferSpeed === true ? [describeSpeed(identities)] : []),
   ];
+}
+
+/** A label as it reads mid-phrase: "web research", "images". */
+const midPhrase = (label: string): string => label.charAt(0).toLowerCase() + label.slice(1);
+
+/** A saved target by its label, or by its account's saved label when the
+ *  identities read does not name it (offline). */
+export function nameOf(
+  target: Target,
+  identities: Identities | undefined,
+  accounts: readonly Pick<SavedAccount, 'id' | 'label'>[] = [],
+): string {
+  const label = labelOf(target, identities);
+  return target.kind === 'source' && label === target.id
+    ? (accounts.find(({ id }) => id === target.id)?.label ?? label)
+    : label;
+}
+
+/**
+ * A SAVED RULE IN A FEW WORDS, for the `tenjin config` listing and the one
+ * settings row `tenjin status` shows. The sentence in {@link RuleReadback.text}
+ * stays what `--json` and an agent read; this is the human glance.
+ */
+export interface RuleSummary {
+  /** `✕` a block, `↑` a preference, `=` an only rule, `»` speed. */
+  mark: string;
+  /** What it names, by label: "Firecrawl", "Exa, then Tavily". */
+  name: string;
+  /** What it does, after the name: "not offered on its own". */
+  does: string;
+  /** Both as one phrase: "Firecrawl blocked", "Exa first for web research". */
+  short: string;
+}
+
+export function summarizeRule(
+  rule: RuleReadback,
+  identities: Identities | undefined,
+  accounts: readonly Pick<SavedAccount, 'id' | 'label'>[] = [],
+): RuleSummary {
+  const name = (target: Target) => nameOf(target, identities, accounts);
+  const where = (scope: Scope) =>
+    scope.kind === 'global' ? undefined : midPhrase(labelOf(scope, identities));
+  switch (rule.kind) {
+    case 'block': {
+      const target = rule.rule as Target;
+      const label =
+        target.kind === 'source' && target.id === BUILT_IN_SOURCE
+          ? "Tenjin's own tools"
+          : name(target);
+      return { mark: '✕', name: label, does: 'not offered on its own', short: `${label} blocked` };
+    }
+    case 'prefer': {
+      const { scope, targets } = rule.rule as PreferRule;
+      const names = targets.map(name).join(', then ');
+      const job = where(scope);
+      const does = job === undefined ? 'first for every job' : `first for ${job}`;
+      return {
+        mark: '↑',
+        name: names,
+        does,
+        short: job === undefined ? `${names} first` : `${names} ${does}`,
+      };
+    }
+    case 'only': {
+      const { scope, dimension, targets } = rule.rule as OnlyRule;
+      if (dimension === 'capability') {
+        const names = list.format(targets.map((target) => midPhrase(name(target))));
+        return {
+          mark: '=',
+          name: list.format(targets.map(name)),
+          does: 'the only jobs Tenjin offers on its own',
+          short: `only ${names}`,
+        };
+      }
+      const names = either.format(targets.map(name));
+      const job = where(scope);
+      const noun = DIMENSION_NOUN[dimension];
+      return {
+        mark: '=',
+        name: names,
+        does: job === undefined ? `the only ${noun} Tenjin picks` : `the only ${noun} for ${job}`,
+        short: job === undefined ? `only ${names}` : `only ${names} for ${job}`,
+      };
+    }
+    case 'speed': {
+      const marked = rule.covers?.map((id) => midPhrase(labelOf({ kind: 'task', id }, identities)));
+      return {
+        mark: '»',
+        name: 'Speed',
+        does:
+          marked === undefined
+            ? "on: faster paid tools where they're as accurate"
+            : marked.length === 0
+              ? 'on, but no jobs are marked faster yet'
+              : `on: faster paid tools for ${named(marked)}`,
+        short: 'speed on',
+      };
+    }
+  }
+}
+
+/** Automatic picks in a few words: "off", "on, only for Exa". */
+export function replacementShort(
+  setting: ReplacementSetting,
+  identities: Identities | undefined,
+): string {
+  if (setting.problem !== undefined) return "off: its saved value can't be read";
+  if (setting.mode === 'off') return 'off';
+  return setting.providers === undefined
+    ? 'on, for any provider'
+    : `on, only for ${either.format(setting.providers.map((target) => labelOf(target, identities)))}`;
 }
 
 /** The two automatic limits, as a person reads them, on the Tenjin balance. */
@@ -482,6 +608,74 @@ export interface SettingsReadback {
   limits: LimitsReadback;
   /** Removes every saved routing rule, readable or not. */
   reset: string;
+  /** The saved accounts (plan 37), when there are any: their names, whether
+   *  this machine holds their sign-in, and what happens when one refuses. */
+  accounts?: AccountReadback[];
+}
+
+export interface AccountReadback {
+  id: string;
+  label: string;
+  connected: boolean;
+  /** In the account-wide preference: set to come first for its jobs. */
+  preferred: boolean;
+  /** `tenjin`: Tenjin's own tool runs in its place; `ask`: the call stops
+   *  and offers it. */
+  onRefusal: 'tenjin' | 'ask';
+  text: string;
+  /** Turns the fallback off again, when it is on. */
+  reset?: string;
+  /** Signs out and forgets the account here. */
+  disconnect: string;
+}
+
+/** A connected account in the user's words: whether it comes first, that
+ *  its own plan pays outside the limits, and what it does when it refuses. */
+export function describeAccount(
+  account: SavedAccount,
+  connected: boolean,
+  preferred = false,
+): AccountReadback {
+  const { label, id } = account;
+  const here = connected ? '' : ` It isn't signed in on this machine: \`tenjin connect ${id}\`.`;
+  const who = `Your ${label} account${preferred ? ', set to come first for its jobs' : ''}: its own plan pays, outside your limits on the Tenjin balance.`;
+  const common = { id, label, connected, preferred, disconnect: `tenjin disconnect ${id}` };
+  return account.onRefusal === 'tenjin'
+    ? {
+        ...common,
+        onRefusal: 'tenjin',
+        text: `${who} When your ${label} account refuses a call, Tenjin's own tool for that job runs in its place, from your Tenjin balance within your limits.${here}`,
+        reset: `tenjin config fallback off --source ${id}`,
+      }
+    : {
+        ...common,
+        onRefusal: 'ask',
+        text: `${who} When your ${label} account refuses a call, Tenjin stops and offers its own tool.${here}`,
+      };
+}
+
+/** Every saved account as readback names it. */
+export function describeAccounts(
+  router: Pick<RouterSettings, 'policy' | 'accounts'>,
+): AccountReadback[] {
+  const { policy, accounts } = router;
+  const first = new Set(
+    policy.status === 'ok'
+      ? (policy.saved.prefer ?? [])
+          .filter(({ scope }) => scope.kind === 'global')
+          .flatMap(({ targets }) => targets.filter(({ kind }) => kind === 'source'))
+          .map(({ id }) => id)
+      : [],
+  );
+  return accounts.saved.map((account) =>
+    describeAccount(account, accounts.connected.includes(account.id), first.has(account.id)),
+  );
+}
+
+/** The names of the accounts connected here, for the readback that names them. */
+export function connectedLabels(router: Pick<RouterSettings, 'accounts'>): string[] {
+  const { saved, connected } = router.accounts;
+  return saved.filter(({ id }) => connected.includes(id)).map(({ label }) => label);
 }
 
 /** Said wherever rules this build cannot read show. */
@@ -489,13 +683,15 @@ export const POLICY_INVALID_TEXT =
   "Your Tenjin settings can't be read, so Tenjin won't route or run anything until they're fixed.";
 
 export function settingsReadback(
-  router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement' | 'wire'>,
+  router: Pick<RouterSettings, 'enabled' | 'policy' | 'nativeReplacement' | 'wire' | 'accounts'>,
   identities: Identities | undefined,
   limits: LimitsReadback,
   support: ReplacementSupport,
 ): { data: SettingsReadback; lines: string[] } {
   const { policy, enabled } = router;
-  const rules = policy.status === 'ok' ? describeRules(policy.saved, identities) : [];
+  const rules =
+    policy.status === 'ok' ? describeRules(policy.saved, identities, connectedLabels(router)) : [];
+  const accounts = describeAccounts(router);
   const replacement = describeReplacement(router.nativeReplacement, identities, support);
   const data: SettingsReadback = {
     saved: SAVED_HERE,
@@ -510,6 +706,7 @@ export function settingsReadback(
     replacement,
     limits,
     reset: 'tenjin config reset --all',
+    ...(accounts.length > 0 ? { accounts } : {}),
   };
   const lines = ['Your settings (saved on this machine, not synced):'];
   if (!enabled.value) {
@@ -532,6 +729,12 @@ export function settingsReadback(
     const inactive = rule.inactive !== undefined ? ` (${rule.inactive})` : '';
     lines.push(`  - ${rule.text}${inactive} Undo: \`${rule.reset}\``);
   }
+  // EVERY CONNECTED ACCOUNT, with who pays and how to remove it: connecting
+  // is a setting like any other, and "What have I changed?" names it.
+  for (const account of accounts)
+    lines.push(
+      `  - ${account.text}${account.reset !== undefined ? ` Undo: \`${account.reset}\`;` : ''} Disconnect: \`${account.disconnect}\``,
+    );
   lines.push(`  ${replacement.text}`, `  ${limits.text}`);
   lines.push('  Change them with `tenjin config --help`.');
   return { data, lines };

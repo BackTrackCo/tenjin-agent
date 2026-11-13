@@ -3008,6 +3008,7 @@ describe('a discovered service', () => {
         'note',
         'tolerant',
         'settings',
+        'mcp',
       ],
     });
     // The footer names the seller, and the id binds this session for `request`.
@@ -3142,6 +3143,7 @@ describe('a discovered service', () => {
       'note',
       'tolerant',
       'settings',
+      'mcp',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3165,6 +3167,7 @@ describe('a discovered service', () => {
       'tolerant',
       'bazaar',
       'settings',
+      'mcp',
     ]);
   });
 
@@ -3465,6 +3468,7 @@ describe('a question to the user', () => {
         'note',
         'tolerant',
         'settings',
+        'mcp',
       ],
     });
   });
@@ -3812,5 +3816,105 @@ describe('the hooks and the user settings', () => {
     expect(out.response).toBeNull();
     expect(calls).toEqual([]);
     expect(lines.join('\n')).toContain("your Tenjin settings can't be read");
+  });
+});
+
+/**
+ * A SERVICE ON A CONNECTED ACCOUNT (plan 37): its line is shown like any
+ * offer's, with no spend check (the user's own plan pays), and its spec is
+ * kept. Where this machine can't run it (the account was found to lack a
+ * tool its call makes), nothing is offered: the hook stays silent.
+ */
+describe('an offer led by a connected account', () => {
+  const answer = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-execute-account.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as {
+    settingsHash: string;
+    decision: { id: string; hint: string } & Record<string, unknown>;
+  };
+
+  /** Apify, fal and Firecrawl connected here, with the preference connecting
+   *  Apify writes: the settings the fixture's answer was decided under. */
+  async function connectApify(missingTools: string[] = [], over: Record<string, unknown> = {}) {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        ...ROUTER_POLICY,
+        ...over,
+        router: {
+          policy: {
+            version: 1,
+            prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] }],
+          },
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
+            {
+              id: 'firecrawl',
+              label: 'Firecrawl',
+              mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+              mapped: true,
+            },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    // Each sign-in's plaintext header: the tools the connect-time check found
+    // the account lacks.
+    for (const id of ['apify', 'fal', 'firecrawl']) {
+      await writeFile(
+        join(dir, 'sources', `${id}.json`),
+        JSON.stringify({ header: { id, missingTools: id === 'apify' ? missingTools : [] } }),
+      );
+    }
+  }
+
+  it('shows its line, with no spend check, and keeps its spec', async () => {
+    // A wallet that cannot sign still shows it: the account's plan pays.
+    await connectApify([], { maxAutoSpend: '0' });
+    const { fetchImpl, calls } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(calls).toHaveLength(1);
+    expect(
+      (calls[0] as { body: { settings: { sources: string[] } } }).body.settings.sources,
+    ).toEqual(['tenjin', 'apify', 'fal', 'firecrawl']);
+    expect(out).toMatchObject({ action: 'execute', id: answer.decision.id });
+    expect(JSON.stringify(out.response)).toContain('your Apify account');
+    const { readKeptSpec } = await import('./specs');
+    const kept = await readKeptSpec(dir, answer.decision.id);
+    expect(kept).toMatchObject({
+      account: true,
+      spec: { source: 'apify', settingsHash: answer.settingsHash },
+    });
+    // Never a spec the balance pays, for a reader that runs only those.
+    expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: account lookup offered (Apify)',
+    );
+  });
+
+  it('offers nothing, with nothing kept, where the account lacks a tool its call makes', async () => {
+    // A wallet that cannot sign: nothing else is offered in its place, and
+    // the hook asks the router nothing more.
+    await connectApify(['get-dataset-items'], { maxAutoSpend: '0' });
+    const { fetchImpl, calls } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(calls).toHaveLength(1);
+    const { readKeptSpec } = await import('./specs');
+    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
   });
 });

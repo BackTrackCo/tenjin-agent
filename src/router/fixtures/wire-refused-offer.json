@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-04.2",
+  "decision": {
+    "action": "spec",
+    "id": "0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41",
+    "spec": {
+      "capabilityId": "munition-scrape",
+      "provider": "Firecrawl",
+      "label": "Firecrawl page read",
+      "holds": {
+        "WebFetch": "url"
+      },
+      "output": "json",
+      "description": "renders one public URL with its scripts and returns its main content as clean markdown",
+      "priceAtomic": "15000",
+      "priceVaries": false,
+      "maxAmountAtomic": "15000",
+      "payTo": "0x54d6C2C08e10F1a1d3dA88dF513bbE9BCf1A4aFa",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "request": {
+        "method": "POST",
+        "url": "https://api.munition.io/v1/firecrawl/scrape",
+        "fields": {
+          "formats": "body",
+          "onlyMainContent": "body",
+          "timeout": "body",
+          "url": "body",
+          "waitFor": "body"
+        },
+        "location": "body"
+      },
+      "input": {
+        "type": "object",
+        "properties": {
+          "formats": {
+            "default": ["markdown"],
+            "items": {
+              "enum": ["markdown", "html", "links", "summary"],
+              "type": "string"
+            },
+            "type": "array",
+            "const": ["markdown"]
+          },
+          "onlyMainContent": {
+            "default": true,
+            "description": "Strip navigation, footers and boilerplate.",
+            "type": "boolean",
+            "const": true
+          },
+          "timeout": {
+            "maximum": 30000,
+            "minimum": 1000,
+            "type": "integer"
+          },
+          "url": {
+            "description": "Page to scrape.",
+            "format": "uri",
+            "type": "string"
+          },
+          "waitFor": {
+            "description": "Milliseconds to wait for dynamic content.",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "pinned": {
+        "formats": ["markdown"],
+        "onlyMainContent": true
+      },
+      "example": {
+        "url": "https://www.x402.org/"
+      },
+      "returns": "JSON {url, title, markdown, statusCode, meta:{characters, fetchedAt}}: the page's main content as markdown",
+      "returnsExample": {
+        "markdown": "# x402\n\nAn open protocol for internet-native payments…",
+        "meta": {
+          "characters": 1240,
+          "fetchedAt": "2026-09-09T00:00:00.000Z"
+        },
+        "statusCode": 200,
+        "title": "x402",
+        "url": "https://www.x402.org/"
+      }
+    },
+    "hint": "Firecrawl page read, $0.015: renders one public URL with its scripts and returns its main content as clean markdown. Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d41\", input: {\"url\":\"https://docs.example.com/pricing\"}}) alone and wait for its result."
+  },
+  "jev": {
+    "calls": 1,
+    "latencyMs": 655
+  },
+  "honored": ["schemaVersion", "refused", "accepts", "harness", "settings"],
+  "settingsHash": "sha256:d3907a149dbce1dc8d7034363a0b3c1f2e7ea099005788a58f74cf5e06eb3a75"
+}
