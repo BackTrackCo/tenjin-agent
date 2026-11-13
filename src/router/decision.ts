@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isLoopbackHost } from '../lib/destination';
 import { fetchFailureToCliError, httpRequest, MAX_BINARY_BODY_BYTES } from '../lib/http';
 import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/http';
 import type { CommandContext } from '../context';
@@ -812,11 +813,15 @@ export type KeyScheme = (typeof KEY_SCHEMES)[number];
 
 /** Where a connected account is called. A user's token goes here, so it is
  *  https, with no credentials, query, fragment or trailing slash to make it
- *  another server or carry anything else. */
-export function isAccountUrl(value: string): boolean {
+ *  another server or carry anything else. One the user typed (`typed`) may
+ *  also be http on this machine (`localhost`, 127.0.0.0/8, `[::1]`); the
+ *  router's never is. */
+export function isAccountUrl(value: string, opts: { typed?: boolean } = {}): boolean {
   const url = URL.canParse(value) ? new URL(value) : undefined;
   return (
-    url?.protocol === 'https:' &&
+    url !== undefined &&
+    (url.protocol === 'https:' ||
+      (opts.typed === true && url.protocol === 'http:' && isLoopbackHost(url.hostname))) &&
     !url.username &&
     !url.password &&
     !value.includes('?') &&
@@ -839,7 +844,10 @@ export const ConnectableSchema = z
     mcpUrl: z
       .string()
       .max(2_048)
-      .refine(isAccountUrl, 'an https URL with no credentials, query, fragment or trailing slash'),
+      .refine(
+        (value) => isAccountUrl(value),
+        'an https URL with no credentials, query, fragment or trailing slash',
+      ),
     signIn: z.array(z.enum(SIGN_IN)).min(1).max(2),
     keyScheme: z.enum(KEY_SCHEMES).optional(),
     expectTools: z.array(McpToolSchema).min(1).max(64),

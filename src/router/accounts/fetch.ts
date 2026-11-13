@@ -1,33 +1,58 @@
 import type { IncomingMessage } from 'node:http';
 import { Readable } from 'node:stream';
 import { composeUserAgent } from '../../lib/client-meta';
-import { resolvePublicDestination, type DestinationOptions } from '../../lib/destination';
+import {
+  addressClassOf,
+  isLoopbackHost,
+  resolvePublicDestination,
+  type AddressClass,
+  type DestinationOptions,
+} from '../../lib/destination';
 import { CliError } from '../../lib/errors';
-import { pinnedHttps, type PinnedTarget } from '../paid';
+import { pinnedHttp, type PinnedTarget } from '../paid';
 
 /**
  * EVERY REQUEST TO A CONNECTED ACCOUNT'S HOSTS, through one fetch: the MCP
  * server's first 401 and the sign-in's discovery, registration, token and
  * revocation requests (`oauth.ts`), a refresh (`credential.ts`), and the MCP
- * session itself (`client.ts`). The server's address comes from the router's
- * identities read or from the user, and the sign-in's from that server's own
- * metadata, so each is held to what a paid call's destination is
- * (`lib/destination.ts`): public HTTPS, every address the name resolves to
- * public, and the socket connected to the one address that was checked
- * ({@link pinnedHttps}), so a name that turns private between the check and
- * the connect gets nothing. TLS still verifies the certificate against the
- * URL's own host name.
+ * session itself (`client.ts`). What a request may reach depends on who
+ * named its host, as the MCP spec's security practices and RFC 9728 §7.7 ask:
+ *
+ * - THE SERVER THE USER TYPED (`tenjin connect http://localhost:3000/mcp`)
+ *   is theirs to name. Every request to its own origin goes out as it is:
+ *   any port, any address, a `.local` name, http on this machine. Its address
+ *   was checked when it was connected (`decision.ts`'s `isAccountUrl`).
+ * - A SERVER THE ROUTER NAMED (fal, Apify, Firecrawl), and every host a
+ *   server's own metadata names on another origin (its authorization server,
+ *   that server's token, registration and revocation endpoints), was picked
+ *   by someone other than the user. Each is held to a paid call's check
+ *   (`lib/destination.ts`): https, every address the name resolves to public,
+ *   and the socket connected to the one address that was checked
+ *   ({@link pinnedHttp}), so a name that turns private between the check and
+ *   the connect gets nothing. Any port. Beyond public addresses, only a
+ *   typed server's own kind: loopback (and http there) when the user typed
+ *   one on this machine, the private network when they typed a private
+ *   address. A link-local address, cloud metadata's among them, never.
  *
  * NO REDIRECT IS FOLLOWED HERE: a 3xx comes back as it is. The MCP SDK
  * follows one only within the request's origin, and does so by calling this
- * again, so every hop is checked and pinned on its own.
+ * again, so every hop is checked on its own.
  */
 
-/** One request, connected to the address that was checked. */
-export type AccountTransport = (target: PinnedTarget, request: Request) => Promise<Response>;
+/** Where an account's MCP server is, and who named it. */
+export interface AccountServer {
+  mcpUrl: string;
+  /** The user typed `mcpUrl` at `tenjin connect`. Absent: the router named it. */
+  typed?: boolean;
+}
+
+/** One request: pinned to the address the check validated, or, on the typed
+ *  server's own origin, with no `pinned`, its name resolved as usual. */
+export type AccountTransport = (request: Request, pinned?: PinnedTarget) => Promise<Response>;
 
 export interface AccountFetchDeps {
-  /** Test seam; production sends on {@link pinnedHttps}. */
+  /** Test seam; production sends on {@link pinnedHttp}, or `fetch` on the
+   *  typed server's own origin. */
   transport?: AccountTransport;
   /** Resolver seam, as the paid call's. */
   destination?: DestinationOptions;
@@ -58,15 +83,21 @@ export function responseOf(res: IncomingMessage, method: string): Response {
 /** `node:https` sends no user agent of its own: the CLI's, as a poll's, where
  *  the caller set none. A network failure rejects as `fetch`'s does, a
  *  `TypeError`, which the SDK's discovery reads as a URL to move past. */
-const sendPinned: AccountTransport = async (target, request) => {
+const send: AccountTransport = async (request, pinned) => {
+  const headers = { 'user-agent': composeUserAgent(), ...Object.fromEntries(request.headers) };
   const body = request.body !== null ? new Uint8Array(await request.arrayBuffer()) : undefined;
-  const res = await pinnedHttps(
-    target,
-    {
+  if (pinned === undefined) {
+    return fetch(request.url, {
       method: request.method,
-      headers: { 'user-agent': composeUserAgent(), ...Object.fromEntries(request.headers) },
+      headers,
+      signal: request.signal,
+      redirect: 'manual',
       ...(body !== undefined ? { body } : {}),
-    },
+    });
+  }
+  const res = await pinnedHttp(
+    pinned,
+    { method: request.method, headers, ...(body !== undefined ? { body } : {}) },
     request.signal,
   ).catch((err: unknown) => {
     if (request.signal.aborted) throw err;
@@ -75,13 +106,34 @@ const sendPinned: AccountTransport = async (target, request) => {
   return responseOf(res, request.method);
 };
 
-/** The account fetch with its seams. */
-export function accountFetchWith(deps: AccountFetchDeps = {}): typeof fetch {
+/** How a refused host is named, by what the account may reach. */
+const REACH: Record<AddressClass, string> = {
+  public: 'a public HTTPS address',
+  loopback: 'a public HTTPS address or one on this machine',
+  private: 'a public HTTPS address or one on your network',
+};
+
+/** The typed server's origin, where it is one `isAccountUrl` takes: https, or
+ *  http on this machine. Anything else is checked as a router's would be. */
+function typedOrigin(server: AccountServer): URL | undefined {
+  if (server.typed !== true || !URL.canParse(server.mcpUrl)) return undefined;
+  const url = new URL(server.mcpUrl);
+  return url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHost(url.hostname))
+    ? url
+    : undefined;
+}
+
+/** The fetch every request for the account at `server` goes out on. */
+export function accountFetch(server: AccountServer, deps: AccountFetchDeps = {}): typeof fetch {
+  const own = typedOrigin(server);
+  const allow: AddressClass = own !== undefined ? addressClassOf(own.hostname) : 'public';
+  const transport = deps.transport ?? send;
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init);
-    let target: PinnedTarget;
+    if (own !== undefined && new URL(request.url).origin === own.origin) return transport(request);
+    let pinned: PinnedTarget;
     try {
-      target = await resolvePublicDestination(request.url, deps.destination ?? {});
+      pinned = await resolvePublicDestination(request.url, { ...deps.destination, allow });
     } catch (err) {
       // As a poll's (`jobs.ts`): a name that did not resolve is the
       // network's failure; anything else is the address refused.
@@ -90,13 +142,10 @@ export function accountFetchWith(deps: AccountFetchDeps = {}): typeof fetch {
         (err.details as { cause?: unknown } | undefined)?.cause !== undefined;
       const host = new URL(request.url).host;
       throw new Error(
-        unresolved ? `${host} could not be resolved` : `${host} is not a public HTTPS address`,
+        unresolved ? `${host} could not be resolved` : `${host} is not ${REACH[allow]}`,
         { cause: err },
       );
     }
-    return (deps.transport ?? sendPinned)(target, request);
+    return transport(request, pinned);
   }) as typeof fetch;
 }
-
-/** The fetch every account request goes out on. */
-export const accountFetch: typeof fetch = accountFetchWith();

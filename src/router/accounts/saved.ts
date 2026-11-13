@@ -46,7 +46,9 @@ export function savedAccountOf(entry: unknown): SavedAccount | undefined {
     unknown
   >;
   if (typeof id !== 'string' || !isAccountId(id)) return undefined;
-  if (typeof mcpUrl !== 'string' || !isAccountUrl(mcpUrl)) return undefined;
+  // One the router never named was typed by the user: http on this machine too.
+  if (typeof mcpUrl !== 'string' || !isAccountUrl(mcpUrl, { typed: mapped !== true }))
+    return undefined;
   return {
     id,
     label: typeof label === 'string' && label.length > 0 ? label.slice(0, 120) : id,

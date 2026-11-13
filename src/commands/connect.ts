@@ -1,3 +1,4 @@
+import { isLoopbackHost } from '../lib/destination';
 import { CliError } from '../lib/errors';
 import {
   editSources,
@@ -131,7 +132,8 @@ const ACCOUNT_CHECKS: Record<string, { tool: string; args: Record<string, unknow
 /** Accounts whose sign-in grants the whole account: the readback says so. */
 const WHOLE_ACCOUNT = new Set(['apify']);
 
-/** The account being connected. `expectTools` is empty for an unmapped one. */
+/** The account being connected. `expectTools` is empty for an unmapped one,
+ *  whose address the user typed; a mapped one's the router named. */
 interface Account {
   id: string;
   label: string;
@@ -158,7 +160,7 @@ async function baseUrlOf(ctx: CommandContext): Promise<string> {
     .baseUrl.value;
 }
 
-/** An https address as an account is kept under: no trailing slash. */
+/** An address as an account is kept under: no trailing slash. */
 function accountUrlOf(url: URL): string {
   const path = url.pathname.replace(/\/+$/, '');
   return `${url.origin}${path}`;
@@ -189,9 +191,17 @@ function resolveAccount(
     // THE ADDRESS AS TYPED, a trailing slash aside: one that names a user, a
     // password, a query or a fragment is refused, never cleaned into another.
     const raw = target.replace(/\/+$/, '');
-    const parsed = isAccountUrl(raw) ? new URL(raw) : undefined;
+    const parsed = isAccountUrl(raw, { typed: true }) ? new URL(raw) : undefined;
     const href = parsed !== undefined ? accountUrlOf(parsed) : '';
-    if (parsed === undefined || !isAccountUrl(href)) {
+    if (parsed === undefined || !isAccountUrl(href, { typed: true })) {
+      // Plain http would carry the sign-in in the clear off this machine.
+      const plain = URL.canParse(raw) ? new URL(raw) : undefined;
+      if (plain?.protocol === 'http:' && !isLoopbackHost(plain.hostname)) {
+        usage(
+          'Use https, or http only for localhost. Nothing was saved.',
+          'tenjin connect https://mcp.example.com/mcp',
+        );
+      }
       usage(
         'Connect takes an https address with no user name, password, query or fragment. Nothing was saved.',
         'tenjin connect https://mcp.example.com/mcp',
@@ -321,6 +331,7 @@ async function checkAccount(
   try {
     session = await open(account.mcpUrl, headers, {
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(account.mapped ? {} : { typed: true }),
     });
     const tools = await session.listTools();
     const check = byKey ? ACCOUNT_CHECKS[account.id] : undefined;
@@ -602,7 +613,7 @@ export async function runConnect(
         : {}),
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     };
-    const signed: SignedIn = await signIn(account, signInDeps);
+    const signed: SignedIn = await signIn({ ...account, typed: !account.mapped }, signInDeps);
     if (human) ctx.io.stderr.write('\n');
     secret = {
       tokens: { ...signed.tokens },
@@ -631,6 +642,7 @@ export async function runConnect(
     {
       kind: byKey ? 'key' : 'oauth',
       mcpUrl: account.mcpUrl,
+      ...(account.mapped ? {} : { typed: true as const }),
       connectedAt: new Date(now).toISOString(),
       ...(expiresAt !== undefined ? { expiresAt } : {}),
       state: 'ok',
@@ -788,7 +800,13 @@ export async function runDisconnect(
     else {
       const read = await readVault(id, label, vaultDeps).catch(() => null);
       signedOut =
-        read?.status === 'ok' ? await revokeSignIn(read.secret, deps.fetchImpl) : 'failed';
+        read?.status === 'ok'
+          ? await revokeSignIn(
+              read.secret,
+              { mcpUrl: read.header.mcpUrl, typed: read.header.typed === true },
+              deps.fetchImpl,
+            )
+          : 'failed';
     }
   }
   await deleteVault(id, vaultDeps);

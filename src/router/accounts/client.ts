@@ -70,8 +70,11 @@ export class AccountBadInput extends Error {
 
 export interface SessionDeps {
   /** The transport's fetch; tests pass a scripted one. Production sends on
-   *  {@link accountFetch}, checked and pinned. */
+   *  {@link accountFetch}. */
   fetchImpl?: typeof fetch;
+  /** The user typed `mcpUrl` at `tenjin connect`: its own origin is theirs
+   *  to name ({@link accountFetch}). */
+  typed?: boolean;
   /** Each request's own deadline. */
   timeoutMs?: number;
 }
@@ -122,7 +125,7 @@ export const openAccountSession: OpenAccountSession = async (mcpUrl, headers, de
   const timeout = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
     requestInit: { headers },
-    fetch: deps.fetchImpl ?? accountFetch,
+    fetch: deps.fetchImpl ?? accountFetch({ mcpUrl, typed: deps.typed === true }),
   });
   const client = new Client({ name: 'tenjin', version: pkg.version }, { capabilities: {} });
   try {

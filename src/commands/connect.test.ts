@@ -109,10 +109,10 @@ function sessions(
   tools: Record<string, AccountTool[]>,
   opts: { refuse?: boolean; checkFails?: boolean } = {},
 ) {
-  const opened: { mcpUrl: string; headers: Record<string, string> }[] = [];
+  const opened: { mcpUrl: string; headers: Record<string, string>; typed?: true }[] = [];
   const called: string[] = [];
-  const open: OpenAccountSession = async (mcpUrl, headers) => {
-    opened.push({ mcpUrl, headers });
+  const open: OpenAccountSession = async (mcpUrl, headers, session) => {
+    opened.push({ mcpUrl, headers, ...(session?.typed === true ? { typed: true as const } : {}) });
     if (opts.refuse === true) throw new AccountRefused(401);
     return {
       listTools: async () => tools[mcpUrl] ?? [],
@@ -248,6 +248,8 @@ describe('tenjin connect', () => {
       expiresAt: '2026-11-11T11:00:00.000Z',
       missingTools: [],
     });
+    // The router named its address: every request to it stays checked.
+    expect(await readVaultHeader(dir, 'apify')).not.toHaveProperty('typed');
     expect(await readFile(sourceVaultPath('apify', dir), 'utf8')).not.toContain('access-1');
     expect([...keychain.entries.keys()]).toEqual([`tenjin-cli/${storeAccountFor('apify', dir)}`]);
     // Connected: the account rides in the settings every lookup sends, and
@@ -571,6 +573,30 @@ describe('tenjin connect', () => {
         (await caught(() => runConnect(bad, {}, makeCtx(), deps({ fetchImpl: network() })))).code,
       ).toBe('USAGE');
     }
+  });
+
+  it('connects a server on this machine over http, as the address the user typed', async () => {
+    // The user's own local MCP server, on its own port.
+    const mcpUrl = 'http://localhost:3000/mcp';
+    const mcp = sessions({ [mcpUrl]: [{ name: 'lookup', arguments: ['q'] }] });
+    await runConnect(
+      mcpUrl,
+      { fromEnv: 'EX_KEY' },
+      makeCtx(),
+      deps({ fetchImpl: network(), openSession: mcp.open, env: { EX_KEY: 'ex-1' } }),
+    );
+    // Opened, sealed and saved as typed: its own origin goes out as named.
+    expect(mcp.opened).toEqual([
+      { mcpUrl, headers: { authorization: 'Bearer ex-1' }, typed: true },
+    ]);
+    expect(await readVaultHeader(dir, 'localhost')).toMatchObject({ mcpUrl, typed: true });
+    const settings = await routerSettings({ cwd: work, dataDir: dir });
+    expect(settings.accounts.connected).toEqual(['localhost']);
+    // Plain http anywhere else would carry the sign-in in the clear.
+    const error = await caught(() =>
+      runConnect('http://mcp.example.test/mcp', {}, makeCtx(), deps({ fetchImpl: network() })),
+    );
+    expect(error.message).toBe('Use https, or http only for localhost. Nothing was saved.');
   });
 
   it('names what it can connect when a name is unknown', async () => {

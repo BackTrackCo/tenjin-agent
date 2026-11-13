@@ -82,6 +82,8 @@ export interface AccountCredential {
    *  one). A call goes here and nowhere else, whatever a descriptor in the
    *  config file says. */
   mcpUrl: string;
+  /** The user typed `mcpUrl` at connect, as the vault's header says. */
+  typed?: true;
 }
 
 /** A token this close to its expiry is refreshed before it is sent. */
@@ -121,8 +123,14 @@ export function expiresAtOf(
     : undefined;
 }
 
-function bearer(token: string, mcpUrl: string): AccountCredential {
-  return { kind: 'oauth', headers: authHeader('Bearer', token), sent: token, mcpUrl };
+function bearer(token: string, header: VaultHeader): AccountCredential {
+  return {
+    kind: 'oauth',
+    headers: authHeader('Bearer', token),
+    sent: token,
+    mcpUrl: header.mcpUrl,
+    ...(header.typed === true ? { typed: true as const } : {}),
+  };
 }
 
 /** How much of what the other side said a refusal keeps. */
@@ -168,11 +176,12 @@ export async function accountCredential(
       headers: authHeader(secret.keyScheme ?? 'Bearer', key),
       sent: key,
       mcpUrl: header.mcpUrl,
+      ...(header.typed === true ? { typed: true as const } : {}),
     };
   }
   const token = tokenOf(secret, 'access_token');
   if (token !== undefined && token !== opts.refused && !expiring(header, now))
-    return bearer(token, header.mcpUrl);
+    return bearer(token, header);
   return refreshUnderLock(id, label, deps, token, opts.refused);
 }
 
@@ -199,7 +208,7 @@ async function refreshUnderLock(
         current !== refused &&
         !expiring(header, now)
       )
-        return bearer(current, header.mcpUrl);
+        return bearer(current, header);
       return refreshed(id, label, header, secret, deps, now);
     });
   } catch (err) {
@@ -239,7 +248,8 @@ async function refreshed(
   if (refreshToken === undefined || typeof serverUrl !== 'string' || client === undefined)
     return expire();
   const resource = (discovery.resourceMetadata as { resource?: unknown } | undefined)?.resource;
-  const fetchImpl = deps.fetchImpl ?? accountFetch;
+  const fetchImpl =
+    deps.fetchImpl ?? accountFetch({ mcpUrl: header.mcpUrl, typed: header.typed === true });
   const timeout = deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const sdk = await import('@modelcontextprotocol/sdk/client/auth.js');
   let tokens: Record<string, unknown>;
@@ -284,5 +294,5 @@ async function refreshed(
     },
     deps,
   );
-  return bearer(access, header.mcpUrl);
+  return bearer(access, header);
 }

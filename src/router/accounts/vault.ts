@@ -61,6 +61,10 @@ const HeaderSchema = z.strictObject({
   /** Where the vault key is kept. */
   store: z.enum(['keychain', 'secret-service', 'dpapi', 'file']),
   mcpUrl: z.string().min(1).max(2_048),
+  /** The user typed `mcpUrl` at `tenjin connect`: requests to its own origin
+   *  go out as the user named them (`fetch.ts`). Absent, the router named
+   *  it, and every request is checked. Sealed in with the rest. */
+  typed: z.literal(true).optional(),
   connectedAt: z.string().min(1).max(64),
   /** The access token's expiry; absent for a key, or a token that names none. */
   expiresAt: z.string().min(1).max(64).optional(),

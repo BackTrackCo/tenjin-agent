@@ -9,7 +9,7 @@ import {
 import { CliError } from '../lib/errors';
 import { isBinaryContentType } from '../lib/http';
 import { POLL_REFERENCE, type Job } from './decision';
-import { MAX_MEDIA_BYTES, pinnedHttps, type PinnedTarget } from './paid';
+import { MAX_MEDIA_BYTES, pinnedHttp, type PinnedTarget } from './paid';
 
 /**
  * A PAID CALL THE SELLER ANSWERED BEFORE ITS RESULT WAS READY, finished by
@@ -168,7 +168,7 @@ export type PollTransport = (
  * No redirect is followed: the answer is whatever this URL said.
  */
 export const pinnedRequest: PollTransport = async (target, request, signal) => {
-  const res = await pinnedHttps(target, request, signal);
+  const res = await pinnedHttp(target, request, signal);
   return {
     status: res.statusCode ?? 0,
     header: (name) => {

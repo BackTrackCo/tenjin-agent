@@ -181,7 +181,7 @@ describe('signing out', () => {
         authorizationServerMetadata: { revocation_endpoint: 'https://auth.example.test/revoke' },
       },
     };
-    expect(await revokeSignIn(secret, server.fetchImpl)).toBe('revoked');
+    expect(await revokeSignIn(secret, ACCOUNT, server.fetchImpl)).toBe('revoked');
     const revoked = server.seen
       .filter(({ url }) => url.endsWith('/revoke'))
       .map(({ body }) => Object.fromEntries(new URLSearchParams(body)));
@@ -189,12 +189,12 @@ describe('signing out', () => {
       { token: 'refresh-1', token_type_hint: 'refresh_token', client_id: DOCUMENT },
       { token: 'access-1', token_type_hint: 'access_token', client_id: DOCUMENT },
     ]);
-    expect(await revokeSignIn({ ...secret, discoveryState: {} }, server.fetchImpl)).toBe(
+    expect(await revokeSignIn({ ...secret, discoveryState: {} }, ACCOUNT, server.fetchImpl)).toBe(
       'unsupported',
     );
     const down: typeof fetch = async () => {
       throw new Error('offline');
     };
-    expect(await revokeSignIn(secret, down)).toBe('failed');
+    expect(await revokeSignIn(secret, ACCOUNT, down)).toBe('failed');
   });
 });

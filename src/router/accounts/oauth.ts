@@ -9,9 +9,10 @@ import type {
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import pkg from '../../../package.json';
+import { isLoopbackHost } from '../../lib/destination';
 import { CliError } from '../../lib/errors';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
-import { accountFetch } from './fetch';
+import { accountFetch, type AccountServer } from './fetch';
 import { openRedirect, REDIRECT_PORTS } from './loopback';
 import { said } from './said';
 
@@ -145,7 +146,8 @@ export class ConnectProvider implements OAuthClientProvider {
 }
 
 export interface SignInDeps {
-  /** Test seam; production sends on {@link accountFetch}, checked and pinned. */
+  /** Test seam; production sends on {@link accountFetch}, for the account's
+   *  server. */
   fetchImpl?: typeof fetch;
   /** Opens the approval page; false when no browser could open. */
   open: (url: string) => Promise<boolean>;
@@ -221,11 +223,11 @@ function cannotSignIn(label: string, id: string, why: string): CliError {
  * happens; a redirect whose `state` is not this sign-in's is never taken.
  */
 export async function signIn(
-  account: { id: string; label: string; mcpUrl: string },
+  account: { id: string; label: string } & AccountServer,
   deps: SignInDeps,
 ): Promise<SignedIn> {
   const { id, label, mcpUrl } = account;
-  const fetchImpl = deps.fetchImpl ?? accountFetch;
+  const fetchImpl = deps.fetchImpl ?? accountFetch(account);
   const fetchFn = (input: string | URL | Request, init?: RequestInit) =>
     fetchImpl(input, {
       ...init,
@@ -289,8 +291,15 @@ export async function signIn(
       discovery,
       onAuthorizationUrl: async (url) => {
         // The approval page comes from the server's own metadata: only an
-        // https page is ever opened.
-        if (url.protocol !== 'https:')
+        // https page is ever opened, or an http one on this machine for a
+        // server the user typed there, as `fetch.ts` would reach it. The
+        // opener takes it as one argument, never through a shell.
+        const local =
+          url.protocol === 'http:' &&
+          account.typed === true &&
+          isLoopbackHost(new URL(mcpUrl).hostname) &&
+          isLoopbackHost(url.hostname);
+        if (url.protocol !== 'https:' && !local)
           throw cannotSignIn(label, id, 'its approval page is not an https address');
         if (deps.approving !== undefined) deps.approving(label, url.href);
         else {
@@ -362,7 +371,8 @@ export async function signIn(
  * Sign the account out where its authorization server lets a client do so
  * (RFC 7009): each token this machine holds, refresh token first. Best
  * effort and bounded; `unsupported` when the server has no revocation
- * endpoint, so only the local copy goes.
+ * endpoint, so only the local copy goes. `server` is the account's, which
+ * decides what the endpoint may be ({@link accountFetch}).
  */
 export async function revokeSignIn(
   secret: {
@@ -370,14 +380,21 @@ export async function revokeSignIn(
     clientInformation?: Record<string, unknown>;
     discoveryState?: Record<string, unknown>;
   },
-  fetchImpl: typeof fetch = accountFetch,
+  server: AccountServer,
+  fetchImpl: typeof fetch = accountFetch(server),
 ): Promise<'revoked' | 'unsupported' | 'failed'> {
   const metadata = (secret.discoveryState?.authorizationServerMetadata ?? {}) as {
     revocation_endpoint?: unknown;
   };
   const endpoint =
     typeof metadata.revocation_endpoint === 'string' ? metadata.revocation_endpoint : undefined;
-  if (endpoint === undefined || !URL.canParse(endpoint) || new URL(endpoint).protocol !== 'https:')
+  // Whether an http endpoint may be reached is the fetch's to say; one that
+  // isn't on the web at all is no endpoint.
+  if (
+    endpoint === undefined ||
+    !URL.canParse(endpoint) ||
+    !['https:', 'http:'].includes(new URL(endpoint).protocol)
+  )
     return 'unsupported';
   const clientId = secret.clientInformation?.client_id;
   const tokens = (['refresh_token', 'access_token'] as const).flatMap((hint) => {

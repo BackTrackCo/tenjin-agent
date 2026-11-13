@@ -335,6 +335,7 @@ class Connection {
           this.#credential.headers,
           {
             ...(this.deps.fetchImpl !== undefined ? { fetchImpl: this.deps.fetchImpl } : {}),
+            ...(this.#credential.typed === true ? { typed: true } : {}),
             timeoutMs: this.deps.callTimeoutMs ?? CALL_TIMEOUT_MS,
           },
         );

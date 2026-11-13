@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, rm, type FileHandle } from 'node:fs/promises';
-import type { IncomingMessage } from 'node:http';
+import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -486,7 +486,7 @@ export interface MediaDeps {
  * it, and TLS still verifies the certificate against the URL's own host name.
  */
 export const pinnedGet: MediaTransport = async (target, signal) => {
-  const res = await pinnedHttps(target, { method: 'GET' }, signal);
+  const res = await pinnedHttp(target, { method: 'GET' }, signal);
   const length = Number(res.headers['content-length']);
   const location = res.headers.location;
   return {
@@ -501,16 +501,19 @@ export const pinnedGet: MediaTransport = async (target, signal) => {
 /**
  * ONE REQUEST ON THE PINNED SOCKET, the one every request to a host this CLI
  * checked goes out on: a media download (above), a job's poll (`jobs.ts`)
- * and every request to a connected account (`accounts/fetch.ts`). No
- * redirect is followed; the caller sees the 3xx and checks the next hop.
+ * and every connected-account request to a host the router or a server named
+ * (`accounts/fetch.ts`). HTTPS, but for the plain `http` the account check
+ * takes to a loopback address alone. No redirect is followed; the caller sees
+ * the 3xx and checks the next hop.
  */
-export function pinnedHttps(
+export function pinnedHttp(
   target: PinnedTarget,
   request: { method: string; headers?: Record<string, string>; body?: string | Uint8Array },
   signal: AbortSignal,
 ): Promise<IncomingMessage> {
+  const send = target.url.protocol === 'http:' ? httpRequest : httpsRequest;
   return new Promise((resolve, reject) => {
-    const req = httpsRequest(
+    const req = send(
       target.url,
       {
         method: request.method,
