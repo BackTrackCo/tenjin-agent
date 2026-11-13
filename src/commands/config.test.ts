@@ -87,9 +87,19 @@ describe('runConfigList', () => {
     expect(d['router.improve']).toEqual({ value: false, source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
     // The human listing: 6 scalar keys + update.mode + 3 router.* +
-    // experimental.bazaar. allowlistCreators stays in `data` only.
-    expect(humanLines).toHaveLength(11);
+    // experimental.bazaar, then the settings readback after a blank line.
+    // allowlistCreators stays in `data` only.
+    const blank = (humanLines ?? []).indexOf('');
+    expect(blank).toBe(11);
     expect((humanLines ?? []).join('\n')).not.toMatch(/allowlistCreators/);
+    expect((humanLines ?? []).slice(blank + 1)).toEqual([
+      'Your settings (saved on this machine, not synced):',
+      '  No custom rules: Tenjin uses its defaults.',
+      "  Run Tenjin's picks automatically: off.",
+      '  Limits: $0.25 a call, $5.00 a day (Tenjin balance).',
+      '  Change them with `tenjin config --help`.',
+    ]);
+    expect((data as { settings: { rules: unknown[] } }).settings.rules).toEqual([]);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {

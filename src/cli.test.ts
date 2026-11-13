@@ -42,6 +42,33 @@ afterAll(async () => {
 // real I/O (network, filesystem, stdin), so every case here is driven to a
 // deterministic, offline dispatcher-level outcome instead of a command result.
 describe('main', () => {
+  /**
+   * `tenjin config --help` IS HOW AN AGENT FINDS THE SETTINGS OPERATIONS: the
+   * MCP instructions send it there when a user asks to change what Tenjin may
+   * use. Every operation is listed with an example and is a real subcommand.
+   */
+  it('lists every settings operation with an example in `tenjin config --help`', async () => {
+    const cap = captureIo();
+    expect(await main(['config', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const operation of [
+      'prefer',
+      'only',
+      'block',
+      'unblock',
+      'reset',
+      'speed',
+      'replacement',
+    ]) {
+      expect(help).toMatch(new RegExp(`^  \\$ tenjin config ${operation} `, 'm'));
+      const leaf = captureIo();
+      expect(await main(['config', operation, '--help'], leaf.io)).toBe(0);
+      expect(leaf.stdout()).toContain(`$ tenjin config ${operation} `);
+    }
+    for (const variant of ['--source tenjin', '--dimension', '--capabilities', '--all-providers'])
+      expect(help.replace(/\s+/g, ' ')).toContain(variant);
+  });
+
   it('unknown command exits 2 with exactly one JSON error object', async () => {
     const cap = captureIo();
     const code = await main(['bogus'], cap.io);

@@ -1,0 +1,5 @@
+---
+'tenjin-cli': patch
+---
+
+Ask your agent to change what Tenjin offers and picks on its own. A tool you or your agent picks by name still runs, whatever the settings say. `tenjin config prefer`, `only`, `block`, `unblock`, `reset`, `speed` and `replacement` save your settings on this machine and answer with what they saved, what it covers and the command that undoes it; `tenjin config` shows them in plain words, and showing, unblocking, resetting and pausing work offline. Every routing request carries the saved rules, which Tenjin's router applies, and before any call runs the CLI checks that the offer was decided under the rules saved now, so a block saved after an offer stops it before anything is paid. "Run Tenjin's picks automatically" (`tenjin config replacement on`, off by default) lets Claude Code with the Tenjin plugin answer a web search or page fetch in place with Tenjin's pick, within your settings and spending limits, naming the service, the price and the search it replaced.

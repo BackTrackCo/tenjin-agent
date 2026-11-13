@@ -5,6 +5,7 @@ Use [setup and permissions](./agent-permissions.md) for first use. This page des
 ## Find the right section
 
 - [Request tool](#request-tool): browse, inspect and execute.
+- [Your settings](#your-settings): prefer, only, block, reset, speed and automatic use.
 - [Routing fees and accounting](#routing-fees-and-accounting): limits, deposits and approval.
 - [Direct payments](#direct-payments): pay a specific endpoint with consent.
 - [Jobs, files and records](#jobs-files-and-records): polling and saved results.
@@ -34,6 +35,28 @@ Specs contain the real input schema, pinned fields and request construction. The
 A spec's live payment challenge must match its recipient, asset and network and stay below its price ceiling. A higher price is refused before signing. Without a spec, the older query-bound contract checks the quoted price and does not claim complete endpoint/payee binding. Provider responses are untrusted data. A 2xx that fails the contract's success rule is returned as `unverified`, with the caveat and body; payment may already have happened.
 
 If a spec declares output fields, the inline result contains those fields and `fullResultPath` names the full saved response. Media is saved only when the spec declares media. A result file is evidence of delivery, not proof of payment settlement.
+
+## Your settings
+
+`tenjin config` operations change what Tenjin offers and picks on its own. Names are the catalog's labels or ids, resolved against the router's free identities read before anything is written; an ambiguous or unknown name lists candidates and writes nothing. Each write merges under the config lock and answers with the changed rule, its scope, what is now in effect, an explanation and the command that undoes it. `--json` carries the typed ids.
+
+| Operation                                                                | Saves                                                                                                                                                    |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prefer --task <t> \| --category <c> --provider\|--service\|--source`    | An ordered preference at that scope; `--source` alone is account-wide. Repeating it replaces that scope's list. Other allowed services remain.           |
+| `only --task <t> --provider\|--seller\|--service`                        | The only providers, sellers or services Tenjin picks for that task on its own.                                                                           |
+| `only --global --category\|--task`                                       | The only tasks Tenjin offers tools for on its own.                                                                                                       |
+| `block` / `unblock`                                                      | Stops Tenjin offering a target on its own, or removes that. A block always wins over its own picks; a rule it leaves unusable stays visible as inactive. |
+| `reset --preference\|--restriction [--dimension]\|--capabilities\|--all` | Removes exactly the named rule, offline.                                                                                                                 |
+| `speed on\|off`                                                          | Whether Tenjin also offers paid tools that are as accurate as the agent's own and faster; `on` names the kinds of job marked so.                         |
+| `replacement on --provider <p>\|--all-providers`, `replacement off`      | "Run Tenjin's picks automatically" and its provider scope, in one write. Off keeps a saved scope.                                                        |
+
+`block --source tenjin` stops Tenjin offering its own tools on its own, free ones too; jobs no connected account can do go back to the agent's own tools. The rules and automatic use are personal settings in the global config; `config set` cannot write them and a project file cannot carry them.
+
+The rules govern only what Tenjin picks on its own: its hook offers and the service it picks for a `{query}`. A tool the agent asks for by name (`{browse}`, `{tool}`, `{tool, query}`, a spec by its id) runs whatever they say, and when they leave nothing to pick, the answer is the ordinary `native` one, with nothing said about them.
+
+Every routing form (hooks, `{query}`, `{tool}`, `{tool, query}` and `{browse}`) sends `settings` in `accepts` and a `settings` field: the normalized rules, automatic use when on, the sources usable on this machine (`["tenjin"]`) and their `sha256:` hash. The file is reread on every call, so a change needs no restart. An answer the router decided under them echoes the hash as `settingsHash`, which is kept with every saved spec and quote. Before any call runs (ordinary, choice set, count, approved quote, server-built or automatic), the CLI compares it with the hash of the rules saved now: a mismatch, or no hash while any rule is saved, refuses before provider HTTP, signing or credentials with `reasonCode` `settings_changed` or `settings_unconfirmed`, and the agent asks again. Rules this build cannot read refuse everything (`settings_unreadable`) until `tenjin config reset --all`.
+
+With automatic use on, Claude Code's plugin asks the request tool's plugin-only `decide` form before a main-agent WebSearch or WebFetch. Only an answer carrying `bound` (the offer id and the complete input the router built from that search or URL) runs, unchanged, through the ordinary executor and the same check and limits. Anything else, a price over the limits included, hands the call back to the ordinary hooks, which offer from the same answer. A call run in place is reported and recorded with `via: "swap"`.
 
 ## Routing fees and accounting
 
@@ -131,7 +154,7 @@ The guide's [sharing section](./agent-permissions.md#what-the-hooks-send) descri
 - Hooks read only a validated transcript belonging to this session or a permitted subagent. A first prompt can route on its own text before its transcript exists. Other unreadable/untrusted transcript paths send and pay nothing.
 - A delegated task is its own current message with bounded prior context. Subagents share the same wallet, reservations and limits; they are not separate daily budgets. A host known to lack the request tool is not redirected into it.
 - Session and install IDs correlate offers and outcomes. An execution report contains the offer ID, outcome, HTTP status, duration and refusal side, not its input or result. An ignored-offer report contains its ID and expiry/native-use reason, not task text or a claim that it helped.
-- `accepts` advertises supported contract features, including `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note` and `tolerant`. Required unknown features are refused without paying. Unknown optional fields do not disable known-field validation.
+- `accepts` advertises supported contract features, including `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`, `tolerant` and, beside the `settings` field, `settings`. Required unknown features are refused without paying. Unknown optional fields do not disable known-field validation.
 
 ## Host integration
 

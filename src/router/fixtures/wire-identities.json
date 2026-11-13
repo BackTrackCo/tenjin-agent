@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-11.1",
+  "honored": ["settings"],
+  "categories": [
+    {
+      "id": "lookups",
+      "label": "Everyday lookups",
+      "tasks": ["web research", "read an exact page", "crypto price quote"]
+    },
+    {
+      "id": "images",
+      "label": "Images",
+      "tasks": ["general image", "image edit"]
+    },
+    {
+      "id": "financial-data",
+      "label": "Financial data",
+      "tasks": ["sec filings"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "web research",
+      "label": "Web research",
+      "category": "lookups"
+    },
+    {
+      "id": "read an exact page",
+      "label": "Read an exact page",
+      "category": "lookups"
+    },
+    {
+      "id": "crypto price quote",
+      "label": "Crypto price quote",
+      "category": "lookups"
+    },
+    {
+      "id": "general image",
+      "label": "General image",
+      "category": "images"
+    },
+    {
+      "id": "image edit",
+      "label": "Image edit",
+      "category": "images"
+    },
+    {
+      "id": "sec filings",
+      "label": "Sec filings",
+      "category": "financial-data",
+      "speed": true
+    }
+  ],
+  "providers": [
+    {
+      "id": "exa",
+      "label": "Exa"
+    },
+    {
+      "id": "coinmarketcap",
+      "label": "CoinMarketCap"
+    }
+  ],
+  "sellers": [
+    {
+      "id": "exa",
+      "label": "Exa"
+    },
+    {
+      "id": "stableenrich",
+      "label": "StableEnrich"
+    }
+  ],
+  "services": [
+    {
+      "id": "exa-search",
+      "label": "Exa search",
+      "task": "web research",
+      "providers": ["exa"],
+      "seller": "exa"
+    },
+    {
+      "id": "stableenrich-exa-answer",
+      "label": "Exa Answer",
+      "task": "web research",
+      "providers": ["exa"],
+      "seller": "stableenrich"
+    },
+    {
+      "id": "exa-contents",
+      "label": "Exa contents",
+      "task": "read an exact page",
+      "providers": ["exa"],
+      "seller": "exa"
+    },
+    {
+      "id": "cmc-quotes",
+      "label": "CoinMarketCap quotes",
+      "task": "crypto price quote",
+      "providers": ["coinmarketcap"],
+      "seller": "coinmarketcap"
+    }
+  ],
+  "sources": [
+    {
+      "id": "tenjin",
+      "label": "Tenjin's tools"
+    }
+  ]
+}
