@@ -2915,7 +2915,6 @@ function supplierOf(url: string): string {
   }
 }
 
-/** ONE COST LINE, because there is one payment: the provider's. */
 /** The cost line of a call on the user's own account: their plan, never the
  *  balance, and not counted in its limits. */
 export function accountCost(label: string): string[] {
@@ -2958,6 +2957,7 @@ export function accountReceipt(
   return parts.join(' · ');
 }
 
+/** ONE COST LINE, because there is one payment: the provider's. */
 export function costLines(providerAtomic: bigint): string[] {
   return [`provider price ${toMoney(providerAtomic.toString()).usd} USD`];
 }

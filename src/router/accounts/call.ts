@@ -18,6 +18,7 @@ import {
   type CredentialDeps,
   type RefusalReason,
 } from './credential';
+import { said } from './said';
 
 /**
  * ONE MAPPED JOB, RUN ON THE USER'S OWN ACCOUNT (#37): the map's call, its
@@ -293,6 +294,8 @@ export interface Resume {
 }
 
 const CALL_TIMEOUT_MS = 120_000;
+/** How much of an error a run's detail keeps. */
+const SAID_CHARS = 300;
 
 /** Which account a call is for. Its server is never named here: the session
  *  opens at the address its vault sealed with the credential. */
@@ -398,14 +401,14 @@ export async function listAccountTools(
   try {
     return { tools: await connection.list() };
   } catch (err) {
-    return refusedBy(err, false) as Extract<AccountRun, { kind: 'refused' }>;
+    return refusedBy(err, false);
   } finally {
     await connection.close();
   }
 }
 
 /** What stopped the run before anything ran on the account. */
-function refusedBy(err: unknown, sent: boolean): AccountRun {
+function refusedBy(err: unknown, sent: boolean): Extract<AccountRun, { kind: 'refused' }> {
   if (err instanceof AccountRefusal)
     return {
       kind: 'refused',
@@ -413,20 +416,31 @@ function refusedBy(err: unknown, sent: boolean): AccountRun {
       ...(err.detail !== undefined ? { detail: err.detail } : {}),
       sent,
     };
-  return { kind: 'refused', reason: 'unreachable', detail: said(err), sent };
-}
-
-/** One line of an error, bounded. */
-function said(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err);
-  return text.replace(/\s+/g, ' ').trim().slice(0, 300);
+  return { kind: 'refused', reason: 'unreachable', detail: said(err, SAID_CHARS), sent };
 }
 
 /**
  * RUN `call` ON THE ACCOUNT: the billing call once (or, with `resume`, not at
  * all), then its follow-up. Never throws for anything the account or the
- * network does.
+ * network does. A call with no follow-up, run fresh, never comes back
+ * `running`: nothing is left to finish.
  */
+export function runAccountCall(
+  account: AccountRef,
+  call: AccountCall & { next?: undefined },
+  input: Json,
+  deps: AccountRunDeps,
+  resume?: undefined,
+  opts?: { literal?: boolean },
+): Promise<Exclude<AccountRun, { kind: 'running' }>>;
+export function runAccountCall(
+  account: AccountRef,
+  call: AccountCall,
+  input: Json,
+  deps: AccountRunDeps,
+  resume?: Resume,
+  opts?: { literal?: boolean },
+): Promise<AccountRun>;
 export async function runAccountCall(
   account: AccountRef,
   call: AccountCall,
@@ -437,10 +451,14 @@ export async function runAccountCall(
 ): Promise<AccountRun> {
   const now = () => deps.now?.() ?? Date.now();
   const connection = new Connection(account, deps);
+  const { next } = call;
   try {
     let first: unknown;
     let firstAt: number;
     if (resume !== undefined) {
+      // A KEPT JOB'S MAP has a follow-up: the job was kept because it had one.
+      if (next === undefined)
+        return { kind: 'failed', why: 'its map has no follow-up to finish it' };
       ({ first, firstAt } = resume);
     } else {
       // A TOOL THE USER NAMED takes the agent's arguments as written: no map,
@@ -461,9 +479,13 @@ export async function runAccountCall(
         result = await connection.call(call.tool, args.value);
       } catch (err) {
         if (err instanceof AccountRefusal) return refusedBy(err, true);
-        if (err instanceof AccountBadInput) return { kind: 'input', detail: said(err) };
+        if (err instanceof AccountBadInput) return { kind: 'input', detail: said(err, SAID_CHARS) };
         // SENT, AND NO ANSWER: it may have run.
-        return { kind: 'failed', why: "Tenjin couldn't tell whether it ran", detail: said(err) };
+        return {
+          kind: 'failed',
+          why: "Tenjin couldn't tell whether it ran",
+          detail: said(err, SAID_CHARS),
+        };
       }
       if (result.isError === true) {
         const detail = errorText(result);
@@ -473,13 +495,12 @@ export async function runAccountCall(
       const read =
         opts.literal === true ? readNamedResult(result) : readResult(result, call.result);
       if ('problem' in read) return { kind: 'failed', why: read.problem };
-      const { next } = call;
       if (next === undefined || (next.when !== undefined && !inState(read.value, next.when)))
         return { kind: 'done', ...read };
       first = read.value;
       await deps.onStarted?.({ first, firstAt });
     }
-    return await followUp(connection, call, input, first, firstAt, deps);
+    return await followUp(connection, next, input, first, firstAt, deps);
   } finally {
     await connection.close();
   }
@@ -489,7 +510,7 @@ export async function runAccountCall(
  *  fetches the result. Free reads only, so a resume may send them again. */
 async function followUp(
   connection: Connection,
-  call: AccountCall,
+  next: NonNullable<AccountCall['next']>,
   input: Json,
   first: unknown,
   firstAt: number,
@@ -497,21 +518,21 @@ async function followUp(
 ): Promise<AccountRun> {
   const now = () => deps.now?.() ?? Date.now();
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const next = call.next!;
-  const running = (stopped?: unknown, finished = false, providerError?: string): AccountRun => ({
+  const running = (
+    stopped?: AccountRefusal,
+    opts: { finished?: boolean; providerError?: string } = {},
+  ): AccountRun => ({
     kind: 'running',
     first,
     firstAt,
-    ...(finished ? { finished: true as const } : {}),
-    ...(providerError !== undefined ? { providerError } : {}),
-    ...(stopped instanceof AccountRefusal
+    ...(opts.finished === true ? { finished: true as const } : {}),
+    ...(opts.providerError !== undefined ? { providerError: opts.providerError } : {}),
+    ...(stopped !== undefined
       ? {
           reason: stopped.reason,
           ...(stopped.detail !== undefined ? { detail: stopped.detail } : {}),
         }
-      : stopped !== undefined
-        ? { detail: typeof stopped === 'string' ? stopped : said(stopped) }
-        : {}),
+      : {}),
   });
   // STILL CONNECTED HERE, asked before every status call and the fetch of
   // the result: the session this process opened keeps the credential it was
@@ -520,7 +541,7 @@ async function followUp(
   const gone = (finished = false) =>
     existsSync(sourceVaultPath(connection.accountId, deps.dataDir))
       ? undefined
-      : running(new AccountRefusal('not_connected'), finished);
+      : running(new AccountRefusal('not_connected'), { finished });
   // A HICCUP KEEPS THE JOB: no answer, or an error from the account, on a
   // status call or on the fetch of the result, hands it back running for
   // `request({job})`, which sends only these free reads again. Only an answer
@@ -537,16 +558,18 @@ async function followUp(
     try {
       result = await connection.call(tool, args);
     } catch (err) {
-      const stopped = err instanceof AccountRefusal ? err : new AccountRefusal('unreachable');
-      return {
-        stop: running(stopped, finished, err instanceof AccountRefusal ? undefined : said(err)),
-      };
+      if (err instanceof AccountRefusal) return { stop: running(err, { finished }) };
+      const providerError = said(err, SAID_CHARS);
+      return { stop: running(new AccountRefusal('unreachable'), { finished, providerError }) };
     }
     if (result.isError !== true) return { result };
     const text = errorText(result);
     const reason = refusalIn(text);
     return {
-      stop: running(reason !== undefined ? new AccountRefusal(reason) : undefined, finished, text),
+      stop: running(reason !== undefined ? new AccountRefusal(reason) : undefined, {
+        finished,
+        providerError: text,
+      }),
     };
   };
   const { poll } = next;

@@ -165,8 +165,10 @@ export async function recordAccountRow(
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await withFileLock(`${path}.lock`, async () => {
       const current = parseLedger(await readFile(path, 'utf8').catch(() => ''));
-      const kept = current.find(({ record: row }) => row?.job === record.job)?.record;
-      if (kept === undefined || kept === null) {
+      const kept = current
+        .map(({ record: row }) => row)
+        .find((row): row is PaidRecord => row?.job === record.job);
+      if (kept === undefined) {
         await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
         return;
       }

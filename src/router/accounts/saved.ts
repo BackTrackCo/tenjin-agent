@@ -1,5 +1,5 @@
 import { loadRawConfig, readPersonalRouter } from '../../lib/config';
-import { isAccountUrl, type KeyScheme } from '../decision';
+import { isAccountUrl, KEY_SCHEMES, type KeyScheme, type SignIn } from '../decision';
 import { isAccountId } from './ids';
 
 /**
@@ -16,7 +16,7 @@ export interface SavedAccount {
   /** The account's name as the user reads it. */
   label: string;
   mcpUrl: string;
-  signIn: 'oauth' | 'key';
+  signIn: SignIn;
   keyScheme?: KeyScheme;
   /** `tenjin`: when this account refuses a call before anything ran on it,
    *  Tenjin's own tool for the same job runs in its place, and the receipt
@@ -34,6 +34,9 @@ export interface SavedAccount {
 
 /** The most tools a descriptor keeps. */
 const MAX_MAPPED_TOOLS = 64;
+
+const isKeyScheme = (value: unknown): value is KeyScheme =>
+  (KEY_SCHEMES as readonly unknown[]).includes(value);
 
 /** Whether a saved descriptor, as the config holds it, is a mapped account. */
 export const isMappedDescriptor = (entry: unknown): boolean =>
@@ -53,7 +56,7 @@ export function savedAccountOf(entry: unknown): SavedAccount | undefined {
     label: typeof label === 'string' && label.length > 0 ? label.slice(0, 120) : id,
     mcpUrl,
     signIn: signIn === 'key' ? 'key' : 'oauth',
-    ...(keyScheme === 'Bearer' || keyScheme === 'Key' ? { keyScheme } : {}),
+    ...(isKeyScheme(keyScheme) ? { keyScheme } : {}),
     ...(onRefusal === 'tenjin' ? { onRefusal } : {}),
     ...(mapped === true ? { mapped } : {}),
     ...(Array.isArray(mappedTools)

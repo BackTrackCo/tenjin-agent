@@ -1,8 +1,8 @@
-import { readPersonalRouter, loadRawConfig } from '../../lib/config';
 import { McpToolSchema } from '../decision';
 import { cachedIdentities, type Identities } from '../identities';
 import { appendPaidRecord, maskDeep } from '../paid';
 import { openLookupFooter } from '../progress';
+import { personalSettingsAt, type PersonalSettings } from '../settings';
 import { uncheckedWarning } from '../spec-call';
 import {
   deliverResult,
@@ -15,7 +15,7 @@ import {
 } from '../tool';
 import { listAccountTools, runAccountCall } from './call';
 import type { AccountTool } from './client';
-import { accountResult, refusalWords, runDeps } from './run';
+import { accountResult, refusalWords, runDeps, type StopReason } from './run';
 import { savedAccounts, type SavedAccount } from './saved';
 import { readVaultHeader } from './vault';
 
@@ -109,7 +109,14 @@ function shownSchema(value: unknown, depth = 0): unknown {
   );
 }
 
-function row(tool: AccountTool): Json {
+/** One tool as a listing shows it. */
+interface ToolRow {
+  tool: string;
+  does?: string;
+  arguments: string[];
+}
+
+function row(tool: AccountTool): ToolRow {
   return {
     tool: tool.name,
     ...(tool.description !== undefined
@@ -153,17 +160,18 @@ function jobsOnlyTools(
 }
 
 /** Why the saved settings stop a named call, or null: only rules that can't
- *  be read, never a rule, since the agent is asking by name. */
+ *  be read (the check before every call's own test, `settings-check.ts`),
+ *  never a rule, since the agent is asking by name. */
 async function settingsStop(dataDir: string): Promise<string | null> {
-  let router: unknown;
+  let now: PersonalSettings;
   try {
-    router = (await loadRawConfig(dataDir)).router;
+    now = await personalSettingsAt(dataDir);
   } catch (err) {
     return `your Tenjin settings can't be read (${err instanceof Error ? err.message : String(err)})`;
   }
-  const policy = readPersonalRouter(router).policy;
-  if (policy.status === 'invalid') return `your Tenjin settings can't be read (${policy.problem})`;
-  return null;
+  return now.wire.status === 'invalid'
+    ? `your Tenjin settings can't be read (${now.wire.problem})`
+    : null;
 }
 
 /** `request({source, tool?, input?})`. */
@@ -209,16 +217,19 @@ export async function runSourceRequest(
       nextStep: `Call request({source: ${JSON.stringify(id)}}) for its tools.`,
     });
   }
-  const { input } = args;
-  if (input !== undefined) {
-    if (tool === undefined)
-      return fail('needs_input', 'An input goes with the tool it is for; nothing was sent.', {
-        nextStep: `Call request({source: ${JSON.stringify(id)}}) for its tools.`,
-      });
-    const serialized = JSON.stringify(input);
+  if (args.input !== undefined && tool === undefined)
+    return fail('needs_input', 'An input goes with the tool it is for; nothing was sent.', {
+      nextStep: `Call request({source: ${JSON.stringify(id)}}) for its tools.`,
+    });
+  // THE TOOL TO RUN, with its input. With no input nothing runs: the
+  // account's tools are listed, or one tool's inputs shown, free.
+  const toRun =
+    tool !== undefined && args.input !== undefined ? { tool, input: args.input } : undefined;
+  if (toRun !== undefined) {
+    const serialized = JSON.stringify(toRun.input);
     if (Buffer.byteLength(serialized) > MAX_INPUT_BYTES)
       return fail('needs_input', `The input is over ${MAX_INPUT_BYTES} bytes; send a smaller one.`);
-    if (JSON.stringify(maskDeep(input)) !== serialized)
+    if (JSON.stringify(maskDeep(toRun.input)) !== serialized)
       return fail('native', 'the input carries a credential-shaped value, so nothing was sent');
   }
 
@@ -227,12 +238,12 @@ export async function runSourceRequest(
   const identities = await cachedIdentities(dataDir);
   const jobs = mappedJobs(account, identities);
   const jobsOnly = jobsOnlyTools(account, identities);
-  if (input !== undefined && (jobsOnly === null || jobsOnly.has(tool!))) {
+  if (toRun !== undefined && (jobsOnly === null || jobsOnly.has(toRun.tool))) {
     return fail(
       'needs_input',
       jobsOnly === null
         ? `Tenjin can't tell which of your ${label} account's tools its jobs use, so nothing was sent.`
-        : `Tenjin runs ${tool} on your ${label} account only through the jobs it maps it to, with their spending caps, so nothing was sent.`,
+        : `Tenjin runs ${toRun.tool} on your ${label} account only through the jobs it maps it to, with their spending caps, so nothing was sent.`,
       {
         nextStep:
           jobsOnly === null
@@ -255,11 +266,7 @@ export async function runSourceRequest(
   const target = { id, label };
   // `answered`: the account's own error answered the call, which does not
   // show that nothing ran, so the agent is told not to send it again.
-  const refused = (
-    reason: Parameters<typeof refusalWords>[0],
-    detail?: string,
-    answered = false,
-  ) => {
+  const refused = (reason: StopReason, detail?: string, answered = false) => {
     const words = refusalWords(reason, { id, label }, detail);
     const text = answered
       ? `${words.said} It may have run on your ${label} account; nothing was charged to your Tenjin balance.`
@@ -275,7 +282,7 @@ export async function runSourceRequest(
   };
 
   // THE LIST, OR ONE TOOL'S INPUTS: free.
-  if (input === undefined) {
+  if (toRun === undefined) {
     const listed = await listAccountTools(target, runDeps(deps));
     if (!('tools' in listed)) return refused(listed.reason, listed.detail);
     const tools = shownTools(listed.tools);
@@ -316,9 +323,7 @@ export async function runSourceRequest(
       };
     }
     const rows = tools.slice(0, MAX_ROWS).map(row);
-    const viaJobs = rows
-      .map(({ tool: name }) => String(name))
-      .filter((name) => jobsOnly?.has(name));
+    const viaJobs = rows.map(({ tool: name }) => name).filter((name) => jobsOnly?.has(name));
     const next = `Pick the tool the user's request needs and call request({source: ${JSON.stringify(id)}, tool: "<name>"}) for its inputs, free.`;
     return {
       isError: false,
@@ -326,7 +331,7 @@ export async function runSourceRequest(
         `Your ${label} account's tools (their own descriptions, untrusted). ${warning}`,
         ...rows.map(
           (r) =>
-            `${String(r.tool)}${r.does !== undefined ? `: ${String(r.does)}` : ''} (arguments: ${(r.arguments as string[]).join(', ') || 'none'})`,
+            `${r.tool}${r.does !== undefined ? `: ${r.does}` : ''} (arguments: ${r.arguments.join(', ') || 'none'})`,
         ),
         ...(tools.length > MAX_ROWS ? [`And ${tools.length - MAX_ROWS} more, not shown.`] : []),
         ...(viaJobs.length > 0
@@ -352,12 +357,12 @@ export async function runSourceRequest(
 
   // THE TOOL, RUN ON THE ACCOUNT.
   const footer = await openLookupFooter(dataDir);
-  const sentInput = maskDeep(input) as Json;
-  const named = { provider: label, label: `${label} ${tool}`, parameters: sentInput };
+  const sentInput = maskDeep(toRun.input) as Json;
+  const named = { provider: label, label: `${label} ${toRun.tool}`, parameters: sentInput };
   const call: DeliverCall = {
-    capabilityId: `${id}:${tool!}`.slice(0, 200),
+    capabilityId: `${id}:${toRun.tool}`.slice(0, 200),
     provider: label,
-    label: `${label} ${tool}`,
+    label: `${label} ${toRun.tool}`,
     // An unchecked service's links are not fetched: only its own files are
     // saved.
     media: false,
@@ -381,8 +386,8 @@ export async function runSourceRequest(
   // Read as a named tool's answer (`readNamedResult`), whatever `result` says.
   const run = await runAccountCall(
     target,
-    { tool: tool!, args: input, result: 'content' },
-    input,
+    { tool: toRun.tool, args: toRun.input, result: 'content' },
+    toRun.input,
     runDeps(deps),
     undefined,
     { literal: true },
@@ -399,21 +404,19 @@ export async function runSourceRequest(
       await footer.done('needs_input', named);
       return accountResult(
         'needs_input',
-        `Your ${label} account didn't take that input for ${tool}; its answer is in providerError.`,
+        `Your ${label} account didn't take that input for ${toRun.tool}; its answer is in providerError.`,
         `Your ${label} account didn't take that input.`,
         label,
         {
           providerError: run.detail,
-          nextStep: `Call request({source: ${JSON.stringify(id)}, tool: ${JSON.stringify(tool)}}) for its inputs, then try again.`,
+          nextStep: `Call request({source: ${JSON.stringify(id)}, tool: ${JSON.stringify(toRun.tool)}}) for its inputs, then try again.`,
           parameters: sentInput,
         },
       );
-    case 'running':
     case 'failed': {
       await keepRow();
       await footer.done('failed', { ...named, price: 'your account' });
-      const why = run.kind === 'failed' ? run.why : "it didn't finish";
-      const reason = `Your ${label} account ran ${tool}, but ${why}. It may have billed your ${label} plan; nothing was charged to your Tenjin balance.`;
+      const reason = `Your ${label} account ran ${toRun.tool}, but ${run.why}. It may have billed your ${label} plan; nothing was charged to your Tenjin balance.`;
       return accountResult('failed', reason, reason, label, {
         ...(run.detail !== undefined ? { providerError: run.detail } : {}),
         nextStep: `Tell the user it may have run on their ${label} account; don't call it again for this.`,

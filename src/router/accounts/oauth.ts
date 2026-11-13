@@ -12,6 +12,7 @@ import pkg from '../../../package.json';
 import { CliError } from '../../lib/errors';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { openRedirect, REDIRECT_PORTS } from './loopback';
+import { said } from './said';
 
 /**
  * SIGNING IN TO A CONNECTED ACCOUNT, through the MCP SDK's `auth()`. Every MCP
@@ -37,6 +38,8 @@ export const CLIENT_METADATA_URL = `${PRODUCTION_ORIGIN}/oauth/client-metadata.j
 
 /** Every request this flow makes, bounded. */
 const REQUEST_TIMEOUT_MS = 10_000;
+/** How much of a server's error a message quotes. */
+const SAID_CHARS = 200;
 
 /** What a sign-in hands back to be sealed in the vault. */
 export interface SignedIn {
@@ -197,12 +200,6 @@ async function challenge(mcpUrl: string, fetchImpl: typeof fetch): Promise<Chall
   };
 }
 
-/** One line of a server's error, bounded, for a message a person reads. */
-function said(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err);
-  return text.replace(/\s+/g, ' ').trim().slice(0, 200);
-}
-
 function cannotSignIn(label: string, id: string, why: string): CliError {
   return new CliError(
     'REFUSED',
@@ -234,7 +231,7 @@ export async function signIn(
   } catch (err) {
     throw new CliError(
       'NETWORK_ERROR',
-      `Tenjin couldn't reach ${label} (${said(err)}). Nothing was saved.`,
+      `Tenjin couldn't reach ${label} (${said(err, SAID_CHARS)}). Nothing was saved.`,
       {
         fix: 'Check the network and the address, then run the command again.',
       },
@@ -254,7 +251,7 @@ export async function signIn(
       fetchFn,
     });
   } catch (err) {
-    throw cannotSignIn(label, id, `its sign-in could not be found (${said(err)})`);
+    throw cannotSignIn(label, id, `its sign-in could not be found (${said(err, SAID_CHARS)})`);
   }
   const metadata = info.authorizationServerMetadata;
   const clientMetadataUrl = deps.clientMetadataUrl ?? CLIENT_METADATA_URL;
@@ -317,7 +314,7 @@ export async function signIn(
       started = await sdk.auth(provider, options);
     } catch (err) {
       if (err instanceof CliError) throw err;
-      throw cannotSignIn(label, id, `the sign-in could not start (${said(err)})`);
+      throw cannotSignIn(label, id, `the sign-in could not start (${said(err, SAID_CHARS)})`);
     }
     if (started === 'REDIRECT') {
       const back = await redirect.wait();
@@ -333,7 +330,7 @@ export async function signIn(
       try {
         await sdk.auth(provider, { ...options, authorizationCode: back.code });
       } catch (err) {
-        throw cannotSignIn(label, id, `the sign-in was not accepted (${said(err)})`);
+        throw cannotSignIn(label, id, `the sign-in was not accepted (${said(err, SAID_CHARS)})`);
       }
     }
     const tokens = provider.tokens();

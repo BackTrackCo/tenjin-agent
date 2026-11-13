@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { open, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { writeFileAtomic } from '../../lib/atomic-json';
 import { AccountSpecSchema } from '../decision';
+import { readJsonFile, writePrivate } from '../store-files';
 
 /**
  * A JOB ON THE USER'S ACCOUNT THAT OUTLASTED ITS CALL, kept by the offer's id
@@ -41,7 +40,7 @@ export async function keepAccountJob(dataDir: string, job: AccountJob): Promise<
   try {
     const text = JSON.stringify(job);
     if (Buffer.byteLength(text, 'utf8') > MAX_JOB_BYTES) return false;
-    await writeFileAtomic(pathOf(dataDir, job.offerId), text, { mode: 0o600, dirMode: 0o700 });
+    await writePrivate(pathOf(dataDir, job.offerId), text);
     return true;
   } catch {
     return false;
@@ -54,22 +53,11 @@ export async function readAccountJob(
   offerId: string,
   now: number = Date.now(),
 ): Promise<AccountJob | null> {
-  const file = await open(
-    pathOf(dataDir, offerId),
-    constants.O_RDONLY | constants.O_NOFOLLOW,
-  ).catch(() => undefined);
-  if (file === undefined) return null;
-  try {
-    const stat = await file.stat();
-    if (stat.size > MAX_JOB_BYTES) return null;
-    const parsed = AccountJobSchema.safeParse(JSON.parse(await file.readFile('utf8')));
-    if (!parsed.success || parsed.data.offerId !== offerId) return null;
-    return now - parsed.data.firstAt > ACCOUNT_JOB_KEEP_MS ? null : parsed.data;
-  } catch {
-    return null;
-  } finally {
-    await file.close().catch(() => undefined);
-  }
+  const parsed = AccountJobSchema.safeParse(
+    await readJsonFile(pathOf(dataDir, offerId), MAX_JOB_BYTES),
+  );
+  if (!parsed.success || parsed.data.offerId !== offerId) return null;
+  return now - parsed.data.firstAt > ACCOUNT_JOB_KEEP_MS ? null : parsed.data;
 }
 
 /** A job that ended: delivered, failed or past its keep time. */

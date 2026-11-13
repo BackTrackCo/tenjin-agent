@@ -2,7 +2,6 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { z } from 'zod';
-import { writeFileAtomic } from '../../lib/atomic-json';
 import { CliError } from '../../lib/errors';
 import { hasCode } from '../../lib/errno';
 import { LockTimeoutError, withFileLock } from '../../lib/lock';
@@ -17,7 +16,9 @@ import {
   type StoreRead,
 } from '../../lib/os-store';
 import { sourceKeyBlobPath, sourceKeyFilePath, sourceVaultPath, sourcesDir } from '../../lib/paths';
+import { KEY_SCHEMES, SIGN_IN } from '../decision';
 import { canonicalJson } from '../settings-wire';
+import { writePrivate } from '../store-files';
 import { accountIdOfStore, isAccountId, STORE_ACCOUNT, storeAccountFor } from './ids';
 
 /**
@@ -56,7 +57,7 @@ const PROBE_MS = 3_000;
 const HeaderSchema = z.strictObject({
   version: z.literal(VAULT_VERSION),
   id: z.string().refine(isAccountId),
-  kind: z.enum(['oauth', 'key']),
+  kind: z.enum(SIGN_IN),
   /** Where the vault key is kept. */
   store: z.enum(['keychain', 'secret-service', 'dpapi', 'file']),
   mcpUrl: z.string().min(1).max(2_048),
@@ -78,6 +79,7 @@ const FileSchema = z.strictObject({
   tag: z.string().min(1).max(64),
   data: z.string().min(1).max(1_048_576),
 });
+type VaultFile = z.infer<typeof FileSchema>;
 
 /** What the vault seals. Tokens and client information are kept as the
  *  sign-in returned them, `issuer` included, so a refresh can only ever go
@@ -89,7 +91,7 @@ const SecretSchema = z.strictObject({
   clientInformation: z.record(z.string(), z.unknown()).optional(),
   discoveryState: z.record(z.string(), z.unknown()).optional(),
   apiKey: z.string().min(1).max(4_096).optional(),
-  keyScheme: z.enum(['Bearer', 'Key']).optional(),
+  keyScheme: z.enum(KEY_SCHEMES).optional(),
 });
 export type VaultSecret = z.infer<typeof SecretSchema>;
 
@@ -173,10 +175,7 @@ export async function readVaultHeader(dataDir: string, id: string): Promise<Vaul
   return file?.header ?? null;
 }
 
-async function readVaultFile(
-  dataDir: string,
-  id: string,
-): Promise<z.infer<typeof FileSchema> | null> {
+async function readVaultFile(dataDir: string, id: string): Promise<VaultFile | null> {
   if (!isAccountId(id)) return null;
   let raw: string;
   try {
@@ -185,6 +184,11 @@ async function readVaultFile(
     if (hasCode(err, 'ENOENT')) return null;
     throw err;
   }
+  return parseVaultFile(raw, id);
+}
+
+/** A vault file's text as account `id`'s vault, or null when it is not one. */
+function parseVaultFile(raw: string, id: string): VaultFile | null {
   try {
     const parsed = FileSchema.safeParse(JSON.parse(raw));
     return parsed.success && parsed.data.header.id === id ? parsed.data : null;
@@ -308,7 +312,7 @@ function seal(header: VaultHeader, secret: VaultSecret, key: Buffer) {
   };
 }
 
-function open(file: z.infer<typeof FileSchema>, key: Buffer): VaultSecret | null {
+function open(file: VaultFile, key: Buffer): VaultSecret | null {
   try {
     const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(file.iv, 'base64url'));
     decipher.setAAD(Buffer.from(canonicalJson(file.header), 'utf8'));
@@ -343,14 +347,11 @@ export async function writeVault(
 ): Promise<{ header: VaultHeader; plainFile: boolean; previous: string | null }> {
   return lockedFor(id, deps, 'saved', async () => {
     const previous = await readFile(sourceVaultPath(id, deps.dataDir), 'utf8').catch(() => null);
-    const existing = await readVaultFile(deps.dataDir, id).catch(() => null);
+    const existing = previous === null ? null : parseVaultFile(previous, id);
     const { key, store, plainFile } = await keyForWrite(id, label, deps, existing?.header.store);
     const header = HeaderSchema.parse({ version: VAULT_VERSION, id, store, ...input });
     const sealed = seal(header, SecretSchema.parse(secret), key);
-    await writeFileAtomic(sourceVaultPath(id, deps.dataDir), `${JSON.stringify(sealed)}\n`, {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writePrivate(sourceVaultPath(id, deps.dataDir), `${JSON.stringify(sealed)}\n`);
     keys.set(cacheKey(deps.dataDir, id), key);
     return { header, plainFile, previous };
   });
@@ -364,10 +365,7 @@ export async function writeVault(
  */
 export async function restoreVault(id: string, previous: string, deps: VaultDeps): Promise<void> {
   await lockedFor(id, deps, 'saved', async () => {
-    await writeFileAtomic(sourceVaultPath(id, deps.dataDir), previous, {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writePrivate(sourceVaultPath(id, deps.dataDir), previous);
     keys.delete(cacheKey(deps.dataDir, id));
   });
 }
@@ -391,10 +389,7 @@ export async function rewriteVault(
       'read',
     );
   const sealed = seal(HeaderSchema.parse(header), SecretSchema.parse(secret), key);
-  await writeFileAtomic(sourceVaultPath(id, deps.dataDir), `${JSON.stringify(sealed)}\n`, {
-    mode: 0o600,
-    dirMode: 0o700,
-  });
+  await writePrivate(sourceVaultPath(id, deps.dataDir), `${JSON.stringify(sealed)}\n`);
 }
 
 async function keyForRead(

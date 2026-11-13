@@ -1,4 +1,6 @@
 import { LockTimeoutError } from '../../lib/lock';
+import type { SignIn } from '../decision';
+import { said } from './said';
 import {
   readVault,
   readVaultHeader,
@@ -6,6 +8,7 @@ import {
   withVaultLock,
   type VaultDeps,
   type VaultHeader,
+  type VaultRead,
   type VaultSecret,
 } from './vault';
 
@@ -68,7 +71,7 @@ export interface CredentialDeps extends VaultDeps {
 }
 
 export interface AccountCredential {
-  kind: 'oauth' | 'key';
+  kind: SignIn;
   /** The request headers that carry it: `authorization` alone. */
   headers: Record<string, string>;
   /** What was sent, so a refusal can name the one it refused. */
@@ -102,18 +105,26 @@ function bearer(token: string, mcpUrl: string): AccountCredential {
   return { kind: 'oauth', headers: { authorization: `Bearer ${token}` }, sent: token, mcpUrl };
 }
 
-/** One line of what the other side said, bounded. */
-function said(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err);
-  return text.replace(/\s+/g, ' ').trim().slice(0, 200);
-}
+/** How much of what the other side said a refusal keeps. */
+const SAID_CHARS = 200;
 
-async function read(id: string, label: string, deps: CredentialDeps) {
+/** The account's sign-in, opened: refused when it is not on this machine,
+ *  can't be read or opened, or was marked expired. */
+async function openVault(
+  id: string,
+  label: string,
+  deps: CredentialDeps,
+): Promise<{ header: VaultHeader; secret: VaultSecret }> {
+  let vault: VaultRead;
   try {
-    return await readVault(id, label, deps);
+    vault = await readVault(id, label, deps);
   } catch (err) {
-    throw new AccountRefusal('store_locked', said(err));
+    throw new AccountRefusal('store_locked', said(err, SAID_CHARS));
   }
+  if (vault.status === 'absent') throw new AccountRefusal('not_connected');
+  if (vault.status === 'unreadable' || vault.header.state === 'expired')
+    throw new AccountRefusal('signin_expired');
+  return vault;
 }
 
 /**
@@ -127,11 +138,7 @@ export async function accountCredential(
   opts: { refused?: string } = {},
 ): Promise<AccountCredential> {
   const now = deps.now?.() ?? Date.now();
-  const vault = await read(id, label, deps);
-  if (vault.status === 'absent') throw new AccountRefusal('not_connected');
-  if (vault.status === 'unreadable' || vault.header.state === 'expired')
-    throw new AccountRefusal('signin_expired');
-  const { header, secret } = vault;
+  const { header, secret } = await openVault(id, label, deps);
   if (header.kind === 'key') {
     const key = secret.apiKey;
     // A key the account refused stays refused: only the user has a new one.
@@ -164,11 +171,7 @@ async function refreshUnderLock(
   try {
     return await withVaultLock(id, deps, async () => {
       const now = deps.now?.() ?? Date.now();
-      const vault = await read(id, label, deps);
-      if (vault.status === 'absent') throw new AccountRefusal('not_connected');
-      if (vault.status === 'unreadable' || vault.header.state === 'expired')
-        throw new AccountRefusal('signin_expired');
-      const { header, secret } = vault;
+      const { header, secret } = await openVault(id, label, deps);
       const current = tokenOf(secret, 'access_token');
       if (
         current !== undefined &&
@@ -239,7 +242,7 @@ async function refreshed(
   } catch (err) {
     const code = (err as { errorCode?: unknown } | null)?.errorCode;
     if (typeof code === 'string' && DEAD_GRANT.has(code)) return expire();
-    throw new AccountRefusal('unreachable', said(err));
+    throw new AccountRefusal('unreachable', said(err, SAID_CHARS));
   }
   const access = typeof tokens.access_token === 'string' ? tokens.access_token : undefined;
   if (access === undefined || access.length === 0) return expire();

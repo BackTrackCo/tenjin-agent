@@ -41,9 +41,6 @@ export {
   storeNoun,
   type ExecFn,
   type PromptFn,
-  type StoreCallOptions,
-  type StoreProbe,
-  type StoreRead,
 } from '../os-store';
 
 /**

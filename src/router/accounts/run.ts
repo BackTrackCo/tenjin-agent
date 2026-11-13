@@ -10,7 +10,7 @@ import {
   type OfferSpec,
   type SpecOutcome,
 } from '../decision';
-import { settingsRefusal, type SettingsRefusal } from '../settings-check';
+import { settingsRefusal, UNREADABLE, type SettingsRefusal } from '../settings-check';
 import { personalSettingsAt } from '../settings';
 import { mergedInput, specInputProblems, specText, uncheckedWarning } from '../spec-call';
 import {
@@ -84,60 +84,81 @@ interface Named {
   label: string;
 }
 
+/** Why a call on an account stopped, as {@link refusalWords} says it: a
+ *  refusal, a tool the account lacks, or the account's own error answer. */
+export type StopReason = RefusalReason | 'missing' | 'declined';
+
+/** A refusal in words: what happened, and the user's own way out of it, as a
+ *  sentence (`fix`) and as the same step without its full stop (`step`).
+ *  `retryIn`: the way out is only to wait that long. */
+export interface RefusalWords {
+  said: string;
+  fix: string;
+  step: string;
+  retryIn?: 'minute' | 'moment';
+}
+
+const worded = (said: string, step: string, retryIn?: 'minute' | 'moment'): RefusalWords => ({
+  said,
+  fix: `${step}.`,
+  step,
+  ...(retryIn !== undefined ? { retryIn } : {}),
+});
+
 /** What a refusal says, and the user's own way out of it. */
 export function refusalWords(
-  reason: RefusalReason | 'missing' | 'declined',
+  reason: StopReason,
   account: Named,
   detail: string | undefined,
-): { said: string; fix: string } {
+): RefusalWords {
   const { label, id } = account;
-  const reconnect = `Reconnect with \`tenjin connect ${id}\`.`;
+  const reconnect = `Reconnect with \`tenjin connect ${id}\``;
   switch (reason) {
     case 'signin_expired':
-      return { said: `Your ${label} sign-in has expired.`, fix: reconnect };
+      return worded(`Your ${label} sign-in has expired.`, reconnect);
     case 'not_connected':
-      return {
-        said: `${label} isn't connected on this machine.`,
-        fix: `Connect it with \`tenjin connect ${id}\`.`,
-      };
+      return worded(
+        `${label} isn't connected on this machine.`,
+        `Connect it with \`tenjin connect ${id}\``,
+      );
     case 'store_locked':
-      return {
-        said: `Tenjin couldn't read your ${label} sign-in: your keychain didn't answer.`,
-        fix: 'Unlock the keychain, then try again.',
-      };
+      return worded(
+        `Tenjin couldn't read your ${label} sign-in: your keychain didn't answer.`,
+        'Unlock the keychain, then try again',
+      );
     case 'credit':
-      return {
-        said: `Your ${label} account's plan or credit has run out.`,
-        fix: `Add credit or change the plan at ${label}.`,
-      };
+      return worded(
+        `Your ${label} account's plan or credit has run out.`,
+        `Add credit or change the plan at ${label}`,
+      );
     case 'rate_limited':
-      return {
-        said: `Your ${label} account is over its rate limit right now.`,
-        fix: 'Try again in a minute.',
-      };
-    case 'busy':
-      return {
-        said: `Another Tenjin process was refreshing your ${label} sign-in and didn't finish.`,
-        fix:
-          detail !== undefined
-            ? `Try again; if no other Tenjin process is running, remove ${detail} first.`
-            : 'Try again in a moment.',
-      };
+      return worded(
+        `Your ${label} account is over its rate limit right now.`,
+        'Try again in a minute',
+        'minute',
+      );
+    case 'busy': {
+      const said = `Another Tenjin process was refreshing your ${label} sign-in and didn't finish.`;
+      return detail !== undefined
+        ? worded(said, `Try again; if no other Tenjin process is running, remove ${detail} first`)
+        : worded(said, 'Try again in a moment', 'moment');
+    }
     case 'unreachable':
-      return {
-        said: `Tenjin couldn't reach your ${label} account.`,
-        fix: 'Try again in a moment.',
-      };
+      return worded(
+        `Tenjin couldn't reach your ${label} account.`,
+        'Try again in a moment',
+        'moment',
+      );
     case 'missing':
-      return {
-        said: `This ${label} account doesn't have what this job needs: a tool it calls was missing when it was connected.`,
-        fix: `If the account changed since, ${reconnect.toLowerCase()}`,
-      };
+      return worded(
+        `This ${label} account doesn't have what this job needs: a tool it calls was missing when it was connected.`,
+        `If the account changed since, ${reconnect.toLowerCase()}`,
+      );
     case 'declined':
-      return {
-        said: `Your ${label} account answered with an error; its answer is in providerError.`,
-        fix: 'Check the input, or the account itself.',
-      };
+      return worded(
+        `Your ${label} account answered with an error; its answer is in providerError.`,
+        'Check the input, or the account itself',
+      );
   }
 }
 
@@ -194,8 +215,13 @@ export function accountResult(
   };
 }
 
-/** The re-ask's offer, as a refusal names it, with its price. */
-function offerWords(offer: OfferSpec): { said: string; next: string; envelope: Json } {
+/** The re-ask's offer, as a refusal names it, with its price and its spec. */
+function offerWords(offer: OfferSpec): {
+  said: string;
+  next: string;
+  spec: string;
+  envelope: Json;
+} {
   const price = offer.priceVaries
     ? `up to $${toMoney(offer.maxAmountAtomic).usd}`
     : `$${toMoney(offer.priceAtomic).usd}`;
@@ -204,6 +230,7 @@ function offerWords(offer: OfferSpec): { said: string; next: string; envelope: J
   return {
     said: `Tenjin has ${name} for ${price}: request({id: ${id}, input}) to run it.`,
     next: `If the user picks Tenjin's tool, call request({id: ${id}, input: {...}}) with the inputs above.`,
+    spec: specText(offer.id, offer),
     envelope: { offer: { id: offer.id, label: name, price } },
   };
 }
@@ -357,20 +384,19 @@ async function accountCheck(
 
 /**
  * WHETHER THE ACCOUNT IS STILL CONNECTED HERE: its descriptor saved, its
- * sign-in on this machine, and named to the router in the settings saved now.
- * Settings that can't be read refuse too: nothing is guessed. Local only.
+ * sign-in on this machine, and named to the router in the settings saved now,
+ * read once. Settings that can't be read refuse too, as the check before
+ * every call refuses them: nothing is guessed. Local only.
  */
 async function connection(
   spec: { source: string },
   account: Account,
   dataDir: string,
 ): Promise<{ settings: SettingsRefusal } | { reason: 'not_connected' } | null> {
-  const unreadable = await settingsRefusal(dataDir, []);
-  if (unreadable !== null) return { settings: unreadable };
-  if (!account.saved || account.mcpUrl === undefined) return { reason: 'not_connected' };
   const now = await personalSettingsAt(dataDir).catch(() => undefined);
-  if (now?.wire.status !== 'ok' || !now.wire.settings.sources.includes(spec.source))
-    return { reason: 'not_connected' };
+  if (now === undefined || now.wire.status === 'invalid') return { settings: UNREADABLE };
+  if (!account.saved || account.mcpUrl === undefined) return { reason: 'not_connected' };
+  if (!now.wire.settings.sources.includes(spec.source)) return { reason: 'not_connected' };
   return null;
 }
 
@@ -656,11 +682,11 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
           ? `Your ${label} account answered with an error; it's in providerError.`
           : undefined);
       const pickUp = `request({job: ${JSON.stringify(id)}}) for its result; nothing is sent to the account again.`;
-      const soon = stopped?.fix.match(/^Try again in a (minute|moment)\.$/);
+      const soon = stopped?.retryIn;
       const next = !kept
         ? `This machine could not keep the job, so it can't be picked up here. Don't call again for this: it would run on your ${label} account again.`
-        : soon !== null && soon !== undefined
-          ? `In a ${soon[1]}, call ${pickUp}`
+        : soon !== undefined
+          ? `In a ${soon}, call ${pickUp}`
           : stopped !== undefined
             ? `${stopped.fix} Then call ${pickUp}`
             : `Call ${pickUp}`;
@@ -685,7 +711,7 @@ async function finish(run: AccountRun, at: Run): Promise<RequestToolResult> {
       const reason = `Your ${account.label} account ran this, but ${run.why}. It may have billed your ${account.label} plan.`;
       return accountResult(
         'failed',
-        `${reason}${offer !== undefined ? ` ${offer.said}\n\n${specText(offered!.id, offered!)}` : ''}`,
+        `${reason}${offer !== undefined ? ` ${offer.said}\n\n${offer.spec}` : ''}`,
         reason,
         account.label,
         {
@@ -827,7 +853,7 @@ async function delivered(
  */
 async function refusal(
   at: Run,
-  reason: RefusalReason | 'missing' | 'declined',
+  reason: StopReason,
   sent: boolean,
   detail?: string,
   opts: { answered?: boolean } = {},
@@ -899,13 +925,13 @@ async function refusal(
   const named = offer !== null ? offerWords(offer) : undefined;
   return accountResult(
     'needs_input',
-    `${text} ${words.fix}${named !== undefined ? ` ${named.said}\n\n${specText(offer!.id, offer!)}` : ''}`,
+    `${text} ${words.fix}${named !== undefined ? ` ${named.said}\n\n${named.spec}` : ''}`,
     text,
     account.label,
     {
       nextStep:
         named !== undefined
-          ? `Ask the user whether to fix it (${words.fix.replace(/\.$/, '')}) or use Tenjin's tool instead. ${named.next}`
+          ? `Ask the user whether to fix it (${words.step}) or use Tenjin's tool instead. ${named.next}`
           : `Tell the user: ${words.fix} Otherwise continue with your own tools.`,
       parameters: at.sentInput,
       ...(answered && detail !== undefined ? { providerError: detail } : {}),
@@ -982,5 +1008,3 @@ export async function resumeAccountJob(
         );
   return finish(run, at);
 }
-
-export { readAccountJob };

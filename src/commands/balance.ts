@@ -79,23 +79,22 @@ export async function runBalance(
   opts: BalanceOptions = {},
 ): Promise<CommandResult> {
   const { address, read } = await balanceReader(ctx, opts);
-  const desc = { address };
   const settings = await resolveContextSettings(ctx);
 
-  if (opts.wait === true) return waitForFunds(ctx, desc.address, read, opts);
+  if (opts.wait === true) return waitForFunds(ctx, address, read, opts);
 
   const atomic = await read();
 
   const balance = toMoney(atomic.toString());
   // The routing balance is a local estimate, separate from on-chain funds.
-  const creditAtomic = await channelCredit(ctx.dataDir, desc.address).catch(() => 0n);
+  const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
   const credit = toMoney(creditAtomic.toString());
   const policy = settings.policy;
   const low = atomic < policy.maxAutoSpendAtomic;
   const label = (text: string) => `  ${text.padEnd(LABEL_WIDTH)}`;
   return {
     data: {
-      address: desc.address,
+      address,
       balance,
       routingCredit: credit,
       limits: limitsData(policy),
