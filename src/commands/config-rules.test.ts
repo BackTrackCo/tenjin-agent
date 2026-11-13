@@ -308,6 +308,17 @@ describe('tenjin config block and unblock', () => {
     );
     expect(said).toContain('This leaves a saved rule unusable, kept as it is');
     expect(said).toContain('inactive: Exa is blocked');
+    // At a terminal: what changed, what it means, the undo, and the rule it
+    // left inactive; the sentences above stay in --json.
+    expect(result.humanLines).toEqual([
+      '✓ Blocked Exa',
+      "  Tenjin won't offer its 3 tools on its own. You can still ask for one by name.",
+      '  Undo: tenjin config unblock --provider exa',
+      '! This makes a saved rule inactive: Exa first for web research',
+    ]);
+    // Nothing changed: one line, and nothing to undo.
+    const again = await runConfigBlock({ provider: ['exa'] }, ctx(), online());
+    expect(again.humanLines).toEqual(['Exa was already blocked.']);
   });
 
   it('unblocks by name with no network, and removes nothing else', async () => {

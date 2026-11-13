@@ -223,7 +223,7 @@ Examples:
     });
 
   const config = leaf(SETUP, 'config', 'read and set config values, and your settings').description(
-    "List your rules, limits and the settings you changed from the default (--all prints every value, where it comes from and what it does), read and write one value, or change what Tenjin offers and picks on its own: prefer, only, block, unblock, reset, speed, and whether Tenjin's picks run automatically. A tool you or your agent picks by name still runs. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved, what it covers and the command that undoes it. " +
+    "List your rules, limits and the settings you changed from the default (--all prints every value, where it comes from and what it does), read and write one value, or change what Tenjin offers and picks on its own: prefer, only, block, unblock, reset, speed, and whether Tenjin's picks run automatically. A tool you or your agent picks by name still runs. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved and the command that undoes it; --json adds what it covers in full sentences. Rules hold for picks run automatically too. " +
       'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
       'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends. ' +
       'router.improve is "Help improve routing", off by default: true lets Tenjin keep the secret-masked text of the turns the router sees, to grade its offers, and false turns it off and deletes what was kept.',
@@ -683,7 +683,7 @@ Examples:
   ])
     .summary("limit Tenjin's own picks to what you name")
     .description(
-      'Limit what Tenjin picks on its own to what you name. --global with --category or --task limits which tasks Tenjin offers tools for; --task with --provider, --seller or --service limits who it picks for that one task and leaves other tasks alone. Repeating it replaces the set for that scope; blocks and other rules stay. When nothing allowed fits, Tenjin offers nothing on its own; you or your agent can still ask for any tool by name.',
+      'Limit what Tenjin picks on its own to what you name. --global with --category or --task limits which tasks Tenjin offers tools for; --task with --provider, --seller or --service limits who it picks for that one task and leaves other tasks alone. A category rule covers services added to it later. Repeating it replaces the set for that scope; blocks, other rules and your limits stay. When nothing allowed fits, Tenjin offers nothing on its own; you or your agent can still ask for any tool by name.',
     )
     .option('--global', 'apply everywhere: with --category or --task, which tasks Tenjin does')
     .addHelpText(
@@ -708,7 +708,7 @@ Examples:
   targetOptions(addGlobalFlags(config.command('block')), all)
     .summary('stop Tenjin offering what you name on its own')
     .description(
-      "Block a provider, seller, service, task, category or account from what Tenjin offers and picks on its own; you or your agent can still ask for it by name. A provider block covers reviewed reseller routes through it. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. --source tenjin stops Tenjin offering its own tools, free ones too; jobs no connected account can do go back to your agent's own tools.",
+      "Block a provider, seller, service, task, category or account from what Tenjin offers and picks on its own; you or your agent can still ask for it by name. A provider block covers reviewed reseller routes through it, and a service whose provider Tenjin can't confirm is left out of its own picks too. A block always wins: a preference or only rule it leaves unusable stays saved and is marked inactive. --source tenjin stops Tenjin offering its own tools, free ones too; jobs no connected account can do go back to your agent's own tools.",
     )
     .addHelpText(
       'after',
@@ -819,7 +819,7 @@ Examples:
   addGlobalFlags(config.command('replacement <state>'))
     .summary("turn Run Tenjin's picks automatically on or off")
     .description(
-      "Run Tenjin's picks automatically: on lets a host that supports it run Tenjin's pick in place of your agent's web search or page fetch, within your limits, instead of offering it first. A pick on an account you connected runs that way too, for the jobs Tenjin has checked, billed to that account's own plan. on needs --provider (repeatable) or --all-providers; off keeps a saved provider choice. It never changes what is allowed or which service is picked first.",
+      "Run Tenjin's picks automatically: on lets a host that supports it run Tenjin's pick in place of your agent's web search or page fetch, within your limits, instead of offering it first. A pick on an account you connected runs that way too, for the jobs Tenjin has checked, billed to that account's own plan. Each pick that runs this way is a charge you aren't asked about separately, and names the service, its price and the search or fetch it answered; a call over your limits is offered as usual instead. It works in Claude Code with the Tenjin plugin; other agents, Codex included, keep getting ordinary offers. on needs --provider (repeatable) or --all-providers; off keeps a saved provider choice. It never changes what is allowed or which service is picked first.",
     )
     .option('--provider <name>', 'only when Tenjin picks this provider (repeatable)', collect)
     .option('--all-providers', 'for any allowed provider')
@@ -849,7 +849,7 @@ Examples:
   addGlobalFlags(config.command('fallback <state>'))
     .summary("whether Tenjin's own tool runs when one of your accounts refuses")
     .description(
-      "When a connected account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops and offers its own tool for the job with its price. on runs that tool in the account's place instead, from your Tenjin balance within your limits, and the receipt says so; off goes back to asking. --source names the account.",
+      "When a connected account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin stops and offers its own tool for the job with its price. on runs that tool in the account's place instead, from your Tenjin balance within your limits, and the receipt says so; off goes back to asking. A call your account ran and then failed is never run again on Tenjin's tool: its plan may already have paid for it. --source names the account.",
     )
     .option('--source <account>', 'the connected account, such as apify', collect)
     .addHelpText(

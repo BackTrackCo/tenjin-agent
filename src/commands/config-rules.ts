@@ -1,4 +1,5 @@
 import { CliError } from '../lib/errors';
+import { paint } from '../lib/output';
 import {
   editSources,
   loadRawConfig,
@@ -8,6 +9,7 @@ import {
 } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 import {
+  BUILT_IN_SOURCE,
   ONLY_DIMENSIONS,
   POLICY_VERSION,
   ReplacementProvidersSchema,
@@ -35,6 +37,9 @@ import {
   KIND_NOUN,
   labelOf,
   resolveName,
+  servicesNaming,
+  speedTasks,
+  tasksOf,
   type Identities,
   type Named,
 } from '../router/identities';
@@ -61,8 +66,10 @@ import {
   onlyResetCommand,
   preferResetCommand,
   replacementSupport,
+  nameOf,
   scopeFlag,
   settingsReadback,
+  summarizeRule,
   unblockCommand,
   type LimitsReadback,
   type ReplacementSupport,
@@ -329,13 +336,50 @@ export interface Outcome {
   scope: SettingScope;
   /** The rule this operation wrote or removed, typed ids and all. */
   rule?: unknown;
-  /** The sentences a person reads first. */
+  /** The sentences an agent reads: `--json`'s `explanation`, and the human
+   *  lines of an operation with no {@link Outcome.human}. */
   explanation: string[];
+  /** What a person reads at a terminal instead: at most three lines. */
+  human?: Reply;
   effective?: RuleReadback[];
   removed?: unknown[];
   reset?: string;
   extra?: Record<string, unknown>;
 }
+
+/**
+ * A REPLY AT A TERMINAL, AT MOST THREE LINES: `✓` and what changed, one line
+ * on what that means, and the dim command that undoes it (the outcome's
+ * `reset`). With no `done`, nothing changed and only `said` prints. A
+ * problem is one `! ` line after it. The fine print lives in the command's
+ * `--help`, and in full in `--json`'s `explanation`.
+ */
+export interface Reply {
+  done?: string;
+  said: string[];
+  problems?: string[];
+}
+
+function replyLines(
+  ctx: CommandContext,
+  reply: Reply,
+  reset: string | undefined,
+  unreadable: readonly string[],
+): string[] {
+  const problems = [...(reply.problems ?? []), ...unreadable].map((problem) =>
+    paint(ctx.io, 'yellow', `! ${problem}`),
+  );
+  if (reply.done === undefined) return [...reply.said, ...problems];
+  return [
+    `${paint(ctx.io, 'green', '✓')} ${reply.done}`,
+    ...reply.said.map((line) => `  ${line}`),
+    ...(reset !== undefined ? [`  ${paint(ctx.io, 'dim', `Undo: ${reset}`)}`] : []),
+    ...problems,
+  ];
+}
+
+/** "Inactive: Exa is blocked", from a readback's `inactive`. */
+const sentence = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /**
  * THE ONE ENVELOPE EVERY OPERATION ANSWERS WITH: the changed rule, its saved
@@ -368,11 +412,14 @@ export async function answer(
       ...outcome.extra,
       settings: settings.data,
     },
-    humanLines: [
-      ...outcome.explanation,
-      ...unreadable,
-      ...(outcome.reset !== undefined ? [`To undo: \`${outcome.reset}\``] : []),
-    ],
+    humanLines:
+      outcome.human !== undefined
+        ? replyLines(ctx, outcome.human, outcome.reset, unreadable)
+        : [
+            ...outcome.explanation,
+            ...unreadable,
+            ...(outcome.reset !== undefined ? [`To undo: \`${outcome.reset}\``] : []),
+          ],
   };
 }
 
@@ -449,6 +496,8 @@ export async function runConfigPrefer(
   });
   const effective = describePrefer(rule, after, identities);
   const read = await readBack(ctx, deps);
+  const summary = summarizeRule(effective, identities, read.router.accounts.saved);
+  const names = either.format(targets.map((target) => nameOf(target, identities)));
   return answer(
     {
       operation: 'prefer',
@@ -456,6 +505,15 @@ export async function runConfigPrefer(
       scope: 'user',
       rule,
       explanation: [`${SAVED_PREFIX} ${said(effective)}`, replacementNote(read)],
+      human: {
+        done: `${summary.name} ${summary.does}`,
+        said: [
+          targets.every(({ kind }) => kind === 'source')
+            ? `${targets.length === 1 ? 'Its plan pays' : 'Their plans pay'}. Other tools still run when ${names} can't do the job.`
+            : `Other tools still run when ${names} can't do the job.`,
+        ],
+        ...(effective.inactive !== undefined ? { problems: [sentence(effective.inactive)] } : {}),
+      },
       effective: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
       // A replaced list comes back as it was; a new one is removed.
@@ -555,6 +613,7 @@ export async function runConfigOnly(
   });
   const effective = describeOnly(rule, after, identities);
   const read = await readBack(ctx, deps);
+  const summary = summarizeRule(effective, identities);
   return answer(
     {
       operation: 'only',
@@ -562,6 +621,10 @@ export async function runConfigOnly(
       scope: 'user',
       rule,
       explanation: [`${SAVED_PREFIX} ${said(effective)}`, replacementNote(read)],
+      human: {
+        ...onlyReply(rule, summary, identities),
+        ...(effective.inactive !== undefined ? { problems: [sentence(effective.inactive)] } : {}),
+      },
       effective: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
       reset: replaced !== undefined ? recreate(replaced) : onlyResetCommand(rule),
@@ -571,6 +634,34 @@ export async function runConfigOnly(
     identities,
     read,
   );
+}
+
+/** What an only rule says at a terminal: what Tenjin now offers, and what still runs. */
+function onlyReply(
+  rule: OnlyRule,
+  summary: { name: string; short: string },
+  identities: Identities | undefined,
+): Reply {
+  if (rule.dimension === 'capability') {
+    const jobs = new Set(
+      rule.targets.flatMap((target) =>
+        target.kind === 'category' ? tasksOf(target.id, identities) : [target.id],
+      ),
+    );
+    return {
+      done: `Tenjin offers ${summary.short} on its own`,
+      said: [
+        `${jobs.size > 0 ? `${jobs.size} ${jobs.size === 1 ? 'kind' : 'kinds'} of job. ` : ''}Anything else still runs when you ask for it by name.`,
+      ],
+    };
+  }
+  const global = rule.scope.kind === 'global';
+  return {
+    done: global ? `Only ${summary.name}, for every job` : sentence(summary.short),
+    said: [
+      `If ${summary.name} can't do ${global ? 'a job' : 'it'}, Tenjin offers nothing for it. You can still ask for any tool by name.`,
+    ],
+  };
 }
 
 /* ------------------------------------------------------------------- block */
@@ -625,6 +716,20 @@ export async function runConfigBlock(
             kind !== 'block' && inactive !== undefined && wasActive.has(JSON.stringify(rule)),
         );
   const fresh = new Set(added.map(targetKey));
+  const already = targets
+    .filter((target) => !fresh.has(targetKey(target)))
+    .map((target) => `${blockName(target, identities)} was already blocked.`);
+  const human: Reply =
+    added.length === 0
+      ? { said: already.map(sentence) }
+      : {
+          done: `Blocked ${list.format(added.map((target) => blockName(target, identities)))}`,
+          said: [blockMeans(added, identities, accounts), ...already.map(sentence)],
+          problems: nowInactive.map(
+            (rule) =>
+              `This makes a saved rule inactive: ${summarizeRule(rule, identities, read.router.accounts.saved).short}`,
+          ),
+        };
   const explanation = [
     ...added
       .map((target) => describeBlock(target, identities, accounts).text)
@@ -643,6 +748,7 @@ export async function runConfigBlock(
       scope: 'user',
       rule: added,
       explanation,
+      human,
       effective,
       ...(added.length > 0
         ? { reset: added.map((target) => unblockCommand(target)).join(' && ') }
@@ -654,6 +760,40 @@ export async function runConfigBlock(
     identities,
     read,
   );
+}
+
+/** A blocked target as a reply names it: "Firecrawl", "your fal account". */
+function blockName(target: Target, identities: Identities | undefined): string {
+  if (target.kind !== 'source') return labelOf(target, identities);
+  return target.id === BUILT_IN_SOURCE
+    ? "Tenjin's own tools"
+    : `your ${labelOf(target, identities)} account`;
+}
+
+/** What a block means, in one line: what stops, and that asking by name still works. */
+function blockMeans(
+  added: readonly Target[],
+  identities: Identities | undefined,
+  accounts: readonly string[],
+): string {
+  const BY_NAME = 'You can still ask for one by name.';
+  if (added.length > 1) return `Tenjin won't offer them on its own. ${BY_NAME}`;
+  const target = added[0]!;
+  if (target.kind === 'source' && target.id === BUILT_IN_SOURCE) {
+    return accounts.length > 0
+      ? `Tenjin now offers only your ${list.format(accounts)} ${accounts.length === 1 ? 'account' : 'accounts'}. Ask for one of Tenjin's tools by name to use it.`
+      : 'With no connected accounts, Tenjin offers nothing on its own for now. Ask for a tool by name to use it.';
+  }
+  if (target.kind === 'category') {
+    const jobs = tasksOf(target.id, identities).length;
+    return `Tenjin won't offer ${jobs > 0 ? `its ${jobs} kinds of job` : 'anything in it'} on its own, or any added later. You can still ask by name.`;
+  }
+  if (target.kind === 'task')
+    return "Tenjin won't offer it on its own, whoever could do it. You can still ask by name.";
+  const tools = target.kind === 'source' ? 0 : servicesNaming(target, identities).length;
+  return tools > 1
+    ? `Tenjin won't offer its ${tools} tools on its own. ${BY_NAME}`
+    : "Tenjin won't offer it on its own. You can still ask for it by name.";
 }
 
 /* ----------------------------------------------------------------- unblock */
@@ -724,6 +864,19 @@ export async function runConfigUnblock(
       ? [`Saved blocks: ${remaining.map((target) => labelOf(target, identities)).join(', ')}.`]
       : []),
   ];
+  const nothing = missing.map(
+    ({ kind, name }) => `Nothing blocks a ${KIND_NOUN[kind]} named "${name}".`,
+  );
+  const human: Reply =
+    removed.length === 0
+      ? { said: [...nothing, 'Nothing changed.'] }
+      : {
+          done: `Unblocked ${list.format(removed.map((target) => blockName(target, identities)))}`,
+          said: [
+            `Tenjin can offer ${removed.length === 1 ? 'it' : 'them'} on its own again.`,
+            ...nothing,
+          ],
+        };
   return answer(
     {
       operation: 'unblock',
@@ -731,6 +884,7 @@ export async function runConfigUnblock(
       scope: 'user',
       rule: removed,
       explanation,
+      human,
       removed,
       ...(removed.length > 0
         ? { reset: `tenjin config block ${removed.map((target) => flagFor(target)).join(' ')}` }
@@ -928,12 +1082,25 @@ export async function runConfigReset(
         : [
             `${SAVED_PREFIX} removed ${describeRemoved(mode, removed, identities)}. Your blocks, limits and other rules stay as they are.`,
           ];
+  const human: Reply =
+    missing !== undefined
+      ? { said: [`${missing} Nothing changed.`] }
+      : mode === 'all'
+        ? {
+            done: 'Removed all your rules',
+            said: ['Automatic picks and your limits are unchanged.'],
+          }
+        : {
+            done: `Removed ${describeRemoved(mode, removed, identities)}`,
+            said: ['Your other rules are unchanged.'],
+          };
   return answer(
     {
       operation: 'reset',
       changed: missing === undefined,
       scope: 'user',
       explanation,
+      human,
       removed,
       ...(missing === undefined && touched.length > 0
         ? { reset: touched.map((rule) => recreate(rule)).join(' && ') }
@@ -1021,6 +1188,26 @@ export async function runConfigSpeed(
     : [
         `${SAVED_PREFIX} Tenjin offers a paid tool only when your agent's own tools can't do the job as well. Your other rules stay as they are.`,
       ];
+  const marked = speedTasks(identities)?.map(
+    (label) => label.charAt(0).toLowerCase() + label.slice(1),
+  );
+  const human: Reply = !changed
+    ? { said: [`Speed is already ${on ? 'on' : 'off'}.`] }
+    : on
+      ? {
+          done: 'Speed on',
+          said: [
+            marked === undefined
+              ? "Tenjin also offers faster paid tools where they're as accurate. Your limits still apply."
+              : marked.length === 0
+                ? 'No jobs are marked faster yet, so nothing changes for now.'
+                : `Tenjin also offers faster paid tools for ${list.format(marked)}. Your limits still apply.`,
+          ],
+        }
+      : {
+          done: 'Speed off',
+          said: ["Tenjin offers a paid tool only when your agent's own can't do the job as well."],
+        };
   return answer(
     {
       operation: 'speed',
@@ -1028,6 +1215,7 @@ export async function runConfigSpeed(
       scope: 'user',
       rule: { preferSpeed: on },
       explanation,
+      human,
       ...(on ? { effective: [effective] } : {}),
       // Only a change has an undo, and it puts the switch back as it was.
       ...(changed ? { reset: `tenjin config speed ${was ? 'on' : 'off'}` } : {}),
@@ -1143,10 +1331,25 @@ export async function runConfigReplacement(
           'This picks no provider ahead of another and changes nothing about what is allowed: add a preference or a rule for that.',
           support.why,
         ];
+  const named =
+    scope !== undefined
+      ? `, only for ${either.format(scope.map((target) => labelOf(target, identities)))}`
+      : '';
+  const human: Reply = !changed
+    ? { said: [`Automatic picks are already ${args.state}.`] }
+    : args.state === 'on'
+      ? {
+          done: `Automatic picks on${named}`,
+          said: [
+            'In Claude Code, Tenjin now runs its pick in place of a web search or page fetch, and says what it ran and what it cost. Your limits still apply.',
+          ],
+        }
+      : { done: 'Automatic picks off', said: ['Tenjin goes back to offering its picks first.'] };
   return answer(
     {
       operation: 'replacement',
       changed,
+      human,
       scope: 'machine',
       rule: {
         mode: router.nativeReplacement.mode,
@@ -1236,6 +1439,22 @@ export async function runConfigFallback(
   );
   const after = find((await loadRawConfig(ctx.dataDir)).router) ?? before;
   const { label, id } = after;
+  const changed = (before.onRefusal === 'tenjin') !== on;
+  const human: Reply = !changed
+    ? { said: [`Fallback is already ${args.state} for ${label}.`] }
+    : on
+      ? {
+          done: `Fallback on for ${label}`,
+          said: [
+            `When ${label} refuses a call, Tenjin's own tool runs instead, on your Tenjin balance.`,
+          ],
+        }
+      : {
+          done: `Fallback off for ${label}`,
+          said: [
+            `When ${label} refuses a call, Tenjin offers its own tool and runs it only when you say so.`,
+          ],
+        };
   const explanation = on
     ? [
         `${SAVED_PREFIX} when your ${label} account refuses a call (its sign-in expired, or its plan or rate limit ran out), Tenjin runs its own tool for the same job instead. It is paid from your Tenjin balance within your limits, and the receipt says so.`,
@@ -1247,9 +1466,10 @@ export async function runConfigFallback(
   return answer(
     {
       operation: 'fallback',
-      changed: (before.onRefusal === 'tenjin') !== on,
+      changed,
       scope: 'user',
       explanation,
+      human,
       ...(on ? { reset: `tenjin config fallback off --source ${id}` } : {}),
       extra: { account: { id, label, onRefusal: on ? 'tenjin' : 'ask' } },
     },
