@@ -193,7 +193,7 @@ describe('tenjin connect', () => {
     expect(lines(result)).toEqual([
       '✓ Connected Apify',
       '  2 tools, billed to your Apify plan, not your Tenjin balance.',
-      '  Tenjin uses your Apify first for these jobs. Your Apify plan pays.',
+      '  Tenjin uses your Apify first for these jobs.',
       '  Undo: tenjin disconnect apify',
     ]);
     expect(explained(result)).toContain(

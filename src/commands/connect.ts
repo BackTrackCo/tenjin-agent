@@ -507,8 +507,8 @@ function connectReply(
     preference === 'blocked'
       ? `Ask for ${label} by name to use ${tools === 1 ? 'it' : 'them'}. \`tenjin status\` lists it.`
       : preference === 'added' || preference === 'kept'
-        ? `Tenjin uses your ${label} first for these jobs. Your ${label} plan pays.`
-        : `Tenjin can use your ${label} for these jobs. Your ${label} plan pays.`;
+        ? `Tenjin uses your ${label} first for these jobs.`
+        : `Tenjin can use your ${label} for these jobs.`;
   return {
     done: `Connected ${label}`,
     said: [
