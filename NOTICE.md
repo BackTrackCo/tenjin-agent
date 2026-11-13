@@ -1,5 +1,9 @@
 # Third-Party Notices
 
+## Claude Agent SDK
+
+The external subagent runner bundles the JavaScript core of Anthropic's Claude Agent SDK. Copyright Anthropic PBC; all rights reserved. Its use is subject to the [Anthropic legal agreements](https://code.claude.com/docs/en/legal-and-compliance). The runner uses an installed Claude Code executable; this package does not redistribute that executable.
+
 ## BlockRun MCP
 
 Portions of this project are adapted from

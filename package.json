@@ -65,6 +65,8 @@
     "githooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.325",
+    "@anthropic-ai/sdk": "0.137.0",
     "@changesets/cli": "^3.0.3",
     "@clack/prompts": "^1.7.0",
     "@eslint/js": "^10",

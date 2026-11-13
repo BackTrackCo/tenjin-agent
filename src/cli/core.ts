@@ -278,6 +278,19 @@ Showing, unblocking, resetting and pausing work offline. To pause Tenjin:
       return runConfigList(ctx);
     });
   });
+  addGlobalFlags(config.command('subagents <mode>'))
+    .summary('opt in to DeepSeek subagents for one repository, or turn them off')
+    .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
+    .option('--max-job <USD>', 'total routing and inference ceiling per job')
+    .action(async function (
+      this: Command,
+      mode: string,
+      options: { repository?: string; maxJob?: string },
+    ) {
+      await runCommand('config subagents', this, async (ctx) =>
+        (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
+      );
+    });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one effective config value')
     .description(

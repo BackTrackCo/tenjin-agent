@@ -71,6 +71,7 @@ export async function runBalance(
   // The routing balance is a local estimate, separate from on-chain funds.
   const creditAtomic = await channelCredit(ctx.dataDir, desc.address).catch(() => 0n);
   const credit = toMoney(creditAtomic.toString());
+  const modelCreditAtomic = await channelCredit(ctx.dataDir, desc.address, 'model').catch(() => 0n);
   const policy = settings.policy;
   const low = atomic < policy.maxAutoSpendAtomic;
   const label = (text: string) => `  ${text.padEnd(LABEL_WIDTH)}`;
@@ -79,6 +80,7 @@ export async function runBalance(
       address: desc.address,
       balance,
       routingCredit: credit,
+      modelCredit: toMoney(modelCreditAtomic.toString()),
       limits: limitsData(policy),
       low,
     },
@@ -87,6 +89,9 @@ export async function runBalance(
       `${label('Limits')}${limitsLine(policy)}`,
       ...(creditAtomic > 0n
         ? [`${label('Set aside')}about ${dollars(creditAtomic)} for routing`]
+        : []),
+      ...(modelCreditAtomic > 0n
+        ? [`${label('Subagents')}about ${dollars(modelCreditAtomic)} set aside for model calls`]
         : []),
       ...(atomic === 0n && creditAtomic < ROUTING_FEE_CEILING_ATOMIC
         ? ['', `  ${FUND_COMMAND_LINE}`]
@@ -169,6 +174,7 @@ async function waitForFunds(
   }
   if (link !== null) await forgetLink(ctx.dataDir);
   const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
+  const modelCreditAtomic = await channelCredit(ctx.dataDir, address, 'model').catch(() => 0n);
   const line = `+${dollars(end.added)} · balance ${dollars(end.balance)}`;
   return {
     data: {
@@ -177,6 +183,7 @@ async function waitForFunds(
       added: toMoney(end.added.toString()),
       balance: toMoney(end.balance.toString()),
       routingCredit: toMoney(creditAtomic.toString()),
+      modelCredit: toMoney(modelCreditAtomic.toString()),
       summary: line,
     },
     humanLines: [human ? `  ${line}` : line],

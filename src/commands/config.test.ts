@@ -90,7 +90,7 @@ describe('runConfigList', () => {
     // experimental.bazaar, then the settings readback after a blank line.
     // allowlistCreators stays in `data` only.
     const blank = (humanLines ?? []).indexOf('');
-    expect(blank).toBe(11);
+    expect(blank).toBe(12);
     expect((humanLines ?? []).join('\n')).not.toMatch(/allowlistCreators/);
     expect((humanLines ?? []).slice(blank + 1)).toEqual([
       'Your settings (saved on this machine, not synced):',

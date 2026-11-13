@@ -11,12 +11,14 @@ import {
 import {
   CODEX_HOOK_TOOL,
   CODEX_REQUEST_TOOL,
+  CODEX_SUBAGENT_TOOL,
   MARKETPLACE_NAME,
   MCP_SERVER_NAME,
   PLUGIN_HOOK_TOOL,
   PLUGIN_NAME,
   PLUGIN_SERVER,
   REQUEST_TOOL,
+  SUBAGENT_TOOL,
 } from './names';
 
 /**
@@ -232,7 +234,11 @@ export function renderPluginHooks(
     { event: 'SessionStart', hooks: command(cliLaunch(ALIVE_ARGS, entry, o)) },
     ...routerHookPlan(),
     { event: 'PreToolUse', matcher: PLUGIN_HOOK_TOOL, hooks: command(denyHook(o)) },
-    { event: 'PreToolUse', matcher: REQUEST_TOOL, hooks: command(allowHook(o)) },
+    {
+      event: 'PreToolUse',
+      matcher: `${REQUEST_TOOL}|${SUBAGENT_TOOL}`,
+      hooks: command(allowHook(o)),
+    },
   ];
   const hooks: Record<string, unknown[]> = {};
   for (const { event, hooks: handlers, ...rest } of plan) {
@@ -622,6 +628,10 @@ export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
       PreToolUse: [
         { matcher: CODEX_WEB_MATCHER, hooks: codexLeg('native') },
         {
+          matcher: 'collaborationspawn_agent|spawn_agent|Agent',
+          hooks: codexLeg('delegation', 15),
+        },
+        {
           matcher: CODEX_HOOK_TOOL,
           hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: LOCAL_HOOK_TIMEOUT_SECONDS }],
         },
@@ -632,9 +642,11 @@ export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
           hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS),
         },
       ],
+      Interrupt: [{ hooks: codexLeg('interrupt', 15) }],
+      SessionEnd: [{ hooks: codexLeg('end', 15) }],
       PermissionRequest: [
         {
-          matcher: CODEX_REQUEST_TOOL,
+          matcher: `${CODEX_REQUEST_TOOL}|${CODEX_SUBAGENT_TOOL}`,
           hooks: [
             {
               type: 'command',

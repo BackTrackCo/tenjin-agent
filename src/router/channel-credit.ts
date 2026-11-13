@@ -11,8 +11,13 @@ import { payerDir } from './fee';
  *
  * Not hook-safe (it loads the x402 SDK's storage), so `fee.ts` does not carry it.
  */
-export async function channelCredit(dataDir: string, address: string): Promise<bigint> {
-  const dir = payerDir(dataDir, address);
+export async function channelCredit(
+  dataDir: string,
+  address: string,
+  lane: 'tool' | 'model' = 'tool',
+): Promise<bigint> {
+  const base = payerDir(dataDir, address);
+  const dir = lane === 'model' ? join(base, 'model-inference') : base;
   const storage = new FileClientChannelStorage({ directory: dir });
   let best = 0n;
   for (const name of await readdir(join(dir, 'client')).catch(() => [] as string[])) {

@@ -1,3 +1,7 @@
+import { registerModelTool, stopModelWorkers } from './model-mcp';
+import { ModelTransport } from './model-transport';
+import type { ModelSession } from './model-handoff';
+import { codexModelPolicy } from './codex-model-context';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -281,11 +285,52 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
    * call can name no file of its own.
    */
   const sessions = new Map<string, { transcript_path?: unknown; cwd?: unknown }>();
+  let modelSession: ModelSession | undefined;
+  const seenModelTurns = new Set<string>();
+  let modelTurn = 0;
+  const modelTool = registerModelTool(server, {
+    dataDir: ctx.dataDir,
+    harness: opts.harness ?? 'claude',
+    session: () => modelSession,
+    transport: async () => {
+      const settings = await resolveContextSettings(ctx);
+      if (!opts.payer) throw new Error('Model payment unavailable');
+      return new ModelTransport({
+        dataDir: ctx.dataDir,
+        baseUrl: settings.baseUrl,
+        routing: opts.payer,
+        payerDeps: {
+          dataDir: ctx.dataDir,
+          getSigner: () => provider.getSigner(),
+          policy: async () => (await resolveContextSettings(ctx)).policy,
+          authorizer: (policy) => createLocalSpendAuthorizer({ dir: ctx.dataDir, policy }),
+          walletBalance: (address, timeoutMs) =>
+            readUsdcBalanceWithFallback(address, settings.rpcUrl, { timeoutMs }),
+          readContract: chainReader(settings.rpcUrl),
+        },
+      });
+    },
+  });
   const rememberSession = (raw: Record<string, unknown>): void => {
     const id = raw['session_id'];
     if (typeof id !== 'string') return;
     sessions.delete(id);
     sessions.set(id, { transcript_path: raw['transcript_path'], cwd: raw['cwd'] });
+    if (
+      raw['hook_event_name'] === 'UserPromptSubmit' &&
+      !raw['agent_id'] &&
+      typeof raw['cwd'] === 'string' &&
+      typeof raw['transcript_path'] === 'string' &&
+      (!modelSession || modelSession.sessionId === id)
+    ) {
+      modelSession = {
+        sessionId: id,
+        turnId: String(++modelTurn),
+        cwd: raw['cwd'],
+        transcript: raw['transcript_path'],
+        harness: 'claude',
+      };
+    }
     for (const old of sessions.keys()) {
       if (sessions.size <= MAX_SESSIONS) break;
       sessions.delete(old);
@@ -542,7 +587,41 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // is plain arguments, so each call must still carry its session's own
   // transcript (`admitHookEvent`); any other call answers "no opinion" with
   // nothing sent.
-  if (opts.harness === 'codex') return registerCodexHookTool(server, ctx, opts);
+  if (opts.harness === 'codex')
+    return registerCodexHookTool(server, ctx, opts, async (kind, raw) => {
+      const id = raw.session_id;
+      if (typeof id !== 'string' || (modelSession && modelSession.sessionId !== id)) return null;
+      if (kind === 'interrupt' || kind === 'end') {
+        if (kind === 'interrupt' && raw.turn_id !== modelSession?.turnId) return null;
+        if (modelSession) await modelTool.fence(modelSession);
+        if (raw.hook_event_name === 'SessionEnd') modelSession = undefined;
+        return null;
+      }
+      if (
+        typeof raw.turn_id !== 'string' ||
+        typeof raw.cwd !== 'string' ||
+        typeof raw.transcript_path !== 'string'
+      )
+        return null;
+      const turnKey = JSON.stringify([id, raw.turn_id]);
+      if (kind === 'prompt' && seenModelTurns.has(turnKey) && modelSession?.turnId !== raw.turn_id)
+        return null;
+      if (kind !== 'prompt' && (!modelSession || modelSession.turnId !== raw.turn_id)) return null;
+      if (kind === 'prompt' && modelSession && modelSession.turnId !== raw.turn_id)
+        await modelTool.fence(modelSession);
+      if (kind === 'prompt') seenModelTurns.add(turnKey);
+      modelSession = {
+        sessionId: id,
+        turnId: raw.turn_id,
+        cwd: raw.cwd,
+        transcript: raw.transcript_path,
+        harness: 'codex',
+      };
+      const policy = await codexModelPolicy(raw.transcript_path, id, raw.turn_id, raw.cwd);
+      if (modelSession?.turnId !== raw.turn_id || modelSession.sessionId !== id) return null;
+      if (policy) modelSession.codexPolicy = policy;
+      return kind === 'delegation' ? modelTool.codexHook(modelSession, raw) : null;
+    });
   const env = opts.env ?? process.env;
   const fromPlugin = launchedByPlugin(env);
   server.registerTool(
@@ -628,6 +707,7 @@ function registerCodexHookTool(
   server: McpServer,
   ctx: CommandContext,
   opts: RouterMcpOptions,
+  modelEvent: (kind: string, event: Record<string, unknown>) => Promise<unknown>,
 ): McpServer {
   server.registerTool(
     HOOK_TOOL,
@@ -651,6 +731,16 @@ function registerCodexHookTool(
           ...(opts.homeDir !== undefined ? { homeDir: opts.homeDir, env: {} } : {}),
         });
         if (event !== null) {
+          const modelResponse =
+            extra._meta?.['threadId'] === event.session_id
+              ? await modelEvent(args.kind, event)
+              : null;
+          if (args.kind === 'delegation' || args.kind === 'interrupt' || args.kind === 'end')
+            return {
+              content: [
+                { type: 'text', text: modelResponse === null ? '' : JSON.stringify(modelResponse) },
+              ],
+            };
           const { codexResponse } = await import('./codex-event');
           response = codexResponse(
             await runHookKind(args.kind, event, {
@@ -708,6 +798,7 @@ export async function runRouterMcpServer(opts: RouterMcpOptions = {}): Promise<v
   // Held through the wait below, so a SIGTERM then does not cut it short.
   process.once('SIGTERM', ended);
   await end;
+  await stopModelWorkers(server);
   await drained(payer);
   process.off('SIGTERM', ended);
 }

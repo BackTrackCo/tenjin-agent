@@ -1,4 +1,5 @@
 [
+  "@anthropic-ai/claude-agent-sdk",
   "@clack/core",
   "@clack/prompts",
   "@modelcontextprotocol/sdk",

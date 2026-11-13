@@ -25,7 +25,10 @@ export function parseCodexHistory(raw: string, session: string): PacketMessage[]
         owned ||
         p.id !== session ||
         p.session_id !== session ||
-        p.thread_source !== 'user' ||
+        !(
+          p.thread_source === 'user' ||
+          (p.thread_source == null && p.cli_version === '0.163.0' && p.source === 'vscode')
+        ) ||
         p.parent_thread_id != null
       )
         return null;

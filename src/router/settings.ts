@@ -99,6 +99,7 @@ export interface PersonalSettings {
 }
 
 export interface RouterSettings extends PersonalSettings {
+  subagents: RouterSetting<boolean>;
   enabled: RouterSetting<boolean>;
   context: RouterSetting<RouterContext>;
   /** "Help improve routing": the global file's, or the default, off. */
@@ -159,12 +160,17 @@ export async function routerSettings(
   if (global?.context !== undefined) {
     context = { value: global.context, source: 'file', path: globalPath };
   }
+  let subagents: RouterSetting<boolean> = {
+    value: global?.subagents === true,
+    source: global?.subagents === true ? 'file' : 'default',
+  };
   const improve: RouterSetting<boolean> =
     global?.improve !== undefined
       ? { value: global.improve, source: 'file', path: globalPath }
       : { value: CONFIG_DEFAULTS.router.improve, source: 'default' };
 
   for (const { source, path, layer } of await projectLayers(input, deps)) {
+    if (layer.subagents === false) subagents = { value: false, source, path };
     // Every layer is a floor: a value looser than the one so far is not read.
     if (layer.enabled !== undefined && (layer.enabled === false || enabled.value)) {
       enabled = { value: layer.enabled, source, path };
@@ -173,7 +179,7 @@ export async function routerSettings(
       context = { value: layer.context, source, path };
     }
   }
-  return { enabled, context, improve, ...personalSettings(global) };
+  return { enabled, context, improve, subagents, ...personalSettings(global) };
 }
 
 const ROUTER_FILES = [PROJECT_ROUTER_FILE, LOCAL_ROUTER_FILE];

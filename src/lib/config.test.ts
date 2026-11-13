@@ -68,7 +68,12 @@ describe('loadConfig', () => {
     expect(raw).toMatchObject(legacy);
     const cfg = await loadConfig(dir);
     expect(cfg.maxAutoSpend).toBe('500000');
-    expect(cfg.router).toEqual({ enabled: false, context: 'session', improve: false });
+    expect(cfg.router).toEqual({
+      enabled: false,
+      context: 'session',
+      improve: false,
+      subagents: false,
+    });
     expect(cfg.install).toEqual({ routerProjects: [] });
     const s = resolveSettings({ config: raw, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: 'https://router.example', source: 'file' });
@@ -186,10 +191,20 @@ describe('parseOnOffFlag', () => {
 });
 
 describe('router block: the switch and the context', () => {
-  it('registers three dotted keys and no scalar', () => {
-    expect(ROUTER_CONFIG_KEYS).toEqual(['router.enabled', 'router.context', 'router.improve']);
+  it('registers four dotted keys and no scalar', () => {
+    expect(ROUTER_CONFIG_KEYS).toEqual([
+      'router.enabled',
+      'router.context',
+      'router.improve',
+      'router.subagents',
+    ]);
     expect(CONFIG_KEYS as string[]).not.toContain('router');
-    expect(CONFIG_DEFAULTS.router).toEqual({ enabled: true, context: 'session', improve: false });
+    expect(CONFIG_DEFAULTS.router).toEqual({
+      enabled: true,
+      context: 'session',
+      improve: false,
+      subagents: false,
+    });
   });
 
   it('loads a partial block over the defaults and keeps an unknown subkey', async () => {
@@ -197,6 +212,7 @@ describe('router block: the switch and the context', () => {
     expect((await loadConfig(dir)).router).toEqual({
       enabled: true,
       context: 'turn',
+      subagents: false,
       improve: false,
     });
     expect((await loadRawConfig(dir)).router).toEqual({ context: 'turn', later: 1 });

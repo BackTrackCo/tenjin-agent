@@ -75,7 +75,14 @@ export function eventFromToolInput(args: Record<string, unknown>): Record<string
  * optional `agent_id` is never one of them: the call's `threadId` metadata
  * tells a subagent's leg apart instead (`admitCodexHookEvent`).
  */
-export const CODEX_HOOK_KINDS = ['prompt', 'native', 'shortfall'] as const;
+export const CODEX_HOOK_KINDS = [
+  'prompt',
+  'native',
+  'shortfall',
+  'delegation',
+  'interrupt',
+  'end',
+] as const;
 export type CodexHookKind = (typeof CODEX_HOOK_KINDS)[number];
 
 const CODEX_COMMON = [
@@ -91,6 +98,9 @@ const CODEX_FIELDS: Record<CodexHookKind, readonly string[]> = {
   prompt: [...CODEX_COMMON, 'prompt'],
   native: [...CODEX_COMMON, ...CODEX_CALL],
   shortfall: [...CODEX_COMMON, ...CODEX_CALL, 'tool_response'],
+  delegation: [...CODEX_COMMON, ...CODEX_CALL],
+  interrupt: [...CODEX_COMMON],
+  end: ['hook_event_name', 'session_id', 'transcript_path', 'cwd'],
 };
 
 /** The `input` of one Codex leg's `mcp_tool` entry. */

@@ -33,6 +33,7 @@ export interface StatusDeps {
   now?: () => number;
   /** Seam for funds set aside for routing; production reads local channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
+  modelCredit?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
    *  null with no wallet. Production reads the chain. */
   wallet?: (
@@ -61,10 +62,13 @@ async function walletOnChain(
 
 /** What the wallet's routing channel still holds; 0n with no wallet, or one
  *  this cannot read without a prompt. */
-async function walletRoutingCredit(ctx: CommandContext): Promise<bigint> {
+async function walletRoutingCredit(
+  ctx: CommandContext,
+  lane: 'tool' | 'model' = 'tool',
+): Promise<bigint> {
   try {
     const { address } = await describeWallet(resolveWalletProvider(ctx));
-    return await channelCredit(ctx.dataDir, address);
+    return await channelCredit(ctx.dataDir, address, lane);
   } catch {
     return 0n;
   }
@@ -94,9 +98,10 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const [creditAtomic, wallet] = await Promise.all([
+  const [creditAtomic, wallet, modelCreditAtomic] = await Promise.all([
     (deps.routingCredit ?? walletRoutingCredit)(ctx),
     (deps.wallet ?? walletOnChain)(ctx, settings.rpcUrl).catch(() => null),
+    deps.modelCredit ? deps.modelCredit(ctx) : walletRoutingCredit(ctx, 'model'),
   ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const data = {
@@ -124,6 +129,7 @@ export async function runRouterStatus(
       // call pays is the router's quote, at or below it.
       calls: Number(creditAtomic / ROUTING_FEE_CEILING_ATOMIC),
     },
+    modelCredit: { remaining: toMoney(modelCreditAtomic.toString()) },
     caps: {
       maxAutoSpend: toMoney(settings.policy.maxAutoSpendAtomic.toString()),
     },
@@ -139,6 +145,11 @@ export async function runRouterStatus(
       ? `automatic spend ${automatic} USD; no daily limit`
       : `counted toward the daily limit: ${automatic} USD of ${toMoney(budgetAtomic.toString()).usd} USD in the rolling 24h window`;
   const routingLines = [
+    ...(modelCreditAtomic > 0n
+      ? [
+          `set aside for subagent model calls: approximately ${data.modelCredit.remaining.usd} USD (local estimate)`,
+        ]
+      : []),
     ...(depositedAtomic > 0n
       ? [
           `deposited for routing in the rolling 24h window: ${toMoney(depositedAtomic.toString()).usd} USD`,

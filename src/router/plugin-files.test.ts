@@ -150,7 +150,10 @@ describe("the plugin's hooks", () => {
       { matcher: 'Agent|Task', hooks: leg('agent') },
       { matcher: 'AskUserQuestion', hooks: leg('ask') },
       { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
-      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
+      {
+        matcher: 'mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent',
+        hooks: command(ALLOW_HOOK),
+      },
     ]);
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
@@ -439,6 +442,10 @@ describe('the checked-in hosts/codex templates', () => {
       PreToolUse: [
         { matcher: 'webrun', hooks: leg({ kind: 'native', ...call }) },
         {
+          matcher: 'collaborationspawn_agent|spawn_agent|Agent',
+          hooks: leg({ kind: 'delegation', ...call }, 15),
+        },
+        {
           matcher: 'mcp__router__hook',
           hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: 5 }],
         },
@@ -449,9 +456,24 @@ describe('the checked-in hosts/codex templates', () => {
           hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
         },
       ],
+      Interrupt: [{ hooks: leg({ kind: 'interrupt', ...common }, 15) }],
+      SessionEnd: [
+        {
+          hooks: leg(
+            {
+              kind: 'end',
+              hook_event_name: '${hook_event_name}',
+              session_id: '${session_id}',
+              transcript_path: '${transcript_path}',
+              cwd: '${cwd}',
+            },
+            15,
+          ),
+        },
+      ],
       PermissionRequest: [
         {
-          matcher: 'mcp__router__request',
+          matcher: 'mcp__router__request|mcp__router__subagent',
           hooks: [
             {
               type: 'command',
