@@ -19,4 +19,4 @@
  * `savedFiles` and `result` where `fullResultPath` says the CLI cut it to the
  * spec's fields. `mod-state.test.ts` pins the fields through each writer.
  */
-export const MOD_STATE_FILES = ['spec', 'choices', 'label', 'offer', 'config'] as const;
+export {};

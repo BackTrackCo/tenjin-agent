@@ -313,7 +313,7 @@ export function describePrefer(
 }
 
 /** What the speed preference costs and what it never does, said with every readback of it. */
-const SPEED_TERMS =
+export const SPEED_TERMS =
   'They cost more, and your limits still apply. This changes when Tenjin offers, never which service it picks, and it turns nothing on by itself.';
 
 /**

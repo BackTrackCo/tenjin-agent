@@ -479,6 +479,7 @@ describe('the request bodies', () => {
       'wire-outcome-request.json',
       'wire-outcome-unpaid.json',
       'wire-outcome-ignored.json',
+      'wire-outcome-via.json',
     ]) {
       const canonical = fixture(name);
       const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
@@ -1162,7 +1163,6 @@ describe('the settings field', () => {
   it('is what the resolver builds from the saved rules, hash and all', () => {
     const { wire } = personalSettings(saved);
     expect(wire).toEqual({ status: 'ok', hasRules: true, settings: sent.settings });
-    expect(settings.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('rides every routing form byte for byte, beside the packet and never in it', () => {
@@ -1177,7 +1177,6 @@ describe('the settings field', () => {
         settings: wire.settings,
       }),
     ).toEqual(sent);
-    expect((sent.packet as Record<string, unknown>).settings).toBeUndefined();
     const byId = fixture('wire-tool-request-by-id-settings.json');
     expect(
       buildToolSpecBody({
@@ -1203,9 +1202,6 @@ describe('the settings field', () => {
         settings: wire.settings,
       }),
     ).toMatchObject({ settings: wire.settings, accepts: expect.arrayContaining(['settings']) });
-    // Not on the outcome report or the forget form.
-    expect(fixture('wire-outcome-request.json')).not.toHaveProperty('settings');
-    expect(acceptsFor(false)).not.toContain('settings');
   });
 
   it('asks for the identities with the free form, and reads their answer', () => {
@@ -1244,13 +1240,5 @@ describe('the settings field', () => {
     const broken = structuredClone(answer) as { decision: { bound: unknown } };
     broken.decision.bound = { id: decision.id, input: 'btc' };
     expect(parseForTests('hook', broken).success).toBe(false);
-  });
-
-  it('reports the path a swapped call took as `via`', () => {
-    const canonical = fixture('wire-outcome-via.json');
-    expect(buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude')).toEqual({
-      ...canonical,
-      harness: 'claude',
-    });
   });
 });

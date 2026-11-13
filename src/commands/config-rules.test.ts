@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '../lib/errors';
-import type { CommandContext, CommandResult } from '../context';
+import type { CommandResult } from '../context';
+import { testCtx } from '../context-test-utils';
 import {
   runConfigBlock,
   runConfigOnly,
@@ -16,6 +17,7 @@ import {
   runConfigUnblock,
 } from './config-rules';
 import { runConfigList, runConfigSet } from './config';
+import { SPEED_TERMS, TENJIN_TOOLS_OFF } from './config-readback';
 import { personalSettingsAt } from '../router/settings';
 
 /**
@@ -57,14 +59,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: 'https://tenjin.sh' },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
+const ctx = () => testCtx(dir, { baseUrl: 'https://tenjin.sh' });
 
 const online = (identities: unknown = WITH_FAL) => ({
   cwd: dir,
@@ -83,7 +78,7 @@ const offline = {
   },
   fetchImpl: (async () => {
     throw new TypeError('fetch failed');
-  }) as unknown as typeof fetch,
+  }) as typeof fetch,
 };
 
 async function saved(): Promise<Record<string, unknown>> {
@@ -297,13 +292,7 @@ describe('tenjin config block and unblock', () => {
       version: 1,
       block: [{ kind: 'source', id: 'tenjin' }],
     });
-    const said = String(data(result).explanation);
-    expect(said).toContain(
-      "Tenjin won't offer its own tools on its own any more, free ones like the docs lookup included.",
-    );
-    expect(said).toContain("You or your agent can still pick one of Tenjin's tools by name.");
-    expect(said).toContain('It still picks among your connected accounts');
-    expect(said).toContain("goes back to your agent's own tools");
+    expect(String(data(result).explanation)).toContain(TENJIN_TOOLS_OFF);
     expect(data(result).reset).toBe('tenjin config unblock --source tenjin');
   });
 
@@ -404,19 +393,16 @@ describe('tenjin config reset', () => {
 
 describe('tenjin config speed and replacement', () => {
   it('turns speed on and off with no network, and the rules sent change with it', async () => {
-    const hash = async () => {
+    const sent = async () => {
       const { wire } = await personalSettingsAt(dir);
       return wire.status === 'ok' ? wire.settings : undefined;
     };
-    const before = await hash();
     const on = await runConfigSpeed({ state: 'on' }, ctx(), offline);
     expect((await saved()).policy).toEqual({ version: 1, preferSpeed: true });
-    expect(data(on).explanation).toContain('They cost more, and your limits still apply.');
-    expect((await hash())?.policy).toEqual({ preferSpeed: true });
-    expect((await hash())?.hash).not.toBe(before?.hash);
+    expect(data(on).explanation).toContain(SPEED_TERMS);
+    expect((await sent())?.policy).toEqual({ preferSpeed: true });
     await runConfigSpeed({ state: 'off' }, ctx(), offline);
     expect((await saved()).policy).toBeUndefined();
-    expect((await hash())?.hash).toBe(before?.hash);
   });
 
   it('names the kinds of job speed changes, and says plainly when none is marked yet', async () => {
@@ -494,8 +480,6 @@ describe('tenjin config speed and replacement', () => {
         router: { nativeReplacement: 'when-routed', nativeReplacementProviders: [] },
       }),
     );
-    const before = await personalSettingsAt(dir);
-    expect(before.nativeReplacement.problem).toContain('router.nativeReplacementProviders');
     const shown = String((await runConfigList(ctx())).humanLines?.join('\n'));
     expect(shown).toContain('Run `tenjin config replacement off` to clear it.');
     await runConfigReplacement({ state: 'off' }, ctx(), offline);

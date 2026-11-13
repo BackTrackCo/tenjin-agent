@@ -1,13 +1,12 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
-import type { CommandContext } from '../context';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
+import { testCtx } from '../context-test-utils';
 import { runRequestTool } from './tool';
 import { readSpec, storeSpecs } from './specs';
-import { personalSettingsAt } from './settings';
+import { hashNow } from './settings-test-utils';
 import { settingsRefusal } from './settings-check';
 import type { OfferSpec } from './decision';
 
@@ -42,39 +41,6 @@ async function save(router: Record<string, unknown>): Promise<void> {
   );
 }
 
-async function hashNow(): Promise<string> {
-  const { wire } = await personalSettingsAt(dir);
-  if (wire.status !== 'ok') throw new Error('unreadable');
-  return wire.settings.hash;
-}
-
-function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: ROUTER },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
-
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: 'allow',
-      reason: 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
-}
-
 interface Leg {
   status: number;
   body: unknown;
@@ -100,9 +66,9 @@ function net(legs: Leg[]) {
 }
 
 function deps(fetchImpl: typeof fetch) {
-  const auth = authorizer();
+  const auth = testAuthorizer();
   return {
-    ctx: ctx(),
+    ctx: testCtx(dir, { baseUrl: ROUTER }),
     cwd: dir,
     authorizer: auth,
     fetchImpl,
@@ -153,7 +119,7 @@ const run = (fetchImpl: typeof fetch) =>
 
 describe('the check before every call', () => {
   it('keeps the hash its answer echoed with every spec', async () => {
-    const hash = await hashNow();
+    const hash = await hashNow(dir);
     await storeSpecs(
       dir,
       [{ ...spec(), settingsHash: 'sha256:'.padEnd(71, '0') } as OfferSpec],
@@ -166,7 +132,7 @@ describe('the check before every call', () => {
 
   it('runs an offer decided under the rules saved now', async () => {
     await save({ policy: BLOCK_EXA });
-    await storeSpecs(dir, [spec()], await hashNow());
+    await storeSpecs(dir, [spec()], await hashNow(dir));
     const { fetchImpl, calls } = net([...providerLegs(), { status: 204, body: {} }]);
     const result = await run(fetchImpl);
     expect(result.envelope).toMatchObject({ status: 'fulfilled' });
@@ -180,7 +146,7 @@ describe('the check before every call', () => {
   });
 
   it('refuses an offer decided before a rule was saved, before any provider request', async () => {
-    await storeSpecs(dir, [spec()], await hashNow());
+    await storeSpecs(dir, [spec()], await hashNow(dir));
     await save({ policy: BLOCK_EXA });
     const { fetchImpl, calls } = net([]);
     const result = await run(fetchImpl);
@@ -206,7 +172,7 @@ describe('the check before every call', () => {
   });
 
   it('refuses when automatic use changed after the decision', async () => {
-    await storeSpecs(dir, [spec()], await hashNow());
+    await storeSpecs(dir, [spec()], await hashNow(dir));
     await save({ nativeReplacement: 'when-routed' });
     const { fetchImpl, calls } = net([]);
     expect((await run(fetchImpl)).envelope).toMatchObject({ reasonCode: 'settings_changed' });
@@ -231,10 +197,10 @@ describe('the check before every call', () => {
   });
 
   it('refuses a whole group when one member was decided under other rules', async () => {
-    const hash = await hashNow();
+    const hash = await hashNow(dir);
     expect(await settingsRefusal(dir, [hash, hash])).toBeNull();
     await save({ policy: BLOCK_EXA });
-    const now = await hashNow();
+    const now = await hashNow(dir);
     expect(await settingsRefusal(dir, [now, hash])).toMatchObject({ code: 'settings_changed' });
     expect(await settingsRefusal(dir, [now, undefined])).toMatchObject({
       code: 'settings_unconfirmed',

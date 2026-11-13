@@ -15,6 +15,7 @@ import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { extensionFor, failureOutcome, runRequestTool } from './tool';
 import type { MediaTransport } from './paid';
 import { readSpec, SPEC_TTL_MS, storeChoices, storeSpecs } from './specs';
+import { wireSettings } from './settings-wire';
 import { claimIgnored, noteShown } from './untaken';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -206,12 +207,7 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
 }
 
 /** The settings field a user with no rules sends on every routing call. */
-const NO_RULES = {
-  version: 1,
-  policy: {},
-  sources: ['tenjin'],
-  hash: 'sha256:4e470b2e578b39c57a9df360011bba9316663a352baa05d458e3fcd618dd58ca',
-};
+const NO_RULES = wireSettings(undefined, { mode: 'off' });
 
 describe('the request tool, one decision and one payment per lookup', () => {
   it('sends the query and the turn id, and pays the provider once', async () => {

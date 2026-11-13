@@ -4,13 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildPaymentRequired, testWalletProvider } from '../lib/read-test-utils';
-import type { SpendAuthorization, SpendAuthorizer } from '../lib/wallet';
-import type { CommandContext } from '../context';
+import { buildPaymentRequired, testAuthorizer, testWalletProvider } from '../lib/read-test-utils';
+import { testCtx } from '../context-test-utils';
 import { paidLedgerPath } from '../lib/paths';
 import { runSwap } from './swap';
 import { runNativeHook } from './hooks';
-import { personalSettingsAt } from './settings';
+import { hashNow } from './settings-test-utils';
 import { ROUTER_PATH } from './decision';
 
 /**
@@ -67,12 +66,6 @@ async function save(router: Record<string, unknown>, maxAutoSpend = '250000'): P
   );
 }
 
-async function hashNow(): Promise<string> {
-  const { wire } = await personalSettingsAt(dir);
-  if (wire.status !== 'ok') throw new Error('unreadable');
-  return wire.settings.hash;
-}
-
 const event = () => ({
   hook_event_name: 'PreToolUse',
   session_id: 'sess-1',
@@ -82,33 +75,6 @@ const event = () => ({
   tool_input: { query: QUERY },
   tool_use_id: 'toolu_swap',
 });
-
-function ctx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: BASE },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
-}
-
-function authorizer(): SpendAuthorizer {
-  return {
-    policyEnforcement: 'client-only',
-    authorize: vi.fn(async (req): Promise<SpendAuthorization> => ({
-      decision: 'allow',
-      reason: 'within_policy',
-      message: 'test',
-      amountAtomic: req.amountAtomic,
-      sessionSpentAtomic: 0n,
-      sessionBudgetAtomic: 0n,
-      policyEnforcement: 'client-only',
-      reservationId: 'rsv',
-    })),
-    commit: vi.fn(async () => undefined),
-    release: vi.fn(async () => undefined),
-  };
-}
 
 /** The router answers `answer` (and records reports apart); Exa answers 402 then 200. */
 function network(answer: unknown, onDecide?: () => Promise<void>) {
@@ -150,11 +116,11 @@ function network(answer: unknown, onDecide?: () => Promise<void>) {
 }
 
 function depsFor(fetchImpl: typeof fetch) {
-  const auth = authorizer();
+  const auth = testAuthorizer();
   return {
     hook: { dataDir: dir, baseUrl: BASE, fetchImpl, warn: () => undefined },
     request: {
-      ctx: ctx(),
+      ctx: testCtx(dir, { baseUrl: BASE }),
       cwd: dir,
       authorizer: auth,
       fetchImpl,
@@ -171,7 +137,7 @@ function depsFor(fetchImpl: typeof fetch) {
 
 const answered = async (over: Record<string, unknown> = {}) => ({
   ...ANSWER,
-  settingsHash: await hashNow(),
+  settingsHash: await hashNow(dir),
   decision: { ...ANSWER.decision, ...over },
 });
 
@@ -211,7 +177,7 @@ describe('the swap', () => {
   it('hands back an answer without bound, and the pre-call hook offers from it without asking again', async () => {
     const plain: Record<string, unknown> = { ...ANSWER.decision };
     delete plain.bound;
-    const net = network({ ...ANSWER, settingsHash: await hashNow(), decision: plain });
+    const net = network({ ...ANSWER, settingsHash: await hashNow(dir), decision: plain });
     const { hook, request } = depsFor(net.fetchImpl);
     const ran = await runSwap(event(), hook, request);
     expect(ran.envelope).toMatchObject({ swap: 'handback', reason: 'no input to run in place' });

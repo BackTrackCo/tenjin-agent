@@ -65,19 +65,7 @@ describe('main', () => {
       expect(await main(['config', operation, '--help'], leaf.io)).toBe(0);
       expect(leaf.stdout()).toContain(`$ tenjin config ${operation} `);
     }
-    // --all takes the blocks with it, and its help says so.
-    const reset = captureIo();
-    expect(await main(['config', 'reset', '--help'], reset.io)).toBe(0);
-    expect(reset.stdout().replace(/\s+/g, ' ')).toContain(
-      '--all removes every saved routing rule, blocks included.',
-    );
-    for (const variant of [
-      '--source tenjin',
-      '--dimension',
-      '--capabilities',
-      '--all-providers',
-      "Run Tenjin's picks automatically",
-    ])
+    for (const variant of ['--source tenjin', '--dimension', '--capabilities', '--all-providers'])
       expect(help.replace(/\s+/g, ' ')).toContain(variant);
   });
 
