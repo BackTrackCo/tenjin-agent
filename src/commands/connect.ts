@@ -422,10 +422,11 @@ const list = new Intl.ListFormat('en', { type: 'conjunction' });
 /** The most jobs one readback line names before it counts the rest. */
 const NAMED_JOBS = 4;
 
-/** A few jobs by name, the rest counted. */
+/** A few jobs by name, the rest counted. The answer's `account.jobs` and
+ *  `tenjin status --json` name them all; the status screen doesn't. */
 function some(jobs: readonly string[]): string {
   if (jobs.length <= NAMED_JOBS) return list.format(jobs);
-  return `${list.format([...jobs.slice(0, NAMED_JOBS - 1), `${jobs.length - NAMED_JOBS + 1} more`])} (\`tenjin status\` lists them)`;
+  return list.format([...jobs.slice(0, NAMED_JOBS - 1), `${jobs.length - NAMED_JOBS + 1} more`]);
 }
 
 /** What a connect says, in the user's words: no ids, no protocol terms. */
