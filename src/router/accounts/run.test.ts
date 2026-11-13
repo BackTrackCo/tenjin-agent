@@ -111,8 +111,8 @@ async function hashNow(): Promise<string> {
 }
 
 /** An offer kept as the hook keeps one, under the settings saved now. */
-async function offered(lead: AccountOfferSpec, opts: { named?: true } = {}): Promise<void> {
-  await storeAccountOffer(dir, lead, await hashNow(), opts);
+async function offered(lead: AccountOfferSpec): Promise<void> {
+  await storeAccountOffer(dir, lead, await hashNow());
 }
 
 /** The re-ask's answers, from the server's real route. */
@@ -395,7 +395,7 @@ describe('a mapped job on the user’s own account', () => {
   it('polls a processing job and never sends the call that bills again', async () => {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, { named: true });
+    await offered(FAL_LEAD);
     const session = account({
       run_model: [text({ status: 'processing', request_id: 'req-1' })],
       check_job: [text({ status: 'IN_PROGRESS' }), text({ status: 'COMPLETED' })],
@@ -428,16 +428,14 @@ describe('a mapped job on the user’s own account', () => {
     const saved = result.envelope.savedFiles as string[];
     expect(saved).toHaveLength(1);
     expect(new Uint8Array(await readFile(saved[0]!))).toEqual(image);
-    // Named, never suggested: it says Tenjin hasn't checked it.
-    expect(result.summary).toBe(
-      "fal · your account · 1 file saved\nTenjin hasn't checked this service yet. Results may vary, and your fal account pays.",
-    );
+    // A mapped account's result is its receipt alone: no note.
+    expect(result.summary).toBe('fal · your account · 1 file saved');
   });
 
   it('hands back a job it cannot wait out, on the ledger at once, and request({job}) finishes it without sending it again', async () => {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, { named: true });
+    await offered(FAL_LEAD);
     const session = account({
       run_model: [text({ status: 'processing', request_id: 'req-1' })],
       check_job: [text({ status: 'IN_QUEUE' }), text({ status: 'COMPLETED' })],
@@ -495,7 +493,7 @@ describe('a long job on the account', () => {
   async function falOffered(): Promise<void> {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, { named: true });
+    await offered(FAL_LEAD);
   }
 
   it('keeps the job and its ledger row once the billing call answers, so a process that exits mid-poll loses nothing', async () => {
@@ -1045,27 +1043,12 @@ describe("the user's settings, before the account", () => {
     expect(session.opened).toEqual([]);
   });
 
-  it('runs a map Tenjin has not checked only when the user named it', async () => {
-    await settings([FAL_ACCOUNT]);
-    await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD);
-    const session = account({ run_model: [text({ images: [] })] });
-    const { fetchImpl } = network();
-    const result = await runRequestTool(
-      { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },
-      deps(fetchImpl, session),
-    );
-    expect(result.envelope).toMatchObject({ status: 'needs_input' });
-    expect(String(result.envelope.nextStep)).toContain('request({tool: "fal.flux-pro-ultra"})');
-    expect(session.opened).toEqual([]);
-  });
-
   /** A fal job this call could not wait out: its billing call sent, its
    *  follow-up kept for `request({job})`. */
   async function falJobRunning(session: ReturnType<typeof account>) {
     await settings([FAL_ACCOUNT]);
     await signedIn(FAL_ACCOUNT);
-    await offered(FAL_LEAD, { named: true });
+    await offered(FAL_LEAD);
     const { fetchImpl } = network();
     const first = await runRequestTool(
       { id: FAL_LEAD.id, input: { prompt: 'a lighthouse at dusk' } },

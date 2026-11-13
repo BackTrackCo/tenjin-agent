@@ -1308,7 +1308,6 @@ describe('the accounts wire', () => {
     expect(decision.specs).toHaveLength(1);
     expect(decision.specs[0]).toMatchObject({
       source: 'apify',
-      verified: true,
       requires: ['mcp'],
       mcp: { tool: 'call-actor', next: { tool: 'get-dataset-items' } },
     });
@@ -1316,8 +1315,22 @@ describe('the accounts wire', () => {
     expect(decision).not.toHaveProperty('fallback');
   });
 
+  it('reads an account lead from a server that still marks it verified, either way', () => {
+    // The check is gone (owner, 2026-11-13): connected is used. A server
+    // that still sends the old field must not lose the offer.
+    for (const verified of [true, false]) {
+      const answer = structuredClone(fixture('wire-hook-execute-account.json'));
+      spec(answer.decision as Json).verified = verified;
+      const read = parseForTests('hook', answer) as {
+        success: boolean;
+        data?: { decision: { specs: Record<string, unknown>[] } };
+      };
+      expect(read.success).toBe(true);
+      expect(read.data!.decision.specs[0]).not.toHaveProperty('verified');
+    }
+  });
+
   it.each([
-    ['an unchecked map in a routed offer', (d: Json) => (spec(d).verified = false)],
     ['an endpoint on an account lead', (d: Json) => (d.endpoint = 'https://mcp.apify.com')],
     ['a balance price on an account lead', (d: Json) => (d.providerPriceAtomic = '1000')],
     [
@@ -1332,19 +1345,15 @@ describe('the accounts wire', () => {
     expect(parseForTests('hook', answer).success).toBe(false);
   });
 
-  it('reads a spec on an account, checked or not', () => {
-    const checked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
-    expect(checked.success).toBe(true);
-    expect(checked.data).toMatchObject({
-      decision: {
-        action: 'spec',
-        spec: { source: 'fal', verified: true, requires: ['mcp'] },
-      },
+  it('reads a spec on an account, picked for a query or named by its id', () => {
+    const picked = parseForTests('tool', fixture('wire-lookup-spec-account.json'));
+    expect(picked.success).toBe(true);
+    expect(picked.data).toMatchObject({
+      decision: { action: 'spec', spec: { source: 'fal', requires: ['mcp'] } },
     });
-    // Named by its id: a map Tenjin has not checked, which runs only so.
     const named = parseForTests('tool', fixture('wire-lookup-spec-account-by-id.json'));
     expect(named.data).toMatchObject({
-      decision: { spec: { capabilityId: 'fal.flux-pro-ultra', verified: false } },
+      decision: { spec: { capabilityId: 'fal.flux-pro-ultra' } },
     });
   });
 

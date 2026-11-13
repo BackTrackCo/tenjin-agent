@@ -101,7 +101,6 @@
           "type": "object",
           "required": ["items"]
         },
-        "verified": true,
         "requires": ["mcp"]
       }
     ],

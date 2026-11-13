@@ -193,11 +193,11 @@ describe('tenjin connect', () => {
     expect(lines(result)).toEqual([
       '✓ Connected Apify',
       '  2 tools, billed to your Apify plan, not your Tenjin balance.',
-      '  Ask for Apify by name to use them. `tenjin status` lists it.',
+      '  Tenjin uses your Apify first for these jobs. Your Apify plan pays.',
       '  Undo: tenjin disconnect apify',
     ]);
     expect(explained(result)).toContain(
-      'Apify connected on this machine, for local business search and web research. Tenjin will use your Apify account first for those jobs once it has checked them with a real call',
+      'Apify connected on this machine, for local business search and web research. Tenjin will use your Apify account first for those jobs.',
     );
     expect(explained(result)).toContain(
       "Your Apify plan pays for these calls, which don't count toward your Tenjin limits.",

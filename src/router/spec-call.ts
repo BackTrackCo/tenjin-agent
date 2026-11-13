@@ -129,16 +129,11 @@ function priceLine(spec: ToolSpec): string {
  * plan, never the Tenjin balance, and no address is shown, since the call
  * goes to the server they connected. `account` is the account's name.
  */
-function accountLines(spec: AccountSpec, account: string): string[] {
+function accountLines(account: string): string[] {
   return [
     `Price: billed to your ${account} account's own plan, not the Tenjin balance, and not counted in its limits.`,
-    `Runs on: your ${account} account.${spec.verified ? '' : ` ${uncheckedWarning(account)}`}`,
+    `Runs on: your ${account} account.`,
   ];
-}
-
-/** The words every result of a service Tenjin hasn't checked carries. */
-export function uncheckedWarning(account: string): string {
-  return `Tenjin hasn't checked this service yet. Results may vary, and your ${account} account pays.`;
 }
 
 /** The spec as the agent reads it, ending with the call that runs it. An
@@ -155,7 +150,7 @@ export function specText(id: string, spec: ToolSpec | AccountSpec, account?: str
   const lines = [
     `${spec.provider}: ${spec.description}`,
     ...(isAccountSpec(spec)
-      ? accountLines(spec, account ?? spec.provider)
+      ? accountLines(account ?? spec.provider)
       : [
           `Price: ${priceLine(spec)}, paid by this machine's wallet straight to the provider.`,
           `Request: ${spec.request.method} ${spec.request.url}`,

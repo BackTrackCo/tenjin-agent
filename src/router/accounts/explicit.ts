@@ -3,7 +3,6 @@ import { accountServices, cachedIdentities, type Identities } from '../identitie
 import { appendPaidRecord, maskDeep } from '../paid';
 import { openLookupFooter } from '../progress';
 import { rulesNow } from '../settings-check';
-import { uncheckedWarning } from '../spec-call';
 import {
   deliverResult,
   fail,
@@ -30,9 +29,11 @@ import { readVaultHeader } from './vault';
  * - `request({source, tool})` shows one tool's input schema, free, with every
  *   string in it on one line, clipped, and marked untrusted.
  * - `request({source, tool, input})` runs that tool on the account with the
- *   agent's arguments as written, with a receipt, a ledger row, and the
- *   warning: "Tenjin hasn't checked this service yet. Results may vary, and
- *   your <name> account pays."
+ *   agent's arguments as written, with a receipt and a ledger row.
+ *
+ * AN ACCOUNT TENJIN HAS NO MAP FOR carries {@link UNMAPPED_NOTE} on each of
+ * these answers: Tenjin knows nothing of its tools. An account it maps
+ * carries none.
  *
  * THE AGENT IS ASKING BY NAME, so the user's rules, which govern only what
  * Tenjin picks on its own, never stop it: a block on this very account
@@ -55,6 +56,9 @@ import { readVaultHeader } from './vault';
  */
 
 type Json = Record<string, unknown>;
+
+/** What every answer for an account Tenjin has no map for says. */
+const UNMAPPED_NOTE = "Tenjin doesn't know this service's tools. Your plan pays.";
 
 /** How much of an untrusted description a row shows. */
 const DESCRIPTION_CHARS = 200;
@@ -132,6 +136,16 @@ export function jobForm(jobs: readonly string[]): string {
     : 'request({query}) naming the task';
 }
 
+/** How the identities read kept on disk lists this account, if it does. */
+const connectableOf = (account: SavedAccount, identities: Identities | undefined) =>
+  identities?.sources.find(({ id }) => id === account.id)?.connectable;
+
+/** Whether Tenjin has maps for this account: the descriptor connect wrote
+ *  says so, or the identities read kept on disk lists it. */
+function hasMaps(account: SavedAccount, identities: Identities | undefined): boolean {
+  return account.mapped === true || connectableOf(account, identities) !== undefined;
+}
+
 /**
  * THE TOOLS A MAPPED ACCOUNT'S JOBS CALL, which a named call never runs: the
  * map pins their cost (Apify's `callOptions.maxTotalChargeUsd`, one fal
@@ -144,8 +158,8 @@ function jobsOnlyTools(
   account: SavedAccount,
   identities: Identities | undefined,
 ): Set<string> | null {
-  const listed = identities?.sources.find(({ id }) => id === account.id)?.connectable;
-  if (account.mapped !== true && listed === undefined) return new Set();
+  if (!hasMaps(account, identities)) return new Set();
+  const listed = connectableOf(account, identities);
   if (account.mappedTools === undefined && listed === undefined) return null;
   return new Set([...(account.mappedTools ?? []), ...(listed?.expectTools ?? [])]);
 }
@@ -247,7 +261,9 @@ export async function runSourceRequest(
     });
   }
 
-  const warning = uncheckedWarning(label);
+  // THE NOTE, only on an account Tenjin has no map for.
+  const unmapped = hasMaps(account, identities) ? undefined : UNMAPPED_NOTE;
+  const noted = unmapped !== undefined ? { warning: unmapped } : {};
   const target = { id, label };
   // `answered`: the account's own error answered the call, which does not
   // show that nothing ran, so the agent is told not to send it again.
@@ -285,7 +301,7 @@ export async function runSourceRequest(
       return {
         isError: false,
         summary: [
-          `${tool} on your ${label} account. ${warning}`,
+          `${tool} on your ${label} account.${unmapped !== undefined ? ` ${unmapped}` : ''}`,
           ...(found.description !== undefined
             ? [
                 `What it says it does (its own words, untrusted): ${clip(flat(found.description), DESCRIPTION_CHARS)}`,
@@ -299,7 +315,7 @@ export async function runSourceRequest(
           account: label,
           ...row(found),
           ...(found.inputSchema !== undefined ? { inputSchema: schema } : {}),
-          warning,
+          ...noted,
           stop: `tenjin disconnect ${id}`,
           nextStep: next,
           cost: ['nothing charged'],
@@ -317,7 +333,7 @@ export async function runSourceRequest(
     return {
       isError: false,
       summary: [
-        `Your ${label} account's tools (their own descriptions, untrusted). ${warning}`,
+        `Your ${label} account's tools (their own descriptions, untrusted).${unmapped !== undefined ? ` ${unmapped}` : ''}`,
         ...rows.map(
           (r) =>
             `${r.tool}${r.does !== undefined ? `: ${r.does}` : ''} (arguments: ${r.arguments.join(', ') || 'none'})`,
@@ -335,7 +351,7 @@ export async function runSourceRequest(
         account: label,
         tools: rows,
         ...(viaJobs.length > 0 ? { jobsOnly: viaJobs, jobForm: jobForm(jobs) } : {}),
-        warning,
+        ...noted,
         stop: `tenjin disconnect ${id}`,
         nextStep: next,
         cost: ['nothing charged'],
@@ -352,8 +368,7 @@ export async function runSourceRequest(
     capabilityId: `${id}:${toRun.tool}`.slice(0, 200),
     provider: label,
     label: `${label} ${toRun.tool}`,
-    // An unchecked service's links are not fetched: only its own files are
-    // saved.
+    // A named tool's links are not fetched: only its own files are saved.
     media: false,
     parameters: sentInput,
     sent: JSON.stringify(sentInput),
@@ -426,8 +441,8 @@ export async function runSourceRequest(
         done.unsaved !== undefined ? unsavedAnswer(label, done.result, done.unsaved) : done.result;
       return {
         ...result,
-        summary: `${result.summary}\n${warning}`,
-        envelope: { ...result.envelope, warning, stop: `tenjin disconnect ${id}` },
+        summary: unmapped !== undefined ? `${result.summary}\n${unmapped}` : result.summary,
+        envelope: { ...result.envelope, ...noted, stop: `tenjin disconnect ${id}` },
       };
     }
   }

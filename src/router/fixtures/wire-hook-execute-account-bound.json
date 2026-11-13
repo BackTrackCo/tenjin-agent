@@ -59,7 +59,6 @@
           "type": "object",
           "required": ["markdown"]
         },
-        "verified": true,
         "requires": ["mcp"]
       }
     ],

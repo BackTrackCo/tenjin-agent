@@ -451,14 +451,8 @@ function connectLines(
       ? `${label} connected on this machine, for ${some(jobs)}.`
       : `${label} connected on this machine.`,
   ];
-  if (preferred)
-    lines.push(
-      `Tenjin will use your ${label} account first for those jobs once it has checked them with a real call; until then a job runs on it when you ask for ${label} by name.`,
-    );
-  else
-    lines.push(
-      `Tenjin can use your ${label} account for those jobs once it has checked them with a real call, without putting it first; until then a job runs on it when you ask for ${label} by name.`,
-    );
+  if (preferred) lines.push(`Tenjin will use your ${label} account first for those jobs.`);
+  else lines.push(`Tenjin can use your ${label} account for those jobs, without putting it first.`);
   if (checked.missingTools.length > 0) {
     lines.push(
       `This ${label} account doesn't have ${list.format(checked.missingTools)}, so Tenjin leaves out the jobs that need ${checked.missingTools.length === 1 ? 'it' : 'them'} here.`,
@@ -507,13 +501,21 @@ function connectReply(
   }
   const tools = accountServices(account.id, identities).length;
   const missing = checked.missingTools;
+  // CONNECTED IS USED: Tenjin picks the account for its jobs on its own, first
+  // when it was put first, and only by name under a block.
+  const use =
+    preference === 'blocked'
+      ? `Ask for ${label} by name to use ${tools === 1 ? 'it' : 'them'}. \`tenjin status\` lists it.`
+      : preference === 'added' || preference === 'kept'
+        ? `Tenjin uses your ${label} first for these jobs. Your ${label} plan pays.`
+        : `Tenjin can use your ${label} for these jobs. Your ${label} plan pays.`;
   return {
     done: `Connected ${label}`,
     said: [
       tools > 0
         ? `${tools} ${tools === 1 ? 'tool' : 'tools'}, ${billed}`
         : `Its calls are ${billed}`,
-      `Ask for ${label} by name to use ${tools === 1 ? 'it' : 'them'}. \`tenjin status\` lists it.`,
+      use,
     ],
     problems: [
       ...(missing.length > 0

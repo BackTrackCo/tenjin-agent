@@ -848,7 +848,6 @@ test("a call on the user's own account says their plan pays, never a balance pri
     provider: 'Apify',
     source: 'apify',
     mcp: { tool: 'call-actor', args: {}, result: 'structured' },
-    verified: true,
   });
   let release = (): void => undefined;
   const running = new Promise<void>((resolve) => {

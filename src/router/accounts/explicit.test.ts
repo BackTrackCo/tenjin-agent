@@ -15,7 +15,7 @@ import { clearVaultKeyCache, writeVault } from './vault';
  * AN ACCOUNT TENJIN HAS NO MAP FOR, USED BECAUSE THE USER NAMED IT (plan 37):
  * its tools listed free with their own words marked untrusted, one run
  * with the agent's arguments as written, under the user's settings, with the
- * warning that Tenjin hasn't checked it and the user's account pays. The
+ * note that Tenjin doesn't know its tools and the user's plan pays. The
  * account is a scripted MCP session and the keychain a fake: nothing here
  * opens a socket.
  */
@@ -27,8 +27,7 @@ const ACCOUNT = {
   signIn: 'key',
   keyScheme: 'Bearer',
 };
-const WARNING =
-  "Tenjin hasn't checked this service yet. Results may vary, and your mcp.example.com account pays.";
+const WARNING = "Tenjin doesn't know this service's tools. Your plan pays.";
 
 let dir: string;
 let keychain: ReturnType<typeof fakeKeychain>;
@@ -473,6 +472,8 @@ describe('an account Tenjin maps, named by the user', () => {
       },
     );
     expect(listed.envelope).toMatchObject({ jobsOnly: ['call-actor'], jobForm: FORM });
+    // Tenjin maps this account, so nothing here carries the unmapped note.
+    expect(listed.envelope).not.toHaveProperty('warning');
     expect(listed.summary).toContain(
       `Tenjin runs call-actor only through its jobs on Apify: for those, call ${FORM}.`,
     );
@@ -489,6 +490,7 @@ describe('an account Tenjin maps, named by the user', () => {
       deps(session).run,
     );
     expect(ran.envelope).toMatchObject({ status: 'fulfilled' });
+    expect(ran.envelope).not.toHaveProperty('warning');
     expect(session.called).toEqual([{ tool: 'lookup', args: { query: 'x' } }]);
   });
 });

@@ -463,9 +463,6 @@ const AccountSpecFields = z.object({
   returnsExample: z.unknown().optional(),
   resultSchema: z.record(z.string(), z.unknown()).optional(),
   outputSchema: z.record(z.string(), z.unknown()).optional(),
-  /** Tenjin has checked this map with a real call. An unchecked one runs only
-   *  when the user names it (`request({tool})` by its id). */
-  verified: z.boolean(),
   requires: RequiresSchema,
   // A paid spec's own keys: an object naming them is no account spec.
   priceAtomic: OtherArm,
@@ -645,10 +642,10 @@ const DiscoveredSchema = z
   .superRefine(checkChoices);
 
 /**
- * AN ACCOUNT LEAD IS OFFERED ALONE, as a checked service this client runs on
- * its own connection: no endpoint, no balance price, in place of a native
- * call only through `bound` as any lead. Every other `execute` is as it always
- * was, with the URL it pays.
+ * AN ACCOUNT LEAD IS OFFERED ALONE, as a service this client runs on its own
+ * connection: no endpoint, no balance price, in place of a native call only
+ * through `bound` as any lead. Every other `execute` is as it always was, with
+ * the URL it pays.
  */
 function checkExecute(
   decision: {
@@ -679,7 +676,6 @@ function checkExecute(
     issue('the listing names the lead', ['capabilityId']);
   if (decision.providerPriceAtomic !== '0')
     issue('the balance pays an account lead nothing', ['providerPriceAtomic']);
-  if (!lead.verified) issue('the hook offers only a checked account service', ['specs']);
   if (decision.delivery === 'augment' || decision.augmentUrl !== undefined)
     issue('an account lead is an offer', ['delivery']);
 }

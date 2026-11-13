@@ -1374,9 +1374,9 @@ export async function runConfigReplacement(
 
 /**
  * WHAT AUTOMATIC USE DOES WITH THE USER'S CONNECTED ACCOUNTS (vraspar,
- * 2026-10-23): it runs them too, for the jobs Tenjin has checked, and their
- * own plans pay, outside the limits above. Named when some are connected; a
- * provider choice applies to them as to any pick, which the router decides.
+ * 2026-10-23): it runs them too, and their own plans pay, outside the limits
+ * above. Named when some are connected; a provider choice applies to them as
+ * to any pick, which the router decides.
  */
 function accountsNote(router: RouterSettings, narrowed: boolean): string {
   const names = router.accounts.saved
@@ -1384,9 +1384,9 @@ function accountsNote(router: RouterSettings, narrowed: boolean): string {
     .map(({ label }) => label);
   const within = narrowed ? ' within the same provider choice' : '';
   if (names.length === 0)
-    return `An account you connect with \`tenjin connect\` runs this way too${within}, for the jobs Tenjin has checked, and its own plan pays, not the Tenjin balance.`;
+    return `An account you connect with \`tenjin connect\` runs this way too${within}, and its own plan pays, not the Tenjin balance.`;
   const yours = `your ${new Intl.ListFormat('en', { type: 'conjunction' }).format(names)} ${names.length === 1 ? 'account' : 'accounts'}`;
-  return `It also runs ${yours} this way${within}, for the jobs Tenjin has checked: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.`;
+  return `It also runs ${yours} this way${within}: those calls bill your own plan, not the Tenjin balance, and don't count toward these limits.`;
 }
 
 /* ---------------------------------------------------------------- fallback */

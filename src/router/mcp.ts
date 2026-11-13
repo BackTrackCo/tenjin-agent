@@ -97,9 +97,7 @@ const CONFIG_RULE =
  * finds `tenjin connect` and `tenjin status` whether or not the host defers
  * tool descriptions. A sign-in waits for the user in the browser, longer than
  * a harness's default command timeout, and a key never travels through the
- * chat. A job Tenjin has not checked on the account runs only when the user
- * names it, by the id its refusal gives; an account Tenjin has no map for is
- * reached through `{source}`.
+ * chat. An account Tenjin has no map for is reached through `{source}`.
  */
 export const ACCOUNT_RULE =
   "To use the user's own account, run `tenjin connect <name>`. For balance, spend and " +

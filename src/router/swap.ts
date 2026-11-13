@@ -35,9 +35,9 @@ import { costLines, runRequestTool, type RequestToolDeps, type RequestToolResult
  * provider call has started, its result or error is the answer, with its real
  * payment state, and nothing is replayed.
  *
- * A PICK ON THE USER'S CONNECTED ACCOUNT runs the same way (plan 37): only a
- * map Tenjin has checked comes with `bound`, the account's plan pays, and the
- * map's own caps hold where the Tenjin limits do not. An account that refuses
+ * A PICK ON THE USER'S CONNECTED ACCOUNT runs the same way (plan 37): its map
+ * comes with `bound`, the account's plan pays, and the map's own caps hold
+ * where the Tenjin limits do not. An account that refuses
  * before anything ran (its sign-in expired, its plan ran out) stops this one
  * call with the reason and Tenjin's own tool for the job and its price, and
  * the agent's retry runs natively; Tenjin's tool never runs in its place here,

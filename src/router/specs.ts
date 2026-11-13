@@ -212,28 +212,21 @@ function paidSpecOf(
   };
 }
 
-/** The field of a kept account spec beside the spec itself: whether the
- *  user named it. */
-const NAMED_KEY = 'named';
-
 /** An account spec as this machine keeps it: with the settings hash its
  *  answer echoed, as every kept spec has. */
 export type KeptAccountSpec = AccountOfferSpec & { settingsHash?: string };
 
 /**
  * KEEP AN OFFER LED BY THE USER'S OWN ACCOUNT (plan 37): its spec and the
- * settings hash its answer echoed. `named`: the user asked for this service
- * by its id (`request({tool})`), the one way a map Tenjin has not checked may
- * run. Never throws.
+ * settings hash its answer echoed. Never throws.
  */
 export async function storeAccountOffer(
   dataDir: string,
   lead: AccountOfferSpec,
   settingsHash: string | undefined,
-  opts: { named?: true } = {},
 ): Promise<void> {
   try {
-    await writeKept(dataDir, lead, settingsHash, opts.named === true ? { [NAMED_KEY]: true } : {});
+    await writeKept(dataDir, lead, settingsHash, {});
   } catch {
     // `request({id})` says no spec is kept, and the agent asks again.
   }
@@ -244,7 +237,7 @@ export async function storeAccountOffer(
  *  it was offered in place of, or one on the user's own account. */
 export type KeptAny =
   | { spec: KeptSpec; account?: undefined; replaces?: string }
-  | { spec: KeptAccountSpec; account: true; named?: true };
+  | { spec: KeptAccountSpec; account: true };
 
 /** Either kind of spec kept for this id, or null. Callers that run only a
  *  spec the balance pays read {@link readSpec}, which never returns the other. */
@@ -257,16 +250,14 @@ function accountSpecOf(
   kept: Record<string, unknown>,
   id: string,
 ): Extract<KeptAny, { account: true }> | null {
-  const named = kept[NAMED_KEY] === true;
   const hash = SettingsHashSchema.optional().safeParse(kept.settingsHash);
   const fields = { ...kept };
-  for (const key of [SHOWN_KEY, NAMED_KEY, 'settingsHash']) delete fields[key];
+  for (const key of [SHOWN_KEY, 'settingsHash']) delete fields[key];
   const account = AccountOfferSpecSchema.safeParse(fields);
   if (!account.success || account.data.id !== id || !hash.success) return null;
   return {
     spec: { ...account.data, ...(hash.data !== undefined ? { settingsHash: hash.data } : {}) },
     account: true,
-    ...(named ? { named: true as const } : {}),
   };
 }
 

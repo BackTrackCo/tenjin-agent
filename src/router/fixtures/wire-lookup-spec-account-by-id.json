@@ -75,7 +75,6 @@
         "aspect_ratio": "16:9"
       },
       "returns": "one image, saved to a file",
-      "verified": false,
       "requires": ["mcp"]
     },
     "hint": "Call request({id: \"0195f3a1-6c4d-7a2b-9e10-5f6a7b8c9d40\", input: {\"prompt\":\"<what the image shows>\"}}) alone and wait for its result."

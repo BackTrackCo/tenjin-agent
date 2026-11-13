@@ -18,7 +18,7 @@ import {
   type SettingsRefusal,
 } from '../settings-check';
 import { personalSettingsAt } from '../settings';
-import { mergedInput, specInputProblems, specText, uncheckedWarning } from '../spec-call';
+import { mergedInput, specInputProblems, specText } from '../spec-call';
 import {
   claimSpecPayment,
   settleAccountRun,
@@ -60,8 +60,7 @@ import { readVaultHeader } from './vault';
  * 1. The input against the spec, locally.
  * 2. The check before every call: the offer's settings hash is the hash of
  *    the rules saved now (`settings-check.ts`), and the account is still
- *    connected here. A map Tenjin has not checked runs only when the user
- *    named it (`request({tool})` by its id).
+ *    connected here.
  * 3. One claim per offer id, before anything is sent, so a retry or a race
  *    never sends the billing call twice.
  * 4. The check again at the call boundary, then the call on the account
@@ -473,8 +472,7 @@ export async function showAccountSpec(
  * connect-time check found this account lacks a tool its call makes: then it
  * is left out, Tenjin is asked again with the account left out ({@link
  * reask}), and an offer back is shown in its place, from the balance like any
- * other. Nothing is sent to the account. `named`: the user asked for this
- * service by its id, the one way a map Tenjin has not checked may run.
+ * other. Nothing is sent to the account.
  */
 export async function offerAccountLead(
   lead: AccountOfferSpec,
@@ -482,11 +480,10 @@ export async function offerAccountLead(
   deps: RequestToolDeps,
   routing: RouteDeps,
   hint?: string,
-  opts: { named?: true } = {},
 ): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
   if (!(await accountLacks(dataDir, lead))) {
-    await storeAccountOffer(dataDir, lead, settingsHash, opts);
+    await storeAccountOffer(dataDir, lead, settingsHash);
     return showAccountSpec(lead.id, lead, dataDir, hint);
   }
   const account = await accountOf(lead, dataDir);
@@ -546,14 +543,10 @@ async function refusedBySettings(at: Run, refusal: SettingsRefusal): Promise<Req
   return settingsFail(refusal);
 }
 
-/**
- * `request({id, input})` FROM AN ACCOUNT SERVICE'S SPEC. `kept.named` says
- * the user asked for the service by its id.
- */
+/** `request({id, input})` FROM AN ACCOUNT SERVICE'S SPEC. */
 export async function runAccountSpec(
   id: string,
   spec: KeptAccountSpec,
-  kept: { named?: true },
   input: Json,
   deps: RequestToolDeps,
   footer: LookupFooter,
@@ -606,15 +599,6 @@ export async function runAccountSpec(
   const checked = await accountCheck(spec, account, dataDir);
   if (checked !== null && 'settings' in checked) return refusedBySettings(at, checked.settings);
   if (checked !== null) return refusal(at, checked.reason, false);
-  // A MAP TENJIN HAS NOT CHECKED runs only when the user named it.
-  if (!spec.verified && kept.named !== true) {
-    report(at, { status: 'unpaid', reason: 'terms' });
-    await footer.done('needs_input');
-    const reason = `Tenjin hasn't checked ${spec.label ?? spec.provider} on your ${account.label} account yet, so it runs only when the user asks for it by name. Nothing was sent.`;
-    return accountResult('needs_input', reason, reason, account.label, {
-      nextStep: `If the user asks for it by name, call request({tool: ${JSON.stringify(spec.capabilityId)}}) for its spec and run that. Otherwise continue with your own tools.`,
-    });
-  }
   // THE CONNECT-TIME CHECK found this account lacks a tool its call makes:
   // refused here, with nothing sent.
   if (await accountLacks(dataDir, spec)) return refusal(at, 'missing', false);
@@ -882,18 +866,9 @@ async function delivered(
   }
   await endAccountJob(dataDir, id);
   report(at, done.outcome);
-  const result =
-    done.unsaved !== undefined
-      ? unsavedAnswer(account.label, done.result, done.unsaved)
-      : done.result;
-  if (spec.verified) return result;
-  // A SERVICE TENJIN HASN'T CHECKED, run because the user named it.
-  const warning = uncheckedWarning(account.label);
-  return {
-    ...result,
-    summary: `${result.summary}\n${warning}`,
-    envelope: { ...result.envelope, warning },
-  };
+  return done.unsaved !== undefined
+    ? unsavedAnswer(account.label, done.result, done.unsaved)
+    : done.result;
 }
 
 /**

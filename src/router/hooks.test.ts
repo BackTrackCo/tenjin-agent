@@ -3917,27 +3917,4 @@ describe('an offer led by a connected account', () => {
     const { readKeptSpec } = await import('./specs');
     expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
   });
-
-  it('injects nothing for an unchecked map’s refusal on a hook, read as plain native', async () => {
-    // Owner decision (review round 1): the agent did not ask, so a hook never
-    // nags with the `unverified` line; only a request-tool result shows it.
-    const unverified = JSON.parse(
-      readFileSync(
-        fileURLToPath(new URL('./fixtures/wire-lookup-account-unverified.json', import.meta.url)),
-        'utf8',
-      ),
-    ) as { settingsHash: string; decision: { diagnostics: { nextAction: string } } };
-    // No rules saved here, so an answer that echoed no hash is still read.
-    const { fetchImpl } = router({ ...unverified, settingsHash: undefined, honored: undefined });
-    const out = await runPromptHook(promptEvent('a photo of a lighthouse at dusk'), {
-      dataDir: dir,
-      baseUrl: BASE,
-      fetchImpl,
-    });
-    expect(out.response).toBeNull();
-    expect(JSON.stringify(out)).not.toContain('fal.flux-pro-ultra');
-    expect(await renderProgress(dir, 'sess-1')).toBe(
-      'x402 · prompt: native tools (router chose native)',
-    );
-  });
 });

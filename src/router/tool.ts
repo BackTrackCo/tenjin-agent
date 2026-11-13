@@ -762,15 +762,7 @@ async function requestTool(
   // which their plan pays (`accounts/run.ts`).
   if (kept?.account === true && input !== undefined) {
     const { runAccountSpec } = await import('./accounts/run');
-    return runAccountSpec(
-      id!,
-      kept.spec,
-      kept.named === true ? { named: true } : {},
-      input,
-      deps,
-      footer,
-      decisionDeps,
-    );
+    return runAccountSpec(id!, kept.spec, input, deps, footer, decisionDeps);
   }
 
   // A SPEC AND AN INPUT: the agent filled the spec's request itself, so it is
@@ -859,8 +851,7 @@ async function requestTool(
   // shown with the skeleton of the next call, `request({id, input})`. Nothing
   // is paid on this answer: only a filled spec pays.
   if (decision.action === 'spec') {
-    // A SERVICE ON THE USER'S OWN ACCOUNT. A routed answer never runs a map
-    // Tenjin has not checked: only the user's naming it does.
+    // A SERVICE ON THE USER'S OWN ACCOUNT.
     if (isAccountSpec(decision.spec)) {
       const lead = { ...decision.spec, id: decision.id };
       const shown = await (
@@ -924,18 +915,6 @@ async function requestTool(
 
   if (decision.action !== 'execute') {
     await footer.done(decision.action === 'native' ? 'native' : 'needs_input');
-    // ONLY AN ACCOUNT MAP TENJIN HAS NOT CHECKED fits this: the server names
-    // the service and the `request({tool})` that runs it when the user names
-    // it. The agent asked, so it is shown here; a hook never shows it.
-    if (decision.action === 'native' && decision.diagnostics.reasonCode === UNVERIFIED) {
-      const line = flat(decision.diagnostics.nextAction);
-      if (line.length > 0) {
-        return fail('native', line, {
-          diagnostics: decision.diagnostics,
-          ...(note !== undefined ? { note } : {}),
-        });
-      }
-    }
     // Both non-execute arms carry diagnostics by construction now: an answer
     // without them does not parse, so there is nothing to fall back to here.
     return fail(
@@ -1027,8 +1006,7 @@ async function readToolList(
   if (fetched.status !== 'decided') return listFailure(fetched);
   const { decision, settingsHash } = fetched.decision;
   if (decision.action === 'spec') {
-    // A SERVICE ON THE USER'S OWN ACCOUNT, NAMED BY ITS ID: the one way a map
-    // Tenjin has not checked runs, with the warning on its result.
+    // A SERVICE ON THE USER'S OWN ACCOUNT, NAMED BY ITS ID.
     if (isAccountSpec(decision.spec)) {
       const lead = { ...decision.spec, id: decision.id };
       return (await import('./accounts/run')).offerAccountLead(
@@ -1037,7 +1015,6 @@ async function readToolList(
         deps,
         decisionDeps,
         decision.hint,
-        { named: true },
       );
     }
     const picked: OfferSpec = { ...decision.spec, id: decision.id };
@@ -1068,14 +1045,6 @@ function listFailure(
 
 /** One plain line of the server's text, for a row shown to the model. */
 const flat = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').trim();
-
-/**
- * `unverified` (plan 37): every route for this step is a connected account's
- * map Tenjin has not checked with a real call, which runs only when the user
- * names it. Its `nextAction` names the service and the `request({tool})` that
- * runs it.
- */
-const UNVERIFIED = 'unverified';
 
 /** The rows as the model reads them: each tool's name, what it does, its
  *  price and the call that fetches its spec. */

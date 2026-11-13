@@ -992,8 +992,8 @@ function isOffer(decision: HookDecision | null): decision is OfferDecision {
  * AN OFFER LED BY A SERVICE ON THE USER'S CONNECTED ACCOUNT (plan 37): no
  * URL, nothing the balance pays, and Tenjin's own route for the job beside
  * it, which a refusal offers. The server sends one only for an account this
- * machine's settings name, alone and checked, with `bound` when it can run in
- * place of the native call it holds. Its lead's own spec, or undefined: an
+ * machine's settings name, alone, with `bound` when it can run in place of the
+ * native call it holds. Its lead's own spec, or undefined: an
  * answer that parsed carries an account spec only as its lead
  * (`checkExecute`), so this is the whole test.
  */
