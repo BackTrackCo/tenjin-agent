@@ -1,4 +1,5 @@
 import { CliError } from '../lib/errors';
+import { normalised } from '../lib/name-match';
 import { paint } from '../lib/output';
 import {
   editSources,
@@ -67,7 +68,9 @@ import {
   preferResetCommand,
   replacementSupport,
   nameOf,
+  namesCommand,
   scopeFlag,
+  shellWord,
   settingsReadback,
   summarizeRule,
   unblockCommand,
@@ -136,7 +139,15 @@ function usage(message: string, fix?: string, details?: unknown): never {
   });
 }
 
-const HELP = 'See `tenjin config --help` for every operation with an example.';
+/** The kinds each slot of an operation takes, for an unknown name's hint. */
+const SCOPE_KINDS: readonly TargetKind[] = ['task', 'category'];
+const PREFERRED_KINDS: readonly TargetKind[] = ['provider', 'service', 'source'];
+const CAPABILITY_KINDS: readonly TargetKind[] = ['category', 'task'];
+const WHO_KINDS: readonly TargetKind[] = ['provider', 'seller', 'service'];
+
+/** Where an operation's flags and examples are: its own `--help`. */
+const helpFor = (operation: string): string =>
+  `\`tenjin config ${operation} --help\` shows its flags and examples.`;
 
 const one = <T>(values: readonly T[]): T => values[0] as T;
 
@@ -175,10 +186,34 @@ async function freshIdentities(
 const shown = (entries: readonly Named[]) =>
   entries.map(({ id, label }) => (label === id ? label : `${label} (${id})`)).join(', ');
 
-/** Every name resolved, or a USAGE error naming the one that was not. */
+/** Names to type, for a "Did you mean": the id, with its label when that
+ *  says more than the id does. */
+const suggested = (entries: readonly Named[]) =>
+  entries
+    .map(({ id, label }) => (folded(label) === folded(id) ? id : `${label} (${id})`))
+    .join(', ');
+
+const article = (noun: string): string => (/^[aeiou]/.test(noun) ? `an ${noun}` : `a ${noun}`);
+
+/** "images is a category: use --category images." */
+function elsewhereHint(name: string, elsewhere: readonly Target[]): string[] {
+  if (elsewhere.length === 0) return [];
+  const nouns = elsewhere.map(({ kind }) => KIND_NOUN[kind]);
+  return [
+    `${shellWord(name)} is ${article(either.format(nouns))}: use ${either.format(elsewhere.map(flagFor))}.`,
+  ];
+}
+
+/**
+ * Every name resolved, or a USAGE error naming the one that was not. An
+ * unknown name's fix names the same name under a kind this operation takes
+ * (`allowed`), else the closest names of its own kind, and always ends with
+ * the command that lists every name near it.
+ */
 function resolveAll(
   identities: Identities,
   wanted: readonly Wanted[],
+  allowed: readonly TargetKind[] = TARGET_KINDS,
 ): { target: Target; label: string }[] {
   const resolved: { target: Target; label: string }[] = [];
   for (const { kind, name } of wanted) {
@@ -192,12 +227,18 @@ function resolveAll(
       );
     }
     if (found.status === 'unknown') {
+      const elsewhere = found.elsewhere.filter((target) => allowed.includes(target.kind));
+      const names = namesCommand(name);
       usage(
         `Tenjin has no ${noun} named "${name}". Nothing was saved.`,
-        found.candidates.length > 0
-          ? `Did you mean: ${shown(found.candidates)}?`
-          : `\`tenjin config\` shows what is saved; ${HELP}`,
-        { kind, name, candidates: found.candidates },
+        [
+          ...elsewhereHint(name, elsewhere),
+          ...(elsewhere.length === 0 && found.candidates.length > 0
+            ? [`Did you mean: ${suggested(found.candidates)}?`]
+            : []),
+          `See every name: ${names}`,
+        ].join(' '),
+        { kind, name, candidates: found.candidates, elsewhere, names },
       );
     }
     if (!resolved.some(({ target }) => targetKey(target) === targetKey(found.target))) {
@@ -263,7 +304,10 @@ function checkSavable(policy: SavedPolicy): void {
   throw new CliError(
     'REFUSED',
     `That change would leave settings Tenjin can't use (${issue?.message ?? 'invalid'}). Nothing was saved.`,
-    { fix: `Remove a rule you no longer need first. ${HELP}`, details: saved.error.issues },
+    {
+      fix: 'Remove a rule you no longer need first: `tenjin config` shows what is saved.',
+      details: saved.error.issues,
+    },
   );
 }
 
@@ -445,12 +489,12 @@ export async function runConfigPrefer(
   if (flags.seller?.length) {
     usage(
       'A preference names providers, services or your accounts: use --provider, --service or --source.',
-      HELP,
+      helpFor('prefer'),
     );
   }
   const kinds = (['provider', 'service', 'source'] as const).filter((kind) => flags[kind]?.length);
   if (kinds.length === 0)
-    usage('Name what to prefer with --provider, --service or --source.', HELP);
+    usage('Name what to prefer with --provider, --service or --source.', helpFor('prefer'));
   if (kinds.length > 1)
     usage(
       'One preference is one kind: providers, services or accounts. Run prefer once for the kind you mean.',
@@ -471,11 +515,13 @@ export async function runConfigPrefer(
   const identities = await liveIdentities(ctx, deps);
   const where =
     tasks.length > 0
-      ? one(resolveAll(identities, [{ kind: 'task', name: one(tasks) }]))
+      ? one(resolveAll(identities, [{ kind: 'task', name: one(tasks) }], SCOPE_KINDS))
       : categories.length > 0
-        ? one(resolveAll(identities, [{ kind: 'category', name: one(categories) }]))
+        ? one(resolveAll(identities, [{ kind: 'category', name: one(categories) }], SCOPE_KINDS))
         : undefined;
-  const targets = resolveAll(identities, wantedOf(flags, [kind])).map(({ target }) => target);
+  const targets = resolveAll(identities, wantedOf(flags, [kind]), PREFERRED_KINDS).map(
+    ({ target }) => target,
+  );
   const scope: Scope =
     where === undefined
       ? { kind: 'global' }
@@ -549,7 +595,7 @@ export async function runConfigOnly(
   if (people.length > 1) {
     usage(
       'One only rule limits one thing: providers, sellers or services. Run only once for each.',
-      HELP,
+      helpFor('only'),
     );
   }
   let scope: Scope | undefined;
@@ -560,13 +606,13 @@ export async function runConfigOnly(
     if (capability.length > 0 && people.length > 0) {
       usage(
         'Tasks and categories are one rule, providers, sellers or services another: run only once for each.',
-        HELP,
+        helpFor('only'),
       );
     }
     if (capability.length === 0 && people.length === 0)
       usage(
         'Name what to allow: --category or --task, or --provider, --seller or --service.',
-        HELP,
+        helpFor('only'),
       );
     scope = { kind: 'global' };
     dimension = people.length > 0 ? one(people) : 'capability';
@@ -582,7 +628,7 @@ export async function runConfigOnly(
     if (tasks.length === 0 || people.length === 0) {
       usage(
         'Say where the rule applies: --task "<task>" with --provider, --seller or --service limits who does that task; --global with --category or --task limits which tasks Tenjin does.',
-        HELP,
+        helpFor('only'),
       );
     }
     if (tasks.length > 1) {
@@ -595,10 +641,16 @@ export async function runConfigOnly(
   }
   const identities = await liveIdentities(ctx, deps);
   if (scope === undefined) {
-    const task = one(resolveAll(identities, [{ kind: 'task', name: one(flags.task ?? []) }]));
+    const task = one(
+      resolveAll(identities, [{ kind: 'task', name: one(flags.task ?? []) }], ['task']),
+    );
     scope = { kind: 'task', id: task.target.id };
   }
-  const targets = resolveAll(identities, wanted).map(({ target }) => target);
+  const targets = resolveAll(
+    identities,
+    wanted,
+    dimension === 'capability' ? CAPABILITY_KINDS : WHO_KINDS,
+  ).map(({ target }) => target);
   const rule: OnlyRule = { scope, dimension, targets };
   let after: SavedPolicy = { version: POLICY_VERSION };
   let replaced: OnlyRule | undefined;
@@ -682,7 +734,7 @@ export async function runConfigBlock(
   if (wanted.length === 0) {
     usage(
       'Name what to block: --provider, --seller, --service, --task, --category or --source.',
-      HELP,
+      helpFor('block'),
     );
   }
   const identities = await liveIdentities(ctx, deps);
@@ -800,7 +852,9 @@ function blockMeans(
 
 /**
  * A saved target a typed name means, with no network: the id itself, the id
- * in another case, or a label the identities last read give that id.
+ * in another case, or a label the identities last read give that id; then
+ * the same once spaces, hyphens and punctuation are set aside, when that
+ * names one saved target.
  */
 function savedMatch(
   wanted: Wanted,
@@ -812,13 +866,15 @@ function savedMatch(
     ofKind.find(({ id }) => id === wanted.name) ??
     ofKind.find(({ id }) => folded(id) === folded(wanted.name));
   if (direct !== undefined) return direct;
-  const ids = new Set(
-    entriesOf(identities, wanted.kind)
-      .filter(({ label }) => folded(label) === folded(wanted.name))
-      .map(({ id }) => id),
-  );
-  const byLabel = ofKind.filter(({ id }) => ids.has(id));
-  return byLabel.length === 1 ? byLabel[0] : undefined;
+  const entries = entriesOf(identities, wanted.kind);
+  for (const same of [folded, normalised]) {
+    const typed = same(wanted.name);
+    const ids = new Set(entries.filter(({ label }) => same(label) === typed).map(({ id }) => id));
+    const matches = ofKind.filter(({ id }) => same(id) === typed || ids.has(id));
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return undefined;
+  }
+  return undefined;
 }
 
 /** `tenjin config unblock`: removes the named blocks and nothing else, offline. */
@@ -831,7 +887,7 @@ export async function runConfigUnblock(
   if (wanted.length === 0) {
     usage(
       'Name what to unblock: --provider, --seller, --service, --task, --category or --source.',
-      HELP,
+      helpFor('unblock'),
     );
   }
   const identities = await cachedIdentities(ctx.dataDir);
@@ -964,7 +1020,7 @@ export async function runConfigReset(
     if (scopes.some(({ kind }) => kind === 'category'))
       usage('A restriction is global or for one task: use --task or --global.');
     if (scopes.length === 0 && flags.global !== true)
-      usage('Say which restriction: --task "<task>" or --global.', HELP);
+      usage('Say which restriction: --task "<task>" or --global.', helpFor('reset'));
   }
   if (mode === 'preference') {
     if (targets.some(({ kind }) => kind === 'seller'))
@@ -972,7 +1028,7 @@ export async function runConfigReset(
     if (scopes.length === 0 && flags.global !== true && targets.length === 0)
       usage(
         'Say which preference: --task "<task>", --category <category>, --global, or --source <account>.',
-        HELP,
+        helpFor('reset'),
       );
   }
 
@@ -1271,6 +1327,7 @@ export async function runConfigReplacement(
       ? resolveAll(
           identities,
           providers.map((name) => ({ kind: 'provider' as const, name: name.trim() })),
+          ['provider'],
         ).map(({ target }) => target)
       : undefined;
   // THE SCOPE AS IT WILL BE READ BACK: a list the reader refuses would make

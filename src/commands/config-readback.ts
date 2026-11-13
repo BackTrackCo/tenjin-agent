@@ -55,7 +55,10 @@ export const either = new Intl.ListFormat('en', { type: 'disjunction' });
 export const shellWord = (id: string): string =>
   /^[A-Za-z0-9._:-]+$/.test(id) ? id : JSON.stringify(id);
 
-const KIND_FLAG: Record<TargetKind, string> = {
+/** The command that lists every name near a typed one. */
+export const namesCommand = (word: string): string => `tenjin config names ${shellWord(word)}`;
+
+export const KIND_FLAG: Record<TargetKind, string> = {
   category: '--category',
   task: '--task',
   provider: '--provider',

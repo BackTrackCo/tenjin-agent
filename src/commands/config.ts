@@ -30,6 +30,7 @@ import type {
   RouterConfigKey,
   RouterContext,
 } from '../lib/config';
+import { closestNames } from '../lib/name-match';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { withFileLock, LockTimeoutError, type FileLockOptions } from '../lib/lock';
@@ -649,11 +650,21 @@ function assertKey(key: string): ScalarConfigKey {
     // Coupled settings: a generic set could skip the checks that keep them
     // consistent, so only their own operations write them.
     throw new CliError('USAGE', `${key} changes only through its own operations`, {
-      fix: '`tenjin config` shows it; `tenjin config --help` lists prefer, only, block, unblock, reset, speed and replacement, each with an example.',
+      fix: '`tenjin config` shows it; `tenjin config --help` lists the operations that change it.',
     });
   }
+  const keys = [
+    ...CONFIG_KEYS,
+    ...UPDATE_CONFIG_KEYS,
+    ...ROUTER_CONFIG_KEYS,
+    ...EXPERIMENTAL_CONFIG_KEYS,
+  ];
+  const near = closestNames(
+    keys.map((name) => ({ id: name, label: name })),
+    key,
+  ).map(({ id }) => id);
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
-    fix: `Valid keys: ${[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
+    fix: `${near.length > 0 ? `Did you mean: ${near.join(', ')}? ` : ''}Valid keys: ${keys.join(', ')}.`,
   });
 }
 

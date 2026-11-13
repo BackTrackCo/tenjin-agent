@@ -207,7 +207,7 @@ describe('tenjin config prefer', () => {
       runConfigPrefer({ task: ['web research'], provider: ['ex'] }, ctx(), online()),
     );
     expect(unknown.message).toContain('Tenjin has no provider named "ex"');
-    expect(unknown.fix).toContain('Exa');
+    expect(unknown.fix).toContain('Did you mean: exa');
     expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
   });
 
@@ -241,6 +241,72 @@ describe('tenjin config prefer', () => {
     );
     expect(err.message).toContain("couldn't look up those names right now, so nothing was saved");
     expect((await saved()).policy).toBeUndefined();
+  });
+});
+
+/**
+ * A NAME TYPED NEARLY RIGHT (`config block --provider "fire crawl"`, `--task
+ * "web search"`, `--task images`): before this, only an exact or same-case
+ * name resolved and only a name holding the typed text was suggested, so
+ * each of these failed with no way forward. A name that is the same once
+ * spacing and punctuation are set aside resolves; any other unknown name
+ * still writes nothing, and its fix says what to type.
+ */
+describe('a name typed nearly right', () => {
+  const unchanged = async (run: Promise<unknown>): Promise<CliError> => {
+    const before = await readFile(join(dir, 'config.json'), 'utf8');
+    const err = await refused(run);
+    expect(err.code).toBe('USAGE');
+    expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
+    return err;
+  };
+
+  it('resolves one typed with other spaces, hyphens or case, and unblocks it the same way offline', async () => {
+    await runConfigBlock(
+      { provider: ['Coin Market-Cap'], task: ['WEB-research'] },
+      ctx(),
+      online(),
+    );
+    expect((await saved()).policy).toEqual({
+      version: 1,
+      block: [
+        { kind: 'task', id: 'web research' },
+        { kind: 'provider', id: 'coinmarketcap' },
+      ],
+    });
+    await runConfigUnblock({ provider: ['coin market cap'] }, ctx(), offline);
+    expect((await saved()).policy).toEqual({
+      version: 1,
+      block: [{ kind: 'task', id: 'web research' }],
+    });
+  });
+
+  it('suggests the closest names of its kind, and ends with where every name is', async () => {
+    const err = await unchanged(runConfigBlock({ task: ['web search'] }, ctx(), online()));
+    expect(err.message).toBe('Tenjin has no task named "web search". Nothing was saved.');
+    expect(err.fix).toBe(
+      'Did you mean: web research? See every name: tenjin config names "web search"',
+    );
+    expect(err.details).toMatchObject({ names: 'tenjin config names "web search"' });
+    const nothing = await unchanged(runConfigBlock({ provider: ['zzzq'] }, ctx(), online()));
+    expect(nothing.fix).toBe('See every name: tenjin config names zzzq');
+  });
+
+  it('names the kind a name belongs to, with a flag the operation takes', async () => {
+    const category = await unchanged(runConfigBlock({ task: ['images'] }, ctx(), online()));
+    expect(category.fix).toBe(
+      'images is a category: use --category images. See every name: tenjin config names images',
+    );
+    const account = await unchanged(
+      runConfigPrefer({ task: ['web research'], provider: ['tenjin'] }, ctx(), online()),
+    );
+    expect(account.fix).toContain('tenjin is an account: use --source tenjin.');
+    // A preference takes no seller, so a seller's name gets no --seller hint.
+    const seller = await unchanged(
+      runConfigPrefer({ task: ['web research'], provider: ['stableenrich'] }, ctx(), online()),
+    );
+    expect(seller.fix).not.toContain('--seller');
+    expect(seller.fix).toMatch(/See every name: tenjin config names stableenrich$/);
   });
 });
 

@@ -322,6 +322,36 @@ resetting and pausing work offline. To pause Tenjin:
       });
     });
 
+  addGlobalFlags(config.command('names [word...]'))
+    .summary('every name you can use in a rule')
+    .description(
+      'List every name a rule can use, by kind, with the id to type after its flag. A word filters them; case, spaces and a typo are fine.',
+    )
+    .option('--kind <kind>', 'only one kind: task, category, provider, seller, service or account')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ tenjin config names
+  $ tenjin config names firecrawl
+  $ tenjin config names --kind task
+`,
+    )
+    // Words unquoted, like `gh search`: `names web search` is one search.
+    .action(async function (this: Command, words: string[]) {
+      const o = this.opts();
+      await runCommand('config.names', this, async (ctx) => {
+        const { runConfigNames } = await import('../commands/config-names');
+        return runConfigNames(
+          {
+            ...(words.length > 0 ? { search: words.join(' ') } : {}),
+            ...(typeof o.kind === 'string' ? { kind: o.kind } : {}),
+          },
+          ctx,
+        );
+      });
+    });
+
   registerConfigRules(config, reg);
 
   // The two everyday money commands, by their plain names. `tenjin wallet
