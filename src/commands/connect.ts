@@ -28,6 +28,7 @@ import {
   fetchIdentities,
   type Identities,
 } from '../router/identities';
+import { authHeader, expiresAtOf } from '../router/accounts/credential';
 import { accountIdForUrl, isAccountId } from '../router/accounts/ids';
 import { savedAccountOf, type SavedAccount } from '../router/accounts/saved';
 import {
@@ -533,7 +534,7 @@ export async function runConnect(
   if (byKey) {
     const key = await keyFrom(flags, account, deps);
     secret = { apiKey: key, keyScheme: account.keyScheme };
-    headers = { authorization: `${account.keyScheme} ${key}` };
+    headers = authHeader(account.keyScheme, key);
   } else {
     if (!account.signIn.includes('oauth')) {
       usage(
@@ -560,9 +561,8 @@ export async function runConnect(
       clientInformation: { ...signed.clientInformation },
       discoveryState: { ...signed.discoveryState },
     };
-    headers = { authorization: `Bearer ${signed.tokens.access_token}` };
-    if (typeof signed.tokens.expires_in === 'number' && Number.isFinite(signed.tokens.expires_in))
-      expiresAt = new Date(signed.obtainedAt + signed.tokens.expires_in * 1_000).toISOString();
+    headers = authHeader('Bearer', signed.tokens.access_token);
+    expiresAt = expiresAtOf(signed.tokens, signed.obtainedAt);
   }
 
   // 3. THE FREE CHECK, on the credential about to be saved.

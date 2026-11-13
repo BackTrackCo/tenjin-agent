@@ -1,5 +1,5 @@
 import { LockTimeoutError } from '../../lib/lock';
-import type { SignIn } from '../decision';
+import type { KeyScheme, SignIn } from '../decision';
 import { said } from './said';
 import {
   readVault,
@@ -101,8 +101,27 @@ function expiring(header: VaultHeader, now: number): boolean {
   return !Number.isFinite(at) || at - now <= REFRESH_SKEW_MS;
 }
 
+/** The headers a credential is sent in: `authorization` alone, a token as
+ *  `Bearer <token>` and a key as its scheme says. */
+export function authHeader(scheme: KeyScheme, value: string): Record<string, string> {
+  return { authorization: `${scheme} ${value}` };
+}
+
+/** When tokens a sign-in or a refresh handed back expire, or undefined when
+ *  they name no time ahead (none, or none past `obtainedAt`): such a token is
+ *  refreshed only once the account refuses it. */
+export function expiresAtOf(
+  tokens: { expires_in?: unknown },
+  obtainedAt: number,
+): string | undefined {
+  const expiresIn = tokens.expires_in;
+  return typeof expiresIn === 'number' && Number.isFinite(expiresIn) && expiresIn > 0
+    ? new Date(obtainedAt + expiresIn * 1_000).toISOString()
+    : undefined;
+}
+
 function bearer(token: string, mcpUrl: string): AccountCredential {
-  return { kind: 'oauth', headers: { authorization: `Bearer ${token}` }, sent: token, mcpUrl };
+  return { kind: 'oauth', headers: authHeader('Bearer', token), sent: token, mcpUrl };
 }
 
 /** How much of what the other side said a refusal keeps. */
@@ -145,7 +164,7 @@ export async function accountCredential(
     if (key === undefined || key === opts.refused) throw new AccountRefusal('signin_expired');
     return {
       kind: 'key',
-      headers: { authorization: `${secret.keyScheme ?? 'Bearer'} ${key}` },
+      headers: authHeader(secret.keyScheme ?? 'Bearer', key),
       sent: key,
       mcpUrl: header.mcpUrl,
     };
@@ -246,11 +265,7 @@ async function refreshed(
   }
   const access = typeof tokens.access_token === 'string' ? tokens.access_token : undefined;
   if (access === undefined || access.length === 0) return expire();
-  const expiresIn = tokens.expires_in;
-  const expiresAt =
-    typeof expiresIn === 'number' && Number.isFinite(expiresIn) && expiresIn > 0
-      ? new Date(now + expiresIn * 1_000).toISOString()
-      : undefined;
+  const expiresAt = expiresAtOf(tokens, now);
   // The issuer the sign-in recorded stays with the tokens: a later refresh
   // goes back to the server that issued them, and only there.
   const issuer = secret.tokens?.issuer;

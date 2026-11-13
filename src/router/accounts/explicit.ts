@@ -323,7 +323,11 @@ export async function runSourceRequest(
       };
     }
     const rows = tools.slice(0, MAX_ROWS).map(row);
-    const viaJobs = rows.map(({ tool: name }) => name).filter((name) => jobsOnly?.has(name));
+    // As the run refuses: with no list of its jobs' tools (null), every tool
+    // runs only through its jobs.
+    const viaJobs = rows
+      .map(({ tool: name }) => name)
+      .filter((name) => jobsOnly === null || jobsOnly.has(name));
     const next = `Pick the tool the user's request needs and call request({source: ${JSON.stringify(id)}, tool: "<name>"}) for its inputs, free.`;
     return {
       isError: false,
