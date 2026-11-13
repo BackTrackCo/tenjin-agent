@@ -1,19 +1,18 @@
 import { CliError } from '../lib/errors';
-import {
-  loadRawConfig,
-  resolveSettings,
-  SavedPolicySchema,
-  type PartialConfig,
-  type SettingScope,
-} from '../lib/config';
+import type { PartialConfig, SettingScope } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
 import {
   ONLY_DIMENSIONS,
   POLICY_VERSION,
   ReplacementProvidersSchema,
   SETTINGS_LIMITS,
+  SavedPolicySchema,
+  TARGET_KINDS,
+  hasRules,
+  onlyKey,
   scopeKey,
   targetKey,
+  wirePolicy,
   type OnlyDimension,
   type OnlyRule,
   type PreferRule,
@@ -26,6 +25,7 @@ import {
   cachedIdentities,
   entriesOf,
   fetchIdentities,
+  folded,
   KIND_NOUN,
   labelOf,
   resolveName,
@@ -33,7 +33,7 @@ import {
   type Named,
 } from '../router/identities';
 import { routerSettings, type RouterSettings } from '../router/settings';
-import { persist } from './config';
+import { persist, resolveFromContext } from './config';
 import {
   POLICY_INVALID_TEXT,
   REPLACEMENT_NAME,
@@ -47,13 +47,17 @@ import {
   describeReplacement,
   describeRules,
   describeSpeed,
+  either,
   flagFor,
+  list,
   onlyResetCommand,
   preferResetCommand,
   replacementSupport,
+  scopeFlag,
   settingsReadback,
-  shellWord,
   unblockCommand,
+  type LimitsReadback,
+  type ReplacementSupport,
   type RuleReadback,
 } from './config-readback';
 
@@ -79,14 +83,7 @@ import {
  */
 
 /** The typed names a command line carries, one list per kind. */
-export interface TargetFlags {
-  category?: string[];
-  task?: string[];
-  provider?: string[];
-  seller?: string[];
-  service?: string[];
-  source?: string[];
-}
+export type TargetFlags = Partial<Record<TargetKind, string[]>>;
 
 export interface ScopeFlags extends TargetFlags {
   global?: boolean;
@@ -106,21 +103,12 @@ export interface ConfigRulesDeps {
   cwd?: string;
 }
 
-const KINDS: readonly TargetKind[] = [
-  'category',
-  'task',
-  'provider',
-  'seller',
-  'service',
-  'source',
-];
-
 interface Wanted {
   kind: TargetKind;
   name: string;
 }
 
-function wantedOf(flags: TargetFlags, kinds: readonly TargetKind[] = KINDS): Wanted[] {
+function wantedOf(flags: TargetFlags, kinds: readonly TargetKind[] = TARGET_KINDS): Wanted[] {
   return kinds.flatMap((kind) =>
     (flags[kind] ?? []).map((name: string) => ({ kind, name: name.trim() })),
   );
@@ -135,18 +123,11 @@ function usage(message: string, fix?: string, details?: unknown): never {
 
 const HELP = 'See `tenjin config --help` for every operation with an example.';
 
-const list = new Intl.ListFormat('en');
-
 const one = <T>(values: readonly T[]): T => values[0] as T;
 
 /** The router's identities now, or an error that saved nothing. */
 async function liveIdentities(ctx: CommandContext, deps: ConfigRulesDeps): Promise<Identities> {
-  const config = await loadRawConfig(ctx.dataDir);
-  const { baseUrl } = resolveSettings({
-    config,
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-  });
+  const { baseUrl } = await resolveFromContext(ctx);
   const read = await fetchIdentities(ctx, {
     baseUrl: baseUrl.value,
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
@@ -226,23 +207,37 @@ function savedPolicyOf(existing: PartialConfig): SavedPolicy {
   });
 }
 
-/** The policy with every emptied collection and a false switch dropped, or none. */
-function tidy(policy: SavedPolicy): SavedPolicy | undefined {
-  const next: SavedPolicy = {
-    version: policy.version,
-    ...(policy.block?.length ? { block: policy.block } : {}),
-    ...(policy.only?.length ? { only: policy.only } : {}),
-    ...(policy.prefer?.length ? { prefer: policy.prefer } : {}),
-    ...(policy.preferSpeed === true ? { preferSpeed: true } : {}),
-  };
-  return Object.keys(next).length === 1 ? undefined : next;
-}
-
+/** The config with `policy` saved as the wire sends it: every emptied
+ *  collection and a false switch dropped, and no policy at all for no rules. */
 function withPolicy(existing: PartialConfig, policy: SavedPolicy): PartialConfig {
   const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
   delete router.policy;
-  const kept = tidy(policy);
-  return { ...existing, router: { ...router, ...(kept !== undefined ? { policy: kept } : {}) } };
+  const rules = wirePolicy(policy);
+  return {
+    ...existing,
+    router: {
+      ...router,
+      ...(hasRules(rules) ? { policy: { version: policy.version, ...rules } } : {}),
+    },
+  };
+}
+
+/** `rules` with `rule` in place of the one in its slot, or added after them,
+ *  and the one it replaced. */
+function upsert<T>(
+  rules: readonly T[] | undefined,
+  rule: T,
+  slot: (rule: T) => string,
+): { next: T[]; replaced: T | undefined } {
+  const saved = rules ?? [];
+  const replaced = saved.find((entry) => slot(entry) === slot(rule));
+  return {
+    next:
+      replaced !== undefined
+        ? saved.map((entry) => (entry === replaced ? rule : entry))
+        : [...saved, rule],
+    replaced,
+  };
 }
 
 /** The checks a saved policy meets, run on the change before it is written. */
@@ -257,6 +252,18 @@ function checkSavable(policy: SavedPolicy): void {
   );
 }
 
+/** Refuses targets a saved block already rules out: blocks win. */
+function refuseBlocked(
+  targets: readonly Target[],
+  policy: Pick<SavedPolicy, 'block'>,
+  identities: Identities | undefined,
+): void {
+  for (const target of targets) {
+    const block = blockedBy(target, policy, identities);
+    if (block !== undefined) conflict(target, block, identities);
+  }
+}
+
 function conflict(target: Target, block: Target, identities: Identities | undefined): never {
   const name = labelOf(target, identities);
   const why =
@@ -269,21 +276,28 @@ function conflict(target: Target, block: Target, identities: Identities | undefi
   });
 }
 
-async function readBack(ctx: CommandContext, deps: ConfigRulesDeps): Promise<RouterSettings> {
-  return routerSettings({ cwd: deps.cwd ?? process.cwd(), dataDir: ctx.dataDir });
+/** The settings as they read back after a write, with the limits and where
+ *  automatic use works. */
+interface ReadBack {
+  router: RouterSettings;
+  limits: LimitsReadback;
+  support: ReplacementSupport;
 }
 
-async function limitsOf(ctx: CommandContext) {
-  const config = await loadRawConfig(ctx.dataDir);
-  const settings = resolveSettings({ config, flags: {}, env: process.env });
-  return describeLimits(settings.maxAutoSpend.value, settings.sessionBudget.value);
+async function readBack(ctx: CommandContext, deps: ConfigRulesDeps): Promise<ReadBack> {
+  const router = await routerSettings({ cwd: deps.cwd ?? process.cwd(), dataDir: ctx.dataDir });
+  const { maxAutoSpend, sessionBudget } = await resolveFromContext(ctx);
+  return {
+    router,
+    limits: describeLimits(maxAutoSpend.value, sessionBudget.value),
+    support: await replacementSupport(ctx.dataDir),
+  };
 }
 
 /** The line every saved rule change adds about automatic use. */
-async function replacementNote(router: RouterSettings, ctx: CommandContext): Promise<string> {
+function replacementNote({ router, support }: ReadBack): string {
   if (router.nativeReplacement.mode === 'off')
     return `${REPLACEMENT_NAME} is off, and this doesn't turn it on.`;
-  const support = await replacementSupport(ctx.dataDir);
   return support.supported
     ? `${REPLACEMENT_NAME} is on, so this also holds for the searches and fetches Tenjin runs in place.`
     : `${REPLACEMENT_NAME} is on. ${support.why}`;
@@ -308,22 +322,18 @@ interface Outcome {
 /**
  * THE ONE ENVELOPE EVERY OPERATION ANSWERS WITH: the changed rule, its saved
  * scope, what is in effect now, why, and how to undo it, from the file as it
- * reads back after the write rather than from what the operation meant.
+ * reads back after the write (`read`, when the operation already read it)
+ * rather than from what the operation meant.
  */
 async function answer(
   outcome: Outcome,
   ctx: CommandContext,
   deps: ConfigRulesDeps,
   identities: Identities | undefined,
+  read?: ReadBack,
 ): Promise<CommandResult> {
-  const router = await readBack(ctx, deps);
-  const limits = await limitsOf(ctx);
-  const settings = settingsReadback(
-    router,
-    identities,
-    limits,
-    await replacementSupport(ctx.dataDir),
-  );
+  const { router, limits, support } = read ?? (await readBack(ctx, deps));
+  const settings = settingsReadback(router, identities, limits, support);
   const unreadable =
     router.policy.status === 'invalid' ? [`${POLICY_INVALID_TEXT} ${router.policy.problem}.`] : [];
   return {
@@ -412,31 +422,22 @@ export async function runConfigPrefer(
   let replaced: PreferRule | undefined;
   await persist(ctx.dataDir, (existing) => {
     const policy = savedPolicyOf(existing);
-    for (const target of targets) {
-      const block = blockedBy(target, policy, identities);
-      if (block !== undefined) conflict(target, block, identities);
-    }
-    const prefer = policy.prefer ?? [];
-    replaced = prefer.find((entry) => scopeKey(entry.scope) === scopeKey(scope));
-    after = {
-      ...policy,
-      prefer:
-        replaced !== undefined
-          ? prefer.map((entry) => (entry === replaced ? rule : entry))
-          : [...prefer, rule],
-    };
+    refuseBlocked(targets, policy, identities);
+    const prefer = upsert(policy.prefer, rule, (entry) => scopeKey(entry.scope));
+    replaced = prefer.replaced;
+    after = { ...policy, prefer: prefer.next };
     checkSavable(after);
     return withPolicy(existing, after);
   });
   const effective = describePrefer(rule, after, identities);
-  const router = await readBack(ctx, deps);
+  const read = await readBack(ctx, deps);
   return answer(
     {
       operation: 'prefer',
       changed: true,
       scope: 'user',
       rule,
-      explanation: [`${SAVED_PREFIX} ${said(effective)}`, await replacementNote(router, ctx)],
+      explanation: [`${SAVED_PREFIX} ${said(effective)}`, replacementNote(read)],
       effective: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
       // A replaced list comes back as it was; a new one is removed.
@@ -445,6 +446,7 @@ export async function runConfigPrefer(
     ctx,
     deps,
     identities,
+    read,
   );
 }
 
@@ -526,32 +528,22 @@ export async function runConfigOnly(
   let replaced: OnlyRule | undefined;
   await persist(ctx.dataDir, (existing) => {
     const policy = savedPolicyOf(existing);
-    for (const target of targets) {
-      const block = blockedBy(target, policy, identities);
-      if (block !== undefined) conflict(target, block, identities);
-    }
-    const only = policy.only ?? [];
-    const key = `${scopeKey(rule.scope)}|${dimension}`;
-    replaced = only.find((entry) => `${scopeKey(entry.scope)}|${entry.dimension}` === key);
-    after = {
-      ...policy,
-      only:
-        replaced !== undefined
-          ? only.map((entry) => (entry === replaced ? rule : entry))
-          : [...only, rule],
-    };
+    refuseBlocked(targets, policy, identities);
+    const only = upsert(policy.only, rule, onlyKey);
+    replaced = only.replaced;
+    after = { ...policy, only: only.next };
     checkSavable(after);
     return withPolicy(existing, after);
   });
   const effective = describeOnly(rule, after, identities);
-  const router = await readBack(ctx, deps);
+  const read = await readBack(ctx, deps);
   return answer(
     {
       operation: 'only',
       changed: true,
       scope: 'user',
       rule,
-      explanation: [`${SAVED_PREFIX} ${said(effective)}`, await replacementNote(router, ctx)],
+      explanation: [`${SAVED_PREFIX} ${said(effective)}`, replacementNote(read)],
       effective: [effective],
       ...(replaced !== undefined ? { removed: [replaced] } : {}),
       reset: replaced !== undefined ? recreate(replaced) : onlyResetCommand(rule),
@@ -559,6 +551,7 @@ export async function runConfigOnly(
     ctx,
     deps,
     identities,
+    read,
   );
 }
 
@@ -592,7 +585,7 @@ export async function runConfigBlock(
     const policy = savedPolicyOf(existing);
     before = policy;
     const saved = new Set((policy.block ?? []).map(targetKey));
-    added.splice(0, added.length, ...targets.filter((target) => !saved.has(targetKey(target))));
+    added.push(...targets.filter((target) => !saved.has(targetKey(target))));
     if (added.length === 0) return existing;
     after = { ...policy, block: [...(policy.block ?? []), ...added] };
     checkSavable(after);
@@ -613,9 +606,9 @@ export async function runConfigBlock(
         );
   const fresh = new Set(added.map(targetKey));
   const explanation = [
-    ...effective
-      .filter(({ rule }) => fresh.has(targetKey(rule as Target)))
-      .map(({ text }, index) => (index === 0 ? `${SAVED_PREFIX} ${text}` : text)),
+    ...added
+      .map((target) => describeBlock(target, identities).text)
+      .map((text, index) => (index === 0 ? `${SAVED_PREFIX} ${text}` : text)),
     ...targets
       .filter((target) => !fresh.has(targetKey(target)))
       .map((target) => `${labelOf(target, identities)} was already blocked.`),
@@ -643,8 +636,6 @@ export async function runConfigBlock(
 }
 
 /* ----------------------------------------------------------------- unblock */
-
-const folded = (text: string) => text.trim().toLowerCase();
 
 /**
  * A saved target a typed name means, with no network: the id itself, the id
@@ -689,8 +680,6 @@ export async function runConfigUnblock(
   await persist(ctx.dataDir, (existing) => {
     const policy = savedPolicyOf(existing);
     const saved = policy.block ?? [];
-    removed.length = 0;
-    missing.length = 0;
     for (const name of wanted) {
       const match = savedMatch(name, saved, identities);
       if (match === undefined) missing.push(name);
@@ -818,9 +807,6 @@ export async function runConfigReset(
   const touched: (OnlyRule | PreferRule)[] = [];
   let missing: string | undefined;
   await persist(ctx.dataDir, (existing) => {
-    removed.length = 0;
-    touched.length = 0;
-    missing = undefined;
     if (mode === 'all') {
       const { policy: gone, ...router } = (existing.router ?? {}) as Record<string, unknown>;
       if (gone === undefined) {
@@ -838,11 +824,13 @@ export async function runConfigReset(
       const scope: Scope | undefined =
         mode === 'capabilities' || flags.global === true
           ? { kind: 'global' }
-          : savedScope(
-              named!,
-              only.map(({ scope: s }) => s),
-              identities,
-            );
+          : named !== undefined
+            ? savedScope(
+                named,
+                only.map(({ scope: s }) => s),
+                identities,
+              )
+            : undefined;
       const want = mode === 'capabilities' ? 'capability' : dimension;
       const drop = only.filter(
         (entry) =>
@@ -938,14 +926,10 @@ export async function runConfigReset(
 
 /** The command that saves a rule again exactly as it was. */
 function recreate(rule: OnlyRule | PreferRule): string {
-  const where =
-    rule.scope.kind === 'global'
-      ? ''
-      : `${rule.scope.kind === 'task' ? '--task' : '--category'} ${shellWord(rule.scope.id)}`;
   const targets = rule.targets.map((target) => flagFor(target)).join(' ');
-  if ('dimension' in rule) {
-    return `tenjin config only ${rule.scope.kind === 'global' ? '--global' : where} ${targets}`;
-  }
+  if ('dimension' in rule) return `tenjin config only ${scopeFlag(rule.scope)} ${targets}`;
+  // An account-wide preference is `--source` alone, with no `--global`.
+  const where = rule.scope.kind === 'global' ? '' : scopeFlag(rule.scope);
   return ['tenjin config prefer', where, targets].filter((part) => part.length > 0).join(' ');
 }
 
@@ -1095,11 +1079,7 @@ export async function runConfigReplacement(
     if (scope !== undefined) {
       // A blocked provider never runs, so naming it here is a conflict.
       const policy = SavedPolicySchema.safeParse(router.policy);
-      const saved = policy.success ? policy.data : { version: POLICY_VERSION };
-      for (const target of scope) {
-        const block = blockedBy(target, saved, identities);
-        if (block !== undefined) conflict(target, block, identities);
-      }
+      refuseBlocked(scope, policy.success ? policy.data : {}, identities);
       router.nativeReplacementProviders = scope;
     } else {
       delete router.nativeReplacementProviders;
@@ -1107,11 +1087,9 @@ export async function runConfigReplacement(
     router.nativeReplacement = 'when-routed';
     return { ...existing, router };
   });
-  const router = await readBack(ctx, deps);
-  const support = await replacementSupport(ctx.dataDir);
+  const read = await readBack(ctx, deps);
+  const { router, support, limits } = read;
   const effective = describeReplacement(router.nativeReplacement, identities, support);
-  const limits = await limitsOf(ctx);
-  const either = new Intl.ListFormat('en', { type: 'disjunction' });
   const explanation =
     args.state === 'off'
       ? [
@@ -1147,5 +1125,6 @@ export async function runConfigReplacement(
     ctx,
     deps,
     identities,
+    read,
   );
 }

@@ -421,8 +421,8 @@ function checkChoices(
   else if (fallback.id !== decision.id) issue("the default choice is this answer's own offer");
 }
 
-/** One call's input, bounded as the server bounds it. */
-export const INPUT_MAX_BYTES = 16 * 1024;
+/** One call's input, serialized, bounded as the server bounds it. */
+export const MAX_INPUT_BYTES = 16 * 1024;
 
 /**
  * THE NATIVE CALL'S OWN INPUT, on a hook answer for a pending WebSearch or
@@ -438,8 +438,8 @@ export const BoundSchema = z.object({
   input: z
     .record(z.string(), z.unknown())
     .refine(
-      (input) => Buffer.byteLength(JSON.stringify(input), 'utf8') <= INPUT_MAX_BYTES,
-      `bound input must serialize to at most ${INPUT_MAX_BYTES} bytes`,
+      (input) => Buffer.byteLength(JSON.stringify(input), 'utf8') <= MAX_INPUT_BYTES,
+      `bound input must serialize to at most ${MAX_INPUT_BYTES} bytes`,
     ),
 });
 export type Bound = z.infer<typeof BoundSchema>;
@@ -526,21 +526,17 @@ const ToolDecisionSchema = z.discriminatedUnion('action', [
   RefusedSchema.extend({ action: z.literal('needs_input') }),
 ]);
 
-/**
- * WHICH REQUEST FIELDS THE SERVER APPLIED (RFC 7240's Preference-Applied):
- * `settings` when it decided under the user's rules, and then
- * {@link SettingsHashSchema} `settingsHash` is the request's own hash,
- * verbatim. Both only to a client that lists `settings` in `accepts`. The
- * hash is what the check before every call compares with the rules saved
- * now (`settings-check.ts`); it names a rule set and authorizes nothing.
- */
-const HonoredSchema = z.array(z.string().min(1).max(32)).max(16).optional();
-
 function envelope<T extends z.ZodTypeAny>(decision: T) {
   return z.object({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
-    honored: HonoredSchema,
+    /**
+     * The request's own settings hash, verbatim, on an answer the server
+     * decided under the user's rules (to a client that lists `settings` in
+     * `accepts`). The check before every call compares it with the rules
+     * saved now (`settings-check.ts`); it names a rule set and authorizes
+     * nothing.
+     */
     settingsHash: SettingsHashSchema.optional(),
     decision,
     /** A plain sentence about the CALL, such as an id that had expired. Never a
@@ -578,8 +574,6 @@ export type BrowseRow = z.infer<typeof BrowseRowSchema>;
 const BrowseResponseSchema = z.object({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
-  honored: HonoredSchema,
-  settingsHash: SettingsHashSchema.optional(),
   rows: z.array(BrowseRowSchema).max(200),
 });
 export type BrowseResponse = z.infer<typeof BrowseResponseSchema>;
@@ -597,7 +591,6 @@ const Labelled = { id: TargetIdSchema, label: z.string().min(1).max(120) };
 const IdentitiesResponseSchema = z.object({
   schemaVersion: z.literal(1),
   routerVersion: z.string().min(1).max(64),
-  honored: HonoredSchema,
   categories: z.array(z.object({ ...Labelled, tasks: z.array(TargetIdSchema).max(256) })).max(256),
   /** `speed`: a task the speed preference changes (it has a speed criterion). */
   tasks: z
@@ -629,6 +622,13 @@ export type IdentitiesResponse = z.infer<typeof IdentitiesResponseSchema>;
  *  the router's: anything else reads as absent. */
 export function parseHookResponse(value: unknown): HookResponse | undefined {
   const parsed = HookResponseSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** The identities read reread from disk (`identities.ts`), held to the same
+ *  schema as the router's answer: anything else reads as absent. */
+export function parseIdentities(value: unknown): IdentitiesResponse | undefined {
+  const parsed = IdentitiesResponseSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
 
@@ -710,7 +710,7 @@ function unmetRefusal(missing: string[]) {
 }
 
 /** Which call this is, and therefore which answer is legal for it. */
-export type CallKind = 'hook' | 'tool' | 'browse' | 'identities';
+export type CallKind = 'hook' | 'tool' | 'browse';
 
 /**
  * What this client can act on beyond the curated answers, sent on every call.
@@ -935,9 +935,7 @@ function schemaFor(kind: CallKind) {
     ? HookResponseSchema
     : kind === 'tool'
       ? ToolResponseSchema
-      : kind === 'browse'
-        ? BrowseResponseSchema
-        : IdentitiesResponseSchema;
+      : BrowseResponseSchema;
 }
 
 /**

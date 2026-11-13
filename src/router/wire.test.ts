@@ -16,6 +16,7 @@ import {
   isWarmAnswer,
   MAX_SPEC_TIMEOUT_S,
   parseForTests,
+  parseIdentities,
   REQUIRES_UNMET,
   unmetRequires,
   withoutUnmet,
@@ -279,7 +280,7 @@ describe('the request bodies', () => {
   /**
    * THE TOLERANT EXCHANGE: what this build sends for a browse row's id, and
    * the answer only a `tolerant` client gets, with `honored` and the spec's
-   * `requires`. The reader keeps `honored`, which the settings check reads.
+   * `requires`. The reader keeps what it knows and drops `honored`.
    */
   it('sends the tolerant by-id request byte for byte, and reads its answer with requires kept', () => {
     const canonical = fixture('wire-tool-request-by-id-tolerant.json');
@@ -295,7 +296,7 @@ describe('the request bodies', () => {
     const parsed = parseForTests('tool', answer);
     expect(parsed.success).toBe(true);
     const read = parsed.data as { honored?: unknown; decision: { spec: ToolSpec } };
-    expect(read.honored).toEqual(['schemaVersion', 'tool', 'accepts', 'harness']);
+    expect(read).not.toHaveProperty('honored');
     expect(read.decision.spec.requires).toEqual(['jobs']);
     expect(unmetRequires(read.decision.spec.requires)).toEqual([]);
   });
@@ -992,6 +993,8 @@ describe('every answer payload on disk', () => {
       false,
     );
     expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
+    // One decided under the user's rules reads the same: its echoed hash is unread.
+    expect(parseForTests('browse', fixture('wire-browse-settings.json')).success).toBe(true);
   });
 });
 
@@ -1143,8 +1146,8 @@ describe('the hook time budget', () => {
 /**
  * THE USER'S SETTINGS ON THE WIRE (plan 36). Every routing form carries the
  * `settings` field with `settings` in `accepts`; an answer the server decided
- * under them says so in `honored` and echoes their hash, which the check
- * before every call compares with the rules saved now. The field is built
+ * under them echoes their hash, which the check before every call compares
+ * with the rules saved now. The field is built
  * from the saved config by the one resolver, and its hash is the CLI's alone.
  */
 describe('the settings field', () => {
@@ -1207,9 +1210,7 @@ describe('the settings field', () => {
 
   it('asks for the identities with the free form, and reads their answer', () => {
     expect(buildIdentitiesBody()).toEqual(fixture('wire-identities-request.json'));
-    const read = parseForTests('identities', fixture('wire-identities.json'));
-    expect(read.success).toBe(true);
-    expect(read.data).toMatchObject({
+    expect(parseIdentities(fixture('wire-identities.json'))).toMatchObject({
       sources: [{ id: 'tenjin', label: "Tenjin's tools" }],
       services: expect.arrayContaining([
         expect.objectContaining({ id: 'exa-search', providers: ['exa'], task: 'web research' }),
@@ -1221,14 +1222,10 @@ describe('the settings field', () => {
     ['hook', 'wire-hook-execute-settings.json'],
     ['hook', 'wire-hook-execute-bound.json'],
     ['tool', 'wire-lookup-spec-settings.json'],
-    ['browse', 'wire-browse-settings.json'],
   ] as const)('reads the echoed hash on a %s answer (%s)', (kind, name) => {
     const read = parseForTests(kind, fixture(name));
     expect(read.success).toBe(true);
-    expect(read.data).toMatchObject({
-      honored: expect.arrayContaining(['settings']),
-      settingsHash: settings.hash,
-    });
+    expect(read.data).toMatchObject({ settingsHash: settings.hash });
   });
 
   it('reads `bound` as the offer id and the input, beside an offer whose spec it fills', () => {

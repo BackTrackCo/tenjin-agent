@@ -7,19 +7,13 @@ import {
   parseRouterLayer,
   readPersonalRouter,
   type PartialConfig,
+  type PersonalRouter,
   type RouterContext,
   type RouterLayer,
 } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { configPath } from '../lib/paths';
-import {
-  hasRules,
-  wireSettings,
-  type ReplacementMode,
-  type SavedPolicy,
-  type Target,
-  type WireSettings,
-} from './settings-wire';
+import { hasRules, wireSettings, type WireSettings } from './settings-wire';
 import {
   findAllProjectFiles,
   findNearestProjectFiles,
@@ -80,19 +74,12 @@ export interface RouterSetting<T> {
 }
 
 /** The saved routing rules: none, readable, or not readable by this build. */
-export type PolicySetting =
-  | { status: 'none' }
-  | { status: 'ok'; saved: SavedPolicy }
-  | { status: 'invalid'; problem: string };
+export type PolicySetting = PersonalRouter['policy'];
 
 /** Automatic use: off unless the global file says `when-routed`. An absent
- *  provider scope means every eligible provider. */
-export interface ReplacementSetting {
-  mode: ReplacementMode;
-  providers?: Target[];
-  /** Why the saved value could not be read; the mode then reads off. */
-  problem?: string;
-}
+ *  provider scope means every eligible provider; a `problem` says why the
+ *  saved value could not be read, and the mode then reads off. */
+export type ReplacementSetting = PersonalRouter['nativeReplacement'];
 
 /**
  * WHAT EVERY ROUTING CALL SENDS: the `settings` field with its hash, and

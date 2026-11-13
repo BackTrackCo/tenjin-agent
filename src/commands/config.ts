@@ -519,7 +519,8 @@ export async function persistRouterDefaults(
   return result;
 }
 
-async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
+/** The effective settings: the global file, `--base-url` and the env. */
+export async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
 }

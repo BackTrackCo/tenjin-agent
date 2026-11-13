@@ -45,10 +45,9 @@ const REQUEST_TOOL = 'mcp__plugin_tenjin_router__request';
 const APPROVE_TOOL = 'mcp__plugin_tenjin_router__approve';
 const OURS = new Set([REQUEST_TOOL, APPROVE_TOOL]);
 /** The native tools a hook holds, by the names the engine draws them under. */
-const NATIVE_NAMES: Readonly<Record<string, string>> = {
-  WebSearch: 'Web Search',
-  WebFetch: 'Fetch',
-};
+const NATIVE_NAMES = { WebSearch: 'Web Search', WebFetch: 'Fetch' } as const;
+type NativeTool = keyof typeof NATIVE_NAMES;
+const isNative = (tool: string): tool is NativeTool => tool in NATIVE_NAMES;
 const ROWS = { plugin: 'tenjin', key: 'rows' } as const;
 const HELD = { plugin: 'tenjin', key: 'held' } as const;
 const LINKS = { plugin: 'tenjin', key: 'links' } as const;
@@ -232,7 +231,7 @@ export const register: Register = (on) => {
     const others = calls.filter((c) => !OURS.has(c.tool));
     if (ours.length === 0) {
       for (const c of others) {
-        if (c.tool in NATIVE_NAMES && c.tool_use_id !== undefined) {
+        if (isNative(c.tool) && c.tool_use_id !== undefined) {
           if ((await heldOf($, c.tool_use_id, nativeKey(c.tool, c.input))) !== null)
             return unfold();
         }
@@ -249,7 +248,7 @@ export const register: Register = (on) => {
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const { tool, tool_use_id, input, isInterrupted } = e.props;
-    if (tool in NATIVE_NAMES && !isInterrupted) {
+    if (isNative(tool) && !isInterrupted) {
       const key = nativeKey(tool, input);
       const held = await heldOf($, tool_use_id, key);
       if (held === null) return next(e);
@@ -271,7 +270,7 @@ export const register: Register = (on) => {
       const ran = await link($, `ran:${held.key}`);
       if (ran !== undefined && ran !== tool_use_id) return <ui.Box display="none" />;
       const offered = held.label !== undefined ? { tail: ` · Tenjin offered ${held.label}` } : {};
-      const name = NATIVE_NAMES[tool] as string;
+      const name = NATIVE_NAMES[tool];
       const argued = asked !== undefined ? { argument: asked } : {};
       return line(ui, { state: 'running', name, ...offered, ...argued }, true);
     }
@@ -303,7 +302,7 @@ export const register: Register = (on) => {
       const unnamed = await unnamedCharge($, e.props.tool_use_id, e.props.output);
       return unnamed ? next(e) : <Box display="none" />;
     }
-    if (!(e.props.tool in NATIVE_NAMES)) return next(e);
+    if (!isNative(e.props.tool)) return next(e);
     const held = await heldOf($, e.props.tool_use_id, undefined);
     // A call answered in place shows its result wherever rows show in full.
     if (held?.swap === true && e.props.isExpanded === true) return next(e);
@@ -405,7 +404,7 @@ async function drawSwap(
   );
   const cost = ended.paid ?? held?.price;
   $.ui.log(
-    `Tenjin ran ${label} in place of ${NATIVE_NAMES[tool] as string}${cost !== undefined ? ` · ${cost}` : ''}`,
+    `Tenjin ran ${label} in place of ${NATIVE_NAMES[tool]}${cost !== undefined ? ` · ${cost}` : ''}`,
   );
   $.ui.invalidate('ui.render');
 }
@@ -418,12 +417,12 @@ function hasEntries(value: unknown): boolean {
  *  and the one line saying what did not run. */
 function swapRow(
   ui: Elements,
-  tool: string,
+  tool: NativeTool,
   held: TenjinHeld,
   ended: TenjinRow | undefined,
   asked: string | undefined,
 ) {
-  const name = ended?.label ?? held.label ?? (NATIVE_NAMES[tool] as string);
+  const name = ended?.label ?? held.label ?? NATIVE_NAMES[tool];
   const shape: Shape =
     ended?.status !== undefined
       ? { ...shapeOf(ended), name }
@@ -433,7 +432,7 @@ function swapRow(
           ...(held.price !== undefined ? { tail: ` · ${held.price}` } : {}),
         };
   const head = line(ui, asked !== undefined ? { ...shape, argument: asked } : shape);
-  return block(ui, head, [`in place of ${NATIVE_NAMES[tool] as string}`]);
+  return block(ui, head, [`in place of ${NATIVE_NAMES[tool]}`]);
 }
 
 /** A call before it runs: `{id, input}` with a kept spec, `{id, choice,

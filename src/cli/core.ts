@@ -3,6 +3,7 @@ import { Option, type Command } from 'commander';
 import { CliError } from '../lib/errors';
 import { PERMISSIONS_DOC_URL } from '../lib/permissions';
 import { HARNESSES, type Harness } from '../router/names';
+import type { TargetKind } from '../router/settings-wire';
 import { SETUP, WALLET, collect, type Registration } from './registration';
 import { installOutput } from '../router/install-output';
 
@@ -596,9 +597,7 @@ function codexArgs(o: Record<string, unknown>): import('../router/codex-install'
   };
 }
 
-type TargetKindFlag = 'task' | 'category' | 'provider' | 'seller' | 'service' | 'source';
-
-const TARGET_FLAGS: Record<TargetKindFlag, string> = {
+const TARGET_FLAGS: Record<TargetKind, string> = {
   task: 'a task, such as "web research" (repeatable)',
   category: 'a category of tasks, such as images (repeatable)',
   provider: 'a provider, such as exa (repeatable)',
@@ -607,15 +606,15 @@ const TARGET_FLAGS: Record<TargetKindFlag, string> = {
   source: "one of your accounts, or tenjin for Tenjin's own tools (repeatable)",
 };
 
-function targetOptions(cmd: Command, kinds: readonly TargetKindFlag[]): Command {
+function targetOptions(cmd: Command, kinds: readonly TargetKind[]): Command {
   for (const kind of kinds) cmd.option(`--${kind} <name>`, TARGET_FLAGS[kind], collect);
   return cmd;
 }
 
 /** The repeatable target flags, as the operations read them. */
-function targetFlags(o: Record<string, unknown>): Partial<Record<TargetKindFlag, string[]>> {
-  const out: Partial<Record<TargetKindFlag, string[]>> = {};
-  for (const key of Object.keys(TARGET_FLAGS) as TargetKindFlag[]) {
+function targetFlags(o: Record<string, unknown>): Partial<Record<TargetKind, string[]>> {
+  const out: Partial<Record<TargetKind, string[]>> = {};
+  for (const key of Object.keys(TARGET_FLAGS) as TargetKind[]) {
     if (Array.isArray(o[key])) out[key] = o[key] as string[];
   }
   return out;
@@ -629,7 +628,7 @@ function targetFlags(o: Record<string, unknown>): Partial<Record<TargetKindFlag,
 function registerConfigRules(config: Command, reg: Registration): void {
   const { runCommand, addGlobalFlags } = reg;
   const rules = () => import('../commands/config-rules');
-  const all: TargetKindFlag[] = ['task', 'category', 'provider', 'seller', 'service', 'source'];
+  const all = Object.keys(TARGET_FLAGS) as TargetKind[];
 
   targetOptions(addGlobalFlags(config.command('prefer')), [
     'task',

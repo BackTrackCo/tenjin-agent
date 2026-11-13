@@ -52,6 +52,7 @@ import { settingsRefusal, UNREADABLE, type SettingsRefusal } from './settings-ch
 import type { WireSettings } from './settings-wire';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
+  MAX_INPUT_BYTES,
   reportSpecOutcome,
   requestBrowse,
   requestDecision,
@@ -192,9 +193,6 @@ export interface RequestToolArgs {
    *  again, with nothing paid. */
   job?: string;
 }
-
-/** The server's own cap on `input`, serialized. */
-export const MAX_INPUT_BYTES = 16 * 1024;
 
 export interface RequestToolDeps {
   ctx: CommandContext;

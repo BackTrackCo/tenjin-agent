@@ -49,7 +49,7 @@ export const SHOWN_KEY = 'shown';
 export const KeptSpecSchema = OfferSpecSchema.extend({
   settingsHash: SettingsHashSchema.optional(),
 });
-export type KeptSpec = OfferSpec & { settingsHash?: string };
+export type KeptSpec = z.infer<typeof KeptSpecSchema>;
 
 /** Past this many characters an input is a prompt, not the key of a lookup. */
 export const SHOWN_INPUT_MAX_CHARS = 80;

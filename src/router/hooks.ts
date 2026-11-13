@@ -63,7 +63,8 @@ import {
   wasOffered,
   writeProgress,
 } from './progress';
-import { routerSettings, type RouterSettings } from './settings';
+import { routerSettings, type RouterSettings, type WireState } from './settings';
+import { hashRefusal } from './settings-check';
 import { claimIgnored, noteShown, offerScope, reportIgnored } from './untaken';
 import { ownHostsFor } from './own-urls';
 
@@ -1887,16 +1888,12 @@ async function decide(
   router: RouterHere,
   sessionId: string,
   deadline: number,
-  footer?: {
+  footer: {
     unpaid: (why: string) => void;
     answered: (answer: HookResponse) => void;
   },
 ): Promise<HookDecision | null> {
   const { config } = router;
-  const unpaid = footer?.unpaid;
-  // THE SAVED RULES RIDE BESIDE THE PACKET on every call, read for this
-  // event: `routerFor` already refused rules this build cannot read.
-  const sent = router.settings.wire.status === 'ok' ? router.settings.wire : undefined;
   const baseUrl = resolveBaseUrl(deps, config);
   const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const now = deps.now?.() ?? Date.now();
@@ -1917,7 +1914,9 @@ async function decide(
       harness: hostOf(deps),
       improve: router.settings.improve.value,
       timeoutMs: Math.max(0, deadline - now),
-      ...(sent !== undefined ? { settings: sent.settings } : {}),
+      // THE SAVED RULES RIDE BESIDE THE PACKET on every call, read for this
+      // event: `routerFor` already refused rules this build cannot read.
+      settings: router.wire.settings,
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       ...(route !== undefined ? { route } : {}),
     },
@@ -1935,7 +1934,7 @@ async function decide(
   if (outcome.status === 'skipped') {
     // The router answered (its 402, say) before the skip: it is reachable.
     if (outcome.answered === true) await clearRouterMemo(deps.dataDir, 'unreachable', baseUrl);
-    unpaid?.(outcome.why);
+    footer.unpaid(outcome.why);
     await tellOnce(deps, sessionId, outcome.why, now, outcome.quotedAtomic);
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
@@ -1966,7 +1965,7 @@ async function decide(
     return null;
   }
   if (!decidedUnder(outcome.decision, router, warn)) return null;
-  footer?.answered(outcome.decision);
+  footer.answered(outcome.decision);
   return outcome.decision.decision;
 }
 
@@ -1981,10 +1980,7 @@ function decidedUnder(
   router: RouterHere,
   warn: (line: string) => void,
 ): boolean {
-  const sent = router.settings.wire.status === 'ok' ? router.settings.wire : undefined;
-  const echoed = answer.settingsHash;
-  if (sent === undefined || echoed === sent.settings.hash) return true;
-  if (echoed === undefined && !sent.hasRules) return true;
+  if (hashRefusal(router.wire, answer.settingsHash) === null) return true;
   warn(
     'tenjin hook: the router did not confirm it applied your Tenjin settings, so no lookup is offered',
   );
@@ -2046,9 +2042,11 @@ function pendingCallOf(
   return tool === 'WebSearch' ? { tool, query: subject } : { tool, url: subject };
 }
 
-/** `router.*` for one event's directory, and the global config it read. */
+/** `router.*` for one event's directory, the `settings` field every call
+ *  sends (only ever readable rules), and the global config it read. */
 interface RouterHere {
   settings: RouterSettings;
+  wire: Extract<WireState, { status: 'ok' }>;
   config: PartialConfig;
 }
 
@@ -2077,7 +2075,7 @@ async function routerFor(cwd: string | undefined, deps: HookDeps): Promise<Route
       );
       return null;
     }
-    return { settings, config };
+    return { settings, wire: settings.wire, config };
   } catch (err) {
     warn(`tenjin hook: ${err instanceof Error ? err.message : String(err)}, so the router is off`);
     return null;
