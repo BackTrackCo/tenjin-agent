@@ -11,7 +11,7 @@ export type CodexAppRequest = (
 export interface CodexAppOptions {
   cwd?: string;
   experimentalApi?: boolean;
-  expectedVersion?: string;
+  expectedVersion?: string | readonly string[];
   /** Internal, trusted argv overrides; never written to user configuration. */
   configOverrides?: string[];
   signal?: AbortSignal;
@@ -21,7 +21,7 @@ export interface CodexAppOptions {
 /** Originator names vary by host; the first product/version identifies the server. */
 export function codexAppServerVersion(userAgent: unknown): string | null {
   return typeof userAgent === 'string'
-    ? (/^[^/]+\/([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)/.exec(userAgent)?.[1] ?? null)
+    ? (/^[^/]+\/([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(userAgent)?.[1] ?? null)
     : null;
 }
 
@@ -30,7 +30,7 @@ export async function withAppServer<T>(
   home: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-  fn: (request: CodexAppRequest) => Promise<T>,
+  fn: (request: CodexAppRequest, serverVersion?: string | null) => Promise<T>,
   options: CodexAppOptions = {},
 ): Promise<T | null> {
   const codex = resolveCodex(env);
@@ -171,13 +171,16 @@ export async function withAppServer<T>(
       ...(options.experimentalApi ? { capabilities: { experimentalApi: true } } : {}),
     });
     if (!isRecord(initialized)) return null;
-    if (
-      options.expectedVersion &&
-      codexAppServerVersion(initialized.userAgent) !== options.expectedVersion
-    )
-      return null;
+    if (options.expectedVersion) {
+      const versions =
+        typeof options.expectedVersion === 'string'
+          ? [options.expectedVersion]
+          : options.expectedVersion;
+      const version = codexAppServerVersion(initialized.userAgent);
+      if (version === null || !versions.includes(version)) return null;
+    }
     send({ method: 'initialized', params: {} });
-    return await fn(request);
+    return await fn(request, codexAppServerVersion(initialized.userAgent));
   } catch {
     return null;
   } finally {

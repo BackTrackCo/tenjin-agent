@@ -1,6 +1,7 @@
 import { open, realpath } from 'node:fs/promises';
 import { parseCodexHistory } from './codex-history';
 import type { CodexModelPolicy } from './codex-model-gates';
+import { isQualifiedCodexModelVersion } from '../lib/codex-model-version';
 
 const record = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -28,7 +29,7 @@ export async function codexModelPolicy(
       !record(meta) ||
       meta.type !== 'session_meta' ||
       !record(meta.payload) ||
-      meta.payload.cli_version !== '0.163.0' ||
+      !isQualifiedCodexModelVersion(meta.payload.cli_version) ||
       meta.payload.source !== 'vscode'
     )
       return null;

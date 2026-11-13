@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { isDeepStrictEqual } from 'node:util';
 import { withAppServer, type CodexAppRequest } from '../lib/codex-app-server';
 import { resolveCodex } from '../lib/codex-bin';
+import { QUALIFIED_CODEX_MODEL_VERSIONS } from '../lib/codex-model-version';
 import { isRecord } from '../lib/guards';
 import { canonicalHash } from '../lib/request-schema';
 import { MCP_SERVER_NAME } from './names';
@@ -31,6 +32,8 @@ export interface CodexModelQualification {
   reasons: string[];
   tools: CodexModelTool[];
   commands: boolean;
+  /** Native config for local instruction qualification; never sent as model context. */
+  instructionConfig?: { config: Record<string, unknown>; layers: unknown };
 }
 export interface CodexModelGates extends CodexModelQualification {
   callMcp(
@@ -59,6 +62,7 @@ interface RunOptions extends Options {
   ask(tool: string, input: Record<string, unknown>, signal: AbortSignal): Promise<boolean>;
 }
 interface Snapshot extends CodexModelQualification {
+  serverVersion?: string | null;
   config: Record<string, unknown>;
   hooks: Record<string, unknown>[];
   rules: string[];
@@ -68,6 +72,18 @@ interface Snapshot extends CodexModelQualification {
 const exec = promisify(execFile);
 const MODES = new Set(['auto', 'prompt', 'writes', 'approve']);
 const GUARDED_EVENTS = new Set(['preToolUse', 'permissionRequest', 'postToolUse']);
+const MODEL_GUARDED_EVENTS = new Set(['preModelRequest', 'postModelRequest']);
+const LIFECYCLE_EVENTS = new Set([
+  'preCompact',
+  'postCompact',
+  'sessionStart',
+  'sessionEnd',
+  'userPromptSubmit',
+  'subagentStart',
+  'subagentStop',
+  'stop',
+  'interrupt',
+]);
 const COMMAND_NAMES = [
   'exec_command',
   'execCommand',
@@ -116,7 +132,8 @@ export function codexModelProfile(
       !isRecord(entry.path) ||
       !['read', 'write', 'deny', 'none'].includes(String(entry.access)) ||
       Object.keys(entry).some((k) => !['path', 'access', 'missing_path_behavior'].includes(k)) ||
-      entry.missing_path_behavior != null
+      (entry.missing_path_behavior != null &&
+        (entry.missing_path_behavior !== 'skip' || entry.access === 'write'))
     )
       return null;
     let path: string;
@@ -136,6 +153,9 @@ export function codexModelProfile(
       else return null;
     } else return null;
     const access = entry.access === 'none' ? 'deny' : String(entry.access);
+    // Current Desktop marks protected read paths skip-when-missing. Keeping
+    // their restriction even when absent is conservative; never add a grant
+    // from an optional write entry whose native activation is unresolved.
     if (access === 'deny') {
       // Creating a new child allow below a parent denial would relax native policy.
       if (
@@ -272,6 +292,18 @@ function askAllowed(policy: CodexModelPolicy) {
   );
 }
 
+/** Native execpolicy omits decision when no rule matches; approval is still required. */
+export function codexExecPolicyDecision(value: unknown): 'allow' | 'prompt' | 'forbidden' | null {
+  if (!isRecord(value)) return null;
+  if (['allow', 'prompt', 'forbidden'].includes(String(value.decision)))
+    return value.decision as 'allow' | 'prompt' | 'forbidden';
+  return value.decision === undefined &&
+    Array.isArray(value.matchedRules) &&
+    value.matchedRules.length === 0
+    ? 'prompt'
+    : null;
+}
+
 async function policyRules(layers: unknown): Promise<string[] | null> {
   if (!Array.isArray(layers)) return null;
   const files: string[] = [];
@@ -310,11 +342,15 @@ async function snapshot(
   request: CodexAppRequest,
   options: Options,
   threadId?: string,
+  serverVersion?: string | null,
 ): Promise<Snapshot> {
   const reasons: string[] = [];
   const [raw, listed, requirements] = await Promise.all([
     request('config/read', { cwd: options.cwd, includeLayers: true }),
-    request('hooks/list', { cwds: [options.cwd] }),
+    request(
+      'hooks/list',
+      threadId && serverVersion === '0.167.0-alpha.4.1' ? { threadId } : { cwds: [options.cwd] },
+    ),
     request('configRequirements/read', {}),
   ]);
   const config = isRecord(raw) && isRecord(raw.config) ? raw.config : {};
@@ -345,6 +381,18 @@ async function snapshot(
   )
     reasons.push('hooks_unavailable');
   else hooks = listed.data[0].hooks.filter(isRecord);
+  if (hooks.some((h) => h.enabled === true && MODEL_GUARDED_EVENTS.has(String(h.eventName))))
+    reasons.push('model_policy_hook_unavailable');
+  if (
+    hooks.some(
+      (h) =>
+        h.enabled === true &&
+        !GUARDED_EVENTS.has(String(h.eventName)) &&
+        !MODEL_GUARDED_EVENTS.has(String(h.eventName)) &&
+        !LIFECYCLE_EVENTS.has(String(h.eventName)),
+    )
+  )
+    reasons.push('hook_event_unqualified');
   const rules = await policyRules(isRecord(raw) ? raw.layers : null);
   if (!rules) reasons.push('execpolicy_layers_unqualified');
   if (hooks.some((h) => hookApplies(h, COMMAND_NAMES)))
@@ -430,6 +478,9 @@ async function snapshot(
     reasons: [...new Set(reasons)],
     tools,
     commands: reasons.length === 0,
+    ...(reasons.length === 0 && isRecord(raw)
+      ? { instructionConfig: { config, layers: raw.layers } }
+      : {}),
     config,
     hooks,
     rules: rules ?? [],
@@ -466,8 +517,8 @@ async function withGates<T>(
     options.home ?? homedir(),
     brokerEnv,
     10_000,
-    async (request) => {
-      const initial = await snapshot(request, options);
+    async (request, serverVersion) => {
+      const initial = await snapshot(request, options, undefined, serverVersion);
       if (!initial.qualified) return run(request, initial, '');
       const started = await request('thread/start', {
         ephemeral: true,
@@ -475,6 +526,10 @@ async function withGates<T>(
         approvalPolicy: options.policy.approvalPolicy,
         approvalsReviewer: options.policy.approvalsReviewer,
         config: {
+          // This ephemeral thread only executes tools. The SDK worker receives
+          // its separately qualified instruction snapshot; do not broaden its
+          // filesystem boundary just to re-read ancestor AGENTS files here.
+          project_doc_max_bytes: 0,
           ...(profile ? { default_permissions: profile.name } : {}),
           ...(options.policy.disabledPluginIds?.length
             ? {
@@ -493,14 +548,16 @@ async function withGates<T>(
         !isDeepStrictEqual(started.approvalPolicy, options.policy.approvalPolicy)
       )
         throw new Error('Codex did not preserve worker policy');
-      const state = await snapshot(request, options, started.thread.id);
+      const state = await snapshot(request, options, started.thread.id, serverVersion);
+      // Preserve the qualified native protocol behavior for live rechecks.
+      state.serverVersion = serverVersion;
       return run(request, state, started.thread.id);
     },
     {
       cwd: options.cwd,
       signal,
       experimentalApi: true,
-      expectedVersion: '0.163.0',
+      expectedVersion: QUALIFIED_CODEX_MODEL_VERSIONS,
       configOverrides: profile?.overrides,
     },
   );
@@ -513,6 +570,7 @@ export async function qualifyCodexModelGates(
     reasons: state.reasons,
     tools: state.tools,
     commands: state.commands,
+    ...(state.instructionConfig ? { instructionConfig: state.instructionConfig } : {}),
   }));
 }
 
@@ -532,7 +590,7 @@ export async function withCodexModelGates<T>(
       const live = async (signal: AbortSignal) => {
         signal.throwIfAborted();
         options.signal.throwIfAborted();
-        const current = await snapshot(request, options, threadId);
+        const current = await snapshot(request, options, threadId, initial.serverVersion);
         if (!current.qualified || current.fingerprint !== initial.fingerprint)
           throw new Error('Codex tool policy changed; keep native');
         return current;
@@ -609,14 +667,10 @@ export async function withCodexModelGates<T>(
               { cwd, env: options.env ?? process.env, signal, timeout: 5000, maxBuffer: 256_000 },
             );
             const policy: unknown = JSON.parse(checked.stdout);
-            if (
-              !isRecord(policy) ||
-              !['allow', 'prompt', 'forbidden'].includes(String(policy.decision))
-            )
-              throw new Error('Execpolicy result unavailable');
-            if (policy.decision === 'forbidden')
-              throw new Error('Command denied by native execpolicy');
-            allowed = policy.decision === 'allow';
+            const decision = codexExecPolicyDecision(policy);
+            if (decision === null) throw new Error('Execpolicy result unavailable');
+            if (decision === 'forbidden') throw new Error('Command denied by native execpolicy');
+            allowed = decision === 'allow';
           }
           if (
             !allowed &&

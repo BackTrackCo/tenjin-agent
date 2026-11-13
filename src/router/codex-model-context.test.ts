@@ -57,6 +57,15 @@ it('binds native restrictions to the exact owned root and turn, never a child or
   });
   expect(await codexModelPolicy(path, 'root', 'old-turn', dir)).toBeNull();
   expect(await codexModelPolicy(path, 'foreign', 'turn', dir)).toBeNull();
+  await save({ ...meta, payload: { ...meta.payload, cli_version: '0.167.0-alpha.4.1' } });
+  expect(await codexModelPolicy(path, 'root', 'turn', dir)).toMatchObject({
+    approvalPolicy: 'never',
+    permissionProfile: { network: 'restricted' },
+  });
+  for (const cli_version of ['0.167.0', '0.167.0-alpha.4.2', '0.163.1']) {
+    await save({ ...meta, payload: { ...meta.payload, cli_version } });
+    expect(await codexModelPolicy(path, 'root', 'turn', dir)).toBeNull();
+  }
   await save({ ...meta, payload: { ...meta.payload, parent_thread_id: 'parent' } });
   expect(await codexModelPolicy(path, 'root', 'turn', dir)).toBeNull();
 });

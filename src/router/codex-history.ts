@@ -1,4 +1,5 @@
 import type { PacketMessage } from './context';
+import { isQualifiedCodexModelVersion } from '../lib/codex-model-version';
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -27,7 +28,9 @@ export function parseCodexHistory(raw: string, session: string): PacketMessage[]
         p.session_id !== session ||
         !(
           p.thread_source === 'user' ||
-          (p.thread_source == null && p.cli_version === '0.163.0' && p.source === 'vscode')
+          (p.thread_source == null &&
+            isQualifiedCodexModelVersion(p.cli_version) &&
+            p.source === 'vscode')
         ) ||
         p.parent_thread_id != null
       )
