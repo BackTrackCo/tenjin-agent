@@ -6,7 +6,7 @@ import {
   savedDescriptors,
   type PartialConfig,
 } from '../lib/config';
-import { emitWriteNotice } from '../lib/output';
+import { emitWriteNotice, sanitizeForTerminal } from '../lib/output';
 import { openInBrowser } from '../lib/open-url';
 import { defaultExecFor, hiddenPrompt, type ExecFn, type PromptFn } from '../lib/os-store';
 import { sourceKeyFilePath } from '../lib/paths';
@@ -26,6 +26,7 @@ import {
 import { isAccountUrl, type Connectable, type KeyScheme } from '../router/decision';
 import {
   accountJobs,
+  accountServices,
   cachedIdentities,
   fetchIdentities,
   type Identities,
@@ -48,7 +49,7 @@ import {
   writeVault,
   type VaultSecret,
 } from '../router/accounts/vault';
-import { answer } from './config-rules';
+import { answer, type Reply } from './config-rules';
 import { blockedBy, describePrefer } from './config-readback';
 import { persist } from './config';
 
@@ -475,6 +476,51 @@ function connectLines(
   return lines;
 }
 
+/** What a connect says at a terminal: the account, who pays, how to use it. */
+function connectReply(
+  account: Account,
+  identities: Identities,
+  checked: { missingTools: string[] },
+  preference: PreferenceOutcome,
+): Reply {
+  const { label } = account;
+  const billed = `billed to your ${label} plan, not your Tenjin balance.`;
+  if (!account.mapped) {
+    return {
+      done: `Connected ${label}`,
+      said: [
+        `Its calls are ${billed}`,
+        "Ask for it by name: Tenjin doesn't know its jobs, and its server isn't told about it.",
+      ],
+    };
+  }
+  const tools = accountServices(account.id, identities).length;
+  const missing = checked.missingTools;
+  return {
+    done: `Connected ${label}`,
+    said: [
+      tools > 0
+        ? `${tools} ${tools === 1 ? 'tool' : 'tools'}, ${billed}`
+        : `Its calls are ${billed}`,
+      `Ask for ${label} by name to use ${tools === 1 ? 'it' : 'them'}. \`tenjin status\` lists it.`,
+    ],
+    problems: [
+      ...(missing.length > 0
+        ? [
+            `This ${label} account lacks ${list.format(missing)}, so jobs that need ${missing.length === 1 ? 'it' : 'them'} are left out.`,
+          ]
+        : []),
+      ...(preference === 'blocked'
+        ? [`Your block on ${label} stays: Tenjin won't offer it on its own.`]
+        : preference === 'unreadable'
+          ? [`Your saved settings can't be read, so ${label} wasn't put first.`]
+          : preference === 'full'
+            ? [`Your account-wide preference is full, so ${label} wasn't put first.`]
+            : []),
+    ],
+  };
+}
+
 /**
  * `tenjin connect <name | url> [--paste | --from-env VAR] [--no-prefer]`.
  */
@@ -531,10 +577,23 @@ export async function runConnect(
         `Ask the user to run \`tenjin connect ${account.id} --paste\` in their own terminal, or use --from-env with a variable that holds it.`,
       );
     }
+    const human = ctx.io.isTTY && !ctx.flags.json;
     const signInDeps: SignInDeps = {
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       open: deps.openUrl ?? ((url) => openInBrowser(url)),
       notice: (line) => emitWriteNotice(ctx.io, line),
+      // AT A TERMINAL, one line while the browser opens and the link dim under
+      // it, whole, to copy; an agent keeps the two lines that name the link.
+      ...(human
+        ? {
+            approving: (label: string, url: string) => {
+              ctx.io.stderr.write(
+                `${sanitizeForTerminal(`Opening your browser to approve Tenjin for ${label}…`)}\n`,
+              );
+              emitWriteNotice(ctx.io, `  If it didn't open: ${url}`);
+            },
+          }
+        : {}),
       interactive: ctx.io.isTTY && (deps.stdinIsTTY ?? Boolean(process.stdin.isTTY)),
       waitMs: deps.waitMs ?? SIGN_IN_WAIT_MS,
       ...(deps.ports !== undefined ? { ports: deps.ports } : {}),
@@ -544,6 +603,7 @@ export async function runConnect(
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     };
     const signed: SignedIn = await signIn(account, signInDeps);
+    if (human) ctx.io.stderr.write('\n');
     secret = {
       tokens: { ...signed.tokens },
       obtainedAt: signed.obtainedAt,
@@ -632,6 +692,7 @@ export async function runConnect(
       changed: true,
       scope: 'user',
       explanation,
+      human: connectReply(account, identities, checked, preference),
       ...(rule !== undefined && policy !== undefined
         ? { effective: [describePrefer(rule, policy, identities)] }
         : {}),
@@ -712,6 +773,7 @@ export async function runDisconnect(
         changed: false,
         scope: 'user',
         explanation: [`${label} isn't connected on this machine. Nothing changed.`],
+        human: { said: [`${label} isn't connected on this machine. Nothing changed.`] },
       },
       ctx,
       answerDeps,
@@ -748,12 +810,32 @@ export async function runDisconnect(
       ? `It's no longer in your preferences. Your other settings and accounts stay as they are.`
       : `Your saved settings can't be read, so any preference for ${label} stays until they're fixed.`,
   ];
+  const human: Reply = {
+    done: `Disconnected ${label}`,
+    said: [
+      signedOut === 'revoked'
+        ? 'Signed out and forgotten on this machine.'
+        : signedOut === 'key'
+          ? `Forgotten on this machine. The key still works at ${label} until you delete it there.`
+          : signedOut === 'none'
+            ? 'Forgotten on this machine.'
+            : `Forgotten on this machine, but Tenjin couldn't sign out at ${label}: remove its access in your ${label} settings.`,
+    ],
+    ...(policyKept
+      ? {}
+      : {
+          problems: [
+            `Your saved settings can't be read, so a preference for ${label} stays until they're fixed.`,
+          ],
+        }),
+  };
   return answer(
     {
       operation: 'disconnect',
       changed: true,
       scope: 'user',
       explanation,
+      human,
       reset: `tenjin connect ${id}`,
       extra: { account: { id, label, signedOut } },
     },

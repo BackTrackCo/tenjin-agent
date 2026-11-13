@@ -147,6 +147,8 @@ const configJson = async () =>
   };
 const lines = (result: CommandResult) => result.humanLines ?? [];
 const data = (result: CommandResult) => result.data as Record<string, unknown>;
+/** The sentences --json carries, which an agent reads. */
+const explained = (result: CommandResult) => String(data(result).explanation);
 
 async function caught(run: () => Promise<unknown>): Promise<CliError> {
   try {
@@ -160,8 +162,11 @@ async function caught(run: () => Promise<unknown>): Promise<CliError> {
 
 /** What a person reads names accounts by label: no ids, no protocol words. */
 function userWords(result: CommandResult): void {
-  // A command in backticks names what it acts on by id, as every readback does.
-  for (const line of lines(result).map((l) => l.replace(/`[^`]*`/g, '`…`'))) {
+  // A command names what it acts on by id, as every readback does: in
+  // backticks, or as the undo line.
+  for (const line of lines(result).map((l) =>
+    l.replace(/`[^`]*`/g, '`…`').replace(/Undo: tenjin .*/, 'Undo: …'),
+  )) {
     expect(line).not.toMatch(/\bwallet\b|x402|USDC|\bJev\b|\bsource\b/i);
     expect(line).not.toMatch(/\bapify\b|\bfirecrawl\b|apify\.google/);
   }
@@ -175,20 +180,32 @@ describe('tenjin connect', () => {
     });
     const mcp = sessions(SESSIONS);
     const before = await routerSettings({ cwd: work, dataDir: dir });
+    // At a terminal, so the sign-in says it is opening the browser.
+    const tty = captureCtx(dir, { json: false, isTTY: true, timeout: 10_000, baseUrl: ROUTER });
     const result = await runConnect(
       'apify',
       {},
-      makeCtx(),
+      tty.ctx,
       deps({ fetchImpl: network(account), openUrl: account.browser, openSession: mcp.open }),
     );
-    expect(lines(result).slice(0, 2)).toEqual([
-      'Apify connected on this machine, for local business search and web research.',
-      'Tenjin will use your Apify account first for those jobs once it has checked them with a real call; until then a job runs on it when you ask for Apify by name.',
+    // At a terminal: the account, who pays, how to use it, the undo. The
+    // sentences an agent reads stay in --json.
+    expect(lines(result)).toEqual([
+      '✓ Connected Apify',
+      '  2 tools, billed to your Apify plan, not your Tenjin balance.',
+      '  Ask for Apify by name to use them. `tenjin status` lists it.',
+      '  Undo: tenjin disconnect apify',
     ]);
-    expect(lines(result)).toContain(
+    expect(explained(result)).toContain(
+      'Apify connected on this machine, for local business search and web research. Tenjin will use your Apify account first for those jobs once it has checked them with a real call',
+    );
+    expect(explained(result)).toContain(
       "Your Apify plan pays for these calls, which don't count toward your Tenjin limits.",
     );
-    expect(lines(result)).toContain('To undo: `tenjin disconnect apify`');
+    // The browser line, and the link whole on its own line to copy.
+    expect(tty.stderr()).toMatch(
+      /^Opening your browser to approve Tenjin for Apify…\n {2}If it didn't open: https:\/\/\S+\n/m,
+    );
     userWords(result);
     expect(data(result)).toMatchObject({
       operation: 'connect',
@@ -278,7 +295,7 @@ describe('tenjin connect', () => {
       'fc-secret-123',
     );
     expect(out.stderr()).not.toContain('fc-secret-123');
-    expect(lines(result)).toContain(
+    expect(explained(result)).toContain(
       'Tenjin can act on your Firecrawl account, and only runs the jobs above and the Firecrawl services you ask for by name.',
     );
     userWords(result);
@@ -299,8 +316,11 @@ describe('tenjin connect', () => {
       deps({ fetchImpl: network(), openSession: mcp.open, env: { FC_KEY: 'fc-1' } }),
     );
     expect(data(blocked)).toMatchObject({ account: { preference: 'blocked' } });
-    expect(lines(blocked)).toContain(
+    expect(explained(blocked)).toContain(
       "Tenjin won't offer your Firecrawl account on its own. You or your agent can still pick it by name.",
+    );
+    expect(lines(blocked).at(-1)).toBe(
+      "! Your block on Firecrawl stays: Tenjin won't offer it on its own.",
     );
     expect((await configJson()).router?.policy?.prefer).toBeUndefined();
 
@@ -311,7 +331,7 @@ describe('tenjin connect', () => {
       deps({ fetchImpl: network(), openSession: mcp.open, env: { APIFY_TOKEN: 'apify_api_1' } }),
     );
     expect(data(quiet)).toMatchObject({ account: { preference: 'skipped' } });
-    expect(lines(quiet)[1]).toContain('without putting it first');
+    expect(explained(quiet)).toContain('without putting it first');
     expect((await configJson()).router?.policy?.prefer).toBeUndefined();
     // Still connected: a connection alone adds eligibility, never a rule.
     const settings = await routerSettings({ cwd: work, dataDir: dir });
@@ -393,8 +413,11 @@ describe('tenjin connect', () => {
       deps({ fetchImpl: network(), openSession: mcp.open, env: { APIFY_TOKEN: 'apify_api_1' } }),
     );
     expect(data(result)).toMatchObject({ account: { missingTools: ['get-actor-run'] } });
-    expect(lines(result)).toContain(
+    expect(explained(result)).toContain(
       "This Apify account doesn't have get-actor-run, so Tenjin leaves out the jobs that need it here.",
+    );
+    expect(lines(result).at(-1)).toBe(
+      '! This Apify account lacks get-actor-run, so jobs that need it are left out.',
     );
     expect(await readVaultHeader(dir, 'apify')).toMatchObject({ missingTools: ['get-actor-run'] });
   });
@@ -515,11 +538,12 @@ describe('tenjin connect', () => {
       makeCtx(),
       deps({ fetchImpl: network(), openSession: mcp.open, env: { EX_KEY: 'ex-1' } }),
     );
-    expect(lines(result).slice(0, 3)).toEqual([
+    expect(explained(result)).toContain(
       "Connected mcp.example.test on this machine. Tenjin doesn't know this service's jobs yet, so it won't pick it on its own. Ask for it by name and Tenjin will run it.",
-      "Your mcp.example.test account pays for its calls, which don't count toward your Tenjin limits.",
-      'Nothing about this service was sent to Tenjin.',
-    ]);
+    );
+    expect(lines(result)).toContain(
+      "  Ask for it by name: Tenjin doesn't know its jobs, and its server isn't told about it.",
+    );
     expect(data(result)).toMatchObject({
       account: { id: 'mcp-example-test', mapped: false, preference: 'skipped' },
     });
@@ -594,10 +618,14 @@ describe('tenjin disconnect', () => {
       deps({ fetchImpl: net, openUrl: account.browser, openSession: mcp.open }),
     );
     const result = await runDisconnect('Apify', makeCtx(), deps({ fetchImpl: net }));
-    expect(lines(result).slice(0, 2)).toEqual([
-      'Apify is disconnected: Tenjin signed out of it and deleted the sign-in on this machine.',
-      "It's no longer in your preferences. Your other settings and accounts stay as they are.",
+    expect(lines(result)).toEqual([
+      '✓ Disconnected Apify',
+      '  Signed out and forgotten on this machine.',
+      '  Undo: tenjin connect apify',
     ]);
+    expect(explained(result)).toContain(
+      "Apify is disconnected: Tenjin signed out of it and deleted the sign-in on this machine. It's no longer in your preferences.",
+    );
     expect(data(result)).toMatchObject({
       operation: 'disconnect',
       changed: true,
@@ -627,8 +655,8 @@ describe('tenjin disconnect', () => {
       deps({ fetchImpl: network(), openSession: mcp.open, env: { FC_KEY: 'fc-1' } }),
     );
     const result = await runDisconnect('firecrawl', makeCtx(), deps());
-    expect(lines(result)[0]).toBe(
-      'Firecrawl is disconnected: Tenjin deleted your Firecrawl key from this machine. The key itself still works at Firecrawl until you delete it there.',
+    expect(lines(result)[1]).toBe(
+      '  Forgotten on this machine. The key still works at Firecrawl until you delete it there.',
     );
     const nothing = await runDisconnect('fal', makeCtx(), deps());
     expect(data(nothing)).toMatchObject({ changed: false });

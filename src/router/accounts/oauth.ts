@@ -151,6 +151,9 @@ export interface SignInDeps {
   open: (url: string) => Promise<boolean>;
   /** One line to the person, on stderr. */
   notice: (line: string) => void;
+  /** Says the approval page is opening, in place of the two notice lines
+   *  that name it: how a person at a terminal is told. */
+  approving?: (label: string, url: string) => void;
   /** A person is at this terminal: a link that did not open can still be clicked. */
   interactive: boolean;
   /** How long to wait for the approval. */
@@ -289,8 +292,11 @@ export async function signIn(
         // https page is ever opened.
         if (url.protocol !== 'https:')
           throw cannotSignIn(label, id, 'its approval page is not an https address');
-        deps.notice(`Approve Tenjin in your browser to connect ${label}:`);
-        deps.notice(`  ${url.href}`);
+        if (deps.approving !== undefined) deps.approving(label, url.href);
+        else {
+          deps.notice(`Approve Tenjin in your browser to connect ${label}:`);
+          deps.notice(`  ${url.href}`);
+        }
         if (await deps.open(url.href)) return;
         if (!deps.interactive) {
           throw new CliError(
