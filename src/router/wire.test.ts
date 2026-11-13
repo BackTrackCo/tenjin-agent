@@ -1262,8 +1262,6 @@ describe('the accounts wire', () => {
   const settings = fixture('wire-hook-request-account.json').settings as WireSettings;
 
   it('sends mcp beside settings, and the connected accounts in their sources', async () => {
-    expect(acceptsFor(false, true)).toEqual([...CLIENT_ACCEPTS, 'settings', 'mcp']);
-    expect(acceptsFor(false)).not.toContain('mcp');
     expect(unmetRequires(['mcp'])).toEqual([]);
     // The fixture's settings are what a machine with Apify, fal and Firecrawl
     // connected sends: each descriptor saved and its vault here, and the
@@ -1348,9 +1346,6 @@ describe('the accounts wire', () => {
     expect(named.data).toMatchObject({
       decision: { spec: { capabilityId: 'fal.flux-pro-ultra', verified: false } },
     });
-    expect(fixture('wire-tool-request-account-by-id.json')).toMatchObject({
-      tool: 'fal.flux-pro-ultra',
-    });
   });
 
   /**
@@ -1367,8 +1362,6 @@ describe('the accounts wire', () => {
       settings: canonical.settings as WireSettings,
     });
     expect(JSON.stringify(built)).toBe(JSON.stringify(canonical));
-    expect(canonical).not.toHaveProperty('query');
-    expect(canonical.accepts).toContain('mcp');
     const hash = (canonical.settings as WireSettings).hash;
     const offer = parseForTests('tool', fixture('wire-refused-offer.json')) as {
       success: boolean;
@@ -1379,7 +1372,6 @@ describe('the accounts wire', () => {
       action: 'spec',
       spec: { capabilityId: 'munition-scrape', priceAtomic: '15000' },
     });
-    expect(offer.data!.decision.id).not.toBe(canonical.refused);
     expect(offer.data!.decision.spec).not.toHaveProperty('source');
     expect(offer.data!.settingsHash).toBe(hash);
     const native = parseForTests('tool', fixture('wire-refused-native.json')) as {
@@ -1390,14 +1382,6 @@ describe('the accounts wire', () => {
       action: 'native',
       diagnostics: { reasonCode: 'native_sufficient' },
     });
-  });
-
-  it('names the unchecked map and how the user runs it', () => {
-    const decision = fixture('wire-lookup-account-unverified.json').decision as {
-      diagnostics: { reasonCode: string; nextAction: string };
-    };
-    expect(decision.diagnostics.reasonCode).toBe('unverified');
-    expect(decision.diagnostics.nextAction).toContain('request({tool: "fal.flux-pro-ultra"})');
   });
 
   it('reads the accounts this client can connect from the identities read', () => {

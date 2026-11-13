@@ -76,7 +76,6 @@ const event = () => ({
   tool_use_id: 'toolu_swap',
 });
 
-/** The router answers `answer` (and records reports apart); Exa answers 402 then 200. */
 /** The router: `answer` for a routing call, `reask` for the re-ask after an
  *  account refused, outcome reports kept, and Exa's paid search. */
 function network(answer: unknown, onDecide?: () => Promise<void>, reask?: unknown) {
