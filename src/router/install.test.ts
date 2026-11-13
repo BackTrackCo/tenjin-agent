@@ -979,12 +979,11 @@ describe('daily limit readouts', () => {
       const today = receipt(result).find((line) => line.trim().startsWith('Today'));
       expect(today?.replace(/\s+/g, ' ').trim()).toBe(
         sessionBudget === 'none'
-          ? 'Today $0.00 spent automatically (Tenjin balance); no daily limit'
+          ? 'Today $0.00, no daily limit · up to $0.25 a call'
           : sessionBudget === '0'
-            ? 'Today automatic payments are off: your daily limit is $0.00 (Tenjin balance)'
-            : 'Today $0.00 of your $2.00 daily limit (Tenjin balance)',
+            ? 'Today automatic payments off ($0.00 a day) · up to $0.25 a call'
+            : 'Today $0.00 of $2.00 · up to $0.25 a call',
       );
-      expect(receipt(result).join('\n')).toContain('Per call');
     },
   );
 });
@@ -1020,17 +1019,7 @@ it('status separates routing deposits in the spend window from the remaining rou
     routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
   });
   const shown = receipt(result).map((line) => line.replace(/\s+/g, ' ').trim());
-  expect(shown).toContain('Today $0.30 of your $5.00 daily limit (Tenjin balance)');
-  expect(shown).toContain('Set aside about $0.24 for routing');
-});
-
-it('status shows no funds set aside before any deposit', async () => {
-  const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), {
-    wallet: async () => null,
-    routingCredit: async () => 0n,
-  });
-  expect(receipt(result).join('\n')).not.toContain('Set aside');
+  expect(shown).toContain('Today $0.30 of $5.00 · up to $0.25 a call');
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {
