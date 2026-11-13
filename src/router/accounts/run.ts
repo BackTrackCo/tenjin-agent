@@ -379,12 +379,11 @@ export function runDeps(deps: RequestToolDeps): AccountRunDeps {
   };
 }
 
-/** The account a spec runs on: its name, the server its sign-in is for, and
- *  what the user chose for when it refuses. */
+/** The account a spec runs on: its name and the server its sign-in is for. */
 async function accountOf(
   spec: { source: string; provider: string },
   dataDir: string,
-): Promise<Named & { mcpUrl?: string; onRefusal?: 'tenjin'; saved: boolean }> {
+): Promise<Named & { mcpUrl?: string; saved: boolean }> {
   const id = spec.source;
   const saved = await savedAccount(dataDir, id);
   const header = await readVaultHeader(dataDir, id).catch(() => null);
@@ -392,7 +391,6 @@ async function accountOf(
     id,
     label: saved?.label ?? spec.provider,
     ...(header !== null ? { mcpUrl: header.mcpUrl } : {}),
-    ...(saved?.onRefusal !== undefined ? { onRefusal: saved.onRefusal } : {}),
     saved: saved !== undefined,
   };
 }
@@ -906,12 +904,14 @@ async function refusal(
     reason === 'not_connected'
       ? { offer: null, routed: false }
       : await reask(at.id, at.deps, at.reportDeps);
+  // The fallback setting is read now, not when the call started: the user
+  // may have turned it off while the account call or the re-ask waited.
   const switchable =
     !answered &&
     at.deps.via === undefined &&
     SWITCHABLE.has(reason) &&
-    account.onRefusal === 'tenjin' &&
-    offer !== null;
+    offer !== null &&
+    (await savedAccount(at.deps.ctx.dataDir, account.id))?.onRefusal === 'tenjin';
   const fitted = switchable ? fittedInput(at.input, offer) : undefined;
   if (switchable && fitted !== undefined) {
     // THE USER'S OWN CHOICE FOR THIS ACCOUNT: the offer, in its place,
