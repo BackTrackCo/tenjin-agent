@@ -664,8 +664,21 @@ const TARGET_FLAGS: Record<TargetKind, string> = {
   source: "one of your accounts, or tenjin for Tenjin's own tools (repeatable)",
 };
 
-function targetOptions(cmd: Command, kinds: readonly TargetKind[]): Command {
-  for (const kind of kinds) cmd.option(`--${kind} <name>`, TARGET_FLAGS[kind], collect);
+/**
+ * `scopes` are the kinds this operation takes once, as the rule's scope (a
+ * preference is for one task or category), so their help drops "(repeatable)".
+ */
+function targetOptions(
+  cmd: Command,
+  kinds: readonly TargetKind[],
+  scopes: readonly TargetKind[] = [],
+): Command {
+  for (const kind of kinds) {
+    const help = scopes.includes(kind)
+      ? TARGET_FLAGS[kind].replace(' (repeatable)', '')
+      : TARGET_FLAGS[kind];
+    cmd.option(`--${kind} <name>`, help, collect);
+  }
   return cmd;
 }
 
@@ -688,13 +701,11 @@ function registerConfigRules(config: Command, reg: Registration): void {
   const rules = () => import('../commands/config-rules');
   const all = Object.keys(TARGET_FLAGS) as TargetKind[];
 
-  targetOptions(addGlobalFlags(config.command('prefer')), [
-    'task',
-    'category',
-    'provider',
-    'service',
-    'source',
-  ])
+  targetOptions(
+    addGlobalFlags(config.command('prefer')),
+    ['task', 'category', 'provider', 'service', 'source'],
+    ['task', 'category'],
+  )
     .summary('try something first')
     .description(
       'Try what you name first, in order: for one task or category, or with --source alone for every job. Other allowed tools stay the fallback.',
