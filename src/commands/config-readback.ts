@@ -451,13 +451,20 @@ export function summarizeRule(
         short: job === undefined ? `only ${names}` : `only ${names} for ${job}`,
       };
     }
-    case 'speed':
+    case 'speed': {
+      const marked = rule.covers?.map((id) => midPhrase(labelOf({ kind: 'task', id }, identities)));
       return {
         mark: '»',
         name: 'Speed',
-        does: "on: faster paid tools where they're as accurate",
+        does:
+          marked === undefined
+            ? "on: faster paid tools where they're as accurate"
+            : marked.length === 0
+              ? 'on, but no jobs are marked faster yet'
+              : `on: faster paid tools for ${named(marked)}`,
         short: 'speed on',
       };
+    }
   }
 }
 

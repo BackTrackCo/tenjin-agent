@@ -75,6 +75,25 @@ describe('main', () => {
       expect(help.replace(/\s+/g, ' ')).toContain(variant);
   });
 
+  // `config --all` is the listing's own flag, and commander hands a parent its
+  // flag wherever it is placed: `config reset --all` must still reach reset.
+  it('still resets every rule with `config reset --all`', async () => {
+    const work = join(sandbox, 'work');
+    await mkdir(join(work, '.git'), { recursive: true });
+    const prev = process.cwd();
+    process.chdir(work);
+    try {
+      const reset = captureIo();
+      expect(await main(['config', 'reset', '--all', '--json'], reset.io)).toBe(0);
+      expect(JSON.parse(reset.stdout())).toMatchObject({
+        ok: true,
+        data: { operation: 'reset', changed: false },
+      });
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
   it('unknown command exits 2 with exactly one JSON error object', async () => {
     const cap = captureIo();
     const code = await main(['bogus'], cap.io);

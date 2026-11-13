@@ -422,7 +422,9 @@ describe('tenjin config speed and replacement', () => {
     );
     // `tenjin config` repeats it from the copy last read, offline.
     const shown = (await runConfigList(ctx())).humanLines ?? [];
-    expect(shown.join('\n')).toContain('No kinds of job are marked faster yet');
+    expect(shown).toContainEqual(
+      expect.stringMatching(/^ {2}» +Speed +on, but no jobs are marked faster yet$/),
+    );
   });
 
   it('writes the mode and its provider scope in one write, and widens by removing the scope', async () => {
@@ -480,8 +482,11 @@ describe('tenjin config speed and replacement', () => {
         router: { nativeReplacement: 'when-routed', nativeReplacementProviders: [] },
       }),
     );
-    const shown = String((await runConfigList(ctx())).humanLines?.join('\n'));
-    expect(shown).toContain('Run `tenjin config replacement off` to clear it.');
+    const shown = (await runConfigList(ctx())).humanLines ?? [];
+    expect(shown).toContainEqual(
+      expect.stringMatching(/Automatic picks +off: its saved value can't be read$/),
+    );
+    expect(shown).toContain('      fix: tenjin config replacement off');
     await runConfigReplacement({ state: 'off' }, ctx(), offline);
     expect(await saved()).toEqual({ nativeReplacement: 'off' });
     expect((await personalSettingsAt(dir)).nativeReplacement).toEqual({ mode: 'off' });
@@ -511,13 +516,16 @@ describe('tenjin config, shown', () => {
     await runConfigBlock({ source: ['tenjin'] }, ctx(), online());
     const shown = await runConfigList(ctx());
     const all = shown.humanLines ?? [];
-    // The readback, with the commands that undo each rule left out.
+    expect(all).toContainEqual(
+      expect.stringMatching(/^ {2}✕ +Tenjin's own tools +not offered on its own$/),
+    );
+    expect(all).toContainEqual(expect.stringMatching(/^ {2}↑ +Exa +first for web research$/));
+    expect(all).toContain('      undo: tenjin config unblock --source tenjin');
+    // The words, with the commands that undo each rule left out.
     const lines = all
-      .slice(all.indexOf('Your settings (saved on this machine, not synced):'))
+      .filter((line) => !/^\s+undo: /.test(line))
       .join('\n')
-      .replace(/`[^`]*`/g, '');
-    expect(lines).toContain('Prefer Exa when Tenjin handles Web research.');
-    expect(lines).toContain("Tenjin won't offer its own tools on its own");
+      .replace(/tenjin config[^\n]*/g, '');
     expect(lines).not.toMatch(/\bsource\b|x402|USDC|wallet|Jev|sha256/);
     const settings = (
       shown.data as { settings: { rules: { rule: unknown }[]; settingsHash: string } }

@@ -223,7 +223,7 @@ Examples:
     });
 
   const config = leaf(SETUP, 'config', 'read and set config values, and your settings').description(
-    "Print every effective config value and your settings, read and write one value, or change what Tenjin offers and picks on its own: prefer, only, block, unblock, reset, speed, and whether Tenjin's picks run automatically. A tool you or your agent picks by name still runs. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved, what it covers and the command that undoes it. " +
+    "List your rules, limits and the settings you changed from the default (--all prints every value, where it comes from and what it does), read and write one value, or change what Tenjin offers and picks on its own: prefer, only, block, unblock, reset, speed, and whether Tenjin's picks run automatically. A tool you or your agent picks by name still runs. Values are stored in config.json under your Tenjin data dir (~/.tenjin by default), on this machine only. Each change answers with what it saved, what it covers and the command that undoes it. " +
       'maxAutoSpend caps automatic router spending per call; sessionBudget is the daily budget shared across chats. ' +
       'An unset sendMaxAmount blocks tenjin wallet send until you set a cap; only an explicit none allows uncapped sends. ' +
       'router.improve is "Help improve routing", off by default: true lets Tenjin keep the secret-masked text of the turns the router sees, to grade its offers, and false turns it off and deletes what was kept.',
@@ -233,6 +233,7 @@ Examples:
     `
 Examples:
   $ tenjin config
+  $ tenjin config --all
   $ tenjin config --json
   $ tenjin config set router.context turn
   $ tenjin config set maxAutoSpend 0.25
@@ -279,12 +280,16 @@ resetting and pausing work offline. To pause Tenjin:
   $ tenjin config set router.enabled false
 `,
   );
-  config.action(async function (this: Command) {
-    await runCommand('config', this, async (ctx) => {
-      const { runConfigList } = await import('../commands/config');
-      return runConfigList(ctx);
+  // `config --all`. commander gives a parent option the flag wherever it is
+  // placed, so `config reset --all` reaches reset through its parent too.
+  config
+    .option('--all', 'print every setting with its value, where it comes from and what it does')
+    .action(async function (this: Command) {
+      await runCommand('config', this, async (ctx) => {
+        const { runConfigList } = await import('../commands/config');
+        return runConfigList(ctx, this.opts().all === true ? { all: true } : {});
+      });
     });
-  });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one effective config value')
     .description(
@@ -784,7 +789,7 @@ Examples:
             ...(o.preference === true ? { preference: true } : {}),
             ...(o.restriction === true ? { restriction: true } : {}),
             ...(o.capabilities === true ? { capabilities: true } : {}),
-            ...(o.all === true ? { all: true } : {}),
+            ...(o.all === true || this.parent?.opts().all === true ? { all: true } : {}),
             ...(typeof o.dimension === 'string' ? { dimension: o.dimension } : {}),
           },
           ctx,
