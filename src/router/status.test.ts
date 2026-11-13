@@ -4,16 +4,15 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../context';
 import { testCtx } from '../context-test-utils';
-import { FUND_COMMAND_LINE } from './fee';
 import { runRouterStatus } from './status';
 
 /**
  * `tenjin status`: WHETHER TENJIN IS ON, THEN THE FOUR THINGS A USER SEES.
- * The balance (at $0 it says how to fund it, a read the RPC did not answer
- * says so, and no wallet means no line and no read), today's spend against
- * the daily limit, the connected accounts with who pays for them, and the
- * settings in plain words. The chain is a seam here; nothing goes on the
- * network.
+ * The balance (below the per-call limit it is low and names the fund
+ * command, a read the RPC did not answer says so, and no wallet means no row
+ * and no read), today's spend against the daily limit, the connected
+ * accounts, and the settings in a few words. The chain is a seam here;
+ * nothing goes on the network.
  */
 
 const ADDRESS = '0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689';
@@ -42,46 +41,49 @@ const lines = (result: Awaited<ReturnType<typeof runRouterStatus>>) =>
   (result.humanLines ?? []).map((line) => line.replace(/\s+/g, ' ').trim());
 
 describe('status, the balance line', () => {
-  it('keeps usable routing funds visible without asking to fund an empty wallet', async () => {
+  it('shows the state in one line, then the rows, with the next commands beside them', async () => {
+    const result = await status(5_000_000n);
+    expect(lines(result)).toEqual([
+      '● Tenjin is on',
+      '',
+      'Balance $5.00',
+      'Today $0.00 of $5.00 · up to $0.25 a call',
+      'Accounts none yet tenjin connect fal',
+      "Settings Tenjin's defaults tenjin config",
+    ]);
+    expect(result.data).toMatchObject({ enabled: true, wallet: { address: ADDRESS } });
+  });
+
+  it('keeps the routing credit in --json only', async () => {
     const result = await runRouterStatus(ctx(), {
       cwd: dir,
       routingCredit: async () => 18_000n,
-      wallet: async () => ({ address: ADDRESS, atomic: 0n }),
+      wallet: async () => ({ address: ADDRESS, atomic: 5_000_000n }),
     });
-    expect(lines(result)).toContain('Set aside about $0.018 for routing');
-    expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
+    expect(JSON.stringify(result.humanLines)).not.toMatch(/routing|set aside/i);
     expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
   });
 
-  it('leads with whether Tenjin is on, and says how to fund a wallet at exactly $0', async () => {
-    const result = await status(0n);
-    expect(lines(result).slice(0, 3)).toEqual([
-      'Tenjin is on.',
-      'Balance $0.00',
-      FUND_COMMAND_LINE,
-    ]);
-    expect(result.data).toMatchObject({
-      enabled: true,
-      wallet: { address: ADDRESS, balance: { atomic: '0', usd: '0' } },
-    });
-  });
-
-  it('shows a funded balance, then today against the daily limit', async () => {
-    const result = await status(5_000_000n);
-    expect(lines(result).slice(1, 4)).toEqual([
-      'Balance $5.00',
-      'Today $0.00 of your $5.00 daily limit (Tenjin balance)',
-      'Per call up to $0.25 from the Tenjin balance runs on its own; above it asks first',
-    ]);
-    expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
+  it('says the balance is low below the per-call limit, as `tenjin balance` does, and how to fund it', async () => {
+    for (const atomic of [0n, 249_999n]) {
+      const result = await status(atomic);
+      expect(lines(result).slice(0, 3)).toEqual([
+        '! Tenjin is on, but your balance is low',
+        '',
+        `Balance ${atomic === 0n ? '$0.00' : '$0.249999'} tenjin fund 5`,
+      ]);
+    }
+    const enough = await status(250_000n);
+    expect(lines(enough)[0]).toBe('● Tenjin is on');
   });
 
   it('says the balance is unknown when the RPC did not answer, without a funding line', async () => {
     const result = await status(null);
-    expect(lines(result)[1]).toBe(
-      "Balance unknown: it couldn't be read just now; `tenjin balance` retries",
+    expect(lines(result)[2]).toBe('Balance unknown');
+    expect(lines(result).at(-1)).toBe(
+      "! Your balance couldn't be read just now: tenjin balance tries again",
     );
-    expect(result.humanLines).not.toContain(FUND_COMMAND_LINE);
+    expect(JSON.stringify(result.humanLines)).not.toContain('tenjin fund');
     expect(result.data).toMatchObject({ wallet: { address: ADDRESS, balance: null } });
   });
 
@@ -97,7 +99,7 @@ describe('status, the balance line', () => {
         routingCredit: async () => 0n,
         wallet,
       });
-      expect(lines(result)[1]).toMatch(/^Today /);
+      expect(lines(result)[2]).toMatch(/^Today /);
       expect(result.data).toMatchObject({ wallet: null });
     }
   });
@@ -119,7 +121,7 @@ describe('status, accounts and settings', () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ router }));
   }
 
-  it('names each connected account, who pays for it, and the settings in plain words', async () => {
+  it('names each connected account and what one needs, and the settings in a few words', async () => {
     await save({
       policy: {
         version: 1,
@@ -166,16 +168,14 @@ describe('status, accounts and settings', () => {
     );
     const result = await status(5_000_000n);
     const shown = lines(result);
-    expect(shown).toContain(
-      'Your accounts Apify (set to come first for the jobs Tenjin has checked); fal (not put first): billed to your own plans, not counted in the limit',
-    );
-    expect(shown).toContain('Apify does local business search and web research');
-    expect(shown).toContain("fal isn't signed in on this machine: `tenjin connect fal`");
-    expect(shown).toContain("when fal refuses a call, Tenjin's own tool runs in its place");
-    expect(shown.at(-1)).toBe(
-      'Your settings never offer Firecrawl unless asked · your Apify first',
-    );
+    expect(shown).toContain('Accounts Apify ✓ · fal ! not signed in here');
+    expect(shown).toContain('Settings Firecrawl blocked · Apify first');
+    expect(shown.at(-1)).toBe("! fal isn't signed in on this machine: tenjin connect fal");
     expect(JSON.stringify(result.humanLines)).not.toMatch(/x402|USDC|wallet|source/i);
+    // The phrases `--json` carries are its own, unchanged.
+    expect(result.data).toMatchObject({
+      settings: { phrases: ['never offer Firecrawl unless asked', 'your Apify first'] },
+    });
     expect(result.data).toMatchObject({
       accounts: [
         { id: 'apify', preferred: true, signIn: 'ok' },
@@ -184,15 +184,32 @@ describe('status, accounts and settings', () => {
     });
   });
 
-  it('says when Tenjin is paused, and when nothing is connected', async () => {
+  it('says when Tenjin is paused, and the command that turns it back on', async () => {
     await save({ enabled: false });
     const result = await status(1_000_000n);
-    expect(lines(result)[0]).toBe(
-      'Tenjin is paused on this machine: `tenjin config set router.enabled true` turns it back on.',
-    );
-    expect(lines(result)).toContain(
-      'Your accounts none connected (`tenjin connect <name>` adds one)',
-    );
-    expect(lines(result)).toContain("Your settings Tenjin's defaults (`tenjin config` shows them)");
+    expect(lines(result).slice(0, 4)).toEqual([
+      '○ Tenjin is paused',
+      'It offers nothing until you turn it back on:',
+      'tenjin config set router.enabled true',
+      '',
+    ]);
+    expect(result.data).toMatchObject({ enabled: false });
+  });
+
+  it('counts the rules once they no longer fit the row', async () => {
+    await save({
+      policy: {
+        version: 1,
+        block: [
+          { kind: 'provider', id: 'firecrawl' },
+          { kind: 'provider', id: 'exa' },
+          { kind: 'provider', id: 'tavily' },
+          { kind: 'provider', id: 'apollo' },
+        ],
+      },
+      nativeReplacement: 'when-routed',
+    });
+    const result = await status(5_000_000n);
+    expect(lines(result)).toContain('Settings 4 rules · automatic picks on');
   });
 });

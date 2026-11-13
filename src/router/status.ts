@@ -6,22 +6,24 @@ import { resolveContextSettings } from '../lib/settings';
 import { describeWallet, resolveWalletProvider } from '../lib/wallet';
 import { readSpendSummary } from '../lib/wallet/spend';
 import type { CommandContext, CommandResult } from '../context';
-import { balanceReader } from '../commands/balance';
+import { balanceReader, lowBalance } from '../commands/balance';
+import { connectedLabels, describeRules, summarizeRule } from '../commands/config-readback';
 import { dollars } from '../commands/fund-watch';
 import { channelCredit } from './channel-credit';
-import { FUND_COMMAND_LINE, ROUTING_DEPOSIT_KEY, ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { ROUTING_DEPOSIT_KEY, ROUTING_FEE_CEILING_ATOMIC, SUGGESTED_FUND_USD } from './fee';
 import { accountJobs, cachedIdentities, labelOf, type Identities } from './identities';
 import { readVaultHeader } from './accounts/vault';
 import { routerSettings, type RouterSettings } from './settings';
 import { BUILT_IN_SOURCE, type Target } from './settings-wire';
 
 /**
- * `tenjin status`: THE FOUR THINGS A USER SEES (plan 37), led by whether
- * Tenjin is on: the balance, today's spend against the daily limit and the
- * per-call limit (both on the Tenjin balance only), the connected accounts
- * and their jobs, and the settings in plain words. Nothing else is printed.
- * What lookups cost, the routing credit and the requests still open are in
- * `--json`.
+ * `tenjin status`: THE FOUR THINGS A USER SEES (plan 37), led by one line
+ * saying whether Tenjin is on: the balance, today's spend against the daily
+ * limit with the per-call limit beside it (both on the Tenjin balance only),
+ * the connected accounts, and the settings in a few words. Each row is one
+ * line, a dim command beside it only where there is a next step, and each
+ * problem one `! ` line at the end with its fix. What lookups cost, the
+ * routing credit and the requests still open are in `--json`.
  *
  * ON OR PAUSED is read the way both hooks read it, from this directory, so a
  * project file that pauses Tenjin here shows here. A setting that can't be
@@ -81,40 +83,45 @@ async function walletRoutingCredit(ctx: CommandContext): Promise<bigint> {
   }
 }
 
-/** Whether Tenjin routes from here, the line that says so, and the settings
- *  read with it. */
+/** Whether Tenjin routes from here, the lines that say so when it doesn't,
+ *  and the settings read with it. */
 async function onOrPaused(
   ctx: CommandContext,
   cwd: string,
-): Promise<{ enabled: boolean; line: string; router?: RouterSettings }> {
+): Promise<{ enabled: boolean; paused: string[]; router?: RouterSettings }> {
   try {
     const router = await routerSettings({ cwd, dataDir: ctx.dataDir });
     const { enabled } = router;
-    if (enabled.value) return { enabled: true, line: 'Tenjin is on.', router };
+    if (enabled.value) return { enabled: true, paused: [], router };
     return {
       enabled: false,
       router,
-      line:
+      paused:
         enabled.source === 'project' || enabled.source === 'local'
-          ? `Tenjin is paused here by ${enabled.path ?? 'a project file'}: set router.enabled to true there to turn it back on.`
-          : 'Tenjin is paused on this machine: `tenjin config set router.enabled true` turns it back on.',
+          ? [
+              '○ Tenjin is paused here',
+              `  It offers nothing here until router.enabled is true in ${enabled.path ?? 'its project file'}.`,
+            ]
+          : [
+              '○ Tenjin is paused',
+              '  It offers nothing until you turn it back on:',
+              '  tenjin config set router.enabled true',
+            ],
     };
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
     return {
       enabled: false,
-      line: `Tenjin is off here: its on/off setting can't be read (${why}).`,
+      paused: ['○ Tenjin is off here', `  Its on/off setting can't be read (${why}).`],
     };
   }
 }
 
 const list = new Intl.ListFormat('en', { type: 'conjunction' });
 const either = new Intl.ListFormat('en', { type: 'disjunction' });
-/** How many phrases the one settings line shows before it points elsewhere. */
-const SETTINGS_SHOWN = 5;
-
 /** The saved settings, one short phrase each, in the order `tenjin config`
- *  reads them back: blocks, only rules, preferences, then the switches. */
+ *  reads them back: blocks, only rules, preferences, then the switches. What
+ *  `--json` carries; the human row is {@link settingsRow}'s. */
 export function settingsPhrases(
   router: Pick<RouterSettings, 'policy' | 'nativeReplacement' | 'accounts'>,
   identities: Identities | undefined,
@@ -165,17 +172,6 @@ export function settingsPhrases(
   return { status: 'ok', phrases };
 }
 
-/** The settings as the one line status shows. */
-function settingsLine(settings: ReturnType<typeof settingsPhrases>): string {
-  if (settings.status === 'invalid') return "can't be read; `tenjin config` shows the problem";
-  const { phrases } = settings;
-  if (phrases.length === 0) return "Tenjin's defaults (`tenjin config` shows them)";
-  const more = phrases.length - SETTINGS_SHOWN;
-  return `${phrases.slice(0, SETTINGS_SHOWN).join(' · ')}${
-    more > 0 ? ` · and ${more} more (\`tenjin config\`)` : ''
-  }`;
-}
-
 /** One saved account, as status reads it. */
 export interface AccountStatus {
   id: string;
@@ -220,44 +216,109 @@ async function accountStatuses(
   );
 }
 
-/** The accounts, as the lines under the label column. */
-function accountLines(accounts: readonly AccountStatus[]): string[] {
-  if (accounts.length === 0) return ['none connected (`tenjin connect <name>` adds one)'];
-  const labels = (keep: (account: AccountStatus) => boolean) =>
-    accounts.filter(keep).map(({ label }) => label);
-  const first = labels(({ preferred }) => preferred);
-  const rest = labels(({ preferred }) => !preferred);
-  const named = [
-    // Set, not used: only a map Tenjin has checked comes first, and the
-    // identities read doesn't say which those are.
-    ...(first.length > 0
-      ? [`${list.format(first)} (set to come first for the jobs Tenjin has checked)`]
-      : []),
-    ...(rest.length > 0 ? [`${list.format(rest)} (not put first)`] : []),
-  ];
-  return [
-    `${named.join('; ')}: billed to your own plans, not counted in the limit`,
-    ...accounts.flatMap(({ id, label, signIn, onRefusal, jobs, missingTools }) => [
-      ...(jobs.length > 0 ? [`${label} does ${list.format(jobs)}`] : []),
-      ...(missingTools.length > 0
-        ? [
-            `this ${label} account lacks ${list.format(missingTools)}, so jobs that need them are left out`,
-          ]
-        : []),
-      ...(signIn === 'expired'
-        ? [`${label}'s sign-in has expired: \`tenjin connect ${id}\` reconnects it`]
-        : signIn === 'signed_out'
-          ? [`${label} isn't signed in on this machine: \`tenjin connect ${id}\``]
-          : []),
-      ...(onRefusal === 'tenjin'
-        ? [`when ${label} refuses a call, Tenjin's own tool runs in its place`]
-        : []),
-    ]),
-  ];
+/** One status row: a label, its value, and a dim next command or detail. */
+interface Row {
+  label: string;
+  /** The value as it reads, for alignment. */
+  value: string;
+  /** The same value with its color, when it has one. */
+  styled?: string;
+  /** A dim command, lined up with the other rows' commands. */
+  hint?: string;
+  /** Dim words right after the value, not lined up. */
+  after?: string;
 }
 
-/** Labels line up at this width, as `tenjin balance`'s do. */
-const LABEL_WIDTH = 14;
+/** Each connected account, `fal ✓`, or what it needs; and the problem lines
+ *  that say how to fix one. Local state only: no account is asked. */
+function accountsRow(
+  ctx: CommandContext,
+  accounts: readonly AccountStatus[],
+): { row: Row; problems: string[] } {
+  if (accounts.length === 0)
+    return {
+      row: { label: 'Accounts', value: 'none yet', hint: 'tenjin connect fal' },
+      problems: [],
+    };
+  const needs = (account: AccountStatus) =>
+    account.signIn === 'expired'
+      ? 'sign-in expired'
+      : account.signIn === 'signed_out'
+        ? 'not signed in here'
+        : undefined;
+  const entries = accounts.map((account) => {
+    const need = needs(account);
+    return need === undefined
+      ? { value: `${account.label} ✓`, styled: `${account.label} ${paint(ctx.io, 'green', '✓')}` }
+      : {
+          value: `${account.label} ! ${need}`,
+          styled: `${account.label} ${paint(ctx.io, 'yellow', `! ${need}`)}`,
+        };
+  });
+  return {
+    row: {
+      label: 'Accounts',
+      value: entries.map(({ value }) => value).join(' · '),
+      styled: entries.map(({ styled }) => styled).join(' · '),
+    },
+    problems: accounts.flatMap(({ id, label, signIn }) =>
+      signIn === 'expired'
+        ? [`${label}'s sign-in expired: tenjin connect ${id}`]
+        : signIn === 'signed_out'
+          ? [`${label} isn't signed in on this machine: tenjin connect ${id}`]
+          : [],
+    ),
+  };
+}
+
+/** The most the settings row spells out before it counts the rules instead. */
+const SETTINGS_PHRASES = 3;
+const SETTINGS_WIDTH = 60;
+
+/** The settings in a few words, from the readback `tenjin config` lists. */
+function settingsRow(
+  router: RouterSettings | undefined,
+  identities: Identities | undefined,
+): { row: Row; problems: string[] } {
+  const label = 'Settings';
+  if (router === undefined || router.policy.status === 'invalid') {
+    return {
+      row: { label, value: "can't be read" },
+      problems: ["Your settings can't be read, so Tenjin won't route: tenjin config shows why"],
+    };
+  }
+  const rules =
+    router.policy.status === 'ok'
+      ? describeRules(router.policy.saved, identities, connectedLabels(router))
+      : [];
+  const phrases = rules.map((rule) => summarizeRule(rule, identities, router.accounts.saved).short);
+  const automatic = router.nativeReplacement.mode !== 'off' ? ['automatic picks on'] : [];
+  const all = [...phrases, ...automatic];
+  if (all.length === 0)
+    return { row: { label, value: "Tenjin's defaults", hint: 'tenjin config' }, problems: [] };
+  const spelled = all.join(' · ');
+  const value =
+    all.length <= SETTINGS_PHRASES && spelled.length <= SETTINGS_WIDTH
+      ? spelled
+      : [`${phrases.length} ${phrases.length === 1 ? 'rule' : 'rules'}`, ...automatic].join(' · ');
+  return { row: { label, value }, problems: [] };
+}
+
+/** Labels line up at this width: `Accounts   `. */
+const LABEL_WIDTH = 11;
+
+/** The rows, labels and next commands lined up. */
+function rowLines(ctx: CommandContext, rows: readonly Row[]): string[] {
+  const hinted = rows.filter(({ hint }) => hint !== undefined);
+  const at = Math.max(0, ...hinted.map(({ value }) => value.length)) + 2;
+  return rows.map(({ label, value, styled, hint, after }) => {
+    const shown = `  ${label.padEnd(LABEL_WIDTH)}${styled ?? value}`;
+    if (after !== undefined) return `${shown}  ${paint(ctx.io, 'dim', after)}`;
+    if (hint !== undefined)
+      return `${shown}${' '.repeat(at - value.length)}${paint(ctx.io, 'dim', hint)}`;
+    return shown;
+  });
+}
 
 export async function runRouterStatus(
   ctx: CommandContext,
@@ -335,44 +396,56 @@ export async function runRouterStatus(
       ...(r.requestKey !== undefined ? { request: r.requestKey } : {}),
     })),
   };
-  const label = (text: string) => `  ${text.padEnd(LABEL_WIDTH)}`;
-  const under = (text: string) => `  ${' '.repeat(LABEL_WIDTH)}${text}`;
-  const rows = (name: string, lines: readonly string[]) =>
-    lines.map((line, at) => (at === 0 ? `${label(name)}${line}` : under(line)));
-  const today =
-    budgetAtomic === null
-      ? `${dollars(automaticAtomic)} spent automatically (Tenjin balance); no daily limit`
-      : budgetAtomic === 0n
-        ? `automatic payments are off: your daily limit is ${dollars(0n)} (Tenjin balance)`
-        : `${dollars(automaticAtomic)} of your ${dollars(budgetAtomic)} daily limit (Tenjin balance)`;
-  const perCall =
-    capAtomic === 0n
-      ? 'every call paid from the Tenjin balance asks you first'
-      : `up to $${formatUsdDisplay(capAtomic.toString())} from the Tenjin balance runs on its own; above it asks first`;
-  const balanceLines =
+  const yellow = (text: string) => paint(ctx.io, 'yellow', text);
+  const low = wallet?.atomic != null && lowBalance(wallet.atomic, settings.policy);
+  const head = !power.enabled
+    ? power.paused
+    : low
+      ? [yellow('! Tenjin is on, but your balance is low')]
+      : [`${paint(ctx.io, 'green', '●')} Tenjin is on`];
+  const balance: Row[] =
     wallet === null
       ? []
       : wallet.atomic === null
-        ? rows('Balance', ["unknown: it couldn't be read just now; `tenjin balance` retries"])
+        ? [{ label: 'Balance', value: 'unknown' }]
         : [
-            `${label('Balance')}${paint(ctx.io, 'bold', dollars(wallet.atomic))}`,
-            ...(wallet.atomic === 0n && creditAtomic < ROUTING_FEE_CEILING_ATOMIC
-              ? [under(FUND_COMMAND_LINE)]
-              : []),
+            {
+              label: 'Balance',
+              value: dollars(wallet.atomic),
+              styled: paint(ctx.io, 'bold', dollars(wallet.atomic)),
+              ...(low ? { hint: `tenjin fund ${SUGGESTED_FUND_USD}` } : {}),
+            },
           ];
+  const today: Row = {
+    label: 'Today',
+    value:
+      budgetAtomic === null
+        ? `${dollars(automaticAtomic)}, no daily limit`
+        : budgetAtomic === 0n
+          ? `automatic payments off (${dollars(0n)} a day)`
+          : `${dollars(automaticAtomic)} of ${dollars(budgetAtomic)}`,
+    after:
+      capAtomic === 0n
+        ? '· every call asks first'
+        : `· up to $${formatUsdDisplay(capAtomic.toString())} a call`,
+  };
+  const accountsShown = accountsRow(ctx, accounts);
+  const settingsShown = settingsRow(power.router, identities);
+  const problems = [
+    ...(wallet !== null && wallet.atomic === null
+      ? ["Your balance couldn't be read just now: tenjin balance tries again"]
+      : []),
+    ...accountsShown.problems,
+    ...settingsShown.problems,
+    ...warnings,
+  ];
   return {
     data,
     humanLines: [
-      power.line,
-      ...balanceLines,
-      `${label('Today')}${today}`,
-      `${label('Per call')}${perCall}`,
-      ...(creditAtomic > 0n
-        ? [`${label('Set aside')}about ${dollars(creditAtomic)} for routing`]
-        : []),
-      ...rows('Your accounts', accountLines(accounts)),
-      `${label('Your settings')}${settingsLine(saved)}`,
-      ...warnings,
+      ...head,
+      '',
+      ...rowLines(ctx, [...balance, today, accountsShown.row, settingsShown.row]),
+      ...(problems.length > 0 ? ['', ...problems.map((problem) => yellow(`! ${problem}`))] : []),
     ],
   };
 }

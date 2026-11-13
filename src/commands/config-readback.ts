@@ -369,6 +369,110 @@ export function describeRules(
   ];
 }
 
+/** A label as it reads mid-phrase: "web research", "images". */
+const midPhrase = (label: string): string => label.charAt(0).toLowerCase() + label.slice(1);
+
+/** A saved target by its label, or by its account's saved label when the
+ *  identities read does not name it (offline). */
+export function nameOf(
+  target: Target,
+  identities: Identities | undefined,
+  accounts: readonly Pick<SavedAccount, 'id' | 'label'>[] = [],
+): string {
+  const label = labelOf(target, identities);
+  return target.kind === 'source' && label === target.id
+    ? (accounts.find(({ id }) => id === target.id)?.label ?? label)
+    : label;
+}
+
+/**
+ * A SAVED RULE IN A FEW WORDS, for the `tenjin config` listing and the one
+ * settings row `tenjin status` shows. The sentence in {@link RuleReadback.text}
+ * stays what `--json` and an agent read; this is the human glance.
+ */
+export interface RuleSummary {
+  /** `✕` a block, `↑` a preference, `=` an only rule, `»` speed. */
+  mark: string;
+  /** What it names, by label: "Firecrawl", "Exa, then Tavily". */
+  name: string;
+  /** What it does, after the name: "not offered on its own". */
+  does: string;
+  /** Both as one phrase: "Firecrawl blocked", "Exa first for web research". */
+  short: string;
+}
+
+export function summarizeRule(
+  rule: RuleReadback,
+  identities: Identities | undefined,
+  accounts: readonly Pick<SavedAccount, 'id' | 'label'>[] = [],
+): RuleSummary {
+  const name = (target: Target) => nameOf(target, identities, accounts);
+  const where = (scope: Scope) =>
+    scope.kind === 'global' ? undefined : midPhrase(labelOf(scope, identities));
+  switch (rule.kind) {
+    case 'block': {
+      const target = rule.rule as Target;
+      const label =
+        target.kind === 'source' && target.id === BUILT_IN_SOURCE
+          ? "Tenjin's own tools"
+          : name(target);
+      return { mark: '✕', name: label, does: 'not offered on its own', short: `${label} blocked` };
+    }
+    case 'prefer': {
+      const { scope, targets } = rule.rule as PreferRule;
+      const names = targets.map(name).join(', then ');
+      const job = where(scope);
+      const does = job === undefined ? 'first for every job' : `first for ${job}`;
+      return {
+        mark: '↑',
+        name: names,
+        does,
+        short: job === undefined ? `${names} first` : `${names} ${does}`,
+      };
+    }
+    case 'only': {
+      const { scope, dimension, targets } = rule.rule as OnlyRule;
+      if (dimension === 'capability') {
+        const names = list.format(targets.map((target) => midPhrase(name(target))));
+        return {
+          mark: '=',
+          name: list.format(targets.map(name)),
+          does: 'the only jobs Tenjin offers on its own',
+          short: `only ${names}`,
+        };
+      }
+      const names = either.format(targets.map(name));
+      const job = where(scope);
+      const noun = DIMENSION_NOUN[dimension];
+      return {
+        mark: '=',
+        name: names,
+        does: job === undefined ? `the only ${noun} Tenjin picks` : `the only ${noun} for ${job}`,
+        short: job === undefined ? `only ${names}` : `only ${names} for ${job}`,
+      };
+    }
+    case 'speed':
+      return {
+        mark: '»',
+        name: 'Speed',
+        does: "on: faster paid tools where they're as accurate",
+        short: 'speed on',
+      };
+  }
+}
+
+/** Automatic picks in a few words: "off", "on, only for Exa". */
+export function replacementShort(
+  setting: ReplacementSetting,
+  identities: Identities | undefined,
+): string {
+  if (setting.problem !== undefined) return "off: its saved value can't be read";
+  if (setting.mode === 'off') return 'off';
+  return setting.providers === undefined
+    ? 'on, for any provider'
+    : `on, only for ${either.format(setting.providers.map((target) => labelOf(target, identities)))}`;
+}
+
 /** The two automatic limits, as a person reads them, on the Tenjin balance. */
 export interface LimitsReadback {
   perCall: string;

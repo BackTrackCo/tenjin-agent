@@ -43,6 +43,15 @@ export interface BalanceOptions extends ResolveWalletProviderOptions {
   live?: LiveLine;
 }
 
+/** A balance is low below the per-call limit: the next automatic call may not
+ *  fit. `tenjin balance` and `tenjin status` both say so by this rule. */
+export function lowBalance(
+  atomic: bigint,
+  policy: Pick<SpendPolicy, 'maxAutoSpendAtomic'>,
+): boolean {
+  return atomic < policy.maxAutoSpendAtomic;
+}
+
 /** How long one balance read may take, across the RPCs it may ask. */
 export const BALANCE_READ_MS = 5_000;
 
@@ -90,7 +99,7 @@ export async function runBalance(
   const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
   const credit = toMoney(creditAtomic.toString());
   const policy = settings.policy;
-  const low = atomic < policy.maxAutoSpendAtomic;
+  const low = lowBalance(atomic, policy);
   const label = (text: string) => `  ${text.padEnd(LABEL_WIDTH)}`;
   return {
     data: {
