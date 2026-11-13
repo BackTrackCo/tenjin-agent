@@ -130,7 +130,7 @@ export function registerRouter(reg: Registration): void {
 
   leaf(SETUP, 'usage', 'what lookups cost, by day and by who ran them')
     .description(
-      "Totals from this machine's own record, by day: Tenjin's tools, paid from your Tenjin balance, and each of your connected accounts, billed to that account's own plan. A call on an account that was still running, failed after the account's job started, or got the account's own error may have charged it: it shows as may have charged and isn't counted as billed. --since takes 24h, 7d (the default), 30d or a date. Routing fees aren't in it: `tenjin status` shows today's.",
+      "Totals from this machine's own record, by day: Tenjin's tools, paid from your Tenjin balance, and each of your connected accounts, billed to that account's own plan. A call on an account that was still running, failed after the account's job started, or got the account's own error may have charged it: it shows as may have charged and isn't counted as billed. --since takes 24h, 7d (the default), 30d or a date. Amounts are rounded to the cent; --json has them exact. Routing fees aren't in it: `tenjin status` shows today's.",
     )
     .option('--since <window>', 'how far back: 24h, 7d, 30d or a date such as 2026-10-01')
     .action(async function (this: Command) {

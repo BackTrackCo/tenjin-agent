@@ -1,7 +1,7 @@
 import { CliError } from '../lib/errors';
 import { ATOMIC_RE } from '../lib/ids';
-import { formatUsdDisplay, toMoney } from '../lib/money';
-import { sanitizeForTerminal } from '../lib/output';
+import { toMoney } from '../lib/money';
+import { paint, sanitizeForTerminal } from '../lib/output';
 import { paidLedgerPath } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 import { savedAccounts } from './accounts/saved';
@@ -19,7 +19,8 @@ import { readPaidRecords, type PaidRecord } from './paid';
  * nothing else.
  *
  * The routing fee is not in it: the ledger keeps the calls a lookup made, and
- * the fee's history lives only in today's spend window (`tenjin status`).
+ * the fee's history lives only in today's spend window (`tenjin status`), so
+ * the table says so in one dim line.
  */
 
 export interface UsageOptions {
@@ -30,18 +31,25 @@ export interface UsageOptions {
 const DAY_MS = 24 * 60 * 60_000;
 const MAX_DAYS = 366;
 
-/** The start of the window `since` names, in ms. */
-export function sinceMs(since: string | undefined, now: number): number {
+/** The start of the window `since` names, in ms, and its name: "Last 7 days". */
+export function sinceWindow(
+  since: string | undefined,
+  now: number,
+): { from: number; title: string } {
   const text = (since ?? '7d').trim();
   const span = /^(\d{1,4})([hd])$/.exec(text);
   if (span !== null) {
     const n = Number(span[1]);
-    const ms = span[2] === 'h' ? n * 60 * 60_000 : n * DAY_MS;
-    if (n > 0 && ms <= MAX_DAYS * DAY_MS) return now - ms;
+    const hours = span[2] === 'h';
+    const ms = hours ? n * 60 * 60_000 : n * DAY_MS;
+    const unit = hours ? 'hour' : 'day';
+    if (n > 0 && ms <= MAX_DAYS * DAY_MS)
+      return { from: now - ms, title: n === 1 ? `Last ${unit}` : `Last ${n} ${unit}s` };
   }
   if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
     const at = Date.parse(`${text}T00:00:00.000Z`);
-    if (Number.isFinite(at) && at <= now && now - at <= MAX_DAYS * DAY_MS) return at;
+    if (Number.isFinite(at) && at <= now && now - at <= MAX_DAYS * DAY_MS)
+      return { from: at, title: `Since ${text}` };
   }
   throw new CliError(
     'USAGE',
@@ -62,6 +70,8 @@ interface Group {
   day: string;
   source: string;
   label: string;
+  /** Who ran it, as the human table names it: "Tenjin's tools", "fal". */
+  name: string;
   calls: number;
   /** From the Tenjin balance; null on an account, whose plan paid. */
   spentAtomic: bigint | null;
@@ -75,7 +85,7 @@ export async function runRouterUsage(
   deps: { now?: () => number } = {},
 ): Promise<CommandResult> {
   const now = (deps.now ?? Date.now)();
-  const from = sinceMs(opts.since, now);
+  const { from, title } = sinceWindow(opts.since, now);
   const names = new Map((await savedAccounts(ctx.dataDir)).map(({ id, label }) => [id, label]));
   // A PAYMENT THE CHAIN SAYS WAS NEVER USED (`not_charged`, from reconcile)
   // never left the balance: it is no spending, and no call that cost anything.
@@ -100,6 +110,7 @@ export async function runRouterUsage(
       day,
       source,
       label: account ? `your ${names.get(source) ?? record.provider} account` : "Tenjin's tools",
+      name: account ? (names.get(source) ?? record.provider) : "Tenjin's tools",
       calls: 0,
       spentAtomic: account ? null : 0n,
       mayHaveCharged,
@@ -120,7 +131,6 @@ export async function runRouterUsage(
   const balanceCalls = callsWhere((row) => row.spentAtomic !== null);
   const accountCalls = callsWhere((row) => row.spentAtomic === null && !row.mayHaveCharged);
   const mayHaveChargedCalls = callsWhere((row) => row.mayHaveCharged);
-  const sinceDay = new Date(from).toISOString().slice(0, 10);
   const data = {
     ledger: paidLedgerPath(ctx.dataDir),
     since: new Date(from).toISOString(),
@@ -142,35 +152,72 @@ export async function runRouterUsage(
       mayHaveChargedCalls,
     },
   };
-  const width = Math.max(0, ...rows.map((row) => row.label.length));
-  const calls = (n: number) => `${n} ${n === 1 ? 'call' : 'calls'}`;
-  return {
-    data,
-    humanLines:
-      rows.length === 0
-        ? [`No lookups on this machine since ${sinceDay}.`]
-        : [
-            `Since ${sinceDay}:`,
-            ...rows.map(
-              (row) =>
-                `${row.day}  ${sanitizeForTerminal(row.label).padEnd(width)}  ${calls(row.calls).padEnd(9)}  ${
-                  row.spentAtomic !== null
-                    ? `$${formatUsdDisplay(row.spentAtomic.toString())}`
-                    : row.mayHaveCharged
-                      ? 'may have charged'
-                      : 'billed to that account'
-                }`,
-            ),
-            `Total: $${formatUsdDisplay(balanceAtomic.toString())} from your Tenjin balance over ${calls(balanceCalls)}` +
-              (accountCalls > 0
-                ? `; ${calls(accountCalls)} on your own accounts, billed to their plans and not counted in the limit.`
-                : '.'),
-            ...(mayHaveChargedCalls > 0
-              ? [
-                  `${calls(mayHaveChargedCalls)} on your own accounts may have charged their plans: still running, failed, or answered with the account's own error.`,
-                ]
-              : []),
-            "Routing fees aren't in this history; `tenjin status` shows today's spending with them.",
-          ],
-  };
+  return { data, humanLines: usageTable(ctx, title, rows, balanceAtomic, { from, now }) };
+}
+
+/** `$1.14`, rounded to the cent; a charge under half a cent is `<$0.01`. */
+function cents(atomic: bigint): string {
+  if (atomic > 0n && atomic < 5_000n) return '<$0.01';
+  const total = (atomic + 5_000n) / 10_000n;
+  return `$${total / 100n}.${(total % 100n).toString().padStart(2, '0')}`;
+}
+
+/** `Nov 13`, and the year too when it is not this one. */
+function shortDay(day: string, now: number): string {
+  const at = new Date(`${day}T00:00:00.000Z`);
+  const sameYear = at.getUTCFullYear() === new Date(now).getUTCFullYear();
+  return at.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+    timeZone: 'UTC',
+  });
+}
+
+/** The days as a table: a header, one row a day and who ran it, the total. */
+function usageTable(
+  ctx: CommandContext,
+  title: string,
+  rows: readonly Group[],
+  balanceAtomic: bigint,
+  { from, now }: { from: number; now: number },
+): string[] {
+  if (rows.length === 0)
+    return [
+      title.startsWith('Since')
+        ? `No lookups ${title.toLowerCase()}.`
+        : `No lookups in the ${title.toLowerCase()}.`,
+    ];
+  const shown = rows.map((row) => ({
+    day: shortDay(row.day, now),
+    name: sanitizeForTerminal(row.name),
+    calls: String(row.calls),
+    cost:
+      row.spentAtomic !== null
+        ? cents(row.spentAtomic)
+        : row.mayHaveCharged
+          ? 'may have charged'
+          : 'your plan',
+  }));
+  const dayWidth = Math.max(...shown.map(({ day }) => day.length));
+  const nameWidth = Math.max(...shown.map(({ name }) => name.length));
+  const callsWidth = Math.max('calls'.length, ...shown.map(({ calls }) => calls.length));
+  const left = Math.max(2 + dayWidth + 3 + nameWidth, title.length);
+  const line = (start: string, calls: string, cost: string) =>
+    `${start.padEnd(left)}  ${calls.padStart(callsWidth)}    ${cost}`;
+  const total = cents(balanceAtomic);
+  const width = Math.max(...shown.map(({ cost }) => cost.length), total.length, 'cost'.length);
+  return [
+    line(title, 'calls', 'cost'),
+    ...shown.map(({ day, name, calls, cost }) =>
+      line(`  ${day.padEnd(dayWidth)}   ${name.padEnd(nameWidth)}`, calls, cost),
+    ),
+    `  ${'─'.repeat(left - 2 + 2 + callsWidth + 4 + width)}`,
+    `${line('  Total', '', total)}  from your Tenjin balance`,
+    paint(
+      ctx.io,
+      'dim',
+      `Routing fees aren't in this history.${now - from < 30 * DAY_MS ? ' For longer: tenjin usage --since 30d' : ''}`,
+    ),
+  ];
 }

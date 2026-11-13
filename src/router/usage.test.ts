@@ -8,7 +8,8 @@ import { runRouterUsage } from './usage';
 
 /**
  * `tenjin usage`: the local ledger, totalled by day and by who ran each call,
- * Tenjin's tools from the balance and each account on its own plan.
+ * Tenjin's tools from the balance and each account on its own plan, as a
+ * table whose header names the window.
  */
 
 let dir: string;
@@ -75,9 +76,15 @@ describe('usage', () => {
       ].join('\n') + '\n',
     );
     const result = await runRouterUsage(ctx(), {}, { now: () => NOW });
-    expect(result.humanLines).toContainEqual(
-      expect.stringMatching(/your Apify account +2 calls +billed to that account$/),
-    );
+    expect(result.humanLines).toEqual([
+      'Last 7 days                calls    cost',
+      "  Oct 23   Tenjin's tools      2    $0.01",
+      '  Oct 23   Apify               2    your plan',
+      "  Oct 22   Tenjin's tools      1    $0.01",
+      `  ${'─'.repeat(43)}`,
+      '  Total                             $0.02  from your Tenjin balance',
+      "Routing fees aren't in this history. For longer: tenjin usage --since 30d",
+    ]);
     expect(result.data).toMatchObject({
       totals: { balanceCalls: 3, accountCalls: 2 },
       days: [
@@ -87,6 +94,7 @@ describe('usage', () => {
       ],
     });
     const day = await runRouterUsage(ctx(), { since: '24h' }, { now: () => NOW });
+    expect(day.humanLines?.[0]).toMatch(/^Last 24 hours /);
     expect(day.data).toMatchObject({ totals: { balanceCalls: 2, accountCalls: 2 } });
   });
 
@@ -116,9 +124,7 @@ describe('usage', () => {
       ].join('\n') + '\n',
     );
     const result = await runRouterUsage(ctx(), {}, { now: () => NOW });
-    expect(result.humanLines).toContainEqual(
-      expect.stringMatching(/your Apify account +2 calls +may have charged$/),
-    );
+    expect(result.humanLines).toContainEqual(expect.stringMatching(/ Apify +2 +may have charged$/));
     expect(result.data).toMatchObject({
       totals: { balanceCalls: 1, accountCalls: 1, mayHaveChargedCalls: 2 },
       days: [
@@ -133,7 +139,7 @@ describe('usage', () => {
 
   it('takes 24h, 7d, 30d or a date, and nothing else', async () => {
     const empty = await runRouterUsage(ctx(), { since: '2026-10-20' }, { now: () => NOW });
-    expect(empty.humanLines).toEqual(['No lookups on this machine since 2026-10-20.']);
+    expect(empty.humanLines).toEqual(['No lookups since 2026-10-20.']);
     await expect(runRouterUsage(ctx(), { since: 'last week' }, { now: () => NOW })).rejects.toThrow(
       CliError,
     );
