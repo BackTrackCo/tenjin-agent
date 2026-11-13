@@ -976,8 +976,14 @@ describe('daily limit readouts', () => {
       expect(result.data).toMatchObject({
         window: { budget: sessionBudget === 'none' ? null : { atomic: sessionBudget } },
       });
-      expect(receipt(result).join('\n')).toContain('automatic router up to');
-      expect(receipt(result).join('\n')).not.toContain('per call at most');
+      const today = receipt(result).find((line) => line.trim().startsWith('Today'));
+      expect(today?.replace(/\s+/g, ' ').trim()).toBe(
+        sessionBudget === 'none'
+          ? 'Today $0.00, no daily limit · up to $0.25 a call'
+          : sessionBudget === '0'
+            ? 'Today automatic payments off ($0.00 a day) · up to $0.25 a call'
+            : 'Today $0.00 of $2.00 · up to $0.25 a call',
+      );
     },
   );
 });
@@ -1012,21 +1018,8 @@ it('status separates routing deposits in the spend window from the remaining rou
     },
     routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
   });
-  expect(receipt(result).slice(0, 4)).toEqual([
-    'lookups 0.05 USD',
-    'deposited for routing in the rolling 24h window: 0.25 USD',
-    'set aside for routing: approximately 0.24 USD (at least 80 calls; local estimate)',
-    'counted toward the daily limit: 0.3 USD of 5 USD in the rolling 24h window',
-  ]);
-});
-
-it('status shows no funds set aside before any deposit', async () => {
-  const { runRouterStatus } = await import('./status');
-  const result = await runRouterStatus(ctx(), {
-    wallet: async () => null,
-    routingCredit: async () => 0n,
-  });
-  expect(receipt(result)[0]).toBe('lookups 0 USD');
+  const shown = receipt(result).map((line) => line.replace(/\s+/g, ' ').trim());
+  expect(shown).toContain('Today $0.30 of $5.00 · up to $0.25 a call');
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {

@@ -86,20 +86,54 @@ describe('runConfigList', () => {
     expect(d['router.context']).toEqual({ value: 'session', source: 'default' });
     expect(d['router.improve']).toEqual({ value: false, source: 'default' });
     expect(d['experimental.bazaar']).toEqual({ value: 'off', source: 'default' });
-    // The human listing: 6 scalar keys + update.mode + 3 router.* +
-    // experimental.bazaar, then the settings readback after a blank line.
-    // allowlistCreators stays in `data` only.
-    const blank = (humanLines ?? []).indexOf('');
-    expect(blank).toBe(12);
-    expect((humanLines ?? []).join('\n')).not.toMatch(/allowlistCreators/);
-    expect((humanLines ?? []).slice(blank + 1)).toEqual([
+    // The plain listing: only what the user set, and on a fresh dir that is
+    // nothing, so no key is listed at all.
+    expect(humanLines).toEqual([
+      'Your rules',
+      '  none yet, so Tenjin uses its defaults',
+      '      Automatic picks   off',
+      '',
+      'Limits',
+      '      $0.25 a call · $5.00 a day',
+      '',
+      'Every setting: tenjin config --all · How to change: tenjin config --help',
+    ]);
+    expect((data as { settings: { rules: unknown[] } }).settings.rules).toEqual([]);
+    // `--all`: 6 scalar keys + update.mode + 4 router.* + experimental.bazaar,
+    // then the settings readback after a blank line. allowlistCreators stays
+    // in `data` only, and the JSON is the same either way.
+    const all = await runConfigList(makeCtx(), { all: true });
+    const lines = all.humanLines ?? [];
+    expect(lines.indexOf('')).toBe(12);
+    expect(lines.join('\n')).not.toMatch(/allowlistCreators/);
+    expect(lines.slice(13)).toEqual([
       'Your settings (saved on this machine, not synced):',
       '  No custom rules: Tenjin uses its defaults.',
       "  Run Tenjin's picks automatically: off.",
       '  Limits: $0.25 a call, $5.00 a day (Tenjin balance).',
       '  Change them with `tenjin config --help`.',
     ]);
-    expect((data as { settings: { rules: unknown[] } }).settings.rules).toEqual([]);
+    expect(all.data).toEqual(data);
+  });
+
+  it('lists the keys the user changed from the default, and no description', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        sendMaxAmount: '100000',
+        maxAutoSpend: '700000',
+        router: { improve: true },
+      }),
+    );
+    const lines = (await runConfigList(makeCtx())).humanLines ?? [];
+    const changed = lines.indexOf('Changed from the default');
+    expect(lines.slice(changed + 1, changed + 3).map((line) => line.trim().split(/\s+/))).toEqual([
+      ['sendMaxAmount', '$0.10'],
+      ['router.improve', 'on'],
+    ]);
+    // The per-call limit is under Limits, not counted as a change.
+    expect(lines).toContain('      $0.70 a call · $5.00 a day');
+    expect(lines.join('\n')).not.toContain('daily budget shared across chats');
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -125,8 +159,8 @@ describe('runConfigList', () => {
     expect(bad.code).toBe('USAGE');
   });
 
-  it('shows the same spending descriptions in the human listing and machine readback', async () => {
-    const { data, humanLines } = await runConfigList(makeCtx());
+  it('shows the same spending descriptions in the full listing and machine readback', async () => {
+    const { data, humanLines } = await runConfigList(makeCtx(), { all: true });
     const text = (humanLines ?? []).join('\n');
     expect(text).toContain('daily budget shared across chats');
     expect(text).toContain('Tenjin API base URL the router asks');

@@ -1,4 +1,3 @@
-import { request as httpsRequest } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
 import { sellerLine } from '../commands/pay';
 import { composeUserAgent } from '../lib/client-meta';
@@ -10,7 +9,7 @@ import {
 import { CliError } from '../lib/errors';
 import { isBinaryContentType } from '../lib/http';
 import { POLL_REFERENCE, type Job } from './decision';
-import { MAX_MEDIA_BYTES, pinnedLookup, type PinnedTarget } from './paid';
+import { MAX_MEDIA_BYTES, pinnedHttp, type PinnedTarget } from './paid';
 
 /**
  * A PAID CALL THE SELLER ANSWERED BEFORE ITS RESULT WAS READY, finished by
@@ -168,26 +167,18 @@ export type PollTransport = (
  * gets nothing. TLS still verifies the certificate against the URL's host.
  * No redirect is followed: the answer is whatever this URL said.
  */
-export const pinnedRequest: PollTransport = (target, request, signal) =>
-  new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      target.url,
-      { method: request.method, headers: request.headers, signal, lookup: pinnedLookup(target) },
-      (res) => {
-        resolve({
-          status: res.statusCode ?? 0,
-          header: (name) => {
-            const value = res.headers[name.toLowerCase()];
-            return Array.isArray(value) ? value.join(', ') : value;
-          },
-          body: res,
-          discard: () => res.destroy(),
-        });
-      },
-    );
-    req.on('error', reject);
-    req.end(request.body);
-  });
+export const pinnedRequest: PollTransport = async (target, request, signal) => {
+  const res = await pinnedHttp(target, request, signal);
+  return {
+    status: res.statusCode ?? 0,
+    header: (name) => {
+      const value = res.headers[name.toLowerCase()];
+      return Array.isArray(value) ? value.join(', ') : value;
+    },
+    body: res,
+    discard: () => res.destroy(),
+  };
+};
 
 /** How a job stood when polling stopped. */
 export type PollAnswer =

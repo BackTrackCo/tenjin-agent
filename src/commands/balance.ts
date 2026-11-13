@@ -3,7 +3,7 @@ import { liveLine, type LiveLine } from '../lib/live-line';
 import { toMoney } from '../lib/money';
 import { paint } from '../lib/output';
 import { resolveContextSettings } from '../lib/settings';
-import { getUsdcBalance } from '../lib/usdc';
+import { readUsdcBalanceWithFallback } from '../lib/usdc-balance';
 import {
   describeWallet,
   resolveWalletProvider,
@@ -43,41 +43,68 @@ export interface BalanceOptions extends ResolveWalletProviderOptions {
   live?: LiveLine;
 }
 
+/** A balance is low below the per-call limit: the next automatic call may not
+ *  fit. `tenjin balance` and `tenjin status` both say so by this rule. */
+export function lowBalance(
+  atomic: bigint,
+  policy: Pick<SpendPolicy, 'maxAutoSpendAtomic'>,
+): boolean {
+  return atomic < policy.maxAutoSpendAtomic;
+}
+
+/** How long one balance read may take, across the RPCs it may ask. */
+export const BALANCE_READ_MS = 5_000;
+
+/**
+ * THE BALANCE, READ THE ONE WAY: this wallet's address and the USDC it holds
+ * on Base. `tenjin balance` and `tenjin status` both read it here, so the two
+ * never disagree. It reads the configured RPC and, only when that is the
+ * default one, retries the public Base RPCs a lookup falls back to
+ * (`readUsdcBalanceWithFallback`); an RPC the user set is the only one asked.
+ * Throws `RPC_ERROR` on a read none of them answered.
+ */
+export async function balanceReader(
+  ctx: CommandContext,
+  opts: ResolveWalletProviderOptions & { rpcFetchImpl?: typeof fetch } = {},
+): Promise<{ address: `0x${string}`; read: () => Promise<bigint> }> {
+  const provider = resolveWalletProvider(ctx, opts);
+  const desc = await describeWallet(provider);
+  const { rpcUrl } = await resolveContextSettings(ctx);
+  const read = async (): Promise<bigint> => {
+    const atomic = await readUsdcBalanceWithFallback(desc.address, rpcUrl, {
+      timeoutMs: BALANCE_READ_MS,
+      ...(opts.rpcFetchImpl !== undefined ? { fetchImpl: opts.rpcFetchImpl } : {}),
+    });
+    if (atomic !== null) return atomic;
+    throw new CliError('RPC_ERROR', `Could not read the USDC balance from ${rpcUrl}.`, {
+      fix: 'Check your network, or set a working RPC with `tenjin config set rpcUrl <url>`.',
+    });
+  };
+  return { address: desc.address, read };
+}
+
 export async function runBalance(
   ctx: CommandContext,
   opts: BalanceOptions = {},
 ): Promise<CommandResult> {
-  const provider = resolveWalletProvider(ctx, opts);
-  const desc = await describeWallet(provider);
+  const { address, read } = await balanceReader(ctx, opts);
   const settings = await resolveContextSettings(ctx);
-  const rpcUrl = settings.rpcUrl;
 
-  const read = async (): Promise<bigint> => {
-    try {
-      return await getUsdcBalance(desc.address, rpcUrl);
-    } catch (err) {
-      throw new CliError('RPC_ERROR', `Could not read the USDC balance from ${rpcUrl}.`, {
-        fix: 'Check your network, or set a working RPC with `tenjin config set rpcUrl <url>`.',
-        cause: err,
-      });
-    }
-  };
-
-  if (opts.wait === true) return waitForFunds(ctx, desc.address, read, opts);
+  if (opts.wait === true) return waitForFunds(ctx, address, read, opts);
 
   const atomic = await read();
 
   const balance = toMoney(atomic.toString());
   // The routing balance is a local estimate, separate from on-chain funds.
-  const creditAtomic = await channelCredit(ctx.dataDir, desc.address).catch(() => 0n);
+  const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
   const credit = toMoney(creditAtomic.toString());
-  const modelCreditAtomic = await channelCredit(ctx.dataDir, desc.address, 'model').catch(() => 0n);
+  const modelCreditAtomic = await channelCredit(ctx.dataDir, address, 'model').catch(() => 0n);
   const policy = settings.policy;
-  const low = atomic < policy.maxAutoSpendAtomic;
+  const low = lowBalance(atomic, policy);
   const label = (text: string) => `  ${text.padEnd(LABEL_WIDTH)}`;
   return {
     data: {
-      address: desc.address,
+      address,
       balance,
       routingCredit: credit,
       modelCredit: toMoney(modelCreditAtomic.toString()),

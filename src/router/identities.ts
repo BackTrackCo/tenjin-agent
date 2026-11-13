@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import type { CommandContext } from '../context';
 import { parseIdentities, requestIdentities, type IdentitiesResponse } from './decision';
-import { BUILT_IN_SOURCE, type Target, type TargetKind } from './settings-wire';
+import { closestNames, normalised } from '../lib/name-match';
+import { BUILT_IN_SOURCE, TARGET_KINDS, type Target, type TargetKind } from './settings-wire';
 import { readJsonFile, writePrivate } from './store-files';
 
 /**
@@ -110,35 +111,54 @@ export const folded = (text: string): string => text.trim().toLowerCase();
 export type Resolved =
   | { status: 'match'; target: Target; label: string }
   | { status: 'ambiguous'; candidates: Named[] }
-  | { status: 'unknown'; candidates: Named[] };
+  | {
+      status: 'unknown';
+      /** The closest names of the same kind, closest first. */
+      candidates: Named[];
+      /** The same name under another kind: "images" is a category. */
+      elsewhere: Target[];
+    };
 
 /** At most this many names come back as candidates. */
 const MAX_CANDIDATES = 8;
 
+/** The entries a test names, one per id. */
+function uniqueWhere(entries: readonly Named[], test: (text: string) => boolean): Named[] {
+  const found = entries.filter(({ id, label }) => test(id) || test(label));
+  return [...new Map(found.map((entry) => [entry.id, entry])).values()];
+}
+
 /**
  * A TYPED NAME, RESOLVED OR NOT: the exact id first; then an id or label equal
- * to it ignoring case, which must be unique. Two that match are ambiguous and
- * one that matches nothing is unknown: both come back with candidates and
- * nothing is written. No fuzzy match ever writes a rule.
+ * to it ignoring case, then one equal once spaces, hyphens and punctuation
+ * are set aside ("fire crawl" is firecrawl); either must be unique. Two that
+ * match are ambiguous and one that matches nothing is unknown: both come
+ * back with candidates and nothing is written. An unknown name comes back
+ * with the closest names of its kind and any other kind it names exactly.
+ * No near match ever writes a rule.
  */
 export function resolveName(identities: Identities, kind: TargetKind, name: string): Resolved {
   const entries = entriesOf(identities, kind);
   const exact = entries.find(({ id }) => id === name);
   if (exact !== undefined) return matched(kind, exact);
   const wanted = folded(name);
-  const same = entries.filter(({ id, label }) => folded(id) === wanted || folded(label) === wanted);
-  const unique = [...new Map(same.map((entry) => [entry.id, entry])).values()];
-  if (unique.length === 1) return matched(kind, unique[0]!);
-  if (unique.length > 1)
-    return { status: 'ambiguous', candidates: unique.slice(0, MAX_CANDIDATES) };
-  const near = entries.filter(
-    ({ id, label }) =>
-      wanted.length > 0 &&
-      (folded(id).includes(wanted) ||
-        folded(label).includes(wanted) ||
-        wanted.includes(folded(label))),
-  );
-  return { status: 'unknown', candidates: near.slice(0, MAX_CANDIDATES) };
+  const typed = normalised(name);
+  for (const same of [
+    uniqueWhere(entries, (text) => folded(text) === wanted),
+    uniqueWhere(entries, (text) => typed.length > 0 && normalised(text) === typed),
+  ]) {
+    if (same.length === 1) return matched(kind, same[0]!);
+    if (same.length > 1) return { status: 'ambiguous', candidates: same.slice(0, MAX_CANDIDATES) };
+  }
+  return {
+    status: 'unknown',
+    candidates: closestNames(entries, name),
+    elsewhere: TARGET_KINDS.flatMap((other) => {
+      if (other === kind || typed.length === 0) return [];
+      const same = uniqueWhere(entriesOf(identities, other), (text) => normalised(text) === typed);
+      return same.length === 1 ? [{ kind: other, id: same[0]!.id }] : [];
+    }),
+  };
 }
 
 function matched(kind: TargetKind, entry: Named): Resolved {
@@ -188,4 +208,26 @@ export function servicesNaming(target: Target, identities: Identities | undefine
 export function isListed(target: Target, identities: Identities | undefined): boolean | undefined {
   if (identities === undefined) return undefined;
   return entriesOf(identities, target.kind).some(({ id }) => id === target.id);
+}
+
+/** The services Tenjin maps on a connected account, in the identities read:
+ *  `<account>.<key>`, sold by the account. */
+export function accountServices(
+  id: string,
+  identities: Identities | undefined,
+): Identities['services'] {
+  return (identities?.services ?? []).filter(
+    (service) => service.seller === id && service.id.startsWith(`${id}.`),
+  );
+}
+
+/** The jobs Tenjin maps on a connected account, by their task's label
+ *  ({@link accountServices}). Display only: the server decides what runs
+ *  where. */
+export function accountJobs(id: string, identities: Identities | undefined): string[] {
+  const tasks = new Map((identities?.tasks ?? []).map((task) => [task.id, task.label]));
+  const jobs = accountServices(id, identities).flatMap(({ task }) =>
+    task !== undefined ? [tasks.get(task) ?? task] : [],
+  );
+  return [...new Set(jobs)].map((job) => job.charAt(0).toLowerCase() + job.slice(1));
 }

@@ -51,6 +51,7 @@ export const SETTINGS_LIMITS = {
   only: 32,
   prefer: 64,
   targets: 16,
+  sources: 16,
 } as const;
 
 /** The hash the CLI computes and the server echoes, never recomputes. */
@@ -237,7 +238,7 @@ export const ReplacementProvidersSchema = z
  * order: the one form the hash is taken over. An undefined value is left out,
  * as `JSON.stringify` leaves it out.
  */
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
@@ -263,7 +264,7 @@ export function settingsHash(fields: Omit<WireSettings, 'hash'>): string {
  * collection is allowed and means no rules (a reset can leave one); an empty
  * target list is not. Every check beyond shape is {@link policyProblems}.
  */
-const SavedPolicyShapeSchema = z.strictObject({
+export const SavedPolicyShapeSchema = z.strictObject({
   version: z.number().int(),
   block: z.array(TargetSchema).max(SETTINGS_LIMITS.block).optional(),
   only: z.array(OnlyRuleSchema).max(SETTINGS_LIMITS.only).optional(),

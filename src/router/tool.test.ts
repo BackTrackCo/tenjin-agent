@@ -1041,6 +1041,7 @@ describe('a discovered service', () => {
         'note',
         'tolerant',
         'settings',
+        'mcp',
       ],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -2075,6 +2076,7 @@ describe('an offer with a request spec', () => {
         'note',
         'tolerant',
         'settings',
+        'mcp',
       ],
       harness: 'claude',
       settings: NO_RULES,
@@ -2173,6 +2175,7 @@ describe('an offer with a request spec', () => {
         'note',
         'tolerant',
         'settings',
+        'mcp',
       ],
       harness: 'claude',
       settings: NO_RULES,
@@ -2551,6 +2554,7 @@ describe('the tool list, read for free', () => {
     'note',
     'tolerant',
     'settings',
+    'mcp',
   ];
   /** A paid routing path that must never be asked. */
   const route = vi.fn((): never => {

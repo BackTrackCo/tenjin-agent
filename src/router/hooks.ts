@@ -18,16 +18,20 @@ import {
   type PendingCall,
   type Sealed,
 } from './context';
-import { storeChoices, storeLabel, storeSpecs } from './specs';
+import { storeAccountOffer, storeChoices, storeLabel, storeSpecs } from './specs';
 import {
+  isAccountSpec,
   requestDecision,
   REQUIRES_UNMET,
   ROUTE_PAID_PATH,
+  type AccountOfferSpec,
+  type AnyOfferSpec,
   type Bound,
   type HookDecision,
   type HookResponse,
   type OfferSpec,
 } from './decision';
+import { accountLacks } from './accounts/presence';
 import { keepDecided, takeDecided, type Decided } from './decided';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
@@ -739,7 +743,18 @@ async function vetOffer<T extends OfferDecision>(
   deadline: number,
   canAskUser: boolean,
 ): Promise<{ offer: T; withheld?: undefined } | { withheld: string }> {
-  const shortfall = await spendShortfall(termsOf(offer), deps, deadline);
+  // THE USER'S OWN PLAN PAYS an account's call: nothing for the spend policy
+  // or the wallet to check, and it is offered alone. One whose call this
+  // account was found to lack when it was connected is left out, rather than
+  // leading its task and failing when called: the hook stays silent.
+  const lead = accountLeadOf(offer);
+  if (lead !== undefined) {
+    if (await accountLacks(deps.dataDir, lead)) return { withheld: 'account lacks this job' };
+    return { offer };
+  }
+  const terms = termsOf(offer);
+  if (terms.endpoint === undefined) return { withheld: 'no endpoint to pay' };
+  const shortfall = await spendShortfall({ ...terms, endpoint: terms.endpoint }, deps, deadline);
   if (shortfall === null) {
     const note = await overCapNote(offer, deps, canAskUser);
     return { offer: note === null ? offer : { ...offer, hint: `${offer.hint} ${note}` } };
@@ -758,7 +773,7 @@ async function vetOffer<T extends OfferDecision>(
 function listedPrices(offer: OfferDecision): bigint[] {
   return (offer.specs ?? [])
     .filter((spec) => spec.id !== offer.id)
-    .map((spec) => BigInt(spec.priceAtomic));
+    .flatMap((spec) => (isAccountSpec(spec) ? [] : [BigInt(spec.priceAtomic)]));
 }
 
 /** A listed price as a line quotes one: dollars with at least two decimals. */
@@ -960,10 +975,12 @@ export interface ShortfallHookOutcome extends NativeHookOutcome {
 type ExecuteDecision = Extract<HookDecision, { action: 'execute' }>;
 
 /**
- * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), or a
+ * AN ANSWER THAT OFFERS SOMETHING: a curated capability (`execute`), a
+ * service on the user's own account (an `execute` led by one), or a
  * pay-per-call service the server found for a step nothing curated serves
- * (`discovered`). Both carry an id and a finished line, and every hook shows
- * them in the same place, under the same spend and one-block rules.
+ * (`discovered`). Each carries an id and a finished line, and every hook
+ * shows them in the same place, under the same rules; only one the balance
+ * pays meets the spend check.
  */
 type OfferDecision = Extract<HookDecision, { action: 'execute' | 'discovered' }>;
 
@@ -971,11 +988,31 @@ function isOffer(decision: HookDecision | null): decision is OfferDecision {
   return decision?.action === 'execute' || decision?.action === 'discovered';
 }
 
-/** What the spend check and the footer read, for either kind of offer. */
+/**
+ * AN OFFER LED BY A SERVICE ON THE USER'S CONNECTED ACCOUNT (plan 37): no
+ * URL, nothing the balance pays, and Tenjin's own route for the job beside
+ * it, which a refusal offers. The server sends one only for an account this
+ * machine's settings name, alone, with `bound` when it can run in place of the
+ * native call it holds. Its lead's own spec, or undefined: an
+ * answer that parsed carries an account spec only as its lead
+ * (`checkExecute`), so this is the whole test.
+ */
+function accountLeadOf(decision: HookDecision | null): AccountOfferSpec | undefined {
+  if (decision?.action !== 'execute') return undefined;
+  const lead = (decision.specs ?? []).find(({ id }) => id === decision.id);
+  return lead !== undefined && isAccountSpec(lead) ? lead : undefined;
+}
+
+/** {@link accountLeadOf}, as a test that narrows the decision. */
+const isAccountOffer = (decision: HookDecision | null): decision is ExecuteDecision =>
+  accountLeadOf(decision) !== undefined;
+
+/** What the spend check and the footer read, for any kind of offer. An
+ *  account's has no URL, and costs the balance nothing. */
 function termsOf(offer: OfferDecision): {
   provider: string;
   providerPriceAtomic: string;
-  endpoint: string;
+  endpoint?: string;
 } {
   if (offer.action === 'execute') return offer;
   const { candidate } = offer;
@@ -989,7 +1026,7 @@ function termsOf(offer: OfferDecision): {
 /** A free curated offer: nothing to pay, so nothing for the spend policy or
  *  the wallet. A discovered service is never one: it is always a sale. */
 function isFree(offer: OfferDecision): offer is ExecuteDecision {
-  return offer.action === 'execute' && offer.providerPriceAtomic === '0';
+  return offer.action === 'execute' && offer.providerPriceAtomic === '0' && !isAccountOffer(offer);
 }
 
 /**
@@ -1180,8 +1217,9 @@ export type SwapDecision =
       offer: OfferDecision;
       /** The offer id and complete input the router built, run unchanged. */
       bound: Bound;
-      /** The spec `bound` fills, as the hook keeps it. */
-      spec: OfferSpec;
+      /** The spec `bound` fills, as the hook keeps it: a paid one, or a
+       *  service on the user's connected account. */
+      spec: AnyOfferSpec;
       tool: 'WebSearch' | 'WebFetch';
       /**
        * Claims every search or URL of the call for the main agent, as a
@@ -1427,7 +1465,8 @@ function offeredTerms(offer: OfferDecision): OfferedTerms {
   return {
     offerId: offer.id,
     ...(label !== undefined ? { label } : {}),
-    priceAtomic: termsOf(offer).providerPriceAtomic,
+    // An account's call costs the balance nothing: no price to show.
+    ...(isAccountOffer(offer) ? {} : { priceAtomic: termsOf(offer).providerPriceAtomic }),
   };
 }
 
@@ -1803,7 +1842,17 @@ async function openFooter(
         // choice set is what `request({id, choice})` picks from.
         // Each with the settings hash its answer echoed: what the check before
         // every call holds the offer to.
-        await storeSpecs(deps.dataDir, decision.specs, settingsHash);
+        const lead = accountLeadOf(decision);
+        if (lead !== undefined) {
+          await storeAccountOffer(deps.dataDir, lead, settingsHash);
+        } else {
+          const specs: readonly AnyOfferSpec[] = decision.specs ?? [];
+          await storeSpecs(
+            deps.dataDir,
+            specs.filter((spec): spec is OfferSpec => !isAccountSpec(spec)),
+            settingsHash,
+          );
+        }
         // A free lookup has no spec to name its row: its label is kept instead.
         if (isFree(decision) && decision.label !== undefined) {
           await storeLabel(deps.dataDir, decision.id, decision.label);
@@ -1857,6 +1906,7 @@ async function sweepUntaken(
  *  routing fee that was not paid (`wallet_low`, `no_payer` and the rest) is
  *  named as such, never passed off as the router choosing native tools. */
 export function hookOutcome(decision: HookDecision | null, unpaid?: string): string {
+  if (isAccountOffer(decision)) return `account lookup offered (${decision.provider})`;
   if (isOffer(decision)) return `paid lookup offered (${termsOf(decision).provider})`;
   if (unpaid !== undefined && (decision === null || decision.action === 'native')) {
     // `fee unpaid: <reason>` fits the record's 40 characters for every reason.

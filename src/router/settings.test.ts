@@ -60,6 +60,7 @@ describe('routerSettings', () => {
           hash: DEFAULT_HASH,
         },
       },
+      accounts: { saved: [], connected: [] },
     });
   });
 

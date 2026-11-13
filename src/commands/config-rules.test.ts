@@ -207,7 +207,7 @@ describe('tenjin config prefer', () => {
       runConfigPrefer({ task: ['web research'], provider: ['ex'] }, ctx(), online()),
     );
     expect(unknown.message).toContain('Tenjin has no provider named "ex"');
-    expect(unknown.fix).toContain('Exa');
+    expect(unknown.fix).toContain('Did you mean: exa');
     expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
   });
 
@@ -244,6 +244,72 @@ describe('tenjin config prefer', () => {
   });
 });
 
+/**
+ * A NAME TYPED NEARLY RIGHT (`config block --provider "fire crawl"`, `--task
+ * "web search"`, `--task images`): before this, only an exact or same-case
+ * name resolved and only a name holding the typed text was suggested, so
+ * each of these failed with no way forward. A name that is the same once
+ * spacing and punctuation are set aside resolves; any other unknown name
+ * still writes nothing, and its fix says what to type.
+ */
+describe('a name typed nearly right', () => {
+  const unchanged = async (run: Promise<unknown>): Promise<CliError> => {
+    const before = await readFile(join(dir, 'config.json'), 'utf8');
+    const err = await refused(run);
+    expect(err.code).toBe('USAGE');
+    expect(await readFile(join(dir, 'config.json'), 'utf8')).toBe(before);
+    return err;
+  };
+
+  it('resolves one typed with other spaces, hyphens or case, and unblocks it the same way offline', async () => {
+    await runConfigBlock(
+      { provider: ['Coin Market-Cap'], task: ['WEB-research'] },
+      ctx(),
+      online(),
+    );
+    expect((await saved()).policy).toEqual({
+      version: 1,
+      block: [
+        { kind: 'task', id: 'web research' },
+        { kind: 'provider', id: 'coinmarketcap' },
+      ],
+    });
+    await runConfigUnblock({ provider: ['coin market cap'] }, ctx(), offline);
+    expect((await saved()).policy).toEqual({
+      version: 1,
+      block: [{ kind: 'task', id: 'web research' }],
+    });
+  });
+
+  it('suggests the closest names of its kind, and ends with where every name is', async () => {
+    const err = await unchanged(runConfigBlock({ task: ['web search'] }, ctx(), online()));
+    expect(err.message).toBe('Tenjin has no task named "web search". Nothing was saved.');
+    expect(err.fix).toBe(
+      'Did you mean: web research? See every name: tenjin config names "web search"',
+    );
+    expect(err.details).toMatchObject({ names: 'tenjin config names "web search"' });
+    const nothing = await unchanged(runConfigBlock({ provider: ['zzzq'] }, ctx(), online()));
+    expect(nothing.fix).toBe('See every name: tenjin config names zzzq');
+  });
+
+  it('names the kind a name belongs to, with a flag the operation takes', async () => {
+    const category = await unchanged(runConfigBlock({ task: ['images'] }, ctx(), online()));
+    expect(category.fix).toBe(
+      'images is a category: use --category images. See every name: tenjin config names images',
+    );
+    const account = await unchanged(
+      runConfigPrefer({ task: ['web research'], provider: ['tenjin'] }, ctx(), online()),
+    );
+    expect(account.fix).toContain('tenjin is an account: use --source tenjin.');
+    // A preference takes no seller, so a seller's name gets no --seller hint.
+    const seller = await unchanged(
+      runConfigPrefer({ task: ['web research'], provider: ['stableenrich'] }, ctx(), online()),
+    );
+    expect(seller.fix).not.toContain('--seller');
+    expect(seller.fix).toMatch(/See every name: tenjin config names stableenrich$/);
+  });
+});
+
 describe('tenjin config only', () => {
   it('limits which tasks Tenjin does anywhere, and names what that covers', async () => {
     const result = await runConfigOnly({ global: true, category: ['Images'] }, ctx(), online());
@@ -277,10 +343,10 @@ describe('tenjin config only', () => {
     );
   });
 
-  it('has no only for accounts', async () => {
+  it('has no only for accounts: that is a preference', async () => {
     const err = await refused(runConfigOnly({ global: true, source: ['fal'] }, ctx(), online()));
+    expect(err.message).toContain('`tenjin config prefer --category <X> --source <account>`');
     expect(err.message).toContain('`tenjin config block --source tenjin`');
-    expect(err.message).not.toContain('--source <account>');
     expect(fetched).toBe(0);
   });
 });
@@ -308,6 +374,17 @@ describe('tenjin config block and unblock', () => {
     );
     expect(said).toContain('This leaves a saved rule unusable, kept as it is');
     expect(said).toContain('inactive: Exa is blocked');
+    // At a terminal: what changed, what it means, the undo, and the rule it
+    // left inactive; the sentences above stay in --json.
+    expect(result.humanLines).toEqual([
+      '✓ Blocked Exa',
+      "  Tenjin won't offer its 3 tools on its own. You can still ask for one by name.",
+      '  Undo: tenjin config unblock --provider exa',
+      '! This makes a saved rule inactive: Exa first for web research',
+    ]);
+    // Nothing changed: one line, and nothing to undo.
+    const again = await runConfigBlock({ provider: ['exa'] }, ctx(), online());
+    expect(again.humanLines).toEqual(['Exa was already blocked.']);
   });
 
   it('unblocks by name with no network, and removes nothing else', async () => {
@@ -422,7 +499,9 @@ describe('tenjin config speed and replacement', () => {
     );
     // `tenjin config` repeats it from the copy last read, offline.
     const shown = (await runConfigList(ctx())).humanLines ?? [];
-    expect(shown.join('\n')).toContain('No kinds of job are marked faster yet');
+    expect(shown).toContainEqual(
+      expect.stringMatching(/^ {2}» +Speed +on, but no jobs are marked faster yet$/),
+    );
   });
 
   it('writes the mode and its provider scope in one write, and widens by removing the scope', async () => {
@@ -480,8 +559,11 @@ describe('tenjin config speed and replacement', () => {
         router: { nativeReplacement: 'when-routed', nativeReplacementProviders: [] },
       }),
     );
-    const shown = String((await runConfigList(ctx())).humanLines?.join('\n'));
-    expect(shown).toContain('Run `tenjin config replacement off` to clear it.');
+    const shown = (await runConfigList(ctx())).humanLines ?? [];
+    expect(shown).toContainEqual(
+      expect.stringMatching(/Automatic picks +off: its saved value can't be read$/),
+    );
+    expect(shown).toContain('      fix: tenjin config replacement off');
     await runConfigReplacement({ state: 'off' }, ctx(), offline);
     expect(await saved()).toEqual({ nativeReplacement: 'off' });
     expect((await personalSettingsAt(dir)).nativeReplacement).toEqual({ mode: 'off' });
@@ -511,13 +593,16 @@ describe('tenjin config, shown', () => {
     await runConfigBlock({ source: ['tenjin'] }, ctx(), online());
     const shown = await runConfigList(ctx());
     const all = shown.humanLines ?? [];
-    // The readback, with the commands that undo each rule left out.
+    expect(all).toContainEqual(
+      expect.stringMatching(/^ {2}✕ +Tenjin's own tools +not offered on its own$/),
+    );
+    expect(all).toContainEqual(expect.stringMatching(/^ {2}↑ +Exa +first for web research$/));
+    expect(all).toContain('      undo: tenjin config unblock --source tenjin');
+    // The words, with the commands that undo each rule left out.
     const lines = all
-      .slice(all.indexOf('Your settings (saved on this machine, not synced):'))
+      .filter((line) => !/^\s+undo: /.test(line))
       .join('\n')
-      .replace(/`[^`]*`/g, '');
-    expect(lines).toContain('Prefer Exa when Tenjin handles Web research.');
-    expect(lines).toContain("Tenjin won't offer its own tools on its own");
+      .replace(/tenjin config[^\n]*/g, '');
     expect(lines).not.toMatch(/\bsource\b|x402|USDC|wallet|Jev|sha256/);
     const settings = (
       shown.data as { settings: { rules: { rule: unknown }[]; settingsHash: string } }

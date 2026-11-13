@@ -1,0 +1,818 @@
+{
+  "schemaVersion": 1,
+  "routerVersion": "2026-11-04.2",
+  "honored": ["settings"],
+  "categories": [
+    {
+      "id": "lookups",
+      "label": "Everyday lookups",
+      "tasks": [
+        "web research",
+        "read an exact page",
+        "crypto price quote",
+        "company profile by domain",
+        "company match by name or social URL",
+        "email verification",
+        "person enrichment",
+        "computation",
+        "library or API documentation",
+        "x post search",
+        "reddit post search"
+      ]
+    },
+    {
+      "id": "images",
+      "label": "Images",
+      "tasks": [
+        "image with exact text",
+        "image edit",
+        "general image",
+        "photoreal image",
+        "illustration"
+      ]
+    },
+    {
+      "id": "voice-and-sound",
+      "label": "Voice and sound",
+      "tasks": ["voiceover", "sound effect", "music", "audio transcription"]
+    },
+    {
+      "id": "video",
+      "label": "Video clips",
+      "tasks": ["video clip"]
+    },
+    {
+      "id": "research",
+      "label": "Research",
+      "tasks": ["academic papers"]
+    },
+    {
+      "id": "people-and-companies",
+      "label": "People and companies",
+      "tasks": ["people search"]
+    },
+    {
+      "id": "financial-data",
+      "label": "Financial data",
+      "tasks": ["sec filings"]
+    },
+    {
+      "id": "jobs",
+      "label": "Jobs",
+      "tasks": ["jobs"]
+    },
+    {
+      "id": "social-and-local",
+      "label": "Social and local",
+      "tasks": ["local business search", "instagram accounts and posts"]
+    },
+    {
+      "id": "files-and-pages",
+      "label": "Files and pages",
+      "tasks": ["pdf to markdown", "send email"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "web research",
+      "label": "Web research",
+      "category": "lookups"
+    },
+    {
+      "id": "read an exact page",
+      "label": "Read an exact page",
+      "category": "lookups"
+    },
+    {
+      "id": "crypto price quote",
+      "label": "Crypto price quote",
+      "category": "lookups"
+    },
+    {
+      "id": "company profile by domain",
+      "label": "Company profile by domain",
+      "category": "lookups"
+    },
+    {
+      "id": "company match by name or social URL",
+      "label": "Company match by name or social URL",
+      "category": "lookups"
+    },
+    {
+      "id": "email verification",
+      "label": "Email verification",
+      "category": "lookups"
+    },
+    {
+      "id": "person enrichment",
+      "label": "Person enrichment",
+      "category": "lookups"
+    },
+    {
+      "id": "computation",
+      "label": "Computation",
+      "category": "lookups"
+    },
+    {
+      "id": "library or API documentation",
+      "label": "Library or API documentation",
+      "category": "lookups"
+    },
+    {
+      "id": "x post search",
+      "label": "X post search",
+      "category": "lookups"
+    },
+    {
+      "id": "reddit post search",
+      "label": "Reddit post search",
+      "category": "lookups"
+    },
+    {
+      "id": "image with exact text",
+      "label": "Image with exact text",
+      "category": "images"
+    },
+    {
+      "id": "image edit",
+      "label": "Image edit",
+      "category": "images"
+    },
+    {
+      "id": "general image",
+      "label": "General image",
+      "category": "images"
+    },
+    {
+      "id": "photoreal image",
+      "label": "Photoreal image",
+      "category": "images"
+    },
+    {
+      "id": "illustration",
+      "label": "Illustration",
+      "category": "images"
+    },
+    {
+      "id": "video clip",
+      "label": "Video clip",
+      "category": "video"
+    },
+    {
+      "id": "voiceover",
+      "label": "Voiceover",
+      "category": "voice-and-sound"
+    },
+    {
+      "id": "sound effect",
+      "label": "Sound effect",
+      "category": "voice-and-sound"
+    },
+    {
+      "id": "music",
+      "label": "Music",
+      "category": "voice-and-sound"
+    },
+    {
+      "id": "audio transcription",
+      "label": "Audio transcription",
+      "category": "voice-and-sound"
+    },
+    {
+      "id": "academic papers",
+      "label": "Academic papers",
+      "category": "research"
+    },
+    {
+      "id": "people search",
+      "label": "People search",
+      "category": "people-and-companies"
+    },
+    {
+      "id": "sec filings",
+      "label": "Sec filings",
+      "category": "financial-data",
+      "speed": true
+    },
+    {
+      "id": "jobs",
+      "label": "Jobs",
+      "category": "jobs"
+    },
+    {
+      "id": "local business search",
+      "label": "Local business search",
+      "category": "social-and-local"
+    },
+    {
+      "id": "instagram accounts and posts",
+      "label": "Instagram accounts and posts",
+      "category": "social-and-local"
+    },
+    {
+      "id": "pdf to markdown",
+      "label": "Pdf to markdown",
+      "category": "files-and-pages"
+    },
+    {
+      "id": "send email",
+      "label": "Send email",
+      "category": "files-and-pages"
+    }
+  ],
+  "providers": [
+    {
+      "id": "agent402",
+      "label": "agent402"
+    },
+    {
+      "id": "apify",
+      "label": "Apify"
+    },
+    {
+      "id": "apollo",
+      "label": "Apollo"
+    },
+    {
+      "id": "black-forest-labs",
+      "label": "Black Forest Labs"
+    },
+    {
+      "id": "clearcut",
+      "label": "clearcut"
+    },
+    {
+      "id": "coinmarketcap",
+      "label": "CoinMarketCap"
+    },
+    {
+      "id": "companyenrich",
+      "label": "CompanyEnrich"
+    },
+    {
+      "id": "context7",
+      "label": "Context7"
+    },
+    {
+      "id": "elevenlabs",
+      "label": "ElevenLabs"
+    },
+    {
+      "id": "exa",
+      "label": "Exa"
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl"
+    },
+    {
+      "id": "glim",
+      "label": "glim"
+    },
+    {
+      "id": "google",
+      "label": "Google"
+    },
+    {
+      "id": "hunter",
+      "label": "Hunter"
+    },
+    {
+      "id": "icypeas",
+      "label": "Icypeas"
+    },
+    {
+      "id": "kadec0",
+      "label": "kadec0"
+    },
+    {
+      "id": "meta",
+      "label": "Meta"
+    },
+    {
+      "id": "minimax",
+      "label": "MiniMax"
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI"
+    },
+    {
+      "id": "openweb-ninja",
+      "label": "OpenWeb Ninja"
+    },
+    {
+      "id": "recraft",
+      "label": "Recraft"
+    },
+    {
+      "id": "scrape-creators",
+      "label": "Scrape Creators"
+    },
+    {
+      "id": "sec-edgar",
+      "label": "SEC EDGAR"
+    },
+    {
+      "id": "stableemail",
+      "label": "StableEmail"
+    },
+    {
+      "id": "venice",
+      "label": "Venice"
+    },
+    {
+      "id": "wolfram-alpha",
+      "label": "Wolfram Alpha"
+    }
+  ],
+  "sellers": [
+    {
+      "id": "agent402",
+      "label": "agent402"
+    },
+    {
+      "id": "aispace",
+      "label": "AiSpace"
+    },
+    {
+      "id": "apify",
+      "label": "Apify"
+    },
+    {
+      "id": "apitoll",
+      "label": "apitoll"
+    },
+    {
+      "id": "blockrun",
+      "label": "BlockRun"
+    },
+    {
+      "id": "clearcut",
+      "label": "clearcut"
+    },
+    {
+      "id": "coinmarketcap",
+      "label": "CoinMarketCap"
+    },
+    {
+      "id": "exa",
+      "label": "Exa"
+    },
+    {
+      "id": "fal",
+      "label": "fal"
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl"
+    },
+    {
+      "id": "glim",
+      "label": "glim"
+    },
+    {
+      "id": "gondola",
+      "label": "Gondola"
+    },
+    {
+      "id": "kadec0",
+      "label": "kadec0"
+    },
+    {
+      "id": "locus",
+      "label": "Locus"
+    },
+    {
+      "id": "munition",
+      "label": "Munition"
+    },
+    {
+      "id": "openweb-ninja",
+      "label": "OpenWeb Ninja"
+    },
+    {
+      "id": "orthogonal",
+      "label": "Orthogonal"
+    },
+    {
+      "id": "sponge",
+      "label": "Sponge"
+    },
+    {
+      "id": "stableemail",
+      "label": "StableEmail"
+    },
+    {
+      "id": "stableenrich",
+      "label": "StableEnrich"
+    },
+    {
+      "id": "tenjin",
+      "label": "Tenjin"
+    },
+    {
+      "id": "treza",
+      "label": "Treza"
+    },
+    {
+      "id": "x402atlas",
+      "label": "x402atlas"
+    }
+  ],
+  "services": [
+    {
+      "id": "exa-search",
+      "label": "Exa search",
+      "task": "web research",
+      "providers": ["exa"],
+      "seller": "exa"
+    },
+    {
+      "id": "stableenrich-exa-answer",
+      "label": "Exa Answer",
+      "task": "web research",
+      "providers": ["exa"],
+      "seller": "stableenrich"
+    },
+    {
+      "id": "munition-scrape",
+      "label": "Firecrawl page read",
+      "task": "read an exact page",
+      "providers": ["firecrawl"],
+      "seller": "munition"
+    },
+    {
+      "id": "exa-contents",
+      "label": "Exa page read",
+      "task": "read an exact page",
+      "providers": ["exa"],
+      "seller": "exa"
+    },
+    {
+      "id": "glim-twitter-get",
+      "label": "X post or profile read",
+      "task": "read an exact page",
+      "providers": ["glim"],
+      "seller": "glim"
+    },
+    {
+      "id": "glim-reddit-get",
+      "label": "Reddit thread read",
+      "task": "read an exact page",
+      "providers": ["glim"],
+      "seller": "glim"
+    },
+    {
+      "id": "cmc-quotes",
+      "label": "CoinMarketCap quotes",
+      "task": "crypto price quote",
+      "providers": ["coinmarketcap"],
+      "seller": "coinmarketcap"
+    },
+    {
+      "id": "companyenrich-domain",
+      "label": "CompanyEnrich profile",
+      "task": "company profile by domain",
+      "providers": ["companyenrich"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "apollo-org",
+      "label": "Apollo company profile",
+      "task": "company profile by domain",
+      "providers": ["apollo"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "apollo-org-bulk",
+      "label": "Apollo company profiles",
+      "task": "company profile by domain",
+      "providers": ["apollo"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "companyenrich-properties",
+      "label": "CompanyEnrich match",
+      "task": "company match by name or social URL",
+      "providers": ["companyenrich"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "hunter-email-verify",
+      "label": "Hunter email check",
+      "task": "email verification",
+      "providers": ["hunter"],
+      "seller": "locus"
+    },
+    {
+      "id": "apollo-person",
+      "label": "Apollo person lookup",
+      "task": "person enrichment",
+      "providers": ["apollo"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "wolfram-compute",
+      "label": "Wolfram Alpha",
+      "task": "computation",
+      "providers": ["wolfram-alpha"],
+      "seller": "sponge"
+    },
+    {
+      "id": "context7-docs",
+      "label": "Context7 docs",
+      "task": "library or API documentation",
+      "providers": ["context7"],
+      "seller": "tenjin"
+    },
+    {
+      "id": "glim-x-search",
+      "label": "X search",
+      "task": "x post search",
+      "providers": ["glim"],
+      "seller": "glim"
+    },
+    {
+      "id": "glim-reddit-search",
+      "label": "Reddit search",
+      "task": "reddit post search",
+      "providers": ["glim"],
+      "seller": "glim"
+    },
+    {
+      "id": "gondola-gpt-image-2.5-sunburst-text",
+      "label": "GPT Image 2.5 Sunburst text",
+      "task": "image with exact text",
+      "providers": ["openai"],
+      "seller": "gondola"
+    },
+    {
+      "id": "clearcut-remove-bg",
+      "label": "Background removal",
+      "task": "image edit",
+      "providers": ["clearcut"],
+      "seller": "clearcut"
+    },
+    {
+      "id": "gondola-gpt-image-2.5-sunburst",
+      "label": "OpenAI GPT Image 2.5 Sunburst",
+      "task": "general image",
+      "providers": ["openai"],
+      "seller": "gondola"
+    },
+    {
+      "id": "aispace-gpt-image-2.5-sunburst",
+      "label": "OpenAI GPT Image 2.5 Sunburst",
+      "task": "general image",
+      "providers": ["openai", "venice"],
+      "seller": "aispace"
+    },
+    {
+      "id": "aispace-muse-image",
+      "label": "Meta Muse Image",
+      "task": "general image",
+      "providers": ["meta", "venice"],
+      "seller": "aispace"
+    },
+    {
+      "id": "aispace-nano-banana-2.1",
+      "label": "Google Nano Banana 2.1",
+      "task": "photoreal image",
+      "providers": ["google", "venice"],
+      "seller": "aispace"
+    },
+    {
+      "id": "treza-image-recraft-v4.1",
+      "label": "Recraft V4.1",
+      "task": "illustration",
+      "providers": ["recraft"],
+      "seller": "treza"
+    },
+    {
+      "id": "aispace-hailuo-3-max",
+      "label": "MiniMax Hailuo 3 Max",
+      "task": "video clip",
+      "providers": ["minimax", "venice"],
+      "seller": "aispace"
+    },
+    {
+      "id": "aispace-hailuo-3-max-i2v",
+      "label": "Hailuo 3 Max image to video",
+      "task": "video clip",
+      "providers": ["minimax", "venice"],
+      "seller": "aispace"
+    },
+    {
+      "id": "treza-video-minimax-h3",
+      "label": "MiniMax Hailuo 3",
+      "task": "video clip",
+      "providers": ["minimax"],
+      "seller": "treza"
+    },
+    {
+      "id": "treza-video-veo-3.1-lite",
+      "label": "Google Veo 3.1 Lite",
+      "task": "video clip",
+      "providers": ["google"],
+      "seller": "treza"
+    },
+    {
+      "id": "agent402-tts",
+      "label": "ElevenLabs v4 Turbo",
+      "task": "voiceover",
+      "providers": ["elevenlabs"],
+      "seller": "agent402"
+    },
+    {
+      "id": "blockrun-sound-effects",
+      "label": "ElevenLabs Sound Effects",
+      "task": "sound effect",
+      "providers": ["elevenlabs"],
+      "seller": "blockrun"
+    },
+    {
+      "id": "treza-music",
+      "label": "Google Lyria 3",
+      "task": "music",
+      "providers": ["google"],
+      "seller": "treza"
+    },
+    {
+      "id": "agent402-transcribe",
+      "label": "ElevenLabs Scribe v2",
+      "task": "audio transcription",
+      "providers": ["elevenlabs"],
+      "seller": "agent402"
+    },
+    {
+      "id": "kadec0-paper-fulltext",
+      "label": "Open-access full text",
+      "task": "academic papers",
+      "providers": ["kadec0"],
+      "seller": "kadec0"
+    },
+    {
+      "id": "icypeas-find-people",
+      "label": "Icypeas lead database",
+      "task": "people search",
+      "providers": ["icypeas"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "edgar-apitoll-filings",
+      "label": "SEC EDGAR",
+      "task": "sec filings",
+      "providers": ["sec-edgar"],
+      "seller": "apitoll"
+    },
+    {
+      "id": "agent402-edgar-search",
+      "label": "SEC EDGAR full-text search",
+      "task": "sec filings",
+      "providers": ["sec-edgar"],
+      "seller": "agent402"
+    },
+    {
+      "id": "x402atlas-sec-financials",
+      "label": "SEC XBRL financials",
+      "task": "sec filings",
+      "providers": ["sec-edgar"],
+      "seller": "x402atlas"
+    },
+    {
+      "id": "openwebninja-jsearch",
+      "label": "JSearch job search",
+      "task": "jobs",
+      "providers": ["openweb-ninja"],
+      "seller": "openweb-ninja"
+    },
+    {
+      "id": "stableenrich-maps-text",
+      "label": "Google Maps Places",
+      "task": "local business search",
+      "providers": ["google"],
+      "seller": "stableenrich"
+    },
+    {
+      "id": "scrapecreators-instagram-profile",
+      "label": "Scrape Creators IG profile",
+      "task": "instagram accounts and posts",
+      "providers": ["scrape-creators"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "scrapecreators-instagram-posts",
+      "label": "Scrape Creators Instagram posts",
+      "task": "instagram accounts and posts",
+      "providers": ["scrape-creators"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "scrapecreators-instagram-post",
+      "label": "Scrape Creators Instagram post",
+      "task": "instagram accounts and posts",
+      "providers": ["scrape-creators"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "scrapecreators-instagram-transcript",
+      "label": "Scrape Creators IG transcript",
+      "task": "instagram accounts and posts",
+      "providers": ["scrape-creators"],
+      "seller": "orthogonal"
+    },
+    {
+      "id": "agent402-pdf-to-markdown",
+      "label": "PDF text layer",
+      "task": "pdf to markdown",
+      "providers": ["agent402"],
+      "seller": "agent402"
+    },
+    {
+      "id": "stableemail-send",
+      "label": "Email relay",
+      "task": "send email",
+      "providers": ["stableemail"],
+      "seller": "stableemail"
+    },
+    {
+      "id": "apify.google-maps-places",
+      "label": "Apify Google Maps",
+      "task": "local business search",
+      "providers": ["apify"],
+      "seller": "apify"
+    },
+    {
+      "id": "apify.web-search",
+      "label": "Apify web search",
+      "task": "web research",
+      "providers": ["apify"],
+      "seller": "apify"
+    },
+    {
+      "id": "fal.flux-pro-ultra",
+      "label": "fal FLUX1.1 Pro Ultra",
+      "task": "photoreal image",
+      "providers": ["black-forest-labs"],
+      "seller": "fal"
+    },
+    {
+      "id": "fal.gpt-image",
+      "label": "fal GPT Image 2.5",
+      "task": "general image",
+      "providers": ["openai"],
+      "seller": "fal"
+    },
+    {
+      "id": "fal.test-image-two",
+      "label": "fal second image model",
+      "task": "general image",
+      "providers": ["openai"],
+      "seller": "fal"
+    },
+    {
+      "id": "firecrawl.scrape",
+      "label": "Firecrawl scrape",
+      "task": "read an exact page",
+      "providers": ["firecrawl"],
+      "seller": "firecrawl"
+    }
+  ],
+  "sources": [
+    {
+      "id": "tenjin",
+      "label": "Tenjin's tools"
+    },
+    {
+      "id": "apify",
+      "label": "Apify",
+      "connectable": {
+        "mcpUrl": "https://mcp.apify.com",
+        "signIn": ["oauth", "key"],
+        "keyScheme": "Bearer",
+        "expectTools": ["call-actor", "get-actor-run", "get-dataset-items"]
+      }
+    },
+    {
+      "id": "fal",
+      "label": "fal",
+      "connectable": {
+        "mcpUrl": "https://mcp.fal.ai/mcp-relay",
+        "signIn": ["oauth", "key"],
+        "keyScheme": "Key",
+        "expectTools": ["run_model", "check_job", "get_job_result"]
+      }
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl",
+      "connectable": {
+        "mcpUrl": "https://mcp.firecrawl.dev/v2/mcp-oauth",
+        "signIn": ["oauth", "key"],
+        "keyScheme": "Bearer",
+        "expectTools": ["firecrawl_scrape"]
+      }
+    }
+  ]
+}

@@ -18,6 +18,13 @@ export interface CodexAppOptions {
   onServerRequest?: (method: string, params: unknown) => Promise<unknown>;
 }
 
+/** Originator names vary by host; the first product/version identifies the server. */
+export function codexAppServerVersion(userAgent: unknown): string | null {
+  return typeof userAgent === 'string'
+    ? (/^.+?\/([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)/.exec(userAgent)?.[1] ?? null)
+    : null;
+}
+
 /** One owned stdio connection. No generation is started by this helper. */
 export async function withAppServer<T>(
   home: string,
@@ -166,9 +173,7 @@ export async function withAppServer<T>(
     if (!isRecord(initialized)) return null;
     if (
       options.expectedVersion &&
-      (typeof initialized.userAgent !== 'string' ||
-        /^tenjin\/([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)/.exec(initialized.userAgent)?.[1] !==
-          options.expectedVersion)
+      codexAppServerVersion(initialized.userAgent) !== options.expectedVersion
     )
       return null;
     send({ method: 'initialized', params: {} });
