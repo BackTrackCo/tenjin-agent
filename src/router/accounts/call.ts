@@ -558,9 +558,11 @@ async function followUp(
     try {
       result = await connection.call(tool, args);
     } catch (err) {
-      if (err instanceof AccountRefusal) return { stop: running(err, { finished }) };
-      const providerError = said(err, SAID_CHARS);
-      return { stop: running(new AccountRefusal('unreachable'), { finished, providerError }) };
+      const stopped =
+        err instanceof AccountRefusal
+          ? err
+          : new AccountRefusal('unreachable', said(err, SAID_CHARS));
+      return { stop: running(stopped, { finished }) };
     }
     if (result.isError !== true) return { result };
     const text = errorText(result);
