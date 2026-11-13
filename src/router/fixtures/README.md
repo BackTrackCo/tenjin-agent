@@ -171,9 +171,59 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
   `requires_unmet` and the missing tokens in `missing`. A spec it cannot run
   that the line does not name is only dropped. This
   client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`,
-  `tolerant` and `bazaar`. Send `requires` for a field whose absence changes what the
+  `tolerant`, `bazaar` and `settings`. Send `requires` for a field whose absence changes what the
   call is (a header it must send, a new kind of payment or streaming); a
   field a client may ignore needs none.
+
+## The settings
+
+`settings` (plan 36) rides every routing form, the hook `{packet}`, the tool
+`{query, id?}`, `{browse}` and `{tool, query?}`, as an `accepts` token and a
+`settings` field beside the other fields (never inside the packet), also when
+the user has no rules. Not on the outcome report, `forget` or the identities
+read. The field is `{version: 1, hash, policy, replacement?, sources}`:
+
+- `policy`: `block` (typed targets `{kind, id}`, `kind` one of `category`,
+  `task`, `provider`, `seller`, `service`, `source`), `only` (`{scope,
+dimension, targets}`), `prefer` (`{scope, targets}`) and `preferSpeed:
+true`, each omitted when empty or off. A scope is `{kind: "global"}`, a
+  task or a category. This client writes `only` rules for the global scope or
+  one task, capability (category and task) rules globally, and preferences
+  that list one kind; a global preference lists sources only.
+- `replacement`: `{mode: "when-routed", providers?}`, omitted when off;
+  absent `providers` means every eligible provider.
+- `sources`: the sources usable on this machine, exactly `["tenjin"]` until
+  accounts land.
+- `hash`: the client's alone, `"sha256:" + hex(sha256(canonical JSON of
+{version, policy, replacement, sources}))`, keys sorted at every depth, no
+  whitespace, arrays in order. The server never recomputes it.
+
+The rules govern only what Tenjin picks on its own: hook offers and the
+service picked for a `{query}`. `{browse}`, `{tool}`, `{tool, query}` and a
+spec read by its id run whatever they say.
+
+An answer to a client that sends `settings` lists it in `honored` when the
+server applied them, and then carries the request's hash verbatim as
+top-level `settingsHash` (hook, lookup and browse answers). The client keeps
+it with every spec and quote, and refuses any call whose hash differs from
+the rules saved now, or that has none while a rule is saved, before provider
+HTTP or signing; it never routes again on its own. When the rules leave Tenjin
+nothing to pick on its own, the answer is the ordinary `native` one, with
+nothing said about them.
+
+`bound: {id, input}` rides a hook `execute` or `discovered` for a pending
+WebSearch or WebFetch only while `replacement.mode` is `when-routed`, the pick
+fits `replacement.providers` and every required field is filled from that
+call's own query or URL: the offer id to run and its complete input. The
+client's swap runs it unchanged through the ordinary executor and its check.
+
+The free identities read is `{schemaVersion: 1, identities: true, accepts}`
+on `POST /api/x402-router`, answered with every id a setting can name and its
+label: `categories` (with their `tasks`), `tasks` (with their `category`, and
+`speed: true` on a task the speed preference changes),
+`providers`, `sellers`, `services` (with `task`, `providers` and `seller`) and
+`sources`. No gate, no model and no payment. `tenjin config` resolves typed
+names against it and names saved rules by it.
 
 ## The harness
 
@@ -447,6 +497,15 @@ payment and reports each outcome under that option's id. Without `catalog` or
 | `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`     |
 | `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                    |
 | `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                              |
+| `wire-hook-request-settings.json`          | the native hook from a `settings` client: rules, automatic use, sources and their hash    |
+| `wire-hook-execute-settings.json`          | hook answer under those settings: `honored` and the echoed `settingsHash`                 |
+| `wire-hook-execute-bound.json`             | the same offer for a pending search with automatic use on: `bound`, the id and its input  |
+| `wire-tool-request-by-id-settings.json`    | a browse row's id sent as `tool` with `settings`                                          |
+| `wire-lookup-spec-settings.json`           | tool answer for it: the row's spec with the echoed `settingsHash`                         |
+| `wire-browse-request-settings.json`        | a browse of the tool list with `settings`                                                 |
+| `wire-browse-settings.json`                | the browse answer: every row the client can run, unfiltered by them, with the echoed hash |
+| `wire-identities-request.json`             | the free identities read                                                                  |
+| `wire-identities.json`                     | its answer: every id a setting can name, with its label                                   |
 | `wire-warm-request.json`                   | the paid route's `warm` call; its payment is a deposit when one is due, else a voucher    |
 | `wire-warm.json`                           | the `warm` answer: no decision                                                            |
 | `wire-tool-request-by-id-tolerant.json`    | a browse row's id from a `tolerant` client (and `jobs`, `label`, `fields`)                |
@@ -469,38 +528,41 @@ caller's own, to the provider.
 
 Take these from here; do not re-derive them.
 
-| field                           | bound                                                                                                                                                                                                       |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`                 | exactly `1`, on every request and response                                                                                                                                                                  |
-| hook vs native hook             | read from `packet.pendingCall`; there is no `source` field                                                                                                                                                  |
-| `packet` serialized             | 16384 bytes, refused rather than truncated                                                                                                                                                                  |
-| `packet.history`                | 6 messages                                                                                                                                                                                                  |
-| message `text`                  | 16000 characters                                                                                                                                                                                            |
-| `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                             |
-| `packet.ownUrls`                | optional; 8 entries, each 2000 characters, each one of `literalUrls`                                                                                                                                        |
-| `packet.current.quoted`         | optional; 1 to 8 blocks, each 1 to 16000 characters, inside the packet's 16384 bytes                                                                                                                        |
-| `improve`                       | optional; `true` only, on the hook and tool forms                                                                                                                                                           |
-| `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                          |
-| `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                |
-| `accepts`                       | up to 16 strings, each 1-32 characters; `spec` is required; the server also reads `catalog`, `label`, `fields`, `jobs`, `discovered` (the list), `bazaar` (the open Bazaar) and `choices` (compare options) |
-| `browse`                        | 0 to 8000 characters                                                                                                                                                                                        |
-| `tool`                          | 1 to 200 characters, a browse row's `id`                                                                                                                                                                    |
-| `label`                         | 1 to 32 characters on a spec or an `execute`; up to 120 on a browse row (a list entry's upstream)                                                                                                           |
-| `via`                           | a lowercase token, 1 to 32 characters, letters and `_`                                                                                                                                                      |
-| `harness`                       | a lowercase token, 1 to 32 characters, starting with a letter, then letters, digits, `_` and `-`                                                                                                            |
-| `sessionId`                     | 1 to 200 characters, hook call only                                                                                                                                                                         |
-| `pendingCall.query` / `.url`    | 1 to 4000 characters                                                                                                                                                                                        |
-| `pendingCall.question`          | 1 to 4000 characters                                                                                                                                                                                        |
-| `packet.nativeOutcome`          | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content`                                    |
-| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                                                                                                                                                                          |
-| `job`                           | integers `everyS` 1 to 30, `maxWaitS` 1 to 600, `keepH` 1 to 48; a field name 1 to 64 of `[A-Za-z0-9_]`, no leading digit; a header 1 to 64 of `[A-Za-z0-9-]`; `httpStatus` and `values` 1 to 8 entries     |
-| `takes.max`                     | 2 to 5                                                                                                                                                                                                      |
-| `requires`                      | up to 16 tokens, each matching `^[a-z][a-z0-9_-]{0,31}$`                                                                                                                                                    |
-| `timeoutS`                      | an integer, 1 to 120                                                                                                                                                                                        |
-| `maxBytes`                      | an integer, 1 to 209715200                                                                                                                                                                                  |
-| `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                  |
-| `id`                            | a uuid the server minted; a client never invents one                                                                                                                                                        |
-| id lifetime                     | 15 minutes from the hook call that created it                                                                                                                                                               |
+| field                           | bound                                                                                                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `schemaVersion`                 | exactly `1`, on every request and response                                                                                                                                                                         |
+| hook vs native hook             | read from `packet.pendingCall`; there is no `source` field                                                                                                                                                         |
+| `packet` serialized             | 16384 bytes, refused rather than truncated                                                                                                                                                                         |
+| `packet.history`                | 6 messages                                                                                                                                                                                                         |
+| message `text`                  | 16000 characters                                                                                                                                                                                                   |
+| `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                                    |
+| `packet.ownUrls`                | optional; 8 entries, each 2000 characters, each one of `literalUrls`                                                                                                                                               |
+| `packet.current.quoted`         | optional; 1 to 8 blocks, each 1 to 16000 characters, inside the packet's 16384 bytes                                                                                                                               |
+| `improve`                       | optional; `true` only, on the hook and tool forms                                                                                                                                                                  |
+| `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                                 |
+| `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                       |
+| `accepts`                       | up to 16 strings, each 1-32 characters; `spec` is required; the server also reads `catalog`, `label`, `fields`, `jobs`, `discovered` (the list), `bazaar` (the open Bazaar) and `choices` (compare options)        |
+| `browse`                        | 0 to 8000 characters                                                                                                                                                                                               |
+| `tool`                          | 1 to 200 characters, a browse row's `id`                                                                                                                                                                           |
+| `label`                         | 1 to 32 characters on a spec or an `execute`; up to 120 on a browse row (a list entry's upstream)                                                                                                                  |
+| `via`                           | a lowercase token, 1 to 32 characters, letters and `_`                                                                                                                                                             |
+| `harness`                       | a lowercase token, 1 to 32 characters, starting with a letter, then letters, digits, `_` and `-`                                                                                                                   |
+| `sessionId`                     | 1 to 200 characters, hook call only                                                                                                                                                                                |
+| `pendingCall.query` / `.url`    | 1 to 4000 characters                                                                                                                                                                                               |
+| `pendingCall.question`          | 1 to 4000 characters                                                                                                                                                                                               |
+| `packet.nativeOutcome`          | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content`                                           |
+| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                                                                                                                                                                                 |
+| `job`                           | integers `everyS` 1 to 30, `maxWaitS` 1 to 600, `keepH` 1 to 48; a field name 1 to 64 of `[A-Za-z0-9_]`, no leading digit; a header 1 to 64 of `[A-Za-z0-9-]`; `httpStatus` and `values` 1 to 8 entries            |
+| `takes.max`                     | 2 to 5                                                                                                                                                                                                             |
+| `requires`                      | up to 16 tokens, each matching `^[a-z][a-z0-9_-]{0,31}$`                                                                                                                                                           |
+| `timeoutS`                      | an integer, 1 to 120                                                                                                                                                                                               |
+| `maxBytes`                      | an integer, 1 to 209715200                                                                                                                                                                                         |
+| `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                         |
+| `settings`                      | at most 64 block targets, 32 only entries, 64 prefer entries, 16 targets per entry, 16 sources; a target id 1 to 120 characters; past a bound the server ignores the whole field and does not list it in `honored` |
+| `settingsHash`                  | `^sha256:[0-9a-f]{64}$`, the request's own, verbatim                                                                                                                                                               |
+| `bound.input`                   | a JSON object, at most 16384 bytes serialized                                                                                                                                                                      |
+| `id`                            | a uuid the server minted; a client never invents one                                                                                                                                                               |
+| id lifetime                     | 15 minutes from the hook call that created it                                                                                                                                                                      |
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first; a discovery run's search text (built from the user's words) is cleared at the same expiry.
 

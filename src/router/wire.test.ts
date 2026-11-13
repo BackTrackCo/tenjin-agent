@@ -9,12 +9,14 @@ import {
   buildOutcomeBody,
   buildToolBody,
   buildToolSpecBody,
+  buildIdentitiesBody,
   buildWarmBody,
   acceptsFor,
   CLIENT_ACCEPTS,
   isWarmAnswer,
   MAX_SPEC_TIMEOUT_S,
   parseForTests,
+  parseIdentities,
   REQUIRES_UNMET,
   unmetRequires,
   withoutUnmet,
@@ -25,6 +27,8 @@ import {
   type ToolSpec,
 } from './decision';
 import { buildSpecRequest, mergedInput } from './spec-call';
+import { personalSettings } from './settings';
+import type { WireSettings } from './settings-wire';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, UNPAID_GATE_TIMEOUT_MS } from './gate';
 import { MAX_PACKET_BYTES, seal, type Packet } from './context';
 import { AFTER_CALL_TIMEOUT_SECONDS, ROUTE_HOOK_TIMEOUT_SECONDS } from './install';
@@ -439,6 +443,9 @@ describe('the request bodies', () => {
         harness: 'claude',
         improve: canonical.improve === true,
         budgetMs: canonical.budgetMs as number,
+        ...(canonical.settings !== undefined
+          ? { settings: canonical.settings as WireSettings }
+          : {}),
       });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
     }
@@ -453,6 +460,9 @@ describe('the request bodies', () => {
               ...(typeof canonical.query === 'string' ? { query: canonical.query } : {}),
               accepts,
               harness: 'claude',
+              ...(canonical.settings !== undefined
+                ? { settings: canonical.settings as WireSettings }
+                : {}),
             })
           : buildToolBody({ query: canonical.query as string, accepts, harness: 'claude' });
       expect(body, name).toEqual({ ...canonical, harness: 'claude' });
@@ -469,6 +479,7 @@ describe('the request bodies', () => {
       'wire-outcome-request.json',
       'wire-outcome-unpaid.json',
       'wire-outcome-ignored.json',
+      'wire-outcome-via.json',
     ]) {
       const canonical = fixture(name);
       const body = buildOutcomeBody(canonical as unknown as SpecOutcome, 'claude');
@@ -494,6 +505,10 @@ describe('the request bodies', () => {
       'wire-hook-request-improve.json',
       'wire-hook-request-quoted.json',
       'wire-forget-request.json',
+      'wire-hook-request-settings.json',
+      'wire-tool-request-by-id-settings.json',
+      'wire-browse-request-settings.json',
+      'wire-identities-request.json',
     ]) {
       expect(JSON.stringify(fixture(name))).not.toMatch(/billing|admission|payment/i);
     }
@@ -979,6 +994,8 @@ describe('every answer payload on disk', () => {
       false,
     );
     expect(parseForTests('browse', { ...payload, rows: [] }).success).toBe(true);
+    // One decided under the user's rules reads the same: its echoed hash is unread.
+    expect(parseForTests('browse', fixture('wire-browse-settings.json')).success).toBe(true);
   });
 });
 
@@ -1124,5 +1141,104 @@ describe('the hook time budget', () => {
   it('fits the slowest paid call inside the after-call timeout', () => {
     const budget = AFTER_CALL_TIMEOUT_SECONDS * 1_000;
     expect(budget - DEPOSIT_GATE_TIMEOUT_MS).toBeGreaterThanOrEqual(FLOOR_MS);
+  });
+});
+
+/**
+ * THE USER'S SETTINGS ON THE WIRE (plan 36). Every routing form carries the
+ * `settings` field with `settings` in `accepts`; an answer the server decided
+ * under them echoes their hash, which the check before every call compares
+ * with the rules saved now. The field is built
+ * from the saved config by the one resolver, and its hash is the CLI's alone.
+ */
+describe('the settings field', () => {
+  const sent = fixture('wire-hook-request-settings.json');
+  const settings = sent.settings as { hash: string };
+  const saved = {
+    policy: { version: 1, ...(sent.settings as { policy: object }).policy },
+    nativeReplacement: 'when-routed',
+    nativeReplacementProviders: [{ kind: 'provider', id: 'exa' }],
+  };
+
+  it('is what the resolver builds from the saved rules, hash and all', () => {
+    const { wire } = personalSettings(saved);
+    expect(wire).toEqual({ status: 'ok', hasRules: true, settings: sent.settings });
+  });
+
+  it('rides every routing form byte for byte, beside the packet and never in it', () => {
+    const { wire } = personalSettings(saved);
+    if (wire.status !== 'ok') throw new Error('unreadable');
+    expect(
+      buildHookBody(sent.packet as Packet, {
+        sessionId: sent.sessionId as string,
+        accepts: acceptsFor(false, true),
+        harness: 'claude',
+        budgetMs: sent.budgetMs as number,
+        settings: wire.settings,
+      }),
+    ).toEqual(sent);
+    const byId = fixture('wire-tool-request-by-id-settings.json');
+    expect(
+      buildToolSpecBody({
+        tool: byId.tool as string,
+        accepts: [...acceptsFor(false, true), 'free-query'],
+        harness: 'claude',
+        settings: wire.settings,
+      }),
+    ).toEqual(byId);
+    const browse = fixture('wire-browse-request-settings.json');
+    expect(
+      buildBrowseBody({
+        browse: browse.browse as string,
+        accepts: acceptsFor(false, true),
+        harness: 'claude',
+        settings: wire.settings,
+      }),
+    ).toEqual(browse);
+    expect(
+      buildToolBody({
+        query: 'btc price',
+        accepts: acceptsFor(false, true),
+        settings: wire.settings,
+      }),
+    ).toMatchObject({ settings: wire.settings, accepts: expect.arrayContaining(['settings']) });
+  });
+
+  it('asks for the identities with the free form, and reads their answer', () => {
+    expect(buildIdentitiesBody()).toEqual(fixture('wire-identities-request.json'));
+    expect(parseIdentities(fixture('wire-identities.json'))).toMatchObject({
+      sources: [{ id: 'tenjin', label: "Tenjin's tools" }],
+      services: expect.arrayContaining([
+        expect.objectContaining({ id: 'exa-search', providers: ['exa'], task: 'web research' }),
+      ]),
+    });
+  });
+
+  it.each([
+    ['hook', 'wire-hook-execute-settings.json'],
+    ['hook', 'wire-hook-execute-bound.json'],
+    ['tool', 'wire-lookup-spec-settings.json'],
+  ] as const)('reads the echoed hash on a %s answer (%s)', (kind, name) => {
+    const read = parseForTests(kind, fixture(name));
+    expect(read.success).toBe(true);
+    expect(read.data).toMatchObject({ settingsHash: settings.hash });
+  });
+
+  it('reads `bound` as the offer id and the input, beside an offer whose spec it fills', () => {
+    const answer = fixture('wire-hook-execute-bound.json');
+    const read = parseForTests('hook', answer) as {
+      success: boolean;
+      data?: {
+        decision: { id: string; bound?: unknown; specs?: { id: string; holds?: unknown }[] };
+      };
+    };
+    expect(read.success).toBe(true);
+    const decision = read.data!.decision;
+    expect(decision.bound).toEqual({ id: decision.id, input: { query: 'btc eth price today' } });
+    expect(decision.specs?.map((spec) => spec.id)).toContain(decision.id);
+    // A bound whose input is not an object is a protocol error, never read.
+    const broken = structuredClone(answer) as { decision: { bound: unknown } };
+    broken.decision.bound = { id: decision.id, input: 'btc' };
+    expect(parseForTests('hook', broken).success).toBe(false);
   });
 });

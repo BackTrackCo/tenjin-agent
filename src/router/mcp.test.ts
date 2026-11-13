@@ -627,6 +627,62 @@ describe('the hook tool', () => {
     }
   });
 
+  /** A session's first prompt fires before Claude Code writes its transcript:
+   *  the swap still reads it for that session's first search, once written. */
+  it('keeps the transcript path of a first prompt for the first search', async () => {
+    const homeDir = join(dir, 'home');
+    const project = join(homeDir, '.claude', 'projects', '-repo');
+    await mkdir(project, { recursive: true });
+    const transcript = join(await realpath(project), 'sess-first.jsonl');
+    const native = (async () =>
+      Response.json({
+        schemaVersion: 1,
+        routerVersion: 'test',
+        decision: {
+          action: 'native',
+          diagnostics: {
+            reasonCode: 'native_sufficient',
+            stage: 'capability',
+            missing: [],
+            nextAction: '',
+          },
+        },
+      })) as typeof fetch;
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir: await realpath(homeDir),
+      handlerDeps: { cwd: dir },
+      hookDeps: { baseUrl: 'https://router.test', fetchImpl: native, warn: () => undefined },
+    });
+    const client = await connect(server);
+    try {
+      await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('sess-first', transcript)),
+      });
+      await writeFile(transcript, '');
+      const decided = await client.callTool({
+        name: 'request',
+        arguments: {
+          decide: {
+            tool: 'WebSearch',
+            input: { query: 'eth price' },
+            tool_use_id: 'toolu_first',
+            session_id: 'sess-first',
+          },
+        },
+      });
+      // Read, and handed back for the switch being off, not for the transcript.
+      expect(envelopeOf(decided)).toMatchObject({
+        swap: 'handback',
+        reason: 'automatic use is off',
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('marks its own session when the plugin started it, and still routes there', async () => {
     const { homeDir, transcript } = await home('sess-plugin');
     const fetchImpl = vi.fn(async () => Response.json({}, { status: 400 }));
@@ -1211,6 +1267,53 @@ describe('a free answer on a machine with no wallet', () => {
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       expect(called.isError).toBe(false);
       expect(envelopeOf(called)).toMatchObject({ status: 'native' });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
+/**
+ * DISCOVERY AND THE SWAP'S OWN FORM (plan 36). The server instructions name
+ * `tenjin config --help` for settings changes, independent of whether a host
+ * defers tool descriptions; the plugin's `decide` form runs only for a
+ * session this router's hook legs served, and only alone.
+ */
+describe('settings discovery and the decide form', () => {
+  it('names tenjin config in the server instructions and the tool description', async () => {
+    const server = buildRouterMcpServer({ dataDir: dir, handlerDeps: { cwd: dir } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const said =
+        'run `tenjin config --help`, perform the requested operation and report its readback';
+      expect(client.getInstructions()).toContain(said);
+      expect(client.getInstructions()).toContain(
+        'prefer, block, limit, reset, choose speed over cost or configure automatic Tenjin use',
+      );
+      const tools = await client.listTools();
+      expect(tools.tools.find((t) => t.name === 'request')?.description).toContain(said);
+      const alone = await client.callTool({
+        name: 'request',
+        arguments: {
+          query: 'weather',
+          decide: { tool: 'WebSearch', input: { query: 'x' }, tool_use_id: 't', session_id: 's' },
+        },
+      });
+      expect(envelopeOf(alone)).toMatchObject({ status: 'needs_input' });
+      const unseen = await client.callTool({
+        name: 'request',
+        arguments: {
+          decide: { tool: 'WebSearch', input: { query: 'x' }, tool_use_id: 't', session_id: 's' },
+        },
+      });
+      expect(envelopeOf(unseen)).toMatchObject({
+        status: 'native',
+        swap: 'handback',
+        reason: 'this session has not been seen by Tenjin yet',
+      });
     } finally {
       await client.close();
       await server.close();

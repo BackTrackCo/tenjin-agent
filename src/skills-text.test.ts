@@ -26,7 +26,20 @@ describe('the permissions doc matches the product this release ships', () => {
 
   it('names the plugin install registers, its two permission answers and its server', async () => {
     const { PLUGIN_HOOK_TOOL, PLUGIN_ID, REQUEST_TOOL } = await import('./router/names');
-    expect(fencedRules(PERMISSIONS_DOC)).toEqual(['Bash(tenjin pay:*)']);
+    // Reading the settings and the two operations that only narrow or reorder
+    // (`block`, `prefer`). `unblock`, `only`, `reset`, `set`, `speed on` and
+    // `replacement` can widen what Tenjin may use, spend or run, so they stay
+    // behind the host's own prompt, and so does the blanket rule covering them.
+    expect(fencedRules(PERMISSIONS_DOC)).toEqual([
+      'Bash(tenjin config)',
+      'Bash(tenjin config --json)',
+      'Bash(tenjin config --help)',
+      'Bash(tenjin config get:*)',
+      'Bash(tenjin config block:*)',
+      'Bash(tenjin config prefer:*)',
+      'Bash(tenjin pay:*)',
+    ]);
+    expect(fencedRules(PERMISSIONS_DOC)).not.toContain('Bash(tenjin config:*)');
     expect(PERMISSIONS_DOC).toContain(`${REQUEST_TOOL}   allow`);
     expect(PERMISSIONS_DOC).toContain(`${PLUGIN_HOOK_TOOL}      deny`);
     expect(PERMISSIONS_DOC).toContain(`claude plugin install ${PLUGIN_ID}`);

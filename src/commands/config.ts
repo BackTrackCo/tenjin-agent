@@ -12,6 +12,7 @@ import {
   EXPERIMENTAL_CONFIG_KEYS,
   ROUTER_CONFIG_KEYS,
   ROUTER_CONTEXTS,
+  PERSONAL_ROUTER_KEYS,
   loadRawConfig,
   MAX_AUTO_SPEND_FLOOR_ATOMIC,
   MAX_AUTO_SPEND_FLOOR_WHY,
@@ -43,6 +44,8 @@ import {
   type RouterSettings,
 } from '../router/settings';
 import { style } from '../lib/output';
+import { cachedIdentities } from '../router/identities';
+import { describeLimits, replacementSupport, settingsReadback } from './config-readback';
 
 /** Machine values use Money for spending keys and scalars for other settings. */
 interface RenderedValue {
@@ -148,7 +151,10 @@ function isUpdateKey(key: string): key is UpdateConfigKey {
  * Show every effective key with its value and provenance. `data` is keyed by
  * config key; provenance comes from resolveSettings over the *raw* file (not the
  * defaults-merged config), so a key the user never set reads `default`, not
- * `file`.
+ * `file`. `data.settings` is the readback of the user's own settings: saved
+ * rules in their words, automatic use and the limits on the Tenjin balance.
+ * All of it is local: names come from the identities last read, and nothing
+ * here asks the network.
  */
 export async function runConfigList(ctx: CommandContext): Promise<CommandResult> {
   const settings = await resolveFromContext(ctx);
@@ -184,7 +190,16 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     show(key, describedLine(key, entry));
   }
-  return { data, humanLines };
+  const readback = settingsReadback(
+    router,
+    await cachedIdentities(ctx.dataDir),
+    describeLimits(settings.maxAutoSpend.value, settings.sessionBudget.value),
+    await replacementSupport(ctx.dataDir),
+  );
+  return {
+    data: { ...data, settings: readback.data },
+    humanLines: [...humanLines, '', ...readback.lines],
+  };
 }
 
 /** Same per-key shape as list, for one key. Unknown key is a USAGE failure. */
@@ -504,7 +519,8 @@ export async function persistRouterDefaults(
   return result;
 }
 
-async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
+/** The effective settings: the global file, `--base-url` and the env. */
+export async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env });
 }
@@ -514,6 +530,13 @@ function assertKey(key: string): ScalarConfigKey {
     throw new CliError('USAGE', `Retired config key: ${key}`, { fix: RETIRED_PAYMENT_GUIDANCE });
   }
   if ((CONFIG_KEYS as string[]).includes(key)) return key as ScalarConfigKey;
+  if ((PERSONAL_ROUTER_KEYS as readonly string[]).includes(key)) {
+    // Coupled settings: a generic set could skip the checks that keep them
+    // consistent, so only their own operations write them.
+    throw new CliError('USAGE', `${key} changes only through its own operations`, {
+      fix: '`tenjin config` shows it; `tenjin config --help` lists prefer, only, block, unblock, reset, speed and replacement, each with an example.',
+    });
+  }
   throw new CliError('USAGE', `Unknown config key: ${JSON.stringify(key)}`, {
     fix: `Valid keys: ${[...CONFIG_KEYS, ...UPDATE_CONFIG_KEYS, ...ROUTER_CONFIG_KEYS, ...EXPERIMENTAL_CONFIG_KEYS].join(', ')}.`,
   });
@@ -638,7 +661,7 @@ function parseHttpUrl(value: string): string {
  * drops the other's update (worst case, a zeroed maxAutoSpend resurrected). The
  * data dir is ensured first so the lock's mkdir has a parent on a fresh install.
  */
-async function persist(
+export async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
   lock?: FileLockOptions,
@@ -651,6 +674,8 @@ async function persist(
       async () => {
         const existing = await loadRawConfig(dir);
         const merged = merge(existing);
+        // A merge that changed nothing hands back what it was given: no write.
+        if (merged === existing) return;
         const validated = RawConfigSchema.parse(merged);
         // 0600: `rpcUrl` can carry an RPC provider's key, and this is the writer
         // `config set` uses to put it there. dirMode 0o700 is no backstop: node's

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { writeFileAtomic, writeFileAtomicExclusive } from '../lib/atomic-json';
 import { ChoicesSchema, OfferSpecSchema, type Choices, type OfferSpec } from './decision';
+import { SettingsHashSchema } from './settings-wire';
 
 /**
  * THE REQUEST SPECS AN OFFER CARRIED, kept on this machine by the offer's id. The
@@ -38,6 +39,17 @@ function specPath(dataDir: string, id: string): string {
 
 /** The field of a kept spec that names the one input a row may show. */
 export const SHOWN_KEY = 'shown';
+
+/**
+ * A SPEC AS THIS MACHINE KEEPS IT: the server's spec and the `settingsHash`
+ * of the answer that carried it, which names the rules that offer was decided
+ * under. Absent when that answer echoed none. The check before every call
+ * compares it with the hash of the rules saved now (`settings-check.ts`).
+ */
+export const KeptSpecSchema = OfferSpecSchema.extend({
+  settingsHash: SettingsHashSchema.optional(),
+});
+export type KeptSpec = z.infer<typeof KeptSpecSchema>;
 
 /** Past this many characters an input is a prompt, not the key of a lookup. */
 export const SHOWN_INPUT_MAX_CHARS = 80;
@@ -86,12 +98,16 @@ export function shownInput(spec: OfferSpec, input: Record<string, unknown>): str
 export async function storeSpecs(
   dataDir: string,
   specs: readonly OfferSpec[] | undefined,
+  settingsHash?: string,
 ): Promise<void> {
   if (specs === undefined || specs.length === 0) return;
   for (const spec of specs) {
     try {
       // `shown` rides beside the spec for the mod, and is dropped on read.
-      const kept = { ...spec, [SHOWN_KEY]: shownInputField(spec) };
+      // The answer's settings hash is this offer's own, never a later one.
+      const kept: Record<string, unknown> = { ...spec, [SHOWN_KEY]: shownInputField(spec) };
+      delete kept.settingsHash;
+      if (settingsHash !== undefined) kept.settingsHash = settingsHash;
       await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
         mode: 0o600,
         dirMode: 0o700,
@@ -103,8 +119,9 @@ export async function storeSpecs(
   await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
 }
 
-/** The spec stored for this id, or null: none, expired, damaged or not ours. */
-export async function readSpec(dataDir: string, id: string): Promise<OfferSpec | null> {
+/** The spec stored for this id, with the settings hash it was decided under,
+ *  or null: none, expired, damaged or not ours. */
+export async function readSpec(dataDir: string, id: string): Promise<KeptSpec | null> {
   const path = specPath(dataDir, id);
   // O_NOFOLLOW: the directory is the user's, and a planted symlink must not
   // turn this read into a read of something else.
@@ -115,7 +132,7 @@ export async function readSpec(dataDir: string, id: string): Promise<OfferSpec |
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
     const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
     delete kept[SHOWN_KEY];
-    const parsed = OfferSpecSchema.safeParse(kept);
+    const parsed = KeptSpecSchema.safeParse(kept);
     return parsed.success && parsed.data.id === id ? parsed.data : null;
   } catch {
     return null;

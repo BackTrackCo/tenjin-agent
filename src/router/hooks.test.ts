@@ -23,6 +23,7 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
 import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
+import { hashNow } from './settings-test-utils';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import { UNPAID_GATE_TIMEOUT_MS } from './gate';
 import {
@@ -300,6 +301,7 @@ describe('the prompt hook', () => {
       'packet',
       'schemaVersion',
       'sessionId',
+      'settings',
     ]);
     expect(sent.body.budgetMs).toBe(UNPAID_GATE_TIMEOUT_MS);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
@@ -553,6 +555,7 @@ describe('the shortfall hook', () => {
       'packet',
       'schemaVersion',
       'sessionId',
+      'settings',
     ]);
     const packet = sent.body.packet as { pendingCall?: unknown; nativeOutcome?: unknown };
     expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
@@ -2432,6 +2435,7 @@ describe('the delegation hook', () => {
         'packet',
         'schemaVersion',
         'sessionId',
+        'settings',
       ]);
       const packet = sent.body.packet as {
         current: { text: string };
@@ -2994,7 +2998,17 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+      ],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -3127,6 +3141,7 @@ describe('a discovered service', () => {
       'headers',
       'note',
       'tolerant',
+      'settings',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3149,6 +3164,7 @@ describe('a discovered service', () => {
       'note',
       'tolerant',
       'bazaar',
+      'settings',
     ]);
   });
 
@@ -3439,7 +3455,17 @@ describe('a question to the user', () => {
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
     expect(body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+      ],
     });
   });
 
@@ -3698,5 +3724,93 @@ describe('an offer the host ignored', () => {
       now: () => T + 16 * 60_000,
     });
     expect(later.reports).toEqual([]);
+  });
+});
+
+/**
+ * THE USER'S SETTINGS ON EVERY HOOK (plan 36): the rules ride beside the
+ * packet, read for each event; an offer is kept with the hash its answer
+ * echoed; and an answer decided under other rules offers nothing.
+ */
+describe('the hooks and the user settings', () => {
+  const fixtureOf = (name: string) =>
+    JSON.parse(
+      readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'),
+    ) as Record<string, unknown> & {
+      settingsHash?: string;
+      decision: { id: string; specs?: unknown[] };
+    };
+  const BLOCK = { kind: 'task', id: 'crypto price quote' };
+  async function saveRules(router: Record<string, unknown>): Promise<string> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ ...ROUTER_POLICY, router }));
+    return hashNow(dir);
+  }
+  const hook = (fetchImpl: typeof fetch, warn: (line: string) => void = () => undefined) => ({
+    dataDir: dir,
+    baseUrl: BASE,
+    fetchImpl,
+    warn,
+  });
+
+  it('sends the saved rules beside the packet, with the settings token', async () => {
+    const hash = await saveRules({ policy: { version: 1, block: [BLOCK] } });
+    const { fetchImpl, calls } = router(NATIVE);
+    await runPromptHook(promptEvent('check the BTC price'), hook(fetchImpl));
+    const body = (calls[0] as { body: Record<string, unknown> }).body;
+    expect(body.settings).toEqual({
+      version: 1,
+      hash,
+      policy: { block: [BLOCK] },
+      sources: ['tenjin'],
+    });
+    expect(body.accepts).toContain('settings');
+    expect((body.packet as Record<string, unknown>).settings).toBeUndefined();
+  });
+
+  it('keeps each shown spec with the hash its answer echoed', async () => {
+    const hash = await saveRules({});
+    const answer = { ...fixtureOf('wire-hook-execute-settings.json'), settingsHash: hash };
+    const { fetchImpl } = router(answer);
+    const out = await runPromptHook(promptEvent('research x402 agent payments'), hook(fetchImpl));
+    expect(out).toMatchObject({ action: 'execute' });
+    expect((await readSpec(dir, answer.decision.id))?.settingsHash).toBe(hash);
+  });
+
+  it('offers nothing from an answer decided under other rules', async () => {
+    await saveRules({ policy: { version: 1, block: [BLOCK] } });
+    const lines: string[] = [];
+    // The fixture's hash names other rules than these.
+    const stale = router(fixtureOf('wire-hook-execute-settings.json'));
+    const out = await runPromptHook(
+      promptEvent('research x402 agent payments'),
+      hook(stale.fetchImpl, (line) => lines.push(line)),
+    );
+    expect(out.response).toBeNull();
+    expect(lines.join('\n')).toContain('did not confirm it applied your Tenjin settings');
+    // And none from a router that applied no rules at all.
+    const { decision } = fixtureOf('wire-hook-execute-settings.json');
+    const old = router({ schemaVersion: 1, routerVersion: 'v', decision });
+    expect(
+      (await runPromptHook(promptEvent('research it'), hook(old.fetchImpl))).response,
+    ).toBeNull();
+    expect(await readSpec(dir, decision.id)).toBeNull();
+  });
+
+  it('routes nothing while the saved rules cannot be read', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, router: { policy: { version: 1, include: [] } } }),
+    );
+    const lines: string[] = [];
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runPromptHook(
+      promptEvent('check the BTC price'),
+      hook(fetchImpl, (line) => lines.push(line)),
+    );
+    expect(out.response).toBeNull();
+    expect(calls).toEqual([]);
+    expect(lines.join('\n')).toContain("your Tenjin settings can't be read");
   });
 });

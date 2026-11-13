@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "tool": "cmc-quotes",
+  "accepts": [
+    "catalog",
+    "spec",
+    "label",
+    "fields",
+    "jobs",
+    "headers",
+    "note",
+    "tolerant",
+    "settings",
+    "free-query"
+  ],
+  "harness": "claude",
+  "settings": {
+    "version": 1,
+    "hash": "sha256:7f55344dd648a7c08185b78bd2b7c1230d3bc704a3537eafc49bdd1b9097a618",
+    "policy": {
+      "block": [
+        {
+          "kind": "task",
+          "id": "crypto price quote"
+        },
+        {
+          "kind": "service",
+          "id": "exa-contents"
+        }
+      ],
+      "only": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "web research"
+          },
+          "dimension": "provider",
+          "targets": [
+            {
+              "kind": "provider",
+              "id": "exa"
+            }
+          ]
+        }
+      ],
+      "prefer": [
+        {
+          "scope": {
+            "kind": "task",
+            "id": "web research"
+          },
+          "targets": [
+            {
+              "kind": "service",
+              "id": "exa-search"
+            }
+          ]
+        },
+        {
+          "scope": {
+            "kind": "category",
+            "id": "images"
+          },
+          "targets": [
+            {
+              "kind": "service",
+              "id": "gondola-gpt-image-2.5-sunburst"
+            }
+          ]
+        }
+      ],
+      "preferSpeed": true
+    },
+    "replacement": {
+      "mode": "when-routed",
+      "providers": [
+        {
+          "kind": "provider",
+          "id": "exa"
+        }
+      ]
+    },
+    "sources": ["tenjin"]
+  }
+}

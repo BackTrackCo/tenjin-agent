@@ -4,6 +4,12 @@ import type { FetchJsonFailure, HttpRequestOptions, HttpResult } from '../lib/ht
 import type { CommandContext } from '../context';
 import type { Packet } from './context';
 import type { Harness } from './names';
+import {
+  SETTINGS_ACCEPT,
+  SettingsHashSchema,
+  TargetIdSchema,
+  type WireSettings,
+} from './settings-wire';
 
 /**
  * ONE ROUTING PATH, ONE DECISION PER LOOKUP. Every routing call, the hook's
@@ -415,6 +421,29 @@ function checkChoices(
   else if (fallback.id !== decision.id) issue("the default choice is this answer's own offer");
 }
 
+/** One call's input, serialized, bounded as the server bounds it. */
+export const MAX_INPUT_BYTES = 16 * 1024;
+
+/**
+ * THE NATIVE CALL'S OWN INPUT, on a hook answer for a pending WebSearch or
+ * WebFetch to a client that sends `settings`, only while the user turned on
+ * automatic use and the pick fits its provider scope: the offer id to run
+ * and the complete input the server built from that call's own query or URL
+ * through the spec's `holds`. Run unchanged in the native call's place,
+ * through the ordinary executor and the check before every call, or not at
+ * all; never edited, merged or parsed here (`swap.ts`).
+ */
+export const BoundSchema = z.object({
+  id: IdSchema,
+  input: z
+    .record(z.string(), z.unknown())
+    .refine(
+      (input) => Buffer.byteLength(JSON.stringify(input), 'utf8') <= MAX_INPUT_BYTES,
+      `bound input must serialize to at most ${MAX_INPUT_BYTES} bytes`,
+    ),
+});
+export type Bound = z.infer<typeof BoundSchema>;
+
 /** The same answer on both calls: the hook's offer, and the tool's answer
  *  when a query with no id found a service nobody curated. */
 const DiscoveredSchema = z
@@ -428,6 +457,7 @@ const DiscoveredSchema = z
     specs: SpecsSchema,
     choices: ChoicesSchema.optional(),
     requires: RequiresSchema,
+    bound: BoundSchema.optional(),
   })
   .superRefine(checkHint)
   .superRefine(checkChoices);
@@ -462,6 +492,7 @@ const HookDecisionSchema = z.discriminatedUnion('action', [
        */
       delivery: z.enum(['offer', 'augment', 'note']).optional(),
       augmentUrl: z.string().url().max(2_048).optional(),
+      bound: BoundSchema.optional(),
     })
     .superRefine(checkHint),
   DiscoveredSchema,
@@ -499,6 +530,14 @@ function envelope<T extends z.ZodTypeAny>(decision: T) {
   return z.object({
     schemaVersion: z.literal(1),
     routerVersion: z.string().min(1).max(64),
+    /**
+     * The request's own settings hash, verbatim, on an answer the server
+     * decided under the user's rules (to a client that lists `settings` in
+     * `accepts`). The check before every call compares it with the rules
+     * saved now (`settings-check.ts`); it names a rule set and authorizes
+     * nothing.
+     */
+    settingsHash: SettingsHashSchema.optional(),
     decision,
     /** A plain sentence about the CALL, such as an id that had expired. Never a
      *  failure: the decision beside it ran anyway. */
@@ -538,6 +577,60 @@ const BrowseResponseSchema = z.object({
   rows: z.array(BrowseRowSchema).max(200),
 });
 export type BrowseResponse = z.infer<typeof BrowseResponseSchema>;
+
+const Labelled = { id: TargetIdSchema, label: z.string().min(1).max(120) };
+
+/**
+ * EVERY ID A SETTING CAN NAME, free: the categories with their tasks, the
+ * tasks, providers, sellers, services (with the task, providers and seller
+ * each is identified by) and sources, each with its label. `tenjin config`
+ * resolves a typed name against it and names saved rules by it; it never
+ * decides with it. Built by the server from its catalog, with no gate, no
+ * model and no payment. Read tolerantly like every answer here.
+ */
+const IdentitiesResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  routerVersion: z.string().min(1).max(64),
+  categories: z.array(z.object({ ...Labelled, tasks: z.array(TargetIdSchema).max(256) })).max(256),
+  /** `speed`: a task the speed preference changes (it has a speed criterion). */
+  tasks: z
+    .array(
+      z.object({
+        ...Labelled,
+        category: TargetIdSchema.optional(),
+        speed: z.literal(true).optional(),
+      }),
+    )
+    .max(1_024),
+  providers: z.array(z.object(Labelled)).max(2_048),
+  sellers: z.array(z.object(Labelled)).max(2_048),
+  services: z
+    .array(
+      z.object({
+        ...Labelled,
+        task: TargetIdSchema.optional(),
+        providers: z.array(TargetIdSchema).max(16),
+        seller: TargetIdSchema.optional(),
+      }),
+    )
+    .max(4_096),
+  sources: z.array(z.object(Labelled)).max(64),
+});
+export type IdentitiesResponse = z.infer<typeof IdentitiesResponseSchema>;
+
+/** A hook answer reread from disk (`decided.ts`), held to the same schema as
+ *  the router's: anything else reads as absent. */
+export function parseHookResponse(value: unknown): HookResponse | undefined {
+  const parsed = HookResponseSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** The identities read reread from disk (`identities.ts`), held to the same
+ *  schema as the router's answer: anything else reads as absent. */
+export function parseIdentities(value: unknown): IdentitiesResponse | undefined {
+  const parsed = IdentitiesResponseSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export type HookResponse = z.infer<typeof HookResponseSchema>;
 export type ToolResponse = z.infer<typeof ToolResponseSchema>;
@@ -669,6 +762,7 @@ const CLIENT_FEATURES: ReadonlySet<string> = new Set([
   ...CLIENT_ACCEPTS,
   BAZAAR_ACCEPT,
   FREE_QUERY_ACCEPT,
+  SETTINGS_ACCEPT,
 ]);
 
 /** The features a `requires` list names that this build lacks; none when it
@@ -677,9 +771,15 @@ export function unmetRequires(requires: readonly string[] | undefined): string[]
   return (requires ?? []).filter((token) => !CLIENT_FEATURES.has(token));
 }
 
-/** The `accepts` this build sends, with the open Bazaar or without it. */
-export function acceptsFor(bazaar: boolean): string[] {
-  return bazaar ? [...CLIENT_ACCEPTS, BAZAAR_ACCEPT] : [...CLIENT_ACCEPTS];
+/** The `accepts` this build sends, with the open Bazaar or without it, and
+ *  `settings` beside the `settings` field, which every production routing
+ *  call carries (also when the user has no rules). */
+export function acceptsFor(bazaar: boolean, settings = false): string[] {
+  return [
+    ...CLIENT_ACCEPTS,
+    ...(bazaar ? [BAZAAR_ACCEPT] : []),
+    ...(settings ? [SETTINGS_ACCEPT] : []),
+  ];
 }
 
 /**
@@ -708,6 +808,7 @@ export function buildHookBody(
     harness?: Harness;
     improve?: boolean;
     budgetMs?: number;
+    settings?: WireSettings;
   } = {},
 ): Record<string, unknown> {
   return {
@@ -718,6 +819,9 @@ export function buildHookBody(
     ...(extras.budgetMs !== undefined ? { budgetMs: extras.budgetMs } : {}),
     packet,
     ...(extras.improve === true ? { improve: true } : {}),
+    // A SIBLING OF THE PACKET, never inside it: the packet is what the
+    // server's model reads, and the user's settings are for code alone.
+    ...(extras.settings !== undefined ? { settings: extras.settings } : {}),
   };
 }
 
@@ -731,6 +835,7 @@ export function buildToolBody(request: {
   accepts?: readonly string[];
   harness?: Harness;
   improve?: boolean;
+  settings?: WireSettings;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -740,6 +845,7 @@ export function buildToolBody(request: {
     ...(request.accepts !== undefined ? { accepts: [...request.accepts] } : {}),
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
     ...(request.improve === true ? { improve: true } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
 }
 
@@ -749,12 +855,14 @@ export function buildBrowseBody(request: {
   browse: string;
   accepts: readonly string[];
   harness?: Harness;
+  settings?: WireSettings;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
     browse: request.browse,
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
 }
 
@@ -764,6 +872,7 @@ export function buildToolSpecBody(request: {
   query?: string;
   accepts: readonly string[];
   harness?: Harness;
+  settings?: WireSettings;
 }): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -771,7 +880,14 @@ export function buildToolSpecBody(request: {
     ...(request.query !== undefined ? { query: request.query } : {}),
     accepts: [...request.accepts],
     ...(request.harness !== undefined ? { harness: request.harness } : {}),
+    ...(request.settings !== undefined ? { settings: request.settings } : {}),
   };
+}
+
+/** The free identities read: every id a setting can name. No settings and
+ *  no harness ride on it: its answer is the same for every client. */
+export function buildIdentitiesBody(): Record<string, unknown> {
+  return { schemaVersion: 1, identities: true, accepts: acceptsFor(false, true) };
 }
 
 /**
@@ -854,6 +970,13 @@ export interface DecisionDeps {
   /** `router.improve`: the person turned on "Help improve routing", so the
    *  call says `improve: true`. Off by default. */
   improve?: boolean;
+  /**
+   * The user's settings as the wire carries them, resolved from the global
+   * file on every call (`routerSettings`) and never cached: sent with
+   * `settings` in `accepts` on every routing form. Absent only in tests and
+   * the free identities read.
+   */
+  settings?: WireSettings;
 }
 
 /** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
@@ -981,18 +1104,20 @@ export async function requestDecision(
       kind === 'hook'
         ? buildHookBody(request.packet as Packet, {
             ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true),
+            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
             budgetMs: Math.min(5_000, Math.max(0, timeoutMs)),
+            ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
           })
         : buildToolBody({
             ...(request.query !== undefined ? { query: request.query } : {}),
             ...(request.id !== undefined ? { id: request.id } : {}),
             ...(request.gateHint !== undefined ? { gateHint: request.gateHint } : {}),
-            accepts: acceptsFor(deps.acceptsBazaar === true),
+            accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
             harness: deps.harness ?? 'claude',
             improve: deps.improve === true,
+            ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
@@ -1035,8 +1160,9 @@ export async function requestBrowse(
       blockRedirects: true,
       jsonBody: buildBrowseBody({
         browse,
-        accepts: acceptsFor(deps.acceptsBazaar === true),
+        accepts: acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
         harness: deps.harness ?? 'claude',
+        ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
@@ -1058,13 +1184,37 @@ export async function requestToolSpec(
       jsonBody: buildToolSpecBody({
         tool,
         ...(query !== undefined ? { query } : {}),
-        accepts: [...acceptsFor(deps.acceptsBazaar === true), FREE_QUERY_ACCEPT],
+        accepts: [
+          ...acceptsFor(deps.acceptsBazaar === true, deps.settings !== undefined),
+          FREE_QUERY_ACCEPT,
+        ],
         harness: deps.harness ?? 'claude',
+        ...(deps.settings !== undefined ? { settings: deps.settings } : {}),
       }),
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     ToolResponseSchema,
   ) as DecisionOutcome<ToolResponse>;
+}
+
+/**
+ * EVERY ID A SETTING CAN NAME, ALWAYS FREE: no gate, no model, no payment, so
+ * it takes the free route whatever `deps.route` says. `tenjin config` resolves
+ * a typed name against it before it writes anything.
+ */
+export async function requestIdentities(
+  deps: Pick<DecisionDeps, 'ctx' | 'baseUrl' | 'fetchImpl' | 'timeoutMs'>,
+): Promise<DecisionOutcome<IdentitiesResponse>> {
+  return readDecision(
+    await httpRequest(new URL(ROUTER_PATH, deps.baseUrl).toString(), {
+      method: 'POST',
+      timeoutMs: deps.timeoutMs ?? deps.ctx.flags.timeout,
+      blockRedirects: true,
+      jsonBody: buildIdentitiesBody(),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    }),
+    IdentitiesResponseSchema,
+  );
 }
 
 /** Why a call from a spec stopped before anything was signed: the input did
@@ -1084,6 +1234,9 @@ export interface SpecOutcome {
   reason?: UnpaidReason;
   httpStatus?: number;
   ms?: number;
+  /** The path that made the call, when it was not an ordinary request:
+   *  `swap`, a native search or fetch answered in place. */
+  via?: 'swap';
 }
 
 /**
@@ -1146,6 +1299,7 @@ export function buildOutcomeBody(
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
     ...(spec.httpStatus !== undefined ? { httpStatus: spec.httpStatus } : {}),
     ...(spec.ms !== undefined ? { ms: Math.max(0, Math.round(spec.ms)) } : {}),
+    ...(spec.via !== undefined ? { via: spec.via } : {}),
   };
 }
 

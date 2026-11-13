@@ -39,6 +39,9 @@ export interface PaidRecord {
   provider: string;
   /** The service's display name, when its decision or spec carried one. */
   label?: string;
+  /** `swap`: the call answered a native search or fetch in place, which
+   *  nobody was asked about separately. */
+  via?: 'swap';
   url: string;
   /** The input or query sent, masked and cut to {@link MAX_SENT_CHARS}. */
   sent: string;
