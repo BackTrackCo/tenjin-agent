@@ -1,5 +1,6 @@
 import { CliError } from '../lib/errors';
 import {
+  editSources,
   loadRawConfig,
   readPersonalRouter,
   type PartialConfig,
@@ -1222,20 +1223,17 @@ export async function runConfigFallback(
     );
   }
   const on = args.state === 'on';
-  await persist(ctx.dataDir, (existing) => {
-    const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
-    const saved = Array.isArray(router.sources)
-      ? (router.sources as Record<string, unknown>[])
-      : [];
-    router.sources = saved.map((entry) => {
-      if (entry.id !== before.id) return entry;
-      const next = { ...entry };
-      if (on) next.onRefusal = 'tenjin';
-      else delete next.onRefusal;
-      return next;
-    });
-    return { ...existing, router };
-  });
+  await persist(ctx.dataDir, (existing) =>
+    editSources(existing, (saved) =>
+      saved.map((entry) => {
+        if (entry.id !== before.id) return entry;
+        const next = { ...entry };
+        if (on) next.onRefusal = 'tenjin';
+        else delete next.onRefusal;
+        return next;
+      }),
+    ),
+  );
   const after = find((await loadRawConfig(ctx.dataDir)).router) ?? before;
   const { label, id } = after;
   const explanation = on

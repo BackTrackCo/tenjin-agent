@@ -134,6 +134,38 @@ export function readPersonalRouter(router: unknown): PersonalRouter {
   };
 }
 
+/** The saved account descriptors in a router block, or a refusal when the
+ *  saved list can't be read: nothing is changed on a list this build can't
+ *  read. */
+export function savedDescriptors(router: unknown): SourceDescriptor[] {
+  const sources = readPersonalRouter(router).sources;
+  if (sources.status === 'invalid') {
+    throw new CliError(
+      'CONFIG_INVALID',
+      `Your saved accounts can't be read (${sources.problem}), so nothing was changed.`,
+      { fix: 'Fix or remove router.sources in your Tenjin config, then run the command again.' },
+    );
+  }
+  return sources.saved;
+}
+
+/**
+ * `existing` with its saved account descriptors replaced by what `edit` makes
+ * of them, the key dropped once none is left. Read through
+ * {@link readPersonalRouter}, so a list this build can't read is refused, as
+ * {@link savedDescriptors} refuses it, and never edited as if it were empty.
+ */
+export function editSources(
+  existing: PartialConfig,
+  edit: (saved: SourceDescriptor[]) => Record<string, unknown>[],
+): PartialConfig {
+  const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
+  const sources = edit(savedDescriptors(router));
+  if (sources.length > 0) router.sources = sources;
+  else delete router.sources;
+  return { ...existing, router };
+}
+
 /**
  * The `router` block of one project file's parsed JSON, and nothing else: an
  * unknown key, inside the block or beside it, is never read. CONFIG_INVALID,

@@ -1,10 +1,10 @@
 import { CliError } from '../lib/errors';
 import {
+  editSources,
   loadRawConfig,
-  readPersonalRouter,
   resolveSettings,
+  savedDescriptors,
   type PartialConfig,
-  type SourceDescriptor,
 } from '../lib/config';
 import { emitWriteNotice } from '../lib/output';
 import { openInBrowser } from '../lib/open-url';
@@ -16,7 +16,9 @@ import {
   SETTINGS_LIMITS,
   SavedPolicySchema,
   SavedPolicyShapeSchema,
+  hasRules,
   scopeKey,
+  wirePolicy,
   type PreferRule,
   type SavedPolicy,
   type Target,
@@ -153,19 +155,6 @@ async function baseUrlOf(ctx: CommandContext): Promise<string> {
   const config = await loadRawConfig(ctx.dataDir);
   return resolveSettings({ config, flags: { baseUrl: ctx.flags.baseUrl }, env: process.env })
     .baseUrl.value;
-}
-
-/** The saved descriptors, or a refusal when the saved list can't be read. */
-function savedDescriptors(config: PartialConfig): SourceDescriptor[] {
-  const sources = readPersonalRouter(config.router).sources;
-  if (sources.status === 'invalid') {
-    throw new CliError(
-      'CONFIG_INVALID',
-      `Your saved accounts can't be read (${sources.problem}), so nothing was changed.`,
-      { fix: 'Fix or remove router.sources in your Tenjin config, then run the command again.' },
-    );
-  }
-  return sources.saved;
 }
 
 /** An https address as an account is kept under: no trailing slash. */
@@ -408,12 +397,12 @@ function withPreference(
  *  A choice the user made about the account (what happens when it refuses)
  *  stays across a reconnect. */
 function withDescriptor(existing: PartialConfig, descriptor: SavedAccount): PartialConfig {
-  const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
-  const saved = Array.isArray(router.sources) ? (router.sources as SourceDescriptor[]) : [];
-  const before = savedAccountOf(saved.find((entry) => entry.id === descriptor.id));
-  const others = saved.filter((entry) => entry.id !== descriptor.id);
-  const kept = before?.onRefusal !== undefined ? { onRefusal: before.onRefusal } : {};
-  return { ...existing, router: { ...router, sources: [...others, { ...descriptor, ...kept }] } };
+  return editSources(existing, (saved) => {
+    const before = savedAccountOf(saved.find((entry) => entry.id === descriptor.id));
+    const others = saved.filter((entry) => entry.id !== descriptor.id);
+    const kept = before?.onRefusal !== undefined ? { onRefusal: before.onRefusal } : {};
+    return [...others, { ...descriptor, ...kept }];
+  });
 }
 
 const list = new Intl.ListFormat('en', { type: 'conjunction' });
@@ -501,7 +490,7 @@ export async function runConnect(
   if (name.length === 0)
     usage('Say which account to connect: tenjin connect <name or https address>.');
   const config = await loadRawConfig(ctx.dataDir);
-  const descriptors = savedDescriptors(config);
+  const descriptors = savedDescriptors(config.router);
   const saved = descriptors.flatMap((entry) => savedAccountOf(entry) ?? []);
 
   // 1. THE NAME, from the router's free identities read.
@@ -677,29 +666,20 @@ function withoutAccount(
   existing: PartialConfig,
   id: string,
 ): { next: PartialConfig; policyKept: boolean } {
-  const router = { ...((existing.router ?? {}) as Record<string, unknown>) };
-  const saved = Array.isArray(router.sources) ? (router.sources as SourceDescriptor[]) : [];
-  const sources = saved.filter((entry) => entry.id !== id);
-  if (sources.length > 0) router.sources = sources;
-  else delete router.sources;
+  const next = editSources(existing, (saved) => saved.filter((entry) => entry.id !== id));
+  const router = { ...((next.router ?? {}) as Record<string, unknown>) };
   const raw = router.policy;
-  if (raw === undefined) return { next: { ...existing, router }, policyKept: true };
+  if (raw === undefined) return { next, policyKept: true };
   const shape = SavedPolicyShapeSchema.safeParse(raw);
-  if (!shape.success) return { next: { ...existing, router }, policyKept: false };
+  if (!shape.success) return { next, policyKept: false };
   const prefer = (shape.data.prefer ?? []).flatMap((rule) => {
     const targets = rule.targets.filter((t) => !(t.kind === 'source' && t.id === id));
     return targets.length === 0 ? [] : [{ ...rule, targets }];
   });
-  const kept = {
-    version: shape.data.version,
-    ...(shape.data.block?.length ? { block: shape.data.block } : {}),
-    ...(shape.data.only?.length ? { only: shape.data.only } : {}),
-    ...(prefer.length ? { prefer } : {}),
-    ...(shape.data.preferSpeed === true ? { preferSpeed: true } : {}),
-  };
-  if (Object.keys(kept).length === 1) delete router.policy;
-  else router.policy = kept;
-  return { next: { ...existing, router }, policyKept: true };
+  const rules = wirePolicy({ ...shape.data, prefer });
+  if (hasRules(rules)) router.policy = { version: shape.data.version, ...rules };
+  else delete router.policy;
+  return { next: { ...next, router }, policyKept: true };
 }
 
 /** `tenjin disconnect <name>`: offline but for the sign-out itself. */
@@ -710,11 +690,10 @@ export async function runDisconnect(
 ): Promise<CommandResult> {
   const name = folded(target);
   if (name.length === 0) usage('Say which account to disconnect: tenjin disconnect <name>.');
+  // A SAVED LIST THIS BUILD CAN'T READ is refused before anything is signed
+  // out or deleted, as the edit that drops the descriptor would refuse it.
   const config = await loadRawConfig(ctx.dataDir);
-  const sources = readPersonalRouter(config.router).sources;
-  const saved = (sources.status === 'ok' ? sources.saved : []).flatMap(
-    (e) => savedAccountOf(e) ?? [],
-  );
+  const saved = savedDescriptors(config.router).flatMap((e) => savedAccountOf(e) ?? []);
   const own = saved.find((account) => account.id === name || folded(account.label) === name);
   const id = own?.id ?? (isAccountId(name) ? name : undefined);
   const vaultDeps = {
