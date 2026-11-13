@@ -747,9 +747,8 @@ async function vetOffer<T extends OfferDecision>(
   // or the wallet to check, and it is offered alone. One whose call this
   // account was found to lack when it was connected is left out, rather than
   // leading its task and failing when called: the hook stays silent.
-  if (isAccountOffer(offer)) {
-    const lead = accountLeadOf(offer);
-    if (lead === undefined) return { withheld: 'account lead unreadable' };
+  const lead = accountLeadOf(offer);
+  if (lead !== undefined) {
     if (await accountLacks(deps.dataDir, lead)) return { withheld: 'account lacks this job' };
     return { offer };
   }
@@ -994,17 +993,19 @@ function isOffer(decision: HookDecision | null): decision is OfferDecision {
  * URL, nothing the balance pays, and Tenjin's own route for the job beside
  * it, which a refusal offers. The server sends one only for an account this
  * machine's settings name, alone and checked, with `bound` when it can run in
- * place of the native call it holds.
+ * place of the native call it holds. Its lead's own spec, or undefined: an
+ * answer that parsed carries an account spec only as its lead
+ * (`checkExecute`), so this is the whole test.
  */
-function isAccountOffer(decision: HookDecision | null): decision is ExecuteDecision {
-  return decision?.action === 'execute' && (decision.specs ?? []).some(isAccountSpec);
-}
-
-/** The account lead's own spec. */
-function accountLeadOf(offer: ExecuteDecision): AccountOfferSpec | undefined {
-  const lead = (offer.specs ?? []).find(({ id }) => id === offer.id);
+function accountLeadOf(decision: HookDecision | null): AccountOfferSpec | undefined {
+  if (decision?.action !== 'execute') return undefined;
+  const lead = (decision.specs ?? []).find(({ id }) => id === decision.id);
   return lead !== undefined && isAccountSpec(lead) ? lead : undefined;
 }
+
+/** {@link accountLeadOf}, as a test that narrows the decision. */
+const isAccountOffer = (decision: HookDecision | null): decision is ExecuteDecision =>
+  accountLeadOf(decision) !== undefined;
 
 /** What the spend check and the footer read, for any kind of offer. An
  *  account's has no URL, and costs the balance nothing. */
@@ -1841,8 +1842,8 @@ async function openFooter(
         // choice set is what `request({id, choice})` picks from.
         // Each with the settings hash its answer echoed: what the check before
         // every call holds the offer to.
-        const lead = isAccountOffer(decision) ? accountLeadOf(decision) : undefined;
-        if (lead !== undefined && decision.action === 'execute') {
+        const lead = accountLeadOf(decision);
+        if (lead !== undefined) {
           await storeAccountOffer(deps.dataDir, lead, settingsHash);
         } else {
           const specs: readonly AnyOfferSpec[] = decision.specs ?? [];

@@ -122,19 +122,12 @@ export async function storeSpecs(
   if (specs === undefined || specs.length === 0) return;
   for (const spec of specs) {
     try {
-      // `shown` rides beside the spec for the mod, and is dropped on read.
-      // The answer's settings hash is this offer's own, never a later one.
-      const kept: Record<string, unknown> = {
-        ...spec,
-        [SHOWN_KEY]: shownInputField(spec),
-        ...(opts.replaces !== undefined ? { [REPLACES_KEY]: opts.replaces } : {}),
-      };
-      delete kept.settingsHash;
-      if (settingsHash !== undefined) kept.settingsHash = settingsHash;
-      await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
-        mode: 0o600,
-        dirMode: 0o700,
-      });
+      await writeKept(
+        dataDir,
+        spec,
+        settingsHash,
+        opts.replaces !== undefined ? { [REPLACES_KEY]: opts.replaces } : {},
+      );
     } catch {
       // The tool falls back to the server for this id; a row shows no input.
     }
@@ -142,40 +135,81 @@ export async function storeSpecs(
   await prune(join(dataDir, SPECS_DIR), SPEC_TTL_MS, Date.now());
 }
 
+/**
+ * Write one kept spec under its id. `shown` rides beside it for the mod, with
+ * `beside` (what a kind of spec keeps of its own), and both are dropped on
+ * read; the answer's settings hash is this offer's own, never a later one.
+ * Throws.
+ */
+async function writeKept(
+  dataDir: string,
+  spec: OfferSpec | AccountOfferSpec,
+  settingsHash: string | undefined,
+  beside: Record<string, unknown>,
+): Promise<void> {
+  const kept: Record<string, unknown> = {
+    ...spec,
+    [SHOWN_KEY]: shownInputField(spec),
+    ...beside,
+  };
+  delete kept.settingsHash;
+  if (settingsHash !== undefined) kept.settingsHash = settingsHash;
+  await writeFileAtomic(specPath(dataDir, spec.id), JSON.stringify(kept), {
+    mode: 0o600,
+    dirMode: 0o700,
+  });
+}
+
 /** The spec stored for this id, with the settings hash it was decided under,
  *  or null: none, expired, damaged or not ours. */
 export async function readSpec(dataDir: string, id: string): Promise<KeptSpec | null> {
-  return (await readSpecFile(dataDir, id))?.spec ?? null;
+  return (await readKept(dataDir, id, (kept) => paidSpecOf(kept, id)))?.spec ?? null;
 }
 
-/** {@link readSpec}, with the account offer it replaces, when it does. */
-async function readSpecFile(
+/**
+ * The file kept for this id, read once and handed to `read`, or null: none,
+ * expired, over its bound or damaged. O_NOFOLLOW: the directory is the
+ * user's, and a planted symlink must not turn this read into a read of
+ * something else. Never throws.
+ */
+async function readKept<T>(
   dataDir: string,
   id: string,
-): Promise<{ spec: KeptSpec; replaces?: string } | null> {
-  const path = specPath(dataDir, id);
-  // O_NOFOLLOW: the directory is the user's, and a planted symlink must not
-  // turn this read into a read of something else.
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  read: (kept: Record<string, unknown>) => T | null,
+): Promise<T | null> {
+  const file = await open(specPath(dataDir, id), constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+    () => undefined,
+  );
   if (file === undefined) return null;
   try {
     const stat = await file.stat();
     if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
-    const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
-    const replaces = kept[REPLACES_KEY];
-    delete kept[SHOWN_KEY];
-    delete kept[REPLACES_KEY];
-    const parsed = KeptSpecSchema.safeParse(kept);
-    if (!parsed.success || parsed.data.id !== id) return null;
-    return {
-      spec: parsed.data,
-      ...(typeof replaces === 'string' && replaces.length > 0 ? { replaces } : {}),
-    };
+    const kept: unknown = JSON.parse(await file.readFile('utf8'));
+    if (kept === null || typeof kept !== 'object' || Array.isArray(kept)) return null;
+    return read(kept as Record<string, unknown>);
   } catch {
     return null;
   } finally {
     await file.close().catch(() => undefined);
   }
+}
+
+/** A kept file as a spec the balance pays, with the account offer it
+ *  replaces, when it does; null when it is not one. */
+function paidSpecOf(
+  kept: Record<string, unknown>,
+  id: string,
+): { spec: KeptSpec; replaces?: string } | null {
+  const replaces = kept[REPLACES_KEY];
+  const fields = { ...kept };
+  delete fields[SHOWN_KEY];
+  delete fields[REPLACES_KEY];
+  const parsed = KeptSpecSchema.safeParse(fields);
+  if (!parsed.success || parsed.data.id !== id) return null;
+  return {
+    spec: parsed.data,
+    ...(typeof replaces === 'string' && replaces.length > 0 ? { replaces } : {}),
+  };
 }
 
 /** The field of a kept account spec beside the spec itself: whether the
@@ -199,17 +233,7 @@ export async function storeAccountOffer(
   opts: { named?: true } = {},
 ): Promise<void> {
   try {
-    const kept: Record<string, unknown> = {
-      ...lead,
-      [SHOWN_KEY]: shownInputField(lead),
-      ...(opts.named === true ? { [NAMED_KEY]: true } : {}),
-    };
-    delete kept.settingsHash;
-    if (settingsHash !== undefined) kept.settingsHash = settingsHash;
-    await writeFileAtomic(specPath(dataDir, lead.id), JSON.stringify(kept), {
-      mode: 0o600,
-      dirMode: 0o700,
-    });
+    await writeKept(dataDir, lead, settingsHash, opts.named === true ? { [NAMED_KEY]: true } : {});
   } catch {
     // `request({id})` says no spec is kept, and the agent asks again.
   }
@@ -225,31 +249,25 @@ export type KeptAny =
 /** Either kind of spec kept for this id, or null. Callers that run only a
  *  spec the balance pays read {@link readSpec}, which never returns the other. */
 export async function readKeptSpec(dataDir: string, id: string): Promise<KeptAny | null> {
-  const paid = await readSpecFile(dataDir, id);
-  if (paid !== null) return paid;
-  const file = await open(specPath(dataDir, id), constants.O_RDONLY | constants.O_NOFOLLOW).catch(
-    () => undefined,
-  );
-  if (file === undefined) return null;
-  try {
-    const stat = await file.stat();
-    if (Date.now() - stat.mtimeMs > SPEC_TTL_MS || stat.size > MAX_SPEC_BYTES) return null;
-    const kept = JSON.parse(await file.readFile('utf8')) as Record<string, unknown>;
-    const named = kept[NAMED_KEY] === true;
-    const hash = SettingsHashSchema.optional().safeParse(kept.settingsHash);
-    for (const key of [SHOWN_KEY, NAMED_KEY, 'settingsHash']) delete kept[key];
-    const account = AccountOfferSpecSchema.safeParse(kept);
-    if (!account.success || account.data.id !== id || !hash.success) return null;
-    return {
-      spec: { ...account.data, ...(hash.data !== undefined ? { settingsHash: hash.data } : {}) },
-      account: true,
-      ...(named ? { named: true as const } : {}),
-    };
-  } catch {
-    return null;
-  } finally {
-    await file.close().catch(() => undefined);
-  }
+  return readKept(dataDir, id, (kept) => paidSpecOf(kept, id) ?? accountSpecOf(kept, id));
+}
+
+/** A kept file as a spec on the user's own account, or null. */
+function accountSpecOf(
+  kept: Record<string, unknown>,
+  id: string,
+): Extract<KeptAny, { account: true }> | null {
+  const named = kept[NAMED_KEY] === true;
+  const hash = SettingsHashSchema.optional().safeParse(kept.settingsHash);
+  const fields = { ...kept };
+  for (const key of [SHOWN_KEY, NAMED_KEY, 'settingsHash']) delete fields[key];
+  const account = AccountOfferSpecSchema.safeParse(fields);
+  if (!account.success || account.data.id !== id || !hash.success) return null;
+  return {
+    spec: { ...account.data, ...(hash.data !== undefined ? { settingsHash: hash.data } : {}) },
+    account: true,
+    ...(named ? { named: true as const } : {}),
+  };
 }
 
 /** What the hook kept of a choice set: the set, and the line it came with. */

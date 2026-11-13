@@ -5,6 +5,7 @@ import type { CommandContext } from '../context';
 import type { Packet } from './context';
 import type { Harness } from './names';
 import {
+  BUILT_IN_SOURCE,
   SETTINGS_ACCEPT,
   SettingsHashSchema,
   TargetIdSchema,
@@ -374,6 +375,12 @@ export const MCP_ACCEPT = 'mcp';
  *  line reads it as anything else. */
 export const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
+/** Whether `id` is an account's: never the built-in source, which is never
+ *  connected. */
+export function isAccountId(id: string): boolean {
+  return ACCOUNT_ID.test(id) && id !== BUILT_IN_SOURCE;
+}
+
 /** A tool name as the MCP specification bounds it. */
 export const McpToolSchema = z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/);
 
@@ -474,14 +481,12 @@ function placeholders(value: unknown): string[] {
   return [];
 }
 
-/** The built-in source, which an account spec never names. */
-const BUILT_IN = 'tenjin';
-
 function accountSpecProblems(spec: z.infer<typeof AccountSpecFields>, ctx: z.RefinementCtx): void {
   const issue = (message: string, path: (string | number)[]) =>
     ctx.addIssue({ code: 'custom', message, path });
   const { mcp } = spec;
-  if (spec.source === BUILT_IN) issue(`an account service is never on ${BUILT_IN}`, ['source']);
+  if (spec.source === BUILT_IN_SOURCE)
+    issue(`an account service is never on ${BUILT_IN_SOURCE}`, ['source']);
   if (!(spec.requires ?? []).includes(MCP_ACCEPT))
     issue(`an account spec requires ${MCP_ACCEPT}`, ['requires']);
   if (Buffer.byteLength(JSON.stringify(mcp), 'utf8') > ACCOUNT_CALL_MAX_BYTES)
@@ -890,8 +895,7 @@ const IdentitiesResponseSchema = z.object({
       z
         .object({ ...Labelled, connectable: ConnectableSchema.optional() })
         .refine(
-          ({ id, connectable }) =>
-            connectable === undefined || (id !== BUILT_IN && ACCOUNT_ID.test(id)),
+          ({ id, connectable }) => connectable === undefined || isAccountId(id),
           'only an account id is connectable, never tenjin',
         ),
     )
@@ -1459,16 +1463,16 @@ export async function requestRefused(
     },
     ToolResponseSchema,
     deps,
-  ) as Promise<DecisionOutcome<ToolResponse>>;
+  );
 }
 
 /** One request on the paid route: sent by the payer, or unpaid with none. */
-async function sendPaid(
+async function sendPaid<R extends HookResponse | ToolResponse>(
   url: string,
   options: HttpRequestOptions,
-  schema: typeof HookResponseSchema | typeof ToolResponseSchema,
+  schema: z.ZodType<R>,
   deps: Pick<DecisionDeps, 'route'>,
-): Promise<DecisionOutcome<HookResponse | ToolResponse>> {
+): Promise<DecisionOutcome<R>> {
   let response: HttpResult;
   try {
     response = await (deps.route?.send ?? httpRequest)(url, options);
@@ -1541,7 +1545,7 @@ export async function requestToolSpec(
       ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
     }),
     ToolResponseSchema,
-  ) as DecisionOutcome<ToolResponse>;
+  );
 }
 
 /**
@@ -1718,16 +1722,16 @@ function readDecision<T extends z.ZodTypeAny>(
 
 /** A hook or tool answer, read, with each offer this build cannot run taken
  *  out ({@link withoutUnmet}). */
-function readOffer(
+function readOffer<R extends HookResponse | ToolResponse>(
   response: HttpResult,
-  schema: typeof HookResponseSchema | typeof ToolResponseSchema,
-): DecisionOutcome<HookResponse | ToolResponse> {
-  const read = readDecision<z.ZodType<HookResponse | ToolResponse>>(response, schema);
+  schema: z.ZodType<R>,
+): DecisionOutcome<R> {
+  const read = readDecision(response, schema);
   if (read.status !== 'decided') return read;
   const { decision, skipped } = withoutUnmet(read.decision.decision);
   return {
     ...read,
-    decision: { ...read.decision, decision } as HookResponse | ToolResponse,
+    decision: { ...read.decision, decision },
     ...(skipped.length > 0 ? { skipped } : {}),
   };
 }

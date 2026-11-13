@@ -10,7 +10,13 @@ import {
   type OfferSpec,
   type SpecOutcome,
 } from '../decision';
-import { settingsRefusal, UNREADABLE, type SettingsRefusal } from '../settings-check';
+import {
+  hashRefusal,
+  rulesNow,
+  UNREADABLE,
+  type ReadableWire,
+  type SettingsRefusal,
+} from '../settings-check';
 import { personalSettingsAt } from '../settings';
 import { mergedInput, specInputProblems, specText, uncheckedWarning } from '../spec-call';
 import {
@@ -376,27 +382,27 @@ async function accountCheck(
   account: Account,
   dataDir: string,
 ): Promise<{ settings: SettingsRefusal } | { reason: 'not_connected' } | null> {
-  const stale = await settingsRefusal(dataDir, [spec.settingsHash]);
+  const now = await rulesNow(dataDir);
+  if ('problem' in now) return { settings: UNREADABLE };
+  const stale = hashRefusal(now.wire, spec.settingsHash);
   if (stale !== null) return { settings: stale };
   if (spec.settingsHash === undefined) return { settings: UNCONFIRMED };
-  return connection(spec, account, dataDir);
+  return connection(spec, account, now.wire);
 }
 
 /**
  * WHETHER THE ACCOUNT IS STILL CONNECTED HERE: its descriptor saved, its
- * sign-in on this machine, and named to the router in the settings saved now,
- * read once. Settings that can't be read refuse too, as the check before
- * every call refuses them: nothing is guessed. Local only.
+ * sign-in on this machine, and named to the router in `wire`, the settings
+ * saved now (a caller refuses settings that can't be read before it asks:
+ * nothing is guessed). Local only.
  */
-async function connection(
+function connection(
   spec: { source: string },
   account: Account,
-  dataDir: string,
-): Promise<{ settings: SettingsRefusal } | { reason: 'not_connected' } | null> {
-  const now = await personalSettingsAt(dataDir).catch(() => undefined);
-  if (now === undefined || now.wire.status === 'invalid') return { settings: UNREADABLE };
+  wire: ReadableWire,
+): { reason: 'not_connected' } | null {
   if (!account.saved || account.mcpUrl === undefined) return { reason: 'not_connected' };
-  if (!now.wire.settings.sources.includes(spec.source)) return { reason: 'not_connected' };
+  if (!wire.settings.sources.includes(spec.source)) return { reason: 'not_connected' };
   return null;
 }
 
@@ -984,7 +990,9 @@ export async function resumeAccountJob(
     startedAt: Date.now(),
   };
   const resume: Resume = { first: job.first, firstAt: job.firstAt };
-  const checked = await connection(spec, at.account, dataDir);
+  const now = await rulesNow(dataDir);
+  const checked =
+    'problem' in now ? { settings: UNREADABLE } : connection(spec, at.account, now.wire);
   if (checked !== null && 'settings' in checked) {
     // The job stays kept: once the settings are fixed, the same call picks it up.
     await footer.done('needs_input');

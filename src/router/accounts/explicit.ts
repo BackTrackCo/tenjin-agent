@@ -1,8 +1,8 @@
 import { MAX_INPUT_BYTES, McpToolSchema } from '../decision';
-import { cachedIdentities, type Identities } from '../identities';
+import { accountServices, cachedIdentities, type Identities } from '../identities';
 import { appendPaidRecord, maskDeep } from '../paid';
 import { openLookupFooter } from '../progress';
-import { personalSettingsAt, type PersonalSettings } from '../settings';
+import { rulesNow } from '../settings-check';
 import { uncheckedWarning } from '../spec-call';
 import {
   deliverResult,
@@ -125,14 +125,6 @@ function row(tool: AccountTool): ToolRow {
   };
 }
 
-/** The jobs Tenjin maps on this account, by their service ids, from the
- *  identities read kept on disk: `<account>.<key>` sold by the account. */
-function mappedJobs(account: SavedAccount, identities: Identities | undefined): string[] {
-  return (identities?.services ?? [])
-    .filter(({ id, seller }) => seller === account.id && id.startsWith(`${account.id}.`))
-    .map(({ id }) => id);
-}
-
 /** The call that runs a task on the user's account through Tenjin's map. */
 export function jobForm(jobs: readonly string[]): string {
   return jobs.length > 0
@@ -159,18 +151,10 @@ function jobsOnlyTools(
 }
 
 /** Why the saved settings stop a named call, or null: only rules that can't
- *  be read (the check before every call's own test, `settings-check.ts`),
- *  never a rule, since the agent is asking by name. */
+ *  be read, never a rule, since the agent is asking by name. */
 async function settingsStop(dataDir: string): Promise<string | null> {
-  let now: PersonalSettings;
-  try {
-    now = await personalSettingsAt(dataDir);
-  } catch (err) {
-    return `your Tenjin settings can't be read (${err instanceof Error ? err.message : String(err)})`;
-  }
-  return now.wire.status === 'invalid'
-    ? `your Tenjin settings can't be read (${now.wire.problem})`
-    : null;
+  const now = await rulesNow(dataDir);
+  return 'problem' in now ? `your Tenjin settings can't be read (${now.problem})` : null;
 }
 
 /** `request({source, tool?, input?})`. */
@@ -235,7 +219,9 @@ export async function runSourceRequest(
   // A MAPPED JOB'S TOOLS run only through that job, with the map's cost
   // pins: never with the agent's own arguments.
   const identities = await cachedIdentities(dataDir);
-  const jobs = mappedJobs(account, identities);
+  // The jobs Tenjin maps on this account, by their service ids, from the
+  // identities read kept on disk.
+  const jobs = accountServices(account.id, identities).map(({ id }) => id);
   const jobsOnly = jobsOnlyTools(account, identities);
   if (toRun !== undefined && (jobsOnly === null || jobsOnly.has(toRun.tool))) {
     return fail(

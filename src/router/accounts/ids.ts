@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { ACCOUNT_ID } from '../decision';
+import { ACCOUNT_ID, isAccountId } from '../decision';
+
+export { isAccountId };
 
 /**
  * THE NAMES A CONNECTED ACCOUNT IS KEPT UNDER. Safe in a hook: no I/O.
@@ -12,15 +14,9 @@ import { ACCOUNT_ID } from '../decision';
  * file system, shell or keychain command line reads as anything else.
  */
 
-/** The built-in source, which is never connected. */
-const BUILT_IN = 'tenjin';
-
-export function isAccountId(id: string): boolean {
-  return ACCOUNT_ID.test(id) && id !== BUILT_IN;
-}
-
-/** The OS-store accounts a vault key may be kept under: `source:<id>:<folder>`. */
-export const STORE_ACCOUNT = /^source:[a-z0-9][a-z0-9-]{0,47}:[0-9a-f]{12}$/;
+/** The OS-store accounts a vault key may be kept under: `source:<id>:<folder>`,
+ *  the id as {@link ACCOUNT_ID} takes it (its pattern, anchors dropped). */
+export const STORE_ACCOUNT = new RegExp(`^source:${ACCOUNT_ID.source.slice(1, -1)}:[0-9a-f]{12}$`);
 
 /**
  * The OS-store account that holds an account's vault key for the data folder
