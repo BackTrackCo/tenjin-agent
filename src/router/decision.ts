@@ -1434,7 +1434,9 @@ export async function requestDecision(
           }),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   };
-  return sendPaid(url, options, kind === 'hook' ? HookResponseSchema : ToolResponseSchema, deps);
+  return kind === 'hook'
+    ? sendPaid(url, options, HookResponseSchema, deps)
+    : sendPaid(url, options, ToolResponseSchema, deps);
 }
 
 /**
