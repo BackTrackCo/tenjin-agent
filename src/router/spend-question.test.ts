@@ -29,7 +29,7 @@ describe('the spend question', () => {
 
   it('asks how much the agent may spend, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'How much can your agent spend from its balance? Routing costs a fee the router quotes for each answer; offers show no fee. Tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits once, when it is sent. Either choice approves this.',
+      'How much can your agent spend from its balance? Paid tool recommendations cost 15% of the estimated tool price, up to 25¢. You pay separately for tools you use. Routing top-ups count toward your limits. Either choice approves this.',
     );
   });
 

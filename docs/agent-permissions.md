@@ -47,7 +47,7 @@ Defaults apply before any answer. Accepting limits records them; explicit amount
 
 Changing global limits is a normal config write: the CLI does not distinguish a person from an agent. Your host's permissions and filesystem access protect those writes. Authorize limit changes deliberately; the request tool itself cannot raise them.
 
-A routing decision and a provider call are separate charges. The server quotes the routing fee for each answer, and it cannot exceed $0.25; offers show no fee. Routing funds are deposited in bounded amounts and counted toward automatic spending once; fees drawn from that deposit are not counted again. Unused routing funds remain yours. [How a deposit is sized and counted →](./router-reference.md#routing-fee-and-deposit)
+A routing decision and a provider call are separate charges. Routing fees vary by answer, up to 25¢. Routing funds are deposited in bounded amounts and counted toward automatic spending once; fees drawn from that deposit are not counted again. Unused routing funds remain yours. [How a deposit is sized and counted →](./router-reference.md#routing-fee-and-deposit)
 
 A call over its automatic allowance pays nothing and returns `needs_approval`. Supported Claude Code versions offer a host-enforced approval prompt for that exact quote; an approved call is manual spending outside the automatic budget, still bounded by the balance. Codex and other hosts without that approval facility refuse the call. The approval does not change your configured limits.
 

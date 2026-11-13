@@ -162,11 +162,7 @@ export async function runRouterStatus(
           `set aside for routing: approximately ${data.routingCredit.remaining.usd} USD (local estimate)`,
         ]
       : []),
-    ...(spentAtomic > 0n
-      ? [
-          `spent on routing: approximately ${data.routingCredit.spent.usd} USD (deposits sent less what is set aside; local estimate)`,
-        ]
-      : []),
+    ...(spentAtomic > 0n ? [`spent on routing: about $${data.routingCredit.spent.usd}`] : []),
   ];
   const walletLines =
     wallet === null

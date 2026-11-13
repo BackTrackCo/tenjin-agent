@@ -57,9 +57,7 @@ describe('status, the wallet line', () => {
     const lines = spent.humanLines ?? [];
     const aside = lines.indexOf('set aside for routing: approximately 0.018 USD (local estimate)');
     expect(aside).toBeGreaterThan(-1);
-    expect(lines[aside + 1]).toBe(
-      'spent on routing: approximately 0.062 USD (deposits sent less what is set aside; local estimate)',
-    );
+    expect(lines[aside + 1]).toBe('spent on routing: about $0.062');
     expect(spent.data).toMatchObject({ routingCredit: { spent: { atomic: '62000' } } });
     const none = await runRouterStatus(ctx(), {
       routingCredit: async () => 0n,

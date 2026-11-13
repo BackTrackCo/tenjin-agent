@@ -125,7 +125,7 @@ Browsing and inspection are free. A selected tool pays only its provider; select
 | Daily budget shared across chats | $5      |
 | Per-call limit                   | $0.25   |
 
-A new chat does not reset the daily budget. Routing has a separate fee, quoted for each answer and capped at $0.25; offers show no fee. When your routing balance runs low, Tenjin tops it up from your wallet; unused funds stay yours. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
+A new chat does not reset the daily budget. Routing fees vary by answer, up to 25¢. Tool charges are separate. [Limits and approval →](./docs/agent-permissions.md#what-bounds-a-payment)
 
 ## Commands
 

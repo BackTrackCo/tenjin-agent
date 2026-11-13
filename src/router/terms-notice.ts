@@ -20,8 +20,9 @@ import { PRIVATE } from './store-files';
 /** The terms this build states; new terms get a new id. */
 const TERMS_ID = 'per-answer-quote';
 
-/** What the person is told once. It names no rate and no command. */
-export const TERMS_CHANGED_SENTENCE = `Tenjin's routing fee is now quoted for each answer, and offers show no fee. Your spend limits have not changed.`;
+/** What the person is told once about the changed routing terms. */
+export const TERMS_CHANGED_SENTENCE =
+  'Routing fees now vary by answer, up to 25¢. Your configured spend limits still apply.';
 
 function marker(dataDir: string): string {
   return join(dataDir, 'router', 'terms', TERMS_ID);

@@ -249,7 +249,7 @@ describe('Codex automatic hooks', () => {
           // (balance_unreadable): no unpaid notice is said to the person. The
           // new routing terms are told once, on this first routing call.
           expect(out?.systemMessage ?? '').not.toContain('could not pay');
-          expect(out?.systemMessage).toContain("Tenjin's routing fee is now quoted");
+          expect(out?.systemMessage).toContain('Routing fees now vary by answer');
           expect(fake.paidRequests()).toBe(0);
           expect(await readSpendSummary(dir)).toBeNull();
         }
