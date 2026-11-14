@@ -22,6 +22,7 @@ import { modelSettings } from './model-settings';
 import { MCP_SERVER_NAME } from './names';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
+import { codexModelPolicy } from './codex-model-context';
 
 const PROVIDER = 'tenjin_deepseek_worker_v1';
 const VERSION = '0.167.0-alpha.4.1';
@@ -33,6 +34,25 @@ const CLEARED_PROVIDER_KEYS = [
   'TYPESAFE_KEY',
   'TYPESAFE_API_KEY',
 ] as const;
+// Native 0.167 ModelProviderInfo serializes these unset Options as null.
+// Only those exact defaults may disappear before the strict authority check.
+const PROVIDER_NULL_DEFAULTS = new Set([
+  'model_catalog_url',
+  'env_key_instructions',
+  'experimental_bearer_token',
+  'auth',
+  'gateway_oauth',
+  'aws',
+  'project_id',
+  'location',
+  'credential_file',
+  'capabilities',
+  'query_params',
+  'http_headers',
+  'env_http_headers',
+  'stream_idle_timeout_ms',
+  'websocket_connect_timeout_ms',
+]);
 interface Options {
   cwd: string;
   dataDir: string;
@@ -59,6 +79,26 @@ interface OwnedProvider {
   catalogPath: string;
 }
 
+async function assertParentCurrent(options: Options) {
+  const parent = options.policy.parent;
+  if (!parent?.transcriptPath || !parent.localEnvironment)
+    throw new Error('Proven local parent authority unavailable');
+  const current = await codexModelPolicy(
+    parent.transcriptPath,
+    parent.sessionId,
+    parent.turnId,
+    options.cwd,
+  );
+  if (
+    current?.parent?.fingerprint !== parent.fingerprint ||
+    !isDeepStrictEqual(current.approvalPolicy, options.policy.approvalPolicy) ||
+    current.approvalsReviewer !== options.policy.approvalsReviewer ||
+    !isDeepStrictEqual(current.permissionProfile, options.policy.permissionProfile) ||
+    !isDeepStrictEqual(current.disabledPluginIds, options.policy.disabledPluginIds)
+  )
+    throw new Error('Native parent environment or authority changed');
+}
+
 function assertOwnedProvider(config: Record<string, unknown>, owned: OwnedProvider) {
   const expected = {
     name: 'Tenjin DeepSeek worker',
@@ -70,13 +110,22 @@ function assertOwnedProvider(config: Record<string, unknown>, owned: OwnedProvid
     request_max_retries: 0,
     stream_max_retries: 0,
   };
+  const provider =
+    isRecord(config.model_providers) && isRecord(config.model_providers[PROVIDER])
+      ? Object.fromEntries(
+          Object.entries(config.model_providers[PROVIDER]).filter(
+            ([key, value]) =>
+              !(PROVIDER_NULL_DEFAULTS.has(key) && value === null) &&
+              !(key === 'supports_standalone_web_search' && value === false),
+          ),
+        )
+      : null;
   if (
     config.model !== 'deepseek-flash' ||
     config.model_provider !== PROVIDER ||
     config.model_reasoning_effort !== 'high' ||
     config.model_catalog_json !== owned.catalogPath ||
-    !isRecord(config.model_providers) ||
-    !isDeepStrictEqual(config.model_providers[PROVIDER], expected)
+    !isDeepStrictEqual(provider, expected)
   )
     throw new Error('Native provider/catalog authority changed');
 }
@@ -261,10 +310,25 @@ async function parentEnvironments(request: CodexAppRequest, options: Options) {
     raw.thread.sessionId !== parent.sessionId ||
     raw.thread.parentThreadId != null ||
     raw.thread.source !== 'vscode' ||
-    raw.thread.extra != null ||
-    !Array.isArray(raw.thread.environments)
+    raw.thread.extra != null
   )
     throw new Error('Native parent environment unavailable');
+  // A separate app-server metadata read does not load the Desktop parent and
+  // reports null selections. Use only the independently proved, frozen native
+  // WorldState descriptor; null itself grants no local/default assumption.
+  if (raw.thread.environments == null) {
+    const local = parent.localEnvironment;
+    if (!local) throw new Error('Proven local parent environment unavailable');
+    return [
+      {
+        environmentId: 'local',
+        cwd: local.cwd,
+        runtimeWorkspaceRoots: parent.runtimeWorkspaceRoots,
+      },
+    ];
+  }
+  if (!Array.isArray(raw.thread.environments) || raw.thread.environments.length !== 1)
+    throw new Error('Unsupported native environment selection');
   const environments = [];
   for (const entry of raw.thread.environments) {
     if (
@@ -281,7 +345,10 @@ async function parentEnvironments(request: CodexAppRequest, options: Options) {
           : Promise.reject(new Error('Unknown native root')),
       ),
     );
-    if (roots.some((root) => !parent.runtimeWorkspaceRoots.includes(root)))
+    if (
+      !isDeepStrictEqual(roots, parent.runtimeWorkspaceRoots) ||
+      (await realpath(entry.cwd)) !== parent.localEnvironment?.cwd
+    )
       throw new Error('Native environment roots changed');
     environments.push({
       environmentId: 'local',
@@ -308,6 +375,11 @@ async function withNativeSession<T>(
     !['on-request', 'never', 'untrusted'].includes(String(options.policy.approvalPolicy))
   )
     return null;
+  try {
+    await assertParentCurrent(options);
+  } catch {
+    return null;
+  }
   const profile = codexInstructionProfile({ ...options, worker: true });
   const instructionProfile = codexInstructionProfile(options);
   if (!profile || !instructionProfile) return null;
@@ -330,9 +402,15 @@ async function withNativeSession<T>(
     `model_catalog_json=${JSON.stringify(catalog.path)}`,
     `model_providers.${PROVIDER}={ name="Tenjin DeepSeek worker", base_url=${JSON.stringify(bridge.url)}, wire_api="responses", env_key="TENJIN_MODEL_TOKEN", requires_openai_auth=false, supports_websockets=false, request_max_retries=0, stream_max_retries=0 }`,
     `mcp_servers.${MCP_SERVER_NAME}.env.TENJIN_MODEL_WORKER="1"`,
-    ...(options.policy.disabledPluginIds ?? []).map(
-      (id) => `plugins.${JSON.stringify(id)}.enabled=false`,
-    ),
+    // Native CLI splits override keys on every dot without parsing quoted keys.
+    // Keep opaque plugin IDs inside the TOML value, where quoting is honored.
+    ...(options.policy.disabledPluginIds?.length
+      ? [
+          `plugins={ ${options.policy.disabledPluginIds
+            .map((id) => `${JSON.stringify(id)} = { enabled = false }`)
+            .join(', ')} }`,
+        ]
+      : []),
   ];
   return withAppServer(
     options.home ?? homedir(),
@@ -402,6 +480,7 @@ async function withNativeSession<T>(
           instructionContext,
           assertCurrent: async () => {
             options.signal?.throwIfAborted();
+            await assertParentCurrent(options);
             if (
               canonicalHash({
                 host: (await hostSnapshot(request, options, owned, threadId)).fingerprint,

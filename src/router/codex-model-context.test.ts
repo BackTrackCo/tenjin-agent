@@ -1,8 +1,9 @@
-import { mkdtemp, writeFile, rm, truncate } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, truncate, realpath, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { codexModelPolicy } from './codex-model-context';
+import { nativeLocalFilesystem } from './codex-local-environment';
 
 let dir: string;
 afterEach(async () => {
@@ -84,7 +85,7 @@ it('binds native restrictions to the exact owned root and turn, never a child or
 });
 
 async function authorityFixture() {
-  dir = await mkdtemp(join(tmpdir(), 'codex-parent-authority-'));
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'codex-parent-authority-')));
   const path = join(dir, 'rollout.jsonl');
   const meta = {
     type: 'session_meta',
@@ -106,7 +107,14 @@ async function authorityFixture() {
       approval_policy: 'on-request',
       approvals_reviewer: 'auto_review',
       sandbox_policy: { type: 'workspace-write' },
-      permission_profile: { type: 'managed', network: 'restricted' },
+      permission_profile: {
+        type: 'managed',
+        network: 'restricted',
+        file_system: {
+          type: 'restricted',
+          entries: [{ path: { type: 'special', value: { kind: 'root' } }, access: 'read' }],
+        },
+      },
       disabled_plugin_ids: [],
     },
   };
@@ -122,9 +130,43 @@ async function authorityFixture() {
       },
     },
   };
-  const save = (rows: unknown[]) =>
-    writeFile(path, rows.map((row) => JSON.stringify(row)).join('\n'));
-  return { path, meta, context, user, save };
+  const nativeState = (snapshot: Record<string, unknown> = context.payload) => [
+    {
+      type: 'world_state',
+      payload: {
+        full: true,
+        state: {
+          environments: {
+            environments: { local: { cwd: dir, status: 'available', shell: 'zsh' } },
+            filesystem: nativeLocalFilesystem(snapshot.permission_profile, [dir]),
+          },
+          environments_instructions: false,
+        },
+      },
+    },
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'thread_settings_applied',
+        thread_id: 'root',
+        thread_settings: { ...snapshot, runtime_workspace_roots: [dir] },
+      },
+    },
+  ];
+  const save = (rows: unknown[], includeNativeState = true) => {
+    const index = rows.findIndex(
+      (row) => row && typeof row === 'object' && 'type' in row && row.type === 'turn_context',
+    );
+    const saved = [...rows];
+    if (includeNativeState && index >= 0)
+      saved.splice(
+        index,
+        0,
+        ...nativeState((saved[index] as { payload: Record<string, unknown> }).payload),
+      );
+    return writeFile(path, saved.map((row) => JSON.stringify(row)).join('\n'));
+  };
+  return { path, meta, context, user, save, nativeState };
 }
 
 const developer = (text: string, kind?: string) => ({
@@ -169,6 +211,107 @@ it('preserves bounded local authority from a large complete rollout without expo
   expect(JSON.stringify(policy)).not.toContain('PRIVATE_USER_HISTORY');
   expect(JSON.stringify(policy)).not.toContain('REGENERATED_PERMISSIONS');
   expect(policy?.parent?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+});
+
+it('requires a native full local witness and owned applied settings, never user prose or creation roots alone', async () => {
+  const f = await authorityFixture();
+  await f.save([f.meta, f.context, f.user], false);
+  expect((await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent).toBeUndefined();
+  const [world] = f.nativeState();
+  await f.save([f.meta, world, f.context, f.user], false);
+  expect((await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent).toBeUndefined();
+});
+
+it.each(['remote', 'filesystem', 'foreign_settings', 'changed_policy', 'later_turn'])(
+  'does not admit stale or foreign local authority: %s',
+  async (kind) => {
+    const f = await authorityFixture();
+    const suffix: unknown[] = [];
+    if (kind === 'remote')
+      suffix.push({
+        type: 'world_state',
+        payload: {
+          full: false,
+          state: {
+            environments: { environments: { remote: { cwd: '/remote', status: 'failed' } } },
+          },
+        },
+      });
+    if (kind === 'filesystem')
+      suffix.push({
+        type: 'world_state',
+        payload: { full: false, state: { environments: { filesystem: 'unbound permissions' } } },
+      });
+    if (kind === 'foreign_settings' || kind === 'changed_policy')
+      suffix.push({
+        type: 'event_msg',
+        payload: {
+          type: 'thread_settings_applied',
+          thread_id: kind === 'foreign_settings' ? 'foreign' : 'root',
+          thread_settings: {
+            ...f.context.payload,
+            runtime_workspace_roots: [dir],
+            ...(kind === 'changed_policy' ? { approvals_reviewer: 'user' } : {}),
+          },
+        },
+      });
+    if (kind === 'later_turn')
+      suffix.push({ ...f.context, payload: { ...f.context.payload, turn_id: 'newer-turn' } });
+    await f.save([f.meta, f.context, f.user, ...suffix]);
+    expect((await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent).toBeUndefined();
+  },
+);
+
+it('binds current applied workspace roots instead of losing roots added after creation', async () => {
+  const f = await authorityFixture();
+  const added = join(dir, 'visualization');
+  await mkdir(added);
+  const roots = [dir, added];
+  await f.save([
+    f.meta,
+    f.context,
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'thread_settings_applied',
+        thread_id: 'root',
+        thread_settings: { ...f.context.payload, runtime_workspace_roots: roots },
+      },
+    },
+    {
+      type: 'world_state',
+      payload: {
+        full: false,
+        state: {
+          environments: {
+            filesystem: nativeLocalFilesystem(f.context.payload.permission_profile, roots),
+          },
+        },
+      },
+    },
+  ]);
+  const policy = await codexModelPolicy(f.path, 'root', 'turn', dir);
+  expect(policy?.parent?.runtimeWorkspaceRoots).toEqual(roots);
+  expect(policy?.parent?.transcriptPath).toBe(f.path);
+});
+
+it('replays environment patches without treating unrelated subagent or clock updates as authority drift', async () => {
+  const f = await authorityFixture();
+  await f.save([f.meta, f.context, f.user]);
+  const original = (await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent?.fingerprint;
+  await f.save([
+    f.meta,
+    f.context,
+    f.user,
+    {
+      type: 'world_state',
+      payload: {
+        full: false,
+        state: { environments: { subagents: 'unrelated workers', current_date: '2099-01-01' } },
+      },
+    },
+  ]);
+  expect((await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent?.fingerprint).toBe(original);
 });
 
 it.each([
@@ -359,6 +502,68 @@ it('preserves the raw default-mode template separately from its regenerated rend
     await f.save([f.meta, mode, context]);
     expect(await codexModelPolicy(f.path, 'root', 'turn', dir)).toBeNull();
   }
+});
+
+it('carries unchanged proven native default instructions across turns without accepting an unwitnessed replacement', async () => {
+  const f = await authorityFixture();
+  const rendered = {
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: 'NATIVE_RENDERED_DEFAULT' }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: 'turn',
+        content_item_kinds: ['collaboration_mode.instructions'],
+        content_item_metadata: [{ provenance: { type: 'harness', hook: false } }],
+      },
+    },
+  };
+  const initial = {
+    ...f.context,
+    payload: {
+      ...f.context.payload,
+      collaboration_mode: {
+        mode: 'default',
+        settings: {
+          model: 'native-parent',
+          reasoning_effort: 'high',
+          developer_instructions: 'RAW_DEFAULT',
+        },
+      },
+    },
+  };
+  const later = { ...initial, payload: { ...initial.payload, turn_id: 'later' } };
+  await f.save([f.meta, rendered, initial, later]);
+  expect((await codexModelPolicy(f.path, 'root', 'later', dir))?.parent?.collaborationMode).toEqual(
+    {
+      mode: 'default',
+      developerInstructions: 'RAW_DEFAULT',
+    },
+  );
+  const changed = {
+    ...later,
+    payload: {
+      ...later.payload,
+      collaboration_mode: {
+        ...later.payload.collaboration_mode,
+        settings: {
+          ...later.payload.collaboration_mode.settings,
+          developer_instructions: 'UNWITNESSED_CHANGE',
+        },
+      },
+    },
+  };
+  const applied = {
+    type: 'event_msg',
+    payload: {
+      type: 'thread_settings_applied',
+      thread_id: 'root',
+      thread_settings: { ...changed.payload, runtime_workspace_roots: [dir] },
+    },
+  };
+  await f.save([f.meta, rendered, initial, applied, changed]);
+  expect(await codexModelPolicy(f.path, 'root', 'later', dir)).toBeNull();
 });
 
 it('binds explicitly served external tool identities without copying their descriptions', async () => {

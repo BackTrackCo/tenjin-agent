@@ -11,6 +11,7 @@ import { qualifyNativeCodexWorker, runNativeCodexWorker } from './codex-native-w
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
+import { codexModelPolicy } from './codex-model-context';
 
 const http = vi.hoisted(() => ({
   handler: undefined as undefined | ((req: unknown, res: unknown) => void),
@@ -32,6 +33,7 @@ vi.mock('node:http', async (importOriginal) => ({
   },
 }));
 vi.mock('../lib/codex-app-server', () => ({ withAppServer: vi.fn() }));
+vi.mock('./codex-model-context', () => ({ codexModelPolicy: vi.fn() }));
 vi.mock('../lib/codex-bin', () => ({ resolveCodex: () => ({ cmd: '/native/codex', prefix: [] }) }));
 vi.mock('./codex-instruction-reader', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./codex-instruction-reader')>()),
@@ -50,6 +52,8 @@ let requests: Array<{ method: string; params: unknown }>,
   env: NodeJS.ProcessEnv,
   closed: boolean;
 let failure: unknown;
+let parentOverride: Record<string, unknown> | undefined;
+let parentEnvironments: unknown;
 let providerOverride: Record<string, unknown> | undefined;
 let effectiveOverride: Record<string, unknown> | undefined;
 let startOverride: Record<string, unknown> | undefined, onTurn: (() => Promise<void>) | undefined;
@@ -104,6 +108,14 @@ beforeEach(async () => {
     baseInstructions: 'EXACT_PARENT_BASE',
     developerInstructions: 'EXTRA_PARENT_AUTHORITY',
     runtimeWorkspaceRoots: [root],
+    transcriptPath: join(dir, 'owned-rollout.jsonl'),
+    localEnvironment: {
+      cwd: root,
+      filesystem: 'NATIVE_FILESYSTEM_WITNESS',
+      shell: 'zsh',
+      network: null,
+      fingerprint: canonicalHash({ cwd: root, filesystem: 'NATIVE_FILESYSTEM_WITNESS' }),
+    },
   };
   policy = {
     approvalPolicy: 'on-request',
@@ -127,6 +139,8 @@ beforeEach(async () => {
   callbacks = {};
   env = {};
   closed = false;
+  parentOverride = undefined;
+  parentEnvironments = null;
   startOverride = undefined;
   providerOverride = undefined;
   effectiveOverride = undefined;
@@ -134,6 +148,17 @@ beforeEach(async () => {
   permission.mockClear();
   responses.mockClear();
   http.closed = 0;
+  vi.mocked(codexModelPolicy).mockImplementation(async () => {
+    const current = structuredClone(policy);
+    if (current.parent && parentOverride) {
+      Object.assign(current.parent, parentOverride);
+      const authority = Object.fromEntries(
+        Object.entries(current.parent).filter(([key]) => key !== 'fingerprint'),
+      );
+      current.parent.fingerprint = canonicalHash(authority);
+    }
+    return current;
+  });
   vi.mocked(readCodexInstructionFilesOnServer).mockImplementation(
     async (_request, _options, paths) =>
       Promise.all(
@@ -207,9 +232,7 @@ beforeEach(async () => {
                 parentThreadId: null,
                 source: 'vscode',
                 extra: null,
-                environments: [
-                  { environmentId: 'local', cwd: root, runtimeWorkspaceRoots: [root] },
-                ],
+                environments: parentEnvironments,
               },
             };
           if (method === 'config/read')
@@ -366,6 +389,7 @@ it('qualifies native autoReview and preserves parent base, roots, authenticated 
     baseInstructions: 'EXACT_PARENT_BASE',
     developerInstructions: 'EXTRA_PARENT_AUTHORITY',
     runtimeWorkspaceRoots: [root],
+    environments: [{ environmentId: 'local', cwd: root, runtimeWorkspaceRoots: [root] }],
   });
   expect(start).not.toHaveProperty('sandbox');
   expect(start).not.toHaveProperty('config.project_doc_max_bytes');
@@ -412,9 +436,61 @@ it('refuses downgraded native reviewer and disabled plugins that remain active',
   inventory[0]!.pluginId = 'blocked';
   expect(await qualify()).toBeNull();
 });
+it('keeps opaque dotted plugin IDs in the TOML value instead of the native dotted-key path', async () => {
+  policy.disabledPluginIds = ['tool.with.dots@marketplace.example', 'other@marketplace'];
+  expect(await qualify()).not.toBeNull();
+  const overrides = callbacks.configOverrides!.filter((value) => value.startsWith('plugins'));
+  expect(overrides).toHaveLength(1);
+  const override = overrides[0]!;
+  // The pinned native key parser uses path.split('.'); quoting a key segment
+  // cannot protect periods or remove quotes from a plugin identity.
+  expect(override.slice(0, override.indexOf('='))).toBe('plugins');
+  for (const id of policy.disabledPluginIds)
+    expect(override.slice(override.indexOf('=') + 1)).toContain(
+      `${JSON.stringify(id)} = { enabled = false }`,
+    );
+});
 it('keeps missing parent authority native before any child starts', async () => {
   delete policy.parent;
   expect(await qualify()).toBeNull();
+});
+it('never interprets a null loaded-parent selection as local without frozen native evidence', async () => {
+  delete policy.parent!.localEnvironment;
+  expect(await qualify()).toBeNull();
+  expect(requests).toEqual([]);
+  expect(responses).not.toHaveBeenCalled();
+});
+it.each([
+  { selection: [] },
+  { selection: [{ environmentId: 'remote', cwd: '/other', runtimeWorkspaceRoots: [] }] },
+])(
+  'refuses a loaded selection contradicting proved native local state: %s',
+  async ({ selection }) => {
+    parentEnvironments = selection;
+    expect(await qualify()).toBeNull();
+    expect(requests.some((r) => r.method === 'thread/start')).toBe(false);
+  },
+);
+it('re-reads parent authority before acceptance/start, before native initialization or fees', async () => {
+  await job();
+  requests = [];
+  parentOverride = { localEnvironment: { ...policy.parent!.localEnvironment, network: 'changed' } };
+  expect(await qualify()).toBeNull();
+  expect(requests).toEqual([]);
+  expect(responses).not.toHaveBeenCalled();
+});
+it('re-reads parent environment after worker start and before its first inference purchase', async () => {
+  const accepted = await job();
+  onTurn = async () => {
+    parentOverride = {
+      localEnvironment: { ...policy.parent!.localEnvironment, filesystem: 'changed' },
+    };
+    await provider();
+  };
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /parent environment or authority changed/,
+  );
+  expect(responses).not.toHaveBeenCalled();
 });
 it('takes only the owned completed final answer, including notifications racing turn/start', async () => {
   const accepted = await job();
@@ -573,10 +649,38 @@ it.each([
   { http_headers: { authorization: 'unexpected-auth' } },
   { query_params: { redirect: 'elsewhere' } },
   { experimental_bearer_token: 'unowned' },
+  { auth: { command: 'unowned' } },
+  { env_http_headers: { authorization: 'OPENAI_API_KEY' } },
+  { capabilities: { web_search: true } },
+  { model_catalog_url: 'https://outside.invalid/models' },
+  { supports_standalone_web_search: true },
+  { unknown_native_option: null },
 ])('rejects effective provider overrides before projection/thread start: %s', async (changed) => {
   providerOverride = changed;
   expect(await qualify()).toBeNull();
   expect(requests.some((r) => r.method === 'thread/start')).toBe(false);
+});
+it('accepts the exact fully serialized native provider defaults without accepting additional authority', async () => {
+  providerOverride = {
+    model_catalog_url: null,
+    env_key_instructions: null,
+    experimental_bearer_token: null,
+    auth: null,
+    gateway_oauth: null,
+    aws: null,
+    project_id: null,
+    location: null,
+    credential_file: null,
+    capabilities: null,
+    query_params: null,
+    http_headers: null,
+    env_http_headers: null,
+    stream_idle_timeout_ms: null,
+    websocket_connect_timeout_ms: null,
+    supports_standalone_web_search: false,
+  };
+  expect(await qualify()).not.toBeNull();
+  expect(requests.some((r) => r.method === 'turn/start')).toBe(false);
 });
 it('rejects an effective unowned catalog before a thread starts', async () => {
   effectiveOverride = { model_catalog_json: '/unowned/catalog.json' };

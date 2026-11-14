@@ -4,6 +4,7 @@ import { ownedCodexSessionMeta } from './codex-history';
 import type { CodexModelPolicy } from './codex-model-gates';
 import { isQualifiedCodexModelVersion } from '../lib/codex-model-version';
 import { canonicalHash } from '../lib/request-schema';
+import { CodexEnvironmentWitness, nativeLocalFilesystem } from './codex-local-environment';
 
 const record = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -51,10 +52,14 @@ export async function codexModelPolicy(
     if (!stat.isFile() || stat.size === 0 || stat.size > MAX_ROLLOUT_BYTES) return null;
     let meta: Record<string, unknown> | undefined;
     let found: Record<string, unknown> | undefined;
+    let latestTurn: string | undefined;
+    let appliedSettings: Record<string, unknown> | undefined;
+    const environment = new CodexEnvironmentWitness();
     let baseInstructions: string | undefined;
     let runtimeWorkspaceRoots: string[] | undefined;
     const developerFragments: string[] = [];
     const collaborationSourceTurns = new Set<string>();
+    const defaultTemplates = new Map<string, string>();
     const externalTools = new Map<string, Set<string>>();
     let authorityBytes = 0;
     const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -110,7 +115,28 @@ export async function codexModelPolicy(
         return false;
       if (row.type === 'turn_context') {
         if (customTurnInstructions(payload)) return false;
+        latestTurn = typeof payload.turn_id === 'string' ? payload.turn_id : undefined;
+        const mode = payload.collaboration_mode;
+        if (
+          latestTurn &&
+          record(mode) &&
+          mode.mode === 'default' &&
+          record(mode.settings) &&
+          typeof mode.settings.developer_instructions === 'string'
+        )
+          defaultTemplates.set(latestTurn, mode.settings.developer_instructions);
         if (payload.turn_id === turn) found = payload;
+        return true;
+      }
+      if (row.type === 'world_state') return environment.apply(payload);
+      if (row.type === 'event_msg' && payload.type === 'thread_settings_applied') {
+        if (
+          payload.thread_id !== session ||
+          !record(payload.thread_settings) ||
+          customTurnInstructions(payload.thread_settings)
+        )
+          return false;
+        appliedSettings = payload.thread_settings;
         return true;
       }
       if (row.type !== 'response_item' || payload.role !== 'developer') return true;
@@ -221,6 +247,7 @@ export async function codexModelPolicy(
     if (
       !meta ||
       !found ||
+      latestTurn !== turn ||
       typeof found.cwd !== 'string' ||
       (await realpath(found.cwd)) !== (await realpath(cwd)) ||
       found.approval_policy === undefined ||
@@ -230,6 +257,46 @@ export async function codexModelPolicy(
       !Array.isArray(found.disabled_plugin_ids)
     )
       return null;
+    // Creation metadata excludes later root updates. Native applied snapshots
+    // carry the current thread-owned roots and policy, while WorldState binds
+    // the selected local executor/permissions used by the sampling step.
+    if (appliedSettings) {
+      const roots = appliedSettings.runtime_workspace_roots;
+      if (
+        !Array.isArray(roots) ||
+        roots.length === 0 ||
+        roots.length > 256 ||
+        roots.some(
+          (root) =>
+            typeof root !== 'string' ||
+            !isAbsolute(root) ||
+            root.includes('\0') ||
+            Buffer.byteLength(root) > 8192,
+        ) ||
+        new Set(roots).size !== roots.length ||
+        typeof appliedSettings.cwd !== 'string' ||
+        (await realpath(appliedSettings.cwd)) !== (await realpath(cwd)) ||
+        [
+          'approval_policy',
+          'approvals_reviewer',
+          'permission_profile',
+          'active_permission_profile',
+          'disabled_plugin_ids',
+          'collaboration_mode',
+        ].some((key) => canonicalHash(appliedSettings![key]) !== canonicalHash(found![key]))
+      )
+        return null;
+      runtimeWorkspaceRoots = roots as string[];
+    }
+    const localEnvironment = environment.local(await realpath(cwd));
+    const boundLocal =
+      appliedSettings &&
+      localEnvironment &&
+      runtimeWorkspaceRoots &&
+      localEnvironment.filesystem ===
+        nativeLocalFilesystem(found.permission_profile, runtimeWorkspaceRoots)
+        ? localEnvironment
+        : undefined;
     let collaborationMode: NonNullable<CodexModelPolicy['parent']>['collaborationMode'];
     if (found.collaboration_mode != null) {
       const mode = found.collaboration_mode;
@@ -244,11 +311,15 @@ export async function codexModelPolicy(
       )
         return null;
       const developer = mode.settings.developer_instructions;
+      // Native WorldState retains unchanged mode instructions across turns;
+      // it does not emit a new rendered fragment on every turn. Carry only an
+      // exact template already bound to a same-root harness/non-hook fragment.
+      const witnessed = [...collaborationSourceTurns].some(
+        (sourceTurn) => sourceTurn === turn || defaultTemplates.get(sourceTurn) === developer,
+      );
       if (
         developer !== null &&
-        (typeof developer !== 'string' ||
-          developer.includes('\0') ||
-          !collaborationSourceTurns.has(turn))
+        (typeof developer !== 'string' || developer.includes('\0') || !witnessed)
       )
         return null;
       authorityBytes += typeof developer === 'string' ? Buffer.byteLength(developer) : 0;
@@ -256,13 +327,15 @@ export async function codexModelPolicy(
       collaborationMode = { mode: 'default', developerInstructions: developer as string | null };
     }
     const parent =
-      baseInstructions !== undefined && runtimeWorkspaceRoots
+      baseInstructions !== undefined && runtimeWorkspaceRoots && boundLocal
         ? {
             sessionId: session,
             turnId: turn,
             baseInstructions,
             developerInstructions: developerFragments.join('\n\n'),
             runtimeWorkspaceRoots,
+            transcriptPath: path,
+            localEnvironment: boundLocal,
             ...(collaborationMode ? { collaborationMode } : {}),
             ...(externalTools.size
               ? {

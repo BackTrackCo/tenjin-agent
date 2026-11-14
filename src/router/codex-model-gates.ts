@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { isRecord } from '../lib/guards';
+import type { NativeLocalEnvironment } from './codex-local-environment';
 
 export interface CodexModelPolicy {
   approvalPolicy: unknown;
@@ -17,6 +18,8 @@ export interface CodexModelPolicy {
     runtimeWorkspaceRoots: string[];
     collaborationMode?: { mode: 'default'; developerInstructions: string | null };
     externalTools?: Array<{ namespace: string; tools: string[] }>;
+    transcriptPath?: string;
+    localEnvironment?: NativeLocalEnvironment;
     fingerprint: string;
   };
 }

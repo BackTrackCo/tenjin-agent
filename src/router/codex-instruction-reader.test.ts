@@ -96,6 +96,19 @@ it('starts the standalone native reader with its captured shielded profile as th
   );
 });
 
+it('keeps dotted and quoted filesystem paths inside the whole inline table value', () => {
+  const path = join(root, 'folder.with.dots', 'quoted "directory"');
+  const original = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  original.file_system.entries.push({ path: { type: 'path', path }, access: 'read' });
+  const profile = codexInstructionProfile(options([]))!;
+  const filesystem = profile.overrides.find((value) =>
+    value.startsWith(`permissions.${profile.name}.filesystem=`),
+  )!;
+  const equals = filesystem.indexOf('=');
+  expect(filesystem.slice(0, equals)).toBe(`permissions.${profile.name}.filesystem`);
+  expect(filesystem.slice(equals + 1)).toContain(`${JSON.stringify(path)} = "read"`);
+});
+
 it('never substitutes an unsandboxed host read when native read permission is denied', async () => {
   const path = await source('AGENTS.md', 'host-readable but native-denied');
   denied = true;

@@ -155,7 +155,7 @@ export function registerModelTool(
             'general-purpose',
             session.codexPolicy,
             options.dataDir,
-            undefined,
+            signal,
             options.harness === 'claude' ? currentClaudeMode() : undefined,
           );
           if (
