@@ -98,6 +98,18 @@ export async function runBalance(
   // The routing balance is a local estimate, separate from on-chain funds.
   const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
   const credit = toMoney(creditAtomic.toString());
+  const modelCreditAtomic = await channelCredit(
+    ctx.dataDir,
+    address,
+    'model',
+    settings.baseUrl,
+  ).catch(() => 0n);
+  const modelRoutingCreditAtomic = await channelCredit(
+    ctx.dataDir,
+    address,
+    'model-routing',
+    settings.baseUrl,
+  ).catch(() => 0n);
   // What routing has cost: the deposits sent less that credit, also local.
   const spentAtomic = await routingSpent(ctx.dataDir, address).catch(() => 0n);
   const spent = toMoney(spentAtomic.toString());
@@ -109,6 +121,8 @@ export async function runBalance(
       address,
       balance,
       routingCredit: credit,
+      modelCredit: toMoney(modelCreditAtomic.toString()),
+      modelRoutingCredit: toMoney(modelRoutingCreditAtomic.toString()),
       routingSpent: spent,
       limits: limitsData(policy),
       low,
@@ -118,6 +132,14 @@ export async function runBalance(
       `${label('Limits')}${limitsLine(policy)}`,
       ...(creditAtomic > 0n
         ? [`${label('Set aside')}about ${dollars(creditAtomic)} for routing`]
+        : []),
+      ...(modelCreditAtomic > 0n
+        ? [`${label('Subagents')}about ${dollars(modelCreditAtomic)} set aside for model calls`]
+        : []),
+      ...(modelRoutingCreditAtomic > 0n
+        ? [
+            `${label('Model fee')}about ${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
+          ]
         : []),
       ...(spentAtomic > 0n ? [`${label('Spent')}about ${dollars(spentAtomic)} on routing`] : []),
       ...(atomic === 0n && creditAtomic < LEGACY_ROUTING_QUOTE_ATOMIC
@@ -201,6 +223,16 @@ async function waitForFunds(
   }
   if (link !== null) await forgetLink(ctx.dataDir);
   const creditAtomic = await channelCredit(ctx.dataDir, address).catch(() => 0n);
+  const { baseUrl } = await resolveContextSettings(ctx);
+  const modelCreditAtomic = await channelCredit(ctx.dataDir, address, 'model', baseUrl).catch(
+    () => 0n,
+  );
+  const modelRoutingCreditAtomic = await channelCredit(
+    ctx.dataDir,
+    address,
+    'model-routing',
+    baseUrl,
+  ).catch(() => 0n);
   const line = `+${dollars(end.added)} · balance ${dollars(end.balance)}`;
   return {
     data: {
@@ -209,6 +241,8 @@ async function waitForFunds(
       added: toMoney(end.added.toString()),
       balance: toMoney(end.balance.toString()),
       routingCredit: toMoney(creditAtomic.toString()),
+      modelCredit: toMoney(modelCreditAtomic.toString()),
+      modelRoutingCredit: toMoney(modelRoutingCreditAtomic.toString()),
       summary: line,
     },
     humanLines: [human ? `  ${line}` : line],

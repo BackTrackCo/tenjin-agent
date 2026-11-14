@@ -52,6 +52,8 @@ export interface StatusDeps {
   cwd?: string;
   /** Seam for funds set aside for routing; production reads local channel files. */
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
+  modelCredit?: (ctx: CommandContext) => Promise<bigint>;
+  modelRoutingCredit?: (ctx: CommandContext) => Promise<bigint>;
   /** Local lifetime routing-cost estimate, separate from the rolling daily budget. */
   routingSpent?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
@@ -76,10 +78,14 @@ async function walletBalance(
 
 /** What the wallet's routing channel still holds; 0n with no wallet, or one
  *  this cannot read without a prompt. */
-async function walletRoutingCredit(ctx: CommandContext): Promise<bigint> {
+async function walletRoutingCredit(
+  ctx: CommandContext,
+  lane: 'tool' | 'model' | 'model-routing' = 'tool',
+  origin?: string,
+): Promise<bigint> {
   try {
     const { address } = await describeWallet(resolveWalletProvider(ctx));
-    return await channelCredit(ctx.dataDir, address);
+    return await channelCredit(ctx.dataDir, address, lane, origin);
   } catch {
     return 0n;
   }
@@ -367,11 +373,18 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const [creditAtomic, spentAtomic, wallet] = await Promise.all([
-    (deps.routingCredit ?? walletRoutingCredit)(ctx),
-    (deps.routingSpent ?? walletRoutingSpent)(ctx),
-    (deps.wallet ?? walletBalance)(ctx).catch(() => null),
-  ]);
+  const [creditAtomic, spentAtomic, wallet, modelCreditAtomic, modelRoutingCreditAtomic] =
+    await Promise.all([
+      (deps.routingCredit ?? walletRoutingCredit)(ctx),
+      (deps.routingSpent ?? walletRoutingSpent)(ctx),
+      (deps.wallet ?? walletBalance)(ctx).catch(() => null),
+      deps.modelCredit
+        ? deps.modelCredit(ctx)
+        : walletRoutingCredit(ctx, 'model', settings.baseUrl),
+      deps.modelRoutingCredit
+        ? deps.modelRoutingCredit(ctx)
+        : walletRoutingCredit(ctx, 'model-routing', settings.baseUrl),
+    ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const capAtomic = settings.policy.maxAutoSpendAtomic;
   const data = {
@@ -398,6 +411,8 @@ export async function runRouterStatus(
       remaining: toMoney(creditAtomic.toString()),
       spent: toMoney(spentAtomic.toString()),
     },
+    modelCredit: { remaining: toMoney(modelCreditAtomic.toString()) },
+    modelRoutingCredit: { remaining: toMoney(modelRoutingCreditAtomic.toString()) },
     caps: { maxAutoSpend: toMoney(capAtomic.toString()) },
     accounts,
     settings: saved,
@@ -455,7 +470,28 @@ export async function runRouterStatus(
     humanLines: [
       ...head,
       '',
-      ...rowLines(ctx, [...balance, today, accountsShown.row, settingsShown.row]),
+      ...rowLines(ctx, [
+        ...balance,
+        today,
+        ...(modelCreditAtomic > 0n
+          ? [
+              {
+                label: 'Subagents',
+                value: `${dollars(modelCreditAtomic)} set aside for model calls`,
+              },
+            ]
+          : []),
+        ...(modelRoutingCreditAtomic > 0n
+          ? [
+              {
+                label: 'Model fee',
+                value: `${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
+              },
+            ]
+          : []),
+        accountsShown.row,
+        settingsShown.row,
+      ]),
       ...(problems.length > 0 ? ['', ...problems.map((problem) => yellow(`! ${problem}`))] : []),
     ],
   };

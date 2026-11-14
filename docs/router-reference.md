@@ -214,7 +214,7 @@ The plugin permits its request tool and denies model use of its internal hook to
 
 Without a runnable Claude binary, a source-compatible folder installation can register the same plugin. Existing settings-based installations remain until the plugin has actually loaded; removing only Tenjin's exact owned entries preserves unrelated hooks and settings. This migration requires a new session, rather than loading old and new servers together.
 
-Codex uses its own plugin and trust APIs. Three MCP hook legs route the prompt and before/after web calls. Other hooks deny model use of the internal tool and permit the request tool under local spend controls. Trust is read back from Codex; Tenjin neither invents trust hashes nor enables unrelated hooks. User-disabled hooks remain disabled. An old host incapable of MCP hook calls keeps its earlier plugin and receives an upgrade instruction.
+Codex uses its own plugin and trust APIs. MCP hook legs handle the prompt, before/after web calls, supported subagent delegation and interruption. Interrupt uses the native three-second hook limit. Codex does not support SessionEnd MCP hooks; MCP disconnection or SIGTERM drains owned workers. Other hooks deny model use of the internal tool and permit the request/subagent tools under local spend and inference-consent controls. Trust is read back from Codex; Tenjin neither invents trust hashes nor enables unrelated hooks. User-disabled hooks remain disabled. An old host incapable of MCP hook calls keeps its earlier plugin and receives an upgrade instruction.
 
 The request executor is shared, but host facilities differ: Codex currently lacks the special over-limit approval tool. Turning off its request-allow hook restores the host's approval behavior and can cause refusal under `approval_policy = "never"`. A denied web search can be retried natively. Plugin checks, current-session observations and payment readiness are separate diagnostics.
 
@@ -225,3 +225,7 @@ Installation creates a wallet if absent, fills spending defaults only as authori
 The encrypted wallet and credential metadata remain outside the runtime. Decryption stays in the CLI and the signer is reused inside the session's MCP process. [Wallet storage and recovery](./agent-permissions.md#wallet-passphrase-storage) covers credential stores and repair; the [safety model](./safety-model.md) records destination-check limitations and deployment-origin trust.
 
 Update verifies npm provenance, tarball integrity and the pinned Node before activating a build. Existing sessions retain their old process until restarted; the previous runtime remains while referenced. Uninstall removes owned integrations and the shared runtime only after no installation remains, while keeping the wallet, ledger and configuration. Maintainer release procedures live in [RELEASING.md](https://github.com/BackTrackCo/tenjin-agent/blob/main/RELEASING.md).
+
+## External subagents
+
+Tool routing and external subagent routing have separate decisions and inference payments. See [DeepSeek subagents](./subagents.md) for repository/data opt-in, parent accept/veto, the 5% proxy fee, the once-per-job router fee and current host qualification limits. Legacy native model/effort settings grant no external inference consent.

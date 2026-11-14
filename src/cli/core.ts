@@ -237,6 +237,26 @@ Examples:
         return runConfigList(ctx, this.opts().all === true ? { all: true } : {});
       });
     });
+  addGlobalFlags(config.command('subagents <mode>'))
+    .summary('opt in to DeepSeek subagents for one repository, or turn them off')
+    .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
+    .option('--max-job <USD>', 'total routing and inference ceiling per job')
+    .addHelpText(
+      'after',
+      configExamples(
+        ['subagents on --repository . --max-job 1.00', 'subagents off'],
+        'Details and recipients: https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/subagents.md',
+      ),
+    )
+    .action(async function (
+      this: Command,
+      mode: string,
+      options: { repository?: string; maxJob?: string },
+    ) {
+      await runCommand('config subagents', this, async (ctx) =>
+        (await import('../commands/config-subagents')).runConfigSubagents(mode, options, ctx),
+      );
+    });
   addGlobalFlags(config.command('get <key>'))
     .summary('print one value')
     .description("Print one setting's value as Tenjin uses it, defaults and environment included.")
@@ -615,6 +635,7 @@ Switches
   speed on|off                  also offer faster paid tools
   replacement on|off            run Tenjin's picks automatically (Claude Code)
   fallback on|off               use Tenjin's tool when your account refuses
+  subagents on|off              opt in to DeepSeek for one repository
 
 Values
   get <key> / set <key> <value>

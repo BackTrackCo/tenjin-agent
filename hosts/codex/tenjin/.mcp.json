@@ -3,7 +3,7 @@
     "router": {
       "command": "tenjin",
       "args": ["mcp", "--harness", "codex"],
-      "env_vars": ["CODEX_HOME"]
+      "env_vars": ["CODEX_HOME", "CODEX_APP_RUNTIME_CLI_PATH"]
     }
   }
 }

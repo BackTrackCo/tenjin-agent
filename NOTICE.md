@@ -1,5 +1,13 @@
 # Third-Party Notices
 
+## Claude Agent SDK
+
+The external subagent runner bundles the JavaScript core of Anthropic's Claude Agent SDK. Copyright Anthropic PBC; all rights reserved. Its use is subject to the [Anthropic legal agreements](https://code.claude.com/docs/en/legal-and-compliance). The runner uses an installed Claude Code executable; this package does not redistribute that executable.
+
+## DeepSeek model metadata
+
+The Codex worker bundles Flash model metadata published in [DeepSeek's Codex integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/). The source artifact's SHA-256 is recorded alongside the loader. It uses the person's installed Codex executable; this package does not redistribute that executable.
+
 ## BlockRun MCP
 
 Portions of this project are adapted from

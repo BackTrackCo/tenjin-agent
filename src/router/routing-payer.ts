@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createPublicClient, http, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
+import { decodePaymentRequiredHeader } from '@x402/core/http';
+import type { PaymentRequirements } from '@x402/core/types';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import {
   BatchSettlementEvmScheme,
@@ -15,6 +17,13 @@ import { releaseUnchargedExposure, type SpendAuthorizer } from '../lib/wallet/sp
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { classifyUnlockError, DEFINITE_UNLOCK, type UnlockReason } from '../lib/wallet-unlock';
 import { channelCredit } from './channel-credit';
+import {
+  modelChannelDir,
+  modelChannelLane,
+  modelChannelScope,
+  MODEL_ROUTING_FEE_CEILING_ATOMIC,
+  type ModelPaymentPath,
+} from './model-channel';
 import {
   acceptsFor,
   buildWarmBody,
@@ -241,6 +250,8 @@ export function chainReader(rpcUrl: string, fetchFn?: typeof fetch): ChainRead {
 
 export interface RoutingPayerDeps {
   dataDir: string;
+  /** Separate inference lane; never widens the routing-fee instance. */
+  modelLane?: { path: ModelPaymentPath; ceilingAtomic: bigint; origin: string };
   /** The wallet signer, unlocked without a prompt; it signs deposits and vouchers. */
   getSigner: () => Promise<TenjinSigner>;
   /** The spend policy, read fresh per deposit. */
@@ -394,7 +405,36 @@ const NOT_ROUTE = 'not_the_routing_route';
  */
 const CHANNEL_BUSY_ERROR = 'invalid_batch_settlement_evm_channel_busy';
 
+/** Model services have their own ceiling; the tool router's per-answer choice does not apply. */
+function modelOffer(offers: PaymentRequirements[], ceiling: bigint) {
+  return offers.find((offer) => BigInt(offer.amount) <= ceiling) ?? offers[0];
+}
+
 export class RoutingPayer {
+  private paymentCeiling(): bigint {
+    const lane = this.deps.modelLane;
+    if (!lane) return ROUTING_FEE_CEILING_ATOMIC;
+    return modelChannelLane(lane.path) === 'model-routing' &&
+      lane.ceilingAtomic > MODEL_ROUTING_FEE_CEILING_ATOMIC
+      ? MODEL_ROUTING_FEE_CEILING_ATOMIC
+      : lane.ceilingAtomic;
+  }
+
+  private paymentQuote(headers: Headers): bigint | null {
+    if (!this.deps.modelLane) return quoteOf((name) => headers.get(name));
+    const value = headers.get('payment-required');
+    if (!value) return null;
+    try {
+      const required = decodePaymentRequiredHeader(value);
+      const chosen = modelOffer(
+        routingOffers(required.x402Version, required.accepts),
+        this.paymentCeiling(),
+      );
+      return chosen ? BigInt(chosen.amount) : null;
+    } catch {
+      return null;
+    }
+  }
   private channel: Channel | null = null;
   private call: Call | null = null;
   /** The call `pay` ran last, for its one diagnostic line. */
@@ -477,11 +517,15 @@ export class RoutingPayer {
    */
   routeFor(baseUrl: string): DecisionRoute {
     const calls: Call[] = [];
-    const route = new URL(ROUTE_PAID_PATH, baseUrl);
+    const route = new URL(this.deps.modelLane?.path ?? ROUTE_PAID_PATH, baseUrl);
     return {
       send: async (url, options) => {
         const target = new URL(url);
-        if (target.origin !== route.origin || target.pathname !== route.pathname) {
+        if (
+          target.origin !== route.origin ||
+          target.pathname !== route.pathname ||
+          (this.deps.modelLane && route.origin !== new URL(this.deps.modelLane.origin).origin)
+        ) {
           throw new RouteSkipped(NOT_ROUTE);
         }
         // The caller's budget starts now, not when this call's turn comes.
@@ -590,6 +634,7 @@ export class RoutingPayer {
    * threshold; a dear answer funds its own larger shortfall inline. Never rejects.
    */
   async topUpIfLow(baseUrl: string): Promise<void> {
+    if (this.deps.modelLane) return;
     await this.unlocking?.catch(() => undefined);
     const memo = this.memo;
     if (memo?.verdict.status !== 'ready' || memo.address === undefined) return;
@@ -840,15 +885,15 @@ export class RoutingPayer {
         // included. With no routing offer to read, the ceiling stands in, and
         // the SDK refuses the 402 below as it always has.
         const challenge = asked.headers;
-        const quoted = quoteOf((name) => challenge.get(name));
+        const quoted = this.paymentQuote(challenge);
         if (quoted !== null) call.quoted = quoted;
-        if (quoted !== null && quoted > ROUTING_FEE_CEILING_ATOMIC) {
+        if (quoted !== null && quoted > this.paymentCeiling()) {
           throw new RouteSkipped(FEE_ABOVE_CEILING);
         }
         const refused = feeRefusal(
           await this.deps.policy(),
           call.host,
-          quoted ?? ROUTING_FEE_CEILING_ATOMIC,
+          quoted ?? this.paymentCeiling(),
         );
         if (refused !== null) throw new RouteSkipped(refused);
         call.channel = this.channelFor(await this.signer(call));
@@ -997,6 +1042,7 @@ export class RoutingPayer {
 
   /** Whether the router at `router` is known to have no `warm` form. */
   private async warmAbsent(router: string): Promise<boolean> {
+    if (this.deps.modelLane) return true;
     return (await readRouterMemo(this.deps.dataDir, 'warm-absent', router, this.now())) !== null;
   }
 
@@ -1137,6 +1183,7 @@ export class RoutingPayer {
    * answer's larger shortfall is funded inline on that answer's call.
    */
   private async afterPaid(call: Call): Promise<void> {
+    if (this.deps.modelLane) return;
     const payer = call.channel?.payer;
     if (payer === undefined) return;
     const credit = await channelCredit(this.deps.dataDir, payer).catch(() => null);
@@ -1214,9 +1261,12 @@ export class RoutingPayer {
     }
     const policy = await this.deps.policy();
     const needed = BigInt(ctx.minimumDepositAmount);
-    const sdkMax =
-      ctx.maxDeposit === undefined ? MAX_CHANNEL_DEPOSIT_ATOMIC : BigInt(ctx.maxDeposit);
-    const max = sdkMax < MAX_CHANNEL_DEPOSIT_ATOMIC ? sdkMax : MAX_CHANNEL_DEPOSIT_ATOMIC;
+    const laneMax =
+      this.deps.modelLane && modelChannelLane(this.deps.modelLane.path) === 'model-inference'
+        ? policy.maxAutoSpendAtomic
+        : MAX_CHANNEL_DEPOSIT_ATOMIC;
+    const sdkMax = ctx.maxDeposit === undefined ? laneMax : BigInt(ctx.maxDeposit);
+    const max = sdkMax < laneMax ? sdkMax : laneMax;
     if (needed > max || needed > policy.maxAutoSpendAtomic) this.refuse('limit_below_deposit');
     const balance = await this.depositBalance(ctx.channelConfig.payer);
     if (balance < needed) this.refuse('wallet_low');
@@ -1472,16 +1522,36 @@ export class RoutingPayer {
   private channelFor(signer: ClientEvmSigner): Channel {
     const payer = signer.address.toLowerCase() as `0x${string}`;
     if (this.channel !== null && this.channel.payer === payer) return this.channel;
-    const dir = payerDir(this.deps.dataDir, payer);
+    const lane = this.deps.modelLane;
+    const dir = lane
+      ? modelChannelDir(this.deps.dataDir, payer, modelChannelLane(lane.path), lane.origin)
+      : payerDir(this.deps.dataDir, payer);
     const scheme = new BatchSettlementEvmScheme(signer, {
       storage: new FileClientChannelStorage({ directory: dir }),
+      ...(lane ? { salt: modelChannelScope(lane.origin, modelChannelLane(lane.path)).salt } : {}),
       depositPolicy: { depositMultiplier: DEPOSIT_MULTIPLIER },
       depositStrategy: (ctx) => this.deposit(ctx),
     });
     const client = new x402Client()
       .register('eip155:*', scheme)
-      .registerPolicy(routingPolicy)
-      .setSpendControls({ maxAmountPerPayment: ROUTING_SPEND_CAP });
+      .registerPolicy(
+        lane
+          ? (version, requirements) => {
+              const chosen = modelOffer(
+                routingOffers(version, requirements),
+                this.paymentCeiling(),
+              );
+              return chosen && BigInt(chosen.amount) <= this.paymentCeiling() ? [chosen] : [];
+            }
+          : routingPolicy,
+      )
+      .setSpendControls({
+        maxAmountPerPayment: lane
+          ? modelChannelLane(lane.path) === 'model-inference'
+            ? '$1'
+            : '$0.05'
+          : ROUTING_SPEND_CAP,
+      });
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
   }

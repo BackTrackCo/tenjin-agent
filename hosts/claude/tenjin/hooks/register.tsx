@@ -92,6 +92,43 @@ type Shape = {
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
 export const register: Register = (on) => {
+  on('tool.describe', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
+    const data = await tenjinDataDir($);
+    const router = data ? asRecord((await readJson($, `${data}/config.json`))?.router) : undefined;
+    if (router?.subagents !== true) return next(e);
+    return {
+      description: `${e.description}\n\nCopy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.`,
+    };
+  });
+  on('tool.call', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
+    const data = await tenjinDataDir($);
+    const router = data ? asRecord((await readJson($, `${data}/config.json`))?.router) : undefined;
+    if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
+      return next(e);
+    const { tool_use_id, ...input } = e;
+    delete (input as Json).tool;
+    try {
+      const response = await $.tool.call({
+        tool: 'mcp__plugin_tenjin_router__subagent',
+        capture: { session_id: await $.session.id(), tool_use_id, input },
+      });
+      const text = textOf(response.result) ?? response.text;
+      const offer = asRecord(parseJson(text));
+      if (
+        offer?.action === 'offer' &&
+        offer.started === false &&
+        typeof offer.offer_id === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          offer.offer_id,
+        )
+      )
+        return { result: text ?? JSON.stringify(offer) };
+    } catch {
+      /* Native pass-through if the local transport is unavailable. */
+    }
+    return next(e);
+  });
+
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {
     // The swap's own `decide` call is drawn on the native call's row.
     if (e.decide !== undefined) return next(e);

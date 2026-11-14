@@ -130,11 +130,13 @@ function isRouterKey(key: string): key is RouterConfigKey {
 /** The list/get shape for a router key, with the file that set it. */
 function renderRouterSetting(key: RouterConfigKey, settings: RouterSettings): RenderedSetting {
   const { value, source, path } =
-    key === 'router.enabled'
-      ? settings.enabled
-      : key === 'router.context'
-        ? settings.context
-        : settings.improve;
+    key === 'router.subagents'
+      ? settings.subagents
+      : key === 'router.enabled'
+        ? settings.enabled
+        : key === 'router.context'
+          ? settings.context
+          : settings.improve;
   return { value, source, ...(path !== undefined ? { path } : {}) };
 }
 
@@ -430,7 +432,11 @@ async function setExperimentalKey(
 
 /** The router keys a project file may carry: both only ever tighten. */
 type ProjectRouterKey = Exclude<RouterConfigKey, 'router.improve'>;
-const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = ['router.enabled', 'router.context'];
+const PROJECT_ROUTER_KEYS: readonly ProjectRouterKey[] = [
+  'router.enabled',
+  'router.context',
+  'router.subagents',
+];
 
 function isProjectRouterKey(key: string): key is ProjectRouterKey {
   return (PROJECT_ROUTER_KEYS as readonly string[]).includes(key);
@@ -488,8 +494,9 @@ async function setRouterKey(
   ctx: CommandContext,
   project: { local: boolean } | undefined,
 ): Promise<CommandResult> {
-  const field = key === 'router.enabled' ? 'enabled' : 'context';
-  const parsed = field === 'enabled' ? parseBoolean(value) : parseRouterContext(value);
+  const field =
+    key === 'router.enabled' ? 'enabled' : key === 'router.subagents' ? 'subagents' : 'context';
+  const parsed = field !== 'context' ? parseBoolean(value) : parseRouterContext(value);
   let written: RenderedSetting;
   if (project === undefined) {
     await persist(ctx.dataDir, (existing) => ({
@@ -532,7 +539,7 @@ function parseRouterContext(value: string): RouterContext {
  */
 async function persistProjectRouter(
   path: string,
-  field: 'enabled' | 'context',
+  field: 'enabled' | 'context' | 'subagents',
   value: boolean | RouterContext,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o755 });
@@ -552,7 +559,7 @@ async function persistProjectRouter(
 
 async function mergeProjectRouter(
   path: string,
-  field: 'enabled' | 'context',
+  field: 'enabled' | 'context' | 'subagents',
   value: boolean | RouterContext,
 ): Promise<void> {
   // Through the one parser: a file that is not an object, or whose block is

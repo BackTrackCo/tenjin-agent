@@ -221,14 +221,14 @@ describe('the router MCP server', () => {
     try {
       const tools = await client.listTools();
       // `approve` is Claude Code's alone (below): this client never sees it.
-      expect(tools.tools.map((t) => t.name)).toEqual(['request', 'hook']);
+      expect(tools.tools.map((t) => t.name)).toEqual(['subagent', 'request', 'hook']);
       // The harness reads its inline-result threshold from the listed tool,
       // and keeps it out of tool search.
-      expect(tools.tools[0]!._meta).toEqual({
+      expect(tools.tools.find((tool) => tool.name === 'request')!._meta).toEqual({
         [MAX_RESULT_SIZE_KEY]: MAX_RESULT_SIZE_CHARS,
         [ALWAYS_LOAD_KEY]: true,
       });
-      expect(tools.tools[1]!._meta).toBeUndefined();
+      expect(tools.tools.find((tool) => tool.name === 'hook')!._meta).toBeUndefined();
       const called = await client.callTool({ name: 'request', arguments: { query: 'weather' } });
       // A `native` decision is a routing outcome delivered, not a tool failure:
       // the MCP error flag stays down and the status carries the fact.
@@ -278,7 +278,7 @@ describe('the router MCP server', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       try {
         const names = (await client.listTools()).tools.map((t) => t.name);
-        expect(names).toEqual(['request', 'hook']);
+        expect(names).toEqual(['subagent', 'request', 'hook']);
         await client.callTool({ name: 'request', arguments: { query: 'weather' } });
         expect(bodies.at(-1)).toMatchObject({ harness: harness ?? 'claude' });
       } finally {

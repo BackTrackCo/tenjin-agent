@@ -150,7 +150,10 @@ describe("the plugin's hooks", () => {
       { matcher: 'Agent|Task', hooks: leg('agent') },
       { matcher: 'AskUserQuestion', hooks: leg('ask') },
       { matcher: 'mcp__plugin_tenjin_router__hook', hooks: command(DENY_HOOK) },
-      { matcher: 'mcp__plugin_tenjin_router__request', hooks: command(ALLOW_HOOK) },
+      {
+        matcher: 'mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent',
+        hooks: command(ALLOW_HOOK),
+      },
     ]);
     expect(hooks.PostToolUse).toEqual([
       { matcher: 'WebSearch|WebFetch', hooks: leg('shortfall', 15) },
@@ -439,6 +442,10 @@ describe('the checked-in hosts/codex templates', () => {
       PreToolUse: [
         { matcher: 'webrun', hooks: leg({ kind: 'native', ...call }) },
         {
+          matcher: 'collaborationspawn_agent|spawn_agent|Agent',
+          hooks: leg({ kind: 'delegation', ...call }, 15),
+        },
+        {
           matcher: 'mcp__router__hook',
           hooks: [{ type: 'command', ...CODEX_DENY_HOOK, timeout: 5 }],
         },
@@ -449,9 +456,10 @@ describe('the checked-in hosts/codex templates', () => {
           hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
         },
       ],
+      Interrupt: [{ hooks: leg({ kind: 'interrupt', ...common }, 3) }],
       PermissionRequest: [
         {
-          matcher: 'mcp__router__request',
+          matcher: 'mcp__router__request|mcp__router__subagent',
           hooks: [
             {
               type: 'command',
@@ -502,7 +510,7 @@ describe('the checked-in hosts/codex templates', () => {
         router: {
           command: 'tenjin',
           args: ['mcp', '--harness', 'codex'],
-          env_vars: ['CODEX_HOME'],
+          env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'],
         },
       },
     });
@@ -513,12 +521,12 @@ describe('the checked-in hosts/codex templates', () => {
     expect(JSON.stringify(renderCodexHostFiles())).not.toMatch(/x402/i);
   });
 
-  it("passes CODEX_HOME through Codex's cleared MCP environment", () => {
+  it("passes session home and Desktop executable through Codex's cleared MCP environment", () => {
     // Codex starts a stdio server with an allowlist that has no CODEX_HOME
     // (openai/codex `rmcp-client/src/utils.rs`, DEFAULT_ENV_VARS); `env_vars` adds it.
     for (const files of [renderCodexHostFiles(), renderCodexHostFiles(runtimeAt)]) {
       expect(JSON.parse(files['tenjin/.mcp.json']!)).toMatchObject({
-        mcpServers: { router: { env_vars: ['CODEX_HOME'] } },
+        mcpServers: { router: { env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'] } },
       });
     }
   });
@@ -560,7 +568,7 @@ describe('the Codex runtime render', () => {
         router: {
           command: `${binDir}/tenjin`,
           args: ['mcp', '--harness', 'codex'],
-          env_vars: ['CODEX_HOME'],
+          env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'],
         },
       },
     });
@@ -605,7 +613,7 @@ describe('the Codex runtime render', () => {
           router: {
             command: `${win.binDir}\\tenjin.cmd`,
             args: ['mcp', '--harness', 'codex'],
-            env_vars: ['CODEX_HOME'],
+            env_vars: ['CODEX_HOME', 'CODEX_APP_RUNTIME_CLI_PATH'],
           },
         },
       });

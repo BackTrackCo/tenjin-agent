@@ -122,6 +122,44 @@ const codexDeps = (fetchImpl: typeof fetch) => ({
 });
 
 describe('Codex transcript ownership and bounds', () => {
+  it('admits the observed Desktop-v2 root while rejecting child, foreign and unknown source shapes', () => {
+    const desktop = {
+      type: 'session_meta',
+      payload: {
+        id: session,
+        session_id: session,
+        source: 'vscode',
+        thread_source: 'vscode',
+        cli_version: '0.167.0-alpha.4.1',
+      },
+    };
+    expect(parseCodexHistory(history(desktop, item('u', 'Owned Desktop task.')), session)).toEqual([
+      { role: 'user', text: 'Owned Desktop task.' },
+    ]);
+    for (const change of [
+      { id: 'foreign' },
+      { session_id: 'foreign' },
+      { parent_thread_id: 'parent' },
+      { thread_source: 'subagent' },
+      { thread_source: { subAgent: { parent_thread_id: session } } },
+      { source: 'cli' },
+      { source: null },
+      { thread_source: 'unknown' },
+      { cli_version: '0.163.0' },
+      { cli_version: '0.167.0' },
+      { cli_version: '0.167.0-alpha.4.2' },
+    ]) {
+      expect(
+        parseCodexHistory(
+          history({ ...desktop, payload: { ...desktop.payload, ...change } }, item('u', 'x')),
+          session,
+        ),
+      ).toBeNull();
+    }
+    expect(parseCodexHistory(history(desktop, desktop, item('u', 'x')), session)).toBeNull();
+    expect(parseCodexHistory(history(desktop, item('u', 'x')), 'foreign')).toBeNull();
+  });
+
   it('admits completed conversation once, excluding synthetic and tool rows', () => {
     const user = item('u', 'No paid tools.');
     expect(
@@ -626,7 +664,10 @@ const listed = (...rows: unknown[]) => ({
 /** A routing leg as Codex 0.157 lists it: an `mcp_tool` hook into the plugin's server. */
 const legRow = (key: string, over: Record<string, unknown> = {}) =>
   row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
-const allRows = () => [legRow('a'), legRow('b'), legRow('c'), row('deny'), allowRow()];
+const allRows = () =>
+  ['prompt', 'native', 'shortfall', 'delegation', 'interrupt']
+    .map((key) => legRow(key))
+    .concat([row('deny'), allowRow()]);
 
 /** What a person reads: the receipt, then its tail (limits, next step, disclosure). */
 function receipt(r: { humanLines?: string[]; humanTail?: string[] }): string[] {
@@ -646,7 +687,7 @@ describe('Codex install, uninstall and doctor', () => {
     ]);
     expect(out.data).not.toHaveProperty('grant');
     expect(out.data).not.toHaveProperty('approval');
-    expect(receipt(out).join('\n')).toContain('five Tenjin hooks');
+    expect(receipt(out).join('\n')).toContain('review the Tenjin hooks');
   });
 
   it('keeps the defaults with no answer and hands the spend question back', async () => {
@@ -682,7 +723,7 @@ describe('Codex install, uninstall and doctor', () => {
     terminal.io.isTTY = true;
     const out = await runCodexInstall({}, terminal, deps);
     expect(out.data).toMatchObject({ nextSteps: [{ id: 'fund' }] });
-    expect(receipt(out).join(' ')).toContain('/hooks and trust the five Tenjin hooks');
+    expect(receipt(out).join(' ')).toContain('/hooks and review the Tenjin hooks');
     expect(receipt(out).join(' ')).toContain('then start a new session');
   });
 
@@ -946,13 +987,7 @@ describe('Codex install, uninstall and doctor', () => {
     // The allow hook off is the documented opt-out, so the plugin still counts as ready.
     expect(
       codexHookRows(
-        listed(
-          legRow('a'),
-          legRow('b'),
-          legRow('c'),
-          row('d'),
-          allowRow({ enabled: false, trustStatus: 'untrusted' }),
-        ),
+        listed(...allRows().slice(0, -1), allowRow({ enabled: false, trustStatus: 'untrusted' })),
       ),
     ).toEqual({ state: 'trusted', allowOff: true, routing: 'paid' });
   });
@@ -1038,8 +1073,7 @@ describe('Codex install, uninstall and doctor', () => {
   });
 
   it('fails when the allow hook is off under approval_policy never, which refuses the tool', async () => {
-    const off = () =>
-      listed(legRow('a'), legRow('b'), legRow('c'), row('d'), allowRow({ enabled: false }));
+    const off = () => listed(...allRows().slice(0, -1), allowRow({ enabled: false }));
     const prompt = await runCodexDoctor({}, ctx(), { ...host().deps, hooks: async () => off() });
     expect(prompt.humanLines?.join('\n')).toContain('asks before each call');
     await expect(
@@ -1058,6 +1092,8 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
     PreToolUse: 'pre_tool_use',
     PostToolUse: 'post_tool_use',
     PermissionRequest: 'permission_request',
+    Interrupt: 'interrupt',
+    SessionEnd: 'session_end',
   };
   /** Every handler the plugin renders, as Codex 0.157 lists it. */
   const ownRows = (over: Record<string, unknown> = {}) =>
@@ -1105,7 +1141,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
 
   it("trusts exactly the plugin's own legs, deny and allow, and no foreign row", async () => {
     const rows = [...ownRows(), foreign];
-    expect(rows.filter(ownCodexRow)).toHaveLength(5);
+    expect(rows.filter(ownCodexRow)).toHaveLength(7);
     expect(ownCodexRow(foreign)).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, pluginId: 'other@x' })).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, server: 'elsewhere' })).toBe(false);
@@ -1195,7 +1231,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       'codex plugin marketplace add /package/dist/hosts/codex',
       'codex plugin add tenjin@tenjin',
     ]);
-    expect(trustedKeys).toHaveLength(5);
+    expect(trustedKeys).toHaveLength(7);
     expect(line).toBe(CODEX_REFRESH_LINES.done);
   });
 

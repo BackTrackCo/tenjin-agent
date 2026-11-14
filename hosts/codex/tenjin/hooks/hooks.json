@@ -45,6 +45,28 @@
         ]
       },
       {
+        "matcher": "collaborationspawn_agent|spawn_agent|Agent",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "router",
+            "tool": "hook",
+            "input": {
+              "kind": "delegation",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}"
+            },
+            "timeout": 15
+          }
+        ]
+      },
+      {
         "matcher": "mcp__router__hook",
         "hooks": [
           {
@@ -81,9 +103,29 @@
         ]
       }
     ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "router",
+            "tool": "hook",
+            "input": {
+              "kind": "interrupt",
+              "hook_event_name": "${hook_event_name}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}"
+            },
+            "timeout": 3
+          }
+        ]
+      }
+    ],
     "PermissionRequest": [
       {
-        "matcher": "mcp__router__request",
+        "matcher": "mcp__router__request|mcp__router__subagent",
         "hooks": [
           {
             "type": "command",

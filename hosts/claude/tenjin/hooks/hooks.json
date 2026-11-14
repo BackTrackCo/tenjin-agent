@@ -25,6 +25,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "prompt": "${prompt}"
             },
             "timeout": 5
@@ -46,6 +47,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "tool_name": "${tool_name}",
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",
@@ -69,6 +71,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "tool_name": "${tool_name}",
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",
@@ -92,6 +95,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "tool_name": "${tool_name}",
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",
@@ -118,7 +122,7 @@
         ]
       },
       {
-        "matcher": "mcp__plugin_tenjin_router__request",
+        "matcher": "mcp__plugin_tenjin_router__request|mcp__plugin_tenjin_router__subagent",
         "hooks": [
           {
             "type": "command",
@@ -147,6 +151,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "tool_name": "${tool_name}",
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",
@@ -173,6 +178,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "tool_name": "${tool_name}",
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",
@@ -199,6 +205,7 @@
               "session_id": "${session_id}",
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}",
+              "permission_mode": "${permission_mode}",
               "tool_name": "${tool_name}",
               "tool_input": "${tool_input}",
               "tool_use_id": "${tool_use_id}",

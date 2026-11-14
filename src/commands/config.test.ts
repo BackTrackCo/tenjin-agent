@@ -99,14 +99,14 @@ describe('runConfigList', () => {
       'Every setting: tenjin config --all · How to change: tenjin config --help',
     ]);
     expect((data as { settings: { rules: unknown[] } }).settings.rules).toEqual([]);
-    // `--all`: 6 scalar keys + update.mode + 3 router.* + experimental.bazaar,
+    // `--all`: 6 scalar keys + update.mode + 4 router.* + experimental.bazaar,
     // then the settings readback after a blank line. allowlistCreators stays
     // in `data` only, and the JSON is the same either way.
     const all = await runConfigList(makeCtx(), { all: true });
     const lines = all.humanLines ?? [];
-    expect(lines.indexOf('')).toBe(11);
+    expect(lines.indexOf('')).toBe(12);
     expect(lines.join('\n')).not.toMatch(/allowlistCreators/);
-    expect(lines.slice(12)).toEqual([
+    expect(lines.slice(13)).toEqual([
       'Your settings (saved on this machine, not synced):',
       '  No custom rules: Tenjin uses its defaults.',
       "  Run Tenjin's picks automatically: off.",

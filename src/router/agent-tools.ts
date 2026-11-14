@@ -127,7 +127,10 @@ export async function agentsWithoutRequestTool(
   return found.sort();
 }
 
-async function findDefinition(agentType: string, lookup: AgentLookup): Promise<string | null> {
+export async function findDefinition(
+  agentType: string,
+  lookup: AgentLookup,
+): Promise<string | null> {
   for (const directory of agentDirs(lookup)) {
     const text = await definitionIn(directory, agentType);
     if (text !== null) return text;

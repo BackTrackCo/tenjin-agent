@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "action": "model",
+  "jobId": "53a6f54e-9106-45d1-9719-7ef41ab8a6e2",
+  "model": "deepseek-flash",
+  "label": "DeepSeek V4.1 Flash 1017",
+  "endpoint": "/api/model-proxy/messages",
+  "thinking": true,
+  "effort": "high",
+  "reason": "selected_execution",
+  "policyHash": "fa29378f46f390c6e153e56246aa72804eb96eb96d08b4641460ec5bfa7d6068",
+  "rateVersion": "deepseek-flash-1017-2026-11-13",
+  "routingFeeAtomic": "3000",
+  "proxyFeePercent": 5,
+  "started": false,
+  "expectedSpendAtomic": "20000",
+  "estimateVersion": "bounded-helper-v1"
+}
