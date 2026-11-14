@@ -84,6 +84,18 @@ it('reads selected outside-root instructions through a fixed native argv and pre
   );
 });
 
+it('starts the standalone native reader with its captured shielded profile as the explicit default', async () => {
+  const path = await source('AGENTS.md', 'native configuration context');
+  expect(await readCodexInstructionFiles(options([path]))).not.toBeNull();
+  const profile = codexInstructionProfile(options([path]))!;
+  const overrides = vi.mocked(withAppServer).mock.calls[0]![4]!.configOverrides!;
+  expect(overrides).toContain(`default_permissions=${JSON.stringify(profile.name)}`);
+  expect(overrides).toContain(profile.overrides[0]);
+  expect(calls.find((call) => call.method === 'command/exec')?.params.permissionProfile).toBe(
+    profile.name,
+  );
+});
+
 it('never substitutes an unsandboxed host read when native read permission is denied', async () => {
   const path = await source('AGENTS.md', 'host-readable but native-denied');
   denied = true;

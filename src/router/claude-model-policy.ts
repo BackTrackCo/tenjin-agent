@@ -3,6 +3,8 @@ import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk/core';
 import { isRecord } from '../lib/guards';
 
 export const CLAUDE_DEEPSEEK_MODEL = 'deepseek-flash';
+// Claude strips this native context hint before calling the fixed Flash provider.
+export const CLAUDE_DEEPSEEK_WORKER_MODEL = `${CLAUDE_DEEPSEEK_MODEL}[1m]`;
 export type ClaudeWorkerPermissionMode = 'default' | 'acceptEdits' | 'auto' | 'dontAsk';
 const MODES = new Set(['default', 'acceptEdits', 'auto', 'dontAsk']);
 const CLEARED_ENV = [
@@ -92,13 +94,14 @@ export function claudeDeepSeekWorkerSettingsEnv(
     ANTHROPIC_API_KEY: token,
     ANTHROPIC_AUTH_TOKEN: token,
     ANTHROPIC_BASE_URL: baseUrl,
-    ANTHROPIC_MODEL: CLAUDE_DEEPSEEK_MODEL,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_DEEPSEEK_MODEL,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_DEEPSEEK_MODEL,
+    ANTHROPIC_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
     TENJIN_MODEL_WORKER: '1',
     ANTHROPIC_MAX_RETRIES: '0',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',

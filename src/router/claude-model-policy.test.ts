@@ -78,13 +78,14 @@ it('keeps provider, aliases and the native auto classifier inside the disposable
     ANTHROPIC_BASE_URL: 'http://127.0.0.1:1234',
     ANTHROPIC_API_KEY: 'worker-token',
     ANTHROPIC_AUTH_TOKEN: 'worker-token',
-    ANTHROPIC_MODEL: 'deepseek-flash',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-flash',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash',
+    ANTHROPIC_MODEL: 'deepseek-flash[1m]',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-flash[1m]',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash[1m]',
     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-flash',
     CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
   });
   expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   expect(env.TENJIN_WALLET_PASSPHRASE).toBeUndefined();
@@ -105,9 +106,10 @@ it('pins the native settings flag layer and clears inherited provider credential
   expect(env).toMatchObject({
     ANTHROPIC_BASE_URL: 'http://127.0.0.1:1234',
     ANTHROPIC_API_KEY: 'worker-token',
-    ANTHROPIC_MODEL: 'deepseek-flash',
+    ANTHROPIC_MODEL: 'deepseek-flash[1m]',
     CLAUDE_CODE_AUTO_MODE_MODEL: 'deepseek-flash',
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
     CLAUDE_CODE_USE_BEDROCK: '',
     CLAUDE_CODE_OAUTH_TOKEN: '',
     DEEPSEEK_API_KEY: '',

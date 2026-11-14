@@ -167,6 +167,9 @@ beforeEach(async () => {
           .configOverrides!.find((value) => value.startsWith('model_catalog_json='))!
           .slice('model_catalog_json='.length),
       );
+      const defaultProfile = options.configOverrides?.find((value) =>
+        value.startsWith('default_permissions='),
+      );
       const purpose = () => ({
         model: 'deepseek-flash',
         model_provider: 'tenjin_deepseek_worker_v1',
@@ -187,6 +190,13 @@ beforeEach(async () => {
         },
       });
       try {
+        if (
+          !defaultProfile ||
+          !options.configOverrides?.some((value) =>
+            value.startsWith(`permissions.${JSON.parse(defaultProfile.slice(20))}.filesystem=`),
+          )
+        )
+          throw new Error('Config defines permission profiles without an owned default');
         return await fn(async (method, params) => {
           requests.push({ method, params });
           if (method === 'thread/read')
@@ -359,6 +369,14 @@ it('qualifies native autoReview and preserves parent base, roots, authenticated 
   });
   expect(start).not.toHaveProperty('sandbox');
   expect(start).not.toHaveProperty('config.project_doc_max_bytes');
+  expect(callbacks.configOverrides).toContain(
+    `default_permissions=${JSON.stringify(start.permissions)}`,
+  );
+  expect(callbacks.configOverrides).toContainEqual(
+    expect.stringMatching(
+      new RegExp(`^permissions\\.${start.permissions}\\.filesystem=.*glob_scan_max_depth`),
+    ),
+  );
   expect(
     requests.some((r) => ['turn/start', 'command/exec', 'mcpServer/tool/call'].includes(r.method)),
   ).toBe(false);

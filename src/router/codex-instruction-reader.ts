@@ -275,6 +275,7 @@ export async function readCodexInstructionFiles(
       expectedVersion: QUALIFIED_CODEX_MODEL_VERSIONS,
       configOverrides: [
         ...profile.overrides,
+        `default_permissions=${JSON.stringify(profile.name)}`,
         'shell_environment_policy.inherit="none"',
         'shell_environment_policy.set={LANG="C",LC_ALL="C"}',
       ],

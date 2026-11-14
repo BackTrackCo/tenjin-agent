@@ -323,6 +323,7 @@ async function withNativeSession<T>(
   const overrides = [
     ...profile.overrides,
     ...instructionProfile.overrides,
+    `default_permissions=${JSON.stringify(profile.name)}`,
     `model=${JSON.stringify('deepseek-flash')}`,
     `model_provider=${JSON.stringify(PROVIDER)}`,
     'model_reasoning_effort="high"',

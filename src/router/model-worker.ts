@@ -26,7 +26,7 @@ import {
   claudeDeepSeekWorkerSettingsEnv,
   claudeManagedProviderCompatible,
   claudeMcpProviderCompatible,
-  CLAUDE_DEEPSEEK_MODEL,
+  CLAUDE_DEEPSEEK_WORKER_MODEL,
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
 import type { InstructionContext } from './model-instructions';
@@ -237,7 +237,7 @@ async function runQualifiedWorker(
         cwd: job.root,
         env,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
-        model: CLAUDE_DEEPSEEK_MODEL,
+        model: CLAUDE_DEEPSEEK_WORKER_MODEL,
         ...(job.native.subagent_type === 'Explore' ? { agent: 'Explore' } : {}),
         effort: 'high',
         abortController: controller,
