@@ -8,7 +8,28 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 const worker = vi.hoisted(() => ({
   run: vi.fn(),
   qualified: vi.fn(
-    async (_cwd?: string, _profile?: string, ..._other: unknown[]) => 'worker' as string | null,
+    async (cwd = '/repo', _profile?: string, ..._other: unknown[]) =>
+      ({
+        path: 'worker',
+        claudeWorkspace: {
+          version: 1 as const,
+          root: cwd,
+          workingDirectories: [cwd],
+          workingDirectorySpellings: [cwd].slice().sort(),
+          readExceptions: [] as string[],
+          writeExceptions: [] as string[],
+        },
+      }) as {
+        path: string;
+        claudeWorkspace: {
+          version: 1;
+          root: string;
+          workingDirectories: string[];
+          workingDirectorySpellings: string[];
+          readExceptions: string[];
+          writeExceptions: string[];
+        };
+      } | null,
   ),
 }));
 vi.mock('./model-worker', () => ({
@@ -29,7 +50,20 @@ import type { ModelJob } from './model-job';
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 
 let dir: string;
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  worker.qualified.mockImplementation(async (cwd = '/repo') => ({
+    path: 'worker',
+    claudeWorkspace: {
+      version: 1,
+      root: cwd,
+      workingDirectories: [cwd],
+      workingDirectorySpellings: [cwd].slice().sort(),
+      readExceptions: [],
+      writeExceptions: [],
+    },
+  }));
+});
 afterEach(async () => {
   vi.unstubAllEnvs();
   if (dir) await rm(dir, { recursive: true, force: true });
@@ -448,6 +482,14 @@ async function ownedClaudeFixture(agentType = 'general-purpose') {
     jobId: job.id,
     routerOrigin: transport.origin,
     claudePermissionMode: 'default',
+    claudeWorkspace: {
+      version: 1,
+      root: repo,
+      workingDirectories: [repo],
+      workingDirectorySpellings: [repo].slice().sort(),
+      readExceptions: [],
+      writeExceptions: [],
+    },
   });
   const call = async (args: Record<string, unknown>) => {
     const reply = await client.callTool({ name: 'subagent', arguments: args });
@@ -547,6 +589,31 @@ it('continues a Claude session through SendMessage with the original ledger and 
     );
     expect(replay?.action).toBe('replay');
     if (replay?.action === 'replay') expect(JSON.parse(replay.result)).toEqual(result);
+  } finally {
+    await f.close();
+  }
+});
+
+it('refuses acceptance when the independently qualified native workspace no longer matches the offered scope', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    worker.qualified.mockImplementation(async (cwd) => ({
+      path: 'worker',
+      claudeWorkspace: {
+        version: 1,
+        root: cwd!,
+        workingDirectories: [cwd!, join(dir, 'new-native-directory')],
+        workingDirectorySpellings: [cwd!, join(dir, 'new-native-directory')].slice().sort(),
+        readExceptions: [],
+        writeExceptions: [],
+      },
+    }));
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+      action: 'native',
+      reason: expect.stringContaining('Host permissions changed'),
+    });
+    expect(worker.run).not.toHaveBeenCalled();
+    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
   } finally {
     await f.close();
   }
@@ -659,8 +726,20 @@ it('refuses a missing original ledger before activation and keeps a foreign Clau
 
 it('qualifies an Explore continuation with its original native profile even when general-purpose is unavailable', async () => {
   const f = await ownedClaudeFixture('Explore');
-  worker.qualified.mockImplementation(async (_cwd, profile) =>
-    profile === 'Explore' ? 'worker' : null,
+  worker.qualified.mockImplementation(async (cwd, profile) =>
+    profile === 'Explore'
+      ? {
+          path: 'worker',
+          claudeWorkspace: {
+            version: 1,
+            root: cwd!,
+            workingDirectories: [cwd!],
+            workingDirectorySpellings: [cwd!].slice().sort(),
+            readExceptions: [],
+            writeExceptions: [],
+          },
+        }
+      : null,
   );
   try {
     const first = await f.call({ offer_id: f.job.id });
@@ -672,7 +751,17 @@ it('qualifies an Explore continuation with its original native profile even when
     expect(worker.qualified.mock.calls.every(([, profile]) => profile === 'Explore')).toBe(true);
     expect(worker.run).toHaveBeenCalledTimes(2);
   } finally {
-    worker.qualified.mockResolvedValue('worker');
+    worker.qualified.mockImplementation(async (cwd) => ({
+      path: 'worker',
+      claudeWorkspace: {
+        version: 1,
+        root: cwd!,
+        workingDirectories: [cwd!],
+        workingDirectorySpellings: [cwd!].slice().sort(),
+        readExceptions: [],
+        writeExceptions: [],
+      },
+    }));
     await f.close();
   }
 });

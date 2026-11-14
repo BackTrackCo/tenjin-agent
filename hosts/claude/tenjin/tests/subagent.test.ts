@@ -98,7 +98,7 @@ test('an action offer in MCP content holds Task as well', async ($, on) => {
     content: [{ type: 'text', text: offered }],
     canContinueAgent: false,
   });
-  expect(result.context?.join(' ')).toContain('Saved repository opt-in');
+  expect(result.context?.join(' ')).toContain('disclosure scope, recipients and spending cap');
 });
 
 test('only verified structured consent adds static local guidance, never the router reason', async ($, on) => {

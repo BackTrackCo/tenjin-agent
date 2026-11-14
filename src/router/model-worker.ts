@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
+import { basename } from 'node:path';
 import { findDefinition } from './agent-tools';
 import { join } from 'node:path';
 import {
@@ -37,6 +37,12 @@ import {
 } from './claude-worker-session';
 import { claudeWorkerProcess } from './claude-worker-process';
 import {
+  resolveClaudeWorkspace,
+  savedClaudeWorkspace,
+  sameClaudeWorkspace,
+  type ClaudeWorkspace,
+} from './claude-workspace';
+import {
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
@@ -48,6 +54,7 @@ type QualifiedWorker = {
   source?: string;
   instructionContext?: InstructionContext;
   nativeSnapshot?: NativeCodexSnapshot;
+  claudeWorkspace?: ClaudeWorkspace;
 };
 
 /** Qualify host policy, not model capability; unsupported paths stay native. */
@@ -74,16 +81,10 @@ export async function qualifiedModelWorker(
     return null;
   if (effective.sandbox?.filesystem?.disabled || effective.sandbox?.excludedCommands?.length)
     return null;
-  const root = await realpath(cwd);
-  const extra = [
-    ...(effective.permissions?.additionalDirectories ?? []),
-    ...(effective.sandbox?.filesystem?.allowRead ?? []),
-  ];
-  for (const path of extra) {
-    const real = await realpath(resolve(cwd, path)).catch(() => null);
-    if (!real || (real !== root && !real.startsWith(`${root}${sep}`))) return null;
-  }
-  return state.binary;
+  const disclosure = await modelSettings(dataDir, cwd);
+  const claudeWorkspace =
+    disclosure && (await resolveClaudeWorkspace(cwd, effective, disclosure.repositories));
+  return claudeWorkspace ? { ...state.binary, claudeWorkspace } : null;
 }
 
 /** Candidate maintained runner. Parent process/provider/Remote Control are untouched. */
@@ -130,6 +131,9 @@ export async function runModelWorker(
       current.currentClaudePermissionMode(),
     );
     if (!binary) throw new Error('Claude Code worker is unavailable; keep native');
+    const saved = savedClaudeWorkspace(job.decision.claudeWorkspace);
+    if (!saved || !binary.claudeWorkspace || !sameClaudeWorkspace(saved, binary.claudeWorkspace))
+      throw new Error('Owned Claude workspace scope changed or is unavailable');
     return runQualifiedWorker(job, current, binary);
   });
 }
@@ -137,7 +141,7 @@ export async function runModelWorker(
 async function runQualifiedWorker(
   job: ModelJob,
   options: Parameters<typeof runModelWorker>[1],
-  binary: { path: string },
+  binary: { path: string; claudeWorkspace?: ClaudeWorkspace },
 ) {
   options.signal.throwIfAborted();
   const permissionMode = assertClaudeWorkerMode(
@@ -147,8 +151,30 @@ async function runQualifiedWorker(
   const assertCurrentMode = () =>
     assertClaudeWorkerMode(permissionMode, options.currentClaudePermissionMode?.());
   assertCurrentMode();
+  const workspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
+  if (!workspace) throw new Error('Owned Claude workspace scope is unavailable');
+  const assertCurrentWorkspace = async () => {
+    const disclosure = await modelSettings(options.dataDir, job.root);
+    const resolved = await resolveWorkerSettings({
+      cwd: job.root,
+      settingSources: ['user', 'project', 'local'],
+    });
+    const current =
+      disclosure &&
+      (await resolveClaudeWorkspace(job.root, resolved.effective, disclosure.repositories));
+    if (!current || !sameClaudeWorkspace(workspace, current))
+      throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
+    return resolved;
+  };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
   const privatePaths = await claudeWorkerPrivatePaths(options.dataDir, job.root);
+  const protectedRoots = [
+    ...new Set([
+      ...workspace.workingDirectories,
+      ...workspace.readExceptions,
+      ...workspace.writeExceptions,
+    ]),
+  ];
   options.signal.throwIfAborted();
   assertCurrentMode();
   const controller = new AbortController();
@@ -183,10 +209,9 @@ async function runQualifiedWorker(
           res.writeHead(403).end();
           return;
         }
-        const settings = await modelSettings(options.dataDir, job.root);
+        await assertCurrentWorkspace();
         assertCurrentMode();
-        if (!settings || controller.signal.aborted)
-          throw new Error('Model consent revoked or job cancelled');
+        if (controller.signal.aborted) throw new Error('Model consent revoked or job cancelled');
         if (!(await nativeModeReady))
           throw new Error('Native Claude did not preserve the owned permission mode');
         assertCurrentMode();
@@ -249,10 +274,7 @@ async function runQualifiedWorker(
     const address = bridge.address();
     if (!address || typeof address === 'string') throw new Error('Worker bridge failed');
     const env = claudeDeepSeekWorkerEnv(process.env, `http://127.0.0.1:${address.port}`, token);
-    const resolved = await resolveWorkerSettings({
-      cwd: job.root,
-      settingSources: ['user', 'project', 'local'],
-    });
+    const resolved = await assertCurrentWorkspace();
     if (
       !claudeManagedProviderCompatible(resolved) ||
       (permissionMode === 'auto' && resolved.effective.permissions?.disableAutoMode === 'disable')
@@ -266,6 +288,7 @@ async function runQualifiedWorker(
         pathToClaudeCodeExecutable: binary.path,
         spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: job.root,
+        additionalDirectories: workspace.workingDirectories.slice(1),
         env,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
@@ -283,8 +306,33 @@ async function runQualifiedWorker(
           permissions: {
             blockReadsOutsideWorkingDirectories: true,
             blockWritesOutsideWorkingDirectories: true,
-            workingDirectoriesAsGiven: [job.root],
-            deny: privatePaths.deny,
+            workingDirectoriesAsGiven: workspace.workingDirectorySpellings,
+            blockReadsExemptPaths: workspace.readExceptions,
+            deny: [
+              ...privatePaths.deny,
+              ...protectedRoots.flatMap((root) => {
+                const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                const patterns = [
+                  `${absolute}/.env*`,
+                  `${absolute}/**/.env*`,
+                  ...(basename(root).startsWith('.env') ? [absolute] : []),
+                ];
+                return ['Read', 'Edit', 'Write'].flatMap((tool) =>
+                  patterns.map((pattern) => `${tool}(${pattern})`),
+                );
+              }),
+              ...[
+                join(homedir(), '.aws'),
+                join(homedir(), '.ssh'),
+                join(homedir(), '.codex', 'auth.json'),
+              ].flatMap((root) => {
+                const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                return ['Read', 'Edit', 'Write'].flatMap((tool) => [
+                  `${tool}(${absolute})`,
+                  `${tool}(${absolute}/**)`,
+                ]);
+              }),
+            ],
           },
         },
         sandbox: {
@@ -295,9 +343,11 @@ async function runQualifiedWorker(
             denyRead: [
               ...privatePaths.paths,
               join(homedir(), '.aws'),
-              join(job.root, '.env'),
-              join(job.root, '.env.local'),
-              `${job.root}/**/.env*`,
+              ...protectedRoots.flatMap((root) => [
+                `${root}/.env*`,
+                `${root}/**/.env*`,
+                ...(basename(root).startsWith('.env') ? [root] : []),
+              ]),
               join(homedir(), '.ssh'),
               join(homedir(), '.codex', 'auth.json'),
             ],
@@ -317,17 +367,18 @@ async function runQualifiedWorker(
                 async () => {
                   try {
                     assertCurrentMode();
+                    await assertCurrentWorkspace();
                   } catch {
                     return {
                       hookSpecificOutput: {
                         hookEventName: 'PreToolUse',
                         permissionDecision: 'deny',
-                        permissionDecisionReason: 'Owned permission mode changed or is unavailable',
+                        permissionDecisionReason:
+                          'Owned permission mode or workspace scope changed or is unavailable',
                       },
                     };
                   }
-                  const settings = await modelSettings(options.dataDir, job.root);
-                  return settings && !controller.signal.aborted
+                  return !controller.signal.aborted
                     ? {}
                     : {
                         hookSpecificOutput: {

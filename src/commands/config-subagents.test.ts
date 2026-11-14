@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -58,4 +58,67 @@ it('records explicit accepted-worker instruction consent while preserving wallet
   expect(await modelSettings(dir, repo)).not.toBeNull();
   await runConfigSubagents('off', {}, testCtx(dir));
   expect(await modelSettings(dir, repo)).toBeNull();
+});
+
+it('adds separately named repositories without losing earlier roots or duplicating canonical aliases', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const first = join(dir, 'first'),
+    second = join(dir, 'second'),
+    alias = join(dir, 'first-alias');
+  await mkdir(first);
+  await mkdir(second);
+  await symlink(first, alias);
+  await runConfigSubagents('on', { repository: first, maxJob: '1' }, testCtx(dir));
+  await runConfigSubagents('on', { repository: second, maxJob: '0.50' }, testCtx(dir));
+  const result = await runConfigSubagents(
+    'on',
+    { repository: alias, maxJob: '0.25' },
+    testCtx(dir),
+  );
+  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  expect(saved.router.subagentConsent.repositories).toEqual([first, second]);
+  expect(saved.router.subagentConsent.maxJobAtomic).toBe('250000');
+  expect(result.data).toMatchObject({ repository: first, repositories: [first, second] });
+  expect(await modelSettings(dir, first)).toMatchObject({ maxJobAtomic: 250000n });
+  expect(await modelSettings(dir, second)).toMatchObject({ maxJobAtomic: 250000n });
+  expect(await modelSettings(dir, dir)).toBeNull();
+});
+
+it.each([
+  { version: 1 },
+  { routerOrigin: 'https://another-router.test' },
+  { instructions: 'none' },
+  { recipients: ['Tenjin'] },
+  { maxJobAtomic: 'not-an-amount' },
+])('does not carry forward incompatible disclosure roots: %j', async (change) => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const old = join(dir, 'old'),
+    selected = join(dir, 'selected');
+  await mkdir(old);
+  await mkdir(selected);
+  await runConfigSubagents('on', { repository: old, maxJob: '1' }, testCtx(dir));
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  Object.assign(config.router.subagentConsent, change);
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  await runConfigSubagents('on', { repository: selected, maxJob: '1' }, testCtx(dir));
+  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  expect(saved.router.subagentConsent.repositories).toEqual([selected]);
+  expect(await modelSettings(dir, old)).toBeNull();
+});
+
+it('canonicalizes only previously named available roots without inferring their parent', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const old = join(dir, 'old'),
+    selected = join(dir, 'selected'),
+    alias = join(dir, 'old-alias');
+  await mkdir(old);
+  await mkdir(selected);
+  await symlink(old, alias);
+  await runConfigSubagents('on', { repository: old, maxJob: '1' }, testCtx(dir));
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  config.router.subagentConsent.repositories = [alias, old, join(dir, 'missing')];
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  await runConfigSubagents('on', { repository: selected, maxJob: '1' }, testCtx(dir));
+  const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  expect(saved.router.subagentConsent.repositories).toEqual([old, selected]);
 });

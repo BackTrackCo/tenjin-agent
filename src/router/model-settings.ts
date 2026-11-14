@@ -1,9 +1,10 @@
 import { realpath } from 'node:fs/promises';
+import { sep } from 'node:path';
 import { z } from 'zod';
 import { loadRawConfig } from '../lib/config';
 import { routerSettings } from './settings';
 
-const consentSchema = z.object({
+export const modelConsentSchema = z.object({
   routerOrigin: z.url(),
   version: z.literal(2),
   instructions: z.literal('applicable'),
@@ -11,12 +12,19 @@ const consentSchema = z.object({
   repositories: z.array(z.string()).min(1),
   maxJobAtomic: z.string().regex(/^\d+$/),
 });
+
+/** A named directory covers its descendants, never its parent or a sibling prefix. */
+export function disclosureCovers(repositories: readonly string[], path: string): boolean {
+  return repositories.some(
+    (root) => path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`),
+  );
+}
 /** Separate inference consent: legacy native-tier/effort settings grant nothing. */
 export async function modelSettings(dataDir: string, cwd: string) {
   const config = await loadRawConfig(dataDir);
   const settings = await routerSettings({ cwd, dataDir, config });
   const block = config.router as Record<string, unknown> | undefined;
-  const parsed = consentSchema.safeParse(block?.subagentConsent);
+  const parsed = modelConsentSchema.safeParse(block?.subagentConsent);
   if (
     !settings.enabled.value ||
     !settings.subagents.value ||
@@ -29,9 +37,11 @@ export async function modelSettings(dataDir: string, cwd: string) {
   const roots = await Promise.all(
     parsed.data.repositories.map((p) => realpath(p).catch(() => null)),
   );
-  if (!roots.includes(root) || BigInt(parsed.data.maxJobAtomic) <= 0n) return null;
+  const repositories = [...new Set(roots.filter((path): path is string => path !== null))];
+  if (!disclosureCovers(repositories, root) || BigInt(parsed.data.maxJobAtomic) <= 0n) return null;
   return {
     root,
+    repositories,
     maxJobAtomic: BigInt(parsed.data.maxJobAtomic),
     routerOrigin: parsed.data.routerOrigin,
     context: settings.context.value,

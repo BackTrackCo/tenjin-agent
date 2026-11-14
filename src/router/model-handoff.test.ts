@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -18,13 +18,23 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-async function continuationFixture() {
+async function continuationFixture(multiple = false) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'model-continuation-')));
   const repo = join(dir, 'repo'),
     configDir = join(dir, 'claude');
   await mkdir(repo);
   await mkdir(join(repo, '.git'));
   await mkdir(configDir);
+  const sibling = join(dir, 'sibling');
+  await mkdir(sibling);
+  const workspace = {
+    version: 1 as const,
+    root: repo,
+    workingDirectories: multiple ? [repo, sibling] : [repo],
+    workingDirectorySpellings: (multiple ? [repo, sibling] : [repo]).sort(),
+    readExceptions: [],
+    writeExceptions: [],
+  };
   vi.stubEnv('CLAUDE_CONFIG_DIR', configDir);
   await writeFile(
     join(dir, 'config.json'),
@@ -35,7 +45,7 @@ async function continuationFixture() {
           version: 2,
           instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
-          repositories: [repo],
+          repositories: multiple ? [repo, sibling] : [repo],
           maxJobAtomic: '1000000',
           routerOrigin: 'http://localhost:3939',
         },
@@ -59,7 +69,12 @@ async function continuationFixture() {
     root: repo,
     task: 'Original complete task',
     native: { prompt: 'Original complete task', subagent_type: 'general-purpose' },
-    decision: { ...offer, routerOrigin: 'http://localhost:3939', claudePermissionMode: 'default' },
+    decision: {
+      ...offer,
+      routerOrigin: 'http://localhost:3939',
+      claudePermissionMode: 'default',
+      claudeWorkspace: workspace,
+    },
     capAtomic: '900000',
   });
   const sdkSessionId = randomUUID();
@@ -78,7 +93,11 @@ async function continuationFixture() {
     'completed',
     'Original result',
   );
-  vi.mocked(qualifiedModelWorker).mockResolvedValue({ path: '/fixture/worker', source: 'path' });
+  vi.mocked(qualifiedModelWorker).mockResolvedValue({
+    path: '/fixture/worker',
+    source: 'path',
+    claudeWorkspace: workspace,
+  });
   vi.mocked(getSessionInfo).mockResolvedValue({ sessionId: sdkSessionId, cwd: repo } as Awaited<
     ReturnType<typeof getSessionInfo>
   >);
@@ -90,8 +109,74 @@ async function continuationFixture() {
     harness: 'claude',
     claudePermissionMode: 'default',
   };
-  return { model, session, conversation, owner, initial, route, requireResumeBudget };
+  return {
+    model,
+    session,
+    conversation,
+    owner,
+    initial,
+    route,
+    requireResumeBudget,
+    workspace,
+    sibling,
+  };
 }
+
+it('shows every explicit disclosure anchor and refuses a continuation whose native scope changes', async () => {
+  const f = await continuationFixture(true);
+  const native = { to: f.conversation.handle, message: 'Continue the same task.' };
+  expect(
+    await f.model.capture(f.session, 'continued', native, undefined, 'SendMessage'),
+  ).toMatchObject({
+    action: 'offer',
+    workspace: f.workspace,
+    consent: { repositories: [f.session.cwd, f.sibling] },
+  });
+  vi.mocked(qualifiedModelWorker).mockResolvedValue({
+    path: '/fixture/worker',
+    claudeWorkspace: { ...f.workspace, workingDirectories: [f.session.cwd] },
+  });
+  expect(
+    await f.model.capture(
+      { ...f.session, turnId: 'new-turn' },
+      'changed',
+      native,
+      undefined,
+      'SendMessage',
+    ),
+  ).toMatchObject({
+    action: 'refused',
+    reason: expect.stringContaining('workspace scope changed'),
+  });
+  expect(f.route).not.toHaveBeenCalled();
+});
+
+it('refuses sibling disclosure revoked during qualification before routing or offering a continuation', async () => {
+  const f = await continuationFixture(true);
+  vi.mocked(qualifiedModelWorker).mockImplementation(async () => {
+    const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+    config.router.subagentConsent.repositories = [f.session.cwd];
+    await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+    return { path: '/fixture/worker', claudeWorkspace: f.workspace };
+  });
+  expect(
+    await f.model.capture(
+      f.session,
+      'continued',
+      { to: f.conversation.handle, message: 'Continue' },
+      undefined,
+      'SendMessage',
+    ),
+  ).toMatchObject({ action: 'refused' });
+  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
+  expect(f.route).not.toHaveBeenCalled();
+  expect(
+    await f.model.capture({ ...f.session, turnId: 'initial-new-turn' }, 'new-worker', {
+      prompt: 'Read both repositories.',
+    }),
+  ).toMatchObject({ action: 'native' });
+  expect(f.route).not.toHaveBeenCalled();
+});
 
 it('offers an across-day continuation with full parent veto, same job ceiling and no Jev fee', async () => {
   const f = await continuationFixture();
@@ -110,7 +195,7 @@ it('offers an across-day continuation with full parent veto, same job ceiling an
       worker_handle: f.conversation.handle,
       routingFeeAtomic: '0',
       capAtomic: '900000',
-      parentPolicy: expect.stringContaining('A live applicable no-pay instruction'),
+      parentPolicy: expect.stringContaining('An unconditional live no-pay instruction'),
       instruction: expect.stringContaining('final veto'),
     });
     expect('parentPolicy' in result ? result.parentPolicy : undefined).not.toContain(
@@ -285,7 +370,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   expect(recommendation).toHaveProperty(
     'parentPolicy',
     expect.stringContaining(
-      'A live applicable no-pay instruction, including a worker paid-tool restriction, vetoes the paid offer even with saved routing opt-in.',
+      'An unconditional live no-pay instruction, including an unconditional worker paid-tool ban, vetoes the paid offer.',
     ),
   );
   expect(route).toHaveBeenCalledWith(

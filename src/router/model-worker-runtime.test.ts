@@ -3,6 +3,7 @@ import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk/core';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { readClaudeCode, meetsFloor } from './claude-cli';
 import { runModelWorker } from './model-worker';
+import { modelSettings } from './model-settings';
 import { workerStop } from './model-worker-control';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -18,7 +19,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
 vi.mock('./agent-tools', () => ({ findDefinition: vi.fn(async () => null) }));
-vi.mock('./model-settings', () => ({ modelSettings: vi.fn(async () => ({})) }));
+vi.mock('./model-settings', async (original) => ({
+  ...(await original<typeof import('./model-settings')>()),
+  modelSettings: vi.fn(async () => ({ root: '/repo', repositories: ['/repo'] })),
+}));
 vi.mock('node:child_process', async (original) => ({
   ...(await original<typeof import('node:child_process')>()),
   spawn: vi.fn(),
@@ -26,6 +30,7 @@ vi.mock('node:child_process', async (original) => ({
 vi.mock('node:fs/promises', async (original) => ({
   ...(await original<typeof import('node:fs/promises')>()),
   realpath: async (path: unknown) => String(path),
+  stat: async () => ({ isDirectory: () => true }),
 }));
 vi.mock('node:http', async (original) => ({
   ...(await original<typeof import('node:http')>()),
@@ -52,6 +57,7 @@ beforeEach(() => {
   } as never);
   vi.mocked(meetsFloor).mockReturnValue(true);
   vi.mocked(resolveSettings).mockResolvedValue({ effective: {} } as never);
+  vi.mocked(modelSettings).mockResolvedValue({ root: '/repo', repositories: ['/repo'] } as never);
 });
 
 const job = {
@@ -59,7 +65,17 @@ const job = {
   root: '/repo',
   native: {},
   task: 'Check the selected function.',
-  decision: { claudePermissionMode: 'default' },
+  decision: {
+    claudePermissionMode: 'default',
+    claudeWorkspace: {
+      version: 1,
+      root: '/repo',
+      workingDirectories: ['/repo'],
+      workingDirectorySpellings: ['/repo'].slice().sort(),
+      readExceptions: [],
+      writeExceptions: [],
+    },
+  },
 } as unknown as ModelJob;
 const options = () => ({
   dataDir: '/data',
@@ -69,7 +85,11 @@ const options = () => ({
   currentClaudePermissionMode: () => 'default',
   permission: vi.fn(async () => false),
 });
-function sdkResult(result: Record<string, unknown>, sessionId?: string) {
+function sdkResult(
+  result: Record<string, unknown>,
+  sessionId?: string,
+  beforeResult?: () => Promise<void>,
+) {
   vi.mocked(query).mockReturnValue({
     async *[Symbol.asyncIterator]() {
       yield {
@@ -79,6 +99,7 @@ function sdkResult(result: Record<string, unknown>, sessionId?: string) {
         cwd: '/repo',
         session_id: sessionId,
       };
+      await beforeResult?.();
       yield { type: 'result', session_id: sessionId, ...result };
     },
     mcpServerStatus: async () => [],
@@ -102,6 +123,118 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
   });
   expect(native.close).toHaveBeenCalled();
   expect(native.bridgeClose).toHaveBeenCalled();
+});
+
+it('keeps native sibling working directories distinct from read-only and shell-write exceptions', async () => {
+  const workspace = {
+    version: 1,
+    root: '/repo',
+    workingDirectories: ['/repo', '/sibling'],
+    workingDirectorySpellings: ['/repo', '/sibling'].slice().sort(),
+    readExceptions: ['/read-only'],
+    writeExceptions: ['/shell-write'],
+  };
+  vi.mocked(modelSettings).mockResolvedValue({
+    root: '/repo',
+    repositories: ['/repo', '/sibling', '/read-only', '/shell-write'],
+  } as never);
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: {
+      permissions: { additionalDirectories: ['/sibling'] },
+      sandbox: { filesystem: { allowRead: ['/read-only'], allowWrite: ['/shell-write'] } },
+    },
+  } as never);
+  sdkResult({ subtype: 'success', result: 'done' });
+  await runModelWorker(
+    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+    options(),
+  );
+  const call = vi.mocked(query).mock.calls[0]![0];
+  expect(call.options?.additionalDirectories).toEqual(['/sibling']);
+  expect(call.options?.settings).toMatchObject({
+    permissions: {
+      workingDirectoriesAsGiven: ['/repo', '/sibling'],
+      blockReadsExemptPaths: ['/read-only'],
+      blockWritesOutsideWorkingDirectories: true,
+    },
+  });
+  expect(call.options?.settings).toHaveProperty(
+    'permissions.deny',
+    expect.arrayContaining([
+      'Read(//sibling/**/.env*)',
+      'Read(//read-only/**/.env*)',
+      'Read(//shell-write/**/.env*)',
+    ]),
+  );
+});
+
+it.each(['native scope', 'disclosure'] as const)(
+  'denies the next native tool when %s changes during an activation',
+  async (change) => {
+    let decision: unknown;
+    sdkResult({ subtype: 'success', result: 'guarded fixture' }, undefined, async () => {
+      if (change === 'native scope')
+        vi.mocked(resolveSettings).mockResolvedValue({
+          effective: { permissions: { additionalDirectories: ['/sibling'] } },
+        } as never);
+      else vi.mocked(modelSettings).mockResolvedValue(null);
+      const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
+      decision = await hook!(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Read',
+          tool_input: { file_path: '/repo/a.ts' },
+          tool_use_id: 'next',
+        } as never,
+        undefined,
+        { signal: new AbortController().signal },
+      );
+    });
+    await runModelWorker(job, options());
+    expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  },
+);
+
+it('stops a paid bridge request after disclosure revocation before invoking transport', async () => {
+  const messages = vi.fn();
+  sdkResult({ subtype: 'success', result: 'not a valid completion' }, undefined, async () => {
+    vi.mocked(modelSettings).mockResolvedValue(null);
+    const call = vi.mocked(query).mock.calls[0]![0];
+    const handle = native.createServer.mock.calls[0]![0] as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    await new Promise<void>((complete) =>
+      handle(
+        {
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from(
+              JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
+            );
+          },
+        },
+        {
+          headersSent: false,
+          destroyed: false,
+          writeHead() {
+            return this;
+          },
+          end(_body: string, done?: () => void) {
+            done?.();
+            complete();
+            return this;
+          },
+        },
+      ),
+    );
+  });
+  await expect(
+    runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+  ).rejects.toThrow(/workspace scope changed|disclosure was revoked/);
+  expect(messages).not.toHaveBeenCalled();
 });
 
 it('persists and resumes an exact owned SDK identity without changing the string result contract', async () => {

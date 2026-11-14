@@ -13,6 +13,11 @@ import parentPolicy from './model-parent-policy.json';
 import { ModelConversationStore } from './model-conversations';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
+  claudeWorkspaceCovered,
+  savedClaudeWorkspace,
+  sameClaudeWorkspace,
+} from './claude-workspace';
+import {
   continuationRefusal,
   ownedModelReference,
   type ModelNativeTool,
@@ -209,7 +214,7 @@ export class ModelHandoff {
       signal,
       session.claudePermissionMode,
     );
-    if (!worker || !claudeWorkerPermissionMode(session.claudePermissionMode))
+    if (!worker?.claudeWorkspace || !claudeWorkerPermissionMode(session.claudePermissionMode))
       return { action: 'native' };
     const task = native.prompt;
     if (
@@ -237,6 +242,7 @@ export class ModelHandoff {
         decision: {
           routerOrigin: transport.origin,
           claudePermissionMode: session.claudePermissionMode,
+          claudeWorkspace: worker.claudeWorkspace,
         },
         capAtomic: settings.maxJobAtomic.toString(),
       },
@@ -291,10 +297,23 @@ export class ModelHandoff {
       signal,
       session.claudePermissionMode,
     );
-    if (!worker) return continuationRefusal('Current native worker policy cannot be preserved');
+    const originalWorkspace = savedClaudeWorkspace(original.decision.claudeWorkspace);
+    if (
+      !worker?.claudeWorkspace ||
+      !originalWorkspace ||
+      !sameClaudeWorkspace(originalWorkspace, worker.claudeWorkspace)
+    )
+      return continuationRefusal(
+        'Current native workspace scope changed or its original disclosure is unavailable',
+      );
     signal?.throwIfAborted();
     const latest = await modelSettings(dataDir, session.cwd);
-    if (!latest || latest.root !== settings.root || latest.routerOrigin !== transport.origin)
+    if (
+      !latest ||
+      latest.root !== settings.root ||
+      latest.routerOrigin !== transport.origin ||
+      !claudeWorkspaceCovered(originalWorkspace, latest.repositories)
+    )
       return continuationRefusal('Current model consent changed during qualification');
     signal?.throwIfAborted();
     const cap =
@@ -313,6 +332,7 @@ export class ModelHandoff {
         workerHandle: handle,
         workerConfigDir: conversation.configDir,
         claudePermissionMode: session.claudePermissionMode,
+        claudeWorkspace: worker.claudeWorkspace,
       },
       capAtomic: cap,
     });
@@ -339,9 +359,11 @@ export class ModelHandoff {
       capAtomic: cap,
       reason: 'Continue the owned DeepSeek worker with its history and remaining original budget',
       parentPolicy: continuationPolicy,
+      workspace: worker.claudeWorkspace,
       consent: {
         version: 2,
         repository: settings.root,
+        repositories: latest.repositories,
         routerOrigin: settings.routerOrigin,
         recipients: ['Tenjin', 'DeepSeek'],
       },
@@ -360,6 +382,12 @@ export class ModelHandoff {
       return native();
     const task = job.task;
     const instructions = savedInstructionContext(job.decision.instructionContext);
+    const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
+    if (
+      session.harness !== 'codex' &&
+      (!claudeWorkspace || !claudeWorkspaceCovered(claudeWorkspace, settings.repositories))
+    )
+      return native();
     if (
       session.harness === 'codex' &&
       (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
@@ -417,7 +445,8 @@ export class ModelHandoff {
       !consent ||
       consent.root !== job.root ||
       consent.routerOrigin !== transport.origin ||
-      consent.maxJobAtomic < BigInt(job.capAtomic)
+      consent.maxJobAtomic < BigInt(job.capAtomic) ||
+      (claudeWorkspace && !claudeWorkspaceCovered(claudeWorkspace, consent.repositories))
     )
       return native();
     await this.store.decided(job.id, {
@@ -425,6 +454,7 @@ export class ModelHandoff {
       routerOrigin: transport.origin,
       ...(instructions ? { instructionContext: instructions } : {}),
       ...(job.decision.nativeSnapshot ? { nativeSnapshot: job.decision.nativeSnapshot } : {}),
+      ...(claudeWorkspace ? { claudeWorkspace } : {}),
       ...(session.harness !== 'codex'
         ? { claudePermissionMode: job.decision.claudePermissionMode }
         : {}),
@@ -439,14 +469,25 @@ export class ModelHandoff {
       capAtomic: job.capAtomic,
       reason: parsed.data.reason,
       parentPolicy,
+      ...(claudeWorkspace
+        ? { workspace: claudeWorkspace }
+        : {
+            workspace: {
+              root: settings.root,
+              workingDirectories: session.codexPolicy?.parent?.runtimeWorkspaceRoots ?? [
+                settings.root,
+              ],
+            },
+          }),
       consent: {
         version: 2,
         repository: consent.root,
+        repositories: consent.repositories,
         routerOrigin: consent.routerOrigin,
         recipients: ['Tenjin', 'DeepSeek'],
       },
       instruction:
-        'Saved version 2 opt-in covers this repository and endpoint: routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.',
+        'Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.',
     };
   }
 }

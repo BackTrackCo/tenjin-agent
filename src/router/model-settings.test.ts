@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -8,7 +8,7 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 async function fixture(router: Record<string, unknown>) {
-  dir = await mkdtemp(join(tmpdir(), 'model-consent-'));
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'model-consent-')));
   const data = join(dir, 'data'),
     repo = join(dir, 'repo');
   await mkdir(data);
@@ -39,7 +39,7 @@ it('does not turn legacy tier routing or a boolean into inference/data consent',
   await writeFile(join(data, 'config.json'), JSON.stringify({ router: { subagents: true } }));
   expect(await modelSettings(data, repo)).toBeNull();
 });
-it('requires the exact consented root and lets a project revoke access immediately', async () => {
+it('keeps the actual cwd beneath an explicitly selected workspace and lets a project revoke access immediately', async () => {
   const { data, repo } = await fixture({});
   await writeFile(
     join(data, 'config.json'),
@@ -57,11 +57,22 @@ it('requires the exact consented root and lets a project revoke access immediate
       },
     }),
   );
-  expect(await modelSettings(data, repo)).toMatchObject({ maxJobAtomic: 1000000n });
+  const nested = join(repo, 'nested');
+  await mkdir(nested);
+  expect(await modelSettings(data, nested)).toMatchObject({
+    root: nested,
+    repositories: [repo],
+    maxJobAtomic: 1000000n,
+  });
+  expect(await modelSettings(data, dir)).toBeNull();
+  const sibling = `${repo}-other`;
+  await mkdir(sibling);
+  expect(await modelSettings(data, sibling)).toBeNull();
   await mkdir(join(repo, '.tenjin'));
   await writeFile(
     join(repo, '.tenjin', 'config.json'),
     JSON.stringify({ router: { subagents: false } }),
   );
   expect(await modelSettings(data, repo)).toBeNull();
+  expect(await modelSettings(data, nested)).toBeNull();
 });

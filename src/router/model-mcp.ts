@@ -11,6 +11,7 @@ import { workerStop } from './model-worker-control';
 import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, ownedModelReference } from './model-continuation';
 import type { ModelConversation, ModelConversationOwner } from './model-conversations';
+import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
 
 type ActiveConversation = {
   handle: string;
@@ -268,8 +269,13 @@ export function registerModelTool(
             signal,
             options.harness === 'claude' ? currentClaudeMode() : undefined,
           );
+          const offeredWorkspace = savedClaudeWorkspace(pending?.decision.claudeWorkspace);
           if (
             !qualified ||
+            (options.harness === 'claude' &&
+              (!offeredWorkspace ||
+                !qualified.claudeWorkspace ||
+                !sameClaudeWorkspace(offeredWorkspace, qualified.claudeWorkspace))) ||
             (options.harness === 'codex' &&
               JSON.stringify(qualified.nativeSnapshot) !==
                 JSON.stringify(pending?.decision.nativeSnapshot))
@@ -330,6 +336,7 @@ export function registerModelTool(
                   decision: {
                     ...conversation.originalJob.decision,
                     claudePermissionMode: currentClaudeMode(),
+                    claudeWorkspace: job.decision.claudeWorkspace,
                     requireExistingBudget: true,
                   },
                 };
