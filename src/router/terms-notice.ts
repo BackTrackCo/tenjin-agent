@@ -22,7 +22,7 @@ const TERMS_ID = 'per-answer-quote';
 
 /** What the person is told once about the changed routing terms. */
 export const TERMS_CHANGED_SENTENCE =
-  'Routing fees now vary, up to 25¢ per answer. Your spend limits still apply.';
+  'Routing fees now vary by answer. Your spend limits still apply.';
 
 function marker(dataDir: string): string {
   return join(dataDir, 'router', 'terms', TERMS_ID);

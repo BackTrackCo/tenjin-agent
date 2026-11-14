@@ -19,7 +19,7 @@ Automatic routing, an explicitly approved over-limit quote, direct `tenjin pay` 
 
 A signed authorization can be charged after a process exits or reports an error. Tenjin counts transmitted automatic authorizations conservatively; only eligible chain-proven expiry releases their exposure. A result file, HTTP success or provider's claim of failure is not settlement proof. Check payment records before retrying an uncertain purchase.
 
-A routing answer can cost the fee the server quotes for it, at most $0.25, even when it suggests no tool; offers show no fee. Tenjin pays it from a routing balance that it tops up from your wallet in deposits. A deposit never exceeds `maxAutoSpend` or a $0.25 ceiling, must pass the automatic spend policy before signing, and counts against the per-call limit and daily budget once; fees drawn from it do not count again. A failed balance lookup sends no deposit. [How a deposit is sized →](./router-reference.md#routing-fee-and-deposit)
+A routing answer can cost the fee the server quotes for it, even when it suggests no tool; offers show no fee. The current routing limit and your spend policy still apply. Tenjin pays it from a routing balance that it tops up from your wallet in deposits. A deposit never exceeds `maxAutoSpend` or the current top-up limit, must pass the automatic spend policy before signing, and counts against the per-call limit and daily budget once; fees drawn from it do not count again. A failed balance lookup sends no deposit. [How a deposit is sized →](./router-reference.md#routing-fee-and-deposit)
 
 ## Destination and result limits
 

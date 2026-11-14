@@ -55,7 +55,7 @@ export function limitsUsd(limits: RouterLimits): { maxAutoSpend: string; session
 
 /** The fee terms approved with either spending-limit choice. */
 export const ROUTING_FEE_TERMS =
-  'Tenjin charges 15% of the estimated tool cost for paid recommendations, up to 25¢. Tool use is billed separately. Routing top-ups count toward your limits.';
+  'Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits.';
 
 /** The selector's own line: either answer approves the fee. */
 export const FEE_APPROVAL = 'Either choice approves this.';

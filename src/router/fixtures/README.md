@@ -287,7 +287,7 @@ behind x402
 `batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). A 402 can
 also carry the answer's own quote as a first offer, with 3000 as the second.
 The 402 is the only price: this client pays the answer's own quote ahead of
-3000, at or below its ceiling of 250000 atomic USDC (`ROUTING_FEE_CEILING_ATOMIC`
+3000, at or below its current routing limit (`ROUTING_FEE_CEILING_ATOMIC`
 in `fee.ts`) inside the user's spend limits, pays nothing above it, and pins no
 payee. With the fee `off`, the route answers with no 402. An answer from
 a completed Jev gate settles that fee; `warm` and any other answer settle at 0, which
