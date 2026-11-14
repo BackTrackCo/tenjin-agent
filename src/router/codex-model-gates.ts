@@ -13,6 +13,11 @@ import { MCP_SERVER_NAME } from './names';
 import { codexHome } from '../lib/codex-home';
 import { dataDir } from '../lib/paths';
 import { ownCodexRow } from './codex-install';
+import {
+  codexInstructionProfile,
+  readCodexInstructionFilesOnServer,
+  type CodexInstructionFile,
+} from './codex-instruction-reader';
 
 export interface CodexModelPolicy {
   approvalPolicy: unknown;
@@ -36,6 +41,12 @@ export interface CodexModelQualification {
   instructionConfig?: { config: Record<string, unknown>; layers: unknown };
 }
 export interface CodexModelGates extends CodexModelQualification {
+  /** Host instruction admission only; never published in the worker tool catalog. */
+  readInstructions?(
+    paths: string[],
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<CodexInstructionFile[] | null>;
   callMcp(
     server: string,
     tool: string,
@@ -369,6 +380,7 @@ async function snapshot(
     reasons.push('managed_requirements_unqualified');
   const profile = codexModelProfile(options.policy, options);
   if (!profile) reasons.push('permission_profile_unrepresentable');
+  if (!codexInstructionProfile(options)) reasons.push('instruction_profile_unrepresentable');
   let hooks: Record<string, unknown>[] = [];
   if (
     !isRecord(listed) ||
@@ -502,6 +514,7 @@ async function withGates<T>(
   run: (request: CodexAppRequest, state: Snapshot, threadId: string) => Promise<T>,
 ): Promise<T | null> {
   const profile = codexModelProfile(options.policy, options);
+  const instructionProfile = codexInstructionProfile(options);
   const brokerEnv = { ...(options.env ?? process.env) };
   for (const key of [
     'TENJIN_WALLET_PASSPHRASE',
@@ -558,7 +571,7 @@ async function withGates<T>(
       signal,
       experimentalApi: true,
       expectedVersion: QUALIFIED_CODEX_MODEL_VERSIONS,
-      configOverrides: profile?.overrides,
+      configOverrides: [...(profile?.overrides ?? []), ...(instructionProfile?.overrides ?? [])],
     },
   );
 }
@@ -597,6 +610,18 @@ export async function withCodexModelGates<T>(
       };
       return fn({
         ...initial,
+        readInstructions: async (paths, maxBytes, signal = options.signal) => {
+          await live(signal);
+          const files = await readCodexInstructionFilesOnServer(
+            request,
+            options,
+            paths,
+            maxBytes,
+            signal,
+          );
+          await live(signal);
+          return files;
+        },
         callMcp: async (server, tool, args, signal) => {
           const stop = () => lifetime.abort();
           signal.addEventListener('abort', stop, { once: true });
