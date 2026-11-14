@@ -118,6 +118,8 @@ Example provider prices vary by tool and inputs and exclude Tenjin's routing fee
 
 Browsing and inspection are free. A selected tool pays only its provider; selected Context7 docs need no wallet or routing fee.
 
+Ask your agent to find x402 endpoints for a need, and it compares Tenjin's catalog, public Bazaar registries and Orthogonal without paying anyone. [How discovery works →](./docs/agent-permissions.md#discover-endpoints)
+
 ## Wallet and limits
 
 | Automatic spending               | Default |

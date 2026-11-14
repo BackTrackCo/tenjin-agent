@@ -675,6 +675,7 @@ export function renderCodexManifest(): Record<string, unknown> {
     homepage: `${PRODUCTION_ORIGIN}/agents`,
     repository: 'https://github.com/BackTrackCo/tenjin-agent',
     interface: { displayName: 'Tenjin', developerName: 'Tenjin', category: 'Productivity' },
+    skills: './skills/',
     mcpServers: './.mcp.json',
   };
 }
@@ -709,6 +710,7 @@ export function renderCodexHostFiles(o?: CodexRuntime): Record<string, string> {
       Object.entries(bin).map(([path, body]) => [`${PLUGIN_DIR}/${path}`, body] as const),
     ),
     [`${PLUGIN_DIR}/hooks/hooks.json`]: json(renderCodexHooks()),
+    [`${PLUGIN_DIR}/${PAY_SKILL_PATH}`]: PAY_SKILL,
     [`${PLUGIN_DIR}/.codex-plugin/plugin.json`]: json(renderCodexManifest()),
   };
 }
