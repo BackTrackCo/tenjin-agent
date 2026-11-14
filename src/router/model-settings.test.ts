@@ -20,6 +20,22 @@ async function fixture(router: Record<string, unknown>) {
 it('does not turn legacy tier routing or a boolean into inference/data consent', async () => {
   const { data, repo } = await fixture({ subagents: 'apply' });
   expect(await modelSettings(data, repo)).toBeNull();
+  await writeFile(
+    join(data, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: {
+          version: 1,
+          recipients: ['Tenjin', 'DeepSeek'],
+          repositories: [repo],
+          maxJobAtomic: '1000000',
+          routerOrigin: 'http://localhost:3939',
+        },
+      },
+    }),
+  );
+  expect(await modelSettings(data, repo)).toBeNull();
   await writeFile(join(data, 'config.json'), JSON.stringify({ router: { subagents: true } }));
   expect(await modelSettings(data, repo)).toBeNull();
 });
@@ -31,7 +47,8 @@ it('requires the exact consented root and lets a project revoke access immediate
       router: {
         subagents: true,
         subagentConsent: {
-          version: 1,
+          version: 2,
+          instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',

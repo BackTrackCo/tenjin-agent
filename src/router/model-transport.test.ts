@@ -24,7 +24,8 @@ async function fixture(options: { drop?: boolean; cap?: string } = {}) {
     router: {
       subagents: true,
       subagentConsent: {
-        version: 1,
+        version: 2,
+        instructions: 'applicable',
         recipients: ['Tenjin', 'DeepSeek'],
         repositories: [repo],
         maxJobAtomic: options.cap ?? '1000000',

@@ -7,6 +7,7 @@ import { modelSettings } from './model-settings';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
+import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -73,15 +74,17 @@ export class ModelHandoff {
       !session.codexPolicy ||
       typeof native.message !== 'string' ||
       native.fork_turns !== 'none' ||
-      Object.keys(native).some((key) => !['message', 'task_name', 'fork_turns'].includes(key)) ||
-      !(await qualifiedModelWorker(
-        session.cwd,
-        'general-purpose',
-        session.codexPolicy,
-        this.options.dataDir,
-      ))
+      Object.keys(native).some((key) => !['message', 'task_name', 'fork_turns'].includes(key))
     )
       return null;
+    const worker = await qualifiedModelWorker(
+      session.cwd,
+      'general-purpose',
+      session.codexPolicy,
+      this.options.dataDir,
+      signal,
+    );
+    if (!worker?.instructionContext) return null;
     signal?.throwIfAborted();
     const job = await this.store.offer(
       {
@@ -91,7 +94,10 @@ export class ModelHandoff {
         root: settings.root,
         task: '',
         native,
-        decision: { routerOrigin: this.options.transport.origin },
+        decision: {
+          routerOrigin: this.options.transport.origin,
+          instructionContext: worker.instructionContext,
+        },
         capAtomic: settings.maxJobAtomic.toString(),
       },
       'awaiting_prompt',
@@ -108,18 +114,29 @@ export class ModelHandoff {
       settings.routerOrigin !== this.options.transport.origin ||
       !session.codexPolicy ||
       !task.trim() ||
-      Buffer.byteLength(task) > 16000 ||
-      !(await qualifiedModelWorker(
-        session.cwd,
-        'general-purpose',
-        session.codexPolicy,
-        this.options.dataDir,
-      ))
+      Buffer.byteLength(task) > 16000
     )
       return {
         action: 'native',
         reason:
           'Host policy or complete assignment unavailable; retry the original native call unchanged',
+      };
+    const worker = await qualifiedModelWorker(
+      session.cwd,
+      'general-purpose',
+      session.codexPolicy,
+      this.options.dataDir,
+      signal,
+    );
+    const pending = await this.store.pending(session.sessionId, session.turnId);
+    if (
+      !worker?.instructionContext ||
+      worker.instructionContext.fingerprint !==
+        savedInstructionContext(pending?.decision.instructionContext)?.fingerprint
+    )
+      return {
+        action: 'native',
+        reason: 'Initial instructions changed or are unavailable; retry native unchanged',
       };
     signal?.throwIfAborted();
     const job = await this.store.submit(id, session.sessionId, session.turnId, task);
@@ -142,12 +159,16 @@ export class ModelHandoff {
     )
       return { action: 'native' };
     signal?.throwIfAborted();
-    if (
-      !(await qualifiedModelWorker(session.cwd, String(native.subagent_type ?? 'general-purpose')))
-    )
-      return { action: 'native' };
     if (await this.store.nativeRetry(session.sessionId, session.turnId, native))
       return { action: 'native' };
+    const worker = await qualifiedModelWorker(
+      session.cwd,
+      String(native.subagent_type ?? 'general-purpose'),
+      undefined,
+      dataDir,
+      signal,
+    );
+    if (!worker) return { action: 'native' };
     const task = native.prompt;
     if (
       typeof task !== 'string' ||
@@ -188,6 +209,12 @@ export class ModelHandoff {
     if (!settings || settings.root !== job.root || settings.routerOrigin !== transport.origin)
       return native();
     const task = job.task;
+    const instructions = savedInstructionContext(job.decision.instructionContext);
+    if (
+      session.harness === 'codex' &&
+      (!instructions || instructions.root !== settings.root || instructions.harness !== 'codex')
+    )
+      return native();
     const packet = await buildPromptPacket(
       session.transcript,
       session.sessionId,
@@ -218,6 +245,8 @@ export class ModelHandoff {
       signal?.throwIfAborted();
       if (pending?.id !== job.id || !['routing', 'offered'].includes(pending.state))
         return native();
+      if (instructions) await assertInstructionMetadataCurrent(instructions);
+      signal?.throwIfAborted();
       raw = job.state === 'offered' ? job.decision : await transport.route(input, signal);
       signal?.throwIfAborted();
     } catch {
@@ -233,7 +262,11 @@ export class ModelHandoff {
       await this.store.decided(job.id, { action: 'native' });
       return { action: 'native' };
     }
-    await this.store.decided(job.id, { ...parsed.data, routerOrigin: transport.origin });
+    await this.store.decided(job.id, {
+      ...parsed.data,
+      routerOrigin: transport.origin,
+      ...(instructions ? { instructionContext: instructions } : {}),
+    });
     return {
       action: 'offer',
       started: false,

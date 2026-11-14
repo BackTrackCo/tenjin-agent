@@ -2,7 +2,9 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn(async () => 'qualified-worker') }));
+vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn() }));
+import { qualifiedModelWorker } from './model-worker';
+import { makeInstructionContext } from './model-instructions';
 import { ModelHandoff, modelOfferSchema, type ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
@@ -16,13 +18,34 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   const repo = join(dir, 'repo');
   await mkdir(repo);
   await mkdir(join(repo, '.git'));
+  const instructionFile = join(repo, 'AGENTS.md');
+  await writeFile(instructionFile, 'Ask before publishing. Keep guarded Neon jobs native.');
+  const instructionContext = await makeInstructionContext({
+    harness: 'codex',
+    root: repo,
+    documents: [
+      {
+        path: instructionFile,
+        content: 'Ask before publishing. Keep guarded Neon jobs native.',
+        source: 'Codex project',
+      },
+    ],
+    configHash: 'fixture',
+    watchPaths: [instructionFile],
+  });
+  vi.mocked(qualifiedModelWorker).mockResolvedValue({
+    path: '/fixture/worker',
+    source: 'path',
+    instructionContext,
+  });
   await writeFile(
     join(dir, 'config.json'),
     JSON.stringify({
       router: {
         subagents: true,
         subagentConsent: {
-          version: 1,
+          version: 2,
+          instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',
@@ -101,6 +124,18 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   });
   expect(await model.captureCodex(session, 'native-retry', native)).toBeNull();
   expect(await model.store.accept(pending!.id, 'root', 'turn')).toBeNull();
+  expect(route).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(route.mock.calls[0])).not.toContain(
+    'Ask before publishing. Keep guarded Neon jobs native.',
+  );
+  const routed = await model.store.pending('root', 'turn');
+  expect(routed?.decision.instructionContext).toEqual(instructionContext);
+
+  const changed = { ...session, turnId: 'changed-turn' };
+  await model.captureCodex(changed, 'next-native-call', native);
+  const next = await model.store.pending('root', 'changed-turn');
+  await writeFile(instructionFile, 'A binding instruction changed after capture.');
+  expect(await model.submitCodex(changed, next!.id, task)).toMatchObject({ action: 'native' });
   expect(route).toHaveBeenCalledTimes(1);
 });
 

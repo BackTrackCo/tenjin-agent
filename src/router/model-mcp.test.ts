@@ -30,7 +30,8 @@ it('cancels and drains an accepted Codex worker on the trusted lifecycle bridge;
       router: {
         subagents: true,
         subagentConsent: {
-          version: 1,
+          version: 2,
+          instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
           maxJobAtomic: '1000000',

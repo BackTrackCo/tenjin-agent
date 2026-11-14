@@ -24,14 +24,15 @@ export async function runConfigSubagents(
   const settings = await resolveContextSettings(ctx);
   if (maxJob <= 0n) throw new CliError('USAGE', 'The job ceiling must be positive.');
   const disclosure =
-    'Allow Tenjin (using TypeSafe/Jev for routing) to receive this repository’s subagent assignments and bounded parent context, and DeepSeek to receive accepted assignments and worker tool results. Proxy replay is available for 24 hours; expired content is removed by bounded cleanup. Known secrets are masked, not guaranteed anonymous. Existing tool permissions and wallet limits still apply.';
+    'Allow Tenjin (using TypeSafe/Jev for routing) to receive this repository’s subagent assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results. Native global, ancestor and repository instructions keep their normal scope; Codex copies its AGENTS hierarchy into the worker. No wallet, login or environment files are included. This grants no extra tool or filesystem permission. Proxy replay is available for 24 hours; expired content is removed by bounded cleanup. Known secrets are masked, not guaranteed anonymous. Existing tool permissions and wallet limits still apply.';
   await persist(ctx.dataDir, (c) => ({
     ...c,
     router: {
       ...c.router,
       subagents: true,
       subagentConsent: {
-        version: 1,
+        version: 2,
+        instructions: 'applicable',
         recipients: ['Tenjin', 'DeepSeek'],
         repositories: [repository],
         maxJobAtomic: maxJob.toString(),

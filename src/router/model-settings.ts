@@ -5,7 +5,8 @@ import { routerSettings } from './settings';
 
 const consentSchema = z.object({
   routerOrigin: z.url(),
-  version: z.literal(1),
+  version: z.literal(2),
+  instructions: z.literal('applicable'),
   recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek')]),
   repositories: z.array(z.string()).min(1),
   maxJobAtomic: z.string().regex(/^\d+$/),
