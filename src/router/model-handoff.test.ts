@@ -121,6 +121,12 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     instruction: expect.stringMatching(/binding instructions.*forbid disclosure/),
   });
   expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
+  expect(recommendation).toHaveProperty(
+    'parentPolicy',
+    expect.stringContaining(
+      'A live applicable no-pay instruction, including a worker paid-tool restriction, vetoes the paid offer even with saved routing opt-in.',
+    ),
+  );
   expect(route).toHaveBeenCalledWith(
     expect.objectContaining({
       subagentTask: task,
