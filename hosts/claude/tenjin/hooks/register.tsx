@@ -121,8 +121,13 @@ export const register: Register = (on) => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
           offer.offer_id,
         )
-      )
-        return { result: text ?? JSON.stringify(offer) };
+      ) {
+        const context = heldOfferContext(offer);
+        return {
+          result: heldAgentResult(input, text ?? JSON.stringify(offer), offer.offer_id),
+          ...(context ? { context } : {}),
+        };
+      }
     } catch {
       /* Native pass-through if the local transport is unavailable. */
     }
@@ -888,6 +893,54 @@ function parseJson(text: unknown): unknown {
   } catch {
     return undefined;
   }
+}
+
+function heldAgentResult(input: Json, offerText: string, offerId: string) {
+  return {
+    status: 'completed' as const,
+    agentId: `tenjin-offer-${offerId}`,
+    ...(typeof input.subagent_type === 'string' ? { agentType: input.subagent_type } : {}),
+    prompt: typeof input.prompt === 'string' ? input.prompt : '',
+    content: [{ type: 'text' as const, text: offerText }],
+    totalToolUseCount: 0,
+    totalDurationMs: 0,
+    totalTokens: 0,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: null,
+      cache_read_input_tokens: null,
+      server_tool_use: null,
+      service_tier: null,
+      cache_creation: null,
+    },
+    canContinueAgent: false,
+  };
+}
+
+function heldOfferContext(offer: Json): string[] | undefined {
+  const consent = asRecord(offer.consent);
+  if (
+    consent?.version !== 2 ||
+    typeof consent.repository !== 'string' ||
+    !consent.repository.trim() ||
+    typeof consent.routerOrigin !== 'string' ||
+    !/^https?:\/\/\S+$/.test(consent.routerOrigin) ||
+    !Array.isArray(consent.recipients) ||
+    consent.recipients.length !== 2 ||
+    consent.recipients[0] !== 'Tenjin' ||
+    consent.recipients[1] !== 'DeepSeek' ||
+    typeof offer.capAtomic !== 'string' ||
+    !/^[1-9][0-9]*$/.test(offer.capAtomic) ||
+    typeof offer.parentPolicy !== 'string' ||
+    !offer.parentPolicy.trim()
+  )
+    return undefined;
+  // This field is constructed by the local handoff, after its consent check.
+  // Never promote the router's reason or other model/provider text into context.
+  return [
+    "This local Tenjin hook held the Agent call; no worker started. Saved repository opt-in permits eligible Tenjin/DeepSeek handoffs within the offer's cap. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.",
+  ];
 }
 
 function asRecord(value: unknown): Json | undefined {
