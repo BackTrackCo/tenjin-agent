@@ -179,31 +179,12 @@ export function savedNativeSnapshot(raw: unknown): NativeCodexSnapshot | null {
     ? (raw as unknown as NativeCodexSnapshot)
     : null;
 }
-async function hostSnapshot(
-  request: CodexAppRequest,
-  options: Options,
-  owned: OwnedProvider,
-  threadId?: string,
-) {
-  const [raw, listed, requirements] = await Promise.all([
-    request('config/read', { cwd: options.cwd, includeLayers: true }),
-    request('hooks/list', threadId ? { threadId } : { cwds: [options.cwd] }),
-    request('configRequirements/read', {}),
-  ]);
-  if (
-    !isRecord(raw) ||
-    !isRecord(raw.config) ||
-    !Array.isArray(raw.layers) ||
-    !isRecord(requirements) ||
-    !isRecord(listed) ||
-    !Array.isArray(listed.data) ||
-    !listed.data.length
-  )
-    throw new Error('Native configuration unavailable');
-  assertOwnedProvider(raw.config, owned);
-  assertMcpEnvironment(raw.config);
-  const hooks: unknown[] = [];
-  for (const entry of listed.data) {
+
+function nativeHooks(raw: unknown): Record<string, unknown>[] {
+  if (!isRecord(raw) || !Array.isArray(raw.data) || !raw.data.length)
+    throw new Error('Native hooks unavailable');
+  const hooks: Record<string, unknown>[] = [];
+  for (const entry of raw.data) {
     if (
       !isRecord(entry) ||
       !Array.isArray(entry.hooks) ||
@@ -224,6 +205,47 @@ async function hostSnapshot(
       hooks.push(hook);
     }
   }
+  return hooks;
+}
+
+function assertLoadedHooks(listed: Record<string, unknown>[], loaded: unknown) {
+  // Pinned native discovery includes a plugin-content hash only in Listing
+  // mode. Keep that complete hash in every durable snapshot, and separately
+  // require the loaded thread's declaration and all other metadata to match.
+  const declarations = listed.map((hook) => {
+    const hash =
+      hook.source === 'plugin' && typeof hook.pluginId === 'string'
+        ? /^(sha256:[a-f0-9]{64})\/sha256:[a-f0-9]{64}$/.exec(String(hook.currentHash))
+        : null;
+    return hash ? { ...hook, currentHash: hash[1] } : hook;
+  });
+  if (!isDeepStrictEqual(declarations, nativeHooks(loaded)))
+    throw new Error('Native loaded hook authority changed');
+}
+
+async function hostSnapshot(
+  request: CodexAppRequest,
+  options: Options,
+  owned: OwnedProvider,
+  threadId?: string,
+) {
+  const [raw, listed, requirements, loadedHooks] = await Promise.all([
+    request('config/read', { cwd: options.cwd, includeLayers: true }),
+    request('hooks/list', { cwds: [options.cwd] }),
+    request('configRequirements/read', {}),
+    threadId ? request('hooks/list', { threadId }) : undefined,
+  ]);
+  if (
+    !isRecord(raw) ||
+    !isRecord(raw.config) ||
+    !Array.isArray(raw.layers) ||
+    !isRecord(requirements)
+  )
+    throw new Error('Native configuration unavailable');
+  assertOwnedProvider(raw.config, owned);
+  assertMcpEnvironment(raw.config);
+  const hooks = nativeHooks(listed);
+  if (threadId) assertLoadedHooks(hooks, loadedHooks);
   const rules = await policyRules(raw.layers);
   if (!rules) throw new Error('Native rule layers unavailable');
   const ruleHashes = [];

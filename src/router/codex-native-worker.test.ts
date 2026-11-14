@@ -53,6 +53,7 @@ let requests: Array<{ method: string; params: unknown }>,
   closed: boolean;
 let failure: unknown;
 let parentOverride: Record<string, unknown> | undefined;
+let loadedHooks: Record<string, unknown>[] | undefined;
 let parentEnvironments: unknown;
 let providerOverride: Record<string, unknown> | undefined;
 let effectiveOverride: Record<string, unknown> | undefined;
@@ -140,6 +141,7 @@ beforeEach(async () => {
   env = {};
   closed = false;
   parentOverride = undefined;
+  loadedHooks = undefined;
   parentEnvironments = null;
   startOverride = undefined;
   providerOverride = undefined;
@@ -253,7 +255,16 @@ beforeEach(async () => {
             };
           if (method === 'hooks/list')
             return {
-              data: [{ cwd: root, hooks: structuredClone(hooks), errors: [], warnings: [] }],
+              data: [
+                {
+                  cwd: root,
+                  hooks: structuredClone(
+                    (params as { threadId?: string }).threadId ? (loadedHooks ?? hooks) : hooks,
+                  ),
+                  errors: [],
+                  warnings: [],
+                },
+              ],
             };
           if (method === 'configRequirements/read') return { requirements: null };
           if (method === 'mcpServerStatus/list')
@@ -427,6 +438,52 @@ it.each([
   hooks = [{ ...base, ...change }];
   expect(await qualify()).toBeNull();
   expect(requests.some((r) => r.method === 'thread/start')).toBe(false);
+});
+const pluginDeclarationHash = `sha256:${'a'.repeat(64)}`;
+const pluginContentHash = `sha256:${'b'.repeat(64)}`;
+const pluginHook = () => ({
+  key: 'owned-plugin-guard',
+  handlerType: 'command',
+  command: 'guard',
+  eventName: 'preToolUse',
+  enabled: true,
+  source: 'plugin',
+  pluginId: 'fixture@marketplace',
+  trustStatus: 'trusted',
+  currentHash: `${pluginDeclarationHash}/${pluginContentHash}`,
+});
+it('qualifies unchanged native plugin hooks while retaining their complete content hash', async () => {
+  hooks = [pluginHook()];
+  loadedHooks = [{ ...hooks[0], currentHash: pluginDeclarationHash }];
+  expect(await qualify()).not.toBeNull();
+  expect(requests.filter((r) => r.method === 'hooks/list').map((r) => r.params)).toEqual([
+    { cwds: [root] },
+    { cwds: [root] },
+    { threadId: 'worker' },
+  ]);
+});
+it.each([
+  { currentHash: `sha256:${'c'.repeat(64)}` },
+  { pluginId: 'different@marketplace' },
+  { source: 'user' },
+  { command: 'different guard' },
+  { trustStatus: 'untrusted' },
+  { currentHash: `${pluginDeclarationHash}/${pluginContentHash}` },
+])('refuses loaded plugin-hook authority mismatches: %s', async (change) => {
+  hooks = [pluginHook()];
+  loadedHooks = [{ ...hooks[0], currentHash: pluginDeclarationHash, ...change }];
+  expect(await qualify()).toBeNull();
+  expect(responses).not.toHaveBeenCalled();
+});
+it('rejects plugin content drift even when the loaded declaration stays identical', async () => {
+  hooks = [pluginHook()];
+  loadedHooks = [{ ...hooks[0], currentHash: pluginDeclarationHash }];
+  const accepted = await job();
+  hooks[0]!.currentHash = `${pluginDeclarationHash}/sha256:${'c'.repeat(64)}`;
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /host changed after recommendation/,
+  );
+  expect(responses).not.toHaveBeenCalled();
 });
 it('refuses downgraded native reviewer and disabled plugins that remain active', async () => {
   startOverride = { approvalsReviewer: 'user' };
