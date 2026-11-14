@@ -16,7 +16,13 @@ export type HookKind = (typeof HOOK_KINDS)[number];
 export const HOOK_TOOL = 'hook';
 
 /** The event fields each leg reads, as Claude Code names them. */
-const COMMON = ['hook_event_name', 'session_id', 'transcript_path', 'cwd'] as const;
+const COMMON = [
+  'hook_event_name',
+  'session_id',
+  'transcript_path',
+  'cwd',
+  'permission_mode',
+] as const;
 const CALL = ['tool_name', 'tool_input', 'tool_use_id', 'agent_id', 'agent_type'] as const;
 
 const FIELDS: Record<HookKind, readonly string[]> = {

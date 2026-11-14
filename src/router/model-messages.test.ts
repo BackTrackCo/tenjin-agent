@@ -59,3 +59,39 @@ it('does not rewrite a tool JSON key named cache_control and refuses provider to
     }),
   ).toThrow();
 });
+it('preserves the native auto classifier stop sequence and non-thinking request', () => {
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'Review the tool call' }] }];
+  const result = workerMessages({
+    model: 'deepseek-flash',
+    messages,
+    max_tokens: 2112,
+    stop_sequences: ['</block>'],
+  });
+  expect(result).toMatchObject({
+    model: 'deepseek-flash',
+    messages,
+    max_tokens: 2112,
+    thinking: { type: 'disabled' },
+    stop_sequences: ['</block>'],
+  });
+  expect(result).not.toHaveProperty('tools');
+});
+it('keeps worker adaptive thinking enabled and rejects unknown thinking instead of changing it', () => {
+  expect(
+    workerMessages({ model: 'deepseek-flash', thinking: { type: 'adaptive', display: 'updates' } }),
+  ).toMatchObject({ thinking: { type: 'enabled' } });
+  expect(
+    workerMessages({ model: 'deepseek-flash', thinking: { type: 'enabled', budget_tokens: 1024 } }),
+  ).toMatchObject({ thinking: { type: 'enabled' } });
+  expect(() =>
+    workerMessages({ model: 'deepseek-flash', thinking: { type: 'unknown' } }),
+  ).toThrow();
+  expect(() =>
+    workerMessages({ model: 'deepseek-flash', stop_sequences: ['x'.repeat(257)] }),
+  ).toThrow();
+});
+it('preserves the native worker output allowance instead of silently halving it', () => {
+  expect(workerMessages({ model: 'deepseek-flash', max_tokens: 32000 }).max_tokens).toBe(32000);
+  expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 65537 })).toThrow();
+  expect(() => workerMessages({ model: 'deepseek-flash', max_tokens: 0 })).toThrow();
+});

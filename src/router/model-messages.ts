@@ -91,6 +91,17 @@ export function completedMessageSse(raw: unknown): string {
 /** Only protocol fields supported by our fixed proxy. No URLs, auth or billable server tools. */
 export function workerMessages(raw: Record<string, unknown>) {
   if (raw.model !== 'deepseek-flash') throw new Error('Worker attempted another model');
+  // Native worker turns request adaptive thinking; auto-mode classifier turns
+  // omit it. Preserve that distinction so a small review budget is not spent
+  // on hidden thinking instead of the native classifier's verdict.
+  const mode =
+    raw.thinking === undefined
+      ? 'disabled'
+      : z.object({ type: z.enum(['enabled', 'adaptive', 'disabled']) }).parse(raw.thinking).type;
+  const stopSequences =
+    raw.stop_sequences === undefined
+      ? undefined
+      : z.array(z.string().min(1).max(256)).max(16).parse(raw.stop_sequences);
   const clearBlocks = (value: unknown): unknown => {
     if (!Array.isArray(value)) return value;
     return value.map((b) => {
@@ -130,7 +141,12 @@ export function workerMessages(raw: Record<string, unknown>) {
           }));
   return {
     model: 'deepseek-flash',
-    max_tokens: Math.min(Number(raw.max_tokens) || 16384, 16384),
+    max_tokens:
+      raw.max_tokens === undefined
+        ? 16384
+        : z.number().int().min(1).max(65536).parse(raw.max_tokens),
+    thinking: { type: mode === 'adaptive' ? 'enabled' : mode },
+    ...(stopSequences ? { stop_sequences: stopSequences } : {}),
     messages,
     ...(raw.system !== undefined ? { system: clearBlocks(raw.system) } : {}),
     ...(tools ? { tools } : {}),

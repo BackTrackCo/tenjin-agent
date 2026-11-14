@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { payerDir } from './fee';
 
-export type ModelPaymentPath = '/api/model-router/route' | '/api/model-proxy/messages';
+export type ModelPaymentPath =
+  '/api/model-router/route' | '/api/model-proxy/messages' | '/api/model-proxy/responses';
 export type ModelChannelLane = 'model-routing' | 'model-inference';
 
 export function modelChannelLane(path: ModelPaymentPath): ModelChannelLane {

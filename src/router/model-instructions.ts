@@ -265,11 +265,12 @@ export async function resolveCodexInstructions(options: {
   home?: string;
   read: InstructionReader;
   signal?: AbortSignal;
+  nativeHarness?: boolean;
 }): Promise<InstructionContext> {
   const root = await realpath(options.cwd),
     env = options.env ?? process.env;
   const { config, layers } = options.nativeConfig;
-  assertDefaultCodexInstructions(config);
+  if (!options.nativeHarness) assertDefaultCodexInstructions(config);
   if (
     record(config.projects) &&
     Object.entries(config.projects).some(
@@ -288,7 +289,7 @@ export async function resolveCodexInstructions(options: {
     if (!record(layer) || !record(layer.name) || !record(layer.config))
       throw new Error('Native instruction config layer is unknown');
     if (layer.disabledReason != null) continue;
-    assertDefaultCodexInstructions(layer.config);
+    if (!options.nativeHarness) assertDefaultCodexInstructions(layer.config);
     if (layer.name.type !== 'project' && layer.config.project_root_markers !== undefined)
       markers = layer.config.project_root_markers;
     if (typeof layer.name.file === 'string') watchPaths.push(layer.name.file);

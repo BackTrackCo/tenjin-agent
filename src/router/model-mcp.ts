@@ -6,6 +6,7 @@ import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
 import parentPolicy from './model-parent-policy.json';
 import { ModelLifecycle } from './model-lifecycle';
+import { claudeWorkerPermissionMode } from './claude-model-policy';
 
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
@@ -62,6 +63,14 @@ export function registerModelTool(
     },
     async (args, extra) => {
       const session = options.session();
+      const ownedSessionId = session?.sessionId;
+      const ownedTurnId = session?.turnId;
+      const currentClaudeMode = () => {
+        const current = options.session();
+        return current?.sessionId === ownedSessionId && current?.turnId === ownedTurnId
+          ? current?.claudePermissionMode
+          : undefined;
+      };
       if (
         !session ||
         process.env.TENJIN_MODEL_WORKER === '1' ||
@@ -131,13 +140,29 @@ export function registerModelTool(
               reason: 'Inference consent revoked or endpoint changed',
             });
           const model = await getHandoff();
+          const pending = await model.store.pending(session.sessionId, session.turnId);
           if (
-            !(await qualifiedModelWorker(
-              session.cwd,
-              'general-purpose',
-              session.codexPolicy,
-              options.dataDir,
-            ))
+            options.harness === 'claude' &&
+            (!claudeWorkerPermissionMode(currentClaudeMode()) ||
+              pending?.decision.claudePermissionMode !== currentClaudeMode())
+          )
+            return answer({
+              action: 'native',
+              reason: 'Owned permission mode changed; retry native',
+            });
+          const qualified = await qualifiedModelWorker(
+            session.cwd,
+            'general-purpose',
+            session.codexPolicy,
+            options.dataDir,
+            undefined,
+            options.harness === 'claude' ? currentClaudeMode() : undefined,
+          );
+          if (
+            !qualified ||
+            (options.harness === 'codex' &&
+              JSON.stringify(qualified.nativeSnapshot) !==
+                JSON.stringify(pending?.decision.nativeSnapshot))
           )
             return answer({
               action: 'native',
@@ -155,6 +180,16 @@ export function registerModelTool(
               reason:
                 'Offer expired, changed, already selected or consent revoked; retry original native call unchanged',
             });
+          if (
+            options.harness === 'claude' &&
+            job.decision.claudePermissionMode !== currentClaudeMode()
+          ) {
+            await model.store.finish(job.id, 'cancelled');
+            return answer({
+              action: 'native',
+              reason: 'Owned permission mode changed; retry native',
+            });
+          }
           const abort = new AbortController();
           const stop = () => abort.abort();
           signal.addEventListener('abort', stop, { once: true });
@@ -168,6 +203,12 @@ export function registerModelTool(
                 transport,
                 signal: abort.signal,
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
+                ...(options.harness === 'claude'
+                  ? {
+                      claudePermissionMode: currentClaudeMode(),
+                      currentClaudePermissionMode: currentClaudeMode,
+                    }
+                  : {}),
                 permission: async (tool, input, signal) => {
                   if (!server.server.getClientCapabilities()?.elicitation || signal.aborted)
                     return false;
@@ -237,6 +278,7 @@ export function registerModelTool(
     shutdown,
     fence,
     async codexHook(session: ModelSession, raw: Record<string, unknown>) {
+      if (process.env.TENJIN_MODEL_WORKER === '1') return null;
       if (
         !['collaborationspawn_agent', 'spawn_agent', 'Agent'].includes(String(raw.tool_name)) ||
         typeof raw.tool_use_id !== 'string' ||

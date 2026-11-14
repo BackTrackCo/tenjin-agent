@@ -29,7 +29,7 @@ const budgetSchema = z.object({
 type Budget = z.infer<typeof budgetSchema>;
 
 /** A bounded read is required even on our own server: provider messages are untrusted. */
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response, limit = 2_100_000): Promise<unknown> {
   if (!response.body) throw new Error('Empty invocation receipt');
   const reader = response.body.getReader();
   let size = 0;
@@ -39,7 +39,7 @@ async function boundedJson(response: Response): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 2_100_000) throw new Error('Invocation receipt exceeds size limit');
+      if (size > limit) throw new Error('Invocation receipt exceeds size limit');
       chunks.push(value);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -49,7 +49,7 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
-function boundedResponse(response: Response): Response {
+function boundedResponse(response: Response, limit = 2_100_000): Response {
   if (!response.body) return response;
   let size = 0;
   return new Response(
@@ -57,7 +57,7 @@ function boundedResponse(response: Response): Response {
       new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) {
           size += chunk.byteLength;
-          if (size > 2_100_000) throw new Error('Model response exceeds size limit');
+          if (size > limit) throw new Error('Model response exceeds size limit');
           controller.enqueue(chunk);
         },
       }),
@@ -124,6 +124,27 @@ export class ModelTransport {
     return result.json;
   }
   async messages(job: ModelJob, messages: Record<string, unknown>, signal: AbortSignal) {
+    return this.invoke(job, messages, signal, 'messages');
+  }
+  async responses(
+    job: ModelJob,
+    responses: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const result = await this.invoke(job, responses, signal, 'responses');
+    if (typeof result.wire !== 'string') throw new Error('Responses wire is unavailable');
+    return result.wire;
+  }
+  private async invoke(
+    job: ModelJob,
+    messages: Record<string, unknown>,
+    signal: AbortSignal,
+    protocol: 'messages' | 'responses',
+  ) {
+    signal.throwIfAborted();
+    const endpoint =
+      protocol === 'responses' ? '/api/model-proxy/responses' : '/api/model-proxy/messages';
+    const resultLimit = protocol === 'responses' ? 64 * 1024 * 1024 : 2_100_000;
     const { dataDir, baseUrl, payerDeps } = this.options;
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
@@ -133,6 +154,7 @@ export class ModelTransport {
       if (!parsed.success && (await lstat(path).catch(() => null)))
         throw new Error('Unreadable model budget; refusing another authorization');
       const current = await modelSettings(dataDir, job.root);
+      signal.throwIfAborted();
       if (!current || current.routerOrigin !== new URL(baseUrl).origin)
         throw new Error('Model consent revoked or origin changed');
       const state: Budget = parsed.success
@@ -142,19 +164,27 @@ export class ModelTransport {
             calls: {},
           };
       const calls = state.calls;
-      const key = canonicalHash(messages);
+      const key =
+        protocol === 'responses'
+          ? canonicalHash({ protocol, responses: messages })
+          : canonicalHash(messages);
       const old = calls[key];
       const resultFile = join(dataDir, 'model-jobs', `${job.id}-${key}.result.json`);
       if (old?.completed) {
-        const kept = await readJsonFile(resultFile, 2_100_000);
+        const kept = await readJsonFile(resultFile, resultLimit);
         if (!kept) throw new Error('Completed result unavailable; inspect the receipt');
         return kept;
       }
       if (old) {
         // Recovery never creates a new voucher or calls the provider again.
-        const recovered = await this.recover(old.invocationId, signal);
+        const recovered = await this.recover(old.invocationId, signal, protocol);
         if (recovered?.state === 'completed' && recovered.voucherState === 'accepted') {
-          const value = this.receipt(recovered.result, old.invocationId, BigInt(old.quote));
+          const value = this.receipt(
+            recovered.result,
+            old.invocationId,
+            BigInt(old.quote),
+            protocol,
+          );
           if (recovered.actualAtomic !== value.actual)
             throw new Error('Conflicting invocation receipt; exposure remains reserved');
           state.charged = (
@@ -162,16 +192,34 @@ export class ModelTransport {
             BigInt(old.quote) +
             BigInt(value.actual)
           ).toString();
-          await writePrivate(resultFile, JSON.stringify(value.message));
+          await writePrivate(resultFile, JSON.stringify(value.result));
           calls[key] = { ...old, completed: true, actual: value.actual };
           await writePrivate(path, JSON.stringify(state));
-          return value.message;
+          return value.result;
         }
         throw new Error(`Uncertain invocation ${old.invocationId}; no new authorization sent`);
       }
       const scrub = (value: unknown, field = ''): unknown => {
+        if (protocol === 'responses' && ['parameters', 'input_schema', 'format'].includes(field))
+          return value;
         if (typeof value === 'string')
-          return ['signature', 'id', 'tool_use_id', 'name', 'type', 'model', 'role'].includes(field)
+          return (protocol === 'responses'
+            ? [
+                'signature',
+                'encrypted_content',
+                'id',
+                'call_id',
+                'tool_call_id',
+                'item_id',
+                'tool_use_id',
+                'name',
+                'namespace',
+                'type',
+                'model',
+                'role',
+              ]
+            : ['signature', 'id', 'tool_use_id', 'name', 'type', 'model', 'role']
+          ).includes(field)
             ? value
             : mask(value);
         if (Array.isArray(value)) return value.map((v) => scrub(v, field));
@@ -184,9 +232,11 @@ export class ModelTransport {
         consent: true,
         jobId: job.decision.jobId,
         invocationId: randomUUID(),
-        messages: scrub(messages),
+        ...(protocol === 'responses'
+          ? { protocol, responses: scrub(messages) }
+          : { messages: scrub(messages) }),
       };
-      const url = new URL('/api/model-proxy/messages', baseUrl).toString();
+      const url = new URL(endpoint, baseUrl).toString();
       const fetchFn = payerDeps.fetchImpl ?? fetch;
       const challenge = await fetchFn(url, {
         method: 'POST',
@@ -223,6 +273,7 @@ export class ModelTransport {
       await writePrivate(path, JSON.stringify(state));
       let first = true;
       const cachedFetch: typeof fetch = async (input, init) => {
+        signal.throwIfAborted();
         if (first) {
           first = false;
           return challenge;
@@ -232,11 +283,12 @@ export class ModelTransport {
             ...init,
             signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
           }),
+          resultLimit,
         );
       };
       const payer = new Payer({
         ...payerDeps,
-        modelLane: { path: '/api/model-proxy/messages', ceilingAtomic: quote, origin: this.origin },
+        modelLane: { path: endpoint, ceilingAtomic: quote, origin: this.origin },
         fetchImpl: cachedFetch,
       });
       let result;
@@ -256,19 +308,26 @@ export class ModelTransport {
       }
       if (!result.ok || result.status !== 200)
         throw new Error('Model call uncertain; inspect invocation receipt before retrying');
-      const value = this.receipt(result.json, body.invocationId, quote);
+      const value = this.receipt(result.json, body.invocationId, quote, protocol);
       state.charged = (BigInt(String(state.charged)) - quote + BigInt(value.actual)).toString();
-      await writePrivate(resultFile, JSON.stringify(value.message));
+      await writePrivate(resultFile, JSON.stringify(value.result));
       calls[key] = { ...calls[key]!, completed: true, actual: value.actual };
       await writePrivate(path, JSON.stringify(state));
-      return value.message;
+      return value.result;
     });
   }
 
-  private receipt(raw: unknown, invocationId: string, quote: bigint) {
+  private receipt(
+    raw: unknown,
+    invocationId: string,
+    quote: bigint,
+    protocol: 'messages' | 'responses',
+  ) {
     const value = z
       .object({
-        message: z.record(z.string(), z.unknown()),
+        ...(protocol === 'responses'
+          ? { wire: z.string().refine((wire) => Buffer.byteLength(wire) <= 32 * 1024 * 1024) }
+          : { message: z.record(z.string(), z.unknown()) }),
         receipt: z.object({
           invocationId: z.literal(invocationId),
           quoteAtomic: z.literal(quote.toString()),
@@ -278,15 +337,22 @@ export class ModelTransport {
       .safeParse(raw);
     if (!value.success || BigInt(value.data.receipt.actualAtomic) > quote)
       throw new Error('Invalid model receipt; exposure remains reserved');
-    return { message: value.data.message, actual: value.data.receipt.actualAtomic };
+    return {
+      result: 'wire' in value.data ? { wire: value.data.wire } : value.data.message,
+      actual: value.data.receipt.actualAtomic,
+    };
   }
 
-  private async recover(invocationId: string, signal: AbortSignal) {
+  private async recover(
+    invocationId: string,
+    signal: AbortSignal,
+    protocol: 'messages' | 'responses',
+  ) {
     const { payerDeps, baseUrl } = this.options;
     const signer = await payerDeps.getSigner();
     const auth = await buildSiwxHeader(signer, { baseUrl, chainId: SIWX_CHAIN_ID, ttlMs: 300_000 });
     const response = await (payerDeps.fetchImpl ?? fetch)(
-      new URL(`/api/model-proxy/messages/${invocationId}`, baseUrl),
+      new URL(`/api/model-proxy/${protocol}/${invocationId}`, baseUrl),
       {
         headers: { [SIWX_HEADER]: auth },
         redirect: 'error',
@@ -297,7 +363,10 @@ export class ModelTransport {
       await response.body?.cancel();
       return null;
     }
-    const value = await boundedJson(response);
+    const value = await boundedJson(
+      response,
+      protocol === 'responses' ? 64 * 1024 * 1024 : 2_100_000,
+    );
     const parsed = z
       .object({
         invocationId: z.literal(invocationId),

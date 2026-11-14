@@ -14,7 +14,14 @@ afterEach(async () => {
   for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function fixture(options: { drop?: boolean; cap?: string } = {}) {
+async function fixture(
+  options: {
+    drop?: boolean;
+    cap?: string;
+    protocol?: 'messages' | 'responses';
+    wire?: string;
+  } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'model-transport-'));
   made.push(dir);
   const repo = join(dir, 'repo');
@@ -48,7 +55,7 @@ async function fixture(options: { drop?: boolean; cap?: string } = {}) {
     expiresAt: Date.now() + 60_000,
   };
   const router = new FakeRouter({
-    path: '/api/model-proxy/messages',
+    path: `/api/model-proxy/${options.protocol ?? 'messages'}`,
     amount: '500000',
     charge: '1000',
     minDeposit: '50000',
@@ -84,7 +91,9 @@ async function fixture(options: { drop?: boolean; cap?: string } = {}) {
     }
     last = (await request.clone().json()) as Record<string, unknown>;
     result = {
-      message,
+      ...(options.protocol === 'responses'
+        ? { wire: options.wire ?? 'event: response.completed\ndata: {"owned":"native wire"}\n\n' }
+        : { message }),
       receipt: { invocationId: last.invocationId, quoteAtomic: '500000', actualAtomic: '1000' },
     };
     router.body = result;
@@ -107,6 +116,7 @@ async function fixture(options: { drop?: boolean; cap?: string } = {}) {
     router,
     make,
     message,
+    last: () => last,
     gets: () => gets,
     signedGets: () => signedGets,
     setVoucher: (value: string) => {
@@ -209,4 +219,104 @@ it('does not transmit a routing authorization after cancellation while the signe
   await rejected;
   expect(router.paidRequests()).toBe(0);
   expect(router.settledFees).toBe(0);
+});
+
+it('keeps native Responses opaque fields intact and budgets worker plus Guardian in the same job', async () => {
+  const wire = 'event: response.completed\ndata: {"response":{"opaque":"unchanged"}}\n\n';
+  const f = await fixture({ protocol: 'responses', wire });
+  const transport = f.make();
+  const worker = {
+    model: 'deepseek-flash',
+    reasoning: { effort: 'high' },
+    stream: true,
+    input: [{ type: 'reasoning', encrypted_content: 'OPAQUE-native-signature-1234567890' }],
+    tools: [{ type: 'namespace', name: 'fixture', tools: [{ type: 'function', name: 'read' }] }],
+  };
+  expect(await transport.responses(f.job, worker, new AbortController().signal)).toBe(wire);
+  expect(f.last()).toMatchObject({
+    protocol: 'responses',
+    responses: worker,
+    jobId: f.job.decision.jobId,
+  });
+  expect(await f.make().responses(f.job, worker, new AbortController().signal)).toBe(wire);
+  await transport.responses(
+    f.job,
+    { ...worker, reasoning: { effort: 'low' } },
+    new AbortController().signal,
+  );
+  expect(f.router.paidRequests()).toBe(2);
+  expect(f.router.channels.size).toBe(1);
+  expect(await transport.summary(f.job)).toEqual({
+    actualAtomic: '5000',
+    reservedAtomic: '5000',
+    uncertain: [],
+  });
+});
+
+it('recovers the exact Responses wire through owner lookup without buying a replacement request', async () => {
+  const wire = 'event: response.completed\ndata: {"opaque":"native-result"}\n\n';
+  const f = await fixture({ protocol: 'responses', wire, drop: true });
+  const input = { model: 'deepseek-flash', reasoning: { effort: 'high' }, input: 'Once' };
+  await expect(f.make().responses(f.job, input, new AbortController().signal)).rejects.toThrow(
+    /uncertain/,
+  );
+  expect(await f.make().responses(f.job, input, new AbortController().signal)).toBe(wire);
+  expect(f.router.paidRequests()).toBe(1);
+  expect(f.gets()).toBe(1);
+  expect(f.signedGets()).toBe(1);
+  expect(await f.make().summary(f.job)).toEqual({
+    actualAtomic: '4000',
+    reservedAtomic: '4000',
+    uncertain: [],
+  });
+});
+
+it('accepts bounded native Responses receipts beyond the old Messages response size', async () => {
+  const wire = 'event: response.completed\ndata: ' + 'x'.repeat(2_200_000) + '\n\n';
+  const f = await fixture({ protocol: 'responses', wire });
+  expect(
+    await f
+      .make()
+      .responses(
+        f.job,
+        { model: 'deepseek-flash', input: 'Long native stream' },
+        new AbortController().signal,
+      ),
+  ).toBe(wire);
+  expect(f.router.paidRequests()).toBe(1);
+});
+
+it('masks known secrets in native instructions/text/tool outputs while preserving opaque pairings and schemas', async () => {
+  const f = await fixture({ protocol: 'responses' });
+  const secret = 'sk-proj-abc123DEF456ghi789JKL012_mno';
+  const native = {
+    model: 'deepseek-flash',
+    instructions: `base ${secret}`,
+    input: [
+      { role: 'developer', content: [{ type: 'input_text', text: `context ${secret}` }] },
+      { type: 'function_call', id: secret, call_id: secret, name: 'read', arguments: '{}' },
+      { type: 'function_call_output', call_id: secret, output: `tool ${secret}` },
+      { type: 'reasoning', encrypted_content: secret, signature: secret },
+    ],
+    tools: [
+      {
+        type: 'function',
+        name: 'read',
+        parameters: {
+          type: 'object',
+          properties: { id: { type: 'string', pattern: '^sk-proj-abc123$' } },
+        },
+      },
+    ],
+  };
+  await f.make().responses(f.job, native, new AbortController().signal);
+  const sent = f.last()!.responses as typeof native;
+  expect(sent.instructions).not.toContain(secret);
+  expect((sent.input[0]!.content![0] as { text: string }).text).not.toContain(secret);
+  expect(sent.input[2]!.output).not.toContain(secret);
+  expect(sent.input[1]!.id).toBe(secret);
+  expect(sent.input[2]!.call_id).toBe(secret);
+  expect(sent.input[3]!.encrypted_content).toBe(secret);
+  expect(sent.input[3]!.signature).toBe(secret);
+  expect(sent.tools).toEqual(native.tools);
 });

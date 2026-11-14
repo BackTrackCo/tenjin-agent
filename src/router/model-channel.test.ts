@@ -64,10 +64,10 @@ it('funds independent SDK channels for tools, model routing and inference at eac
     });
     const inference = new RoutingPayer({
       ...deps,
-      modelLane: { path: '/api/model-proxy/messages', origin, ceilingAtomic: 3000n },
+      modelLane: { path: '/api/model-proxy/responses', origin, ceilingAtomic: 3000n },
     });
     payers.push(inference);
-    await inference.routeFor(origin).send(`${origin}/api/model-proxy/messages`, {
+    await inference.routeFor(origin).send(`${origin}/api/model-proxy/responses`, {
       method: 'POST',
       jsonBody: {},
       timeoutMs: 5000,
@@ -96,6 +96,7 @@ it('keeps model-routing fees at $0.003 and ordinary deposit liquidity while bind
   for (const path of [
     '/api/model-router/route',
     '/api/model-proxy/messages',
+    '/api/model-proxy/responses',
   ] as ModelPaymentPath[]) {
     const payer = new RoutingPayer({
       ...deps,

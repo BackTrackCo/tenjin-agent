@@ -22,6 +22,7 @@ import { ROUTING_FEE_CEILING_ATOMIC, usd, type RouteFor } from './fee';
 import { runHookKind } from './hook-command';
 import { markSessionServed, sessionServedByPlugin } from './alive';
 import { admitCodexHookEvent, admitHookEvent } from './hook-session';
+import { observeClaudeWorkerMode } from './claude-model-policy';
 import {
   CODEX_HOOK_KINDS,
   CODEX_HOOK_TOOL_FIELDS,
@@ -293,7 +294,9 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // the hooks gate on and the observer records. The request tool's provider is
   // not unlocked a second time beside it: both share the wallet layer's signer
   // cache, so the payer's unlock serves a paid lookup too.
-  if (opts.payer !== undefined) {
+  if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1') {
+    // Native worker qualification lists tools without unlocking or funding the wallet.
+  } else if (opts.payer !== undefined) {
     void opts.payer.prewarm();
   } else if (opts.handlerDeps?.provider === undefined) {
     void provider.getSigner().catch(() => undefined);
@@ -352,6 +355,10 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         transcript: raw['transcript_path'],
         harness: 'claude',
       };
+    }
+    if (modelSession?.harness === 'claude' && opts.harness !== 'codex') {
+      const observed = observeClaudeWorkerMode(raw, modelSession);
+      if (observed) modelSession.claudePermissionMode = observed.mode;
     }
     for (const old of sessions.keys()) {
       if (sessions.size <= MAX_SESSIONS) break;
@@ -686,7 +693,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
         // THE HOST'S OWN PATH, admitted again when the swap reads it: on a
         // session's first prompt the transcript is not written yet, and the
         // admitted event leaves it out, which would hand back its first search.
-        rememberSession(raw);
+        rememberSession({ ...raw, ...event });
         response = await runHookKind(args.kind, event, {
           ...hookDepsOf(ctx, opts),
           ...(opts.observer !== undefined
@@ -889,7 +896,7 @@ async function createRouterMcp(
     rest.payer ??
     (await routingPayer(ctx, observer, { harness: rest.harness ?? 'claude', ...payerDeps }));
   const server = buildRouterMcpServer({ ...rest, payer, observer });
-  if (atStart === true) void topUpAtStart(ctx, payer, rest.handlerDeps?.cwd ?? process.cwd());
+  if (atStart === true) void topUpAtStart(ctx, payer, rest.handlerDeps?.cwd ?? process.cwd(), env);
   return { server, payer };
 }
 
@@ -900,7 +907,13 @@ async function createRouterMcp(
  * the first prompt finds it ready rather than meeting the deposit. Where it is
  * off nothing is sent, and no money is set aside for routing nobody uses.
  */
-async function topUpAtStart(ctx: CommandContext, payer: RoutingPayer, cwd: string): Promise<void> {
+async function topUpAtStart(
+  ctx: CommandContext,
+  payer: RoutingPayer,
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  if (env.TENJIN_MODEL_WORKER === '1') return;
   try {
     const { enabled } = await routerSettings({ cwd, dataDir: ctx.dataDir });
     if (!enabled.value) return;

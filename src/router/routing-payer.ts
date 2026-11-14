@@ -824,7 +824,8 @@ export class RoutingPayer {
         if (
           quoted !== null &&
           quoted >
-            (this.deps.modelLane?.path === '/api/model-proxy/messages'
+            (this.deps.modelLane?.path === '/api/model-proxy/messages' ||
+            this.deps.modelLane?.path === '/api/model-proxy/responses'
               ? this.deps.modelLane.ceilingAtomic
               : ROUTING_FEE_CEILING_ATOMIC)
         ) {
@@ -1200,7 +1201,8 @@ export class RoutingPayer {
     const policy = await this.deps.policy();
     const needed = BigInt(ctx.minimumDepositAmount);
     const laneMax =
-      this.deps.modelLane?.path === '/api/model-proxy/messages'
+      this.deps.modelLane?.path === '/api/model-proxy/messages' ||
+      this.deps.modelLane?.path === '/api/model-proxy/responses'
         ? policy.maxAutoSpendAtomic
         : MAX_CHANNEL_DEPOSIT_ATOMIC;
     const sdkMax = ctx.maxDeposit === undefined ? laneMax : BigInt(ctx.maxDeposit);
@@ -1473,7 +1475,8 @@ export class RoutingPayer {
     const client = new x402Client()
       .register('eip155:*', scheme)
       .registerPolicy(
-        this.deps.modelLane?.path === '/api/model-proxy/messages'
+        this.deps.modelLane?.path === '/api/model-proxy/messages' ||
+          this.deps.modelLane?.path === '/api/model-proxy/responses'
           ? (version, requirements) =>
               routingOffers(version, requirements).filter(
                 (r) => BigInt(r.amount) <= this.deps.modelLane!.ceilingAtomic,
@@ -1482,7 +1485,10 @@ export class RoutingPayer {
       )
       .setSpendControls({
         maxAmountPerPayment:
-          this.deps.modelLane?.path === '/api/model-proxy/messages' ? '$1' : ROUTING_SPEND_CAP,
+          this.deps.modelLane?.path === '/api/model-proxy/messages' ||
+          this.deps.modelLane?.path === '/api/model-proxy/responses'
+            ? '$1'
+            : ROUTING_SPEND_CAP,
       });
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;

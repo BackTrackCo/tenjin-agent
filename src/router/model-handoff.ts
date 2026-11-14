@@ -8,6 +8,7 @@ import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
 import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
+import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -32,6 +33,7 @@ export interface ModelSession {
   transcript: string;
   harness?: 'claude' | 'codex';
   codexPolicy?: CodexModelPolicy;
+  claudePermissionMode?: ClaudeWorkerPermissionMode;
 }
 
 const codexOptions = (native: Record<string, unknown>) =>
@@ -56,6 +58,7 @@ export class ModelHandoff {
     signal?: AbortSignal,
   ) {
     signal?.throwIfAborted();
+    if (process.env.TENJIN_MODEL_WORKER === '1') return null;
     const old = await this.store.pending(session.sessionId, session.turnId);
     if (old) {
       // A completed foreground worker is quiescent. Do not hold later native
@@ -97,6 +100,7 @@ export class ModelHandoff {
         decision: {
           routerOrigin: this.options.transport.origin,
           instructionContext: worker.instructionContext,
+          ...(worker.nativeSnapshot ? { nativeSnapshot: worker.nativeSnapshot } : {}),
         },
         capAtomic: settings.maxJobAtomic.toString(),
       },
@@ -131,6 +135,7 @@ export class ModelHandoff {
     const pending = await this.store.pending(session.sessionId, session.turnId);
     if (
       !worker?.instructionContext ||
+      JSON.stringify(worker.nativeSnapshot) !== JSON.stringify(pending?.decision.nativeSnapshot) ||
       worker.instructionContext.fingerprint !==
         savedInstructionContext(pending?.decision.instructionContext)?.fingerprint
     )
@@ -155,7 +160,8 @@ export class ModelHandoff {
     if (
       !settings ||
       settings.routerOrigin !== transport.origin ||
-      process.env.TENJIN_MODEL_WORKER === '1'
+      process.env.TENJIN_MODEL_WORKER === '1' ||
+      !claudeWorkerPermissionMode(session.claudePermissionMode)
     )
       return { action: 'native' };
     signal?.throwIfAborted();
@@ -167,8 +173,10 @@ export class ModelHandoff {
       undefined,
       dataDir,
       signal,
+      session.claudePermissionMode,
     );
-    if (!worker) return { action: 'native' };
+    if (!worker || !claudeWorkerPermissionMode(session.claudePermissionMode))
+      return { action: 'native' };
     const task = native.prompt;
     if (
       typeof task !== 'string' ||
@@ -192,7 +200,10 @@ export class ModelHandoff {
         root: settings.root,
         task,
         native,
-        decision: { routerOrigin: transport.origin },
+        decision: {
+          routerOrigin: transport.origin,
+          claudePermissionMode: session.claudePermissionMode,
+        },
         capAtomic: settings.maxJobAtomic.toString(),
       },
       'routing',
@@ -266,6 +277,10 @@ export class ModelHandoff {
       ...parsed.data,
       routerOrigin: transport.origin,
       ...(instructions ? { instructionContext: instructions } : {}),
+      ...(job.decision.nativeSnapshot ? { nativeSnapshot: job.decision.nativeSnapshot } : {}),
+      ...(session.harness !== 'codex'
+        ? { claudePermissionMode: job.decision.claudePermissionMode }
+        : {}),
     });
     return {
       action: 'offer',

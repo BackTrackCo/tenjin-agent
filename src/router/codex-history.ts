@@ -22,23 +22,7 @@ export function parseCodexHistory(raw: string, session: string): PacketMessage[]
     if (!record(row) || !record(row.payload)) continue;
     const p = row.payload;
     if (row.type === 'session_meta') {
-      if (
-        owned ||
-        p.id !== session ||
-        p.session_id !== session ||
-        !(
-          p.thread_source === 'user' ||
-          (isQualifiedCodexModelVersion(p.cli_version) &&
-            p.source === 'vscode' &&
-            (p.thread_source == null ||
-              // Fresh Desktop-v2 roots repeat the source in thread_source.
-              // Only this observed build/shape is qualified; child ownership
-              // and exact session/item binding remain independent checks.
-              (p.cli_version === '0.167.0-alpha.4.1' && p.thread_source === 'vscode')))
-        ) ||
-        p.parent_thread_id != null
-      )
-        return null;
+      if (owned || !ownedCodexSessionMeta(p, session)) return null;
       owned = true;
       continue;
     }
@@ -69,4 +53,18 @@ export function parseCodexHistory(raw: string, session: string): PacketMessage[]
     if (text.trim()) messages.push({ role: user ? 'user' : 'assistant', text });
   }
   return owned && messages.some((m) => m.role === 'user') ? messages : null;
+}
+
+/** Shared transcript ownership check, independent from history-size/context admission. */
+export function ownedCodexSessionMeta(p: Record<string, unknown>, session: string): boolean {
+  return (
+    p.id === session &&
+    p.session_id === session &&
+    p.parent_thread_id == null &&
+    (p.thread_source === 'user' ||
+      (isQualifiedCodexModelVersion(p.cli_version) &&
+        p.source === 'vscode' &&
+        (p.thread_source == null ||
+          (p.cli_version === '0.167.0-alpha.4.1' && p.thread_source === 'vscode'))))
+  );
 }

@@ -17,6 +17,8 @@ export interface CodexInstructionReadOptions {
   home?: string;
   env?: NodeJS.ProcessEnv;
   protectedPaths?: string[];
+  /** Native worker: keep captured grants and add credential glob shields. */
+  worker?: boolean;
 }
 export interface CodexInstructionFile {
   path: string;
@@ -115,7 +117,7 @@ export function codexInstructionProfile(
     for (const key of entries.keys()) if (inside(path, key)) entries.delete(key);
     entries.set(path, 'deny');
   }
-  const filesystem = `{ ${[...entries].map(([p, a]) => `${JSON.stringify(p)} = ${JSON.stringify(a)}`).join(', ')} }`;
+  const filesystem = `{ ${[...entries].map(([p, a]) => `${JSON.stringify(p)} = ${JSON.stringify(a)}`).join(', ')}${options.worker ? ', ":workspace_roots" = { "**/.env*" = "deny", "**/*.pem" = "deny", "**/*.p12" = "deny" }, glob_scan_max_depth = 6' : ''} }`;
   if (Buffer.byteLength(filesystem) > 64_000) return null;
   const name = `tenjin-instructions-${canonicalHash(filesystem).slice(0, 16)}`;
   return {
