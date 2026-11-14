@@ -16,6 +16,7 @@ import type { ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
+import { ModelWorkerStopped } from './model-worker-control';
 
 let dir: string;
 beforeEach(() => vi.clearAllMocks());
@@ -238,6 +239,97 @@ it('cancels and drains an accepted Codex worker on the trusted lifecycle bridge;
     ]);
     await model.fence(session);
     expect(JSON.stringify(await running)).toContain('cancelled');
+    const retry = await client.callTool({
+      name: 'subagent',
+      arguments: { offer_id: job.id },
+      _meta: { threadId: 'root' },
+    });
+    expect(JSON.stringify(retry)).toContain('native');
+    expect(worker.run).toHaveBeenCalledTimes(1);
+  } finally {
+    await model.shutdown();
+    await client.close();
+    await server.close();
+  }
+});
+
+it('reports a harness stop while retaining uncertain spend and refusing repeated acceptance', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'model-harness-stop-')));
+  const repo = join(dir, 'repo');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: {
+          version: 2,
+          instructions: 'applicable',
+          recipients: ['Tenjin', 'DeepSeek'],
+          repositories: [repo],
+          maxJobAtomic: '1000000',
+          routerOrigin: 'http://localhost:3939',
+        },
+      },
+    }),
+  );
+  const session: ModelSession = {
+    sessionId: 'root',
+    turnId: 'turn',
+    cwd: repo,
+    transcript: 'unused',
+    harness: 'codex',
+    codexPolicy: { approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: {} },
+  };
+  const store = new ModelJobStore(dir);
+  const job = await store.offer({
+    sessionId: 'root',
+    turnId: 'turn',
+    callId: 'call',
+    root: repo,
+    task: 'Read fixture',
+    native: {},
+    capAtomic: '1000000',
+    decision: { routerOrigin: 'http://localhost:3939' },
+  });
+  const spend = { actualAtomic: '3000', reservedAtomic: '3000', uncertain: ['owned-invocation'] };
+  worker.run.mockRejectedValue(
+    new ModelWorkerStopped({
+      kind: 'harness_limit',
+      reason: 'turn_guard',
+      turns: 500,
+    }),
+  );
+  const server = new McpServer({ name: 'test', version: '1' });
+  const model = registerModelTool(server, {
+    dataDir: dir,
+    harness: 'codex',
+    session: () => session,
+    transport: async () =>
+      ({
+        origin: 'http://localhost:3939',
+        summary: async () => spend,
+      }) as unknown as ModelTransport,
+  });
+  const client = new Client({ name: 'test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  await client.connect(b);
+  try {
+    const accepted = await client.callTool({
+      name: 'subagent',
+      arguments: { offer_id: job.id },
+      _meta: { threadId: 'root' },
+    });
+    const content = (accepted.content as Array<{ text: string }>)[0]!.text;
+    const result = JSON.parse(content);
+    expect(result).toMatchObject({
+      status: 'unknown',
+      spend,
+      stopReason: { kind: 'harness_limit', reason: 'turn_guard', turns: 500 },
+      nextStep: expect.stringContaining('do not rebuy an uncertain turn'),
+    });
+    expect((await store.pending('root', 'turn'))?.state).toBe('unknown');
     const retry = await client.callTool({
       name: 'subagent',
       arguments: { offer_id: job.id },

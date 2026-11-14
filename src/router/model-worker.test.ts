@@ -1,10 +1,11 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { qualifyNativeCodexWorker, runNativeCodexWorker } from './codex-native-worker';
 import { query } from '@anthropic-ai/claude-agent-sdk/core';
 import { readClaudeCode } from './claude-cli';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
+import { workerStop } from './model-worker-control';
 vi.mock('./codex-native-worker', () => ({
   qualifyNativeCodexWorker: vi.fn(),
   runNativeCodexWorker: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
 vi.mock('./claude-cli', () => ({ readClaudeCode: vi.fn(), meetsFloor: vi.fn() }));
 const policy = { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandbox: {} };
 beforeEach(() => vi.clearAllMocks());
+afterEach(() => vi.useRealTimers());
 it('qualifies genuine Codex independently of Claude installation or permission settings', async () => {
   vi.mocked(qualifyNativeCodexWorker).mockResolvedValue({
     path: '/native/codex',
@@ -50,7 +52,10 @@ it('executes an accepted Codex job only through the genuine native runner', asyn
     permission: vi.fn(),
   };
   expect(await runModelWorker(job, options)).toBe('native completed result');
-  expect(runNativeCodexWorker).toHaveBeenCalledWith(job, options);
+  expect(runNativeCodexWorker).toHaveBeenCalledWith(
+    job,
+    expect.objectContaining({ ...options, signal: expect.any(AbortSignal) }),
+  );
   expect(query).not.toHaveBeenCalled();
   expect(readClaudeCode).not.toHaveBeenCalled();
 });
@@ -68,4 +73,30 @@ it('does not start a native or SDK worker after cancellation', async () => {
   ).rejects.toThrow();
   expect(runNativeCodexWorker).not.toHaveBeenCalled();
   expect(query).not.toHaveBeenCalled();
+});
+
+it('applies the shared wall guard to an accepted native Codex worker', async () => {
+  vi.useFakeTimers();
+  let nativeSignal: AbortSignal | undefined;
+  vi.mocked(runNativeCodexWorker).mockImplementation(async (_job, options) => {
+    nativeSignal = options.signal;
+    await new Promise<void>((resolve) =>
+      options.signal.addEventListener('abort', () => resolve(), { once: true }),
+    );
+    throw options.signal.reason;
+  });
+  const run = runModelWorker({ id: 'owned', root: '/repo' } as ModelJob, {
+    dataDir: '/data',
+    transport: {} as ModelTransport,
+    signal: new AbortController().signal,
+    codexPolicy: policy,
+    permission: vi.fn(),
+  });
+  const outcome = run.catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(39 * 60 * 1000);
+  expect(nativeSignal?.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(60 * 1000);
+  expect(workerStop(await outcome)).toEqual({ kind: 'harness_limit', reason: 'wall_time' });
+  expect(nativeSignal?.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
 });

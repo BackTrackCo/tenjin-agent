@@ -6,6 +6,7 @@ import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
+import { workerStop } from './model-worker-control';
 
 const workerShutdown = new WeakMap<McpServer, () => Promise<void>>();
 export async function stopModelWorkers(server: McpServer) {
@@ -243,10 +244,11 @@ export function registerModelTool(
                 spend: await transport.summary(job).catch(() => ({ accounting: 'unknown' })),
                 result,
               });
-            } catch {
+            } catch (error) {
               await model.store.finish(job.id, abort.signal.aborted ? 'cancelled' : 'unknown');
               return answer({
                 status: abort.signal.aborted ? 'cancelled' : 'unknown',
+                stopReason: workerStop(error),
                 elapsedMs: Date.now() - started,
                 spend: await transport.summary(job).catch(() => ({ accounting: 'unknown' })),
                 nextStep:

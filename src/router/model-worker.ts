@@ -30,6 +30,12 @@ import {
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
 import type { InstructionContext } from './model-instructions';
+import {
+  withWorkerDeadline,
+  WorkerRepeatReminder,
+  workerResultError,
+  WORKER_EMERGENCY_TURNS,
+} from './model-worker-control';
 
 type QualifiedWorker = {
   path: string;
@@ -91,25 +97,34 @@ export async function runModelWorker(
     ) => Promise<boolean>;
   },
 ) {
-  options.signal.throwIfAborted();
-  if (options.codexPolicy)
-    return runNativeCodexWorker(job, { ...options, codexPolicy: options.codexPolicy });
-  assertClaudeWorkerMode(job.decision.claudePermissionMode, options.claudePermissionMode);
-  if (!options.currentClaudePermissionMode)
-    throw new Error('Owned Claude mode observer is unavailable');
-  assertClaudeWorkerMode(job.decision.claudePermissionMode, options.currentClaudePermissionMode());
-  const binary = await qualifiedModelWorker(
-    job.root,
-    String(job.native.subagent_type ?? 'general-purpose'),
-    undefined,
-    options.dataDir,
-    options.signal,
-    options.claudePermissionMode,
-  );
-  options.signal.throwIfAborted();
-  assertClaudeWorkerMode(job.decision.claudePermissionMode, options.currentClaudePermissionMode());
-  if (!binary) throw new Error('Claude Code worker is unavailable; keep native');
-  return runQualifiedWorker(job, options, binary);
+  return withWorkerDeadline(options.signal, async (signal) => {
+    const current = { ...options, signal };
+    signal.throwIfAborted();
+    if (current.codexPolicy)
+      return runNativeCodexWorker(job, { ...current, codexPolicy: current.codexPolicy });
+    assertClaudeWorkerMode(job.decision.claudePermissionMode, current.claudePermissionMode);
+    if (!current.currentClaudePermissionMode)
+      throw new Error('Owned Claude mode observer is unavailable');
+    assertClaudeWorkerMode(
+      job.decision.claudePermissionMode,
+      current.currentClaudePermissionMode(),
+    );
+    const binary = await qualifiedModelWorker(
+      job.root,
+      String(job.native.subagent_type ?? 'general-purpose'),
+      undefined,
+      current.dataDir,
+      signal,
+      current.claudePermissionMode,
+    );
+    signal.throwIfAborted();
+    assertClaudeWorkerMode(
+      job.decision.claudePermissionMode,
+      current.currentClaudePermissionMode(),
+    );
+    if (!binary) throw new Error('Claude Code worker is unavailable; keep native');
+    return runQualifiedWorker(job, current, binary);
+  });
 }
 
 async function runQualifiedWorker(
@@ -126,7 +141,7 @@ async function runQualifiedWorker(
     assertClaudeWorkerMode(permissionMode, options.currentClaudePermissionMode?.());
   assertCurrentMode();
   const controller = new AbortController();
-  const cancel = () => controller.abort();
+  const cancel = () => controller.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
   const token = randomBytes(32).toString('hex');
@@ -211,6 +226,7 @@ async function runQualifiedWorker(
     );
   });
   let result: string | undefined;
+  const repeats = new WorkerRepeatReminder();
   try {
     await new Promise<void>((resolve, reject) => {
       bridge.once('error', reject);
@@ -271,7 +287,8 @@ async function runQualifiedWorker(
           },
         },
         persistSession: false,
-        maxTurns: 40,
+        // Emergency runaway guard, not the former ordinary 40-turn cutoff.
+        maxTurns: WORKER_EMERGENCY_TURNS,
         disallowedTools: ['Agent', 'Task', 'mcp__plugin_tenjin_router__subagent'],
         hooks: {
           PreToolUse: [
@@ -299,6 +316,42 @@ async function runQualifiedWorker(
                           permissionDecisionReason: 'Model access revoked or job cancelled',
                         },
                       };
+                },
+              ],
+            },
+          ],
+          PostToolUse: [
+            {
+              hooks: [
+                async (input) => {
+                  if (input.hook_event_name !== 'PostToolUse') return {};
+                  const reminder = repeats.observe(input.tool_name, input.tool_input);
+                  return reminder
+                    ? {
+                        hookSpecificOutput: {
+                          hookEventName: 'PostToolUse',
+                          additionalContext: reminder,
+                        },
+                      }
+                    : {};
+                },
+              ],
+            },
+          ],
+          PostToolUseFailure: [
+            {
+              hooks: [
+                async (input) => {
+                  if (input.hook_event_name !== 'PostToolUseFailure') return {};
+                  const reminder = repeats.observe(input.tool_name, input.tool_input);
+                  return reminder
+                    ? {
+                        hookSpecificOutput: {
+                          hookEventName: 'PostToolUseFailure',
+                          additionalContext: reminder,
+                        },
+                      }
+                    : {};
                 },
               ],
             },
@@ -332,7 +385,7 @@ async function runQualifiedWorker(
         if (!matches) throw new Error('Native Claude changed the owned permission mode');
       }
       if (message.type === 'result') {
-        if (message.subtype !== 'success') throw new Error('DeepSeek worker did not finish');
+        if (message.subtype !== 'success') throw workerResultError(message);
         result = message.result;
       }
     }
