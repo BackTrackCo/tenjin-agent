@@ -28,6 +28,24 @@ it('keeps an auto parent native when managed settings disable native auto mode',
   expect(query).not.toHaveBeenCalled();
 });
 
+it('keeps a conflicting managed provider native before starting a worker', async () => {
+  vi.mocked(readClaudeCode).mockResolvedValue({
+    binary: { path: '/native/claude', source: 'path' },
+    version: '2.1.325',
+  } as never);
+  vi.mocked(meetsFloor).mockReturnValue(true);
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: { env: { ANTHROPIC_BASE_URL: 'https://managed.invalid' } },
+    sources: [
+      { source: 'managed', settings: { env: { ANTHROPIC_BASE_URL: 'https://managed.invalid' } } },
+    ],
+  } as never);
+  expect(
+    await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data', undefined, 'auto'),
+  ).toBeNull();
+  expect(query).not.toHaveBeenCalled();
+});
+
 it('rejects a changed or unsupported Claude mode before querying a worker or provider', async () => {
   const job = {
     id: 'owned',

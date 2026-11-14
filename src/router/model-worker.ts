@@ -23,6 +23,9 @@ import type { ModelTransport } from './model-transport';
 import {
   assertClaudeWorkerMode,
   claudeDeepSeekWorkerEnv,
+  claudeDeepSeekWorkerSettingsEnv,
+  claudeManagedProviderCompatible,
+  claudeMcpProviderCompatible,
   CLAUDE_DEEPSEEK_MODEL,
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
@@ -49,10 +52,12 @@ export async function qualifiedModelWorker(
   const state = await readClaudeCode(process.env, cwd);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
   if (await findDefinition(agentType, { cwd, homeDir: homedir() })) return null;
-  const { effective } = await resolveWorkerSettings({
+  const resolved = await resolveWorkerSettings({
     cwd,
     settingSources: ['user', 'project', 'local'],
   });
+  const { effective } = resolved;
+  if (!claudeManagedProviderCompatible(resolved)) return null;
   if (claudePermissionMode === 'auto' && effective.permissions?.disableAutoMode === 'disable')
     return null;
   if (effective.sandbox?.filesystem?.disabled || effective.sandbox?.excludedCommands?.length)
@@ -214,6 +219,16 @@ async function runQualifiedWorker(
     const address = bridge.address();
     if (!address || typeof address === 'string') throw new Error('Worker bridge failed');
     const env = claudeDeepSeekWorkerEnv(process.env, `http://127.0.0.1:${address.port}`, token);
+    const resolved = await resolveWorkerSettings({
+      cwd: job.root,
+      settingSources: ['user', 'project', 'local'],
+    });
+    if (
+      !claudeManagedProviderCompatible(resolved) ||
+      (permissionMode === 'auto' && resolved.effective.permissions?.disableAutoMode === 'disable')
+    )
+      throw new Error('Managed Claude worker policy changed; keep native');
+    assertCurrentMode();
     options.signal.throwIfAborted();
     worker = query({
       prompt: job.task,
@@ -232,6 +247,7 @@ async function runQualifiedWorker(
         // Preserve the parent's workspace, including uncommitted changes.
         // The SDK sandbox isolates execution; native worktree-only calls stay native.
         settings: {
+          env: claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
           permissions: {
             blockReadsOutsideWorkingDirectories: true,
             blockWritesOutsideWorkingDirectories: true,
@@ -309,6 +325,8 @@ async function runQualifiedWorker(
     for await (const message of worker) {
       if (message.type === 'system' && message.subtype === 'init') {
         const matches = message.permissionMode === permissionMode;
+        if (matches && !claudeMcpProviderCompatible(await worker.mcpServerStatus()))
+          throw new Error('An MCP depends on replaced provider credentials; keep native');
         initialized(matches);
         clearTimeout(initTimer);
         if (!matches) throw new Error('Native Claude changed the owned permission mode');
