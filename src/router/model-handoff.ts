@@ -9,6 +9,7 @@ import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
 import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
+import parentPolicy from './model-parent-policy.json';
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -273,6 +274,14 @@ export class ModelHandoff {
       await this.store.decided(job.id, { action: 'native' });
       return { action: 'native' };
     }
+    const consent = await modelSettings(dataDir, session.cwd);
+    if (
+      !consent ||
+      consent.root !== job.root ||
+      consent.routerOrigin !== transport.origin ||
+      consent.maxJobAtomic < BigInt(job.capAtomic)
+    )
+      return native();
     await this.store.decided(job.id, {
       ...parsed.data,
       routerOrigin: transport.origin,
@@ -291,8 +300,15 @@ export class ModelHandoff {
       proxyFeePercent: 5,
       capAtomic: job.capAtomic,
       reason: parsed.data.reason,
+      parentPolicy,
+      consent: {
+        version: 2,
+        repository: consent.root,
+        routerOrigin: consent.routerOrigin,
+        recipients: ['Tenjin', 'DeepSeek'],
+      },
       instruction:
-        'No worker started. Accept with subagent({offer_id}) or retry the original native Agent call unchanged. You retain the final veto.',
+        'Saved version 2 opt-in covers this repository and endpoint: routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.',
     };
   }
 }

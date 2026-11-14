@@ -15,6 +15,7 @@ import { ModelJobStore } from './model-job';
 import type { ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
+import parentPolicy from './model-parent-policy.json';
 
 let dir: string;
 beforeEach(() => vi.clearAllMocks());
@@ -83,6 +84,11 @@ it.each(['default', 'acceptEdits', 'auto', 'dontAsk'] as const)(
     await server.connect(a);
     await client.connect(b);
     try {
+      const listed = await client.listTools();
+      const tool = listed.tools.find((tool) => tool.name === 'subagent');
+      expect(tool?.description).toContain('Accept with offer_id');
+      expect(tool?.description).not.toContain(parentPolicy);
+      expect(tool?._meta?.['anthropic/alwaysLoad']).toBeUndefined();
       const captured = await client.callTool({
         name: 'subagent',
         arguments: {

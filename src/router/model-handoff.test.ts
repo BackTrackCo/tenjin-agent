@@ -8,6 +8,7 @@ import { makeInstructionContext } from './model-instructions';
 import { ModelHandoff, modelOfferSchema, type ModelSession } from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
+import parentPolicy from './model-parent-policy.json';
 let dir: string;
 afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
@@ -106,10 +107,20 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   const pending = await model.store.pending('root', 'turn');
   const task =
     'Read the current implementation.\nPreserve literal command: pnpm check\nReturn JSON with findings and evidence.';
-  expect(await model.submitCodex(session, pending!.id, task)).toMatchObject({
+  const recommendation = await model.submitCodex(session, pending!.id, task);
+  expect(recommendation).toMatchObject({
     action: 'offer',
     started: false,
+    parentPolicy,
+    consent: {
+      version: 2,
+      repository: repo,
+      routerOrigin: 'http://localhost:3939',
+      recipients: ['Tenjin', 'DeepSeek'],
+    },
+    instruction: expect.stringMatching(/binding instructions.*forbid disclosure/),
   });
+  expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
   expect(route).toHaveBeenCalledWith(
     expect.objectContaining({
       subagentTask: task,
@@ -137,6 +148,36 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   await writeFile(instructionFile, 'A binding instruction changed after capture.');
   expect(await model.submitCodex(changed, next!.id, task)).toMatchObject({ action: 'native' });
   expect(route).toHaveBeenCalledTimes(1);
+
+  // Revocation while the paid classifier runs cannot manufacture a current
+  // consent statement or an inference offer from the earlier saved settings.
+  await writeFile(instructionFile, 'Ask before publishing. Keep guarded Neon jobs native.');
+  vi.mocked(qualifiedModelWorker).mockResolvedValue({
+    path: '/fixture/worker',
+    instructionContext: await makeInstructionContext({
+      harness: 'codex',
+      root: repo,
+      documents: instructionContext.documents,
+      configHash: 'fixture',
+      watchPaths: [instructionFile],
+    }),
+  });
+  const revoking = { ...session, turnId: 'revoking' };
+  await model.captureCodex(revoking, 'revoking-call', native);
+  const revokingJob = await model.store.pending('root', 'revoking');
+  route.mockImplementationOnce(async (body) => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ router: { subagents: true, subagentConsent: { version: 1 } } }),
+    );
+    return { ...offer, jobId: body.jobId };
+  });
+  expect(await model.submitCodex(revoking, revokingJob!.id, task)).toEqual({ action: 'native' });
+  expect(route).toHaveBeenCalledTimes(2);
+  expect(
+    await model.captureCodex({ ...session, turnId: 'revoked' }, 'revoked-call', native),
+  ).toBeNull();
+  expect(route).toHaveBeenCalledTimes(2);
 });
 
 it('consumes the server canonical offer contract without enabling an alias or provider switch', () => {

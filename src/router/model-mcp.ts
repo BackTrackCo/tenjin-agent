@@ -4,7 +4,6 @@ import { ModelHandoff, type ModelSession } from './model-handoff';
 import { modelSettings } from './model-settings';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
-import parentPolicy from './model-parent-policy.json';
 import { ModelLifecycle } from './model-lifecycle';
 import { claudeWorkerPermissionMode } from './claude-model-policy';
 
@@ -44,7 +43,8 @@ export function registerModelTool(
     'subagent',
     {
       title: 'Tenjin subagent',
-      description: parentPolicy,
+      description:
+        'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
       annotations: { title: 'DeepSeek subagent', readOnlyHint: false },
       inputSchema: {
         offer_id: z.string().uuid().optional(),
