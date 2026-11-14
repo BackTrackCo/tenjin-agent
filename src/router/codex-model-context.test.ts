@@ -62,6 +62,19 @@ it('binds native restrictions to the exact owned root and turn, never a child or
     approvalPolicy: 'never',
     permissionProfile: { network: 'restricted' },
   });
+  const desktop = {
+    ...meta,
+    payload: { ...meta.payload, cli_version: '0.167.0-alpha.4.1', thread_source: 'vscode' },
+  };
+  await save(desktop);
+  expect(await codexModelPolicy(path, 'root', 'turn', dir)).toMatchObject({
+    approvalPolicy: 'never',
+    permissionProfile: { network: 'restricted' },
+  });
+  await save({ ...desktop, payload: { ...desktop.payload, parent_thread_id: 'parent' } });
+  expect(await codexModelPolicy(path, 'root', 'turn', dir)).toBeNull();
+  await save(desktop);
+  expect(await codexModelPolicy(path, 'foreign', 'turn', dir)).toBeNull();
   for (const cli_version of ['0.167.0', '0.167.0-alpha.4.2', '0.163.1']) {
     await save({ ...meta, payload: { ...meta.payload, cli_version } });
     expect(await codexModelPolicy(path, 'root', 'turn', dir)).toBeNull();

@@ -5,7 +5,7 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** CLI 0.154.0's completed conversation items, not synthetic response_item
+/** Native completed conversation items, not synthetic response_item
  * prompts or tool output. Unknown ownership/compaction means unavailable. */
 export function parseCodexHistory(raw: string, session: string): PacketMessage[] | null {
   const messages: PacketMessage[] = [];
@@ -28,9 +28,13 @@ export function parseCodexHistory(raw: string, session: string): PacketMessage[]
         p.session_id !== session ||
         !(
           p.thread_source === 'user' ||
-          (p.thread_source == null &&
-            isQualifiedCodexModelVersion(p.cli_version) &&
-            p.source === 'vscode')
+          (isQualifiedCodexModelVersion(p.cli_version) &&
+            p.source === 'vscode' &&
+            (p.thread_source == null ||
+              // Fresh Desktop-v2 roots repeat the source in thread_source.
+              // Only this observed build/shape is qualified; child ownership
+              // and exact session/item binding remain independent checks.
+              (p.cli_version === '0.167.0-alpha.4.1' && p.thread_source === 'vscode')))
         ) ||
         p.parent_thread_id != null
       )

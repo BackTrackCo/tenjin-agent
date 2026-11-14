@@ -122,6 +122,44 @@ const codexDeps = (fetchImpl: typeof fetch) => ({
 });
 
 describe('Codex transcript ownership and bounds', () => {
+  it('admits the observed Desktop-v2 root while rejecting child, foreign and unknown source shapes', () => {
+    const desktop = {
+      type: 'session_meta',
+      payload: {
+        id: session,
+        session_id: session,
+        source: 'vscode',
+        thread_source: 'vscode',
+        cli_version: '0.167.0-alpha.4.1',
+      },
+    };
+    expect(parseCodexHistory(history(desktop, item('u', 'Owned Desktop task.')), session)).toEqual([
+      { role: 'user', text: 'Owned Desktop task.' },
+    ]);
+    for (const change of [
+      { id: 'foreign' },
+      { session_id: 'foreign' },
+      { parent_thread_id: 'parent' },
+      { thread_source: 'subagent' },
+      { thread_source: { subAgent: { parent_thread_id: session } } },
+      { source: 'cli' },
+      { source: null },
+      { thread_source: 'unknown' },
+      { cli_version: '0.163.0' },
+      { cli_version: '0.167.0' },
+      { cli_version: '0.167.0-alpha.4.2' },
+    ]) {
+      expect(
+        parseCodexHistory(
+          history({ ...desktop, payload: { ...desktop.payload, ...change } }, item('u', 'x')),
+          session,
+        ),
+      ).toBeNull();
+    }
+    expect(parseCodexHistory(history(desktop, desktop, item('u', 'x')), session)).toBeNull();
+    expect(parseCodexHistory(history(desktop, item('u', 'x')), 'foreign')).toBeNull();
+  });
+
   it('admits completed conversation once, excluding synthetic and tool rows', () => {
     const user = item('u', 'No paid tools.');
     expect(
