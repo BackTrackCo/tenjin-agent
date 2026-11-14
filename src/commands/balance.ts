@@ -10,8 +10,8 @@ import {
   type ResolveWalletProviderOptions,
 } from '../lib/wallet';
 import type { SpendPolicy } from '../lib/policy';
-import { channelCredit } from '../router/channel-credit';
-import { FUND_COMMAND_LINE, ROUTING_FEE_CEILING_ATOMIC } from '../router/fee';
+import { channelCredit, routingSpent } from '../router/channel-credit';
+import { FUND_COMMAND_LINE, LEGACY_ROUTING_QUOTE_ATOMIC } from '../router/fee';
 import { limitsLine } from '../router/spend-question';
 import { dollars, forgetLink, recallLink, watchFunding } from './fund-watch';
 import type { CommandContext, CommandResult } from '../context';
@@ -110,6 +110,9 @@ export async function runBalance(
     'model-routing',
     settings.baseUrl,
   ).catch(() => 0n);
+  // What routing has cost: the deposits sent less that credit, also local.
+  const spentAtomic = await routingSpent(ctx.dataDir, address).catch(() => 0n);
+  const spent = toMoney(spentAtomic.toString());
   const policy = settings.policy;
   const low = lowBalance(atomic, policy);
   const label = (text: string) => `  ${text.padEnd(LABEL_WIDTH)}`;
@@ -120,6 +123,7 @@ export async function runBalance(
       routingCredit: credit,
       modelCredit: toMoney(modelCreditAtomic.toString()),
       modelRoutingCredit: toMoney(modelRoutingCreditAtomic.toString()),
+      routingSpent: spent,
       limits: limitsData(policy),
       low,
     },
@@ -137,7 +141,8 @@ export async function runBalance(
             `${label('Model fee')}about ${dollars(modelRoutingCreditAtomic)} set aside for model routing`,
           ]
         : []),
-      ...(atomic === 0n && creditAtomic < ROUTING_FEE_CEILING_ATOMIC
+      ...(spentAtomic > 0n ? [`${label('Spent')}about ${dollars(spentAtomic)} on routing`] : []),
+      ...(atomic === 0n && creditAtomic < LEGACY_ROUTING_QUOTE_ATOMIC
         ? ['', `  ${FUND_COMMAND_LINE}`]
         : []),
     ],

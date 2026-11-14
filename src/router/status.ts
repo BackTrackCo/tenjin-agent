@@ -9,8 +9,8 @@ import type { CommandContext, CommandResult } from '../context';
 import { balanceReader, lowBalance } from '../commands/balance';
 import { connectedLabels, describeRules, summarizeRule } from '../commands/config-readback';
 import { dollars } from '../commands/fund-watch';
-import { channelCredit } from './channel-credit';
-import { ROUTING_DEPOSIT_KEY, ROUTING_FEE_CEILING_ATOMIC, SUGGESTED_FUND_USD } from './fee';
+import { channelCredit, routingSpent } from './channel-credit';
+import { ROUTING_DEPOSIT_KEY, SUGGESTED_FUND_USD } from './fee';
 import { accountJobs, cachedIdentities, labelOf, type Identities } from './identities';
 import { readVaultHeader } from './accounts/vault';
 import { routerSettings, type RouterSettings } from './settings';
@@ -54,6 +54,8 @@ export interface StatusDeps {
   routingCredit?: (ctx: CommandContext) => Promise<bigint>;
   modelCredit?: (ctx: CommandContext) => Promise<bigint>;
   modelRoutingCredit?: (ctx: CommandContext) => Promise<bigint>;
+  /** Local lifetime routing-cost estimate, separate from the rolling daily budget. */
+  routingSpent?: (ctx: CommandContext) => Promise<bigint>;
   /** Seam for the wallet and its USDC balance (null when the read failed);
    *  null with no wallet. Production reads it as `tenjin balance` does. */
   wallet?: (ctx: CommandContext) => Promise<{ address: string; atomic: bigint | null } | null>;
@@ -84,6 +86,16 @@ async function walletRoutingCredit(
   try {
     const { address } = await describeWallet(resolveWalletProvider(ctx));
     return await channelCredit(ctx.dataDir, address, lane, origin);
+  } catch {
+    return 0n;
+  }
+}
+
+/** Deposits sent less remaining channel credit, without another network read. */
+async function walletRoutingSpent(ctx: CommandContext): Promise<bigint> {
+  try {
+    const { address } = await describeWallet(resolveWalletProvider(ctx));
+    return await routingSpent(ctx.dataDir, address);
   } catch {
     return 0n;
   }
@@ -361,14 +373,18 @@ export async function runRouterStatus(
     .reduce((sum, e) => sum + BigInt(e.amountAtomic), 0n);
   // Never below zero, whatever an older ledger holds.
   const lookupsAtomic = committedAtomic > depositedAtomic ? committedAtomic - depositedAtomic : 0n;
-  const [creditAtomic, wallet, modelCreditAtomic, modelRoutingCreditAtomic] = await Promise.all([
-    (deps.routingCredit ?? walletRoutingCredit)(ctx),
-    (deps.wallet ?? walletBalance)(ctx).catch(() => null),
-    deps.modelCredit ? deps.modelCredit(ctx) : walletRoutingCredit(ctx, 'model', settings.baseUrl),
-    deps.modelRoutingCredit
-      ? deps.modelRoutingCredit(ctx)
-      : walletRoutingCredit(ctx, 'model-routing', settings.baseUrl),
-  ]);
+  const [creditAtomic, spentAtomic, wallet, modelCreditAtomic, modelRoutingCreditAtomic] =
+    await Promise.all([
+      (deps.routingCredit ?? walletRoutingCredit)(ctx),
+      (deps.routingSpent ?? walletRoutingSpent)(ctx),
+      (deps.wallet ?? walletBalance)(ctx).catch(() => null),
+      deps.modelCredit
+        ? deps.modelCredit(ctx)
+        : walletRoutingCredit(ctx, 'model', settings.baseUrl),
+      deps.modelRoutingCredit
+        ? deps.modelRoutingCredit(ctx)
+        : walletRoutingCredit(ctx, 'model-routing', settings.baseUrl),
+    ]);
   const budgetAtomic = settings.policy.sessionBudgetAtomic;
   const capAtomic = settings.policy.maxAutoSpendAtomic;
   const data = {
@@ -393,9 +409,7 @@ export async function runRouterStatus(
     },
     routingCredit: {
       remaining: toMoney(creditAtomic.toString()),
-      // At least this many: counted at the fee ceiling, since the fee each
-      // call pays is the router's quote, at or below it.
-      calls: Number(creditAtomic / ROUTING_FEE_CEILING_ATOMIC),
+      spent: toMoney(spentAtomic.toString()),
     },
     modelCredit: { remaining: toMoney(modelCreditAtomic.toString()) },
     modelRoutingCredit: { remaining: toMoney(modelRoutingCreditAtomic.toString()) },

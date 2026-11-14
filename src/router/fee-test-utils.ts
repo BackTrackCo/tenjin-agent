@@ -10,7 +10,7 @@ import type { SpendPolicy } from '../lib/policy';
 import type { TenjinSigner } from '../lib/wallet/provider';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { ROUTE_PAID_PATH } from './decision';
-import { CHANNEL_DEPOSIT_ATOMIC, ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { CHANNEL_DEPOSIT_ATOMIC, LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
 import type { RoutingPayerDeps } from './routing-payer';
 
 /**
@@ -27,8 +27,8 @@ import type { RoutingPayerDeps } from './routing-payer';
  */
 
 export const NETWORK = 'eip155:84532';
-/** What the fake quotes by default: the ceiling, the fee today's router quotes. */
-export const FEE = ROUTING_FEE_CEILING_ATOMIC.toString();
+/** What the fake quotes by default: the router's fixed quote. */
+export const FEE = LEGACY_ROUTING_QUOTE_ATOMIC.toString();
 export const BASE = 'https://router.test';
 export const MISMATCH = 'invalid_batch_settlement_evm_cumulative_amount_mismatch';
 export const BUSY = 'invalid_batch_settlement_evm_channel_busy';
@@ -82,10 +82,15 @@ export class FakeRouter {
   /** The `error` a deposit over {@link walletAtomic} is refused with. */
   insufficientError = INSUFFICIENT;
   readonly requirement: PaymentRequirements;
+  /** The router's fixed quote, offered second beside this answer's own when
+   *  the fake is built with `legacy`, as the router does for released CLIs. */
+  readonly legacyRequirement: PaymentRequirements | null;
+  /** The amount each paid request's voucher was signed for, in order. */
+  readonly paidAmounts: bigint[] = [];
 
-  /** What each settled call is charged: the quote unless `charge` says less,
-   *  as batch settlement lets the server charge below its quote. */
-  private readonly charge: bigint;
+  /** What each settled call is charged: the matched quote unless `charge`
+   *  says less, as batch settlement lets the server charge below its quote. */
+  private readonly charge: bigint | null;
 
   constructor(
     private readonly opts: {
@@ -95,11 +100,15 @@ export class FakeRouter {
       charge?: string;
       /** The 402's `extra.minDeposit`; `null` leaves the field out. */
       minDeposit?: string | null;
+      /** Also offer the router's fixed quote, second. */
+      legacy?: boolean;
       /** False: a router from before the `warm` form, which 400s it. */
       warm?: boolean;
+      /** A background quote independent of the routing answer, as on the live router. */
+      warmAmount?: string;
     } = {},
   ) {
-    this.charge = BigInt(opts.charge ?? opts.amount ?? FEE);
+    this.charge = opts.charge === undefined ? null : BigInt(opts.charge);
     this.requirement = {
       scheme: 'batch-settlement',
       network: NETWORK,
@@ -118,6 +127,19 @@ export class FakeRouter {
         version: '2',
       },
     };
+    this.legacyRequirement = opts.legacy === true ? { ...this.requirement, amount: FEE } : null;
+  }
+
+  /** The amount one paid request settles: the charge, at most the matched quote. */
+  private charged(matched: bigint): bigint {
+    return this.charge !== null && this.charge < matched ? this.charge : matched;
+  }
+
+  /** What every 402 offers: this answer's quote, then the fixed one when set. */
+  private accepts(requirement: PaymentRequirements = this.requirement): PaymentRequirements[] {
+    return this.legacyRequirement === null
+      ? [requirement]
+      : [requirement, { ...requirement, amount: this.legacyRequirement.amount }];
   }
 
   readonly fetch: typeof fetch = async (input, init) => {
@@ -125,6 +147,10 @@ export class FakeRouter {
     const url = new URL(request.url);
     const signature = request.headers.get('payment-signature');
     const warm = await isWarm(request);
+    const requirement =
+      warm && this.opts.warmAmount !== undefined
+        ? { ...this.requirement, amount: this.opts.warmAmount }
+        : this.requirement;
     this.log.push(
       `${request.method} ${url.pathname}${warm ? ' warm' : ''} ${signature ? 'paid' : 'unpaid'}`,
     );
@@ -136,8 +162,11 @@ export class FakeRouter {
       if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
       return json(warm ? WARM : this.body, 200);
     }
-    if (signature === null) return this.required(url.toString());
-    const payload = decodePaymentSignatureHeader(signature).payload as {
+    if (signature === null) return this.required(url.toString(), requirement);
+    const decoded = decodePaymentSignatureHeader(signature);
+    // The offer the voucher was signed for; the server charges at most it.
+    const matched = BigInt(decoded.accepted?.amount ?? this.requirement.amount);
+    const payload = decoded.payload as {
       type: 'deposit' | 'voucher';
       voucher: { channelId: string; maxClaimableAmount: string; signature: `0x${string}` };
       deposit?: { amount: string };
@@ -146,11 +175,8 @@ export class FakeRouter {
     const channel = this.channels.get(id) ?? { balance: 0n, charged: 0n, pending: false };
     this.channels.set(id, channel);
     if (channel.pending) return this.error(url.toString(), BUSY);
-    if (
-      BigInt(payload.voucher.maxClaimableAmount) !==
-      channel.charged + BigInt(this.requirement.amount)
-    ) {
-      return this.corrective(url.toString(), id, channel);
+    if (BigInt(payload.voucher.maxClaimableAmount) !== channel.charged + matched) {
+      return this.corrective(url.toString(), id, channel, requirement);
     }
     if (refusesWarm) return json({ error: { code: 'bad_request', message: 'warm' } }, 400);
     if (payload.type === 'deposit') {
@@ -160,7 +186,7 @@ export class FakeRouter {
       }
     }
     // `warm` is answered in code, with no gate, and settles at $0.
-    const charge = warm ? 0n : this.charge;
+    const charge = warm ? 0n : this.charged(matched);
     channel.pending = true;
     try {
       if (this.hold !== null) {
@@ -183,7 +209,10 @@ export class FakeRouter {
       };
       channel.charged += charge;
       if (warm) this.warms += 1;
-      else this.settledFees += 1;
+      else {
+        this.paidAmounts.push(matched);
+        this.settledFees += 1;
+      }
     } finally {
       channel.pending = false;
     }
@@ -220,12 +249,12 @@ export class FakeRouter {
     };
   }
 
-  private required(url: string): Response {
+  private required(url: string, requirement: PaymentRequirements = this.requirement): Response {
     return json({}, 402, {
       'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
         x402Version: 2,
         resource: { url, description: 'routing', mimeType: 'application/json' },
-        accepts: [this.requirement],
+        accepts: this.accepts(requirement),
       }),
     });
   }
@@ -236,34 +265,37 @@ export class FakeRouter {
         x402Version: 2,
         error,
         resource: { url, description: 'routing', mimeType: 'application/json' },
-        accepts: [this.requirement],
+        accepts: this.accepts(),
       }),
     });
   }
 
-  private corrective(url: string, id: string, channel: Channel): Response {
+  private corrective(
+    url: string,
+    id: string,
+    channel: Channel,
+    requirement: PaymentRequirements = this.requirement,
+  ): Response {
     return json({}, 402, {
       'PAYMENT-REQUIRED': encodePaymentRequiredHeader({
         x402Version: 2,
         error: MISMATCH,
         resource: { url, description: 'routing', mimeType: 'application/json' },
-        accepts: [
-          {
-            ...this.requirement,
-            extra: {
-              ...this.requirement.extra,
-              channelState: this.state(id, channel),
-              ...(channel.last !== undefined
-                ? {
-                    voucherState: {
-                      signedMaxClaimable: channel.last.maxClaimableAmount,
-                      signature: channel.last.signature,
-                    },
-                  }
-                : {}),
-            },
+        accepts: this.accepts({
+          ...requirement,
+          extra: {
+            ...requirement.extra,
+            channelState: this.state(id, channel),
+            ...(channel.last !== undefined
+              ? {
+                  voucherState: {
+                    signedMaxClaimable: channel.last.maxClaimableAmount,
+                    signature: channel.last.signature,
+                  },
+                }
+              : {}),
           },
-        ],
+        }),
       }),
     });
   }

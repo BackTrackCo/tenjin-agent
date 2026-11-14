@@ -12,7 +12,7 @@ import { canonicalHash } from '../lib/request-schema';
 import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import type { ModelJob } from './model-job';
-import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
@@ -80,7 +80,7 @@ export class ModelTransport {
       ...options.payerDeps,
       modelLane: {
         path: '/api/model-router/route',
-        ceilingAtomic: ROUTING_FEE_CEILING_ATOMIC,
+        ceilingAtomic: MODEL_ROUTING_FEE_CEILING_ATOMIC,
         origin: this.origin,
       },
     });

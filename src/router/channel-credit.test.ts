@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { FileClientChannelStorage } from '@x402/evm/batch-settlement/client/file-storage';
 import { afterEach, expect, it } from 'vitest';
 import { payerDir } from './fee';
-import { channelCredit } from './channel-credit';
+import { channelCredit, routingSpent } from './channel-credit';
 import { modelChannelDir } from './model-channel';
 let dir: string;
 afterEach(async () => {
@@ -35,4 +35,11 @@ it('keeps inference credit visible without making it available for router fees',
   expect(await channelCredit(dir, address, 'model-routing', 'https://router.test')).toBe(47000n);
   expect(await channelCredit(dir, address, 'model', 'http://localhost:3939')).toBe(0n);
   expect(await channelCredit(dir, address, 'model-routing', 'http://localhost:3939')).toBe(0n);
+  expect(await routingSpent(dir, address)).toBe(9000n);
+  await new FileClientChannelStorage({ directory: base }).set(`0x${'01'.repeat(32)}`, {
+    balance: '10000',
+    chargedCumulativeAmount: '4000',
+  });
+  expect(await routingSpent(dir, address)).toBe(13000n);
+  expect(await channelCredit(dir, address)).toBe(21000n);
 });

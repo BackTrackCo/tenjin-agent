@@ -1224,7 +1224,7 @@ describe('what the tool tells the model to send', () => {
       expect(SCOPE_RULE).not.toContain("the user's request verbatim");
       // The router quotes the fee; the only amount written here is this CLI's ceiling.
       expect(request.description).toContain(
-        'Paid routing costs a fee the router quotes, never more than $0.003 a call;',
+        'Routing fees and tool charges paid from the Tenjin balance follow the user’s spend limits. Connected-account tools bill that account’s plan. Routing top-ups count once, when sent.',
       );
     } finally {
       await client.close();

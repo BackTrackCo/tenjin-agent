@@ -35,6 +35,7 @@ import { accountLacks } from './accounts/presence';
 import { keepDecided, takeDecided, type Decided } from './decided';
 import { canSign, type SignVerdict } from './eligibility';
 import { depositSentence, unpaidSentence, type RouteFor } from './fee';
+import { termsNotice } from './terms-notice';
 import { noticeCleared, noticeFor } from './notice-markers';
 import { agentFixFor } from './wallet-reasons';
 import { readsAsEmptyPage, savedPdfOf } from './fetch-result';
@@ -1976,6 +1977,11 @@ async function decide(
       `tenjin hook: offer ${id} needs ${missing.join(', ')}, which this build lacks, so it was skipped`,
     );
   }
+  // New routing terms are told once, on the first paid-path call after an update.
+  if (route !== undefined && deps.notice !== undefined) {
+    const terms = await termsNotice(deps.dataDir);
+    if (terms !== null) deps.notice(terms);
+  }
   // A deposit sets funds aside; the user would otherwise see it only as spend.
   // A background top-up's is said here alone, never in a tool's result, so the
   // person reads it.
@@ -1989,10 +1995,9 @@ async function decide(
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
-  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
-  // over, and the session hears so once ("Tenjin wallet unlocked." or
-  // "... funded.").
-  if (route !== undefined && outcome.status === 'decided') {
+  // ONLY A COMPLETED SIGNED PAYMENT establishes paid routing recovered.
+  // A free decision, or a background deposit, proves no such recovery.
+  if (outcome.status === 'decided' && route?.paid?.() === true) {
     const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
     if (cleared !== null) deps.notice?.(cleared);
   }

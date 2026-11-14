@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createPublicClient, http, type TypedDataDefinition } from 'viem';
 import { x402Client, x402HTTPClient, type PaymentPolicy } from '@x402/core/client';
+import { decodePaymentRequiredHeader } from '@x402/core/http';
+import type { PaymentRequirements } from '@x402/core/types';
 import { toClientEvmSigner, type ClientEvmSigner } from '@x402/evm';
 import {
   BatchSettlementEvmScheme,
@@ -19,6 +21,7 @@ import {
   modelChannelDir,
   modelChannelLane,
   modelChannelScope,
+  MODEL_ROUTING_FEE_CEILING_ATOMIC,
   type ModelPaymentPath,
 } from './model-channel';
 import {
@@ -42,6 +45,7 @@ import {
   FEE_ABOVE_CEILING,
   feeRefusal,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
+  LEGACY_ROUTING_QUOTE_ATOMIC,
   payerDir,
   refusedWhy,
   ROUTING_DEPOSIT_KEY,
@@ -58,7 +62,7 @@ import {
   writeRouterMemo,
 } from './router-memo';
 import type { RouterObservation } from './router-observation';
-import { quoteOf, routingOffers } from './routing-quote';
+import { chosenOffer, quoteOf, routingOffers } from './routing-quote';
 import { UNKNOWN_DETAIL, WALLET_REASONS } from './wallet-reasons';
 
 export { reasonCode } from '../lib/payment-failure';
@@ -79,11 +83,14 @@ export { reasonCode } from '../lib/payment-failure';
  *
  * What is Tenjin's own, because the SDK has no equivalent:
  *
- * - THE QUOTE, UNDER A CEILING. The router's 402 is the only price. This pays
- *   it when it is at or below `ROUTING_FEE_CEILING_ATOMIC`, inside the SDK's
- *   per-payment cap, the deposit cap and the spend limits; a quote above the
- *   ceiling is not paid (`fee_above_ceiling`), and is read before the wallet
- *   is unlocked. Nothing else is pinned: not the payee, not the exact price.
+ * - THE QUOTE, UNDER A CEILING. The router's 402 is the only price: this
+ *   answer's own quote, picked ahead of the fixed one beside it
+ *   (`chosenOffer`). This pays it when it is at or below
+ *   `ROUTING_FEE_CEILING_ATOMIC`, inside the SDK's per-payment cap, the
+ *   deposit cap and the spend limits; a quote above the ceiling is not paid
+ *   (`fee_above_ceiling`), and is read before the wallet is unlocked. A dear
+ *   quote the channel cannot cover gets its deposit inline, on the same call.
+ *   Nothing else is pinned: not the payee, not the exact price.
  *   It pays only the configured router's paid route ({@link RoutingPayer.routeFor}),
  *   so the ceiling never applies to a provider's 402, which `runPay` checks
  *   against that service's own spec price. A charge below the quote (batch
@@ -95,7 +102,7 @@ export { reasonCode } from '../lib/payment-failure';
  *   second payment in flight on one channel (`channel_busy`): that call is
  *   skipped. A stale total after such a meeting is the SDK's to resync
  *   from the corrective 402, and a cumulative voucher cannot charge twice.
- * - A ROUTING CALL NEVER CARRIES A DEPOSIT. A prompt's hook leg
+ * - ORDINARY FEES ARE FUNDED IN THE BACKGROUND. A prompt's hook leg
  *   has 3.5 s and a deposit settles on chain in about 5, so the channel is
  *   funded in the background instead ({@link RoutingPayer.topUpIfLow}): one
  *   `warm` call to the paid route, which the server answers in code and
@@ -103,8 +110,10 @@ export { reasonCode } from '../lib/payment-failure';
  *   starts when `tenjin mcp` starts on a channel that cannot cover a fee (a
  *   new one included), after a paid call leaves it so, and when a call's
  *   SDK asks for a deposit anyway. A call that meets one in flight in this
- *   process waits for it inside its own budget, since the fee is required and
- *   nothing routes without it, then pays a voucher. A router that answers
+ *   process asks the router without a payment first: a free answer returns
+ *   at once, while a 402 waits inside its own budget and then pays a voucher. A per-answer quote above the fixed $0.003 fee can
+ *   need more credit than a `warm` call replenishes, so it deposits inline
+ *   on its own call. A router that answers
  *   `warm` with anything but its answer (an older server) has no form: for
  *   {@link WARM_ABSENT_MS} a deposit rides the next paid call, as it did
  *   before, and that call gets {@link DEPOSIT_GATE_TIMEOUT_MS}.
@@ -119,15 +128,16 @@ export { reasonCode } from '../lib/payment-failure';
  *   paid from it gets only the per-payment checks (the per-call limit, the
  *   allowlist, an explicit zero daily limit) and never counts again.
  * - A DEPOSIT MAKES ONE BALANCE LOOKUP, bounded by the call deadline.
- *   Ordinary vouchers make no balance read, so no leg reads it while the
- *   router has the `warm` form. The facilitator still checks
+ *   Ordinary vouchers make no balance read. An inline deposit for a dear
+ *   quote or a router without `warm` does. The facilitator still checks
  *   funds. A 402 that `paymentShortOfFunds` reads as low funds (a reason
  *   code of `insufficient_funds`, `invalid_exact_evm_insufficient_funds`, or
  *   one ending in `insufficient_balance`) skips the call as `wallet_low`,
  *   with no retry.
  * - THE TIMEOUT. The wrapper runs inside `httpRequest`, whose deadline is the
  *   caller's, and the SDK's chain reads are each cut at what is left of it,
- *   so a leg returns inside the hook's 5 s. The top-up has its own
+ *   so a leg returns inside the hook's 5 s. An inline deposit gets
+ *   {@link DEPOSIT_GATE_TIMEOUT_MS}. The top-up has its own
  *   {@link TOP_UP_TIMEOUT_MS}. A payment already sent when the time runs out
  *   is not cut: the call returns, and the request finishes in the background
  *   ({@link DETACHED_CEILING_MS} at most) so the SDK's channel records it; a
@@ -143,8 +153,8 @@ export { reasonCode } from '../lib/payment-failure';
  *   answer, an unlock still running at the call's deadline, an unclassified
  *   failure). A definite block is remembered for {@link SIGNER_RECHECK_MS}, or
  *   until `wallet.json` or the passphrase sidecar changes, so a known-wrong
- *   passphrase costs no scrypt on every prompt; once this process has seen
- *   the server ask for the fee, the call is not even sent. An unknown answer
+ *   passphrase costs no scrypt on every prompt. Every call still reaches the
+ *   router, allowing a later free answer without a wallet. An unknown answer
  *   is never remembered as a block: the next call tries again.
  * - THE UNLOCK IS ONE FLIGHT, BOUNDED IN ITS WAIT, NEVER IN ITS READ. Every
  *   caller (and the prewarm) awaits the same unlock, each only up to its own
@@ -166,17 +176,18 @@ const NOT_CHECKED: SignVerdict = {
 };
 
 /**
- * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default.
- * The SDK bounds each deposit by this cap times `depositMultiplier`, so the
- * two together are the largest deposit: $0.05 × 5 = $0.25
- * (`MAX_CHANNEL_DEPOSIT_ATOMIC`). The fee ceiling is the payment policy's to hold.
+ * THE SDK'S PER-PAYMENT CAP for the routing fee, in place of its $1 default:
+ * the fee ceiling, so the SDK never filters out a quote the payment policy
+ * allows. The SDK's own deposit bound is this cap times `depositMultiplier`
+ * ($1.25); the deposit strategy holds every deposit to
+ * `MAX_CHANNEL_DEPOSIT_ATOMIC` ($0.25) on its own, whatever that bound says.
  */
-export const ROUTING_SPEND_CAP = '$0.05';
+export const ROUTING_SPEND_CAP = '$0.25';
 /** The SDK's default multiplier, spelled out because the deposit is cap × it. */
 export const DEPOSIT_MULTIPLIER = 5;
 
 /** An inline deposit call's budget past the caller's: the hook leg's rest.
- *  Only a router with no `warm` form gets an inline deposit. */
+ *  A dear quote or a router with no `warm` form gets an inline deposit. */
 const DEPOSIT_EXTRA_MS = DEPOSIT_GATE_TIMEOUT_MS - GATE_TIMEOUT_MS;
 /** How long a paid request still out at its call's deadline may run on. */
 export const DETACHED_CEILING_MS = 15_000;
@@ -199,9 +210,6 @@ export const TOP_UP_BACKOFF_MS: readonly number[] = [30_000, 120_000, 600_000];
  */
 export const WALLET_LOW_BACKOFF_MS: readonly number[] = [30_000, 120_000];
 
-/** How long after this process last saw a 402 a wallet known not to sign
- *  sends nothing: the 402 is then certain. */
-const FEE_SEEN_TTL_MS = 60 * 60_000;
 /**
  * HOW LONG A DEFINITE SIGN BLOCK IS BELIEVED without unlocking again, unless
  * the wallet file or the passphrase sidecar changes first (`unlockStamp`): a
@@ -337,8 +345,7 @@ interface Call {
   host: string;
   /** The router's paid route, which a top-up this call starts goes to. */
   router: string;
-  /** The background top-up's `warm` call: the one call that may carry a
-   *  deposit while the router has the form. */
+  /** The background top-up's `warm` call; ordinary fees defer deposits to it. */
   carrier?: boolean;
   /** When the caller's budget ends; later once the SDK sizes an inline deposit. */
   until: number;
@@ -356,6 +363,8 @@ interface Call {
   quoted?: bigint;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
+  /** A non-warm signed routing payment completed successfully. */
+  paidAnswer?: true;
   /** Whether the router answered any request of this call. */
   answered: boolean;
   /** The wallet's channel, once the server asked for a payment. */
@@ -376,15 +385,16 @@ type TopUp =
   | { status: 'refused'; skip: RouteSkipped };
 
 /**
- * THE PAYMENT POLICY, the guide's check of the requirement before signing: a
- * routing offer at or below the fee ceiling. The server's `payTo` is not
- * pinned: the client ships no treasury address, and what the user approved
- * is a fee no higher than the ceiling, which this holds.
+ * THE PAYMENT POLICY, the guide's check of the requirement before signing:
+ * the one routing offer `chosenOffer` picks, the per-answer quote ahead of the
+ * fixed one, at or below the fee ceiling. The server's `payTo` is not pinned:
+ * the client ships no treasury address, and what the user approved is a fee
+ * no higher than the ceiling, which this holds.
  */
-const routingPolicy: PaymentPolicy = (version, requirements) =>
-  routingOffers(version, requirements).filter(
-    (r) => BigInt(r.amount) <= ROUTING_FEE_CEILING_ATOMIC,
-  );
+const routingPolicy: PaymentPolicy = (version, requirements) => {
+  const chosen = chosenOffer(routingOffers(version, requirements));
+  return chosen?.allowed === true ? [chosen.offer] : [];
+};
 
 /** A call to anything but the configured router's paid route is not paid. */
 const NOT_ROUTE = 'not_the_routing_route';
@@ -395,7 +405,36 @@ const NOT_ROUTE = 'not_the_routing_route';
  */
 const CHANNEL_BUSY_ERROR = 'invalid_batch_settlement_evm_channel_busy';
 
+/** Model services have their own ceiling; the tool router's per-answer choice does not apply. */
+function modelOffer(offers: PaymentRequirements[], ceiling: bigint) {
+  return offers.find((offer) => BigInt(offer.amount) <= ceiling) ?? offers[0];
+}
+
 export class RoutingPayer {
+  private paymentCeiling(): bigint {
+    const lane = this.deps.modelLane;
+    if (!lane) return ROUTING_FEE_CEILING_ATOMIC;
+    return modelChannelLane(lane.path) === 'model-routing' &&
+      lane.ceilingAtomic > MODEL_ROUTING_FEE_CEILING_ATOMIC
+      ? MODEL_ROUTING_FEE_CEILING_ATOMIC
+      : lane.ceilingAtomic;
+  }
+
+  private paymentQuote(headers: Headers): bigint | null {
+    if (!this.deps.modelLane) return quoteOf((name) => headers.get(name));
+    const value = headers.get('payment-required');
+    if (!value) return null;
+    try {
+      const required = decodePaymentRequiredHeader(value);
+      const chosen = modelOffer(
+        routingOffers(required.x402Version, required.accepts),
+        this.paymentCeiling(),
+      );
+      return chosen ? BigInt(chosen.amount) : null;
+    } catch {
+      return null;
+    }
+  }
   private channel: Channel | null = null;
   private call: Call | null = null;
   /** The call `pay` ran last, for its one diagnostic line. */
@@ -403,6 +442,8 @@ export class RoutingPayer {
   private queue: Promise<unknown> = Promise.resolve();
   /** A detached request still finishing; the next call waits for it. */
   private tail: Promise<void> = Promise.resolve();
+  /** A sent payment still settling after its caller returned. Only unsigned requests bypass it. */
+  private settling = false;
   /** The one unlock in flight, which every caller and the prewarm await. */
   private unlocking: Promise<TenjinSigner> | null = null;
   /** Calls waiting on `unlocking` right now (the prewarm is not one). */
@@ -412,8 +453,6 @@ export class RoutingPayer {
   private handoff: TenjinSigner | null = null;
   /** The last settled unlock's verdict (decision 16). */
   private memo: SignMemo | null = null;
-  /** When this process last saw the server ask for the fee. */
-  private paidPathSeenAt: number | null = null;
   /** The sign and routing verdicts last reported to `observe`, as status:reason. */
   private reported: { sign?: string; routing?: string } = {};
   /** The background top-up in flight, which a call that meets it waits for. */
@@ -430,9 +469,6 @@ export class RoutingPayer {
   } | null = null;
   /** What settled top-ups deposited that no leg has said yet. */
   private toppedUp = 0n;
-  /** The fee the router last quoted any call: the mark a start top-up holds
-   *  the channel to, before this process has a call's own quote. */
-  private quoted: bigint | undefined;
   /** Background work a test or a shutdown can wait out ({@link idle}). */
   private pending: Promise<unknown> = Promise.resolve();
 
@@ -495,20 +531,66 @@ export class RoutingPayer {
         // The caller's budget starts now, not when this call's turn comes.
         const sent = this.now();
         const until = sent + options.timeoutMs;
+        let firstChallenge: Response | undefined;
+        if (this.topping !== null || this.settling) {
+          // ONLY THE UNSIGNED REQUEST MAY PASS A TOP-UP. It cannot touch the
+          // SDK, signer or this.call: that shared state belongs to the queued
+          // payment still settling. A free answer needs none of that state.
+          const call: Call = {
+            host: target.host,
+            router: url,
+            until,
+            paid: false,
+            answered: false,
+            deposits: [],
+          };
+          calls.push(call);
+          let headers: Headers | undefined;
+          const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
+          const response = (call.result = await httpRequest(url, {
+            ...options,
+            timeoutMs: Math.max(0, until - this.now()),
+            fetchImpl: async (input, init) => {
+              const answer = await base(input, init);
+              call.answered = true;
+              headers = new Headers(answer.headers);
+              return answer;
+            },
+          }));
+          if (!response.ok || response.status >= 500) {
+            this.note(PAYMENT_FAILED, call, sent);
+            this.reportRouting(PAYMENT_FAILED);
+            throw new RouteSkipped(PAYMENT_FAILED, {
+              answered: call.answered,
+              ...(!response.ok && !call.answered && isUnreachable(response)
+                ? { unreached: response }
+                : {}),
+            });
+          }
+          if (response.status !== 402) return response;
+          // Its bounded body and exact headers become the SDK's first answer
+          // after the top-up, without asking or charging this prompt twice.
+          firstChallenge = new Response(response.text, { status: 402, headers });
+        }
         const once = () =>
           this.turn(
-            () => this.noted(sent, () => this.pay(url, options, until, calls)),
+            () => {
+              const first = firstChallenge;
+              firstChallenge = undefined;
+              return this.noted(sent, () => this.pay(url, options, until, calls, false, first));
+            },
             until,
             sent,
           );
-        // A TOP-UP IN FLIGHT IN THIS PROCESS: the call waits for it inside its
-        // own budget instead of skipping. The fee is required, so there is no
-        // free path to fall back to.
+        // ONLY THE PAYMENT RETRY WAITS for the top-up inside its budget. A
+        // router answer that needs no payment has already returned above.
         if (
           this.topping !== null &&
           (await this.waitForTopUp(this.topping, until, sent)) === null
         ) {
-          throw new RouteSkipped(TOPPING_UP);
+          throw new RouteSkipped(TOPPING_UP, {
+            ...(firstChallenge !== undefined ? { answered: true } : {}),
+          });
         }
         try {
           return await once();
@@ -540,6 +622,7 @@ export class RoutingPayer {
       },
       deposited: () => settledIn(calls),
       toppedUp: () => this.takeToppedUp(),
+      paid: () => calls.at(-1)?.paidAnswer === true,
     };
   }
 
@@ -547,24 +630,16 @@ export class RoutingPayer {
    * THE SESSION'S FIRST TOP-UP. `tenjin mcp` calls this as it starts, after
    * the prewarm, so a new channel, or one that cannot cover the next fee, is
    * funded before the first prompt needs it. The channel is read from the
-   * SDK's own files, with no request; with no quote seen yet, the ceiling is
-   * the fee it must cover. Never rejects.
+   * SDK's own files, with no request. The fixed routing quote is the low-credit
+   * threshold; a dear answer funds its own larger shortfall inline. Never rejects.
    */
   async topUpIfLow(baseUrl: string): Promise<void> {
+    if (this.deps.modelLane) return;
     await this.unlocking?.catch(() => undefined);
     const memo = this.memo;
     if (memo?.verdict.status !== 'ready' || memo.address === undefined) return;
-    const credit = await channelCredit(
-      this.deps.dataDir,
-      memo.address,
-      this.deps.modelLane
-        ? this.deps.modelLane.path === '/api/model-router/route'
-          ? 'model-routing'
-          : 'model'
-        : 'tool',
-      this.deps.modelLane?.origin,
-    ).catch(() => null);
-    if (credit === null || credit >= (this.quoted ?? ROUTING_FEE_CEILING_ATOMIC)) return;
+    const credit = await channelCredit(this.deps.dataDir, memo.address).catch(() => null);
+    if (credit === null || credit >= LEGACY_ROUTING_QUOTE_ATOMIC) return;
     await this.topUpWhenDue(new URL(ROUTE_PAID_PATH, baseUrl).toString(), memo.address);
   }
 
@@ -698,6 +773,7 @@ export class RoutingPayer {
           settle();
           if (!call.paid) return own.abort(reason);
           call.detached = true;
+          this.settling = true;
           this.tail = this.finishDetached(call, sent, work, own);
           reject(reason);
         };
@@ -748,6 +824,7 @@ export class RoutingPayer {
       this.note(PAYMENT_FAILED, call, sent, own.signal.aborted ? 'late ceiling' : 'late network');
     } finally {
       this.timers.clearTimeout(ceiling);
+      this.settling = false;
     }
   }
 
@@ -762,6 +839,7 @@ export class RoutingPayer {
     until: number,
     calls: Call[],
     carrier = false,
+    firstChallenge?: Response,
   ): Promise<HttpResult> {
     if (until - this.now() <= 0) throw new RouteSkipped('busy');
     const call: Call = {
@@ -775,18 +853,6 @@ export class RoutingPayer {
     };
     // The route's own record, which its `deposited` reads once the call ends.
     calls.push(call);
-    // A WALLET KNOWN NOT TO SIGN, ON A SERVER KNOWN TO CHARGE: the 402 is
-    // certain and nothing could answer it, so nothing is sent. Before this
-    // process has seen a 402, the server is asked first as always (a fee that
-    // is off costs no unlock), and an unknown verdict never gets here.
-    if (this.paidPathSeenAt !== null && this.now() - this.paidPathSeenAt < FEE_SEEN_TTL_MS) {
-      const blocked = await this.freshBlock();
-      if (blocked !== null) {
-        this.last = call;
-        call.skipped = blocked.reason;
-        throw new RouteSkipped(blocked.reason);
-      }
-    }
     const base = options.fetchImpl ?? this.deps.fetchImpl ?? fetch;
     const hookBody = options.jsonBody;
     const refreshHookBudget = (request: Request): Request => {
@@ -808,10 +874,10 @@ export class RoutingPayer {
       // only follows it through copied Requests stops following once a copy is
       // garbage collected, and the call then outlives the hook's budget.
       const signal = init?.signal ?? request.signal;
-      let asked: Response | undefined = await base(request.clone(), { signal });
+      let asked: Response | undefined = firstChallenge ?? (await base(request.clone(), { signal }));
+      firstChallenge = undefined;
       call.answered = true;
       if (asked.status !== 402) return asked;
-      this.paidPathSeenAt = this.now();
       try {
         // THE QUOTE, read before the wallet is even unlocked: one above the
         // ceiling is not paid, and the rest get the per-payment checks
@@ -819,22 +885,15 @@ export class RoutingPayer {
         // included. With no routing offer to read, the ceiling stands in, and
         // the SDK refuses the 402 below as it always has.
         const challenge = asked.headers;
-        const quoted = quoteOf((name) => challenge.get(name));
-        if (quoted !== null) call.quoted = this.quoted = quoted;
-        if (
-          quoted !== null &&
-          quoted >
-            (this.deps.modelLane?.path === '/api/model-proxy/messages' ||
-            this.deps.modelLane?.path === '/api/model-proxy/responses'
-              ? this.deps.modelLane.ceilingAtomic
-              : ROUTING_FEE_CEILING_ATOMIC)
-        ) {
+        const quoted = this.paymentQuote(challenge);
+        if (quoted !== null) call.quoted = quoted;
+        if (quoted !== null && quoted > this.paymentCeiling()) {
           throw new RouteSkipped(FEE_ABOVE_CEILING);
         }
         const refused = feeRefusal(
           await this.deps.policy(),
           call.host,
-          quoted ?? ROUTING_FEE_CEILING_ATOMIC,
+          quoted ?? this.paymentCeiling(),
         );
         if (refused !== null) throw new RouteSkipped(refused);
         call.channel = this.channelFor(await this.signer(call));
@@ -918,7 +977,10 @@ export class RoutingPayer {
     // A fee paid and answered: routing works, whatever was said before.
     if (call.paid && response.status < 400) {
       this.report({ routing: { status: 'ready', at: this.now() } });
-      if (!carrier) this.track(this.afterPaid(call));
+      if (!carrier) {
+        if (response.status >= 200 && response.status < 300) call.paidAnswer = true;
+        this.track(this.afterPaid(call));
+      }
     }
     return response;
   }
@@ -1117,23 +1179,15 @@ export class RoutingPayer {
    * A CHANNEL RUNNING LOW: after a paid call, the SDK's record (one small file
    * read, no request) says whether the next fee would need a deposit, and if
    * so the top-up starts now rather than on the prompt that would need it.
-   * The SDK deposits only once the next voucher passes the balance, so the
-   * mark is one quoted fee.
+   * The mark is the fixed quote, which a `warm` call can replenish. A dear
+   * answer's larger shortfall is funded inline on that answer's call.
    */
   private async afterPaid(call: Call): Promise<void> {
+    if (this.deps.modelLane) return;
     const payer = call.channel?.payer;
     if (payer === undefined) return;
-    const credit = await channelCredit(
-      this.deps.dataDir,
-      payer,
-      this.deps.modelLane
-        ? this.deps.modelLane.path === '/api/model-router/route'
-          ? 'model-routing'
-          : 'model'
-        : 'tool',
-      this.deps.modelLane?.origin,
-    ).catch(() => null);
-    if (credit === null || credit >= (call.quoted ?? ROUTING_FEE_CEILING_ATOMIC)) return;
+    const credit = await channelCredit(this.deps.dataDir, payer).catch(() => null);
+    if (credit === null || credit >= LEGACY_ROUTING_QUOTE_ATOMIC) return;
     await this.topUpWhenDue(call.router, payer);
   }
 
@@ -1176,10 +1230,11 @@ export class RoutingPayer {
   /**
    * THE SDK'S `depositStrategy`, called right before it signs a deposit.
    *
-   * ONLY THE TOP-UP'S `warm` CALL DEPOSITS. Any other call's deposit is not
-   * made: the top-up starts instead ({@link deferral}), and the call waits
-   * for it in `send`. A router known to have no `warm` form gets today's
-   * deposit on the call that needs it, with the longer budget.
+   * ORDINARY FEES USE THE TOP-UP'S `warm` CALL. The top-up starts instead
+   * ({@link deferral}), and the routing call waits for it in `send`. A quote
+   * above the fixed fee can need credit that `warm` would not replenish, so
+   * it deposits inline. A router without `warm` also deposits inline, with
+   * the longer budget.
    *
    * THE SIZE is the SDK's target and voucher deficit, with local liquidity
    * bounds ({@link routingDepositAtomic}). The balance read happens only for a
@@ -1197,12 +1252,17 @@ export class RoutingPayer {
       // deferred call ends at once, whatever its budget says.
       if (call.carrier !== true) call.until += DEPOSIT_EXTRA_MS;
     }
-    if (call.carrier !== true && !(await this.warmAbsent(call.router))) this.deferral(call);
+    if (
+      call.carrier !== true &&
+      (call.quoted ?? 0n) <= LEGACY_ROUTING_QUOTE_ATOMIC &&
+      !(await this.warmAbsent(call.router))
+    ) {
+      this.deferral(call);
+    }
     const policy = await this.deps.policy();
     const needed = BigInt(ctx.minimumDepositAmount);
     const laneMax =
-      this.deps.modelLane?.path === '/api/model-proxy/messages' ||
-      this.deps.modelLane?.path === '/api/model-proxy/responses'
+      this.deps.modelLane && modelChannelLane(this.deps.modelLane.path) === 'model-inference'
         ? policy.maxAutoSpendAtomic
         : MAX_CHANNEL_DEPOSIT_ATOMIC;
     const sdkMax = ctx.maxDeposit === undefined ? laneMax : BigInt(ctx.maxDeposit);
@@ -1475,20 +1535,22 @@ export class RoutingPayer {
     const client = new x402Client()
       .register('eip155:*', scheme)
       .registerPolicy(
-        this.deps.modelLane?.path === '/api/model-proxy/messages' ||
-          this.deps.modelLane?.path === '/api/model-proxy/responses'
-          ? (version, requirements) =>
-              routingOffers(version, requirements).filter(
-                (r) => BigInt(r.amount) <= this.deps.modelLane!.ceilingAtomic,
-              )
+        lane
+          ? (version, requirements) => {
+              const chosen = modelOffer(
+                routingOffers(version, requirements),
+                this.paymentCeiling(),
+              );
+              return chosen && BigInt(chosen.amount) <= this.paymentCeiling() ? [chosen] : [];
+            }
           : routingPolicy,
       )
       .setSpendControls({
-        maxAmountPerPayment:
-          this.deps.modelLane?.path === '/api/model-proxy/messages' ||
-          this.deps.modelLane?.path === '/api/model-proxy/responses'
+        maxAmountPerPayment: lane
+          ? modelChannelLane(lane.path) === 'model-inference'
             ? '$1'
-            : ROUTING_SPEND_CAP,
+            : '$0.05'
+          : ROUTING_SPEND_CAP,
       });
     this.channel = { payer, http: new x402HTTPClient(client) };
     return this.channel;
