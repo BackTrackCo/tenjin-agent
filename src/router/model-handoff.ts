@@ -10,6 +10,18 @@ import type { ModelJob } from './model-job';
 import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
+import { ModelConversationStore } from './model-conversations';
+import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
+import {
+  continuationRefusal,
+  ownedModelReference,
+  type ModelNativeTool,
+} from './model-continuation';
+
+const continuationPolicy = parentPolicy.replace(
+  'Pass offer_id only to accept; otherwise retry the original native Agent call unchanged.',
+  'Pass offer_id only to accept. Otherwise cancel this continuation. Never retry a Tenjin worker handle through native tools; a fresh native assignment requires its own complete context.',
+);
 
 export const MODEL_BRIEF_GUIDANCE =
   'Copy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.';
@@ -49,8 +61,10 @@ const held = (reason: string) => ({
 
 export class ModelHandoff {
   readonly store: ModelJobStore;
+  readonly conversations: ModelConversationStore;
   constructor(private options: { dataDir: string; transport: ModelTransport }) {
     this.store = new ModelJobStore(options.dataDir);
+    this.conversations = new ModelConversationStore(options.dataDir);
   }
   async captureCodex(
     session: ModelSession,
@@ -154,8 +168,27 @@ export class ModelHandoff {
     callId: string,
     native: Record<string, unknown>,
     signal?: AbortSignal,
+    nativeTool: ModelNativeTool = 'Agent',
   ) {
     signal?.throwIfAborted();
+    const reference = ownedModelReference(native, nativeTool);
+    if (reference.owned) {
+      if (reference.error || !reference.handle || !reference.task)
+        return continuationRefusal(reference.error ?? 'Unavailable DeepSeek continuation');
+      try {
+        return await this.continue(
+          session,
+          callId,
+          native,
+          reference.handle,
+          reference.task,
+          signal,
+        );
+      } catch {
+        return continuationRefusal('DeepSeek continuation is unavailable or interrupted');
+      }
+    }
+    if (nativeTool === 'SendMessage') return { action: 'native' };
     const { dataDir, transport } = this.options;
     const settings = await modelSettings(dataDir, session.cwd);
     if (
@@ -210,6 +243,111 @@ export class ModelHandoff {
       'routing',
     );
     return this.route(session, job, signal);
+  }
+  private async continue(
+    session: ModelSession,
+    callId: string,
+    native: Record<string, unknown>,
+    handle: string,
+    task: string,
+    signal?: AbortSignal,
+  ) {
+    const { dataDir, transport } = this.options;
+    const settings = await modelSettings(dataDir, session.cwd);
+    if (
+      session.harness === 'codex' ||
+      !settings ||
+      settings.routerOrigin !== transport.origin ||
+      process.env.TENJIN_MODEL_WORKER === '1' ||
+      !claudeWorkerPermissionMode(session.claudePermissionMode)
+    )
+      return continuationRefusal('Current model consent or Claude permission mode is unavailable');
+    const owner = {
+      parentSessionId: session.sessionId,
+      root: settings.root,
+      configDir: claudeWorkerConfigDir(settings.root),
+    };
+    const conversation = await this.conversations.lookup(handle, owner);
+    if (!conversation || !['idle', 'offered'].includes(conversation.state))
+      return continuationRefusal('Worker history is foreign, unavailable or already active');
+    const original = conversation.originalJob;
+    if (
+      native.subagent_type !== undefined &&
+      native.subagent_type !== (original.native.subagent_type ?? 'general-purpose')
+    )
+      return continuationRefusal('A continuation cannot change its native worker profile');
+    if (original.decision.routerOrigin !== transport.origin)
+      return continuationRefusal('Original worker endpoint changed');
+    await transport.requireResumeBudget(original);
+    await prepareClaudeWorkerSession(
+      { resume: conversation.sdkSessionId, onSession: async () => {} },
+      settings.root,
+    );
+    const worker = await qualifiedModelWorker(
+      settings.root,
+      String(original.native.subagent_type ?? 'general-purpose'),
+      undefined,
+      dataDir,
+      signal,
+      session.claudePermissionMode,
+    );
+    if (!worker) return continuationRefusal('Current native worker policy cannot be preserved');
+    signal?.throwIfAborted();
+    const latest = await modelSettings(dataDir, session.cwd);
+    if (!latest || latest.root !== settings.root || latest.routerOrigin !== transport.origin)
+      return continuationRefusal('Current model consent changed during qualification');
+    signal?.throwIfAborted();
+    const cap =
+      latest.maxJobAtomic < BigInt(original.capAtomic)
+        ? latest.maxJobAtomic.toString()
+        : original.capAtomic;
+    const job = await this.store.offer({
+      sessionId: session.sessionId,
+      turnId: session.turnId,
+      callId,
+      root: settings.root,
+      task,
+      native,
+      decision: {
+        ...original.decision,
+        workerHandle: handle,
+        workerConfigDir: conversation.configDir,
+        claudePermissionMode: session.claudePermissionMode,
+      },
+      capAtomic: cap,
+    });
+    const offered = await this.conversations.offer(handle, owner, {
+      id: job.id,
+      parentTurnId: session.turnId,
+      callId,
+      task,
+    });
+    if (!offered || offered.state !== 'offered') {
+      await this.store.fence(session.sessionId, session.turnId);
+      return continuationRefusal('This continuation cannot be selected again');
+    }
+    signal?.throwIfAborted();
+    return {
+      action: 'offer',
+      started: false,
+      offer_id: job.id,
+      worker_handle: handle,
+      continuation: true,
+      label: 'DeepSeek V4.1 Flash 1017',
+      routingFeeAtomic: '0',
+      proxyFeePercent: 5,
+      capAtomic: cap,
+      reason: 'Continue the owned DeepSeek worker with its history and remaining original budget',
+      parentPolicy: continuationPolicy,
+      consent: {
+        version: 2,
+        repository: settings.root,
+        routerOrigin: settings.routerOrigin,
+        recipients: ['Tenjin', 'DeepSeek'],
+      },
+      instruction:
+        'Assess the complete follow-up against the full parent policy and current repository constraints. Accept with offer_id only if it remains suitable for this DeepSeek worker. You retain the final veto. This reuses the original history and budget, with no new routing fee. Otherwise cancel the offer; do not send a Tenjin handle to native tools. No worker started.',
+    };
   }
   private async route(session: ModelSession, job: ModelJob, signal?: AbortSignal) {
     const { dataDir, transport } = this.options;

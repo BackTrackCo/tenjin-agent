@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { SIWX_HEADER } from '../lib/siwx';
 import { FakeRouter, payerDeps, BASE, TEST_POLICY, testSigner } from './fee-test-utils';
 import { ModelTransport } from './model-transport';
@@ -11,6 +11,7 @@ import type { ModelJob } from './model-job';
 
 const made: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -141,6 +142,59 @@ it('uses the real SDK inference lane for multiple turns, reusing credit and repl
     uncertain: [],
   });
 });
+
+it('continues with the original ledger and refuses to recreate a missing resume budget', async () => {
+  const f = await fixture();
+  const transport = f.make();
+  const initial = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'first' }] };
+  await transport.messages(f.job, initial, new AbortController().signal);
+  await transport.requireResumeBudget(f.job);
+  const resumed = { ...f.job, decision: { ...f.job.decision, requireExistingBudget: true } };
+  await transport.messages(resumed, { ...initial, max_tokens: 200 }, new AbortController().signal);
+  expect(await transport.summary(resumed)).toMatchObject({ actualAtomic: '5000' });
+  const path = join(f.dir, 'model-jobs', `${f.job.id}.budget.json`);
+  const saved = await readFile(path, 'utf8');
+  await rm(path);
+  await expect(transport.requireResumeBudget(f.job)).rejects.toThrow(/Original model budget/);
+  await expect(
+    transport.messages(resumed, { ...initial, max_tokens: 300 }, new AbortController().signal),
+  ).rejects.toThrow(/Original model budget/);
+  expect(f.router.paidRequests()).toBe(2);
+  await writeFile(path, saved);
+  await transport.requireResumeBudget(f.job);
+  expect(await transport.summary(resumed)).toMatchObject({ actualAtomic: '5000' });
+});
+
+it.each(['messages', 'responses'] as const)(
+  'waits past the former 180-second paid %s deadline and settles once',
+  async (protocol) => {
+    const f = await fixture({ protocol });
+    const transport = f.make();
+    const request = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'first' }] };
+    const invoke = (body: Record<string, unknown>) =>
+      protocol === 'responses'
+        ? transport.responses(f.job, body, new AbortController().signal)
+        : transport.messages(f.job, body, new AbortController().signal);
+    await invoke(request); // Establish warm credit before the slow inference.
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.router.delayMs = 200_000;
+    f.router.onDelayArmed = entered;
+    vi.useFakeTimers();
+    const pending = expect(invoke({ ...request, max_tokens: 200 })).resolves.toEqual(
+      protocol === 'responses'
+        ? 'event: response.completed\ndata: {"owned":"native wire"}\n\n'
+        : f.message,
+    );
+    await started;
+    await vi.advanceTimersByTimeAsync(200_000);
+    await pending;
+    expect(f.router.paidRequests()).toBe(2);
+    expect((await transport.summary(f.job)).uncertain).toEqual([]);
+  },
+);
 
 it('recovers a dropped paid response through signed owner lookup without another model authorization', async () => {
   const f = await fixture({ drop: true });

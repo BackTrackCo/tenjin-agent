@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing';
 import { DATA, OFFER, SESSION, machine } from './fixtures';
 
 const SUBAGENT = 'mcp__plugin_tenjin_router__subagent';
+const WORKER = 'tenjin-worker-f30fcbad-15d3-4515-86d5-5856048032bf';
 const ASSIGNMENT = {
   description: 'Read the selected file',
   prompt: 'Read src/example.ts and report the exported names verbatim. Final line: DONE.',
@@ -31,7 +32,7 @@ function enabled(files: Map<string, string>) {
 }
 function native(on: On) {
   const ran: string[] = [];
-  on('tool.call', { tool: ['Agent', 'Task'] }, async (_$, e) => {
+  on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async (_$, e) => {
     ran.push(e.tool_use_id);
     return { result: 'native child result' as never };
   });
@@ -53,6 +54,7 @@ test('a real action offer holds Agent and reaches the parent without a legacy st
       session_id: SESSION,
       tool_use_id: 'agent_offer',
       input: ASSIGNMENT,
+      tool: 'Agent',
     },
   ]);
   expect(ran).toEqual([]);
@@ -154,4 +156,177 @@ test('disabled inference calls Agent without asking the subagent transport', asy
   await $.tool.call({ tool: 'Agent', tool_use_id: 'off', ...ASSIGNMENT });
   expect(asked).toBe(false);
   expect(ran).toEqual(['off']);
+});
+
+test('SendMessage to an owned worker holds the complete continuation without claiming delivery', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: offered, text: offered };
+  });
+  const ran = native(on);
+  const input = { to: WORKER, message: 'Continue with exactly this follow-up. Final line: DONE.' };
+  const result = await $.tool.call({ tool: 'SendMessage', tool_use_id: 'resume_send', ...input });
+  expect(asked).toEqual([
+    { session_id: SESSION, tool_use_id: 'resume_send', input, tool: 'SendMessage' },
+  ]);
+  expect(ran).toEqual([]);
+  expect(result.result).toEqual({ success: false, message: offered });
+  expect(result.context?.join(' ')).toContain('no continuation started');
+});
+
+test('Agent resume compatibility holds the owned handle through the same captured offer path', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: offered, text: offered };
+  });
+  const ran = native(on);
+  const input = { ...ASSIGNMENT, resume: WORKER };
+  const result = await $.tool.call({ tool: 'Agent', tool_use_id: 'resume_agent', ...input });
+  expect(asked).toEqual([
+    { session_id: SESSION, tool_use_id: 'resume_agent', input, tool: 'Agent' },
+  ]);
+  expect(ran).toEqual([]);
+  expect(result.result).toMatchObject({
+    status: 'completed',
+    agentId: `tenjin-offer-${OFFER}`,
+    canContinueAgent: false,
+  });
+});
+
+test('disabled routing refuses reserved worker and unstarted-offer addresses before native fallback', async ($, on) => {
+  machine(on);
+  let asked = false;
+  on('tool.call', { tool: SUBAGENT }, async () => {
+    asked = true;
+    return { result: offered, text: offered };
+  });
+  const ran = native(on);
+  const agent = await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 'off_owned_agent',
+    ...ASSIGNMENT,
+    resume: '  TENJIN-WORKER-malformed  ',
+  });
+  expect(agent.result).toMatchObject({ status: 'completed', canContinueAgent: false });
+  expect(JSON.stringify(agent.result)).toContain('No continuation started');
+  const send = await $.tool.call({
+    tool: 'SendMessage',
+    tool_use_id: 'off_owned_send',
+    to: `tenjin-offer-${OFFER}`,
+    message: 'Continue',
+  });
+  expect(send.result).toMatchObject({ success: false });
+  expect(JSON.stringify(send.result)).toContain('unavailable');
+  expect(asked).toBe(false);
+  expect(ran).toEqual([]);
+});
+
+test('owned continuations never fall through after a transport error or invalid response', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  let reply: string | undefined;
+  on('tool.call', { tool: SUBAGENT }, async () => {
+    if (reply === undefined) throw Error('Local transport unavailable');
+    return { result: reply, text: reply };
+  });
+  const ran = native(on);
+  for (const [id, value] of [
+    ['unavailable', undefined],
+    ['native', JSON.stringify({ action: 'native' })],
+    ['refused', JSON.stringify({ action: 'refused', started: false })],
+    ['malformed', '{invalid'],
+    ['started', JSON.stringify({ action: 'offer', started: true, offer_id: OFFER })],
+  ]) {
+    reply = value;
+    const send = await $.tool.call({
+      tool: 'SendMessage',
+      tool_use_id: `send_${id}`,
+      to: WORKER,
+      message: 'Continue',
+    });
+    expect(send.result).toMatchObject({ success: false });
+    expect(JSON.stringify(send.result)).toContain('No continuation started');
+    const agent = await $.tool.call({
+      tool: 'Task',
+      tool_use_id: `agent_${id}`,
+      ...ASSIGNMENT,
+      resume: WORKER,
+    });
+    expect(agent.result).toMatchObject({ status: 'completed', canContinueAgent: false });
+  }
+  expect(ran).toEqual([]);
+});
+
+test('mixed owned and native addresses stay held when the backend refuses them', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: '{"action":"refused","started":false}' };
+  });
+  const ran = native(on);
+  const input = {
+    to: 'native-agent',
+    recipient: WORKER,
+    message: 'Do not redirect either address',
+  };
+  const result = await $.tool.call({ tool: 'SendMessage', tool_use_id: 'mixed', ...input });
+  expect(asked).toEqual([
+    { session_id: SESSION, tool_use_id: 'mixed', input, tool: 'SendMessage' },
+  ]);
+  expect(result.result).toMatchObject({ success: false });
+  expect(ran).toEqual([]);
+});
+
+test('a validated local refusal preserves its actionable reason without native fallback', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const refusal = {
+    action: 'refused',
+    started: false,
+    reason: 'Original accounting is missing; restore its existing records before continuing.',
+    instruction: 'No continuation started. Do not buy an uncertain invocation again.',
+  };
+  on('tool.call', { tool: SUBAGENT }, async () => ({
+    result: JSON.stringify({ ...refusal, extra: 'UNVALIDATED_EXTRA' }),
+  }));
+  const ran = native(on);
+  const result = await $.tool.call({
+    tool: 'SendMessage',
+    tool_use_id: 'local_refusal',
+    to: WORKER,
+    message: 'Continue',
+  });
+  expect(result.result).toEqual({ success: false, message: JSON.stringify(refusal) });
+  expect(ran).toEqual([]);
+});
+
+test('ordinary native addresses and mentions in message text retain native behavior', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: '{"action":"native"}' };
+  });
+  const ran = native(on);
+  const input = { ...ASSIGNMENT, resume: 'native-agent-id' };
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'native_resume', ...input });
+  await $.tool.call({
+    tool: 'SendMessage',
+    tool_use_id: 'native_message',
+    to: 'native-agent-id',
+    message: `The text mentions ${WORKER}; this is not its address.`,
+  });
+  expect(ran).toEqual(['native_resume', 'native_message']);
+  expect(asked).toEqual([
+    { session_id: SESSION, tool_use_id: 'native_resume', input, tool: 'Agent' },
+  ]);
 });

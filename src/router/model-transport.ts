@@ -88,6 +88,14 @@ export class ModelTransport {
   get origin() {
     return new URL(this.options.baseUrl).origin;
   }
+  /** A continuation must retain every old charge and uncertain reservation. */
+  async requireResumeBudget(job: ModelJob) {
+    const path = join(this.options.dataDir, 'model-jobs', `${job.id}.budget.json`);
+    await withFileLock(`${path}.lock`, async () => {
+      if (!budgetSchema.safeParse(await readJsonFile(path, 1_000_000)).success)
+        throw new Error('Original model budget is unavailable; refusing continuation');
+    });
+  }
   async route(body: unknown, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const route = this.routing.routeFor(this.options.baseUrl);
@@ -151,6 +159,8 @@ export class ModelTransport {
     return withFileLock(`${path}.lock`, async () => {
       const raw = await readJsonFile(path, 1_000_000);
       const parsed = budgetSchema.safeParse(raw);
+      if (job.decision.requireExistingBudget === true && !parsed.success)
+        throw new Error('Original model budget is unavailable; refusing continuation');
       if (!parsed.success && (await lstat(path).catch(() => null)))
         throw new Error('Unreadable model budget; refusing another authorization');
       const current = await modelSettings(dataDir, job.root);
@@ -295,7 +305,7 @@ export class ModelTransport {
       try {
         result = await payer
           .routeFor(baseUrl)
-          .send(url, { method: 'POST', jsonBody: body, timeoutMs: 180_000, blockRedirects: true });
+          .send(url, { method: 'POST', jsonBody: body, timeoutMs: 360_000, blockRedirects: true });
       } catch (cause) {
         throw new Error(
           `Model call uncertain (${body.invocationId}); recover its receipt before retrying`,

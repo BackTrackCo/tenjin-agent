@@ -2,6 +2,9 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
+import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn() }));
 import { qualifiedModelWorker } from './model-worker';
 import { makeInstructionContext } from './model-instructions';
@@ -11,7 +14,165 @@ import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
 let dir: string;
 afterEach(async () => {
+  vi.unstubAllEnvs();
   if (dir) await rm(dir, { recursive: true, force: true });
+});
+
+async function continuationFixture() {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'model-continuation-')));
+  const repo = join(dir, 'repo'),
+    configDir = join(dir, 'claude');
+  await mkdir(repo);
+  await mkdir(join(repo, '.git'));
+  await mkdir(configDir);
+  vi.stubEnv('CLAUDE_CONFIG_DIR', configDir);
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      router: {
+        subagents: true,
+        subagentConsent: {
+          version: 2,
+          instructions: 'applicable',
+          recipients: ['Tenjin', 'DeepSeek'],
+          repositories: [repo],
+          maxJobAtomic: '1000000',
+          routerOrigin: 'http://localhost:3939',
+        },
+      },
+    }),
+  );
+  const route = vi.fn(),
+    requireResumeBudget = vi.fn(async () => {});
+  const model = new ModelHandoff({
+    dataDir: dir,
+    transport: {
+      origin: 'http://localhost:3939',
+      route,
+      requireResumeBudget,
+    } as unknown as ModelTransport,
+  });
+  const initial = await model.store.offer({
+    sessionId: 'root',
+    turnId: 'initial',
+    callId: 'initial-call',
+    root: repo,
+    task: 'Original complete task',
+    native: { prompt: 'Original complete task', subagent_type: 'general-purpose' },
+    decision: { ...offer, routerOrigin: 'http://localhost:3939', claudePermissionMode: 'default' },
+    capAtomic: '900000',
+  });
+  const sdkSessionId = randomUUID();
+  const conversation = await model.conversations.create({
+    job: initial,
+    parentSessionId: 'root',
+    sdkSessionId,
+    configDir,
+  });
+  const owner = { parentSessionId: 'root', root: repo, configDir };
+  await model.conversations.accept(conversation.handle, owner, initial.id);
+  await model.conversations.finish(
+    conversation.handle,
+    owner,
+    initial.id,
+    'completed',
+    'Original result',
+  );
+  vi.mocked(qualifiedModelWorker).mockResolvedValue({ path: '/fixture/worker', source: 'path' });
+  vi.mocked(getSessionInfo).mockResolvedValue({ sessionId: sdkSessionId, cwd: repo } as Awaited<
+    ReturnType<typeof getSessionInfo>
+  >);
+  const session: ModelSession = {
+    sessionId: 'root',
+    turnId: 'later-turn',
+    cwd: repo,
+    transcript: '',
+    harness: 'claude',
+    claudePermissionMode: 'default',
+  };
+  return { model, session, conversation, owner, initial, route, requireResumeBudget };
+}
+
+it('offers an across-day continuation with full parent veto, same job ceiling and no Jev fee', async () => {
+  const f = await continuationFixture();
+  const now = Date.now();
+  vi.spyOn(Date, 'now').mockReturnValue(now + 3 * 86400000);
+  try {
+    const native = {
+      to: f.conversation.handle,
+      message: 'Continue with the exact next step.\nReturn JSON.',
+    };
+    const result = await f.model.capture(f.session, 'follow-up', native, undefined, 'SendMessage');
+    expect(result).toMatchObject({
+      action: 'offer',
+      started: false,
+      continuation: true,
+      worker_handle: f.conversation.handle,
+      routingFeeAtomic: '0',
+      capAtomic: '900000',
+      parentPolicy: expect.stringContaining('A live applicable no-pay instruction'),
+      instruction: expect.stringContaining('final veto'),
+    });
+    expect('parentPolicy' in result ? result.parentPolicy : undefined).not.toContain(
+      'otherwise retry the original native Agent call unchanged',
+    );
+    const selected = await f.model.store.pending('root', 'later-turn');
+    expect(selected).toMatchObject({
+      task: native.message,
+      decision: {
+        jobId: f.initial.decision.jobId,
+        workerHandle: f.conversation.handle,
+        workerConfigDir: f.owner.configDir,
+      },
+    });
+    expect(f.requireResumeBudget).toHaveBeenCalledWith(
+      expect.objectContaining({ id: f.initial.id }),
+    );
+    expect(f.route).not.toHaveBeenCalled();
+    expect(
+      await f.model.capture(f.session, 'follow-up', native, undefined, 'SendMessage'),
+    ).toMatchObject({ offer_id: selected!.id });
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it('refuses owned handles for missing history, foreign parents, revocation and unavailable accounting without routing', async () => {
+  const f = await continuationFixture();
+  const native = { resume: f.conversation.handle, prompt: 'Continue' };
+  expect(
+    await f.model.capture({ ...f.session, sessionId: 'foreign' }, 'foreign', native),
+  ).toMatchObject({ action: 'refused' });
+  vi.mocked(getSessionInfo).mockResolvedValue(undefined);
+  expect(await f.model.capture(f.session, 'missing', native)).toMatchObject({ action: 'refused' });
+  vi.mocked(getSessionInfo).mockResolvedValue({
+    sessionId: f.conversation.sdkSessionId,
+    cwd: f.session.cwd,
+  } as Awaited<ReturnType<typeof getSessionInfo>>);
+  f.requireResumeBudget.mockRejectedValueOnce(new Error('missing budget'));
+  expect(await f.model.capture(f.session, 'budget', native)).toMatchObject({ action: 'refused' });
+  await writeFile(join(dir, 'config.json'), '{}');
+  expect(await f.model.capture(f.session, 'revoked', native)).toMatchObject({ action: 'refused' });
+  expect(f.route).not.toHaveBeenCalled();
+  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
+});
+
+it('refuses a complete follow-up whose encoded private record would be unreadable without truncating or selecting it', async () => {
+  const f = await continuationFixture();
+  const result = await f.model.capture(
+    f.session,
+    'large',
+    {
+      to: f.conversation.handle,
+      message: 'Keep every character: ' + '\u0000'.repeat(120_000),
+    },
+    undefined,
+    'SendMessage',
+  );
+  expect(result).toMatchObject({ action: 'refused', started: false });
+  expect(await f.model.store.pending('root', 'later-turn')).toBeNull();
+  expect((await f.model.conversations.lookup(f.conversation.handle, f.owner))?.state).toBe('idle');
+  expect(f.route).not.toHaveBeenCalled();
 });
 
 it('routes the complete resubmitted task with owned parent context once, and preserves the parent veto', async () => {

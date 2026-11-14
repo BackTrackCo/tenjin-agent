@@ -31,6 +31,7 @@ const jobSchema = z.object({
   result: z.string().optional(),
 });
 export type ModelJob = z.infer<typeof jobSchema>;
+export const modelJobSchema = jobSchema;
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
 
 /** One active foreground delegation per root turn; immutable calls, atomic selection. */
@@ -83,7 +84,10 @@ export class ModelJobStore {
         state,
         expiresAt: Date.now() + 15 * 60_000,
       };
-      await writePrivate(this.path(job.id), JSON.stringify(job));
+      const serialized = JSON.stringify(job);
+      if (Buffer.byteLength(serialized) > 1_000_000)
+        throw new Error('Complete model assignment exceeds private record size limit');
+      await writePrivate(this.path(job.id), serialized);
       await writePrivate(
         this.window(input.sessionId, input.turnId),
         JSON.stringify({ id: job.id }),

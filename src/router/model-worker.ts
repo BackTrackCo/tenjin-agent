@@ -31,6 +31,12 @@ import {
 } from './claude-model-policy';
 import type { InstructionContext } from './model-instructions';
 import {
+  claudeWorkerPrivatePaths,
+  prepareClaudeWorkerSession,
+  type ClaudeWorkerSession,
+} from './claude-worker-session';
+import { claudeWorkerProcess } from './claude-worker-process';
+import {
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
@@ -90,6 +96,7 @@ export async function runModelWorker(
     codexPolicy?: CodexModelPolicy;
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
+    claudeSession?: ClaudeWorkerSession;
     permission: (
       tool: string,
       input: Record<string, unknown>,
@@ -140,11 +147,16 @@ async function runQualifiedWorker(
   const assertCurrentMode = () =>
     assertClaudeWorkerMode(permissionMode, options.currentClaudePermissionMode?.());
   assertCurrentMode();
+  const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
+  const privatePaths = await claudeWorkerPrivatePaths(options.dataDir, job.root);
+  options.signal.throwIfAborted();
+  assertCurrentMode();
   const controller = new AbortController();
   const cancel = () => controller.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
   const token = randomBytes(32).toString('hex');
+  const nativeProcess = claudeWorkerProcess();
   const pending = new Set<Promise<void>>();
   let worker: ReturnType<typeof query> | undefined;
   let proxyFailure: { error: unknown } | undefined;
@@ -226,6 +238,8 @@ async function runQualifiedWorker(
     );
   });
   let result: string | undefined;
+  let executionFailure: { error: unknown } | undefined;
+  let closeFailure: { error: unknown; quiescent: boolean } | undefined;
   const repeats = new WorkerRepeatReminder();
   try {
     await new Promise<void>((resolve, reject) => {
@@ -250,6 +264,7 @@ async function runQualifiedWorker(
       prompt: job.task,
       options: {
         pathToClaudeCodeExecutable: binary.path,
+        spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: job.root,
         env,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
@@ -258,6 +273,7 @@ async function runQualifiedWorker(
         effort: 'high',
         abortController: controller,
         permissionMode,
+        ...session?.query,
         settingSources: ['user', 'project', 'local'],
         // Native worktree and sandbox, fail closed when unavailable. No bypass mode.
         // Preserve the parent's workspace, including uncommitted changes.
@@ -268,6 +284,7 @@ async function runQualifiedWorker(
             blockReadsOutsideWorkingDirectories: true,
             blockWritesOutsideWorkingDirectories: true,
             workingDirectoriesAsGiven: [job.root],
+            deny: privatePaths.deny,
           },
         },
         sandbox: {
@@ -276,7 +293,7 @@ async function runQualifiedWorker(
           failIfUnavailable: true,
           filesystem: {
             denyRead: [
-              options.dataDir,
+              ...privatePaths.paths,
               join(homedir(), '.aws'),
               join(job.root, '.env'),
               join(job.root, '.env.local'),
@@ -284,9 +301,12 @@ async function runQualifiedWorker(
               join(homedir(), '.ssh'),
               join(homedir(), '.codex', 'auth.json'),
             ],
+            denyWrite: privatePaths.paths,
           },
         },
-        persistSession: false,
+        // Direct callers remain ephemeral; only the owned controller may retain
+        // and reopen a session. Native retention/config discovery are unchanged.
+        persistSession: session !== undefined,
         // Emergency runaway guard, not the former ordinary 40-turn cutoff.
         maxTurns: WORKER_EMERGENCY_TURNS,
         disallowedTools: ['Agent', 'Task', 'mcp__plugin_tenjin_router__subagent'],
@@ -378,13 +398,22 @@ async function runQualifiedWorker(
     for await (const message of worker) {
       if (message.type === 'system' && message.subtype === 'init') {
         const matches = message.permissionMode === permissionMode;
+        if (session) {
+          if ((await realpath(message.cwd)) !== (await realpath(job.root)))
+            throw new Error('Native Claude changed the owned worker workspace');
+          session.assert(message.session_id);
+        }
         if (matches && !claudeMcpProviderCompatible(await worker.mcpServerStatus()))
           throw new Error('An MCP depends on replaced provider credentials; keep native');
+        if (!matches) throw new Error('Native Claude changed the owned permission mode');
+        await session?.bind(message.session_id);
+        controller.signal.throwIfAborted();
+        assertCurrentMode();
         initialized(matches);
         clearTimeout(initTimer);
-        if (!matches) throw new Error('Native Claude changed the owned permission mode');
       }
       if (message.type === 'result') {
+        session?.assert(message.session_id);
         if (message.subtype !== 'success') throw workerResultError(message);
         result = message.result;
       }
@@ -393,19 +422,41 @@ async function runQualifiedWorker(
     if (!result) throw new Error('DeepSeek worker returned no completed result');
     if (Buffer.byteLength(result, 'utf8') > 256_000)
       throw new Error('Worker handback exceeds size limit; inspect receipts before retrying');
-    return result;
   } catch (error) {
-    if (proxyFailure) throw proxyFailure.error;
-    throw error;
+    executionFailure = proxyFailure ?? { error };
   } finally {
     clearTimeout(initTimer);
     initialized(false);
     controller.signal.removeEventListener('abort', denyInitialization);
     controller.abort();
     worker?.close();
+    const processClosed = (async () => {
+      let cleanupFailure: { error: unknown } | undefined;
+      try {
+        await worker?.return?.();
+      } catch (error) {
+        cleanupFailure = { error };
+      }
+      const drained = await nativeProcess.drain();
+      return cleanupFailure || !drained.successful
+        ? {
+            error:
+              cleanupFailure?.error ??
+              new Error('Claude worker process did not close successfully'),
+            quiescent: true,
+          }
+        : undefined;
+    })().then(
+      (outcome) => outcome,
+      (error) => ({ error, quiescent: false }),
+    );
     bridge.closeAllConnections();
     await Promise.allSettled([...pending]);
     await new Promise<void>((resolve) => bridge.close(() => resolve()));
     options.signal.removeEventListener('abort', cancel);
+    closeFailure = await processClosed;
   }
+  if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
+  if (executionFailure) throw executionFailure.error;
+  return result!;
 }

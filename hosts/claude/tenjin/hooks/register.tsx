@@ -100,20 +100,56 @@ export const register: Register = (on) => {
       description: `${e.description}\n\nCopy complete assignments verbatim, including the final line, literal commands and output format. Add only missing known context. Preserve all binding details, actors and scope; never truncate. Add no model/routing advice. Compare the full assignment with the source before calling.`,
     };
   });
-  on('tool.call', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
-    const data = await tenjinDataDir($);
-    const router = data ? asRecord((await readJson($, `${data}/config.json`))?.router) : undefined;
-    if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
-      return next(e);
+  on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async ($, e, next) => {
     const { tool_use_id, ...input } = e;
     delete (input as Json).tool;
+    const owned = ownedContinuationAddress(input, e.tool);
+    if (e.tool === 'SendMessage' && !owned) return next(e);
+    const unavailable = () => ({
+      result: heldModelResult(
+        e.tool,
+        input,
+        'Tenjin continuation is unavailable. No continuation started. Do not retry this owned handle through native tools.',
+        'tenjin-unavailable',
+      ),
+    });
     try {
+      const data = await tenjinDataDir($);
+      const router = data
+        ? asRecord((await readJson($, `${data}/config.json`))?.router)
+        : undefined;
+      if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
+        return owned ? unavailable() : next(e);
       const response = await $.tool.call({
         tool: 'mcp__plugin_tenjin_router__subagent',
-        capture: { session_id: await $.session.id(), tool_use_id, input },
+        capture: { session_id: await $.session.id(), tool_use_id, input, tool: e.tool },
       });
       const text = textOf(response.result) ?? response.text;
       const offer = asRecord(parseJson(text));
+      if (
+        owned &&
+        offer?.action === 'refused' &&
+        offer.started === false &&
+        typeof offer.reason === 'string' &&
+        offer.reason.trim().length > 0 &&
+        offer.reason.length <= 4000 &&
+        typeof offer.instruction === 'string' &&
+        offer.instruction.trim().length > 0 &&
+        offer.instruction.length <= 4000
+      )
+        return {
+          result: heldModelResult(
+            e.tool,
+            input,
+            JSON.stringify({
+              action: 'refused',
+              started: false,
+              reason: offer.reason,
+              instruction: offer.instruction,
+            }),
+            'tenjin-unavailable',
+          ),
+        };
       if (
         offer?.action === 'offer' &&
         offer.started === false &&
@@ -122,16 +158,21 @@ export const register: Register = (on) => {
           offer.offer_id,
         )
       ) {
-        const context = heldOfferContext(offer);
+        const context = heldOfferContext(offer, e.tool === 'SendMessage');
         return {
-          result: heldAgentResult(input, text ?? JSON.stringify(offer), offer.offer_id),
+          result: heldModelResult(
+            e.tool,
+            input,
+            text ?? JSON.stringify(offer),
+            `tenjin-offer-${offer.offer_id}`,
+          ),
           ...(context ? { context } : {}),
         };
       }
     } catch {
-      /* Native pass-through if the local transport is unavailable. */
+      /* An owned handle must never reach a native executor, including on local failure. */
     }
-    return next(e);
+    return owned ? unavailable() : next(e);
   });
 
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {
@@ -895,10 +936,20 @@ function parseJson(text: unknown): unknown {
   }
 }
 
-function heldAgentResult(input: Json, offerText: string, offerId: string) {
+/** Reserve address fields only; backend validation owns identity and follow-up semantics. */
+function ownedContinuationAddress(input: Json, tool: string): boolean {
+  const addresses = tool === 'SendMessage' ? [input.to, input.recipient] : [input.resume];
+  return addresses
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .some((value) => typeof value === 'string' && /^tenjin-(worker|offer)-/i.test(value.trim()));
+}
+
+function heldModelResult(tool: string, input: Json, offerText: string, agentId: string) {
+  // Native SendMessage refusals return this data shape; an offer is not a delivered message.
+  if (tool === 'SendMessage') return { success: false, message: offerText };
   return {
     status: 'completed' as const,
-    agentId: `tenjin-offer-${offerId}`,
+    agentId,
     ...(typeof input.subagent_type === 'string' ? { agentType: input.subagent_type } : {}),
     prompt: typeof input.prompt === 'string' ? input.prompt : '',
     content: [{ type: 'text' as const, text: offerText }],
@@ -918,7 +969,7 @@ function heldAgentResult(input: Json, offerText: string, offerId: string) {
   };
 }
 
-function heldOfferContext(offer: Json): string[] | undefined {
+function heldOfferContext(offer: Json, continuation = false): string[] | undefined {
   const consent = asRecord(offer.consent);
   if (
     consent?.version !== 2 ||
@@ -939,7 +990,7 @@ function heldOfferContext(offer: Json): string[] | undefined {
   // This field is constructed by the local handoff, after its consent check.
   // Never promote the router's reason or other model/provider text into context.
   return [
-    "This local Tenjin hook held the Agent call; no worker started. Saved repository opt-in permits eligible Tenjin/DeepSeek handoffs within the offer's cap. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.",
+    `${continuation ? 'This local Tenjin hook held the continuation; no continuation started.' : 'This local Tenjin hook held the Agent call; no worker started.'} Saved repository opt-in permits eligible Tenjin/DeepSeek handoffs within the offer's cap. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.`,
   ];
 }
 
