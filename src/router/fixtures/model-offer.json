@@ -8,7 +8,7 @@
   "thinking": true,
   "effort": "high",
   "reason": "bounded_work",
-  "policyHash": "a9709b33be046c50915444adaeb8f36aa68570ab95482b5574e195806169932d",
+  "policyHash": "0c342dbf8db76d0d2636af9800dd9de7755ae12999e6733ec8ef48a3898b764d",
   "rateVersion": "deepseek-flash-1017-2026-11-13",
   "routingFeeAtomic": "3000",
   "proxyFeePercent": 5,
