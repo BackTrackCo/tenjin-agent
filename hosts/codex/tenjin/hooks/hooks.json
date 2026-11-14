@@ -118,26 +118,7 @@
               "transcript_path": "${transcript_path}",
               "cwd": "${cwd}"
             },
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "mcp_tool",
-            "server": "router",
-            "tool": "hook",
-            "input": {
-              "kind": "end",
-              "hook_event_name": "${hook_event_name}",
-              "session_id": "${session_id}",
-              "transcript_path": "${transcript_path}",
-              "cwd": "${cwd}"
-            },
-            "timeout": 15
+            "timeout": 3
           }
         ]
       }

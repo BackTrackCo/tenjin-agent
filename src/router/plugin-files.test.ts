@@ -456,21 +456,7 @@ describe('the checked-in hosts/codex templates', () => {
           hooks: leg({ kind: 'shortfall', ...call, tool_response: '${tool_response}' }, 15),
         },
       ],
-      Interrupt: [{ hooks: leg({ kind: 'interrupt', ...common }, 15) }],
-      SessionEnd: [
-        {
-          hooks: leg(
-            {
-              kind: 'end',
-              hook_event_name: '${hook_event_name}',
-              session_id: '${session_id}',
-              transcript_path: '${transcript_path}',
-              cwd: '${cwd}',
-            },
-            15,
-          ),
-        },
-      ],
+      Interrupt: [{ hooks: leg({ kind: 'interrupt', ...common }, 3) }],
       PermissionRequest: [
         {
           matcher: 'mcp__router__request|mcp__router__subagent',

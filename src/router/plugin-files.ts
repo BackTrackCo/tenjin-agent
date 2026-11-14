@@ -535,7 +535,9 @@ export function renderPluginBin(launch: RuntimeLaunch): Record<string, string> {
  * launcher on each switch.
  */
 export const CODEX_WEB_MATCHER = 'webrun';
-export const CODEX_LEGS = CODEX_HOOK_KINDS;
+// SessionEnd rejects MCP handlers. Shutdown is handled by the owned server's
+// disconnect/SIGTERM drain; keep the old wire kind readable for compatibility.
+export const CODEX_LEGS = CODEX_HOOK_KINDS.filter((kind) => kind !== 'end');
 /**
  * The first Codex that runs `mcp_tool` hooks: rust-v0.149.0 adds
  * `core/src/hook_mcp_executor.rs`; rust-v0.148.0 builds hooks with no MCP
@@ -617,7 +619,7 @@ export const CODEX_ALLOW_HOOK_COMMAND = `echo '${CODEX_ALLOW_ANSWER}'`;
  */
 export const CODEX_ALLOW_HOOK_COMMAND_WINDOWS = `echo ${CODEX_ALLOW_ANSWER}`;
 
-/** Every hook the Codex plugin carries: the three legs, the deny and the allow answer. */
+/** Every registered hook: the supported MCP legs, deny and allow answers. */
 export const CODEX_HOOK_COUNT = CODEX_LEGS.length + 2;
 
 /** `hooks/hooks.json`: the same for the package and the runtime render. */
@@ -642,8 +644,7 @@ export function renderCodexHooks(): { hooks: Record<string, unknown[]> } {
           hooks: codexLeg('shortfall', AFTER_CALL_TIMEOUT_SECONDS),
         },
       ],
-      Interrupt: [{ hooks: codexLeg('interrupt', 15) }],
-      SessionEnd: [{ hooks: codexLeg('end', 15) }],
+      Interrupt: [{ hooks: codexLeg('interrupt', 3) }],
       PermissionRequest: [
         {
           matcher: `${CODEX_REQUEST_TOOL}|${CODEX_SUBAGENT_TOOL}`,

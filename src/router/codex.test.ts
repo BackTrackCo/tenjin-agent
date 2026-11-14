@@ -627,7 +627,7 @@ const listed = (...rows: unknown[]) => ({
 const legRow = (key: string, over: Record<string, unknown> = {}) =>
   row(key, { handlerType: 'mcpTool', server: 'router', tool: 'hook', ...over });
 const allRows = () =>
-  ['prompt', 'native', 'shortfall', 'delegation', 'interrupt', 'end']
+  ['prompt', 'native', 'shortfall', 'delegation', 'interrupt']
     .map((key) => legRow(key))
     .concat([row('deny'), allowRow()]);
 
@@ -1103,7 +1103,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
 
   it("trusts exactly the plugin's own legs, deny and allow, and no foreign row", async () => {
     const rows = [...ownRows(), foreign];
-    expect(rows.filter(ownCodexRow)).toHaveLength(8);
+    expect(rows.filter(ownCodexRow)).toHaveLength(7);
     expect(ownCodexRow(foreign)).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, pluginId: 'other@x' })).toBe(false);
     expect(ownCodexRow({ ...ownRows()[0]!, server: 'elsewhere' })).toBe(false);
@@ -1193,7 +1193,7 @@ describe('turning the Codex plugin hooks on, and the update refresh', () => {
       'codex plugin marketplace add /package/dist/hosts/codex',
       'codex plugin add tenjin@tenjin',
     ]);
-    expect(trustedKeys).toHaveLength(8);
+    expect(trustedKeys).toHaveLength(7);
     expect(line).toBe(CODEX_REFRESH_LINES.done);
   });
 
