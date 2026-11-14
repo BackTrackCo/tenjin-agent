@@ -414,18 +414,16 @@ export async function runRouterStatus(
     : low
       ? [yellow('! Tenjin is on, but your balance is low')]
       : [`${paint(ctx.io, 'green', '●')} Tenjin is on`];
-  // A lifetime estimate belongs beside the balance, never in the Today row.
-  const routingCost = spentAtomic > 0n ? ` · spent about ${dollars(spentAtomic)} on routing` : '';
   const balance: Row[] =
     wallet === null
       ? []
       : wallet.atomic === null
-        ? [{ label: 'Balance', value: `unknown${routingCost}` }]
+        ? [{ label: 'Balance', value: 'unknown' }]
         : [
             {
               label: 'Balance',
-              value: `${dollars(wallet.atomic)}${routingCost}`,
-              styled: `${paint(ctx.io, 'bold', dollars(wallet.atomic))}${routingCost}`,
+              value: dollars(wallet.atomic),
+              styled: paint(ctx.io, 'bold', dollars(wallet.atomic)),
               ...(low ? { hint: `tenjin fund ${SUGGESTED_FUND_USD}` } : {}),
             },
           ];

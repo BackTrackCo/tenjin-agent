@@ -388,7 +388,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.05 for routing fees. It counts toward your spend limits once.',
+      'Tenjin set aside $0.05 for routing. It counts toward your spend limits.',
     );
     deposited = 0n;
     const next = await runRequestTool(

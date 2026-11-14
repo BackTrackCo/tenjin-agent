@@ -558,7 +558,7 @@ describe('RoutingPayer', () => {
     expect(router.log).toEqual(['POST /api/x402-router/route unpaid']);
     expect(unlocks).toBe(0);
     expect(unpaidSentence(FEE_ABOVE_CEILING, 'person', ROUTING_FEE_CEILING_ATOMIC + 1n)).toBe(
-      'Tenjin could not pay the routing fee (the router quoted $0.250001 a call, more than this install agreed to pay), so Tenjin is not routing calls until that is fixed. Your usual tools still work.',
+      'Tenjin could not pay the routing fee (the router quoted $0.250001 a call, more than this install agreed to pay). Free routing still works. Your usual tools still work.',
     );
   });
 

@@ -29,7 +29,7 @@ describe('the spend question', () => {
 
   it('asks how much the agent may spend, with the fee terms either answer approves', () => {
     expect(spendChoiceQuestion()).toBe(
-      'How much can your agent spend from its balance? Paid tool recommendations cost 15% of the estimated tool price, up to 25¢. You pay separately for tools you use. Routing top-ups count toward your limits. Either choice approves this.',
+      'How much can your agent spend from its balance? Tenjin charges 15% of the estimated tool cost for paid recommendations, up to 25¢. Tool use is billed separately. Routing top-ups count toward your limits. Either choice approves this.',
     );
   });
 

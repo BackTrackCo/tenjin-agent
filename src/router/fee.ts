@@ -259,7 +259,7 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
  * deposit counts toward spend limits once, when it is sent ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin set aside $${usd(amountAtomic)} for routing fees. It counts toward your spend limits once.`;
+  return `Tenjin set aside $${usd(amountAtomic)} for routing. It counts toward your spend limits.`;
 }
 
 /**
@@ -269,7 +269,7 @@ export function depositSentence(amountAtomic: bigint): string {
  * and doctor results keep `unpaid().fix`).
  */
 export const WALLET_LOW_SENTENCE =
-  'Tenjin could not pay for this routing answer. Routing answers that need no payment can still work. Your usual tools still work.';
+  'Your balance was too low for this routing fee. Free routing still works.';
 
 /**
  * The one line the user sees, once per session and reason, when a call was not
@@ -302,7 +302,7 @@ export function unpaidSentence(
     why === FEE_ABOVE_CEILING && quotedAtomic !== undefined
       ? `the router quoted $${usd(quotedAtomic)} a call, more than this install agreed to pay`
       : u.reason;
-  return `Tenjin could not pay the routing fee (${reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
+  return `Tenjin could not pay the routing fee (${reason}). Free routing still works. ${fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;

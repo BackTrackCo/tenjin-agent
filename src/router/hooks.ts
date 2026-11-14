@@ -1995,10 +1995,9 @@ async function decide(
     warn(`tenjin hook: the routing fee was not paid (${outcome.why}), so the native tool runs`);
     return null;
   }
-  // A PAID CALL WENT THROUGH: a wallet reason told earlier in this session is
-  // over, and the session hears so once ("Tenjin wallet unlocked." or
-  // "... funded.").
-  if (route !== undefined && outcome.status === 'decided') {
+  // ONLY A COMPLETED SIGNED PAYMENT establishes paid routing recovered.
+  // A free decision, or a background deposit, proves no such recovery.
+  if (outcome.status === 'decided' && route?.paid?.() === true) {
     const cleared = await noticeCleared(deps.dataDir, sessionId, now).catch(() => null);
     if (cleared !== null) deps.notice?.(cleared);
   }

@@ -352,6 +352,8 @@ interface Call {
   quoted?: bigint;
   /** Whether a request carrying a payment went out. */
   paid: boolean;
+  /** A non-warm signed routing payment completed successfully. */
+  paidAnswer?: true;
   /** Whether the router answered any request of this call. */
   answered: boolean;
   /** The wallet's channel, once the server asked for a payment. */
@@ -576,6 +578,7 @@ export class RoutingPayer {
       },
       deposited: () => settledIn(calls),
       toppedUp: () => this.takeToppedUp(),
+      paid: () => calls.at(-1)?.paidAnswer === true,
     };
   }
 
@@ -929,7 +932,10 @@ export class RoutingPayer {
     // A fee paid and answered: routing works, whatever was said before.
     if (call.paid && response.status < 400) {
       this.report({ routing: { status: 'ready', at: this.now() } });
-      if (!carrier) this.track(this.afterPaid(call));
+      if (!carrier) {
+        if (response.status >= 200 && response.status < 300) call.paidAnswer = true;
+        this.track(this.afterPaid(call));
+      }
     }
     return response;
   }

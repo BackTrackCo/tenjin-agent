@@ -1296,8 +1296,9 @@ export interface DecisionDeps {
   settings?: WireSettings;
 }
 
-/** How a routing call is paid. `send` throws {@link RouteSkipped} when it has
- *  no paid answer for the call, which then is skipped, or read as the
+/** One decision's payment transport; do not share it between concurrent decisions.
+ * `send` throws {@link RouteSkipped} when it has
+ *  no usable answer for the call, which then is skipped, or read as the
  *  transport failure it carries in `unreached`. */
 export interface DecisionRoute {
   send: (url: string, options: HttpRequestOptions) => Promise<HttpResult>;
@@ -1309,6 +1310,9 @@ export interface DecisionRoute {
    *  read, 0n for none, and taken by the read. Only a hook leg reads it, so
    *  the person is told, in its `systemMessage`. */
   toppedUp?: () => bigint;
+  /** The most recent call completed a signed routing payment successfully.
+   *  Free answers, background top-ups and payments still settling do not count. */
+  paid?: () => boolean;
 }
 
 /** The paid route gave this call no answer: the wallet locked, low or over

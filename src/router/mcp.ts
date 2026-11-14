@@ -138,10 +138,9 @@ const INSTRUCTIONS =
   'To see what is available, `{browse}` lists the tools for a need (or every tool, for ' +
   '""), and `{tool}` with a row\'s id returns its spec; both are free. ' +
   'Run the selected spec with `{id, input}`; no routing decision is needed. ' +
-  `${SCOPE_RULE} Call it alone and wait for its result. Routing fees and tool charges are separate. ` +
-  'Charges to the Tenjin balance follow the user’s spend limits; tool charges on a connected ' +
-  'account follow that account’s plan. A wallet on THIS machine pays routing and other balance charges, and a routing ' +
-  'deposit counts against those limits once, when it is sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
+  `${SCOPE_RULE} Call it alone and wait for its result. Routing fees and tool charges paid from the Tenjin balance ` +
+  'follow the user’s spend limits. Connected-account tools bill that account’s plan. ' +
+  'Routing top-ups count once, when sent. A call whose total is over the per-call limit or remaining daily budget pays ' +
   'nothing and returns `needs_approval` with what it costs; its `nextStep` says ' +
   'what follows. When the user asks to add funds to Tenjin, run `tenjin fund 5` (or the ' +
   'amount they name). When a paid call fails for low balance, ask the person once to add ' +
