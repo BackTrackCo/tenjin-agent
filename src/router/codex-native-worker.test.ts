@@ -549,6 +549,17 @@ it('re-reads parent environment after worker start and before its first inferenc
   );
   expect(responses).not.toHaveBeenCalled();
 });
+it('rejects an updated parent deferred inventory before its first inference purchase', async () => {
+  const accepted = await job();
+  onTurn = async () => {
+    parentOverride = { deferredNamespaces: ['mcp__newly_advertised'] };
+    await provider();
+  };
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /parent environment or authority changed/,
+  );
+  expect(responses).not.toHaveBeenCalled();
+});
 it('takes only the owned completed final answer, including notifications racing turn/start', async () => {
   const accepted = await job();
   onTurn = async () => {
@@ -682,6 +693,22 @@ it('refuses an explicitly parent-served external namespace missing from the chil
   expect(requests.some((r) => r.method === 'turn/start')).toBe(false);
   policy.parent!.externalTools = [{ namespace: 'mcp__fixture', tools: ['read'] }];
   expect(await qualify()).not.toBeNull();
+});
+it('requires deferred-only parent capabilities even when no tools were materialized', async () => {
+  policy.parent!.deferredNamespaces = ['mcp__artifact_session', 'mcp__codex_app', 'mcp__fixture'];
+  expect(await qualify()).toBeNull();
+  expect(requests.some((r) => r.method === 'turn/start')).toBe(false);
+  expect(responses).not.toHaveBeenCalled();
+  policy.parent!.deferredNamespaces = ['mcp__fixture'];
+  expect(await qualify()).not.toBeNull();
+  inventory[0]!.tools = {};
+  expect(await qualify()).toBeNull();
+});
+it('does not treat arbitrary MCP tool metadata as proof of another native namespace', async () => {
+  policy.parent!.deferredNamespaces = ['mcp__artifact_session'];
+  inventory[0]!.tools = { read: { name: 'read', namespace: 'mcp__artifact_session' } };
+  expect(await qualify()).toBeNull();
+  expect(responses).not.toHaveBeenCalled();
 });
 it('native rule-file drift is detected before the first paid request', async () => {
   await mkdir(join(dir, 'rules'));

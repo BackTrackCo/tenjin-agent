@@ -222,6 +222,55 @@ it('requires a native full local witness and owned applied settings, never user 
   expect((await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent).toBeUndefined();
 });
 
+it('binds advertised deferred MCP namespaces without copying descriptions or requiring materialized tools', async () => {
+  const f = await authorityFixture();
+  const advertised = {
+    type: 'world_state',
+    payload: {
+      full: false,
+      state: {
+        tools: {
+          mcp__artifact_session: 'PRIVATE_DEFERRED_DESCRIPTION',
+          mcp__neon: 'Database tools',
+          functions: 'Native client tools',
+        },
+      },
+    },
+  };
+  await f.save([f.meta, f.context, f.user, advertised]);
+  const parent = (await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent;
+  expect(parent?.deferredNamespaces).toEqual(['mcp__artifact_session', 'mcp__neon']);
+  expect(parent?.externalTools).toBeUndefined();
+  expect(JSON.stringify(parent)).not.toContain('PRIVATE_DEFERRED_DESCRIPTION');
+  await f.save([
+    f.meta,
+    f.context,
+    f.user,
+    advertised,
+    {
+      type: 'world_state',
+      payload: { full: false, state: { tools: { mcp__neon: null } } },
+    },
+  ]);
+  const changed = (await codexModelPolicy(f.path, 'root', 'turn', dir))?.parent;
+  expect(changed?.deferredNamespaces).toEqual(['mcp__artifact_session']);
+  expect(changed?.fingerprint).not.toBe(parent?.fingerprint);
+});
+
+it('keeps unreconstructable advertised tool namespaces native', async () => {
+  const f = await authorityFixture();
+  await f.save([
+    f.meta,
+    f.context,
+    f.user,
+    {
+      type: 'world_state',
+      payload: { full: false, state: { tools: { mcp__neon: { opaque: 'not native schema' } } } },
+    },
+  ]);
+  expect(await codexModelPolicy(f.path, 'root', 'turn', dir)).toBeNull();
+});
+
 it.each(['remote', 'filesystem', 'foreign_settings', 'changed_policy', 'later_turn'])(
   'does not admit stale or foreign local authority: %s',
   async (kind) => {

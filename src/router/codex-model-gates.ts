@@ -18,6 +18,8 @@ export interface CodexModelPolicy {
     runtimeWorkspaceRoots: string[];
     collaborationMode?: { mode: 'default'; developerInstructions: string | null };
     externalTools?: Array<{ namespace: string; tools: string[] }>;
+    /** Native WorldState's advertised MCP namespace inventory, including deferred tools. */
+    deferredNamespaces?: string[];
     transcriptPath?: string;
     localEnvironment?: NativeLocalEnvironment;
     fingerprint: string;

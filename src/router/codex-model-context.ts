@@ -5,6 +5,7 @@ import type { CodexModelPolicy } from './codex-model-gates';
 import { isQualifiedCodexModelVersion } from '../lib/codex-model-version';
 import { canonicalHash } from '../lib/request-schema';
 import { CodexEnvironmentWitness, nativeLocalFilesystem } from './codex-local-environment';
+import { CodexToolWitness } from './codex-tool-witness';
 
 const record = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -55,6 +56,7 @@ export async function codexModelPolicy(
     let latestTurn: string | undefined;
     let appliedSettings: Record<string, unknown> | undefined;
     const environment = new CodexEnvironmentWitness();
+    const advertisedTools = new CodexToolWitness();
     let baseInstructions: string | undefined;
     let runtimeWorkspaceRoots: string[] | undefined;
     const developerFragments: string[] = [];
@@ -128,7 +130,8 @@ export async function codexModelPolicy(
         if (payload.turn_id === turn) found = payload;
         return true;
       }
-      if (row.type === 'world_state') return environment.apply(payload);
+      if (row.type === 'world_state')
+        return environment.apply(payload) && advertisedTools.apply(payload);
       if (row.type === 'event_msg' && payload.type === 'thread_settings_applied') {
         if (
           payload.thread_id !== session ||
@@ -289,6 +292,7 @@ export async function codexModelPolicy(
       runtimeWorkspaceRoots = roots as string[];
     }
     const localEnvironment = environment.local(await realpath(cwd));
+    const deferredNamespaces = advertisedTools.namespaces();
     const boundLocal =
       appliedSettings &&
       localEnvironment &&
@@ -327,7 +331,7 @@ export async function codexModelPolicy(
       collaborationMode = { mode: 'default', developerInstructions: developer as string | null };
     }
     const parent =
-      baseInstructions !== undefined && runtimeWorkspaceRoots && boundLocal
+      baseInstructions !== undefined && runtimeWorkspaceRoots && boundLocal && deferredNamespaces
         ? {
             sessionId: session,
             turnId: turn,
@@ -336,6 +340,7 @@ export async function codexModelPolicy(
             runtimeWorkspaceRoots,
             transcriptPath: path,
             localEnvironment: boundLocal,
+            deferredNamespaces: deferredNamespaces.filter((name) => name.startsWith('mcp__')),
             ...(collaborationMode ? { collaborationMode } : {}),
             ...(externalTools.size
               ? {

@@ -305,14 +305,17 @@ async function hostSnapshot(
         add(`mcp__${row.name}`, key);
         if (isRecord(tool) && typeof tool.name === 'string') {
           add(`mcp__${row.name}`, tool.name);
-          if (typeof tool.namespace === 'string' && tool.namespace.startsWith('mcp__'))
-            add(tool.namespace, tool.name);
         }
       }
     }
     for (const expected of options.policy.parent?.externalTools ?? [])
       if (expected.tools.some((name) => !served.get(expected.namespace)?.has(name)))
         throw new Error('A parent-served external tool is unavailable in the native worker');
+    for (const namespace of options.policy.parent?.deferredNamespaces ?? [])
+      if (!served.get(namespace)?.size)
+        throw new Error(
+          'A parent-advertised deferred namespace is unavailable in the native worker',
+        );
   }
   const host = { config: projectConfig(raw.config), layers, requirements, hooks, ruleHashes };
   return {
