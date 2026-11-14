@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
@@ -8,20 +8,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPOSIT_GATE_TIMEOUT_MS, GATE_TIMEOUT_MS } from './gate';
 import { runHookCommand, runHookKind, STALE_HOOK_LINE } from './hook-command';
 import { runPromptHook, type HookDeps } from './hooks';
-import { requestDecision } from './decision';
-import { ROUTING_FEE_CEILING_ATOMIC } from './fee';
+import { LEGACY_ROUTING_QUOTE_ATOMIC } from './fee';
+import { recordTermsTold, TERMS_CHANGED_SENTENCE } from './terms-notice';
+import { runRequestTool } from './tool';
 import { CliError } from '../lib/errors';
-import { FakeRouter, payerDeps, testSigner } from './fee-test-utils';
+import { FakeRouter, payerDeps, TEST_POLICY, testSigner } from './fee-test-utils';
 import { RoutingPayer, WALLET_LOW_BACKOFF_MS, type RoutingPayerDeps } from './routing-payer';
+import { requestDecision } from './decision';
 import { writeRouterMemo } from './router-memo';
+import { noticeFor } from './notice-markers';
 import { readSpendSummary } from '../lib/wallet/spend';
 import { KEYCHAIN_LOCKED_FIX, unlockDetails, type UnlockReason } from '../lib/wallet-unlock';
 import {
   ASK_FOR_REPAIR,
   REPAIR_CLAUSE,
-  WALLET_FUNDED,
+  PAID_ROUTING_RESTORED,
   WALLET_REASONS,
-  WALLET_UNLOCKED,
 } from './wallet-reasons';
 
 /**
@@ -67,6 +69,8 @@ beforeEach(async () => {
       install: { improveAsked: true },
     }),
   );
+  // An install whose person approved limits on today's routing terms.
+  await recordTermsTold(dir);
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -259,25 +263,74 @@ describe('the hook legs and the routing fee', () => {
       'POST /api/x402-router/route paid',
     ]);
     expect(fake.depositedOn).toEqual(['warm']);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * LEGACY_ROUTING_QUOTE_ATOMIC);
   });
 
   it('tells the user once, beside the offer, that the deposit set funds aside for routing', async () => {
-    // A quote below the ceiling: the line names the ceiling, which later calls
-    // keep. The fake announces the router's $0.05 hint, and that is the deposit.
+    // The line names the deposit and no fee. The fake announces the router's
+    // $0.05 hint, and that is the deposit.
     const fake = new FakeRouter({ amount: '1000' });
     fake.body = OFFER;
     const p = payer(fake);
     const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(contextOf(first)).toContain('CoinMarketCap fits this');
     expect(systemMessageOf(first)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
+      'Tenjin set aside $0.05 for routing. It counts toward your spend limits.',
     );
     // A voucher from that deposit is nothing new.
     const second = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
   });
+
+  it('tells an install that approved the old fee its new routing terms once, never asking', async () => {
+    // An install from before per-answer quotes: nothing records the new terms told.
+    await rm(join(dir, 'router', 'terms'), { recursive: true, force: true });
+    const fake = new FakeRouter({ amount: '1000' });
+    fake.body = OFFER;
+    const p = payer(fake);
+    const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+    expect(systemMessageOf(first)).toContain(TERMS_CHANGED_SENTENCE);
+    // Once per machine, a new session included.
+    const later = await runHookKind('prompt', prompt('sess-2'), deps(fake.fetch, p));
+    expect(systemMessageOf(later)).toBeUndefined();
+  });
+
+  it.each(['tool', 'hook'] as const)(
+    'shares the terms notice across tool and hook when the %s routes first',
+    async (first) => {
+      await rm(join(dir, 'router', 'terms'), { recursive: true, force: true });
+      const fake = new FakeRouter({ amount: '1000' });
+      const p = payer(fake);
+      const authorizer = payerDeps(fake, dir, wallet).authorizer(TEST_POLICY);
+      const sink = { write: () => true } as unknown as NodeJS.WritableStream;
+      const tool = async () =>
+        (
+          await runRequestTool(
+            { query: 'what is the current price of ETH in USD' },
+            {
+              ctx: {
+                dataDir: dir,
+                flags: { json: true, timeout: 5000, baseUrl: BASE },
+                io: { stdout: sink, stderr: sink, isTTY: false },
+              },
+              cwd: dir,
+              authorizer,
+              fetchImpl: fake.fetch,
+              route: p.routeFor.bind(p),
+            },
+          )
+        ).summary;
+      const hook = async () =>
+        systemMessageOf(await runHookKind('prompt', prompt(), deps(fake.fetch, p))) ?? '';
+
+      expect(await (first === 'tool' ? tool() : hook())).toContain(TERMS_CHANGED_SENTENCE);
+      expect((await stat(join(dir, 'router', 'terms', 'per-answer-quote'))).isFile()).toBe(true);
+      expect(await tool()).not.toContain(TERMS_CHANGED_SENTENCE);
+      expect(await hook()).not.toContain(TERMS_CHANGED_SENTENCE);
+      expect(fake.settledFees).toBe(3);
+    },
+  );
 
   it("tells the person about a start top-up on the next hook leg, never in a tool call's result", async () => {
     const fake = new FakeRouter();
@@ -322,7 +375,7 @@ describe('the hook legs and the routing fee', () => {
     [
       'the wallet holds less than the deposit',
       { walletBalance: async () => 12_999n },
-      'the wallet holds less than the $0.013 Tenjin needs to set aside for routing',
+      'Free routing still works.',
       [ASK, WARM_ASK],
     ],
     [
@@ -368,7 +421,6 @@ describe('the hook legs and the routing fee', () => {
       const first = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
       // Nothing was routed: no offer, and the native tool runs.
       expect(contextOf(first)).toBeUndefined();
-      expect(systemMessageOf(first)).toContain('could not pay');
       expect(systemMessageOf(first)).toContain(says);
       expect(systemMessageOf(first)).not.toContain('tenjin fund');
       expect(systemMessageOf(first)).not.toContain('TENJIN_WALLET_PASSPHRASE');
@@ -555,7 +607,7 @@ describe('the hook legs and the routing fee', () => {
     expect(systemMessageOf(second)).toBeUndefined();
     expect(fake.deposits).toBe(1);
     expect(fake.paidRequests()).toBe(2);
-    expect([...fake.channels.values()][0]!.charged).toBe(2n * ROUTING_FEE_CEILING_ATOMIC);
+    expect([...fake.channels.values()][0]!.charged).toBe(2n * LEGACY_ROUTING_QUOTE_ATOMIC);
     const ledger = await readSpendSummary(dir);
     expect(ledger?.reservations).toEqual([]);
     expect(ledger?.committedAtomic).not.toBe('0');
@@ -655,7 +707,7 @@ describe('wallet notices', () => {
     expect(systemMessageOf(repeat)).toBeUndefined();
   });
 
-  it('says the wallet is unlocked once, after a paid decided call', async () => {
+  it('says paid routing recovered once, after a paid decided call', async () => {
     const fake = new FakeRouter();
     const state: { reason: UnlockReason | 'abort' | null } = { reason: 'keychain_locked' };
     const p = payer(fake, switchable(state));
@@ -664,17 +716,22 @@ describe('wallet notices', () => {
     state.reason = null;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(fake.paidRequests()).toBeGreaterThan(0);
-    expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_UNLOCKED);
+    expect(systemMessageOf(paid)?.split('\n')).toContain(PAID_ROUTING_RESTORED);
     const next = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
     expect(systemMessageOf(next)).toBeUndefined();
   });
 
-  it('says nothing about funding before the facilitator answers', async () => {
+  it('does not claim funding just because the first paid routing answer succeeded', async () => {
+    holdTime();
     const fake = new FakeRouter();
     const p = payer(fake);
-    const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(answer)).not.toContain('tenjin fund');
-    expect(fake.paidRequests()).toBeGreaterThan(0);
+    try {
+      const answer = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
+      expect(systemMessageOf(answer) ?? '').not.toContain('tenjin fund');
+      expect(fake.paidRequests()).toBeGreaterThan(0);
+    } finally {
+      await p.idle();
+    }
   });
 
   it('skips as wallet_low before sending a deposit that would consume the reserve', async () => {
@@ -684,27 +741,116 @@ describe('wallet notices', () => {
     // The deposit-only balance read refuses before signing.
     expect(fake.paidRequests()).toBe(0);
     expect(fake.deposits).toBe(0);
-    expect(systemMessageOf(answer)).toContain('could not pay');
-    expect(systemMessageOf(answer)).toContain('Your usual tools still work.');
+    expect(systemMessageOf(answer)).toContain('balance was too low');
+    expect(systemMessageOf(answer)).toContain('Free routing still works.');
     expect(systemMessageOf(answer)).not.toContain('tenjin fund');
   });
 
-  it('says the wallet is funded once, after a paid call that wallet_low held back', async () => {
+  it('says paid routing recovered once, after a paid call that wallet_low held back', async () => {
     const fake = new FakeRouter();
     fake.walletAtomic = 2_000n;
     let clock = NOW;
     const p = payer(fake, { now: () => clock });
     const low = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(low)).toContain('could not pay');
-    expect(systemMessageOf(low)).toContain('Your usual tools still work.');
+    expect(systemMessageOf(low)).toContain('balance was too low');
+    expect(systemMessageOf(low)).toContain('Free routing still works.');
     expect(systemMessageOf(low)).not.toContain('tenjin fund');
     fake.walletAtomic = 10_000_000n;
     // The balance is read only by the next top-up, once the refused one's
-    // backoff ends: then the prompt pays, and the funding is said once.
+    // backoff ends: then the prompt pays, and paid-routing recovery is said once.
     clock += WALLET_LOW_BACKOFF_MS[0]!;
     const paid = await runHookKind('prompt', prompt(), deps(fake.fetch, p));
-    expect(systemMessageOf(paid)?.split('\n')).toContain(WALLET_FUNDED);
+    expect(systemMessageOf(paid)?.split('\n')).toContain(PAID_ROUTING_RESTORED);
     expect(systemMessageOf(paid)).toContain('Tenjin set aside $0.05 for routing.');
+  });
+
+  it('keeps a low-wallet warning through a free answer and reports paid routing recovery once', async () => {
+    const fake = new FakeRouter();
+    fake.walletAtomic = 2_000n;
+    let clock = NOW;
+    let free = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (free)
+        return new Response(JSON.stringify(fake.body), {
+          headers: { 'content-type': 'application/json' },
+        });
+      return fake.fetch(input, init);
+    };
+    const p = payer(fake, { now: () => clock });
+    const low = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(low)).toBeDefined();
+    expect(fake.paidRequests()).toBe(0);
+    free = true;
+    const answer = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(fake.paidRequests()).toBe(0);
+    expect(fake.deposits).toBe(0);
+    free = false;
+    fake.walletAtomic = 10_000_000n;
+    clock += WALLET_LOW_BACKOFF_MS[0]!;
+    const paid = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(paid)?.split('\n')).toContain('Paid routing is working again.');
+    const next = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(next)).toBeUndefined();
+    await p.idle();
+  });
+
+  it('reports recovery from existing channel credit without claiming funds, and does not reuse old paid evidence', async () => {
+    const fake = new FakeRouter();
+    const p = payer(fake);
+    await p.prewarm();
+    await p.topUpIfLow(BASE);
+    p.routeFor(BASE).toppedUp?.();
+    const deposits = fake.deposits;
+    fake.walletAtomic = 0n;
+    await noticeFor(dir, 'sess-1', 'wallet_low', NOW);
+    const route = p.routeFor(BASE);
+    const paid = await runHookKind('prompt', prompt(), {
+      ...deps(fake.fetch, p),
+      route: () => route,
+    });
+    expect(systemMessageOf(paid)).toBe(PAID_ROUTING_RESTORED);
+    expect(fake.deposits).toBe(deposits);
+    expect(route.paid?.()).toBe(true);
+    await noticeFor(dir, 'sess-1', 'wallet_low', NOW);
+    const free: typeof fetch = async () =>
+      new Response(JSON.stringify(fake.body), {
+        headers: { 'content-type': 'application/json' },
+      });
+    const answer = await runHookKind('prompt', prompt(), { ...deps(free, p), route: () => route });
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(route.paid?.()).toBe(false);
+    expect(fake.deposits).toBe(deposits);
+    await p.idle();
+  });
+
+  it('does not claim a locked wallet recovered from a free answer', async () => {
+    const fake = new FakeRouter();
+    const state: { reason: UnlockReason | 'abort' | null } = { reason: 'keychain_locked' };
+    const getSigner = vi.fn(switchable(state).getSigner);
+    let free = false;
+    const fetchImpl: typeof fetch = async (input, init) =>
+      free
+        ? new Response(JSON.stringify(fake.body), {
+            headers: { 'content-type': 'application/json' },
+          })
+        : fake.fetch(input, init);
+    const p = payer(fake, { getSigner });
+    const locked = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(locked)).toContain(KEYCHAIN_LOCKED_FIX);
+    const unlocks = getSigner.mock.calls.length;
+    free = true;
+    const answer = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(answer)).toBeUndefined();
+    expect(getSigner).toHaveBeenCalledTimes(unlocks);
+    expect(fake.paidRequests()).toBe(0);
+    free = false;
+    state.reason = null;
+    const paid = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(paid)?.split('\n')).toContain('Paid routing is working again.');
+    const next = await runHookKind('prompt', prompt(), deps(fetchImpl, p));
+    expect(systemMessageOf(next)).toBeUndefined();
+    await p.idle();
   });
 
   it('says nothing for an unlock that ran out of time', async () => {

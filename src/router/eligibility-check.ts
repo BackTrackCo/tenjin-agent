@@ -16,9 +16,9 @@ import {
 import {
   CHANNEL_DEPOSIT_ATOMIC,
   feeRefusal,
+  LEGACY_ROUTING_QUOTE_ATOMIC,
   MAX_CHANNEL_DEPOSIT_ATOMIC,
   refusedWhy,
-  ROUTING_FEE_CEILING_ATOMIC,
   routingDepositAtomic,
 } from './fee';
 import { UNKNOWN_DETAIL } from './wallet-reasons';
@@ -137,12 +137,11 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
         }).catch(() => null),
   ]);
 
-  // The deposit the payer's top-up would sign for this balance. Doctor has no
-  // live SDK quote: it estimates from the announced target and the known fee
-  // ceiling, with the same liquidity policy as the deposit strategy.
+  // Doctor has no live SDK quote; estimate the announced target and the
+  // router's fixed quote using the same liquidity policy as the deposit strategy.
   const depositAtomic = routingDepositAtomic({
     suggestedAtomic: CHANNEL_DEPOSIT_ATOMIC,
-    neededAtomic: ROUTING_FEE_CEILING_ATOMIC,
+    neededAtomic: LEGACY_ROUTING_QUOTE_ATOMIC,
     balanceAtomic,
     perCallAtomic: input.policy.maxAutoSpendAtomic,
     maxAtomic: MAX_CHANNEL_DEPOSIT_ATOMIC,
@@ -154,8 +153,8 @@ async function check(input: EligibilityInput, facts: WalletFacts): Promise<Eligi
     sessionSpentAtomic: spent ?? 0n,
   });
   const routing = canPayRouting({
-    // No quote to go on here: the ceiling, the most a call would pay.
-    feeRefusal: feeRefusal(input.policy, input.host, ROUTING_FEE_CEILING_ATOMIC),
+    // No quote to go on here: the router's fixed quote.
+    feeRefusal: feeRefusal(input.policy, input.host, LEGACY_ROUTING_QUOTE_ATOMIC),
     sign,
     creditAtomic,
     depositRefusal: deposit.decision === 'allow' ? null : refusedWhy(deposit.reason),

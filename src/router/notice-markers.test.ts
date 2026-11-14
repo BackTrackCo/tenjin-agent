@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { WALLET_FUNDED, WALLET_UNLOCKED } from './wallet-reasons';
+import { PAID_ROUTING_RESTORED } from './wallet-reasons';
 import { firstNoticeFor, noticeCleared, noticeFor, settleCurrent } from './notice-markers';
 
 const NOW = 1_800_000_000_000;
@@ -40,26 +40,26 @@ describe('noticeFor', () => {
 });
 
 describe('noticeCleared', () => {
-  it('says funded after wallet_low, once', async () => {
+  it('says paid routing recovered after wallet_low, once', async () => {
     await noticeFor(dir, 's', 'wallet_low', NOW);
-    expect(await noticeCleared(dir, 's', NOW + 1)).toBe(WALLET_FUNDED);
+    expect(await noticeCleared(dir, 's', NOW + 1)).toBe(PAID_ROUTING_RESTORED);
     expect(await noticeCleared(dir, 's', NOW + 2)).toBeNull();
   });
 
-  it('says unlocked after passphrase_missing, exactly once when two callers race', async () => {
+  it('says paid routing recovered after passphrase_missing, exactly once when two callers race', async () => {
     await noticeFor(dir, 's', 'passphrase_missing', NOW);
     const answers = await Promise.all([
       noticeCleared(dir, 's', NOW + 1),
       noticeCleared(dir, 's', NOW + 1),
       noticeCleared(dir, 's', NOW + 1),
     ]);
-    expect(answers.filter((a) => a === WALLET_UNLOCKED)).toHaveLength(1);
+    expect(answers.filter((a) => a === PAID_ROUTING_RESTORED)).toHaveLength(1);
     expect(answers.filter((a) => a === null)).toHaveLength(2);
   });
 
   it('tells a relapse again after it cleared', async () => {
     await noticeFor(dir, 's', 'passphrase_wrong', NOW);
-    expect(await noticeCleared(dir, 's', NOW + 1)).toBe(WALLET_UNLOCKED);
+    expect(await noticeCleared(dir, 's', NOW + 1)).toBe(PAID_ROUTING_RESTORED);
     expect(await noticeFor(dir, 's', 'passphrase_wrong', NOW + 2)).toBe('tell');
   });
 

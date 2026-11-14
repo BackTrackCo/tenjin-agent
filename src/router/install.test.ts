@@ -42,7 +42,7 @@ const ADDRESS = '0x3c0D84055994c3062819Ce8730869D0aDeA4c3Bf';
 
 /** The routing fee's terms, as the selector shows them. */
 const FEE_TERMS =
-  'Routing costs $0.001 a call; tool charges are separate. Tenjin may set aside up to $0.25 at a time for it, counted in these limits. Either choice approves this.';
+  'Tenjin charges 15% of the estimated tool cost for paid recommendations. Tool use is billed separately. Routing top-ups count toward your limits. Either choice approves this.';
 /** What a run that could not ask prints for the agent that ran it. */
 const QUESTION = `How much can your agent spend from its balance? ${FEE_TERMS}`;
 const ASK_LINES = [
@@ -582,6 +582,19 @@ describe('install asks a person the spend question once', () => {
     expect(spendStepOf(result)).toBeUndefined();
   });
 
+  // Limits approved now were approved on today's routing terms; a refresh, as
+  // `tenjin update` runs, leaves the old install to be told them once.
+  it('records the routing terms as told only when limits are approved in the run', async () => {
+    const { termsNotice } = await import('./terms-notice');
+    // An agent's install hands the question over; the refresh asks nothing.
+    await runRouterInstall({}, ctx(), deps());
+    await runRouterInstall({ refresh: true }, ctx(), deps());
+    expect(await termsNotice(data)).not.toBeNull();
+    await rm(join(data, 'router', 'terms'), { recursive: true, force: true });
+    await runRouterInstall({ yes: true }, ctx(), deps());
+    expect(await termsNotice(data)).toBeNull();
+  });
+
   it('--yes keeps a 0 the file names', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ maxAutoSpend: '0' }));
     await runRouterInstall({ yes: true }, ctx(), deps());
@@ -1016,7 +1029,7 @@ it('status separates routing deposits in the spend window from the remaining rou
       routingDeposits: { atomic: '250000' },
       automaticExposure: { atomic: '300000' },
     },
-    routingCredit: { remaining: { atomic: '240000' }, calls: 80 },
+    routingCredit: { remaining: { atomic: '240000' } },
   });
   const shown = receipt(result).map((line) => line.replace(/\s+/g, ' ').trim());
   expect(shown).toContain('Today $0.30 of $5.00 · up to $0.25 a call');

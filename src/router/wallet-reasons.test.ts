@@ -12,9 +12,8 @@ import {
   sessionStartMessage,
   stillLockedSentence,
   WALLET_CLASS,
-  WALLET_FUNDED,
+  PAID_ROUTING_RESTORED,
   WALLET_REASONS,
-  WALLET_UNLOCKED,
   walletClearedSentence,
 } from './wallet-reasons';
 
@@ -34,11 +33,11 @@ const REPAIR = '`tenjin wallet repair`';
 
 describe('walletClearedSentence', () => {
   it.each<[string, string | null]>([
-    ['wallet_low', WALLET_FUNDED],
-    ['wallet_locked', WALLET_UNLOCKED],
-    ['passphrase_missing', WALLET_UNLOCKED],
-    ['keychain_locked', WALLET_UNLOCKED],
-    ['env_passphrase_wrong', WALLET_UNLOCKED],
+    ['wallet_low', PAID_ROUTING_RESTORED],
+    ['wallet_locked', PAID_ROUTING_RESTORED],
+    ['passphrase_missing', PAID_ROUTING_RESTORED],
+    ['keychain_locked', PAID_ROUTING_RESTORED],
+    ['env_passphrase_wrong', PAID_ROUTING_RESTORED],
     ['budget_reached', null],
     ['no_payer', null],
     ['payment_failed', null],

@@ -124,8 +124,8 @@ export async function probeRouter(
         name: 'router',
         status: 'warn',
         required: true,
-        detail: `${url} quotes $${usd(quoted)} a routing call, more than the $${usd(ROUTING_FEE_CEILING_ATOMIC)} this CLI pays, so every routing call is skipped`,
-        fix: 'Routing resumes once the router quotes within that. Your usual tools still work.',
+        detail: `${url} quotes $${usd(quoted)} a routing call, above this CLI’s current routing limit, so this fee is not paid`,
+        fix: 'Paid routing resumes once the router quotes within that limit. Free routing still works.',
       };
     }
     return { name: 'router', status: 'ok', required: true, detail: `${url} is live` };

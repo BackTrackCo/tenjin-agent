@@ -64,6 +64,29 @@ describe('status, the balance line', () => {
     expect(result.data).toMatchObject({ routingCredit: { remaining: { atomic: '18000' } } });
   });
 
+  it('keeps lifetime routing spend in JSON without changing the terminal rows', async () => {
+    const result = await runRouterStatus(ctx(), {
+      cwd: dir,
+      routingCredit: async () => 18_000n,
+      routingSpent: async () => 62_000n,
+      wallet: async () => ({ address: ADDRESS, atomic: 5_000_000n }),
+    });
+    expect(lines(result)).toEqual([
+      '● Tenjin is on',
+      '',
+      'Balance $5.00',
+      'Today $0.00 of $5.00 · up to $0.25 a call',
+      'Accounts none yet tenjin connect fal',
+      "Settings Tenjin's defaults tenjin config",
+    ]);
+    expect(result.data).toMatchObject({
+      routingCredit: { remaining: { atomic: '18000' }, spent: { atomic: '62000' } },
+    });
+    expect(JSON.stringify(result.humanLines)).not.toMatch(/routing|spent about/i);
+    expect(result.data).not.toHaveProperty('routingCredit.calls');
+    expect(JSON.stringify((await status(5_000_000n)).humanLines)).not.toContain('spent about');
+  });
+
   it('says the balance is low below the per-call limit, as `tenjin balance` does, and how to fund it', async () => {
     for (const atomic of [0n, 249_999n]) {
       const result = await status(atomic);

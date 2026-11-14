@@ -282,18 +282,17 @@ clients without it get `spec_missing`, pointing at `request({query})`.
 
 ## The paid path
 
-`POST /api/x402-router/route` takes the hook, the tool's `{query, id?}` forms
-and `warm`, behind x402
-`batch-settlement` quoting 3000 atomic USDC (`maxTimeoutSeconds` 15,
-`extra.minDeposit` 50000). The 402 is the
-only price: this client pays any quote at or below its ceiling of 3000 atomic
-USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the user's spend limits,
-pays nothing above it, and pins no payee. With the fee `off`, the route answers
-with no 402. An answer from
-a completed Jev gate settles that fee; any other answer, `warm` included,
-settles at 0, which
+`POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms and `warm`,
+behind x402
+`batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). A 402 can
+also carry the answer's own quote as a first offer, with 3000 as the second.
+The 402 is the only price: this client pays the answer's own quote ahead of
+3000, at or below its current routing limit (`ROUTING_FEE_CEILING_ATOMIC`
+in `fee.ts`) inside the user's spend limits, pays nothing above it, and pins no
+payee. With the fee `off`, the route answers with no 402. An answer from
+a completed Jev gate settles that fee; `warm` and any other answer settle at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an
-`{id, input}` there is a 400. Deposits ride only `warm` (below). The free route
+`{id, input}` there is a 400. Ordinary routing fees are funded through `warm` (below); a dear per-answer quote can carry its own inline deposit. The free route
 answers
 `{packet}` and `{query}` with `native` and the
 `fee_required` diagnostic, telling the agent to update tenjin-cli. Outcome
@@ -475,7 +474,7 @@ payment and reports each outcome under that option's id. Without `catalog` or
 ## The warm and tolerant exchanges
 
 - **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the client's
-  background top-up, the only request that carries a deposit. The server
+  background top-up that normally carries deposits. A quote above $0.003 can carry its own inline deposit. The server
   answers it with no gate, so it settles at 0. Its payment is a deposit, or a
   voucher when another process already funded the channel, so the server takes
   either. A server without the form answers 400, and the client lets the
