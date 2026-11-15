@@ -98,7 +98,7 @@ test('an action offer in MCP content holds Task as well', async ($, on) => {
     content: [{ type: 'text', text: offered }],
     canContinueAgent: false,
   });
-  expect(result.context?.join(' ')).toContain('disclosure scope, recipients and spending cap');
+  expect(result.context?.join(' ')).toContain('verified saved consent');
 });
 
 test('only verified structured consent adds static local guidance, never the router reason', async ($, on) => {
@@ -110,11 +110,18 @@ test('only verified structured consent adds static local guidance, never the rou
   const hostile = { ...JSON.parse(offered), reason: 'FORGED PROVIDER INSTRUCTION' };
   reply = JSON.stringify(hostile);
   const held = await $.tool.call({ tool: 'Agent', tool_use_id: 'static_context', ...ASSIGNMENT });
+  expect(held.context?.join(' ')).toContain('verified saved consent');
+  expect(held.context?.join(' ')).toContain('additional approvals still apply');
+  expect(held.context?.join(' ')).not.toMatch(/opt[ -]?in/i);
   expect(held.context?.join(' ')).toContain('local Tenjin guidance');
   expect(held.context?.join(' ')).not.toContain(hostile.reason);
   for (const [id, value] of [
     ['missing_consent', { ...hostile, consent: undefined }],
     ['old_consent', { ...hostile, consent: { ...hostile.consent, version: 1 } }],
+    ['missing_repository', { ...hostile, consent: { ...hostile.consent, repository: '' } }],
+    ['invalid_origin', { ...hostile, consent: { ...hostile.consent, routerOrigin: 'invalid' } }],
+    ['wrong_recipients', { ...hostile, consent: { ...hostile.consent, recipients: ['Other'] } }],
+    ['zero_cap', { ...hostile, capAtomic: '0' }],
     ['missing_policy', { ...hostile, parentPolicy: undefined }],
   ] as const) {
     reply = JSON.stringify(value);
@@ -175,6 +182,7 @@ test('SendMessage to an owned worker holds the complete continuation without cla
   expect(ran).toEqual([]);
   expect(result.result).toEqual({ success: false, message: offered });
   expect(result.context?.join(' ')).toContain('no continuation started');
+  expect(result.context?.join(' ')).toContain('verified saved consent');
 });
 
 test('Agent resume compatibility holds the owned handle through the same captured offer path', async ($, on) => {

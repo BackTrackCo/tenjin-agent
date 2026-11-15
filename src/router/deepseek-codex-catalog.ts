@@ -4,12 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { writePrivate } from './store-files';
 
-/** Published Flash catalog from DeepSeek's official Codex integration docs.
- * https://api-docs.deepseek.com/quick_start/agent_integrations/codex/
- * Original published artifact SHA256:
- * c3c8e6a019d2b80459c916aa2c4df016313039484db5d17b573b814a18a2fb16
- * This standalone public artifact is bundled; no workspace/private path needed.
- */
+/** Flash metadata attribution and source/serialized hashes are in NOTICE.md. */
 export async function nativeFlashCatalog(dataDir: string) {
   const bytes = JSON.stringify(catalog);
   const hash = createHash('sha256').update(bytes).digest('hex');

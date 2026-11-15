@@ -10,6 +10,7 @@ import type { ModelJob } from './model-job';
 import { assertInstructionMetadataCurrent, savedInstructionContext } from './model-instructions';
 import { claudeWorkerPermissionMode, type ClaudeWorkerPermissionMode } from './claude-model-policy';
 import parentPolicy from './model-parent-policy.json';
+import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { ModelConversationStore } from './model-conversations';
 import { claudeWorkerConfigDir, prepareClaudeWorkerSession } from './claude-worker-session';
 import {
@@ -127,7 +128,7 @@ export class ModelHandoff {
       'awaiting_prompt',
     );
     return held(
-      `The native child has NOT started. Submit the SAME COMPLETE PLAINTEXT assignment through the Tenjin subagent tool with delegation_id=${job.id} and task=<the full assignment text>. ${MODEL_BRIEF_GUIDANCE} Tenjin attaches parent context itself. This obtains a recommendation only. Accept its offer_id or keep native by retrying the original native call unchanged; it bypasses this hold once. Ignoring this launches neither worker.`,
+      `The native child has not started. Submit the same complete plaintext assignment through the Tenjin subagent tool with delegation_id=${job.id} and task=<the full assignment text>. ${MODEL_BRIEF_GUIDANCE} Tenjin attaches parent context itself. This obtains a recommendation only. Accept its offer_id or keep native by retrying the original native call unchanged; it bypasses this hold once. Ignoring this launches neither worker.`,
     );
   }
   async submitCodex(session: ModelSession, id: string, task: string, signal?: AbortSignal) {
@@ -413,7 +414,10 @@ export class ModelHandoff {
       parentContext,
       expectedSpendAtomic: '20000',
     };
-    if (Buffer.byteLength(JSON.stringify(admission)) + 64 > 16384 || settings.maxJobAtomic < 3000n)
+    if (
+      Buffer.byteLength(JSON.stringify(admission)) + 64 > 16384 ||
+      settings.maxJobAtomic < MODEL_ROUTING_FEE_CEILING_ATOMIC
+    )
       return native();
     const input = { ...admission, jobId: job.id };
     let raw: unknown;
@@ -435,7 +439,7 @@ export class ModelHandoff {
     if (
       !parsed.success ||
       parsed.data.jobId !== job.id ||
-      BigInt(parsed.data.routingFeeAtomic) > 3000n
+      BigInt(parsed.data.routingFeeAtomic) > MODEL_ROUTING_FEE_CEILING_ATOMIC
     ) {
       await this.store.decided(job.id, { action: 'native' });
       return { action: 'native' };
@@ -487,7 +491,7 @@ export class ModelHandoff {
         recipients: ['Tenjin', 'DeepSeek'],
       },
       instruction:
-        'Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.',
+        "Local checks verified saved consent for this repository, router origin, Tenjin/DeepSeek disclosure and inference within the offer's cap. Binding restrictions and additional approvals still apply. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.",
     };
   }
 }

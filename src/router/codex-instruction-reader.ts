@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { withAppServer, type CodexAppRequest } from '../lib/codex-app-server';
+import type { CodexAppRequest } from '../lib/codex-app-server';
 import { codexHome } from '../lib/codex-home';
-import { QUALIFIED_CODEX_MODEL_VERSIONS } from '../lib/codex-model-version';
 import { isRecord } from '../lib/guards';
 import { dataDir } from '../lib/paths';
 import { canonicalHash } from '../lib/request-schema';
+import { isSecretPath, secretHomePaths } from './model-worker-privacy';
 import type { CodexModelPolicy } from './codex-model-gates';
 
 export interface CodexInstructionReadOptions {
@@ -70,26 +70,10 @@ function privatePaths(options: CodexInstructionReadOptions): string[] {
   const home = options.home ?? homedir();
   return [
     options.dataDir ?? dataDir(env),
-    ...['.ssh', '.aws', '.kube', '.gnupg', '.claude', '.netrc', '.npmrc', '.git-credentials'].map(
-      (name) => join(homedir(), name),
-    ),
+    ...secretHomePaths(home),
     join(codexHome(home, env), 'auth.json'),
-    join(homedir(), '.claude.json'),
     ...(options.protectedPaths ?? []),
   ];
-}
-
-function privateInstructionPath(path: string, protectedPaths: string[]): boolean {
-  const parts = path.split(sep),
-    file = basename(path);
-  return (
-    protectedPaths.some((p) => inside(resolve(p), path)) ||
-    parts.some((p) => ['.ssh', '.aws', '.kube', '.gnupg', '.tenjin'].includes(p)) ||
-    file.startsWith('.env') ||
-    /^(?:auth|wallet(?:\..+)?|credentials|passphrase-store)\.json$/i.test(file) ||
-    /^(?:\.netrc|\.npmrc|\.git-credentials)$/i.test(file) ||
-    /\.(?:pem|p12|key)$/i.test(file)
-  );
 }
 
 /** Serialize captured native entries without deciding which ACL applies.
@@ -206,7 +190,7 @@ export async function readCodexInstructionFilesOnServer(
         resolve(path) !== path ||
         path.includes('\0') ||
         Buffer.byteLength(path) > 8192 ||
-        privateInstructionPath(path, shields) ||
+        isSecretPath(path, shields) ||
         (await realpath(path)) !== path
       )
         return null;
@@ -283,50 +267,4 @@ export async function readCodexInstructionFilesOnServer(
   } catch {
     return null;
   }
-}
-
-/** One no-generation native connection for instruction admission before Jev. */
-export async function readCodexInstructionFiles(
-  options: CodexInstructionReadOptions & {
-    paths: string[];
-    maxBytes: number;
-    signal?: AbortSignal;
-  },
-): Promise<CodexInstructionFile[] | null> {
-  if (!['darwin', 'linux'].includes(process.platform)) return null;
-  const profile = codexInstructionProfile(options);
-  if (!profile) return null;
-  const env = { ...(options.env ?? process.env) };
-  for (const key of [
-    'TENJIN_WALLET_PASSPHRASE',
-    'DEEPSEEK_API_KEY',
-    'TYPESAFE_KEY',
-    'TYPESAFE_API_KEY',
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_AUTH_TOKEN',
-    'OPENAI_API_KEY',
-  ])
-    delete env[key];
-  const signal = options.signal
-    ? AbortSignal.any([options.signal, AbortSignal.timeout(7_000)])
-    : AbortSignal.timeout(7_000);
-  return withAppServer(
-    options.home ?? homedir(),
-    env,
-    3_000,
-    (request) =>
-      readCodexInstructionFilesOnServer(request, options, options.paths, options.maxBytes, signal),
-    {
-      cwd: options.cwd,
-      signal,
-      experimentalApi: true,
-      expectedVersion: QUALIFIED_CODEX_MODEL_VERSIONS,
-      configOverrides: [
-        ...profile.overrides,
-        `default_permissions=${JSON.stringify(profile.name)}`,
-        'shell_environment_policy.inherit="none"',
-        'shell_environment_policy.set={LANG="C",LC_ALL="C"}',
-      ],
-    },
-  );
 }

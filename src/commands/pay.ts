@@ -212,6 +212,11 @@ export async function runPay(
   ctx: CommandContext,
   deps: PayDeps = {},
 ): Promise<CommandResult> {
+  if (process.env.TENJIN_MODEL_WORKER === '1')
+    throw new CliError(
+      'REFUSED',
+      'Nested Tenjin payments are unavailable inside a model worker; use the native tools.',
+    );
   const warnings: RegistryWarning[] = [];
   try {
     return await executePay(args, ctx, deps, warnings);

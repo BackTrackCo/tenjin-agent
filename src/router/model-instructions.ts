@@ -4,6 +4,8 @@ import { homedir, tmpdir } from 'node:os';
 import { z } from 'zod';
 import { canonicalHash } from '../lib/request-schema';
 import { mask } from '../lib/redact';
+import { isRecord as record } from '../lib/guards';
+import { isSecretPath, secretHomePaths } from './model-worker-privacy';
 import { codexHome } from '../lib/codex-home';
 import type { CodexModelPolicy } from './codex-model-gates';
 
@@ -17,7 +19,7 @@ export interface InstructionDocument {
 const probeSchema = z.object({ path: z.string(), stamp: z.string() });
 const contextSchema = z.object({
   version: z.literal(1),
-  harness: z.enum(['claude', 'codex']),
+  harness: z.literal('codex'),
   root: z.string(),
   documents: z
     .array(
@@ -42,8 +44,6 @@ export type InstructionReader = (
 ) => Promise<Array<{ path: string; contents: string; bytes: number; stamp: string }> | null>;
 
 const inside = (root: string, path: string) => path === root || path.startsWith(`${root}${sep}`);
-const record = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
 const CUSTOM_CODEX_INSTRUCTION_FIELDS = [
   'instructions',
   'base_instructions',
@@ -70,15 +70,7 @@ function assertDefaultCodexInstructions(config: Record<string, unknown>) {
 
 /** Instruction consent never authorizes wallet, login, or environment files. */
 export function protectedInstructionPath(path: string, dataDir?: string): boolean {
-  const parts = resolve(path).split(sep);
-  const file = parts.at(-1) ?? '';
-  return Boolean(
-    (dataDir && inside(resolve(dataDir), resolve(path))) ||
-    parts.some((part) => ['.ssh', '.aws', '.kube', '.gnupg', '.tenjin'].includes(part)) ||
-    file.startsWith('.env') ||
-    /^(?:auth|wallet(?:\..+)?|credentials|passphrase-store)\.json$/i.test(file) ||
-    /\.(?:pem|p12|key)$/i.test(file),
-  );
+  return isSecretPath(path, [...secretHomePaths(homedir()), ...(dataDir ? [dataDir] : [])]);
 }
 
 /** Conservative metadata discovery only. Source reads use the native reader,
@@ -189,7 +181,7 @@ export function instructionContextText(context: InstructionContext): string {
 }
 
 export async function makeInstructionContext(options: {
-  harness: 'claude' | 'codex';
+  harness: 'codex';
   root: string;
   documents: InstructionDocument[];
   configHash: string;

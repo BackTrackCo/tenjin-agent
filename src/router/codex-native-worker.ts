@@ -26,17 +26,10 @@ import { MCP_SERVER_NAME } from './names';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { codexModelPolicy } from './codex-model-context';
+import { MODEL_WORKER_CREDENTIAL_KEYS as CLEARED_CREDENTIAL_KEYS } from './model-worker-privacy';
 
 const PROVIDER = 'tenjin_deepseek_worker_v1';
 const VERSION = '0.167.0-alpha.4.1';
-const CLEARED_PROVIDER_KEYS = [
-  'DEEPSEEK_API_KEY',
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'TYPESAFE_KEY',
-  'TYPESAFE_API_KEY',
-] as const;
 // Native 0.167 ModelProviderInfo serializes these unset Options as null.
 // Only those exact defaults may disappear before the strict authority check.
 const PROVIDER_NULL_DEFAULTS = new Set([
@@ -192,12 +185,12 @@ function assertMcpEnvironment(config: Record<string, unknown>) {
   for (const [name, server] of Object.entries(config.mcp_servers)) {
     if (name === MCP_SERVER_NAME || !isRecord(server) || server.enabled === false) continue;
     if (!Array.isArray(server.env_vars)) continue;
-    for (const key of CLEARED_PROVIDER_KEYS) {
+    for (const key of CLEARED_CREDENTIAL_KEYS) {
       if (
         server.env_vars.includes(key) &&
         (!isRecord(server.env) || typeof server.env[key] !== 'string' || !server.env[key])
       )
-        throw new Error('Native MCP requires a provider credential excluded from worker commands');
+        throw new Error('Native MCP requires a credential excluded from worker commands');
     }
   }
 }
@@ -479,8 +472,7 @@ async function withNativeSession<T>(
     TENJIN_MODEL_WORKER: '1',
     TENJIN_MODEL_TOKEN: bridge.token,
   };
-  for (const key of ['TENJIN_WALLET_PASSPHRASE', ...CLEARED_PROVIDER_KEYS])
-    delete env[key as keyof typeof env];
+  for (const key of CLEARED_CREDENTIAL_KEYS) delete env[key as keyof typeof env];
   const overrides = [
     ...profile.overrides,
     ...instructionProfile.overrides,

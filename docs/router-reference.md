@@ -228,10 +228,4 @@ Update verifies npm provenance, tarball integrity and the pinned Node before act
 
 ## External subagents
 
-Tool routing and external subagent routing have separate decisions and inference payments. See [DeepSeek subagents](./subagents.md) for repository/data opt-in, parent accept/veto, the 5% proxy fee, the once-per-job router fee and current host qualification limits. Legacy native model/effort settings grant no external inference consent.
-
-Claude workers retain native session history for owned continuations across days. The same parent holds and accepts each complete follow-up through `SendMessage` (or a compatible `Agent.resume`), reusing the original job, cumulative budget and routing fee. Current consent, instructions, settings, MCPs and permissions apply on every activation. Missing history/accounting refuses continuation; native retention can remove history. No idle process or background-agent UI is promised. Codex resume is outside this pilot.
-
-### Draft external-model invocation deadlines
-
-The disabled external-model Messages and Responses lanes both allow 360 seconds for a paid invocation, including payment setup and buffered receipt delivery. Their server upstream deadline is 300 seconds across retry backoff and attempts; stream activity does not reset it. A caller cancellation or the worker's 40-minute job wall limit can stop the invocation earlier. Receipt recovery retains its 10-second request bound and never buys a replacement inference. The job ceiling and conservative exposure for uncertain calls remain in force.
+See [DeepSeek subagents](./subagents.md) for consent, disclosure, fees, parent veto, cancellation, continuation and current host limits. Model routing and inference use separate channels from tool routing. Each paid invocation has a 360-second client deadline and a 300-second server upstream deadline; receipt recovery remains bounded and never buys a replacement inference.

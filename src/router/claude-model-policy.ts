@@ -1,6 +1,7 @@
 import { basename, resolve } from 'node:path';
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk/core';
 import { isRecord } from '../lib/guards';
+import { MODEL_WORKER_CREDENTIAL_KEYS } from './model-worker-privacy';
 
 export const CLAUDE_DEEPSEEK_MODEL = 'deepseek-flash';
 // Claude strips this native context hint before calling the fixed Flash provider.
@@ -16,17 +17,11 @@ const CLEARED_ENV = [
   'CLAUDE_CODE_SESSION_ACCESS_TOKEN',
   'CLAUDE_CODE_HOST_SESSION_ID',
   'CLAUDECODE',
-  'TENJIN_WALLET_PASSPHRASE',
-  'DEEPSEEK_API_KEY',
-  'OPENAI_API_KEY',
-  'TYPESAFE_KEY',
-  'TYPESAFE_API_KEY',
+  ...MODEL_WORKER_CREDENTIAL_KEYS.filter(
+    (key) => key !== 'ANTHROPIC_API_KEY' && key !== 'ANTHROPIC_AUTH_TOKEN',
+  ),
 ] as const;
-const REPLACED_CREDENTIALS = new Set<string>([
-  ...CLEARED_ENV,
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-]);
+const REPLACED_CREDENTIALS = new Set<string>([...CLEARED_ENV, ...MODEL_WORKER_CREDENTIAL_KEYS]);
 
 export function claudeWorkerPermissionMode(value: unknown): ClaudeWorkerPermissionMode | null {
   return typeof value === 'string' && MODES.has(value)
@@ -69,6 +64,35 @@ export function assertClaudeWorkerMode(
   return mode;
 }
 
+/** These native contexts bind credentials to their host; a local worker cannot replace them. */
+export function claudeWorkerAuthCompatible(
+  env: NodeJS.ProcessEnv,
+  settingsEnv: Record<string, string> = {},
+): boolean {
+  return [env, settingsEnv].every(
+    (source) =>
+      ![
+        'CLAUDE_CODE_REMOTE',
+        'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+        'CLAUDE_CODE_REMOTE_TOOLS_PIN_STORED_LOGIN',
+        'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+        'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+        'CLAUDE_CODE_USE_MANTLE',
+        'CLAUDE_CODE_USE_GATEWAY',
+        'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+        'CLAUDE_CODE_HOST_CREDS_FILE',
+        'ANTHROPIC_UNIX_SOCKET',
+      ].some((key) => Boolean(source[key])),
+  );
+}
+
+/** Native helper auth does not approve or change any key in the user's saved profile. */
+export function claudeDeepSeekWorkerApiKeyHelper(platform = process.platform): string {
+  // The command is fixed. Its value comes only from the worker's pinned env,
+  // rather than placing another copy of the bridge secret in command text.
+  return platform === 'win32' ? 'echo %ANTHROPIC_API_KEY%' : `printf '%s' "$ANTHROPIC_API_KEY"`;
+}
+
 /** All overrides belong to the disposable worker, including its native auto classifier. */
 export function claudeDeepSeekWorkerEnv(
   parent: NodeJS.ProcessEnv,
@@ -98,10 +122,14 @@ export function claudeDeepSeekWorkerSettingsEnv(
     ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
     ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_DEEPSEEK_MODEL,
+    // This is a new local SDK child, rather than its parent's Desktop entrypoint.
+    CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+    // Native's explicit false disable flag otherwise forces memory on ahead of settings.
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
     TENJIN_MODEL_WORKER: '1',
     ANTHROPIC_MAX_RETRIES: '0',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
@@ -116,7 +144,13 @@ export function claudeManagedProviderCompatible(
   return !(resolved.sources ?? []).some(
     ({ source, settings }) =>
       source === 'managed' &&
-      Object.keys(settings.env ?? {}).some((key) => Object.hasOwn(fixed, key)),
+      (settings.autoMemoryEnabled === true ||
+        settings.apiKeyHelper !== undefined ||
+        settings.forceLoginMethod !== undefined ||
+        settings.forceLoginOrgUUID !== undefined ||
+        settings.forceLoginGatewayUrl !== undefined ||
+        settings.allowedProviders !== undefined ||
+        Object.keys(settings.env ?? {}).some((key) => Object.hasOwn(fixed, key))),
   );
 }
 

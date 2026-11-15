@@ -6,7 +6,7 @@ The external subagent runner bundles the JavaScript core of Anthropic's Claude A
 
 ## DeepSeek model metadata
 
-The Codex worker bundles Flash model metadata published in [DeepSeek's Codex integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/). The source artifact's SHA-256 is recorded alongside the loader. It uses the person's installed Codex executable; this package does not redistribute that executable.
+The Codex worker bundles Flash model metadata published in [DeepSeek's Codex integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/). The original published artifact's SHA-256 is `c3c8e6a019d2b80459c916aa2c4df016313039484db5d17b573b814a18a2fb16`. The serialized bundled catalog written at runtime has SHA-256 `80859588d6956394e4a457d6f2298c449d629a925e75526582b11aba30fb8d74`; formatting the source JSON does not preserve the original artifact bytes. It uses the person's installed Codex executable; this package does not redistribute that executable.
 
 ## BlockRun MCP
 

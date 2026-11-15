@@ -3,12 +3,15 @@ import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, resolve } from 'node:path';
+import { secretHomePaths } from './model-worker-privacy';
+import { codexHome } from '../lib/codex-home';
 import { findDefinition } from './agent-tools';
 import { join } from 'node:path';
 import {
   query,
   resolveSettings as resolveWorkerSettings,
+  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk/core';
 import type { CodexModelPolicy } from './codex-model-gates';
 import {
@@ -22,16 +25,19 @@ import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import {
   assertClaudeWorkerMode,
+  claudeDeepSeekWorkerApiKeyHelper,
   claudeDeepSeekWorkerEnv,
   claudeDeepSeekWorkerSettingsEnv,
   claudeManagedProviderCompatible,
   claudeMcpProviderCompatible,
+  claudeWorkerAuthCompatible,
   CLAUDE_DEEPSEEK_WORKER_MODEL,
   type ClaudeWorkerPermissionMode,
 } from './claude-model-policy';
 import type { InstructionContext } from './model-instructions';
 import {
   claudeWorkerPrivatePaths,
+  claudeWorkerConfigDir,
   prepareClaudeWorkerSession,
   type ClaudeWorkerSession,
 } from './claude-worker-session';
@@ -68,6 +74,7 @@ export async function qualifiedModelWorker(
 ): Promise<QualifiedWorker | null> {
   if (!dataDir) return null;
   if (codexPolicy) return qualifyNativeCodexWorker({ cwd, policy: codexPolicy, dataDir, signal });
+  if (!claudeWorkerAuthCompatible(process.env)) return null;
   const state = await readClaudeCode(process.env, cwd);
   if (!state.binary || !state.version || !meetsFloor(state.version, '2.1.325')) return null;
   if (await findDefinition(agentType, { cwd, homeDir: homedir() })) return null;
@@ -76,6 +83,7 @@ export async function qualifiedModelWorker(
     settingSources: ['user', 'project', 'local'],
   });
   const { effective } = resolved;
+  if (!claudeWorkerAuthCompatible(process.env, effective.env)) return null;
   if (!claudeManagedProviderCompatible(resolved)) return null;
   if (claudePermissionMode === 'auto' && effective.permissions?.disableAutoMode === 'disable')
     return null;
@@ -154,11 +162,18 @@ async function runQualifiedWorker(
   const workspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
   if (!workspace) throw new Error('Owned Claude workspace scope is unavailable');
   const assertCurrentWorkspace = async () => {
+    if (!claudeWorkerAuthCompatible(process.env))
+      throw new Error('Native Claude authentication is owned by its host; keep native');
     const disclosure = await modelSettings(options.dataDir, job.root);
     const resolved = await resolveWorkerSettings({
       cwd: job.root,
       settingSources: ['user', 'project', 'local'],
     });
+    if (
+      !claudeManagedProviderCompatible(resolved) ||
+      !claudeWorkerAuthCompatible(process.env, resolved.effective.env)
+    )
+      throw new Error('Managed Claude provider or authentication changed; keep native');
     const current =
       disclosure &&
       (await resolveClaudeWorkspace(job.root, resolved.effective, disclosure.repositories));
@@ -190,6 +205,20 @@ async function runQualifiedWorker(
   const nativeModeReady = new Promise<boolean>((resolve) => {
     initialized = resolve;
   });
+  let authorizePrompt!: (allowed: boolean) => void;
+  const authenticationReady = new Promise<boolean>((resolve) => {
+    authorizePrompt = resolve;
+  });
+  async function* prompt(): AsyncGenerator<SDKUserMessage> {
+    if (!(await authenticationReady)) return;
+    controller.signal.throwIfAborted();
+    yield {
+      type: 'user',
+      session_id: '',
+      message: { role: 'user', content: [{ type: 'text', text: job.task }] },
+      parent_tool_use_id: null,
+    };
+  }
   const denyInitialization = () => initialized(false);
   controller.signal.addEventListener('abort', denyInitialization, { once: true });
   const initTimer = setTimeout(() => {
@@ -275,6 +304,29 @@ async function runQualifiedWorker(
     if (!address || typeof address === 'string') throw new Error('Worker bridge failed');
     const env = claudeDeepSeekWorkerEnv(process.env, `http://127.0.0.1:${address.port}`, token);
     const resolved = await assertCurrentWorkspace();
+    const privateHomePaths = [
+      ...secretHomePaths(homedir()),
+      join(homedir(), '.codex', 'auth.json'),
+      ...[process.env, { ...process.env, ...resolved.effective.env }].flatMap((source) => {
+        const config = claudeWorkerConfigDir(job.root, source);
+        const secure = source.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+        return [
+          resolve(job.root, codexHome(homedir(), source), 'auth.json'),
+          join(config, '.credentials.json'),
+          resolve(
+            job.root,
+            (secure === undefined ? config : secure || join(homedir(), '.claude')).normalize('NFC'),
+            '.credentials.json',
+          ),
+        ];
+      }),
+    ];
+    const secretPaths = [
+      ...new Set([
+        ...privateHomePaths,
+        ...(await Promise.all(privateHomePaths.map((path) => realpath(path).catch(() => path)))),
+      ]),
+    ];
     if (
       !claudeManagedProviderCompatible(resolved) ||
       (permissionMode === 'auto' && resolved.effective.permissions?.disableAutoMode === 'disable')
@@ -283,7 +335,7 @@ async function runQualifiedWorker(
     assertCurrentMode();
     options.signal.throwIfAborted();
     worker = query({
-      prompt: job.task,
+      prompt: prompt(),
       options: {
         pathToClaudeCodeExecutable: binary.path,
         spawnClaudeCodeProcess: nativeProcess.spawn,
@@ -302,6 +354,10 @@ async function runQualifiedWorker(
         // Preserve the parent's workspace, including uncommitted changes.
         // The SDK sandbox isolates execution; native worktree-only calls stay native.
         settings: {
+          // Auto memory is undeclared input outside this job's disclosure scope.
+          // Native settings, instruction files and owned session history still load.
+          autoMemoryEnabled: false,
+          apiKeyHelper: claudeDeepSeekWorkerApiKeyHelper(),
           env: claudeDeepSeekWorkerSettingsEnv(`http://127.0.0.1:${address.port}`, token),
           permissions: {
             blockReadsOutsideWorkingDirectories: true,
@@ -321,11 +377,7 @@ async function runQualifiedWorker(
                   patterns.map((pattern) => `${tool}(${pattern})`),
                 );
               }),
-              ...[
-                join(homedir(), '.aws'),
-                join(homedir(), '.ssh'),
-                join(homedir(), '.codex', 'auth.json'),
-              ].flatMap((root) => {
+              ...secretPaths.flatMap((root) => {
                 const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
                 return ['Read', 'Edit', 'Write'].flatMap((tool) => [
                   `${tool}(${absolute})`,
@@ -342,14 +394,12 @@ async function runQualifiedWorker(
           filesystem: {
             denyRead: [
               ...privatePaths.paths,
-              join(homedir(), '.aws'),
+              ...secretPaths,
               ...protectedRoots.flatMap((root) => [
                 `${root}/.env*`,
                 `${root}/**/.env*`,
                 ...(basename(root).startsWith('.env') ? [root] : []),
               ]),
-              join(homedir(), '.ssh'),
-              join(homedir(), '.codex', 'auth.json'),
             ],
             denyWrite: privatePaths.paths,
           },
@@ -359,7 +409,13 @@ async function runQualifiedWorker(
         persistSession: session !== undefined,
         // Emergency runaway guard, not the former ordinary 40-turn cutoff.
         maxTurns: WORKER_EMERGENCY_TURNS,
-        disallowedTools: ['Agent', 'Task', 'mcp__plugin_tenjin_router__subagent'],
+        disallowedTools: [
+          'Agent',
+          'Task',
+          'mcp__plugin_tenjin_router__subagent',
+          'mcp__plugin_tenjin_router__request',
+          'mcp__plugin_tenjin_router__approve',
+        ],
         hooks: {
           PreToolUse: [
             {
@@ -446,6 +502,23 @@ async function runQualifiedWorker(
         },
       },
     });
+    controller.signal.throwIfAborted();
+    let stopAuthentication!: () => void;
+    const authenticationStopped = new Promise<never>((_resolve, reject) => {
+      stopAuthentication = () => reject(controller.signal.reason);
+    });
+    controller.signal.addEventListener('abort', stopAuthentication, { once: true });
+    try {
+      // accountInfo is the maintained SDK initialize response, before a task is
+      // sent. A saved gateway can override env/helper auth without an env flag.
+      const account = await Promise.race([worker.accountInfo(), authenticationStopped]);
+      if (account?.apiProvider !== 'firstParty')
+        throw new Error('Native Claude selected an unsupported API provider; keep native');
+      controller.signal.throwIfAborted();
+      authorizePrompt(true);
+    } finally {
+      controller.signal.removeEventListener('abort', stopAuthentication);
+    }
     for await (const message of worker) {
       if (message.type === 'system' && message.subtype === 'init') {
         const matches = message.permissionMode === permissionMode;
@@ -476,6 +549,7 @@ async function runQualifiedWorker(
   } catch (error) {
     executionFailure = proxyFailure ?? { error };
   } finally {
+    authorizePrompt(false);
     clearTimeout(initTimer);
     initialized(false);
     controller.signal.removeEventListener('abort', denyInitialization);

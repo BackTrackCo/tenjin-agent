@@ -10,8 +10,15 @@ import type { ModelTransport } from './model-transport';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
-const native = vi.hoisted(() => ({ close: vi.fn(), bridgeClose: vi.fn(), createServer: vi.fn() }));
+const native = vi.hoisted(() => ({
+  close: vi.fn(),
+  bridgeClose: vi.fn(),
+  createServer: vi.fn(),
+  promptMessages: [] as unknown[],
+}));
 vi.mock('@anthropic-ai/claude-agent-sdk/core', () => ({
   query: vi.fn(),
   resolveSettings: vi.fn(),
@@ -51,6 +58,7 @@ vi.mock('node:http', async (original) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  native.promptMessages.length = 0;
   vi.mocked(readClaudeCode).mockResolvedValue({
     binary: { path: '/fixture/claude' },
     version: '2.1.325',
@@ -90,22 +98,113 @@ function sdkResult(
   sessionId?: string,
   beforeResult?: () => Promise<void>,
 ) {
-  vi.mocked(query).mockReturnValue({
-    async *[Symbol.asyncIterator]() {
-      yield {
-        type: 'system',
-        subtype: 'init',
-        permissionMode: 'default',
-        cwd: '/repo',
-        session_id: sessionId,
-      };
-      await beforeResult?.();
-      yield { type: 'result', session_id: sessionId, ...result };
-    },
-    mcpServerStatus: async () => [],
-    close: native.close,
-  } as unknown as ReturnType<typeof query>);
+  vi.mocked(query).mockImplementation(
+    (call) =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          for await (const message of call.prompt) native.promptMessages.push(message);
+          yield {
+            type: 'system',
+            subtype: 'init',
+            permissionMode: 'default',
+            cwd: '/repo',
+            session_id: sessionId,
+          };
+          await beforeResult?.();
+          yield { type: 'result', session_id: sessionId, ...result };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
 }
+
+function authenticationQuery(account: Promise<unknown>) {
+  let started!: (value: Promise<IteratorResult<unknown>>) => void;
+  const pendingPrompt = new Promise<Promise<IteratorResult<unknown>>>((resolve) => {
+    started = resolve;
+  });
+  vi.mocked(query).mockImplementation((call) => {
+    if (typeof call.prompt === 'string') throw new Error('Task was sent without authentication');
+    const next = call.prompt[Symbol.asyncIterator]().next();
+    started(next);
+    return {
+      accountInfo: () => account,
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'system', subtype: 'init', permissionMode: 'default' };
+        yield { type: 'result', subtype: 'success', result: 'done' };
+      },
+      mcpServerStatus: async () => [],
+      close: native.close,
+    } as unknown as ReturnType<typeof query>;
+  });
+  return pendingPrompt;
+}
+
+it.each([undefined, 'gateway', 'bedrock'])(
+  'never releases the original task to an unqualified initialized provider: %s',
+  async (apiProvider) => {
+    const pending = authenticationQuery(Promise.resolve({ apiProvider }));
+    const messages = vi.fn();
+    await expect(
+      runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+    ).rejects.toThrow(/unsupported API provider/);
+    expect(await pending).toEqual({ done: true, value: undefined });
+    expect(messages).not.toHaveBeenCalled();
+    expect(native.close).toHaveBeenCalled();
+    expect(native.bridgeClose).toHaveBeenCalled();
+  },
+);
+
+it('releases the exact native user message only after provider initialization is allowed', async () => {
+  let allow!: (account: unknown) => void;
+  const account = new Promise((resolve) => {
+    allow = resolve;
+  });
+  const pending = authenticationQuery(account);
+  const run = runModelWorker(job, options());
+  allow({ apiProvider: 'firstParty' });
+  expect(await pending).toEqual({
+    done: false,
+    value: {
+      type: 'user',
+      session_id: '',
+      parent_tool_use_id: null,
+      message: { role: 'user', content: [{ type: 'text', text: job.task }] },
+    },
+  });
+  await expect(run).resolves.toBe('done');
+});
+
+it('cancels an unresolved authentication check and closes its pending task iterator', async () => {
+  let started!: () => void;
+  const checked = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const account = new Promise<never>(() => {});
+  const pending = authenticationQuery(account);
+  const queryImplementation = vi.mocked(query).getMockImplementation()!;
+  vi.mocked(query).mockImplementation((call) => {
+    const result = queryImplementation(call);
+    started();
+    return result;
+  });
+  const controller = new AbortController();
+  const messages = vi.fn();
+  const outcome = runModelWorker(job, {
+    ...options(),
+    signal: controller.signal,
+    transport: { messages } as unknown as ModelTransport,
+  }).catch((error: unknown) => error);
+  await checked;
+  controller.abort(new Error('Cancelled authentication'));
+  expect(await outcome).toBeInstanceOf(Error);
+  expect(await pending).toEqual({ done: true, value: undefined });
+  expect(messages).not.toHaveBeenCalled();
+  expect(native.close).toHaveBeenCalled();
+  expect(native.bridgeClose).toHaveBeenCalled();
+});
 
 it('uses the native emergency guard beyond the old forty-turn cutoff while retaining its evaluated model profile', async () => {
   sdkResult({ subtype: 'success', result: 'finished after 114 turns', num_turns: 114 });
@@ -119,8 +218,35 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
     persistSession: false,
   });
   expect(call.options?.settings).toMatchObject({
-    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432' },
+    autoMemoryEnabled: false,
+    apiKeyHelper: expect.any(String),
+    env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
   });
+  expect(call.options?.disallowedTools).toEqual([
+    'Agent',
+    'Task',
+    'mcp__plugin_tenjin_router__subagent',
+    'mcp__plugin_tenjin_router__request',
+    'mcp__plugin_tenjin_router__approve',
+  ]);
+  expect(call.options?.settingSources).toEqual(['user', 'project', 'local']);
+  for (const name of [
+    '.netrc',
+    '.npmrc',
+    '.git-credentials',
+    '.claude',
+    '.claude.json',
+    '.kube',
+    '.gnupg',
+  ]) {
+    const path = join(homedir(), name);
+    const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+    expect(call.options?.settings).toHaveProperty(
+      'permissions.deny',
+      expect.arrayContaining([`Read(${absolute})`, `Edit(${absolute})`, `Write(${absolute})`]),
+    );
+    expect(call.options?.sandbox?.filesystem?.denyRead).toContain(path);
+  }
   expect(native.close).toHaveBeenCalled();
   expect(native.bridgeClose).toHaveBeenCalled();
 });
@@ -265,7 +391,12 @@ it('persists and resumes an exact owned SDK identity without changing the string
     ),
   ).resolves.toBe('continued result');
   const resumed = vi.mocked(query).mock.calls[1]![0];
-  expect(resumed.prompt).toBe('Continue the selected check.');
+  expect(native.promptMessages.at(-1)).toEqual({
+    type: 'user',
+    session_id: '',
+    parent_tool_use_id: null,
+    message: { role: 'user', content: [{ type: 'text', text: 'Continue the selected check.' }] },
+  });
   expect(resumed.options).toMatchObject({ persistSession: true, resume: sessionId, maxTurns: 500 });
   expect(resumed.options).not.toHaveProperty('sessionId');
 });
@@ -369,6 +500,7 @@ it('admits no inference until the owned session observer has durably accepted th
         await responseComplete;
         yield { type: 'result', subtype: 'success', session_id: sessionId, result: 'done' };
       },
+      accountInfo: async () => ({ apiProvider: 'firstParty' }),
       mcpServerStatus: async () => [],
       close: native.close,
     } as unknown as ReturnType<typeof query>;
@@ -420,6 +552,7 @@ it('does not return a completed worker while its native process has exited but s
         yield { type: 'system', subtype: 'init', permissionMode: 'default' };
         yield { type: 'result', subtype: 'success', result: 'done' };
       },
+      accountInfo: async () => ({ apiProvider: 'firstParty' }),
       mcpServerStatus: async () => [],
       close: native.close,
       return: async () => {
@@ -473,6 +606,7 @@ it.each([
           yield { type: 'system', subtype: 'init', permissionMode: 'default' };
           yield { type: 'result', subtype, result: 'not a confirmed success', num_turns: 500 };
         },
+        accountInfo: async () => ({ apiProvider: 'firstParty' }),
         mcpServerStatus: async () => [],
         close: native.close,
         return: async () => {
@@ -538,3 +672,52 @@ it('keeps native turn-limit diagnostics separate from model capability and never
   expect(native.close).toHaveBeenCalled();
   expect(native.bridgeClose).toHaveBeenCalled();
 });
+
+it.each(['', '/repo/custom-claude'])(
+  'protects the exact credentials file in a defined custom config %s without hiding the workspace',
+  async (config) => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', config);
+    try {
+      sdkResult({ subtype: 'success', result: 'done' });
+      await runModelWorker(job, options());
+      const call = vi.mocked(query).mock.calls[0]![0];
+      const credential = (config || '/repo') + '/.credentials.json';
+      expect(call.options?.env?.CLAUDE_CONFIG_DIR).toBe(config);
+      expect(call.options?.settings).toHaveProperty(
+        'permissions.deny',
+        expect.arrayContaining([
+          `Read(/${credential})`,
+          `Edit(/${credential})`,
+          `Write(/${credential})`,
+        ]),
+      );
+      expect(call.options?.settings).toHaveProperty('env.CLAUDE_CODE_DISABLE_AUTO_MEMORY', '1');
+      expect(call.options?.sandbox?.filesystem?.denyRead).toContain(credential);
+      expect(call.options?.sandbox?.filesystem?.denyRead).not.toContain('/repo');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it.each(['/repo/secure-storage', ''])(
+  'protects native secure-storage fallback %s from file tools and Bash',
+  async (secure) => {
+    vi.mocked(resolveSettings).mockResolvedValue({
+      effective: { env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: secure } },
+    } as never);
+    sdkResult({ subtype: 'success', result: 'done' });
+    await runModelWorker(job, options());
+    const call = vi.mocked(query).mock.calls[0]![0];
+    const credential = join(secure || join(homedir(), '.claude'), '.credentials.json');
+    expect(call.options?.settings).toHaveProperty(
+      'permissions.deny',
+      expect.arrayContaining([
+        `Read(/${credential})`,
+        `Edit(/${credential})`,
+        `Write(/${credential})`,
+      ]),
+    );
+    expect(call.options?.sandbox?.filesystem?.denyRead).toContain(credential);
+  },
+);

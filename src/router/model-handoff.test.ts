@@ -8,7 +8,12 @@ import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 vi.mock('./model-worker', () => ({ qualifiedModelWorker: vi.fn() }));
 import { qualifiedModelWorker } from './model-worker';
 import { makeInstructionContext } from './model-instructions';
-import { ModelHandoff, modelOfferSchema, type ModelSession } from './model-handoff';
+import {
+  ModelHandoff,
+  modelOfferSchema,
+  MODEL_BRIEF_GUIDANCE,
+  type ModelSession,
+} from './model-handoff';
 import type { ModelTransport } from './model-transport';
 import offer from './fixtures/model-offer.json';
 import parentPolicy from './model-parent-policy.json';
@@ -122,6 +127,14 @@ async function continuationFixture(multiple = false) {
   };
 }
 
+it('keeps native tool guidance aligned with the complete Codex resubmission brief', async () => {
+  const hook = await readFile(
+    new URL('../../hosts/claude/tenjin/hooks/register.tsx', import.meta.url),
+    'utf8',
+  );
+  expect(hook).toContain('\\n\\n' + MODEL_BRIEF_GUIDANCE + '`');
+});
+
 it('shows every explicit disclosure anchor and refuses a continuation whose native scope changes', async () => {
   const f = await continuationFixture(true);
   const native = { to: f.conversation.handle, message: 'Continue the same task.' };
@@ -198,6 +211,10 @@ it('offers an across-day continuation with full parent veto, same job ceiling an
       parentPolicy: expect.stringContaining('An unconditional live no-pay instruction'),
       instruction: expect.stringContaining('final veto'),
     });
+    expect(result).toHaveProperty(
+      'parentPolicy',
+      expect.stringContaining('Never retry a Tenjin worker handle through native tools'),
+    );
     expect('parentPolicy' in result ? result.parentPolicy : undefined).not.toContain(
       'otherwise retry the original native Agent call unchanged',
     );
@@ -302,6 +319,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     }),
   );
   const transcript = join(dir, 'owned.jsonl');
+  const savedConfig = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
   await writeFile(
     transcript,
     [
@@ -368,6 +386,17 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   });
   expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
   expect(recommendation).toHaveProperty(
+    'instruction',
+    expect.stringContaining('verified saved consent'),
+  );
+  expect(recommendation).toHaveProperty(
+    'instruction',
+    expect.stringContaining('additional approvals still apply'),
+  );
+  expect('instruction' in recommendation ? recommendation.instruction : '').not.toMatch(
+    /opt[ -]?in/i,
+  );
+  expect(recommendation).toHaveProperty(
     'parentPolicy',
     expect.stringContaining(
       'An unconditional live no-pay instruction, including an unconditional worker paid-tool ban, vetoes the paid offer.',
@@ -430,6 +459,36 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     await model.captureCodex({ ...session, turnId: 'revoked' }, 'revoked-call', native),
   ).toBeNull();
   expect(route).toHaveBeenCalledTimes(2);
+  // The consent statement is about the current endpoint and ceiling, not an
+  // earlier configuration that happened to authorize classification.
+  for (const [turnId, consentChange] of [
+    ['origin-changed', { routerOrigin: 'https://other-router.example' }],
+    ['cap-lowered', { maxJobAtomic: '500000' }],
+  ] as const) {
+    await writeFile(join(dir, 'config.json'), JSON.stringify(savedConfig));
+    const guarded = { ...session, turnId };
+    await model.captureCodex(guarded, `${turnId}-call`, native);
+    const guardedJob = await model.store.pending('root', guarded.turnId);
+    expect(guardedJob).not.toBeNull();
+    route.mockImplementationOnce(async (body) => {
+      await writeFile(
+        join(dir, 'config.json'),
+        JSON.stringify({
+          ...savedConfig,
+          router: {
+            ...savedConfig.router,
+            subagentConsent: { ...savedConfig.router.subagentConsent, ...consentChange },
+          },
+        }),
+      );
+      return { ...offer, jobId: body.jobId };
+    });
+    expect(await model.submitCodex(guarded, guardedJob!.id, task)).toEqual({
+      action: 'native',
+    });
+    expect(await model.store.pending('root', guarded.turnId)).toMatchObject({ state: 'native' });
+  }
+  expect(route).toHaveBeenCalledTimes(4);
 });
 
 it('consumes the server canonical offer contract without enabling an alias or provider switch', () => {

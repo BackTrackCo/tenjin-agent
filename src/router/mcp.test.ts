@@ -536,6 +536,37 @@ describe('the hook tool', () => {
     prompt: 'what is the current price of ETH in USD',
   });
 
+  it('does not run Tenjin routing legs inside a model worker', async () => {
+    const { homeDir, transcript } = await home('worker-hook');
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = testWalletProvider();
+    const getSigner = vi.spyOn(provider, 'getSigner');
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      homeDir,
+      env: { TENJIN_MODEL_WORKER: '1' },
+      handlerDeps: { cwd: dir, provider, fetchImpl },
+      hookDeps: {
+        baseUrl: 'https://router.test',
+        fetchImpl,
+        env: { TENJIN_WALLET_KEY: generatePrivateKey() },
+      },
+    });
+    const client = await connect(server);
+    try {
+      const called = await client.callTool({
+        name: 'hook',
+        arguments: substituted('prompt', promptEvent('worker-hook', transcript)),
+      });
+      expect(called.content).toEqual([{ type: 'text', text: '' }]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(getSigner).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('runs the prompt leg in this process and answers in the hook format', async () => {
     const { homeDir, transcript } = await home('sess-hook');
     const log: string[] = [];
@@ -1416,3 +1447,52 @@ describe('the top-up at the start of tenjin mcp', () => {
     }
   });
 });
+
+it.each(['claude', 'codex'] as const)(
+  'refuses nested Tenjin request/decide/approval in a %s worker without unlocking or fetching',
+  async (harness) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = testWalletProvider();
+    const getSigner = vi.spyOn(provider, 'getSigner');
+    const server = buildRouterMcpServer({
+      dataDir: dir,
+      harness,
+      env: { TENJIN_MODEL_WORKER: '1' },
+      handlerDeps: { cwd: dir, provider, fetchImpl },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'claude-code', version: '2.1.325' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      for (const args of [
+        { query: 'ETH price' },
+        { id: 'fixture', input: { symbol: 'ETH' } },
+        {
+          decide: {
+            tool: 'WebSearch',
+            input: { query: 'ETH' },
+            tool_use_id: 'worker-call',
+            session_id: 'worker',
+          },
+        },
+      ]) {
+        expect(
+          envelopeOf(await client.callTool({ name: 'request', arguments: args })),
+        ).toMatchObject({
+          status: 'failed',
+          reason: expect.stringContaining('inside a model worker'),
+        });
+      }
+      expect(
+        envelopeOf(
+          await client.callTool({ name: 'approve', arguments: { quote: 'fixture-quote' } }),
+        ),
+      ).toMatchObject({ status: 'failed' });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(getSigner).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  },
+);

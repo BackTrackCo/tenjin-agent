@@ -94,6 +94,7 @@ beforeEach(async () => {
   await writeFile(join(home, '.codex', 'AGENTS.md'), 'GLOBAL_NATIVE_INSTRUCTION\n');
   await writeFile(join(root, 'AGENTS.md'), 'REPO_NATIVE_INSTRUCTION\n');
   await writeFile(join(dir, 'config.toml'), '# owned native config\n');
+  vi.stubEnv('HOME', home);
   vi.stubEnv('CODEX_HOME', join(home, '.codex'));
   config = {
     approvals_reviewer: 'user',
@@ -1071,7 +1072,14 @@ it('rejects an effective unowned catalog before a thread starts', async () => {
   expect(await qualify()).toBeNull();
   expect(requests.some((r) => r.method === 'thread/start')).toBe(false);
 });
-it.each(['OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'DEEPSEEK_API_KEY'])(
+it.each([
+  'OPENAI_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'DEEPSEEK_API_KEY',
+  'DEEPSEEK_KEY',
+  'TENJIN_WALLET_KEY',
+  'TENJIN_WALLET_PASSPHRASE',
+])(
   'keeps an active foreign MCP requiring cleared %s native before thread start or purchase',
   async (key) => {
     config.mcp_servers = { fixture: { env_vars: [key] } };
@@ -1082,6 +1090,8 @@ it.each(['OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'DEEPSEEK_API_KEY'])(
 );
 it('preserves an explicit foreign MCP credential override without restoring it to worker commands', async () => {
   vi.stubEnv('OPENAI_API_KEY', 'parent-provider-secret');
+  vi.stubEnv('DEEPSEEK_KEY', 'parent-deepseek-secret');
+  vi.stubEnv('TENJIN_WALLET_KEY', 'parent-wallet-secret');
   config.mcp_servers = {
     fixture: {
       env_vars: ['OPENAI_API_KEY', 'NEON_API_KEY'],
@@ -1090,6 +1100,8 @@ it('preserves an explicit foreign MCP credential override without restoring it t
   };
   expect(await qualify()).not.toBeNull();
   expect(env.OPENAI_API_KEY).toBeUndefined();
+  expect(env.DEEPSEEK_KEY).toBeUndefined();
+  expect(env.TENJIN_WALLET_KEY).toBeUndefined();
   expect(config.mcp_servers).toMatchObject({
     fixture: { env: { OPENAI_API_KEY: 'explicit-fixture-credential' } },
   });
@@ -1112,7 +1124,7 @@ it('refuses an empty literal MCP override and catches an auth dependency added b
     await provider();
   };
   await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
-    /Native MCP requires a provider credential/,
+    /Native MCP requires a credential/,
   );
   expect(responses).not.toHaveBeenCalled();
 });

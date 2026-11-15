@@ -13,6 +13,7 @@ import { buildSiwxHeader, SIWX_CHAIN_ID, SIWX_HEADER } from '../lib/siwx';
 import { z } from 'zod';
 import type { ModelJob } from './model-job';
 import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
+import { RouteSkipped } from './decision';
 
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
@@ -156,175 +157,250 @@ export class ModelTransport {
     const { dataDir, baseUrl, payerDeps } = this.options;
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
-    return withFileLock(`${path}.lock`, async () => {
-      const raw = await readJsonFile(path, 1_000_000);
-      const parsed = budgetSchema.safeParse(raw);
+    const key =
+      protocol === 'responses'
+        ? canonicalHash({ protocol, responses: messages })
+        : canonicalHash(messages);
+    const resultFile = join(dataDir, 'model-jobs', `${job.id}-${key}.result.json`);
+    const load = async (): Promise<Budget> => {
+      const parsed = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
       if (job.decision.requireExistingBudget === true && !parsed.success)
         throw new Error('Original model budget is unavailable; refusing continuation');
       if (!parsed.success && (await lstat(path).catch(() => null)))
         throw new Error('Unreadable model budget; refusing another authorization');
+      // The route's payment ceiling is trusted locally; an offer cannot reduce it.
+      return parsed.success
+        ? parsed.data
+        : {
+            charged: MODEL_ROUTING_FEE_CEILING_ATOMIC.toString(),
+            calls: {},
+          };
+    };
+    const consent = async () => {
       const current = await modelSettings(dataDir, job.root);
       signal.throwIfAborted();
       if (!current || current.routerOrigin !== new URL(baseUrl).origin)
         throw new Error('Model consent revoked or origin changed');
-      const state: Budget = parsed.success
-        ? parsed.data
-        : {
-            charged: String(job.decision.routingFeeAtomic ?? '3000'),
-            calls: {},
-          };
-      const calls = state.calls;
-      const key =
-        protocol === 'responses'
-          ? canonicalHash({ protocol, responses: messages })
-          : canonicalHash(messages);
-      const old = calls[key];
-      const resultFile = join(dataDir, 'model-jobs', `${job.id}-${key}.result.json`);
-      if (old?.completed) {
-        const kept = await readJsonFile(resultFile, resultLimit);
-        if (!kept) throw new Error('Completed result unavailable; inspect the receipt');
-        return kept;
-      }
-      if (old) {
-        // Recovery never creates a new voucher or calls the provider again.
-        const recovered = await this.recover(old.invocationId, signal, protocol);
-        if (recovered?.state === 'completed' && recovered.voucherState === 'accepted') {
-          const value = this.receipt(
-            recovered.result,
-            old.invocationId,
-            BigInt(old.quote),
-            protocol,
-          );
-          if (recovered.actualAtomic !== value.actual)
-            throw new Error('Conflicting invocation receipt; exposure remains reserved');
-          state.charged = (
-            BigInt(state.charged) -
-            BigInt(old.quote) +
-            BigInt(value.actual)
-          ).toString();
-          await writePrivate(resultFile, JSON.stringify(value.result));
-          calls[key] = { ...old, completed: true, actual: value.actual };
-          await writePrivate(path, JSON.stringify(state));
-          return value.result;
+      return current;
+    };
+    type Call = Budget['calls'][string];
+    const keptResult = async () => {
+      const kept = await readJsonFile(resultFile, resultLimit);
+      if (!kept) throw new Error('Completed result unavailable; inspect the receipt');
+      return kept;
+    };
+    const settle = (call: Call, value: ReturnType<ModelTransport['receipt']>) =>
+      withFileLock(`${path}.lock`, async () => {
+        const state = await load();
+        const current = state.calls[key];
+        if (!current || current.invocationId !== call.invocationId || current.quote !== call.quote)
+          throw new Error('Model reservation changed; exposure remains reserved');
+        if (current.completed) {
+          if (current.actual !== value.actual) throw new Error('Conflicting invocation receipt');
+          return keptResult();
         }
-        throw new Error(`Uncertain invocation ${old.invocationId}; no new authorization sent`);
-      }
-      const scrub = (value: unknown, field = ''): unknown => {
-        if (protocol === 'responses' && ['parameters', 'input_schema', 'format'].includes(field))
-          return value;
-        if (typeof value === 'string')
-          return (protocol === 'responses'
-            ? [
-                'signature',
-                'encrypted_content',
-                'id',
-                'call_id',
-                'tool_call_id',
-                'item_id',
-                'tool_use_id',
-                'name',
-                'namespace',
-                'type',
-                'model',
-                'role',
-              ]
-            : ['signature', 'id', 'tool_use_id', 'name', 'type', 'model', 'role']
-          ).includes(field)
-            ? value
-            : mask(value);
-        if (Array.isArray(value)) return value.map((v) => scrub(v, field));
-        if (value && typeof value === 'object')
-          return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrub(v, k)]));
-        return value;
-      };
-      const body = {
-        schemaVersion: 1,
-        consent: true,
-        jobId: job.decision.jobId,
-        invocationId: randomUUID(),
-        ...(protocol === 'responses'
-          ? { protocol, responses: scrub(messages) }
-          : { messages: scrub(messages) }),
-      };
-      const url = new URL(endpoint, baseUrl).toString();
-      const fetchFn = payerDeps.fetchImpl ?? fetch;
-      const challenge = await fetchFn(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        redirect: 'error',
-        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        state.charged = (
+          BigInt(state.charged) -
+          BigInt(call.quote) +
+          BigInt(value.actual)
+        ).toString();
+        // Result first: a crash can retain an over-reservation, never erase exposure.
+        await writePrivate(resultFile, JSON.stringify(value.result));
+        state.calls[key] = { ...current, completed: true, actual: value.actual };
+        await writePrivate(path, JSON.stringify(state));
+        return value.result;
       });
-      if (challenge.status !== 402) {
-        await challenge.body?.cancel();
-        throw new Error('Model proxy did not return a payment quote');
-      }
-      const header = challenge.headers.get('payment-required');
-      if (!header) {
-        await challenge.body?.cancel();
-        throw new Error('Model proxy has no quote');
-      }
-      const required = decodePaymentRequiredHeader(header);
-      const offers = required.accepts.filter((r) => r.scheme === 'batch-settlement');
-      if (offers.length !== 1 || !/^\d+$/.test(offers[0]!.amount)) {
-        await challenge.body?.cancel();
-        throw new Error('Unsupported model payment quote');
-      }
-      const quote = BigInt(offers[0]!.amount);
-      const cap =
-        current.maxJobAtomic < BigInt(job.capAtomic) ? current.maxJobAtomic : BigInt(job.capAtomic);
-      const remaining = cap - BigInt(String(state.charged));
-      if (quote <= 0n || quote > remaining) {
-        await challenge.body?.cancel();
-        throw new Error('Model quote exceeds remaining job ceiling');
-      }
-      calls[key] = { invocationId: body.invocationId, quote: quote.toString() };
-      state.charged = (BigInt(String(state.charged)) + quote).toString();
-      await writePrivate(path, JSON.stringify(state));
-      let first = true;
-      const cachedFetch: typeof fetch = async (input, init) => {
-        signal.throwIfAborted();
-        if (first) {
-          first = false;
-          return challenge;
-        }
-        return boundedResponse(
-          await fetchFn(input, {
-            ...init,
-            signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
-          }),
-          resultLimit,
+    const existing = async (call: Call) => {
+      if (call.completed) return keptResult();
+      // Owner lookup is outside the lock and never creates another authorization.
+      const recovered = await this.recover(call.invocationId, signal, protocol);
+      if (recovered?.state === 'completed' && recovered.voucherState === 'accepted') {
+        const value = this.receipt(
+          recovered.result,
+          call.invocationId,
+          BigInt(call.quote),
+          protocol,
         );
-      };
-      const payer = new Payer({
-        ...payerDeps,
-        modelLane: { path: endpoint, ceilingAtomic: quote, origin: this.origin },
-        fetchImpl: cachedFetch,
-      });
-      let result;
-      try {
-        result = await payer
-          .routeFor(baseUrl)
-          .send(url, { method: 'POST', jsonBody: body, timeoutMs: 360_000, blockRedirects: true });
-      } catch (cause) {
-        throw new Error(
-          `Model call uncertain (${body.invocationId}); recover its receipt before retrying`,
-          { cause },
-        );
-      } finally {
-        // A stopped upstream socket does not erase signed payment exposure.
-        // Drain SDK accounting before the worker reports quiescence.
-        await payer.idle();
+        if (recovered.actualAtomic !== value.actual)
+          throw new Error('Conflicting invocation receipt; exposure remains reserved');
+        return settle(call, value);
       }
-      if (!result.ok || result.status !== 200)
-        throw new Error('Model call uncertain; inspect invocation receipt before retrying');
-      const value = this.receipt(result.json, body.invocationId, quote, protocol);
-      state.charged = (BigInt(String(state.charged)) - quote + BigInt(value.actual)).toString();
-      await writePrivate(resultFile, JSON.stringify(value.result));
-      calls[key] = { ...calls[key]!, completed: true, actual: value.actual };
-      await writePrivate(path, JSON.stringify(state));
-      return value.result;
+      throw new Error(`Uncertain invocation ${call.invocationId}; no new authorization sent`);
+    };
+    const old = await withFileLock(`${path}.lock`, async () => {
+      await consent();
+      return (await load()).calls[key];
     });
+    if (old) return existing(old);
+    const scrub = (value: unknown, field = ''): unknown => {
+      if (protocol === 'responses' && ['parameters', 'input_schema', 'format'].includes(field))
+        return value;
+      if (typeof value === 'string')
+        return (protocol === 'responses'
+          ? [
+              'signature',
+              'encrypted_content',
+              'id',
+              'call_id',
+              'tool_call_id',
+              'item_id',
+              'tool_use_id',
+              'name',
+              'namespace',
+              'type',
+              'model',
+              'role',
+            ]
+          : ['signature', 'id', 'tool_use_id', 'name', 'type', 'model', 'role']
+        ).includes(field)
+          ? value
+          : mask(value);
+      if (Array.isArray(value)) return value.map((v) => scrub(v, field));
+      if (value && typeof value === 'object')
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrub(v, k)]));
+      return value;
+    };
+    const body = {
+      schemaVersion: 1,
+      consent: true,
+      jobId: job.decision.jobId,
+      invocationId: randomUUID(),
+      ...(protocol === 'responses'
+        ? { protocol, responses: scrub(messages) }
+        : { messages: scrub(messages) }),
+    };
+    const url = new URL(endpoint, baseUrl).toString();
+    const fetchFn = payerDeps.fetchImpl ?? fetch;
+    const challenge = await fetchFn(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      redirect: 'error',
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    });
+    if (challenge.status !== 402) {
+      await challenge.body?.cancel();
+      throw new Error('Model proxy did not return a payment quote');
+    }
+    const header = challenge.headers.get('payment-required');
+    if (!header) {
+      await challenge.body?.cancel();
+      throw new Error('Model proxy has no quote');
+    }
+    const required = decodePaymentRequiredHeader(header);
+    const offers = required.accepts.filter((r) => r.scheme === 'batch-settlement');
+    if (offers.length !== 1 || !/^\d+$/.test(offers[0]!.amount)) {
+      await challenge.body?.cancel();
+      throw new Error('Unsupported model payment quote');
+    }
+    const quote = BigInt(offers[0]!.amount);
+    let reservation: Call | undefined;
+    try {
+      reservation = await withFileLock(`${path}.lock`, async () => {
+        const current = await consent();
+        const state = await load();
+        if (state.calls[key]) return state.calls[key];
+        const cap =
+          current.maxJobAtomic < BigInt(job.capAtomic)
+            ? current.maxJobAtomic
+            : BigInt(job.capAtomic);
+        if (quote <= 0n || quote > cap - BigInt(state.charged))
+          throw new Error('Model quote exceeds remaining job ceiling');
+        const call = { invocationId: body.invocationId, quote: quote.toString() };
+        state.calls[key] = call;
+        state.charged = (BigInt(state.charged) + quote).toString();
+        await writePrivate(path, JSON.stringify(state));
+        return call;
+      });
+    } catch (error) {
+      await challenge.body?.cancel();
+      throw error;
+    }
+    if (reservation.invocationId !== body.invocationId) {
+      await challenge.body?.cancel();
+      return existing(reservation);
+    }
+    let signingStarted = false;
+    let paymentSent = false;
+    let first = true;
+    const cachedFetch: typeof fetch = async (input, init) => {
+      signal.throwIfAborted();
+      if (first) {
+        first = false;
+        return challenge;
+      }
+      const headers = new Headers(
+        init?.headers ?? (input instanceof Request ? input.headers : undefined),
+      );
+      if (headers.has('payment-signature')) paymentSent = true;
+      return boundedResponse(
+        await fetchFn(input, {
+          ...init,
+          signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
+        }),
+        resultLimit,
+      );
+    };
+    const payer = new Payer({
+      ...payerDeps,
+      getSigner: async () => {
+        const signer = await payerDeps.getSigner();
+        return {
+          address: signer.address,
+          signMessage: (args) => {
+            signingStarted = true;
+            return signer.signMessage(args);
+          },
+          signTypedData: (args) => {
+            signingStarted = true;
+            return signer.signTypedData(args);
+          },
+          signTransaction: (args) => {
+            signingStarted = true;
+            return signer.signTransaction(args);
+          },
+        };
+      },
+      modelLane: { path: endpoint, ceilingAtomic: quote, origin: this.origin },
+      fetchImpl: cachedFetch,
+    });
+    let result;
+    let failure: unknown;
+    try {
+      result = await payer
+        .routeFor(baseUrl)
+        .send(url, { method: 'POST', jsonBody: body, timeoutMs: 360_000, blockRedirects: true });
+    } catch (cause) {
+      failure = cause;
+    } finally {
+      // Drain SDK accounting before either releasing or reporting uncertainty.
+      await payer.idle();
+    }
+    if (failure !== undefined) {
+      // RouteSkipped alone does not prove safety: it can also follow a signed send.
+      // Only a refusal with neither signing nor transmission can release exposure.
+      if (failure instanceof RouteSkipped && !signingStarted && !paymentSent) {
+        await withFileLock(`${path}.lock`, async () => {
+          const state = await load();
+          const call = state.calls[key];
+          if (call?.invocationId === body.invocationId && !call.completed) {
+            state.charged = (BigInt(state.charged) - BigInt(call.quote)).toString();
+            delete state.calls[key];
+            await writePrivate(path, JSON.stringify(state));
+          }
+        });
+        throw new Error('Model payment refused before signing; no authorization sent', {
+          cause: failure,
+        });
+      }
+      throw new Error(
+        `Model call uncertain (${body.invocationId}); recover its receipt before retrying`,
+        { cause: failure },
+      );
+    }
+    if (!result?.ok || result.status !== 200)
+      throw new Error('Model call uncertain; inspect invocation receipt before retrying');
+    return settle(reservation, this.receipt(result.json, body.invocationId, quote, protocol));
   }
 
   private receipt(
@@ -393,7 +469,7 @@ export class ModelTransport {
   async summary(job: ModelJob) {
     const path = join(this.options.dataDir, 'model-jobs', `${job.id}.budget.json`);
     const parsed = budgetSchema.safeParse(await readJsonFile(path, 1_000_000));
-    const routing = String(job.decision.routingFeeAtomic ?? '3000');
+    const routing = MODEL_ROUTING_FEE_CEILING_ATOMIC.toString();
     if (!parsed.success && (await lstat(path).catch(() => null)))
       throw new Error('Model accounting is unreadable; exposure is unknown');
     if (!parsed.success)

@@ -505,6 +505,13 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       { query, id, input, choice, browse, tool, count, job, source, decide },
       extra,
     ): Promise<CallToolResult> => {
+      if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1')
+        return toolResult(
+          fail(
+            'failed',
+            'Nested Tenjin requests are unavailable inside a model worker; use the native tools.',
+          ),
+        );
       // Resolved per call, from settings read now: a policy frozen at the
       // first call would leave a limit the user changed with no effect until
       // the harness restarts the server.
@@ -584,6 +591,13 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async ({ quote, total, what }, extra): Promise<CallToolResult> => {
+      if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1')
+        return toolResult(
+          fail(
+            'failed',
+            'Nested Tenjin payments are unavailable inside a model worker; use the native tools.',
+          ),
+        );
       const settings = await resolveContextSettings(ctx);
       const authorizer =
         opts.handlerDeps?.authorizer ?? resolveSpendAuthorizer(ctx, settings.policy);
@@ -673,6 +687,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async (args): Promise<CallToolResult> => {
+      if (env.TENJIN_MODEL_WORKER === '1') return { content: [{ type: 'text', text: '' }] };
       let response: unknown;
       try {
         const raw = eventFromToolInput(args);
@@ -760,6 +775,8 @@ function registerCodexHookTool(
       },
     },
     async (args, extra): Promise<CallToolResult> => {
+      if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1')
+        return { content: [{ type: 'text', text: '' }] };
       let response: unknown = null;
       try {
         const event = await admitCodexHookEvent(codexEventFromToolInput(args), {

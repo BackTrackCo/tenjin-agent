@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,7 +98,13 @@ async function fixture(
       receipt: { invocationId: last.invocationId, quoteAtomic: '500000', actualAtomic: '1000' },
     };
     router.body = result;
-    return router.fetch(request);
+    // Real concurrent responses belong to their request, rather than the
+    // fake router's mutable default body (which another quote can replace).
+    const ownResult = result;
+    const response = await router.fetch(request);
+    if (response.status !== 200) return response;
+    await response.body?.cancel();
+    return Response.json(ownResult, { headers: response.headers });
   };
   const deps = payerDeps(router, dir, privateKeyToAccount(generatePrivateKey()), {
     fetchImpl,
@@ -116,6 +122,7 @@ async function fixture(
     job,
     router,
     make,
+    deps,
     message,
     last: () => last,
     gets: () => gets,
@@ -373,4 +380,183 @@ it('masks known secrets in native instructions/text/tool outputs while preservin
   expect(sent.input[3]!.encrypted_content).toBe(secret);
   expect(sent.input[3]!.signature).toBe(secret);
   expect(sent.tools).toEqual(native.tools);
+});
+
+it('releases the job lock during inference and atomically refuses a concurrent over-cap call', async () => {
+  const f = await fixture({ cap: '750000' });
+  let release!: () => void;
+  f.router.hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  f.router.onDelayArmed = entered;
+  const first = f
+    .make()
+    .messages(
+      f.job,
+      { messages: [{ role: 'user', content: 'first' }] },
+      new AbortController().signal,
+    );
+  try {
+    await started;
+    const path = join(f.dir, 'model-jobs', `${f.job.id}.budget.json`);
+    expect(await lstat(`${path}.lock`).catch(() => null)).toBeNull();
+    await expect(
+      f
+        .make()
+        .messages(
+          f.job,
+          { messages: [{ role: 'user', content: 'second' }] },
+          new AbortController().signal,
+        ),
+    ).rejects.toThrow(/remaining job ceiling/);
+    expect(JSON.parse(await readFile(path, 'utf8')).charged).toBe('503000');
+  } finally {
+    release();
+  }
+  await expect(first).resolves.toEqual(f.message);
+  expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '4000', uncertain: [] });
+  expect(f.router.paidRequests()).toBe(1);
+});
+
+it('releases a verified pre-sign policy refusal and permits the same input after policy changes', async () => {
+  const f = await fixture();
+  const policy = f.deps.policy;
+  f.deps.policy = async () => ({ ...TEST_POLICY, maxAutoSpendAtomic: 1n });
+  const body = { messages: [{ role: 'user', content: 'once' }] };
+  await expect(f.make().messages(f.job, body, new AbortController().signal)).rejects.toThrow(
+    /refused before signing/,
+  );
+  expect(f.router.paidRequests()).toBe(0);
+  expect(await f.make().summary(f.job)).toEqual({
+    reservedAtomic: '3000',
+    actualAtomic: '3000',
+    uncertain: [],
+  });
+  f.deps.policy = policy;
+  await expect(f.make().messages(f.job, body, new AbortController().signal)).resolves.toEqual(
+    f.message,
+  );
+  expect(f.router.paidRequests()).toBe(1);
+});
+
+it.each(['0', '1', '999999999'])(
+  'does not trust an offer routing fee of %s when seeding exposure',
+  async (routingFeeAtomic) => {
+    const f = await fixture({ cap: '502999' });
+    f.job.decision.routingFeeAtomic = routingFeeAtomic;
+    expect(await f.make().summary(f.job)).toMatchObject({
+      reservedAtomic: '3000',
+      actualAtomic: '3000',
+    });
+    await expect(
+      f.make().messages(f.job, { messages: [] }, new AbortController().signal),
+    ).rejects.toThrow(/remaining job ceiling/);
+    expect(f.router.paidRequests()).toBe(0);
+  },
+);
+
+it('settles concurrent owner recoveries once without subtracting the same reservation twice', async () => {
+  const f = await fixture({ drop: true });
+  const body = { messages: [{ role: 'user', content: 'lost receipt' }] };
+  await expect(f.make().messages(f.job, body, new AbortController().signal)).rejects.toThrow(
+    /uncertain/,
+  );
+  expect(
+    await Promise.all([
+      f.make().messages(f.job, body, new AbortController().signal),
+      f.make().messages(f.job, body, new AbortController().signal),
+    ]),
+  ).toEqual([f.message, f.message]);
+  expect(f.router.paidRequests()).toBe(1);
+  expect(await f.make().summary(f.job)).toEqual({
+    actualAtomic: '4000',
+    reservedAtomic: '4000',
+    uncertain: [],
+  });
+});
+
+it('retains exposure when signing starts but fails before a paid request is sent', async () => {
+  const f = await fixture();
+  const signer = await f.deps.getSigner();
+  f.deps.getSigner = async () => ({
+    ...signer,
+    signTypedData: async () => {
+      throw new Error('signing result unknown');
+    },
+  });
+  await expect(
+    f.make().messages(f.job, { messages: [] }, new AbortController().signal),
+  ).rejects.toThrow(/uncertain/);
+  expect(f.router.paidRequests()).toBe(0);
+  expect(await f.make().summary(f.job)).toMatchObject({
+    reservedAtomic: '503000',
+    uncertain: [expect.any(String)],
+  });
+});
+
+it('preserves a second in-flight reservation when the first call settles', async () => {
+  const f = await fixture({ cap: '1100000' });
+  f.job.capAtomic = '1100000';
+  let finishFirst!: () => void;
+  f.router.hold = new Promise<void>((resolve) => {
+    finishFirst = resolve;
+  });
+  let firstEntered!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    firstEntered = resolve;
+  });
+  f.router.onDelayArmed = firstEntered;
+  let releaseSecond!: () => void;
+  const heldSigner = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  let secondEntered!: () => void;
+  const secondReserved = new Promise<void>((resolve) => {
+    secondEntered = resolve;
+  });
+  const getSigner = f.deps.getSigner;
+  let signers = 0;
+  f.deps.getSigner = async () => {
+    if (++signers === 2) {
+      secondEntered();
+      await heldSigner;
+    }
+    return getSigner();
+  };
+  const first = f
+    .make()
+    .messages(
+      f.job,
+      { messages: [{ role: 'user', content: 'first' }] },
+      new AbortController().signal,
+    );
+  await firstStarted;
+  const second = f
+    .make()
+    .messages(
+      f.job,
+      { messages: [{ role: 'user', content: 'second' }] },
+      new AbortController().signal,
+    );
+  try {
+    await secondReserved;
+    expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '1003000' });
+    finishFirst();
+    await expect(first).resolves.toEqual(f.message);
+    expect(await f.make().summary(f.job)).toMatchObject({ reservedAtomic: '504000' });
+  } finally {
+    finishFirst();
+    releaseSecond();
+  }
+  await expect(second).resolves.toEqual(f.message);
+  expect(await f.make().summary(f.job)).toEqual({
+    actualAtomic: '5000',
+    reservedAtomic: '5000',
+    uncertain: [],
+  });
+  expect(f.router.paidRequests()).toBe(2);
 });

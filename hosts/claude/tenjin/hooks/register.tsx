@@ -990,7 +990,7 @@ function heldOfferContext(offer: Json, continuation = false): string[] | undefin
   // This field is constructed by the local handoff, after its consent check.
   // Never promote the router's reason or other model/provider text into context.
   return [
-    `${continuation ? 'This local Tenjin hook held the continuation; no continuation started.' : 'This local Tenjin hook held the Agent call; no worker started.'} The offer identifies its disclosure scope, recipients and spending cap. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.`,
+    `${continuation ? 'This local Tenjin hook held the continuation; no continuation started.' : 'This local Tenjin hook held the Agent call; no worker started.'} Local checks verified saved consent for this repository, router origin, Tenjin/DeepSeek disclosure and inference within the offer's cap. Binding restrictions and additional approvals still apply. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.`,
   ];
 }
 
