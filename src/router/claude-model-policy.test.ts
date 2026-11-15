@@ -155,18 +155,58 @@ it.each([
   'CLAUDE_CODE_USE_MANTLE',
   'CLAUDE_CODE_USE_GATEWAY',
 ])('keeps host-bound authentication native without clearing %s', (key) => {
-  expect(claudeWorkerAuthCompatible({ [key]: 'true' })).toBe(false);
-  expect(claudeWorkerAuthCompatible({ [key]: '0' })).toBe(false);
-  expect(claudeWorkerAuthCompatible({ [key]: 'false' })).toBe(false);
-  expect(claudeWorkerAuthCompatible({}, { [key]: 'true' })).toBe(false);
+  for (const value of ['1', 'true', 'unknown-host-selection']) {
+    expect(claudeWorkerAuthCompatible({ [key]: value })).toBe(false);
+    expect(claudeWorkerAuthCompatible({}, { [key]: value })).toBe(false);
+  }
   expect(claudeDeepSeekWorkerEnv({ [key]: 'true' }, 'http://127.0.0.1', 'worker-token')[key]).toBe(
     'true',
   );
 });
 
+it.each([
+  'CLAUDE_CODE_REMOTE',
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'CLAUDE_CODE_REMOTE_TOOLS_PIN_STORED_LOGIN',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_GATEWAY',
+])('does not reject ordinary worker authentication for an explicitly disabled %s', (key) => {
+  for (const value of ['0', 'false', 'FALSE', ' 0 ']) {
+    expect(claudeWorkerAuthCompatible({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', [key]: value })).toBe(
+      true,
+    );
+    expect(claudeWorkerAuthCompatible({}, { [key]: value })).toBe(true);
+  }
+});
+
+it('never lets a false flag hide another host authentication selection', () => {
+  expect(
+    claudeWorkerAuthCompatible(
+      { CLAUDE_CODE_USE_GATEWAY: 'false' },
+      { CLAUDE_CODE_USE_GATEWAY: 'true' },
+    ),
+  ).toBe(false);
+  expect(
+    claudeWorkerAuthCompatible({ CLAUDE_CODE_REMOTE: 'true' }, { CLAUDE_CODE_REMOTE: '0' }),
+  ).toBe(false);
+  expect(
+    claudeWorkerAuthCompatible({
+      CLAUDE_CODE_REMOTE: 'false',
+      CLAUDE_CODE_USE_GATEWAY: 'unknown-host-selection',
+    }),
+  ).toBe(false);
+});
+
 it.each(['CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CLAUDE_CODE_HOST_CREDS_FILE', 'ANTHROPIC_UNIX_SOCKET'])(
   'keeps a native host credential binding unchanged: %s',
-  (key) => expect(claudeWorkerAuthCompatible({ [key]: 'bound-by-host' })).toBe(false),
+  (key) => {
+    for (const value of ['bound-by-host', '0', 'false']) {
+      expect(claudeWorkerAuthCompatible({ [key]: value })).toBe(false);
+      expect(claudeWorkerAuthCompatible({}, { [key]: value })).toBe(false);
+    }
+  },
 );
 
 it.each(['claude-desktop', 'claude-desktop-3p', 'local-agent', 'claude-vscode', 'sdk-ts'])(

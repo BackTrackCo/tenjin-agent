@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { ModelHandoff, type ModelSession } from './model-handoff';
+import { ModelJobStore } from './model-job';
 import { modelSettings } from './model-settings';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import type { ModelTransport } from './model-transport';
@@ -12,6 +13,9 @@ import { claudeWorkerConfigDir } from './claude-worker-session';
 import { continuationRefusal, ownedModelReference } from './model-continuation';
 import type { ModelConversation, ModelConversationOwner } from './model-conversations';
 import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
+import { realpath } from 'node:fs/promises';
+import { ModelWorkerActivity } from './model-worker-activity';
+import { ModelWorkerViews } from './model-worker-views';
 
 type ActiveConversation = {
   handle: string;
@@ -38,6 +42,7 @@ export function registerModelTool(
     string,
     { abort: AbortController; done: Promise<unknown>; conversation?: ActiveConversation }
   >();
+  const views = new ModelWorkerViews();
   let handoff: ModelHandoff | undefined;
   const getHandoff = async () =>
     (handoff ??= new ModelHandoff({
@@ -75,6 +80,69 @@ export function registerModelTool(
     await fenceConversation();
     await model.store.fence(session.sessionId, session.turnId);
   };
+  if (options.harness === 'claude')
+    server.registerTool(
+      'subagent_activity',
+      {
+        title: 'DeepSeek worker activity',
+        description:
+          'Read current activity for an owned DeepSeek worker offer. Set follow to wait for its controller to finish. This display-only operation starts no work.',
+        annotations: { title: 'DeepSeek worker activity', readOnlyHint: true },
+        inputSchema: {
+          offer_id: z.string().uuid(),
+          follow: z.boolean().optional(),
+        },
+      },
+      async (args, extra) => {
+        const session = options.session();
+        if (!session || process.env.TENJIN_MODEL_WORKER === '1')
+          return answer({ status: 'unavailable' });
+        const [root, configDir] = await Promise.all([
+          realpath(session.cwd).catch(() => null),
+          realpath(claudeWorkerConfigDir(session.cwd)).catch(() => null),
+        ]);
+        const existing = views.get(args.offer_id)?.snapshot();
+        if (
+          existing &&
+          (existing.binding.parentSessionId !== session.sessionId ||
+            existing.binding.root !== root ||
+            existing.binding.configDir !== configDir)
+        )
+          return answer({ status: 'unavailable' });
+        if (args.follow && !existing) {
+          const pending = await new ModelJobStore(options.dataDir).pending(
+            session.sessionId,
+            session.turnId,
+          );
+          if (pending?.id !== args.offer_id || pending.root !== root)
+            return answer({ status: 'unavailable' });
+        }
+        const activity = args.follow
+          ? await views.follow(args.offer_id, extra.signal)
+          : views.get(args.offer_id)?.snapshot();
+        if (
+          !activity ||
+          activity.binding.parentSessionId !== session.sessionId ||
+          activity.binding.root !== root ||
+          activity.binding.configDir !== configDir
+        )
+          return answer({ status: 'unavailable' });
+        return answer({
+          status: 'activity',
+          activity: {
+            version: activity.version,
+            offerId: activity.binding.offerId,
+            workerHandle: activity.binding.workerHandle,
+            nativeProfile: activity.binding.nativeProfile,
+            generation: activity.binding.generation,
+            sequence: activity.sequence,
+            state: activity.state,
+            ...(!args.follow ? { droppedRows: activity.droppedRows, rows: activity.rows } : {}),
+            ...(activity.spend ? { spend: activity.spend } : {}),
+          },
+        });
+      },
+    );
   server.registerTool(
     'subagent',
     {
@@ -350,6 +418,43 @@ export function registerModelTool(
           signal.addEventListener('abort', stop, { once: true });
           if (signal.aborted) stop();
           const started = Date.now();
+          let activity: ModelWorkerActivity | undefined;
+          if (activeConversation && conversation) {
+            try {
+              const owned = activeConversation;
+              const { parentSessionId, root, configDir, sdkSessionId } = conversation;
+              const nativeProfile = executionJob.native.subagent_type ?? 'general-purpose';
+              if (nativeProfile !== 'general-purpose' && nativeProfile !== 'Explore')
+                throw new Error('Unsupported native worker profile for activity');
+              activity = views.begin(
+                job.id,
+                () =>
+                  new ModelWorkerActivity({
+                    dataDir: options.dataDir,
+                    binding: {
+                      parentSessionId,
+                      root,
+                      configDir,
+                      offerId: job.id,
+                      workerHandle: owned.handle,
+                      nativeProfile,
+                      continuationId: owned.continuationId,
+                      sdkSessionId,
+                      generation: randomUUID(),
+                    },
+                    isCurrentBinding: async () => {
+                      const current = await model.conversations.lookup(owned.handle, owned.owner);
+                      return (
+                        current?.sdkSessionId === sdkSessionId &&
+                        current.currentContinuationId === owned.continuationId
+                      );
+                    },
+                  }),
+              );
+            } catch {
+              // Activity is optional display data, never execution authority.
+            }
+          }
           const done = (async () => {
             try {
               signal.throwIfAborted();
@@ -357,6 +462,7 @@ export function registerModelTool(
                 dataDir: options.dataDir,
                 transport,
                 signal: abort.signal,
+                ...(activity ? { activity } : {}),
                 ...(session.codexPolicy ? { codexPolicy: session.codexPolicy } : {}),
                 ...(options.harness === 'claude'
                   ? {
@@ -430,6 +536,10 @@ export function registerModelTool(
                 // job update is repaired by replay, never by another worker.
                 await model.store.finish(job.id, 'completed').catch(() => undefined);
               } else await model.store.finish(job.id, 'completed', result);
+              activity?.finish(
+                'completed',
+                'reservedAtomic' in envelope.spend ? envelope.spend : undefined,
+              );
               return answer(envelope);
             } catch (error) {
               if (activeConversation)
@@ -444,18 +554,24 @@ export function registerModelTool(
               await model.store
                 .finish(job.id, abort.signal.aborted ? 'cancelled' : 'unknown')
                 .catch(() => undefined);
+              const spend = await transport
+                .summary(executionJob)
+                .catch(() => ({ accounting: 'unknown' }));
+              activity?.finish(
+                abort.signal.aborted ? 'cancelled' : 'unknown',
+                'reservedAtomic' in spend ? spend : undefined,
+              );
               return answer({
                 status: abort.signal.aborted ? 'cancelled' : 'unknown',
                 stopReason: workerStop(error),
                 elapsedMs: Date.now() - started,
-                spend: await transport
-                  .summary(executionJob)
-                  .catch(() => ({ accounting: 'unknown' })),
+                spend,
                 nextStep: activeConversation
                   ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
                   : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
               });
             } finally {
+              views.finished(job.id);
               controllers.delete(job.id);
               signal.removeEventListener('abort', stop);
             }
@@ -476,6 +592,7 @@ export function registerModelTool(
     await lifecycle.stop();
     for (const running of controllers.values()) running.abort.abort();
     await Promise.allSettled([...controllers.values()].map((c) => c.done));
+    await views.shutdown();
   };
   workerShutdown.set(server, shutdown);
   return {

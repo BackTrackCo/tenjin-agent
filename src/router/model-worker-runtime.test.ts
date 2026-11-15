@@ -97,6 +97,7 @@ function sdkResult(
   result: Record<string, unknown>,
   sessionId?: string,
   beforeResult?: () => Promise<void>,
+  activity: Record<string, unknown>[] = [],
 ) {
   vi.mocked(query).mockImplementation(
     (call) =>
@@ -111,6 +112,7 @@ function sdkResult(
             session_id: sessionId,
           };
           await beforeResult?.();
+          for (const message of activity) yield message;
           yield { type: 'result', session_id: sessionId, ...result };
         },
         accountInfo: async () => ({ apiProvider: 'firstParty' }),
@@ -147,15 +149,71 @@ it.each([undefined, 'gateway', 'bedrock'])(
   async (apiProvider) => {
     const pending = authenticationQuery(Promise.resolve({ apiProvider }));
     const messages = vi.fn();
+    const activity = { running: vi.fn(), observe: vi.fn() };
     await expect(
-      runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+      runModelWorker(job, {
+        ...options(),
+        activity,
+        transport: { messages } as unknown as ModelTransport,
+      }),
     ).rejects.toThrow(/unsupported API provider/);
     expect(await pending).toEqual({ done: true, value: undefined });
     expect(messages).not.toHaveBeenCalled();
+    expect(activity.running).not.toHaveBeenCalled();
+    expect(activity.observe).not.toHaveBeenCalled();
     expect(native.close).toHaveBeenCalled();
     expect(native.bridgeClose).toHaveBeenCalled();
   },
 );
+
+it('observes actual worker messages without changing the result or leaking them into the handback', async () => {
+  const events = [
+    {
+      type: 'assistant',
+      uuid: 'assistant-message',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'read-1', name: 'Read', input: { file_path: '/repo/a' } },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      uuid: 'tool-result',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read-1', content: 'observed fixture' }],
+      },
+    },
+  ];
+  sdkResult({ subtype: 'success', result: 'finished' }, undefined, undefined, events);
+  const activity = { running: vi.fn(), observe: vi.fn() };
+  await expect(runModelWorker(job, { ...options(), activity })).resolves.toBe('finished');
+  expect(activity.running).toHaveBeenCalledOnce();
+  expect(activity.observe.mock.calls.map(([message]) => message)).toEqual([
+    expect.objectContaining({ type: 'system', subtype: 'init' }),
+    ...events,
+    expect.objectContaining({ type: 'result', result: 'finished' }),
+  ]);
+});
+
+it('completes and drains the worker when the activity observer fails', async () => {
+  sdkResult({ subtype: 'success', result: 'finished' });
+  const activity = {
+    running: vi.fn(() => {
+      throw new Error('display unavailable');
+    }),
+    observe: vi.fn(() => {
+      throw new Error('display unavailable');
+    }),
+  };
+  await expect(runModelWorker(job, { ...options(), activity })).resolves.toBe('finished');
+  expect(activity.running).toHaveBeenCalledOnce();
+  expect(activity.observe).toHaveBeenCalled();
+  expect(native.close).toHaveBeenCalled();
+  expect(native.bridgeClose).toHaveBeenCalled();
+});
 
 it('releases the exact native user message only after provider initialization is allowed', async () => {
   let allow!: (account: unknown) => void;

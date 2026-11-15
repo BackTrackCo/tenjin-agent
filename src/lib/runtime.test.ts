@@ -1184,6 +1184,7 @@ describe('setupRuntime', () => {
       const mod = {
         'types/index.d.ts': 'export interface State {}\n',
         'hooks/register.tsx': 'export default function register() {}\n',
+        'hooks/model-viewer.tsx': 'export {};\n',
       };
       const pkg = npmPackage(
         '0.1.0-alpha.32',

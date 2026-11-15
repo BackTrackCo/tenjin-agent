@@ -1,6 +1,11 @@
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
 
 import type { TenjinHeld, TenjinRow } from '../types';
+import {
+  registerModelViewer,
+  rememberModelOffer,
+  translateViewerContinuation,
+} from './model-viewer';
 
 /**
  * THE TENJIN MOD: one line per paid lookup, drawn from documented props only.
@@ -92,6 +97,7 @@ type Shape = {
 type Elements = ReturnType<Dollar['ui']['resolve']>;
 
 export const register: Register = (on) => {
+  registerModelViewer(on);
   on('tool.describe', { tool: ['Agent', 'Task'] }, async ($, e, next) => {
     const data = await tenjinDataDir($);
     const router = data ? asRecord((await readJson($, `${data}/config.json`))?.router) : undefined;
@@ -101,10 +107,11 @@ export const register: Register = (on) => {
     };
   });
   on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async ($, e, next) => {
-    const { tool_use_id, ...input } = e;
-    delete (input as Json).tool;
-    const owned = ownedContinuationAddress(input, e.tool);
-    if (e.tool === 'SendMessage' && !owned) return next(e);
+    const { tool_use_id, ...raw } = e;
+    delete (raw as Json).tool;
+    const translated = await translateViewerContinuation($, e.tool, raw);
+    const input = translated.input;
+    const owned = translated.owned || ownedContinuationAddress(input, e.tool);
     const unavailable = () => ({
       result: heldModelResult(
         e.tool,
@@ -113,6 +120,8 @@ export const register: Register = (on) => {
         'tenjin-unavailable',
       ),
     });
+    if (translated.unavailable) return unavailable();
+    if (e.tool === 'SendMessage' && !owned) return next(e);
     try {
       const data = await tenjinDataDir($);
       const router = data
@@ -158,6 +167,7 @@ export const register: Register = (on) => {
           offer.offer_id,
         )
       ) {
+        await rememberModelOffer($, offer.offer_id, input).catch(() => undefined);
         const context = heldOfferContext(offer, e.tool === 'SendMessage');
         return {
           result: heldModelResult(

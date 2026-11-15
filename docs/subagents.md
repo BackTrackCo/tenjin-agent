@@ -23,11 +23,15 @@ The parent calls its native subagent tool normally. An offer starts no worker. A
 
 Cancel an offer or active worker with `subagent({cancel: offer_id})`, or interrupt the host. Turning routing off prevents new paid requests; cancel to drain active work. Repeated acceptance does not start a second worker.
 
+On supported Claude Code versions, use the native Down-arrow agent selector and Enter to open the running DeepSeek agent. Its Tenjin activity panel shows recent worker tool calls/results and final accounted spend. Stopping that agent cancels its owned worker. Worker operations appear as activity rows; the work result returns separately to the parent, and continuations retain the full worker history.
+
+Before reloading or removing Tenjin, wait for the parent's Tenjin call to finish or confirm cancellation, and for its native activity agent to stop. A stop acknowledgement alone does not confirm both have drained. Removing or reloading the mod while the viewer is active can let Claude call its own model outside the DeepSeek worker budget.
+
 Completed Claude workers return a `tenjin-worker-…` handle. The same parent can continue with native `SendMessage`, or compatible `Agent.resume`. Each full follow-up is held for accept/veto, then reopens the same history and original budget across days. Current instructions and permissions refresh. Missing history/accounting, uncertain state, changed directory scope or revoked disclosure refuses continuation. Native retention may remove history; no idle worker service is maintained.
 
 ## Charges and limits
 
-A valid offered job incurs one routing fee: 15% of expected inference spend, capped at $0.003, even if declined. Inference uses reported tokens plus the 5% proxy fee. Quotes reserve an upper bound; final usage can be lower. Messages thinking can exceed the requested output limit, so its quote covers full output exposure. Inference is refused if its quote exceeds your ceiling; a routing fee may already be paid. Routing/inference share the job ceiling and existing wallet limits. Other connected services retain their own permissions and billing. Tenjin's paid-tool router and purchase tool do not run inside these workers.
+A valid offered job incurs one routing fee: 15% of expected inference spend, capped at $0.003, even if declined. Inference uses reported tokens plus the 5% proxy fee. Quotes reserve an upper bound; final usage can be lower. Claude's Messages requests reserve at least about $0.50 on the current tariff; larger inputs increase that reserve. The quote covers full output exposure because thinking can exceed the requested output limit. Inference is refused if its quote exceeds your ceiling; a routing fee may already be paid. Routing/inference share the job ceiling and existing wallet limits. Other connected services retain their own permissions and billing. Tenjin's paid-tool router and purchase tool do not run inside these workers.
 
 Uncertain signed requests keep their full reservation until reconciled; recovery does not buy a replacement. `subagent` reports completion, elapsed time, accounted spend and unresolved reservations. Timeout or interruption is not proof of settlement. Jobs have a 40-minute wall limit and Claude's 500-turn emergency guard; native compaction remains enabled.
 

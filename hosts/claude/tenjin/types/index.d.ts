@@ -34,6 +34,55 @@ export type TenjinHeld = {
   price?: string;
 };
 
+/** Bounded, redacted display data only; the worker controller owns execution/history/accounting. */
+export type TenjinModelActivity = {
+  version: 1;
+  offerId: string;
+  workerHandle: string;
+  generation: string;
+  nativeProfile: 'general-purpose' | 'Explore';
+  sequence: number;
+  state: 'starting' | 'running' | 'completed' | 'cancelled' | 'unknown';
+  droppedRows: number;
+  rows: {
+    id: string;
+    sequence: number;
+    kind: 'text' | 'tool' | 'status' | 'compaction';
+    state: string;
+    name?: string;
+    text?: string;
+    inputSummary?: string;
+    outputPreview?: string;
+    elapsedSeconds?: number;
+  }[];
+  spend?: { reservedAtomic: string; actualAtomic: string; uncertain: string[] };
+};
+
+export type TenjinModelViewerRecord = {
+  offerId: string;
+  ordinal: number;
+  description: string;
+  profile: 'general-purpose' | 'Explore';
+  active: boolean;
+  nativeId?: string;
+  parentId?: string;
+  turnId?: string;
+  workerHandle?: string;
+  generation?: string;
+  activity?: TenjinModelActivity;
+  inspectionUnavailable?: boolean;
+};
+
+export type TenjinModelViewerState = {
+  version: 1;
+  parentSessionId: string;
+  cwd: string;
+  serial: number;
+  records: TenjinModelViewerRecord[];
+  /** Type guards only, never offer/execution authority. */
+  knownIds: string[];
+};
+
 declare module 'claude-code' {
   interface PluginState {
     tenjin: {
@@ -47,6 +96,7 @@ declare module 'claude-code' {
       prompts: StateFamily<string>;
       /** Start time of the latest root turn, used to reject an older offer. */
       lastTurnStart: number;
+      modelViewers: TenjinModelViewerState;
     };
   }
 }

@@ -1,4 +1,14 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -266,6 +276,9 @@ it('cancels and drains an accepted Codex worker on the trusted lifecycle bridge;
   await server.connect(a);
   await client.connect(b);
   try {
+    expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain(
+      'subagent_activity',
+    );
     const foreign = await client.callTool({
       name: 'subagent',
       arguments: { offer_id: job.id },
@@ -448,12 +461,13 @@ async function ownedClaudeFixture(agentType = 'general-purpose') {
     requireResumeBudget,
     summary,
   } as unknown as ModelTransport;
+  const getTransport = vi.fn(async () => transport);
   const server = new McpServer({ name: 'test', version: '1' });
   const model = registerModelTool(server, {
     dataDir: dir,
     harness: 'claude',
     session: () => session,
-    transport: async () => transport,
+    transport: getTransport,
   });
   const client = new Client(
     { name: 'test', version: '1' },
@@ -495,6 +509,10 @@ async function ownedClaudeFixture(agentType = 'general-purpose') {
     const reply = await client.callTool({ name: 'subagent', arguments: args });
     return JSON.parse((reply.content as Array<{ text: string }>)[0]!.text);
   };
+  const activity = async (args: { offer_id: string; follow?: boolean }) => {
+    const reply = await client.callTool({ name: 'subagent_activity', arguments: args });
+    return JSON.parse((reply.content as Array<{ text: string }>)[0]!.text);
+  };
   const capture = async (handle: string, callId = 'followup-call') =>
     call({
       capture: {
@@ -517,82 +535,294 @@ async function ownedClaudeFixture(agentType = 'general-purpose') {
     store,
     conversations,
     job,
+    client,
     call,
+    activity,
     capture,
     close,
     route,
     requireResumeBudget,
+    getTransport,
   };
 }
 
-it('continues a Claude session through SendMessage with the original ledger and exact completed replay', async () => {
+it('advertises display activity as read-only without changing the original subagent wire contract', async () => {
   const f = await ownedClaudeFixture();
   try {
-    const first = await f.call({ offer_id: f.job.id });
-    expect(first).toMatchObject({
-      status: 'completed',
-      worker_handle: expect.stringMatching(/^tenjin-worker-/),
-      continuation: expect.stringContaining('SendMessage'),
-    });
-    const initialOptions = worker.run.mock.calls[0]![1];
-    const sdkId = initialOptions.claudeSession.sessionId;
-    expect(sdkId).toMatch(/^[0-9a-f-]{36}$/);
-    await expect(initialOptions.claudeSession.onSession(sdkId)).resolves.toBeUndefined();
-    await expect(initialOptions.claudeSession.onSession('foreign')).rejects.toThrow(/session/);
-    expect(JSON.stringify(first)).not.toContain(sdkId);
-    expect(await f.call({ offer_id: f.job.id })).toEqual(first);
-    expect(worker.run).toHaveBeenCalledTimes(1);
-    f.session.turnId = 'followup-turn';
-    f.session.claudePermissionMode = 'auto';
-    const configPath = join(dir, 'config.json');
-    const config = JSON.parse(await readFile(configPath, 'utf8'));
-    config.router.subagentConsent.maxJobAtomic = '500000';
-    await writeFile(configPath, JSON.stringify(config));
-    const held = await f.capture(first.worker_handle);
-    expect(held).toMatchObject({
-      action: 'offer',
-      continuation: true,
-      routingFeeAtomic: '0',
-      capAtomic: '500000',
-    });
-    expect(worker.run).toHaveBeenCalledTimes(1);
-    expect(f.route).not.toHaveBeenCalled();
-    config.router.subagentConsent.maxJobAtomic = '1000000';
-    await writeFile(configPath, JSON.stringify(config));
-    const result = await f.call({ offer_id: held.offer_id });
-    expect(result.worker_handle).toBe(first.worker_handle);
-    const [execution, options] = worker.run.mock.calls[1]!;
-    expect(execution).toMatchObject({
-      id: f.job.id,
-      turnId: 'followup-turn',
-      callId: 'followup-call',
-      task: 'Continue the same change with the current constraints.',
-      capAtomic: '500000',
-      decision: { jobId: f.job.id, requireExistingBudget: true, claudePermissionMode: 'auto' },
-    });
-    expect(options.claudeSession).toMatchObject({ resume: sdkId });
-    expect(options.claudeSession).not.toHaveProperty('sessionId');
-    expect(f.requireResumeBudget.mock.calls.every(([job]) => job.id === f.job.id)).toBe(true);
-    expect(await f.call({ offer_id: held.offer_id })).toEqual(result);
-    expect(worker.run).toHaveBeenCalledTimes(2);
-    const local = await f.store.pending('root', 'followup-turn');
-    expect(local?.state).toBe('completed');
-    expect(local?.result).toBeUndefined();
-    const replay = await f.conversations.accept(
-      first.worker_handle,
-      {
-        parentSessionId: 'root',
-        root: f.repo,
-        configDir: f.configDir,
-      },
-      held.offer_id,
+    const tools = (await f.client.listTools()).tools;
+    const activity = tools.find((tool) => tool.name === 'subagent_activity');
+    expect(activity?.annotations?.readOnlyHint).toBe(true);
+    expect(Object.keys(activity?.inputSchema.properties ?? {}).sort()).toEqual([
+      'follow',
+      'offer_id',
+    ]);
+    expect(activity?.inputSchema.required).toEqual(['offer_id']);
+    const subagent = tools.find((tool) => tool.name === 'subagent');
+    expect(subagent?.description).toBe(
+      'Run or cancel a Tenjin DeepSeek subagent offer. Accept with offer_id; cancel with cancel. For a held Codex delegation, submit delegation_id and the complete plaintext task. The offer carries consent and the parent routing policy.',
     );
-    expect(replay?.action).toBe('replay');
-    if (replay?.action === 'replay') expect(JSON.parse(replay.result)).toEqual(result);
+    expect(subagent?.annotations?.readOnlyHint).toBe(false);
+    expect(Object.keys(subagent?.inputSchema.properties ?? {}).sort()).toEqual([
+      'cancel',
+      'capture',
+      'delegation_id',
+      'offer_id',
+      'task',
+    ]);
+    expect(subagent?.inputSchema.required ?? []).toEqual([]);
   } finally {
     await f.close();
   }
 });
+
+it('keeps activity unavailable inside a model worker without claiming or starting its offer', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    vi.stubEnv('TENJIN_MODEL_WORKER', '1');
+    expect(await f.activity({ offer_id: f.job.id, follow: true })).toEqual({
+      status: 'unavailable',
+    });
+    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+    expect(worker.run).not.toHaveBeenCalled();
+    expect(f.route).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it('rejects an unrelated activity follow without initializing transport or mutating the job store', async () => {
+  const f = await ownedClaudeFixture();
+  const jobFiles = async () => {
+    const path = join(dir, 'model-jobs');
+    return Promise.all(
+      (await readdir(path))
+        .sort()
+        .map(async (name) => [name, await readFile(join(path, name), 'utf8')]),
+    );
+  };
+  try {
+    const before = await jobFiles();
+    expect(await f.activity({ offer_id: randomUUID(), follow: true })).toEqual({
+      status: 'unavailable',
+    });
+    expect(f.getTransport).not.toHaveBeenCalled();
+    expect(worker.run).not.toHaveBeenCalled();
+    expect(worker.qualified).not.toHaveBeenCalled();
+    expect(f.route).not.toHaveBeenCalled();
+    expect(await jobFiles()).toEqual(before);
+    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+  } finally {
+    await f.close();
+  }
+});
+
+it('inspects only owned activity without starting work, changing selection or adding the trace to the handback', async () => {
+  const f = await ownedClaudeFixture();
+  let release!: () => void;
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  worker.run.mockImplementation(async (_job, options) => {
+    options.activity.running();
+    options.activity.observe({
+      type: 'assistant',
+      uuid: 'actual-sdk-observation',
+      session_id: options.claudeSession.sessionId,
+      message: {
+        id: 'message-1',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'read-1',
+            name: 'Read',
+            input: { file_path: '/repo/observed.ts' },
+          },
+        ],
+      },
+    });
+    started();
+    await blocked;
+    return 'completed fixture';
+  });
+  let accepted: Promise<Record<string, unknown>> | undefined;
+  let following: Promise<Record<string, unknown>> | undefined;
+  try {
+    expect(await f.activity({ offer_id: f.job.id })).toEqual({ status: 'unavailable' });
+    expect(worker.run).not.toHaveBeenCalled();
+    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('offered');
+    following = f.activity({ offer_id: f.job.id, follow: true });
+    accepted = f.call({ offer_id: f.job.id });
+    await ready;
+    const viewed = await f.activity({ offer_id: f.job.id });
+    expect(viewed).toMatchObject({
+      status: 'activity',
+      activity: { state: 'running', offerId: f.job.id },
+    });
+    expect(viewed.activity.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'Read', state: 'running' })]),
+    );
+    expect(JSON.stringify(viewed)).toContain('observed.ts');
+    expect(JSON.stringify(viewed)).not.toContain('sdkSessionId');
+    f.session.sessionId = 'foreign';
+    expect(await f.activity({ offer_id: f.job.id })).toEqual({ status: 'unavailable' });
+    expect(await f.activity({ offer_id: f.job.id, follow: true })).toEqual({
+      status: 'unavailable',
+    });
+    expect((await f.call({ offer_id: f.job.id })).status).not.toBe('completed');
+    f.session.sessionId = 'root';
+    expect((await f.call({ offer_id: f.job.id })).status).not.toBe('completed');
+    expect((await f.call({ offer_id: f.job.id, cancel: f.job.id })).reason).toBe(
+      'Use one subagent operation',
+    );
+    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('running');
+    release();
+    const completed = await accepted;
+    expect(completed.status).toBe('completed');
+    expect(JSON.stringify(completed)).not.toContain('observed.ts');
+    const followed = await following;
+    expect(followed).toMatchObject({
+      status: 'activity',
+      activity: { state: 'completed', offerId: f.job.id },
+    });
+    expect(followed.activity).not.toHaveProperty('rows');
+    expect(followed.activity).not.toHaveProperty('droppedRows');
+    expect(JSON.stringify(followed)).not.toContain('observed.ts');
+    expect(await f.activity({ offer_id: f.job.id })).toMatchObject({
+      status: 'activity',
+      activity: {
+        state: 'completed',
+        spend: { actualAtomic: '3000', reservedAtomic: '3000', uncertain: [] },
+      },
+    });
+    expect(worker.run).toHaveBeenCalledOnce();
+    expect(f.route).not.toHaveBeenCalled();
+  } finally {
+    f.session.sessionId = 'root';
+    release();
+    await accepted?.catch(() => undefined);
+    await following?.catch(() => undefined);
+    await f.close();
+  }
+});
+
+it('inspects the owned activation when the parent workspace and Claude config use symlink spellings', async () => {
+  const f = await ownedClaudeFixture();
+  try {
+    const repoAlias = join(dir, 'repo-alias');
+    const configAlias = join(dir, 'config-alias');
+    await symlink(f.repo, repoAlias, 'dir');
+    await symlink(f.configDir, configAlias, 'dir');
+    f.session.cwd = repoAlias;
+    vi.stubEnv('CLAUDE_CONFIG_DIR', configAlias);
+    worker.qualified.mockImplementation(async () => ({
+      path: 'worker',
+      claudeWorkspace: {
+        version: 1,
+        root: f.repo,
+        workingDirectories: [f.repo],
+        workingDirectorySpellings: [f.repo],
+        readExceptions: [],
+        writeExceptions: [],
+      },
+    }));
+    expect((await f.call({ offer_id: f.job.id })).status).toBe('completed');
+    expect(await f.activity({ offer_id: f.job.id })).toMatchObject({
+      status: 'activity',
+      activity: { state: 'completed', offerId: f.job.id },
+    });
+    expect(worker.run).toHaveBeenCalledOnce();
+  } finally {
+    await f.close();
+  }
+});
+
+it.each(['general-purpose', 'Explore'] as const)(
+  'continues a Claude %s session through SendMessage with the original profile, ledger and exact completed replay',
+  async (nativeProfile) => {
+    const f = await ownedClaudeFixture(nativeProfile);
+    try {
+      const first = await f.call({ offer_id: f.job.id });
+      expect(first).toMatchObject({
+        status: 'completed',
+        worker_handle: expect.stringMatching(/^tenjin-worker-/),
+        continuation: expect.stringContaining('SendMessage'),
+      });
+      const [initialExecution, initialOptions] = worker.run.mock.calls[0]!;
+      expect(initialExecution.native).toMatchObject({ subagent_type: nativeProfile });
+      for (const follow of [false, true])
+        expect(await f.activity({ offer_id: f.job.id, follow })).toMatchObject({
+          status: 'activity',
+          activity: { nativeProfile, state: 'completed', workerHandle: first.worker_handle },
+        });
+      const sdkId = initialOptions.claudeSession.sessionId;
+      expect(sdkId).toMatch(/^[0-9a-f-]{36}$/);
+      await expect(initialOptions.claudeSession.onSession(sdkId)).resolves.toBeUndefined();
+      await expect(initialOptions.claudeSession.onSession('foreign')).rejects.toThrow(/session/);
+      expect(JSON.stringify(first)).not.toContain(sdkId);
+      expect(await f.call({ offer_id: f.job.id })).toEqual(first);
+      expect(worker.run).toHaveBeenCalledTimes(1);
+      f.session.turnId = 'followup-turn';
+      f.session.claudePermissionMode = 'auto';
+      const configPath = join(dir, 'config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf8'));
+      config.router.subagentConsent.maxJobAtomic = '500000';
+      await writeFile(configPath, JSON.stringify(config));
+      const held = await f.capture(first.worker_handle);
+      expect(held).toMatchObject({
+        action: 'offer',
+        continuation: true,
+        routingFeeAtomic: '0',
+        capAtomic: '500000',
+      });
+      expect(worker.run).toHaveBeenCalledTimes(1);
+      expect(f.route).not.toHaveBeenCalled();
+      config.router.subagentConsent.maxJobAtomic = '1000000';
+      await writeFile(configPath, JSON.stringify(config));
+      const result = await f.call({ offer_id: held.offer_id });
+      expect(result.worker_handle).toBe(first.worker_handle);
+      const [execution, options] = worker.run.mock.calls[1]!;
+      expect(execution).toMatchObject({
+        id: f.job.id,
+        turnId: 'followup-turn',
+        callId: 'followup-call',
+        task: 'Continue the same change with the current constraints.',
+        capAtomic: '500000',
+        native: { subagent_type: nativeProfile },
+        decision: { jobId: f.job.id, requireExistingBudget: true, claudePermissionMode: 'auto' },
+      });
+      for (const follow of [false, true])
+        expect(await f.activity({ offer_id: held.offer_id, follow })).toMatchObject({
+          status: 'activity',
+          activity: { nativeProfile, state: 'completed', workerHandle: first.worker_handle },
+        });
+      expect(options.claudeSession).toMatchObject({ resume: sdkId });
+      expect(options.claudeSession).not.toHaveProperty('sessionId');
+      expect(f.requireResumeBudget.mock.calls.every(([job]) => job.id === f.job.id)).toBe(true);
+      expect(await f.call({ offer_id: held.offer_id })).toEqual(result);
+      expect(worker.run).toHaveBeenCalledTimes(2);
+      const local = await f.store.pending('root', 'followup-turn');
+      expect(local?.state).toBe('completed');
+      expect(local?.result).toBeUndefined();
+      const replay = await f.conversations.accept(
+        first.worker_handle,
+        {
+          parentSessionId: 'root',
+          root: f.repo,
+          configDir: f.configDir,
+        },
+        held.offer_id,
+      );
+      expect(replay?.action).toBe('replay');
+      if (replay?.action === 'replay') expect(JSON.parse(replay.result)).toEqual(result);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 it('refuses acceptance when the independently qualified native workspace no longer matches the offered scope', async () => {
   const f = await ownedClaudeFixture();

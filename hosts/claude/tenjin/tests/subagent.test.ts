@@ -271,7 +271,7 @@ test('owned continuations never fall through after a transport error or invalid 
   expect(ran).toEqual([]);
 });
 
-test('mixed owned and native addresses stay held when the backend refuses them', async ($, on) => {
+test('mixed owned and native addresses are held before capture or native delivery', async ($, on) => {
   const { files } = machine(on);
   enabled(files);
   const asked: unknown[] = [];
@@ -286,9 +286,7 @@ test('mixed owned and native addresses stay held when the backend refuses them',
     message: 'Do not redirect either address',
   };
   const result = await $.tool.call({ tool: 'SendMessage', tool_use_id: 'mixed', ...input });
-  expect(asked).toEqual([
-    { session_id: SESSION, tool_use_id: 'mixed', input, tool: 'SendMessage' },
-  ]);
+  expect(asked).toEqual([]);
   expect(result.result).toMatchObject({ success: false });
   expect(ran).toEqual([]);
 });

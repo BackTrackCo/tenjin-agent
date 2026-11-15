@@ -106,6 +106,10 @@ export async function runModelWorker(
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
     claudeSession?: ClaudeWorkerSession;
+    activity?: {
+      observe: (message: unknown) => void;
+      running: () => void;
+    };
     permission: (
       tool: string,
       input: Record<string, unknown>,
@@ -519,6 +523,7 @@ async function runQualifiedWorker(
     } finally {
       controller.signal.removeEventListener('abort', stopAuthentication);
     }
+    let activityReady = false;
     for await (const message of worker) {
       if (message.type === 'system' && message.subtype === 'init') {
         const matches = message.permissionMode === permissionMode;
@@ -535,6 +540,19 @@ async function runQualifiedWorker(
         assertCurrentMode();
         initialized(matches);
         clearTimeout(initTimer);
+        activityReady = true;
+        try {
+          options.activity?.running();
+        } catch {
+          // Display failures never change execution or permission decisions.
+        }
+      }
+      if (activityReady) {
+        try {
+          options.activity?.observe(message);
+        } catch {
+          // The SDK remains the owner of complete worker history.
+        }
       }
       if (message.type === 'result') {
         session?.assert(message.session_id);

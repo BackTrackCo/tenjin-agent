@@ -14,7 +14,7 @@ import {
  * Claude Code manifest (the Codex plugin carries none). `tenjin install`
  * registers those folders as local marketplaces, so they must sit inside the
  * published `files`; `dist` already is. The checked-in `hosts/` templates are
- * pinned to the same render by a test, and the Claude mod's two files are
+ * pinned to the same render by a test, and the Claude mod's source files are
  * copied from them as written.
  */
 function writeHosts(): void {

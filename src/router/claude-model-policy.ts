@@ -69,21 +69,26 @@ export function claudeWorkerAuthCompatible(
   env: NodeJS.ProcessEnv,
   settingsEnv: Record<string, string> = {},
 ): boolean {
-  return [env, settingsEnv].every(
-    (source) =>
-      ![
-        'CLAUDE_CODE_REMOTE',
-        'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
-        'CLAUDE_CODE_REMOTE_TOOLS_PIN_STORED_LOGIN',
-        'CLAUDE_CODE_USE_ANTHROPIC_AWS',
-        'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
-        'CLAUDE_CODE_USE_MANTLE',
-        'CLAUDE_CODE_USE_GATEWAY',
-        'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
-        'CLAUDE_CODE_HOST_CREDS_FILE',
-        'ANTHROPIC_UNIX_SOCKET',
-      ].some((key) => Boolean(source[key])),
-  );
+  return [env, settingsEnv].every((source) => {
+    const selectedByFlag = [
+      'CLAUDE_CODE_REMOTE',
+      'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+      'CLAUDE_CODE_REMOTE_TOOLS_PIN_STORED_LOGIN',
+      'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+      'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+      'CLAUDE_CODE_USE_MANTLE',
+      'CLAUDE_CODE_USE_GATEWAY',
+    ].some((key) => {
+      const value = source[key];
+      return Boolean(value && !/^(?:0|false)$/i.test(value.trim()));
+    });
+    const boundByHost = [
+      'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+      'CLAUDE_CODE_HOST_CREDS_FILE',
+      'ANTHROPIC_UNIX_SOCKET',
+    ].some((key) => Boolean(source[key]));
+    return !selectedByFlag && !boundByHost;
+  });
 }
 
 /** Native helper auth does not approve or change any key in the user's saved profile. */
