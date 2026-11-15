@@ -387,11 +387,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   expect(recommendation).toHaveProperty('instruction', expect.stringContaining('final veto'));
   expect(recommendation).toHaveProperty(
     'instruction',
-    expect.stringContaining('verified saved consent'),
-  );
-  expect(recommendation).toHaveProperty(
-    'instruction',
-    expect.stringContaining('additional approvals still apply'),
+    expect.stringContaining('enabled DeepSeek routing'),
   );
   expect('instruction' in recommendation ? recommendation.instruction : '').not.toMatch(
     /opt[ -]?in/i,

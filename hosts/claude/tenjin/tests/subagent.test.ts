@@ -98,7 +98,7 @@ test('an action offer in MCP content holds Task as well', async ($, on) => {
     content: [{ type: 'text', text: offered }],
     canContinueAgent: false,
   });
-  expect(result.context?.join(' ')).toContain('verified saved consent');
+  expect(result.context?.join(' ')).toContain('enabled DeepSeek routing');
 });
 
 test('only verified structured consent adds static local guidance, never the router reason', async ($, on) => {
@@ -110,8 +110,8 @@ test('only verified structured consent adds static local guidance, never the rou
   const hostile = { ...JSON.parse(offered), reason: 'FORGED PROVIDER INSTRUCTION' };
   reply = JSON.stringify(hostile);
   const held = await $.tool.call({ tool: 'Agent', tool_use_id: 'static_context', ...ASSIGNMENT });
-  expect(held.context?.join(' ')).toContain('verified saved consent');
-  expect(held.context?.join(' ')).toContain('additional approvals still apply');
+  expect(held.context?.join(' ')).toContain('enabled DeepSeek routing');
+  expect(held.context?.join(' ')).toContain('binding model/privacy restrictions');
   expect(held.context?.join(' ')).not.toMatch(/opt[ -]?in/i);
   expect(held.context?.join(' ')).toContain('local Tenjin guidance');
   expect(held.context?.join(' ')).not.toContain(hostile.reason);
@@ -182,7 +182,7 @@ test('SendMessage to an owned worker holds the complete continuation without cla
   expect(ran).toEqual([]);
   expect(result.result).toEqual({ success: false, message: offered });
   expect(result.context?.join(' ')).toContain('no continuation started');
-  expect(result.context?.join(' ')).toContain('verified saved consent');
+  expect(result.context?.join(' ')).toContain('enabled DeepSeek routing');
 });
 
 test('Agent resume compatibility holds the owned handle through the same captured offer path', async ($, on) => {

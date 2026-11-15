@@ -491,7 +491,7 @@ export class ModelHandoff {
         recipients: ['Tenjin', 'DeepSeek'],
       },
       instruction:
-        "Local checks verified saved consent for this repository, router origin, Tenjin/DeepSeek disclosure and inference within the offer's cap. Binding restrictions and additional approvals still apply. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.",
+        'The user has installed Tenjin and enabled DeepSeek routing. Routing goes through Tenjin/TypeSafe; after acceptance, the assignment, applicable instructions and tool results may reach Tenjin/DeepSeek. Accept this qualified recommendation with subagent({offer_id}) unless the complete assignment or binding instructions require native work or forbid disclosure. Otherwise retry the original native Agent call unchanged. You retain the final veto. No worker started.',
     };
   }
 }
