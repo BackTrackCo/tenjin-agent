@@ -15,6 +15,7 @@ let files: Map<string, Buffer>;
 let denied: boolean;
 let mutate: (() => Promise<void>) | undefined;
 let policy: CodexModelPolicy;
+let profileMutation: ((profile: Record<string, unknown>) => void) | undefined;
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'tenjin-instruction-read-')));
   await mkdir(join(root, 'repo'));
@@ -22,6 +23,7 @@ beforeEach(async () => {
   files = new Map();
   denied = false;
   mutate = undefined;
+  profileMutation = undefined;
   policy = {
     approvalPolicy: 'on-request',
     approvalsReviewer: 'user',
@@ -40,6 +42,12 @@ beforeEach(async () => {
     fn(async (method, raw) => {
       const params = raw as Record<string, unknown>;
       calls.push({ method, params });
+      if (method === 'config/read') {
+        const profile = codexInstructionProfile(options([]))!;
+        const actual: Record<string, unknown> = structuredClone(profile.expected);
+        profileMutation?.(actual);
+        return { config: { permissions: { [profile.name]: actual } } };
+      }
       if (method !== 'command/exec') return {};
       await mutate?.();
       if (denied) return { exitCode: 1, stdout: '', stderr: 'Operation not permitted' };
@@ -79,9 +87,11 @@ it('reads selected outside-root instructions through a fixed native argv and pre
     ['/usr/bin/base64', '-i', global],
     ['/usr/bin/base64', '-i', local],
   ]);
-  expect(calls.every((c) => ['command/exec', 'command/exec/terminate'].includes(c.method))).toBe(
-    true,
-  );
+  expect(
+    calls.every((c) =>
+      ['config/read', 'command/exec', 'command/exec/terminate'].includes(c.method),
+    ),
+  ).toBe(true);
 });
 
 it('starts the standalone native reader with its captured shielded profile as the explicit default', async () => {
@@ -95,6 +105,21 @@ it('starts the standalone native reader with its captured shielded profile as th
     profile.name,
   );
 });
+
+it.each(['extra grant', 'extends', 'workspace roots'] as const)(
+  'refuses a merged standalone reader profile with %s before running its fixed command',
+  async (changed) => {
+    const path = await source('AGENTS.md', 'selected native instructions');
+    profileMutation = (profile) => {
+      if (changed === 'extra grant')
+        (profile.filesystem as Record<string, unknown>)['/outside'] = 'read';
+      else if (changed === 'extends') profile.extends = 'unbounded-lower-layer';
+      else profile.workspace_roots = { '/outside': true };
+    };
+    expect(await readCodexInstructionFiles(options([path]))).toBeNull();
+    expect(calls.some((call) => call.method === 'command/exec')).toBe(false);
+  },
+);
 
 it('keeps dotted and quoted filesystem paths inside the whole inline table value', () => {
   const path = join(root, 'folder.with.dots', 'quoted "directory"');

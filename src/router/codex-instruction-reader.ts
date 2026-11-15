@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { withAppServer, type CodexAppRequest } from '../lib/codex-app-server';
 import { codexHome } from '../lib/codex-home';
 import { QUALIFIED_CODEX_MODEL_VERSIONS } from '../lib/codex-model-version';
@@ -29,6 +30,37 @@ export interface CodexInstructionFile {
 export interface CodexInstructionProfile {
   name: string;
   overrides: string[];
+  expected: { filesystem: Record<string, unknown>; network: { enabled: false } };
+}
+
+/** Config/read serializes native Option fields as null; no other extras are qualified. */
+export function codexProfileMatches(config: unknown, profile: CodexInstructionProfile): boolean {
+  if (!isRecord(config) || !isRecord(config.permissions)) return false;
+  const selected = config.permissions[profile.name];
+  if (!isRecord(selected)) return false;
+  const actual = structuredClone(selected);
+  for (const key of ['description', 'extends', 'workspace_roots'])
+    if (actual[key] === null) delete actual[key];
+  if (isRecord(actual.filesystem) && actual.filesystem.glob_scan_max_depth === null)
+    delete actual.filesystem.glob_scan_max_depth;
+  if (isRecord(actual.network))
+    for (const key of [
+      'enabled',
+      'proxy_url',
+      'enable_socks5',
+      'socks_url',
+      'enable_socks5_udp',
+      'allow_upstream_proxy',
+      'dangerously_allow_non_loopback_proxy',
+      'dangerously_allow_all_unix_sockets',
+      'mode',
+      'domains',
+      'unix_sockets',
+      'allow_local_binding',
+      'mitm',
+    ])
+      if (actual.network[key] === null) delete actual.network[key];
+  return isDeepStrictEqual(actual, profile.expected);
 }
 const MAX_BYTES = 64_000;
 const inside = (root: string, path: string) => path === root || path.startsWith(`${root}${sep}`);
@@ -117,11 +149,25 @@ export function codexInstructionProfile(
     for (const key of entries.keys()) if (inside(path, key)) entries.delete(key);
     entries.set(path, 'deny');
   }
-  const filesystem = `{ ${[...entries].map(([p, a]) => `${JSON.stringify(p)} = ${JSON.stringify(a)}`).join(', ')}${options.worker ? ', ":workspace_roots" = { "**/.env*" = "deny", "**/*.pem" = "deny", "**/*.p12" = "deny" }, glob_scan_max_depth = 6' : ''} }`;
+  const globs = { '**/.env*': 'deny', '**/*.pem': 'deny', '**/*.p12': 'deny' };
+  const filesystem = `{ ${[...entries].map(([p, a]) => `${JSON.stringify(p)} = ${JSON.stringify(a)}`).join(', ')}${
+    options.worker
+      ? `, ":workspace_roots" = { ${Object.entries(globs)
+          .map(([path, access]) => `${JSON.stringify(path)} = ${JSON.stringify(access)}`)
+          .join(', ')} }, glob_scan_max_depth = 6`
+      : ''
+  } }`;
   if (Buffer.byteLength(filesystem) > 64_000) return null;
   const name = `tenjin-instructions-${canonicalHash(filesystem).slice(0, 16)}`;
   return {
     name,
+    expected: {
+      filesystem: {
+        ...Object.fromEntries(entries),
+        ...(options.worker ? { ':workspace_roots': globs, glob_scan_max_depth: 6 } : {}),
+      },
+      network: { enabled: false },
+    },
     overrides: [
       `permissions.${name}.filesystem=${filesystem}`,
       `permissions.${name}.network.enabled=false`,
@@ -172,6 +218,8 @@ export async function readCodexInstructionFilesOnServer(
         (before.mode & 0o444) === 0
       )
         return null;
+      const raw = await request('config/read', { cwd: options.cwd }, 2_500);
+      if (!isRecord(raw) || !codexProfileMatches(raw.config, profile)) return null;
       const processId = `tenjin-instructions-${randomUUID()}`;
       const abort = () => {
         void request('command/exec/terminate', { processId });

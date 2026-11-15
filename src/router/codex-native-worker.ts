@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { isAbsolute, resolve } from 'node:path';
 import { readFile, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { withAppServer, type CodexAppRequest } from '../lib/codex-app-server';
@@ -9,7 +10,9 @@ import { isRecord } from '../lib/guards';
 import { canonicalHash } from '../lib/request-schema';
 import {
   codexInstructionProfile,
+  codexProfileMatches,
   readCodexInstructionFilesOnServer,
+  type CodexInstructionProfile,
 } from './codex-instruction-reader';
 import { policyRules, type CodexModelPolicy } from './codex-model-gates';
 import {
@@ -18,7 +21,7 @@ import {
   type InstructionContext,
 } from './model-instructions';
 import { nativeFlashCatalog } from './deepseek-codex-catalog';
-import { modelSettings } from './model-settings';
+import { disclosureCovers, modelSettings } from './model-settings';
 import { MCP_SERVER_NAME } from './names';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
@@ -77,6 +80,60 @@ interface Session {
 interface OwnedProvider {
   url: string;
   catalogPath: string;
+  profiles: CodexInstructionProfile[];
+}
+
+// On the pinned native runtime, a fresh never/user turn cannot acquire runtime
+// permissions or approve sandbox escalation. Other policies remain native.
+const supportedApproval = (policy: CodexModelPolicy) =>
+  policy.approvalPolicy === 'never' && policy.approvalsReviewer === 'user';
+
+/** Keep native authority intact; unsupported data scope stays native, never narrowed by consent. */
+async function assertDisclosureCurrent(options: Options) {
+  const settings = await modelSettings(options.dataDir, options.cwd);
+  const profile = options.policy.permissionProfile;
+  if (
+    !settings ||
+    !supportedApproval(options.policy) ||
+    !options.policy.parent ||
+    !isRecord(profile) ||
+    !isRecord(profile.file_system) ||
+    !Array.isArray(profile.file_system.entries)
+  )
+    throw new Error('Native worker disclosure scope unavailable');
+  const covered = async (path: unknown, concrete = true) => {
+    if (typeof path !== 'string' || !isAbsolute(path))
+      throw new Error('Native worker filesystem scope is unsupported');
+    const canonical = await realpath(path);
+    // A broad filesystem grant and a path whose alias may retarget have not
+    // been qualified as a bounded worker scope. Do not rewrite the native ACL.
+    if (
+      canonical === resolve('/') ||
+      (concrete && canonical !== resolve(path)) ||
+      !disclosureCovers(settings.repositories, canonical)
+    )
+      throw new Error('Native worker filesystem scope exceeds disclosure');
+  };
+  if (!options.policy.parent.runtimeWorkspaceRoots.length)
+    throw new Error('Native worker workspace roots unavailable');
+  for (const root of options.policy.parent.runtimeWorkspaceRoots) await covered(root);
+  for (const entry of profile.file_system.entries) {
+    if (!isRecord(entry) || !isRecord(entry.path))
+      throw new Error('Native worker filesystem scope is unsupported');
+    if (entry.access === 'deny' || entry.access === 'none') continue;
+    if (entry.access !== 'read' && entry.access !== 'write')
+      throw new Error('Native worker filesystem scope is unsupported');
+    if (entry.path.type === 'path') await covered(entry.path.path);
+    else if (entry.path.type === 'special' && isRecord(entry.path.value)) {
+      const kind = entry.path.value.kind;
+      if (kind === 'root') await covered('/', false);
+      else if (kind === 'slash_tmp') await covered('/tmp', false);
+      else if (kind === 'tmpdir') {
+        const temporary = (options.env ?? process.env).TMPDIR;
+        await covered(temporary || tmpdir(), false);
+      } else throw new Error('Native worker special filesystem scope is unsupported');
+    } else throw new Error('Native worker filesystem scope is unsupported');
+  }
 }
 
 async function assertParentCurrent(options: Options) {
@@ -243,6 +300,13 @@ async function hostSnapshot(
   )
     throw new Error('Native configuration unavailable');
   assertOwnedProvider(raw.config, owned);
+  if (
+    raw.config.default_permissions !== owned.profiles[0]?.name ||
+    !owned.profiles.every((profile) => codexProfileMatches(raw.config, profile))
+  )
+    throw new Error('Native worker filesystem authority changed');
+  if (raw.config.approval_policy !== 'never' || raw.config.approvals_reviewer !== 'user')
+    throw new Error('Native worker approval authority changed');
   assertMcpEnvironment(raw.config);
   const hooks = nativeHooks(listed);
   if (threadId) assertLoadedHooks(hooks, loadedHooks);
@@ -394,14 +458,10 @@ async function withNativeSession<T>(
     serverRequest?: (method: string, params: unknown) => Promise<unknown>;
   } = {},
 ): Promise<T | null> {
-  if (
-    !options.policy.parent ||
-    !['user', 'auto_review'].includes(options.policy.approvalsReviewer) ||
-    !['on-request', 'never', 'untrusted'].includes(String(options.policy.approvalPolicy))
-  )
-    return null;
+  if (!options.policy.parent || !supportedApproval(options.policy)) return null;
   try {
     await assertParentCurrent(options);
+    await assertDisclosureCurrent(options);
   } catch {
     return null;
   }
@@ -409,7 +469,11 @@ async function withNativeSession<T>(
   const instructionProfile = codexInstructionProfile(options);
   if (!profile || !instructionProfile) return null;
   const catalog = await nativeFlashCatalog(options.dataDir);
-  const owned = { url: bridge.url, catalogPath: catalog.path };
+  const owned = {
+    url: bridge.url,
+    catalogPath: catalog.path,
+    profiles: [profile, instructionProfile],
+  };
   const env = {
     ...(options.env ?? process.env),
     TENJIN_MODEL_WORKER: '1',
@@ -421,6 +485,9 @@ async function withNativeSession<T>(
     ...profile.overrides,
     ...instructionProfile.overrides,
     `default_permissions=${JSON.stringify(profile.name)}`,
+    // Mirror the already-qualified parent policy, never downgrade its reviewer.
+    'approval_policy="never"',
+    'approvals_reviewer="user"',
     `model=${JSON.stringify('deepseek-flash')}`,
     `model_provider=${JSON.stringify(PROVIDER)}`,
     'model_reasoning_effort="high"',
@@ -506,6 +573,7 @@ async function withNativeSession<T>(
           assertCurrent: async () => {
             options.signal?.throwIfAborted();
             await assertParentCurrent(options);
+            await assertDisclosureCurrent(options);
             if (
               canonicalHash({
                 host: (await hostSnapshot(request, options, owned, threadId)).fingerprint,
@@ -570,6 +638,12 @@ export async function runNativeCodexWorker(
     throw new Error('Native worker authority unavailable');
   const controller = new AbortController(),
     token = randomBytes(32).toString('hex');
+  const nativeOptions = {
+    cwd: job.root,
+    dataDir: options.dataDir,
+    policy: options.codexPolicy,
+    signal: controller.signal,
+  };
   let session: Session | undefined, turnId: string | undefined, proxyFailure: unknown;
   let finish!: (text: string) => void, fail!: (error: unknown) => void;
   const completion = new Promise<string>((resolve, reject) => {
@@ -577,8 +651,7 @@ export async function runNativeCodexWorker(
     fail = reject;
   });
   void completion.catch(() => {});
-  const messages = new Map<string, string>(),
-    fileChanges = new Map<string, unknown>();
+  const messages = new Map<string, string>();
   const early: Array<{ method: string; params: unknown }> = [];
   let turnReady!: (value: string | undefined) => void;
   const ready = new Promise<string | undefined>((resolve) => {
@@ -600,14 +673,6 @@ export async function runNativeCodexWorker(
       early.push({ method, params });
       return;
     }
-    if (
-      method === 'item/started' &&
-      params.turnId === turnId &&
-      isRecord(params.item) &&
-      params.item.type === 'fileChange' &&
-      typeof params.item.id === 'string'
-    )
-      fileChanges.set(params.item.id, params.item.changes);
     if (
       method === 'item/completed' &&
       params.turnId === turnId &&
@@ -641,42 +706,17 @@ export async function runNativeCodexWorker(
       params.turnId !== ownedTurn
     )
       throw new Error('Foreign native request');
-    if (method === 'item/commandExecution/requestApproval') {
-      if (
-        typeof params.itemId !== 'string' ||
-        typeof params.command !== 'string' ||
-        typeof params.cwd !== 'string' ||
-        params.additionalPermissions != null ||
-        (params.kind != null && params.kind !== 'command') ||
-        (params.environmentId != null && params.environmentId !== 'local')
-      )
-        return { decision: 'decline' };
-      const allow = await options.permission(
-        'Codex command',
-        { command: params.command, cwd: params.cwd, itemId: params.itemId },
-        controller.signal,
-      );
-      return { decision: allow ? 'accept' : 'decline' };
-    }
-    if (method === 'item/fileChange/requestApproval') {
-      const changes =
-        typeof params.itemId === 'string' ? fileChanges.get(params.itemId) : undefined;
-      if (!changes) return { decision: 'decline' };
-      return {
-        decision: (await options.permission(
-          'Codex file changes',
-          { ...params, changes },
-          controller.signal,
-        ))
-          ? 'accept'
-          : 'decline',
-      };
-    }
+    await session.assertCurrent();
+    // An approval must never widen the supported never/user worker's ACL.
+    if (
+      method === 'item/commandExecution/requestApproval' ||
+      method === 'item/fileChange/requestApproval'
+    )
+      return { decision: 'decline' };
     if (method === 'mcpServer/elicitation/request') return { action: 'cancel' };
     if (method === 'item/permissions/requestApproval') return { permissions: {}, scope: 'turn' };
     throw new Error('Unsupported native user request');
   };
-  let checked = false;
   const pending = new Set<Promise<void>>();
   const bridge = createServer((req, res) => {
     const operation = (async () => {
@@ -689,16 +729,8 @@ export async function runNativeCodexWorker(
           res.writeHead(403).end();
           return;
         }
-        if (
-          !session ||
-          controller.signal.aborted ||
-          !(await modelSettings(options.dataDir, job.root))
-        )
+        if (!session || controller.signal.aborted)
           throw new Error('Native worker cancelled or consent revoked');
-        if (!checked) {
-          await session.assertCurrent();
-          checked = true;
-        }
         const chunks: Buffer[] = [];
         let size = 0;
         for await (const chunk of req) {
@@ -707,11 +739,16 @@ export async function runNativeCodexWorker(
           chunks.push(Buffer.from(chunk));
         }
         const raw: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const guardian =
+          isRecord(raw) &&
+          isRecord(raw.client_metadata) &&
+          raw.client_metadata['x-openai-subagent'] === 'guardian';
         if (
           !isRecord(raw) ||
           raw.model !== 'deepseek-flash' ||
           raw.stream !== true ||
           !isRecord(raw.reasoning) ||
+          (guardian && options.codexPolicy.approvalsReviewer !== 'auto_review') ||
           raw.reasoning.effort !==
             (isRecord(raw.client_metadata) &&
             raw.client_metadata['x-openai-subagent'] === 'guardian'
@@ -720,6 +757,7 @@ export async function runNativeCodexWorker(
         )
           throw new Error('Unsupported native model request');
         const body = { ...raw, max_output_tokens: raw.max_output_tokens ?? 65536 };
+        await session.assertCurrent();
         const wire = await options.transport.responses(job, body, controller.signal);
         if (!res.destroyed) res.writeHead(200, { 'content-type': 'text/event-stream' }).end(wire);
       } catch (error) {
@@ -747,12 +785,7 @@ export async function runNativeCodexWorker(
     if (!address || typeof address === 'string') throw new Error('Native bridge unavailable');
     let workerFailure: unknown;
     const result = await withNativeSession(
-      {
-        cwd: job.root,
-        dataDir: options.dataDir,
-        policy: options.codexPolicy,
-        signal: controller.signal,
-      },
+      nativeOptions,
       { url: `http://127.0.0.1:${address.port}/v1`, token },
       async (current) => {
         try {

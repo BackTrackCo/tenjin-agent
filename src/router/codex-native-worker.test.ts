@@ -1,12 +1,15 @@
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { mkdtemp, mkdir, readFile, writeFile, stat, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, stat, rm, realpath, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { withAppServer, type CodexAppOptions } from '../lib/codex-app-server';
 import { canonicalHash } from '../lib/request-schema';
-import { readCodexInstructionFilesOnServer } from './codex-instruction-reader';
+import {
+  codexInstructionProfile,
+  readCodexInstructionFilesOnServer,
+} from './codex-instruction-reader';
 import { qualifyNativeCodexWorker, runNativeCodexWorker } from './codex-native-worker';
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
@@ -58,9 +61,13 @@ let parentEnvironments: unknown;
 let providerOverride: Record<string, unknown> | undefined;
 let effectiveOverride: Record<string, unknown> | undefined;
 let startOverride: Record<string, unknown> | undefined, onTurn: (() => Promise<void>) | undefined;
+let profileMutation:
+  ((profiles: Record<string, unknown>, worker: string, reader: string) => void) | undefined;
 const permission = vi.fn(async () => true),
   responses = vi.fn(async () => 'event: response.completed\ndata: {}\n\n');
 beforeEach(async () => {
+  vi.mocked(withAppServer).mockClear();
+  vi.mocked(readCodexInstructionFilesOnServer).mockClear();
   dir = await realpath(await mkdtemp(join(tmpdir(), 'native-codex-worker-')));
   root = join(dir, 'repo');
   home = join(dir, 'home');
@@ -75,7 +82,7 @@ beforeEach(async () => {
           version: 2,
           instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
-          repositories: [root],
+          repositories: [root, join(home, '.codex', 'AGENTS.md')],
           maxJobAtomic: '1000000',
           routerOrigin: 'http://localhost',
         },
@@ -89,7 +96,8 @@ beforeEach(async () => {
   await writeFile(join(dir, 'config.toml'), '# owned native config\n');
   vi.stubEnv('CODEX_HOME', join(home, '.codex'));
   config = {
-    approvals_reviewer: 'auto_review',
+    approvals_reviewer: 'user',
+    approval_policy: 'never',
     mcp_servers: { fixture: {}, router: {} },
     project_doc_max_bytes: 32768,
   };
@@ -119,8 +127,8 @@ beforeEach(async () => {
     },
   };
   policy = {
-    approvalPolicy: 'on-request',
-    approvalsReviewer: 'auto_review',
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user',
     sandbox: { type: 'workspace-write' },
     permissionProfile: {
       type: 'managed',
@@ -128,7 +136,7 @@ beforeEach(async () => {
       file_system: {
         type: 'restricted',
         entries: [
-          { path: { type: 'special', value: { kind: 'root' } }, access: 'read' },
+          { path: { type: 'path', path: join(home, '.codex', 'AGENTS.md') }, access: 'read' },
           { path: { type: 'path', path: root }, access: 'write' },
         ],
       },
@@ -147,6 +155,7 @@ beforeEach(async () => {
   providerOverride = undefined;
   effectiveOverride = undefined;
   onTurn = undefined;
+  profileMutation = undefined;
   permission.mockClear();
   responses.mockClear();
   http.closed = 0;
@@ -197,25 +206,49 @@ beforeEach(async () => {
       const defaultProfile = options.configOverrides?.find((value) =>
         value.startsWith('default_permissions='),
       );
-      const purpose = () => ({
-        model: 'deepseek-flash',
-        model_provider: 'tenjin_deepseek_worker_v1',
-        model_reasoning_effort: 'high',
-        model_catalog_json: catalogPath,
-        model_providers: {
-          tenjin_deepseek_worker_v1: {
-            name: 'Tenjin DeepSeek worker',
-            base_url: ownedUrl,
-            wire_api: 'responses',
-            env_key: 'TENJIN_MODEL_TOKEN',
-            requires_openai_auth: false,
-            supports_websockets: false,
-            request_max_retries: 0,
-            stream_max_retries: 0,
-            ...providerOverride,
+      const purpose = () => {
+        const worker = codexInstructionProfile({
+          cwd: root,
+          dataDir,
+          policy,
+          home,
+          env: childEnv,
+          worker: true,
+        })!;
+        const reader = codexInstructionProfile({
+          cwd: root,
+          dataDir,
+          policy,
+          home,
+          env: childEnv,
+        })!;
+        const permissions: Record<string, unknown> = {
+          [worker.name]: structuredClone(worker.expected),
+          [reader.name]: structuredClone(reader.expected),
+        };
+        profileMutation?.(permissions, worker.name, reader.name);
+        return {
+          default_permissions: JSON.parse(defaultProfile!.slice(20)),
+          permissions,
+          model: 'deepseek-flash',
+          model_provider: 'tenjin_deepseek_worker_v1',
+          model_reasoning_effort: 'high',
+          model_catalog_json: catalogPath,
+          model_providers: {
+            tenjin_deepseek_worker_v1: {
+              name: 'Tenjin DeepSeek worker',
+              base_url: ownedUrl,
+              wire_api: 'responses',
+              env_key: 'TENJIN_MODEL_TOKEN',
+              requires_openai_auth: false,
+              supports_websockets: false,
+              request_max_retries: 0,
+              stream_max_retries: 0,
+              ...providerOverride,
+            },
           },
-        },
-      });
+        };
+      };
       try {
         if (
           !defaultProfile ||
@@ -311,6 +344,186 @@ const qualify = () =>
     home,
     signal: new AbortController().signal,
   });
+
+it('keeps a broad native filesystem read profile native before starting an app server', async () => {
+  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  profile.file_system.entries.unshift({
+    path: { type: 'special', value: { kind: 'root' } },
+    access: 'read',
+  });
+  expect(await qualify()).toBeNull();
+  expect(withAppServer).not.toHaveBeenCalled();
+  expect(responses).not.toHaveBeenCalled();
+});
+
+it.each([
+  { approvalPolicy: 'on-request', approvalsReviewer: 'user' },
+  { approvalPolicy: 'untrusted', approvalsReviewer: 'user' },
+  { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' },
+  { approvalPolicy: 'untrusted', approvalsReviewer: 'auto_review' },
+  { approvalPolicy: 'never', approvalsReviewer: 'auto_review' },
+])('keeps a potentially escalating native policy unchanged and native: %j', async (approval) => {
+  Object.assign(policy, approval);
+  expect(await qualify()).toBeNull();
+  expect(withAppServer).not.toHaveBeenCalled();
+  expect(responses).not.toHaveBeenCalled();
+  expect(policy).toMatchObject(approval);
+});
+
+it.each([{ approval_policy: 'on-request' }, { approvals_reviewer: 'auto_review' }])(
+  'rejects effective native approval normalization instead of overriding it: %j',
+  async (changed) => {
+    Object.assign(config, changed);
+    expect(await qualify()).toBeNull();
+    expect(requests.some((request) => request.method === 'thread/start')).toBe(false);
+  },
+);
+
+it.each([{ approvalPolicy: 'on-request' }, { approvalsReviewer: 'auto_review' }])(
+  'rejects a returned thread with different approval authority: %j',
+  async (changed) => {
+    startOverride = changed;
+    expect(await qualify()).toBeNull();
+    expect(requests.some((request) => request.method === 'turn/start')).toBe(false);
+  },
+);
+
+it.each(['worker', 'reader'] as const)(
+  'rejects lower-layer extra grants in the generated %s profile before commands or startup',
+  async (kind) => {
+    profileMutation = (profiles, worker, reader) => {
+      const profile = profiles[kind === 'worker' ? worker : reader] as {
+        filesystem: Record<string, unknown>;
+      };
+      profile.filesystem['/outside-disclosure'] = 'read';
+    };
+    expect(await qualify()).toBeNull();
+    expect(
+      requests.some((request) => ['thread/start', 'command/exec'].includes(request.method)),
+    ).toBe(false);
+    expect(readCodexInstructionFilesOnServer).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  { extends: 'unbounded-lower-layer' },
+  { workspace_roots: { '/outside-disclosure': true } },
+  { unknown_native_option: null },
+])(
+  'rejects retained generated-profile authority instead of trusting its hash-derived name: %j',
+  async (retained) => {
+    profileMutation = (profiles, worker) => Object.assign(profiles[worker] as object, retained);
+    expect(await qualify()).toBeNull();
+    expect(requests.some((request) => request.method === 'thread/start')).toBe(false);
+  },
+);
+
+it('accepts only source-defined native optional nulls in both exact generated profiles', async () => {
+  profileMutation = (profiles) => {
+    for (const value of Object.values(profiles)) {
+      const profile = value as {
+        filesystem: Record<string, unknown>;
+        network: Record<string, unknown>;
+      } & Record<string, unknown>;
+      Object.assign(profile, { description: null, extends: null, workspace_roots: null });
+      Object.assign(profile.network, { proxy_url: null, allow_local_binding: null });
+      profile.filesystem.glob_scan_max_depth ??= null;
+    }
+  };
+  expect(await qualify()).not.toBeNull();
+});
+
+it('rejects a fallback effective default permission profile before native startup', async () => {
+  effectiveOverride = { default_permissions: 'unrelated-profile' };
+  expect(await qualify()).toBeNull();
+  expect(requests.some((request) => request.method === 'thread/start')).toBe(false);
+});
+
+it('refuses an unconsented sibling grant or runtime root before starting an app server', async () => {
+  const sibling = join(dir, 'sibling');
+  await mkdir(sibling);
+  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'read' });
+  expect(await qualify()).toBeNull();
+  profile.file_system.entries.pop();
+  policy.parent!.runtimeWorkspaceRoots.push(sibling);
+  expect(await qualify()).toBeNull();
+  expect(withAppServer).not.toHaveBeenCalled();
+});
+
+async function repositories(paths: string[]) {
+  const file = join(dataDir, 'config.json');
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  saved.router.subagentConsent.repositories = paths;
+  await writeFile(file, JSON.stringify(saved));
+}
+
+it('preserves a concrete multi-root native profile only when each grant and runtime root is explicitly covered', async () => {
+  const sibling = join(dir, 'sibling');
+  await mkdir(sibling);
+  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'write' });
+  policy.parent!.runtimeWorkspaceRoots.push(sibling);
+  await repositories([root, sibling, join(home, '.codex', 'AGENTS.md')]);
+  expect(await qualify()).not.toBeNull();
+  expect(requests.find((request) => request.method === 'thread/start')?.params).toMatchObject({
+    runtimeWorkspaceRoots: [root, sibling],
+  });
+});
+
+it('does not turn applicable instruction consent into an uncovered global worker file grant', async () => {
+  await repositories([root]);
+  expect(await qualify()).toBeNull();
+  expect(withAppServer).not.toHaveBeenCalled();
+  expect(readCodexInstructionFilesOnServer).not.toHaveBeenCalled();
+});
+
+it.each(['alias', 'missing'] as const)(
+  'keeps an unresolved or aliased %s grant native even with disclosure coverage',
+  async (kind) => {
+    const target = join(root, 'target'),
+      path = join(root, 'extra');
+    await mkdir(target);
+    if (kind === 'alias') await symlink(target, path);
+    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+    profile.file_system.entries.push({ path: { type: 'path', path }, access: 'read' });
+    expect(await qualify()).toBeNull();
+    expect(withAppServer).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['minimal', 'slash_tmp', 'tmpdir'])(
+  'keeps an unknown or uncovered native %s scope native',
+  async (kind) => {
+    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+    profile.file_system.entries.push({
+      path: { type: 'special', value: { kind } },
+      access: 'read',
+    });
+    expect(await qualify()).toBeNull();
+    expect(withAppServer).not.toHaveBeenCalled();
+  },
+);
+
+it('resolves a native temporary-directory grant without adding it from disclosure configuration', async () => {
+  const temporary = join(root, 'native-temp');
+  await mkdir(temporary);
+  const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+  profile.file_system.entries.push({
+    path: { type: 'special', value: { kind: 'tmpdir' } },
+    access: 'write',
+  });
+  expect(
+    await qualifyNativeCodexWorker({
+      cwd: root,
+      dataDir,
+      policy,
+      home,
+      env: { CODEX_HOME: join(home, '.codex'), TMPDIR: temporary },
+      signal: new AbortController().signal,
+    }),
+  ).not.toBeNull();
+});
 async function job() {
   const qualified = await qualify();
   expect(qualified).not.toBeNull();
@@ -345,16 +558,23 @@ async function final() {
     turn: { id: 'worker-turn', status: 'completed' },
   });
 }
-async function provider(overrides: Record<string, unknown> = {}) {
-  const req = Readable.from([
-    JSON.stringify({
-      model: 'deepseek-flash',
-      reasoning: { effort: 'high' },
-      stream: true,
-      input: 'Owned provider fixture',
-      ...overrides,
-    }),
-  ]) as unknown as Record<string, unknown>;
+async function provider(overrides: Record<string, unknown> = {}, duringBody?: () => Promise<void>) {
+  const body = JSON.stringify({
+    model: 'deepseek-flash',
+    reasoning: { effort: 'high' },
+    stream: true,
+    input: 'Owned provider fixture',
+    ...overrides,
+  });
+  const req = (duringBody
+    ? {
+        async *[Symbol.asyncIterator]() {
+          yield body.slice(0, 10);
+          await duringBody();
+          yield body.slice(10);
+        },
+      }
+    : Readable.from([body])) as unknown as Record<string, unknown>;
   req.method = 'POST';
   req.url = '/v1/responses';
   req.headers = { authorization: `Bearer ${env.TENJIN_MODEL_TOKEN}` };
@@ -373,7 +593,7 @@ async function provider(overrides: Record<string, unknown> = {}) {
     http.handler!(req, res);
   });
 }
-it('qualifies native autoReview and preserves parent base, roots, authenticated MCP and command hooks without generation', async () => {
+it('qualifies only the native never/user lane and preserves parent base, roots, authenticated MCP and command hooks without generation', async () => {
   hooks = [
     {
       handlerType: 'command',
@@ -395,8 +615,8 @@ it('qualifies native autoReview and preserves parent base, roots, authenticated 
     unknown
   >;
   expect(start).toMatchObject({
-    approvalPolicy: 'on-request',
-    approvalsReviewer: 'auto_review',
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user',
     baseInstructions: 'EXACT_PARENT_BASE',
     developerInstructions: 'EXTRA_PARENT_AUTHORITY',
     runtimeWorkspaceRoots: [root],
@@ -407,6 +627,13 @@ it('qualifies native autoReview and preserves parent base, roots, authenticated 
   expect(callbacks.configOverrides).toContain(
     `default_permissions=${JSON.stringify(start.permissions)}`,
   );
+  expect(callbacks.configOverrides).toContain('approval_policy="never"');
+  expect(callbacks.configOverrides).toContain('approvals_reviewer="user"');
+  expect(
+    callbacks.configOverrides?.find((value) =>
+      value.startsWith(`permissions.${start.permissions}.filesystem=`),
+    ),
+  ).toContain(`${JSON.stringify(dataDir)} = "deny"`);
   expect(callbacks.configOverrides).toContainEqual(
     expect.stringMatching(
       new RegExp(`^permissions\\.${start.permissions}\\.filesystem=.*glob_scan_max_depth`),
@@ -486,7 +713,7 @@ it('rejects plugin content drift even when the loaded declaration stays identica
   expect(responses).not.toHaveBeenCalled();
 });
 it('refuses downgraded native reviewer and disabled plugins that remain active', async () => {
-  startOverride = { approvalsReviewer: 'user' };
+  startOverride = { approvalsReviewer: 'auto_review' };
   expect(await qualify()).toBeNull();
   startOverride = undefined;
   policy.disabledPluginIds = ['blocked'];
@@ -595,6 +822,65 @@ it('uses the paid Responses bridge for worker calls and defaults only the bounde
     expect.any(AbortSignal),
   );
 });
+
+it.each([0, 1])(
+  'rechecks disclosure after %i successful requests before another inference purchase',
+  async (completed) => {
+    const accepted = await job();
+    onTurn = async () => {
+      if (completed) await provider();
+      await repositories([root]);
+      await provider();
+    };
+    await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+      /scope exceeds disclosure/,
+    );
+    expect(responses).toHaveBeenCalledTimes(completed);
+    expect(http.closed).toBe(1);
+  },
+);
+
+it('rejects a later uncovered positive grant before buying the next native request', async () => {
+  const accepted = await job();
+  const sibling = join(dir, 'later-sibling');
+  await mkdir(sibling);
+  onTurn = async () => {
+    await provider();
+    const profile = policy.permissionProfile as { file_system: { entries: unknown[] } };
+    profile.file_system.entries.push({ path: { type: 'path', path: sibling }, access: 'read' });
+    await provider();
+  };
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /scope exceeds disclosure/,
+  );
+  expect(responses).toHaveBeenCalledTimes(1);
+});
+
+it('refuses sibling disclosure revoked between request-body chunks before invoking transport', async () => {
+  const accepted = await job();
+  onTurn = async () => {
+    await provider({}, async () => repositories([root]));
+    await final();
+  };
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /scope exceeds disclosure/,
+  );
+  expect(responses).not.toHaveBeenCalled();
+});
+
+it('refuses changed effective approval authority during the body before invoking transport', async () => {
+  const accepted = await job();
+  onTurn = async () => {
+    await provider({}, async () => {
+      config.approvals_reviewer = 'auto_review';
+    });
+    await final();
+  };
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /approval authority changed/,
+  );
+  expect(responses).not.toHaveBeenCalled();
+});
 it('config drift before first inference aborts without purchasing a request', async () => {
   const accepted = await job();
   onTurn = async () => {
@@ -638,7 +924,7 @@ it('cancellation interrupts the native turn and drains the owned bridge', async 
   expect(http.closed).toBe(1);
   expect(closed).toBe(true);
 });
-it('one-shot native approval preserves owned command details and refuses unknown grants/forms', async () => {
+it('declines unexpected native approval requests without calling a permission approver', async () => {
   const accepted = await job();
   onTurn = async () => {
     expect(
@@ -649,7 +935,21 @@ it('one-shot native approval preserves owned command details and refuses unknown
         command: 'echo owned',
         cwd: root,
       }),
-    ).toEqual({ decision: 'accept' });
+    ).toEqual({ decision: 'decline' });
+    expect(
+      await callbacks.onServerRequest!('item/fileChange/requestApproval', {
+        threadId: 'worker',
+        turnId: 'worker-turn',
+        itemId: 'files',
+      }),
+    ).toEqual({ decision: 'decline' });
+    expect(
+      await callbacks.onServerRequest!('item/permissions/requestApproval', {
+        threadId: 'worker',
+        turnId: 'worker-turn',
+        permissions: { fileSystem: { write: ['/outside'] } },
+      }),
+    ).toEqual({ permissions: {}, scope: 'turn' });
     expect(
       await callbacks.onServerRequest!('item/commandExecution/requestApproval', {
         threadId: 'worker',
@@ -669,7 +969,7 @@ it('one-shot native approval preserves owned command details and refuses unknown
     await final();
   };
   await runNativeCodexWorker(accepted, options());
-  expect(permission).toHaveBeenCalledTimes(1);
+  expect(permission).not.toHaveBeenCalled();
 });
 
 it('lets trusted MCP hook guards run through the native pipeline', async () => {
@@ -836,7 +1136,7 @@ it('preserves user-layer model changes while normalizing only owned session flag
   );
   expect(responses).not.toHaveBeenCalled();
 });
-it('allows low effort only for an explicitly native Guardian request', async () => {
+it('refuses an unexpected Guardian request in the supported never/user lane', async () => {
   const accepted = await job();
   onTurn = async () => {
     await provider({
@@ -845,12 +1145,10 @@ it('allows low effort only for an explicitly native Guardian request', async () 
     });
     await final();
   };
-  expect(await runNativeCodexWorker(accepted, options())).toBe('owned completed result');
-  expect(responses).toHaveBeenCalledWith(
-    accepted,
-    expect.objectContaining({ reasoning: { effort: 'low' } }),
-    expect.any(AbortSignal),
+  await expect(runNativeCodexWorker(accepted, options())).rejects.toThrow(
+    /Unsupported native model request/,
   );
+  expect(responses).not.toHaveBeenCalled();
 });
 it.each([
   { reasoning: { effort: 'low' } },
