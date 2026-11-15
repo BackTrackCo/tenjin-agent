@@ -208,6 +208,11 @@ function setup(_$: Engine, on: On) {
   on('ui.render', { component: 'AbovePrompt', plugin: 'tenjin' }, ($, e) =>
     $.ui.resolve(e).Text({ children: ['native band'] }),
   );
+  // Older test engines delegate an untagged band; newer ones give this fixture its own row.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box, Text } = $.ui.resolve(e);
+    return e.plugin === undefined ? Text({ children: ['native band'] }) : Box({ children: [] });
+  });
   on('turn.complete', (_$, e) => ({ text: e.answer }));
   on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, (_$, e) => {
     state.nativeCalls.push(e);
