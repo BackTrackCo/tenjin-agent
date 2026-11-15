@@ -28,7 +28,7 @@ export interface CodexModelPolicy {
 export async function policyRules(layers: unknown): Promise<string[] | null> {
   if (!Array.isArray(layers)) return null;
   const files: string[] = [];
-  //0.163 config/read lists highest precedence first; native execpolicy loads low to high.
+  // config/read lists highest precedence first; native execpolicy loads low to high.
   for (const layer of [...layers].reverse()) {
     if (!isRecord(layer) || !isRecord(layer.name)) return null;
     if (layer.disabledReason != null) continue;

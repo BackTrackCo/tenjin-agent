@@ -2,6 +2,7 @@ import { basename, resolve } from 'node:path';
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk/core';
 import { isRecord } from '../lib/guards';
 import { MODEL_WORKER_CREDENTIAL_KEYS } from './model-worker-privacy';
+import { MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 
 export const CLAUDE_DEEPSEEK_MODEL = 'deepseek-flash';
 // Claude strips this native context hint before calling the fixed Flash provider.
@@ -127,7 +128,6 @@ export function claudeDeepSeekWorkerSettingsEnv(
     ANTHROPIC_DEFAULT_OPUS_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
     ANTHROPIC_DEFAULT_SONNET_MODEL: CLAUDE_DEEPSEEK_WORKER_MODEL,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: CLAUDE_DEEPSEEK_MODEL,
-    // This is a new local SDK child, rather than its parent's Desktop entrypoint.
     CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
     CLAUDE_CODE_SUBAGENT_MODEL: CLAUDE_DEEPSEEK_MODEL,
     CLAUDE_CODE_AUTO_MODE_MODEL: CLAUDE_DEEPSEEK_MODEL,
@@ -175,7 +175,7 @@ export function claudeMcpProviderCompatible(statuses: unknown): boolean {
     } catch {
       return false;
     }
-    if (Buffer.byteLength(config) > 256_000) return false;
+    if (Buffer.byteLength(config) > MODEL_NATIVE_TEXT_BYTES) return false;
     for (const match of config.matchAll(
       /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|([A-Za-z_][A-Za-z0-9_]*))/g,
     )) {

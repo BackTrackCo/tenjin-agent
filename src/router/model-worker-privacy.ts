@@ -23,7 +23,6 @@ export const SECRET_HOME_PATHS = [
   '.aws',
   '.kube',
   '.gnupg',
-  '.claude',
   '.netrc',
   '.npmrc',
   '.git-credentials',
@@ -31,7 +30,30 @@ export const SECRET_HOME_PATHS = [
 ] as const;
 
 export function secretHomePaths(home: string): string[] {
-  return SECRET_HOME_PATHS.map((name) => join(home, name));
+  return [
+    ...SECRET_HOME_PATHS.map((name) => join(home, name)),
+    ...claudePrivatePaths(join(home, '.claude')),
+  ];
+}
+
+/** Native support files remain usable; credentials and cross-session state do not. */
+export function claudePrivatePaths(configDir: string): string[] {
+  return [
+    '.credentials.json',
+    '.claude.json',
+    'settings.json',
+    'settings.local.json',
+    '.mcp.json',
+    'mcp.json',
+    'projects',
+    'history.jsonl',
+    'debug',
+    'session-env',
+    'tasks',
+    'todos',
+    'backups',
+    'file-history',
+  ].map((name) => join(configDir, name));
 }
 
 /** Instruction disclosure never admits credential files or private controller state. */

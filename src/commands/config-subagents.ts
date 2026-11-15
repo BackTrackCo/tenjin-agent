@@ -41,8 +41,11 @@ export async function runConfigSubagents(
   const settings = await resolveContextSettings(ctx);
   const routerOrigin = new URL(settings.baseUrl).origin;
   if (maxJob <= 0n) throw new CliError('USAGE', 'The job ceiling must be positive.');
-  const disclosure =
-    'Allow Tenjin (using TypeSafe/Jev for routing) to receive this repository’s subagent assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results. Native global, ancestor and repository instructions keep their normal scope; Codex copies its AGENTS hierarchy into the worker. No wallet, login or environment files are included. This grants no extra tool or filesystem permission. Proxy replay is available for 24 hours; expired content is removed by bounded cleanup. Known secrets are masked, not guaranteed anonymous. Existing tool permissions and wallet limits still apply.';
+  const disclosure = [
+    'Allow Tenjin (using TypeSafe/Jev for routing) to receive this repository’s subagent assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results.',
+    'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. This grants no extra tool or filesystem permission. Wallet, login and environment files are excluded; known secrets are masked, not guaranteed anonymous.',
+    'Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. Existing wallet limits apply. Claude’s Messages requests currently reserve about $0.50 minimum; a quote above the job ceiling is refused.',
+  ].join('\n\n');
   let repositories = [repository];
   await persist(ctx.dataDir, (c) => {
     // The locked merge keeps other explicitly named roots; this list never

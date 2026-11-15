@@ -1,3 +1,4 @@
+import { isModelWorkerProcess } from './model-worker-context';
 import { registerModelTool, stopModelWorkers } from './model-mcp';
 import { ModelTransport } from './model-transport';
 import type { ModelSession } from './model-handoff';
@@ -293,7 +294,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
   // the hooks gate on and the observer records. The request tool's provider is
   // not unlocked a second time beside it: both share the wallet layer's signer
   // cache, so the payer's unlock serves a paid lookup too.
-  if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1') {
+  if (isModelWorkerProcess(opts.env)) {
     // Native worker qualification lists tools without unlocking or funding the wallet.
   } else if (opts.payer !== undefined) {
     void opts.payer.prewarm();
@@ -505,7 +506,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       { query, id, input, choice, browse, tool, count, job, source, decide },
       extra,
     ): Promise<CallToolResult> => {
-      if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1')
+      if (isModelWorkerProcess(opts.env))
         return toolResult(
           fail(
             'failed',
@@ -591,7 +592,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async ({ quote, total, what }, extra): Promise<CallToolResult> => {
-      if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1')
+      if (isModelWorkerProcess(opts.env))
         return toolResult(
           fail(
             'failed',
@@ -687,7 +688,7 @@ export function buildRouterMcpServer(opts: RouterMcpOptions = {}): McpServer {
       },
     },
     async (args): Promise<CallToolResult> => {
-      if (env.TENJIN_MODEL_WORKER === '1') return { content: [{ type: 'text', text: '' }] };
+      if (isModelWorkerProcess(env)) return { content: [{ type: 'text', text: '' }] };
       let response: unknown;
       try {
         const raw = eventFromToolInput(args);
@@ -775,8 +776,7 @@ function registerCodexHookTool(
       },
     },
     async (args, extra): Promise<CallToolResult> => {
-      if ((opts.env ?? process.env).TENJIN_MODEL_WORKER === '1')
-        return { content: [{ type: 'text', text: '' }] };
+      if (isModelWorkerProcess(opts.env)) return { content: [{ type: 'text', text: '' }] };
       let response: unknown = null;
       try {
         const event = await admitCodexHookEvent(codexEventFromToolInput(args), {
@@ -929,7 +929,7 @@ async function topUpAtStart(
   cwd: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  if (env.TENJIN_MODEL_WORKER === '1') return;
+  if (isModelWorkerProcess(env)) return;
   try {
     const { enabled } = await routerSettings({ cwd, dataDir: ctx.dataDir });
     if (!enabled.value) return;

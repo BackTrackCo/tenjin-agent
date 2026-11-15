@@ -3,11 +3,8 @@ import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { realpath } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
-import { secretHomePaths } from './model-worker-privacy';
-import { codexHome } from '../lib/codex-home';
+import { basename } from 'node:path';
 import { findDefinition } from './agent-tools';
-import { join } from 'node:path';
 import {
   query,
   resolveSettings as resolveWorkerSettings,
@@ -21,6 +18,7 @@ import {
 } from './codex-native-worker';
 import { readClaudeCode, meetsFloor } from './claude-cli';
 import { modelSettings } from './model-settings';
+import { MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import {
@@ -37,7 +35,6 @@ import {
 import type { InstructionContext } from './model-instructions';
 import {
   claudeWorkerPrivatePaths,
-  claudeWorkerConfigDir,
   prepareClaudeWorkerSession,
   type ClaudeWorkerSession,
 } from './claude-worker-session';
@@ -95,7 +92,7 @@ export async function qualifiedModelWorker(
   return claudeWorkspace ? { ...state.binary, claudeWorkspace } : null;
 }
 
-/** Candidate maintained runner. Parent process/provider/Remote Control are untouched. */
+/** Runs a qualified worker without changing the parent process or provider. */
 export async function runModelWorker(
   job: ModelJob,
   options: {
@@ -186,7 +183,6 @@ async function runQualifiedWorker(
     return resolved;
   };
   const session = await prepareClaudeWorkerSession(options.claudeSession, job.root);
-  const privatePaths = await claudeWorkerPrivatePaths(options.dataDir, job.root);
   const protectedRoots = [
     ...new Set([
       ...workspace.workingDirectories,
@@ -308,29 +304,13 @@ async function runQualifiedWorker(
     if (!address || typeof address === 'string') throw new Error('Worker bridge failed');
     const env = claudeDeepSeekWorkerEnv(process.env, `http://127.0.0.1:${address.port}`, token);
     const resolved = await assertCurrentWorkspace();
-    const privateHomePaths = [
-      ...secretHomePaths(homedir()),
-      join(homedir(), '.codex', 'auth.json'),
-      ...[process.env, { ...process.env, ...resolved.effective.env }].flatMap((source) => {
-        const config = claudeWorkerConfigDir(job.root, source);
-        const secure = source.CLAUDE_SECURESTORAGE_CONFIG_DIR;
-        return [
-          resolve(job.root, codexHome(homedir(), source), 'auth.json'),
-          join(config, '.credentials.json'),
-          resolve(
-            job.root,
-            (secure === undefined ? config : secure || join(homedir(), '.claude')).normalize('NFC'),
-            '.credentials.json',
-          ),
-        ];
-      }),
-    ];
-    const secretPaths = [
-      ...new Set([
-        ...privateHomePaths,
-        ...(await Promise.all(privateHomePaths.map((path) => realpath(path).catch(() => path)))),
-      ]),
-    ];
+    const privatePaths = await claudeWorkerPrivatePaths(
+      options.dataDir,
+      job.root,
+      process.env,
+      resolved.effective.env,
+      { sources: resolved.sources, workingDirectories: workspace.workingDirectories },
+    );
     if (
       !claudeManagedProviderCompatible(resolved) ||
       (permissionMode === 'auto' && resolved.effective.permissions?.disableAutoMode === 'disable')
@@ -381,13 +361,6 @@ async function runQualifiedWorker(
                   patterns.map((pattern) => `${tool}(${pattern})`),
                 );
               }),
-              ...secretPaths.flatMap((root) => {
-                const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-                return ['Read', 'Edit', 'Write'].flatMap((tool) => [
-                  `${tool}(${absolute})`,
-                  `${tool}(${absolute}/**)`,
-                ]);
-              }),
             ],
           },
         },
@@ -398,7 +371,6 @@ async function runQualifiedWorker(
           filesystem: {
             denyRead: [
               ...privatePaths.paths,
-              ...secretPaths,
               ...protectedRoots.flatMap((root) => [
                 `${root}/.env*`,
                 `${root}/**/.env*`,
@@ -411,7 +383,7 @@ async function runQualifiedWorker(
         // Direct callers remain ephemeral; only the owned controller may retain
         // and reopen a session. Native retention/config discovery are unchanged.
         persistSession: session !== undefined,
-        // Emergency runaway guard, not the former ordinary 40-turn cutoff.
+        // Emergency runaway guard; ordinary jobs may continue until completion.
         maxTurns: WORKER_EMERGENCY_TURNS,
         disallowedTools: [
           'Agent',
@@ -516,8 +488,17 @@ async function runQualifiedWorker(
       // accountInfo is the maintained SDK initialize response, before a task is
       // sent. A saved gateway can override env/helper auth without an env flag.
       const account = await Promise.race([worker.accountInfo(), authenticationStopped]);
-      if (account?.apiProvider !== 'firstParty')
-        throw new Error('Native Claude selected an unsupported API provider; keep native');
+      if (
+        account?.apiProvider !== 'firstParty' ||
+        !['apiKeyHelper', 'ANTHROPIC_API_KEY'].includes(account.apiKeySource ?? '') ||
+        account.email !== undefined ||
+        account.subscriptionType !== undefined ||
+        (account.tokenSource !== undefined &&
+          !['none', 'apiKeyHelper', 'ANTHROPIC_AUTH_TOKEN'].includes(account.tokenSource))
+      )
+        throw new Error(
+          'Native Claude selected an unsupported API provider or authentication source; keep native',
+        );
       controller.signal.throwIfAborted();
       authorizePrompt(true);
     } finally {
@@ -562,7 +543,7 @@ async function runQualifiedWorker(
     }
     if (proxyFailure) throw proxyFailure.error;
     if (!result) throw new Error('DeepSeek worker returned no completed result');
-    if (Buffer.byteLength(result, 'utf8') > 256_000)
+    if (Buffer.byteLength(result, 'utf8') > MODEL_NATIVE_TEXT_BYTES)
       throw new Error('Worker handback exceeds size limit; inspect receipts before retrying');
   } catch (error) {
     executionFailure = proxyFailure ?? { error };

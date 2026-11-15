@@ -1,3 +1,4 @@
+import { isModelWorkerProcess } from '../router/model-worker-context';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import { SIGN_IN_WITH_X } from '@x402/extensions/sign-in-with-x';
 import type { PaymentRequired, PaymentRequirements } from '@x402/core/types';
@@ -212,7 +213,7 @@ export async function runPay(
   ctx: CommandContext,
   deps: PayDeps = {},
 ): Promise<CommandResult> {
-  if (process.env.TENJIN_MODEL_WORKER === '1')
+  if (isModelWorkerProcess())
     throw new CliError(
       'REFUSED',
       'Nested Tenjin payments are unavailable inside a model worker; use the native tools.',

@@ -22,10 +22,9 @@ function fields(value: unknown, max: number): [string, unknown][] {
   });
 }
 
-/** Native 0.167 deferred-namespace witness from a complete, owned rollout.
+/** Native deferred-namespace witness from a complete, owned rollout.
  * The caller proves ownership, version, completeness and the sampling boundary.
- * Pinned tools.rs snapshot is a direct namespace -> description string map:
- * openai/codex blob 6353bd2e354b9fc4ce5c4efd7bda409019f8571f.
+ * Tools are a direct namespace -> description string map.
  * Empty maps are not persisted. Native world-state records use RFC 7386 patches.
  * Descriptions are never copied or retained; their lengths bound cumulative state.
  */

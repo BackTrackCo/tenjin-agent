@@ -221,7 +221,20 @@ describe('the router MCP server', () => {
     try {
       const tools = await client.listTools();
       // `approve` is Claude Code's alone (below): this client never sees it.
-      expect(tools.tools.map((t) => t.name)).toEqual(['subagent', 'request', 'hook']);
+      expect(tools.tools.map((t) => t.name)).toEqual([
+        'subagent_activity',
+        'subagent',
+        'request',
+        'hook',
+      ]);
+      const activity = tools.tools.find((tool) => tool.name === 'subagent_activity')!;
+      expect(activity.annotations?.readOnlyHint).toBe(true);
+      expect(Object.keys(activity.inputSchema.properties ?? {})).toEqual(['offer_id', 'follow']);
+      expect(activity.inputSchema).toMatchObject({
+        type: 'object',
+        required: ['offer_id'],
+        properties: { offer_id: { type: 'string', format: 'uuid' }, follow: { type: 'boolean' } },
+      });
       // The harness reads its inline-result threshold from the listed tool,
       // and keeps it out of tool search.
       expect(tools.tools.find((tool) => tool.name === 'request')!._meta).toEqual({
@@ -278,7 +291,11 @@ describe('the router MCP server', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       try {
         const names = (await client.listTools()).tools.map((t) => t.name);
-        expect(names).toEqual(['subagent', 'request', 'hook']);
+        expect(names).toEqual(
+          harness === 'codex'
+            ? ['subagent', 'request', 'hook']
+            : ['subagent_activity', 'subagent', 'request', 'hook'],
+        );
         await client.callTool({ name: 'request', arguments: { query: 'weather' } });
         expect(bodies.at(-1)).toMatchObject({ harness: harness ?? 'claude' });
       } finally {

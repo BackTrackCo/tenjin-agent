@@ -2,7 +2,9 @@ import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { codexHome } from '../lib/codex-home';
+import { claudePrivatePaths, secretHomePaths } from './model-worker-privacy';
 
 /** Only the owned conversation controller supplies native session identities. */
 export type ClaudeWorkerSession = {
@@ -58,14 +60,64 @@ export async function prepareClaudeWorkerSession(
 }
 
 /** Tool restrictions do not change native SDK transcript/config access. */
-export async function claudeWorkerPrivatePaths(dataDir: string, cwd: string) {
-  const paths = [resolve(dataDir), join(claudeWorkerConfigDir(cwd), 'projects')];
+export async function claudeWorkerPrivatePaths(
+  dataDir: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+  settingsEnv: Record<string, string> = {},
+  native: {
+    workingDirectories?: readonly string[];
+    sources?: readonly { source: string; path?: string }[];
+  } = {},
+) {
+  const home = homedir();
+  const sources = (native.sources ?? [])
+    .filter((source) => typeof source.path === 'string' && source.path.length > 0)
+    .map((source) => ({ source: source.source, path: resolve(cwd, source.path!) }));
+  const roots = new Set([
+    resolve(cwd),
+    ...(native.workingDirectories ?? []).map((root) => resolve(cwd, root)),
+    ...sources
+      .filter(
+        (source) =>
+          ['project', 'local'].includes(source.source) &&
+          basename(dirname(source.path)) === '.claude',
+      )
+      .map((source) => dirname(dirname(source.path))),
+  ]);
+  const paths = [
+    resolve(dataDir),
+    ...sources.map((source) => source.path),
+    ...[...roots].flatMap((root) => [
+      join(root, '.claude', 'settings.json'),
+      join(root, '.claude', 'settings.local.json'),
+      join(root, '.mcp.json'),
+    ]),
+    ...secretHomePaths(home),
+    join(home, '.codex', 'auth.json'),
+    ...[env, { ...env, ...settingsEnv }].flatMap((source) => {
+      const config = claudeWorkerConfigDir(cwd, source);
+      const secure = source.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+      return [
+        resolve(cwd, codexHome(home, source), 'auth.json'),
+        ...claudePrivatePaths(config),
+        resolve(
+          cwd,
+          (secure === undefined ? config : secure || join(home, '.claude')).normalize('NFC'),
+          '.credentials.json',
+        ),
+      ];
+    }),
+  ];
   const canonical = await Promise.all(paths.map((path) => realpath(path).catch(() => path)));
   const protectedPaths = [...new Set([...paths, ...canonical])];
   const deny = protectedPaths.flatMap((path) => {
     // Native permission rules use // for an absolute filesystem pattern.
     const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
-    return ['Read', 'Edit'].flatMap((tool) => [`${tool}(${absolute})`, `${tool}(${absolute}/**)`]);
+    return ['Read', 'Edit', 'Write'].flatMap((tool) => [
+      `${tool}(${absolute})`,
+      `${tool}(${absolute}/**)`,
+    ]);
   });
   return { paths: protectedPaths, deny };
 }

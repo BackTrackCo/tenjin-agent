@@ -2,6 +2,4 @@
 'tenjin-cli': minor
 ---
 
-Add opt-in external DeepSeek subagent handoff, durable selection and spending bounds, and native Claude/Codex workers. Preserve Claude permission modes and Codex Guardian review, with Flash-only approval models sharing the job ceiling. Keep unsupported host paths native; qualify paid execution before activation.
-
-Retain owned Claude worker history for parent-approved continuations across days, reusing the original job and cumulative budget without another routing fee. Preserve current native instructions, tools and permissions, drain each process before resume, and replay completed results without another worker.
+Add DeepSeek Flash subagents with parent accept/veto and native Claude activity; Claude continuations preserve history and reuse the original budget without another routing fee. Keep native instructions, permissions and ordinary MCPs/CLIs, and drain each worker before resume; unsupported sessions stay native and Codex support remains experimental. Apply the routing fee and reported inference usage plus the 5% proxy fee within existing wallet limits, and replay eligible completed results without another worker.

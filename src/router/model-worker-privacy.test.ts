@@ -39,8 +39,46 @@ it('includes native authentication files among private home paths', () => {
       join(home, '.netrc'),
       join(home, '.npmrc'),
       join(home, '.git-credentials'),
-      join(home, '.claude'),
+      join(home, '.claude', '.credentials.json'),
+      join(home, '.claude', 'projects'),
       join(home, '.claude.json'),
     ]),
   );
+  expect(secretHomePaths(home)).not.toContain(join(home, '.claude'));
 });
+
+it('keeps Claude support files eligible without admitting credentials or session history', () => {
+  const home = resolve('fixture', 'home');
+  const protectedPaths = secretHomePaths(home);
+  for (const support of [
+    'skills/example/SKILL.md',
+    'agents/reviewer.md',
+    'commands/test.md',
+    'CLAUDE.md',
+    'support/readme.md',
+    'skills/example/settings.json',
+    'commands/support/.mcp.json',
+  ])
+    expect(isSecretPath(join(home, '.claude', support), protectedPaths)).toBe(false);
+  for (const privateFile of [
+    '.credentials.json',
+    '.claude.json',
+    'projects/repo/session.jsonl',
+    'history.jsonl',
+    'session-env/session/private.env',
+    'debug/session.log',
+  ])
+    expect(isSecretPath(join(home, '.claude', privateFile), protectedPaths)).toBe(true);
+});
+
+it.each(['settings.json', 'settings.local.json', '.mcp.json', 'mcp.json'])(
+  'protects the native config-root %s that may embed provider or MCP credentials without a basename ban',
+  (name) => {
+    const home = resolve('fixture', 'home');
+    const protectedPaths = secretHomePaths(home);
+    expect(isSecretPath(join(home, '.claude', name), protectedPaths)).toBe(true);
+    expect(isSecretPath(join(home, '.claude', 'skills', 'example', name), protectedPaths)).toBe(
+      false,
+    );
+  },
+);

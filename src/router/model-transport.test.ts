@@ -15,6 +15,14 @@ afterEach(async () => {
   for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 async function fixture(
   options: {
     drop?: boolean;
@@ -67,6 +75,8 @@ async function fixture(
   let gets = 0;
   let signedGets = 0;
   let voucherState = 'accepted';
+  let recoveryState = 'completed';
+  const paidSignals: AbortSignal[] = [];
   const message = {
     id: 'msg',
     type: 'message',
@@ -84,12 +94,13 @@ async function fixture(
       if (request.headers.has(SIWX_HEADER)) signedGets++;
       return Response.json({
         invocationId: last?.invocationId,
-        state: 'completed',
+        state: recoveryState,
         voucherState,
         actualAtomic: '1000',
         result,
       });
     }
+    if (request.headers.has('payment-signature')) paidSignals.push(request.signal);
     last = (await request.clone().json()) as Record<string, unknown>;
     result = {
       ...(options.protocol === 'responses'
@@ -127,6 +138,10 @@ async function fixture(
     last: () => last,
     gets: () => gets,
     signedGets: () => signedGets,
+    paidSignals,
+    setRecoveryState: (value: string) => {
+      recoveryState = value;
+    },
     setVoucher: (value: string) => {
       voucherState = value;
     },
@@ -148,6 +163,193 @@ it('uses the real SDK inference lane for multiple turns, reusing credit and repl
     reservedAtomic: '5000',
     uncertain: [],
   });
+});
+
+it.each(['messages', 'responses'] as const)(
+  'shares one live identical %s request instead of recovering an invocation still in flight',
+  async (protocol) => {
+    const f = await fixture({ protocol });
+    const transport = f.make();
+    const held = deferred();
+    const entered = deferred();
+    f.router.hold = held.promise;
+    f.router.onDelayArmed = entered.resolve;
+    const body = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'same task' }] };
+    const invoke = () => transport[protocol](f.job, body, new AbortController().signal);
+    const first = invoke();
+    await entered.promise;
+    const second = invoke();
+    const pending = Promise.all([first, second]);
+    held.resolve();
+    const results = await pending;
+    expect(results).toEqual([
+      protocol === 'responses'
+        ? 'event: response.completed\ndata: {"owned":"native wire"}\n\n'
+        : f.message,
+      protocol === 'responses'
+        ? 'event: response.completed\ndata: {"owned":"native wire"}\n\n'
+        : f.message,
+    ]);
+    if (protocol === 'messages') {
+      const [firstResult, secondResult] = results as [typeof f.message, typeof f.message];
+      expect(firstResult).not.toBe(secondResult);
+      firstResult.content[0]!.text = 'Only this caller changed its result';
+      expect(secondResult).toEqual(f.message);
+      await expect(transport.messages(f.job, body, new AbortController().signal)).resolves.toEqual(
+        f.message,
+      );
+    }
+    expect(f.router.paidRequests()).toBe(1);
+    expect(f.router.settledFees).toBe(1);
+    expect(f.gets()).toBe(0);
+    expect(await transport.summary(f.job)).toEqual({
+      actualAtomic: '4000',
+      reservedAtomic: '4000',
+      uncertain: [],
+    });
+  },
+);
+
+it('shares the first live uncertain failure and retains its reservation until owner recovery', async () => {
+  const f = await fixture({ drop: true });
+  const transport = f.make();
+  const held = deferred();
+  const entered = deferred();
+  f.router.hold = held.promise;
+  f.router.onDelayArmed = entered.resolve;
+  const body = { messages: [{ role: 'user', content: 'same uncertain task' }] };
+  const first = transport.messages(f.job, body, new AbortController().signal);
+  await entered.promise;
+  const second = transport.messages(f.job, body, new AbortController().signal);
+  const pending = Promise.allSettled([first, second]);
+  held.resolve();
+  const results = await pending;
+  expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+  for (const result of results)
+    if (result.status === 'rejected') expect(result.reason.message).toMatch(/uncertain/);
+  if (results[0]?.status === 'rejected' && results[1]?.status === 'rejected')
+    expect(results[0].reason).toBe(results[1].reason);
+  expect(f.router.paidRequests()).toBe(1);
+  expect(f.gets()).toBe(0);
+  expect(await transport.summary(f.job)).toMatchObject({
+    reservedAtomic: '503000',
+    uncertain: [expect.any(String)],
+  });
+  await expect(transport.messages(f.job, body, new AbortController().signal)).resolves.toEqual(
+    f.message,
+  );
+  expect(f.gets()).toBe(1);
+  expect(f.router.paidRequests()).toBe(1);
+});
+
+it.each(['first', 'second'] as const)(
+  'cancels only the %s identical caller while its peer still owns the live request',
+  async (cancelled) => {
+    const f = await fixture();
+    const transport = f.make();
+    const held = deferred();
+    const entered = deferred();
+    f.router.hold = held.promise;
+    f.router.onDelayArmed = entered.resolve;
+    const body = { messages: [{ role: 'user', content: 'shared task' }] };
+    const firstController = new AbortController(),
+      secondController = new AbortController();
+    const first = transport.messages(f.job, body, firstController.signal);
+    await entered.promise;
+    const second = transport.messages(f.job, body, secondController.signal);
+    const pending = Promise.allSettled([first, second]);
+    const reason = new Error('Only this caller cancelled');
+    try {
+      (cancelled === 'first' ? firstController : secondController).abort(reason);
+      expect(f.paidSignals).toHaveLength(1);
+      expect(f.paidSignals[0]!.aborted).toBe(false);
+    } finally {
+      held.resolve();
+    }
+    const results = await pending;
+    const stopped = results[cancelled === 'first' ? 0 : 1]!;
+    const remaining = results[cancelled === 'first' ? 1 : 0]!;
+    expect(stopped).toEqual({ status: 'rejected', reason });
+    expect(remaining).toEqual({ status: 'fulfilled', value: f.message });
+    expect(f.router.paidRequests()).toBe(1);
+    expect(f.gets()).toBe(0);
+    expect(await transport.summary(f.job)).toMatchObject({ reservedAtomic: '4000', uncertain: [] });
+  },
+);
+
+it('keeps another transport on authoritative owner recovery while the original request is pending', async () => {
+  const f = await fixture();
+  const held = deferred();
+  const entered = deferred();
+  f.router.hold = held.promise;
+  f.router.onDelayArmed = entered.resolve;
+  f.setRecoveryState('pending');
+  const body = { messages: [{ role: 'user', content: 'same request in another process' }] };
+  const first = f.make().messages(f.job, body, new AbortController().signal);
+  await entered.promise;
+  try {
+    await expect(f.make().messages(f.job, body, new AbortController().signal)).rejects.toThrow(
+      /no new authorization/,
+    );
+    expect(f.gets()).toBe(1);
+    expect(f.router.paidRequests()).toBe(1);
+    expect(await f.make().summary(f.job)).toMatchObject({
+      reservedAtomic: '503000',
+      uncertain: [expect.any(String)],
+    });
+  } finally {
+    held.resolve();
+  }
+  await expect(first).resolves.toEqual(f.message);
+});
+
+it('aborts and drains the paid operation when its last identical caller cancels without erasing exposure', async () => {
+  const f = await fixture({ drop: true });
+  const transport = f.make();
+  const held = deferred(),
+    entered = deferred();
+  f.router.hold = held.promise;
+  f.router.onDelayArmed = entered.resolve;
+  const body = { messages: [{ role: 'user', content: 'cancel the final waiter' }] };
+  const firstController = new AbortController(),
+    controller = new AbortController();
+  const first = transport
+    .messages(f.job, body, firstController.signal)
+    .catch((error: unknown) => error);
+  await entered.promise;
+  let finished = false;
+  const pending = transport.messages(f.job, body, controller.signal).catch((error: unknown) => {
+    finished = true;
+    return error;
+  });
+  const firstReason = new Error('First caller stopped');
+  const reason = new Error('Owner stopped');
+  try {
+    firstController.abort(firstReason);
+    expect(f.paidSignals[0]!.aborted).toBe(false);
+    controller.abort(reason);
+    expect(f.paidSignals[0]!.aborted).toBe(true);
+    expect(await first).toBe(firstReason);
+    expect(await transport.summary(f.job)).toMatchObject({
+      reservedAtomic: '503000',
+      uncertain: [expect.any(String)],
+    });
+    expect(finished).toBe(false);
+  } finally {
+    held.resolve();
+  }
+  expect(await pending).toBe(reason);
+  expect(finished).toBe(true);
+  expect(f.router.paidRequests()).toBe(1);
+  expect(await transport.summary(f.job)).toMatchObject({
+    reservedAtomic: '503000',
+    uncertain: [expect.any(String)],
+  });
+  await expect(f.make().messages(f.job, body, new AbortController().signal)).resolves.toEqual(
+    f.message,
+  );
+  expect(f.router.paidRequests()).toBe(1);
+  expect(f.gets()).toBe(1);
 });
 
 it('continues with the original ledger and refuses to recreate a missing resume budget', async () => {
@@ -345,6 +547,66 @@ it('accepts bounded native Responses receipts beyond the old Messages response s
       ),
   ).toBe(wire);
   expect(f.router.paidRequests()).toBe(1);
+});
+
+it('preserves complete Responses wire near the hosted JSON receipt envelope ceiling', async () => {
+  const wire = 'event: response.completed\ndata: ' + 'x'.repeat(4_300_000) + '\n\n';
+  const f = await fixture({ protocol: 'responses', wire });
+  await expect(
+    f
+      .make()
+      .responses(
+        f.job,
+        { model: 'deepseek-flash', input: 'Exact wire' },
+        new AbortController().signal,
+      ),
+  ).resolves.toBe(wire);
+  expect(f.router.paidRequests()).toBe(1);
+});
+
+it('bounds escaped Responses envelopes on both paid results and owner recovery without releasing exposure', async () => {
+  // The raw wire fits 4.5MB, but JSON escaping exceeds the actual hosted POST/GET limit.
+  const f = await fixture({ protocol: 'responses', wire: '"'.repeat(2_300_000) });
+  const body = { model: 'deepseek-flash', input: 'Oversized escaped wire' };
+  const first = await f
+    .make()
+    .responses(f.job, body, new AbortController().signal)
+    .then(
+      () => 'unexpected success',
+      (error: Error) => error.message,
+    );
+  expect(first).toMatch(/uncertain/);
+  expect(await f.make().summary(f.job)).toMatchObject({
+    reservedAtomic: '503000',
+    uncertain: [expect.any(String)],
+  });
+  await expect(f.make().responses(f.job, body, new AbortController().signal)).rejects.toThrow(
+    /size limit/,
+  );
+  expect(f.router.paidRequests()).toBe(1);
+  expect(f.gets()).toBe(1);
+  expect(await f.make().summary(f.job)).toMatchObject({
+    reservedAtomic: '503000',
+    uncertain: [expect.any(String)],
+  });
+});
+
+it('rejects a Messages result above the server message ceiling even when the receipt envelope fits', async () => {
+  const f = await fixture();
+  f.message.content[0]!.text = 'x'.repeat(2_000_000);
+  const failure = await f
+    .make()
+    .messages(f.job, { messages: [] }, new AbortController().signal)
+    .then(
+      () => 'unexpected success',
+      (error: Error) => error.message,
+    );
+  expect(failure).toMatch(/Invalid model receipt/);
+  expect(f.router.paidRequests()).toBe(1);
+  expect(await f.make().summary(f.job)).toMatchObject({
+    reservedAtomic: '503000',
+    uncertain: [expect.any(String)],
+  });
 });
 
 it('masks known secrets in native instructions/text/tool outputs while preserving opaque pairings and schemas', async () => {

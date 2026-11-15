@@ -1,3 +1,10 @@
+import {
+  MODEL_CODEX_TASK_BYTES,
+  MODEL_EXPECTED_SPEND_ATOMIC,
+  MODEL_ROUTE_BODY_BYTES,
+  MODEL_ROUTE_ENVELOPE_BYTES,
+} from './model-limits';
+import { isModelWorkerProcess } from './model-worker-context';
 import { qualifiedModelWorker } from './model-worker';
 import { z } from 'zod';
 import { mask } from '../lib/redact';
@@ -72,6 +79,10 @@ export class ModelHandoff {
     this.store = new ModelJobStore(options.dataDir);
     this.conversations = new ModelConversationStore(options.dataDir);
   }
+  private async currentConsent(cwd: string) {
+    const settings = await modelSettings(this.options.dataDir, cwd);
+    return settings?.routerOrigin === this.options.transport.origin ? settings : null;
+  }
   async captureCodex(
     session: ModelSession,
     callId: string,
@@ -79,7 +90,7 @@ export class ModelHandoff {
     signal?: AbortSignal,
   ) {
     signal?.throwIfAborted();
-    if (process.env.TENJIN_MODEL_WORKER === '1') return null;
+    if (isModelWorkerProcess()) return null;
     const old = await this.store.pending(session.sessionId, session.turnId);
     if (old) {
       // A completed foreground worker is quiescent. Do not hold later native
@@ -91,10 +102,9 @@ export class ModelHandoff {
         'This turn already has a held or selected delegation. No additional child started. Cancel or finish it before continuing.',
       );
     }
-    const settings = await modelSettings(this.options.dataDir, session.cwd);
+    const settings = await this.currentConsent(session.cwd);
     if (
       !settings ||
-      settings.routerOrigin !== this.options.transport.origin ||
       !session.codexPolicy ||
       typeof native.message !== 'string' ||
       native.fork_turns !== 'none' ||
@@ -133,13 +143,12 @@ export class ModelHandoff {
   }
   async submitCodex(session: ModelSession, id: string, task: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    const settings = await modelSettings(this.options.dataDir, session.cwd);
+    const settings = await this.currentConsent(session.cwd);
     if (
       !settings ||
-      settings.routerOrigin !== this.options.transport.origin ||
       !session.codexPolicy ||
       !task.trim() ||
-      Buffer.byteLength(task) > 16000
+      Buffer.byteLength(task) > MODEL_CODEX_TASK_BYTES
     )
       return {
         action: 'native',
@@ -196,11 +205,10 @@ export class ModelHandoff {
     }
     if (nativeTool === 'SendMessage') return { action: 'native' };
     const { dataDir, transport } = this.options;
-    const settings = await modelSettings(dataDir, session.cwd);
+    const settings = await this.currentConsent(session.cwd);
     if (
       !settings ||
-      settings.routerOrigin !== transport.origin ||
-      process.env.TENJIN_MODEL_WORKER === '1' ||
+      isModelWorkerProcess() ||
       !claudeWorkerPermissionMode(session.claudePermissionMode)
     )
       return { action: 'native' };
@@ -260,12 +268,11 @@ export class ModelHandoff {
     signal?: AbortSignal,
   ) {
     const { dataDir, transport } = this.options;
-    const settings = await modelSettings(dataDir, session.cwd);
+    const settings = await this.currentConsent(session.cwd);
     if (
       session.harness === 'codex' ||
       !settings ||
-      settings.routerOrigin !== transport.origin ||
-      process.env.TENJIN_MODEL_WORKER === '1' ||
+      isModelWorkerProcess() ||
       !claudeWorkerPermissionMode(session.claudePermissionMode)
     )
       return continuationRefusal('Current model consent or Claude permission mode is unavailable');
@@ -308,11 +315,10 @@ export class ModelHandoff {
         'Current native workspace scope changed or its original disclosure is unavailable',
       );
     signal?.throwIfAborted();
-    const latest = await modelSettings(dataDir, session.cwd);
+    const latest = await this.currentConsent(session.cwd);
     if (
       !latest ||
       latest.root !== settings.root ||
-      latest.routerOrigin !== transport.origin ||
       !claudeWorkspaceCovered(originalWorkspace, latest.repositories)
     )
       return continuationRefusal('Current model consent changed during qualification');
@@ -373,14 +379,13 @@ export class ModelHandoff {
     };
   }
   private async route(session: ModelSession, job: ModelJob, signal?: AbortSignal) {
-    const { dataDir, transport } = this.options;
+    const { transport } = this.options;
     const native = async () => {
       await this.store.decided(job.id, { action: 'native' });
       return { action: 'native' };
     };
-    const settings = await modelSettings(dataDir, session.cwd);
-    if (!settings || settings.root !== job.root || settings.routerOrigin !== transport.origin)
-      return native();
+    const settings = await this.currentConsent(session.cwd);
+    if (!settings || settings.root !== job.root) return native();
     const task = job.task;
     const instructions = savedInstructionContext(job.decision.instructionContext);
     const claudeWorkspace = savedClaudeWorkspace(job.decision.claudeWorkspace);
@@ -412,10 +417,11 @@ export class ModelHandoff {
       accepts: ['deepseek-flash'],
       subagentTask: mask(task),
       parentContext,
-      expectedSpendAtomic: '20000',
+      expectedSpendAtomic: MODEL_EXPECTED_SPEND_ATOMIC,
     };
     if (
-      Buffer.byteLength(JSON.stringify(admission)) + 64 > 16384 ||
+      Buffer.byteLength(JSON.stringify(admission)) + MODEL_ROUTE_ENVELOPE_BYTES >
+        MODEL_ROUTE_BODY_BYTES ||
       settings.maxJobAtomic < MODEL_ROUTING_FEE_CEILING_ATOMIC
     )
       return native();
@@ -444,11 +450,10 @@ export class ModelHandoff {
       await this.store.decided(job.id, { action: 'native' });
       return { action: 'native' };
     }
-    const consent = await modelSettings(dataDir, session.cwd);
+    const consent = await this.currentConsent(session.cwd);
     if (
       !consent ||
       consent.root !== job.root ||
-      consent.routerOrigin !== transport.origin ||
       consent.maxJobAtomic < BigInt(job.capAtomic) ||
       (claudeWorkspace && !claudeWorkspaceCovered(claudeWorkspace, consent.repositories))
     )

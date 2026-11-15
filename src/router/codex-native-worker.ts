@@ -1,3 +1,4 @@
+import { MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
@@ -308,7 +309,7 @@ async function hostSnapshot(
   const ruleHashes = [];
   for (const path of rules) {
     const bytes = await readFile(path);
-    if (bytes.byteLength > 256_000) throw new Error('Native rules oversized');
+    if (bytes.byteLength > MODEL_NATIVE_TEXT_BYTES) throw new Error('Native rules oversized');
     ruleHashes.push({ path, hash: canonicalHash(bytes.toString('utf8')) });
   }
   const inventory: unknown[] = [];
@@ -674,7 +675,7 @@ export async function runNativeCodexWorker(
       typeof params.item.id === 'string' &&
       typeof params.item.text === 'string'
     ) {
-      if (Buffer.byteLength(params.item.text) > 256_000)
+      if (Buffer.byteLength(params.item.text) > MODEL_NATIVE_TEXT_BYTES)
         throw new Error('Native worker result exceeds bound');
       messages.set(params.item.id, params.item.text);
     }
@@ -682,7 +683,7 @@ export async function runNativeCodexWorker(
       if (params.turn.status !== 'completed') fail(new Error('Native worker did not complete'));
       else {
         const text = [...messages.values()].join('\n\n');
-        if (!text || Buffer.byteLength(text) > 256_000)
+        if (!text || Buffer.byteLength(text) > MODEL_NATIVE_TEXT_BYTES)
           fail(new Error('Native completed result unavailable'));
         else finish(text);
       }

@@ -17,6 +17,8 @@ Routing sends the assignment and bounded parent context to Tenjin and TypeSafe b
 
 The Claude worker retains native settings, rules, hooks, MCPs, CLIs and tool permissions in the current workspace, including uncommitted changes. Global auto-memory is disabled for this worker. Native directory grants must fit disclosure; extra disclosure roots grant no access. Your parent's endpoint, saved login and Remote Control stay in place. Unsupported authority or host-controlled authentication keeps work native. A provider refusal at worker startup can follow an already-paid routing fee.
 
+Worker file tools and commands cannot read credential-bearing native config, history or private controller data. Ordinary skill, agent, command and support files remain usable under the current native permissions.
+
 ## Accept, cancel and continue
 
 The parent calls its native subagent tool normally. An offer starts no worker. Accept with `subagent({offer_id})` or retry the original native call unchanged. Saved consent covers its stated disclosure/inference scope; binding restrictions and additional approvals still apply. The parent retains repository-specific risk judgment and normal tool asks.

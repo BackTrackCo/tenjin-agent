@@ -1,5 +1,5 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { canonicalHash } from '../lib/request-schema';
@@ -8,11 +8,34 @@ import {
   instructionContextText,
   resolveCodexInstructions,
   savedInstructionContext,
+  protectedInstructionPath,
   type InstructionReader,
 } from './model-instructions';
 import type { CodexModelPolicy } from './codex-model-gates';
 
 let dir: string;
+it('allows native support instructions while protecting login, history and private controller state', () => {
+  const home = homedir();
+  for (const support of [
+    'skills/example/SKILL.md',
+    'agents/reviewer.md',
+    'commands/check.md',
+    'CLAUDE.md',
+  ])
+    expect(protectedInstructionPath(join(home, '.claude', support))).toBe(false);
+  for (const privateFile of [
+    '.credentials.json',
+    '.claude.json',
+    'settings.json',
+    'settings.local.json',
+    '.mcp.json',
+    'mcp.json',
+    'projects/foreign/session.jsonl',
+    'history.jsonl',
+  ])
+    expect(protectedInstructionPath(join(home, '.claude', privateFile))).toBe(true);
+  expect(protectedInstructionPath('/repo/registry/owned.json', '/repo/registry')).toBe(true);
+});
 afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });

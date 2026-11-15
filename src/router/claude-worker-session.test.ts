@@ -7,6 +7,7 @@ import {
   claudeWorkerPrivatePaths,
   prepareClaudeWorkerSession,
 } from './claude-worker-session';
+import { isSecretPath } from './model-worker-privacy';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 vi.mock('node:fs/promises', () => ({ realpath: async (path: string) => path }));
@@ -67,7 +68,88 @@ it('preserves native config override semantics and refuses mismatched relative s
 it('protects an in-repository registry and native history from file tools and sandboxed commands', async () => {
   vi.stubEnv('CLAUDE_CONFIG_DIR', '/repo/native config');
   const protectedPaths = await claudeWorkerPrivatePaths('/repo/private', '/repo');
-  expect(protectedPaths.paths).toEqual(['/repo/private', '/repo/native config/projects']);
+  expect(protectedPaths.paths).toEqual(
+    expect.arrayContaining([
+      '/repo/private',
+      '/repo/native config/projects',
+      '/repo/native config/.credentials.json',
+      '/repo/native config/.claude.json',
+      '/repo/native config/history.jsonl',
+    ]),
+  );
   expect(protectedPaths.deny).toContain('Read(//repo/private/**)');
   expect(protectedPaths.deny).toContain('Edit(//repo/native config/projects/**)');
+  expect(protectedPaths.deny).toContain('Write(//repo/private/**)');
+  expect(isSecretPath('/repo/native config/skills/example/SKILL.md', protectedPaths.paths)).toBe(
+    false,
+  );
+});
+
+it('protects both declared config layers and secure storage without blocking their support files', async () => {
+  const protectedPaths = await claudeWorkerPrivatePaths(
+    '/repo/private',
+    '/repo',
+    {
+      CLAUDE_CONFIG_DIR: '/repo/parent-profile',
+      CODEX_HOME: '/repo/codex-profile',
+    },
+    {
+      CLAUDE_CONFIG_DIR: '/repo/effective-profile',
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: '/repo/secure-store',
+    },
+  );
+  for (const path of [
+    '/repo/parent-profile/.credentials.json',
+    '/repo/parent-profile/projects/session.jsonl',
+    '/repo/effective-profile/.claude.json',
+    '/repo/effective-profile/settings.json',
+    '/repo/effective-profile/settings.local.json',
+    '/repo/parent-profile/.mcp.json',
+    '/repo/parent-profile/mcp.json',
+    '/repo/effective-profile/history.jsonl',
+    '/repo/secure-store/.credentials.json',
+    '/repo/codex-profile/auth.json',
+    '/repo/private/owned.json',
+  ])
+    expect(isSecretPath(path, protectedPaths.paths)).toBe(true);
+  for (const path of [
+    '/repo/parent-profile/agents/reviewer.md',
+    '/repo/effective-profile/commands/check.md',
+    '/repo/effective-profile/skills/example/settings.json',
+  ])
+    expect(isSecretPath(path, protectedPaths.paths)).toBe(false);
+});
+
+it('protects exact native workspace and discovered source files without an ancestor scan or basename ban', async () => {
+  const protectedPaths = await claudeWorkerPrivatePaths(
+    '/repo/private',
+    '/repo/child',
+    {},
+    {},
+    {
+      workingDirectories: ['/repo/child', '/sibling'],
+      sources: [
+        { source: 'project', path: '/repo/.claude/settings.json' },
+        { source: 'local', path: '/custom/native-policy.json' },
+      ],
+    },
+  );
+  for (const file of [
+    '/repo/.claude/settings.json',
+    '/repo/.claude/settings.local.json',
+    '/repo/.mcp.json',
+    '/repo/child/.mcp.json',
+    '/sibling/.claude/settings.local.json',
+    '/sibling/.mcp.json',
+    '/custom/native-policy.json',
+  ])
+    expect(isSecretPath(file, protectedPaths.paths)).toBe(true);
+  for (const file of [
+    '/repo/child/settings.json',
+    '/sibling/settings.json',
+    '/custom/settings.json',
+    '/repo/.claude/skills/example/settings.json',
+    '/.mcp.json',
+  ])
+    expect(isSecretPath(file, protectedPaths.paths)).toBe(false);
 });

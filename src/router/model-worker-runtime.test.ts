@@ -115,7 +115,7 @@ function sdkResult(
           for (const message of activity) yield message;
           yield { type: 'result', session_id: sessionId, ...result };
         },
-        accountInfo: async () => ({ apiProvider: 'firstParty' }),
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
         mcpServerStatus: async () => [],
         close: native.close,
       }) as unknown as ReturnType<typeof query>,
@@ -163,6 +163,65 @@ it.each([undefined, 'gateway', 'bedrock'])(
     expect(activity.observe).not.toHaveBeenCalled();
     expect(native.close).toHaveBeenCalled();
     expect(native.bridgeClose).toHaveBeenCalled();
+  },
+);
+
+it.each([
+  { apiProvider: 'firstParty' },
+  { apiProvider: 'firstParty', apiKeySource: '/login managed key' },
+  { apiProvider: 'firstParty', apiKeySource: 'oauth' },
+  { apiProvider: 'firstParty', apiKeySource: 'none', tokenSource: 'ANTHROPIC_AUTH_TOKEN' },
+  { apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper', email: 'account@example.test' },
+  { apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY', subscriptionType: 'max' },
+  { apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper', tokenSource: 'claude.ai' },
+  {
+    apiProvider: 'firstParty',
+    apiKeySource: 'apiKeyHelper',
+    tokenSource: 'CLAUDE_CODE_OAUTH_TOKEN',
+  },
+  { apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper', tokenSource: 'CCR_OAUTH_TOKEN_FILE' },
+  {
+    apiProvider: 'firstParty',
+    apiKeySource: 'apiKeyHelper',
+    tokenSource: 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  },
+])(
+  'never releases the assignment when initialized auth provenance is ambiguous or OAuth-shaped: %j',
+  async (account) => {
+    const pending = authenticationQuery(Promise.resolve(account));
+    const messages = vi.fn();
+    await expect(
+      runModelWorker(job, {
+        ...options(),
+        transport: { messages } as unknown as ModelTransport,
+      }),
+    ).rejects.toThrow(/unsupported API provider|authentication/);
+    expect(await pending).toEqual({ done: true, value: undefined });
+    expect(messages).not.toHaveBeenCalled();
+    expect(native.close).toHaveBeenCalled();
+    expect(native.bridgeClose).toHaveBeenCalled();
+  },
+);
+
+it.each([
+  ['apiKeyHelper', 'apiKeyHelper'],
+  ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+  ['ANTHROPIC_API_KEY', 'none'],
+  ['apiKeyHelper', undefined],
+])(
+  'releases the complete assignment for native bridge key provenance %s/%s',
+  async (apiKeySource, tokenSource) => {
+    const pending = authenticationQuery(
+      Promise.resolve({ apiProvider: 'firstParty', apiKeySource, tokenSource }),
+    );
+    const run = runModelWorker(job, options());
+    expect(await pending).toEqual({
+      done: false,
+      value: expect.objectContaining({
+        message: { role: 'user', content: [{ type: 'text', text: job.task }] },
+      }),
+    });
+    await expect(run).resolves.toBe('done');
   },
 );
 
@@ -222,7 +281,7 @@ it('releases the exact native user message only after provider initialization is
   });
   const pending = authenticationQuery(account);
   const run = runModelWorker(job, options());
-  allow({ apiProvider: 'firstParty' });
+  allow({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' });
   expect(await pending).toEqual({
     done: false,
     value: {
@@ -292,7 +351,13 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
     '.netrc',
     '.npmrc',
     '.git-credentials',
-    '.claude',
+    '.claude/.credentials.json',
+    '.claude/projects',
+    '.claude/history.jsonl',
+    '.claude/settings.json',
+    '.claude/settings.local.json',
+    '.claude/.mcp.json',
+    '.claude/mcp.json',
     '.claude.json',
     '.kube',
     '.gnupg',
@@ -305,6 +370,12 @@ it('uses the native emergency guard beyond the old forty-turn cutoff while retai
     );
     expect(call.options?.sandbox?.filesystem?.denyRead).toContain(path);
   }
+  expect(call.options?.sandbox?.filesystem?.denyRead).not.toContain(join(homedir(), '.claude'));
+  expect(call.options?.sandbox?.filesystem?.denyWrite).not.toContain(join(homedir(), '.claude'));
+  expect(call.options?.settings).not.toHaveProperty(
+    'permissions.deny',
+    expect.arrayContaining([`Read(/${join(homedir(), '.claude')}/**)`]),
+  );
   expect(native.close).toHaveBeenCalled();
   expect(native.bridgeClose).toHaveBeenCalled();
 });
@@ -350,6 +421,34 @@ it('keeps native sibling working directories distinct from read-only and shell-w
       'Read(//shell-write/**/.env*)',
     ]),
   );
+});
+
+it('applies native settings-source and project MCP credential guards while preserving ordinary application settings', async () => {
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: {},
+    sources: [
+      { source: 'project', path: '/ancestor/.claude/settings.json', settings: {} },
+      { source: 'local', path: '/custom/native-settings.json', settings: {} },
+    ],
+  } as never);
+  sdkResult({ subtype: 'success', result: 'done' });
+  await expect(runModelWorker(job, options())).resolves.toBe('done');
+  const call = vi.mocked(query).mock.calls[0]![0];
+  const paths = call.options?.sandbox?.filesystem?.denyRead;
+  for (const file of [
+    '/repo/.mcp.json',
+    '/repo/.claude/settings.local.json',
+    '/ancestor/.mcp.json',
+    '/ancestor/.claude/settings.json',
+    '/custom/native-settings.json',
+  ])
+    expect(paths).toContain(file);
+  for (const file of [
+    '/repo/settings.json',
+    '/repo/.claude/skills/example/settings.json',
+    '/custom/settings.json',
+  ])
+    expect(paths).not.toContain(file);
 });
 
 it.each(['native scope', 'disclosure'] as const)(
@@ -558,7 +657,7 @@ it('admits no inference until the owned session observer has durably accepted th
         await responseComplete;
         yield { type: 'result', subtype: 'success', session_id: sessionId, result: 'done' };
       },
-      accountInfo: async () => ({ apiProvider: 'firstParty' }),
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
       mcpServerStatus: async () => [],
       close: native.close,
     } as unknown as ReturnType<typeof query>;
@@ -610,7 +709,7 @@ it('does not return a completed worker while its native process has exited but s
         yield { type: 'system', subtype: 'init', permissionMode: 'default' };
         yield { type: 'result', subtype: 'success', result: 'done' };
       },
-      accountInfo: async () => ({ apiProvider: 'firstParty' }),
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
       mcpServerStatus: async () => [],
       close: native.close,
       return: async () => {
@@ -664,7 +763,7 @@ it.each([
           yield { type: 'system', subtype: 'init', permissionMode: 'default' };
           yield { type: 'result', subtype, result: 'not a confirmed success', num_turns: 500 };
         },
-        accountInfo: async () => ({ apiProvider: 'firstParty' }),
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
         mcpServerStatus: async () => [],
         close: native.close,
         return: async () => {

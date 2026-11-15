@@ -1,3 +1,4 @@
+import { isModelWorkerProcess } from './model-worker-context';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -95,8 +96,7 @@ export function registerModelTool(
       },
       async (args, extra) => {
         const session = options.session();
-        if (!session || process.env.TENJIN_MODEL_WORKER === '1')
-          return answer({ status: 'unavailable' });
+        if (!session || isModelWorkerProcess()) return answer({ status: 'unavailable' });
         const [root, configDir] = await Promise.all([
           realpath(session.cwd).catch(() => null),
           realpath(claudeWorkerConfigDir(session.cwd)).catch(() => null),
@@ -183,7 +183,7 @@ export function registerModelTool(
       };
       if (
         !session ||
-        process.env.TENJIN_MODEL_WORKER === '1' ||
+        isModelWorkerProcess() ||
         (options.harness === 'codex' && extra._meta?.['threadId'] !== session.sessionId)
       )
         return unavailable('Host worker permission bridge is not qualified');
@@ -599,7 +599,7 @@ export function registerModelTool(
     shutdown,
     fence,
     async codexHook(session: ModelSession, raw: Record<string, unknown>) {
-      if (process.env.TENJIN_MODEL_WORKER === '1') return null;
+      if (isModelWorkerProcess()) return null;
       if (
         !['collaborationspawn_agent', 'spawn_agent', 'Agent'].includes(String(raw.tool_name)) ||
         typeof raw.tool_use_id !== 'string' ||

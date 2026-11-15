@@ -14,6 +14,11 @@ import { z } from 'zod';
 import type { ModelJob } from './model-job';
 import { MODEL_ROUTING_FEE_CEILING_ATOMIC } from './model-channel';
 import { RouteSkipped } from './decision';
+import {
+  MODEL_MESSAGES_RESULT_BYTES,
+  MODEL_RESPONSE_ENVELOPE_BYTES,
+  MODEL_RESPONSES_WIRE_BYTES,
+} from './model-limits';
 
 const budgetSchema = z.object({
   charged: z.string().regex(/^\d+$/),
@@ -28,9 +33,17 @@ const budgetSchema = z.object({
   ),
 });
 type Budget = z.infer<typeof budgetSchema>;
+type InFlightInvocation = {
+  abort: AbortController;
+  callers: number;
+  result: Promise<Record<string, unknown>>;
+};
 
 /** A bounded read is required even on our own server: provider messages are untrusted. */
-async function boundedJson(response: Response, limit = 2_100_000): Promise<unknown> {
+async function boundedJson(
+  response: Response,
+  limit = MODEL_RESPONSE_ENVELOPE_BYTES,
+): Promise<unknown> {
   if (!response.body) throw new Error('Empty invocation receipt');
   const reader = response.body.getReader();
   let size = 0;
@@ -50,7 +63,7 @@ async function boundedJson(response: Response, limit = 2_100_000): Promise<unkno
   }
 }
 
-function boundedResponse(response: Response, limit = 2_100_000): Response {
+function boundedResponse(response: Response, limit = MODEL_RESPONSE_ENVELOPE_BYTES): Response {
   if (!response.body) return response;
   let size = 0;
   return new Response(
@@ -70,6 +83,8 @@ function boundedResponse(response: Response, limit = 2_100_000): Response {
 /** Job ceiling survives process death. Reserve before sending, retain uncertainty. */
 export class ModelTransport {
   private routing: Payer;
+  /** Local waiters only. The persisted reservation remains authoritative across transports. */
+  private readonly invocations = new Map<string, InFlightInvocation>();
   constructor(
     private options: {
       dataDir: string;
@@ -149,11 +164,75 @@ export class ModelTransport {
     messages: Record<string, unknown>,
     signal: AbortSignal,
     protocol: 'messages' | 'responses',
+  ): Promise<Record<string, unknown>> {
+    signal.throwIfAborted();
+    // Do not share across changed job authority, even when the provider body is identical.
+    const key = canonicalHash({ job, protocol, messages });
+    let invocation = this.invocations.get(key);
+    if (!invocation) {
+      const abort = new AbortController();
+      const result = this.invokeOnce(
+        structuredClone(job),
+        structuredClone(messages),
+        abort.signal,
+        protocol,
+      ).finally(() => {
+        if (this.invocations.get(key)?.abort === abort) this.invocations.delete(key);
+      });
+      invocation = { abort, callers: 0, result };
+      this.invocations.set(key, invocation);
+    }
+    const owned = invocation;
+    owned.callers++;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const detach = () => {
+        if (settled) return false;
+        settled = true;
+        owned.callers--;
+        signal.removeEventListener('abort', cancel);
+        return true;
+      };
+      const cancel = () => {
+        if (!detach()) return;
+        // One disconnected HTTP caller cannot cancel a live peer's paid request.
+        if (owned.callers === 0) {
+          owned.abort.abort(signal.reason);
+          // The last owner must still drain any signing/accounting already in progress.
+          void owned.result.then(
+            () => reject(signal.reason),
+            () => reject(signal.reason),
+          );
+        } else reject(signal.reason);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      owned.result.then(
+        (value) => {
+          if (!detach()) return;
+          try {
+            // Consumers must not mutate another caller's response or the shared result.
+            resolve(structuredClone(value));
+          } catch (error) {
+            reject(error);
+          }
+        },
+        (error: unknown) => {
+          if (detach()) reject(error);
+        },
+      );
+      if (signal.aborted) cancel();
+    });
+  }
+  private async invokeOnce(
+    job: ModelJob,
+    messages: Record<string, unknown>,
+    signal: AbortSignal,
+    protocol: 'messages' | 'responses',
   ) {
     signal.throwIfAborted();
     const endpoint =
       protocol === 'responses' ? '/api/model-proxy/responses' : '/api/model-proxy/messages';
-    const resultLimit = protocol === 'responses' ? 64 * 1024 * 1024 : 2_100_000;
+    const resultLimit = MODEL_RESPONSE_ENVELOPE_BYTES;
     const { dataDir, baseUrl, payerDeps } = this.options;
     await mkdir(join(dataDir, 'model-jobs'), { recursive: true, mode: 0o700 });
     const path = join(dataDir, 'model-jobs', `${job.id}.budget.json`);
@@ -412,8 +491,19 @@ export class ModelTransport {
     const value = z
       .object({
         ...(protocol === 'responses'
-          ? { wire: z.string().refine((wire) => Buffer.byteLength(wire) <= 32 * 1024 * 1024) }
-          : { message: z.record(z.string(), z.unknown()) }),
+          ? {
+              wire: z
+                .string()
+                .refine((wire) => Buffer.byteLength(wire) <= MODEL_RESPONSES_WIRE_BYTES),
+            }
+          : {
+              message: z
+                .record(z.string(), z.unknown())
+                .refine(
+                  (message) =>
+                    Buffer.byteLength(JSON.stringify(message)) <= MODEL_MESSAGES_RESULT_BYTES,
+                ),
+            }),
         receipt: z.object({
           invocationId: z.literal(invocationId),
           quoteAtomic: z.literal(quote.toString()),
@@ -449,10 +539,7 @@ export class ModelTransport {
       await response.body?.cancel();
       return null;
     }
-    const value = await boundedJson(
-      response,
-      protocol === 'responses' ? 64 * 1024 * 1024 : 2_100_000,
-    );
+    const value = await boundedJson(response);
     const parsed = z
       .object({
         invocationId: z.literal(invocationId),
