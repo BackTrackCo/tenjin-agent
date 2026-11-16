@@ -95,10 +95,21 @@ it('executes an accepted Codex job only through the genuine native runner', asyn
     permission: vi.fn(),
   };
   expect(await runModelWorker(job, options)).toBe('native completed result');
+  const { permission, ...rest } = options;
   expect(runNativeCodexWorker).toHaveBeenCalledWith(
     job,
-    expect.objectContaining({ ...options, signal: expect.any(AbortSignal) }),
+    expect.objectContaining({
+      ...rest,
+      signal: expect.any(AbortSignal),
+      permission: expect.any(Function),
+    }),
   );
+  // Codex keeps no job-wide allow: a person's answer allows this one call only.
+  const passed = vi.mocked(runNativeCodexWorker).mock.calls.at(-1)![1].permission;
+  permission.mockResolvedValueOnce('job');
+  expect(await passed('Bash', {}, new AbortController().signal)).toBe(true);
+  permission.mockResolvedValueOnce(false);
+  expect(await passed('Bash', {}, new AbortController().signal)).toBe(false);
   expect(query).not.toHaveBeenCalled();
   expect(readClaudeCode).not.toHaveBeenCalled();
 });

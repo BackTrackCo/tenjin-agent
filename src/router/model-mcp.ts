@@ -16,6 +16,7 @@ import type { ModelConversation, ModelConversationOwner } from './model-conversa
 import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
 import { realpath } from 'node:fs/promises';
 import { ModelWorkerActivity, partialHandback } from './model-worker-activity';
+import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
 import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
 
@@ -500,30 +501,20 @@ export function registerModelTool(
                       },
                     }
                   : {}),
-                permission: async (tool, input, signal) => {
+                permission: async (tool, input, signal, ask) => {
                   if (!server.server.getClientCapabilities()?.elicitation || signal.aborted)
                     return false;
-                  const details = JSON.stringify(input);
-                  if (Buffer.byteLength(details) > 12000) return false;
-                  const response = await server.server.elicitInput(
-                    {
-                      mode: 'form',
-                      message: `DeepSeek worker requests ${tool}: ${details}`,
-                      requestedSchema: {
-                        type: 'object',
-                        properties: {
-                          allow: {
-                            type: 'boolean',
-                            title: 'Allow this action once',
-                            default: false,
-                          },
-                        },
-                        required: ['allow'],
+                  if (Buffer.byteLength(JSON.stringify(input)) > 12000) return false;
+                  return workerPermissionAnswer(
+                    await server.server.elicitInput(
+                      workerPermissionForm(tool, input, ask, {
+                        jobChoice: options.harness === 'claude',
+                      }),
+                      {
+                        signal,
                       },
-                    },
-                    { signal },
+                    ),
                   );
-                  return response.action === 'accept' && response.content?.allow === true;
                 },
               });
               const envelope = {

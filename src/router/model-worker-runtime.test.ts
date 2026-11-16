@@ -1124,3 +1124,35 @@ it('denies credential probes and pushes to main in the worker hook whatever the 
   expect(decisions[1]).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
   expect(decisions[2]).toEqual({});
 });
+
+it('asks a person once for a call allowed for the rest of the job and keeps its rule in the session', async () => {
+  const answers: unknown[] = [];
+  const permission = vi.fn(async () => 'job' as const);
+  sdkResult({ subtype: 'success', result: 'job allow fixture' }, undefined, async () => {
+    const canUseTool = vi.mocked(query).mock.calls[0]![0].options!.canUseTool!;
+    const ask = {
+      signal: new AbortController().signal,
+      toolUseID: 'one',
+      requestId: 'one',
+      suggestions: [
+        {
+          type: 'addRules',
+          rules: [{ toolName: 'Bash' }],
+          behavior: 'allow',
+          destination: 'localSettings',
+        },
+        { type: 'addDirectories', directories: ['/outside'], destination: 'session' },
+      ],
+    } as never;
+    answers.push(await canUseTool('Bash', { command: 'pnpm lint' }, ask));
+    answers.push(await canUseTool('Bash', { command: 'pnpm lint' }, ask));
+  });
+  await runModelWorker(job, { ...options(), permission });
+  expect(permission).toHaveBeenCalledTimes(1);
+  expect(answers[0]).toMatchObject({
+    behavior: 'allow',
+    updatedPermissions: [{ type: 'addRules', destination: 'session' }],
+  });
+  expect((answers[0] as { updatedPermissions: unknown[] }).updatedPermissions).toHaveLength(1);
+  expect(answers[1]).toEqual({ behavior: 'allow', updatedInput: { command: 'pnpm lint' } });
+});

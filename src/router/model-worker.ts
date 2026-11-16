@@ -8,6 +8,7 @@ import { findDefinition } from './agent-tools';
 import {
   query,
   resolveSettings as resolveWorkerSettings,
+  type PermissionUpdate,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk/core';
 import type { CodexModelPolicy } from './codex-model-gates';
@@ -41,6 +42,11 @@ import {
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
 import { workerHardDeny } from './worker-hard-denies';
+import {
+  jobScopedRules,
+  type WorkerPermissionAnswer,
+  type WorkerPermissionAsk,
+} from './model-worker-prompt';
 import {
   resolveClaudeWorkspace,
   savedClaudeWorkspace,
@@ -119,14 +125,21 @@ export async function runModelWorker(
       tool: string,
       input: Record<string, unknown>,
       signal: AbortSignal,
-    ) => Promise<boolean>;
+      ask?: WorkerPermissionAsk,
+    ) => Promise<WorkerPermissionAnswer>;
   },
 ) {
   return withWorkerDeadline(options.signal, async (signal) => {
     const current = { ...options, signal };
     signal.throwIfAborted();
     if (current.codexPolicy)
-      return runNativeCodexWorker(job, { ...current, codexPolicy: current.codexPolicy });
+      return runNativeCodexWorker(job, {
+        ...current,
+        codexPolicy: current.codexPolicy,
+        // Codex has no job-wide allow; any allow is for this call only.
+        permission: async (tool, input, signal) =>
+          (await current.permission(tool, input, signal)) !== false,
+      });
     assertClaudeWorkerMode(job.decision.claudePermissionMode, current.claudePermissionMode);
     if (!current.currentClaudePermissionMode)
       throw new Error('Owned Claude mode observer is unavailable');
@@ -311,6 +324,8 @@ async function runQualifiedWorker(
   let executionFailure: { error: unknown } | undefined;
   let closeFailure: { error: unknown; quiescent: boolean } | undefined;
   const repeats = new WorkerRepeatReminder();
+  // Calls a person allowed for the rest of this job; never persisted.
+  const allowedForJob = new Set<string>();
   try {
     await new Promise<void>((resolve, reject) => {
       bridge.once('error', reject);
@@ -498,7 +513,14 @@ async function runQualifiedWorker(
               canUseTool: async (
                 tool: string,
                 input: Record<string, unknown>,
-                context: { signal: AbortSignal },
+                context: {
+                  signal: AbortSignal;
+                  suggestions?: PermissionUpdate[];
+                  suppressAlwaysAllowRule?: boolean;
+                  title?: string;
+                  description?: string;
+                  decisionReason?: string;
+                },
               ) => {
                 assertCurrentMode();
                 if (permissionMode === 'dontAsk')
@@ -506,8 +528,25 @@ async function runQualifiedWorker(
                     behavior: 'deny',
                     message: 'Inherited dontAsk mode does not authorize a prompt',
                   };
-                const allowed = await options.permission(tool, input, context.signal);
+                const key = JSON.stringify([tool, input]);
+                if (allowedForJob.has(key)) return { behavior: 'allow', updatedInput: input };
+                const allowed = await options.permission(tool, input, context.signal, {
+                  ...(context.title ? { title: context.title } : {}),
+                  ...(context.description ? { description: context.description } : {}),
+                  ...(context.decisionReason ? { reason: context.decisionReason } : {}),
+                });
                 assertCurrentMode();
+                if (allowed === 'job') {
+                  allowedForJob.add(key);
+                  const rules = context.suppressAlwaysAllowRule
+                    ? []
+                    : jobScopedRules(context.suggestions);
+                  return {
+                    behavior: 'allow',
+                    updatedInput: input,
+                    ...(rules.length ? { updatedPermissions: rules } : {}),
+                  };
+                }
                 return allowed
                   ? { behavior: 'allow', updatedInput: input }
                   : {
