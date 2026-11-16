@@ -25,7 +25,7 @@ const hook = {
   transcript_path: session.transcript,
 };
 
-it.each(['default', 'acceptEdits', 'auto', 'dontAsk'] as const)(
+it.each(['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'] as const)(
   'preserves the owned native %s mode exactly',
   (mode) => {
     expect(observeClaudeWorkerMode({ ...hook, permission_mode: mode }, session)).toEqual({ mode });
@@ -33,7 +33,7 @@ it.each(['default', 'acceptEdits', 'auto', 'dontAsk'] as const)(
   },
 );
 
-it.each([undefined, 'plan', 'bypassPermissions', 'acceptAll', {}, 1])(
+it.each([undefined, 'plan', 'acceptAll', {}, 1])(
   'keeps unsupported or missing mode native: %s',
   (mode) => {
     expect(claudeWorkerPermissionMode(mode)).toBeNull();

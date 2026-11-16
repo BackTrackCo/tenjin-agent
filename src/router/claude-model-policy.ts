@@ -7,8 +7,10 @@ import { MODEL_NATIVE_TEXT_BYTES } from './model-limits';
 export const CLAUDE_DEEPSEEK_MODEL = 'deepseek-flash';
 // Claude strips this native context hint before calling the fixed Flash provider.
 export const CLAUDE_DEEPSEEK_WORKER_MODEL = `${CLAUDE_DEEPSEEK_MODEL}[1m]`;
-export type ClaudeWorkerPermissionMode = 'default' | 'acceptEdits' | 'auto' | 'dontAsk';
-const MODES = new Set(['default', 'acceptEdits', 'auto', 'dontAsk']);
+export type ClaudeWorkerPermissionMode =
+  'default' | 'acceptEdits' | 'auto' | 'dontAsk' | 'bypassPermissions';
+// A plan-mode parent stays native; a bypass parent's worker keeps the sandbox and hard denies.
+const MODES = new Set(['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions']);
 const CLEARED_ENV = [
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',

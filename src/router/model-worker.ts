@@ -91,7 +91,11 @@ export async function qualifiedModelWorker(
   const { effective } = resolved;
   if (!claudeWorkerAuthCompatible(process.env, effective.env)) return null;
   if (!claudeManagedProviderCompatible(resolved)) return null;
-  if (claudePermissionMode === 'auto' && effective.permissions?.disableAutoMode === 'disable')
+  if (
+    (claudePermissionMode === 'auto' && effective.permissions?.disableAutoMode === 'disable') ||
+    (claudePermissionMode === 'bypassPermissions' &&
+      effective.permissions?.disableBypassPermissionsMode === 'disable')
+  )
     return null;
   const disclosure = await modelSettings(dataDir, cwd);
   const claudeWorkspace =
@@ -323,6 +327,8 @@ async function runQualifiedWorker(
   let result: string | undefined;
   let executionFailure: { error: unknown } | undefined;
   let closeFailure: { error: unknown; quiescent: boolean } | undefined;
+  // Auto and bypass workers never wait on a person; the sandbox and hard denies still apply.
+  const nobodyAsked = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
   const repeats = new WorkerRepeatReminder();
   // Calls a person allowed for the rest of this job; never persisted.
   const allowedForJob = new Set<string>();
@@ -344,7 +350,10 @@ async function runQualifiedWorker(
     );
     if (
       !claudeManagedProviderCompatible(resolved) ||
-      (permissionMode === 'auto' && resolved.effective.permissions?.disableAutoMode === 'disable')
+      (permissionMode === 'auto' &&
+        resolved.effective.permissions?.disableAutoMode === 'disable') ||
+      (permissionMode === 'bypassPermissions' &&
+        resolved.effective.permissions?.disableBypassPermissionsMode === 'disable')
     )
       throw new Error('Managed Claude worker policy changed; keep native');
     assertCurrentMode();
@@ -420,12 +429,15 @@ async function runQualifiedWorker(
           'mcp__plugin_tenjin_router__request',
           'mcp__plugin_tenjin_router__approve',
           // In auto mode nobody answers the worker's questions.
-          ...(permissionMode === 'auto' ? ['AskUserQuestion'] : []),
+          ...(nobodyAsked ? ['AskUserQuestion'] : []),
         ],
-        // Auto mode: the native classifier judges each call that needs a decision,
-        // and a call that would still prompt is denied at once with the reason, as
-        // for a native agent with no approval surface. No worker call waits for a person.
-        ...(permissionMode === 'auto' ? { permissionPrompts: 'none' as const } : {}),
+        // Auto mode: the native classifier judges each call that needs a decision.
+        // Auto and bypass: a call that would still prompt is denied at once with the
+        // reason, as for a native agent with no approval surface. No call waits for a person.
+        ...(nobodyAsked ? { permissionPrompts: 'none' as const } : {}),
+        ...(permissionMode === 'bypassPermissions'
+          ? { allowDangerouslySkipPermissions: true }
+          : {}),
         hooks: {
           PreToolUse: [
             {
@@ -507,7 +519,7 @@ async function runQualifiedWorker(
             },
           ],
         },
-        ...(permissionMode === 'auto'
+        ...(nobodyAsked
           ? {}
           : {
               canUseTool: async (

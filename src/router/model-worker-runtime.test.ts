@@ -1054,7 +1054,7 @@ it.each(['/repo/secure-storage', ''])(
   },
 );
 
-it.each(['auto', 'default'] as const)(
+it.each(['auto', 'bypassPermissions', 'default'] as const)(
   'in %s mode routes a would-be prompt to a person only when one can answer',
   async (mode) => {
     const owned = {
@@ -1082,11 +1082,12 @@ it.each(['auto', 'default'] as const)(
       }),
     ).resolves.toBe('finished');
     const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
-    if (mode === 'auto') {
-      // Auto mode: the classifier decides; nothing may wait on a person dialog.
+    if (mode !== 'default') {
+      // Auto and bypass: nothing may wait on a person dialog.
       expect(sent.permissionPrompts).toBe('none');
       expect(sent.canUseTool).toBeUndefined();
       expect(sent.disallowedTools).toContain('AskUserQuestion');
+      expect(sent.allowDangerouslySkipPermissions).toBe(mode === 'bypassPermissions' || undefined);
     } else {
       expect(sent.permissionPrompts).toBeUndefined();
       expect(sent.canUseTool).toBeTypeOf('function');
