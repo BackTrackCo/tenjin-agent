@@ -83,8 +83,9 @@ export function signInOnlyChallenge(challenge: PaymentRequired | null): SIWxExte
   return extension as SIWxExtension;
 }
 
-/** Why a seller's sign-in challenge was not signed. */
-export type SignInRefusal = 'origin' | 'unpaid' | 'unsigned';
+/** Why a seller's sign-in challenge was not signed. `payer_unknown`: the
+ *  only record of a payment to that host does not say which wallet paid. */
+export type SignInRefusal = 'origin' | 'unpaid' | 'payer_unknown' | 'unsigned';
 
 /** The headers that answer the challenge, or why it was not signed: a
  *  lower-case clause each caller frames as its own sentence. */
@@ -95,8 +96,9 @@ export type SignInAnswer =
 export interface SignInWallet {
   /** Its address, read without opening it, once the challenge is bound. */
   address: () => Promise<string>;
-  /** Whether that address paid `host`, by the local payment ledger. */
-  paidHost: (host: string, address: string) => Promise<boolean>;
+  /** Whether that address paid `host`, by the caller's evidence: the take
+   *  that paid, or the local payment ledger. */
+  paidHost: (host: string, address: string) => Promise<'paid' | 'unpaid' | 'payer_unknown'>;
   /** Opens the wallet; called only after both checks pass. */
   signer: () => Promise<TenjinSigner>;
 }
@@ -111,12 +113,15 @@ function named(value: unknown): string {
  * `createSIWxClientHook` signs the seller's own challenge (its nonce, its
  * expiry), and only when both of these hold:
  *
- * 1. The challenge's `domain` and `uri` origin are the URL that sent it: the
- *    spec has a client refuse one that differs. Checked before the wallet is
- *    opened.
- * 2. This wallet paid that host, by the local payment ledger. That
- *    seller already holds the address from the payment, so the signature
- *    tells it only that this is the wallet that paid.
+ * 1. The challenge matches the responding origin: its `domain` and its
+ *    `uri`'s origin are those of the URL that answered (the path and query
+ *    may differ), as the spec has a client check. Checked before the wallet
+ *    is opened.
+ * 2. This wallet paid that host, by the caller's evidence of who paid: for a
+ *    router poll, the take whose submit it paid; for a direct `tenjin pay`,
+ *    the local payment ledger. That seller already holds the address from
+ *    the payment, so the signature tells it only that this is the wallet
+ *    that paid. Evidence that names no payer signs nothing.
  *
  * Nothing here is a payment: the 402 offered none, and none is built.
  */
@@ -132,7 +137,7 @@ export async function answerSignInChallenge(
   } catch {
     return {
       refused: 'origin',
-      reason: `its challenge names ${named(extension.info.domain)} and ${named(extension.info.uri)}, not the URL that sent it`,
+      reason: `its challenge names ${named(extension.info.domain)} and ${named(extension.info.uri)}, which do not match the responding origin`,
     };
   }
   const unpaid: SignInAnswer = {
@@ -140,7 +145,14 @@ export async function answerSignInChallenge(
     reason: `this wallet has not paid ${target.host}`,
   };
   const address = await wallet.address();
-  if (!(await wallet.paidHost(target.host, address))) return unpaid;
+  const paid = await wallet.paidHost(target.host, address);
+  if (paid === 'payer_unknown') {
+    return {
+      refused: 'payer_unknown',
+      reason: `this machine's record of its payment to ${target.host} does not say which wallet paid, so it is not proof that this one did`,
+    };
+  }
+  if (paid !== 'paid') return unpaid;
   const signer = await wallet.signer();
   // The wallet that opened is the one the ledger was read for, or nothing is signed.
   if (signer.address.toLowerCase() !== address.toLowerCase()) return unpaid;

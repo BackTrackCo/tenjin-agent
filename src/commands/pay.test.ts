@@ -35,7 +35,7 @@ import type { ToolSpec } from '../router/decision';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import { createLocalSpendAuthorizer } from '../lib/wallet/spend';
 import { readSpendSummary } from '../lib/spend-ledger';
-import { readPaidRecords, reconcilePayments } from '../router/paid';
+import { appendPaidRecord, readPaidRecords, reconcilePayments } from '../router/paid';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -898,9 +898,29 @@ describe('runPay, a seller that asks only for a sign-in', () => {
   // Monid's async runs: `tenjin pay` stopped at the empty `accepts`, so a run
   // it paid for could not be collected. Only a payment this version recorded
   // counts: runs paid with an earlier one have no ledger row.
+  /** A ledger row for the run's host, as a release of any age wrote it. */
+  const ledgerRow = (over: { payer?: string; from?: string }) =>
+    appendPaidRecord(dir, {
+      version: 1,
+      ts: new Date().toISOString(),
+      capabilityId: 'pay',
+      provider: 'seller.example',
+      url: FOREIGN_URL,
+      sent: '',
+      amountAtomic: '1000',
+      settlement: 'unknown',
+      savedFiles: [],
+      ...(over.payer !== undefined ? { payer: over.payer } : {}),
+      ...(over.from !== undefined
+        ? { authorization: { from: over.from, nonce: `0x${'1'.repeat(64)}`, validBefore: '1' } }
+        : {}),
+    });
+
   it("signs the seller's own challenge for a host this wallet paid, and pays nothing", async () => {
     await payTheRun();
-    expect(await readPaidRecords(dir)).toMatchObject([{ url: FOREIGN_URL, settlement: 'unknown' }]);
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { url: FOREIGN_URL, settlement: 'unknown', payer: testSigner().address },
+    ]);
     const challenge = buildSignInChallenge(POLL_URL);
     const { fetch, calls } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': challenge.header }),
@@ -967,6 +987,48 @@ describe('runPay, a seller that asks only for a sign-in', () => {
       }),
     ).rejects.toMatchObject({ code: 'REFUSED', details: { reason, signIn: true } });
     expect(calls).toHaveLength(1);
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  // Who paid is the row's payer, whatever the payment's scheme: a payload
+  // with no EIP-3009 authorization once read as unpaid for the same wallet.
+  it.each([
+    { name: 'its payer', row: { payer: testSigner().address } },
+    { name: 'only an older authorization', row: { from: testSigner().address } },
+  ])('signs for a host whose ledger row names this wallet by $name', async ({ row }) => {
+    await ledgerRow(row);
+    const { fetch, calls } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(POLL_URL).header }),
+      json(200, { runId: 'R1', status: 'COMPLETED' }),
+    ]);
+    const result = await runPay({ url: POLL_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer: fakeAuthorizer('allow'),
+    });
+    expect(result.data).toMatchObject({ paid: false, signedIn: true });
+    expect(calls[1]!.headers['sign-in-with-x']).toBeDefined();
+  });
+
+  it('signs nothing for a host whose only row names no payer, and says why', async () => {
+    await ledgerRow({});
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildSignInChallenge(POLL_URL).header }),
+    ]);
+    const getSigner = vi.fn(async () => testSigner());
+    await expect(
+      runPay({ url: POLL_URL }, makeCtx(), {
+        ...PUBLIC_DNS,
+        fetchImpl: fetch,
+        provider: { ...testWalletProvider(), getSigner },
+        authorizer: fakeAuthorizer('allow'),
+      }),
+    ).rejects.toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('does not say which wallet paid'),
+      details: { reason: 'sign_in_payer_unknown', signIn: true },
+    });
     expect(getSigner).not.toHaveBeenCalled();
   });
 
@@ -1081,15 +1143,41 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
       name: 'a take paid on another host',
       paidBy: { from: PAYER, url: 'https://elsewhere.example/v1/run' },
     },
-    { name: 'no take and no ledger row', paidBy: undefined },
+    // A take from before payers were kept, whose payment was not EIP-3009:
+    // nothing on it says who paid, and the ledger is not asked.
+    { name: 'a take that names no payer', paidBy: { url: SUBMIT_URL } },
   ])('signs nothing for $name, and opens no wallet', async ({ paidBy }) => {
     const getSigner = vi.fn(async () => testSigner());
     const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
       provider: { ...testWalletProvider(), getSigner },
-      ...(paidBy !== undefined ? { paidBy } : {}),
+      paidBy,
     });
     expect(answer).toHaveProperty('refused');
     expect(getSigner).not.toHaveBeenCalled();
+  });
+
+  // A take with no payer once fell back to any payment to the host in the
+  // ledger, so another wallet with history there could sign for it.
+  it('signs nothing for a take that names no payer, even with a ledger row for the host', async () => {
+    await appendPaidRecord(dir, {
+      version: 1,
+      ts: new Date().toISOString(),
+      capabilityId: 'pay',
+      provider: 'seller.example',
+      url: SUBMIT_URL,
+      sent: '',
+      amountAtomic: '1000',
+      settlement: 'settled',
+      savedFiles: [],
+      payer: PAYER,
+    });
+    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+      provider: testWalletProvider(),
+      paidBy: { url: SUBMIT_URL },
+    });
+    expect(answer).toMatchObject({
+      refused: expect.stringContaining('does not say which wallet paid'),
+    });
   });
 
   // A locked wallet or a keychain that did not answer ended a paid take for

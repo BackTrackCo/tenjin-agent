@@ -96,6 +96,7 @@ import {
   extensionFor,
   MAX_MEDIA_FILES,
   mediaUrlsIn,
+  payerOf,
   reconcilePayments,
   recordedSent,
   saveMedia,
@@ -1594,6 +1595,8 @@ async function payAndDeliver(
       contentType?: string;
       /** From the payment-response header, when the seller sent one. */
       settlementTxHash?: string;
+      /** The wallet that signed the payment. */
+      payer?: string;
       authorization?: SignedAuthorization;
       amountPaid?: { atomic: string };
       /** Set when the body missed its success rule, or the rule never ran. */
@@ -1622,6 +1625,7 @@ async function payAndDeliver(
           ...(leg?.header !== undefined ? { header: leg.header } : {}),
           providerAtomic,
           ...tx,
+          ...(data.payer !== undefined ? { payer: data.payer } : {}),
           ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
         });
         return { ...job, left: left() };
@@ -1642,6 +1646,7 @@ async function payAndDeliver(
       {
         providerAtomic,
         ...tx,
+        ...(data.payer !== undefined ? { payer: data.payer } : {}),
         ...(data.authorization !== undefined ? { authorization: data.authorization } : {}),
         ledger: 'append',
       },
@@ -1682,6 +1687,7 @@ async function payAndDeliver(
       /** Where a long job's result will be, named by the seller before the paid
        *  leg timed out. */
       statusUrl?: string;
+      payer?: string;
       authorization?: SignedAuthorization;
       /** The live 402's terms, on a REGISTRY_MISMATCH. */
       live?: { amount?: string };
@@ -1717,6 +1723,7 @@ async function payAndDeliver(
         text: '',
         header: cutHeader,
         providerAtomic: leftAtomic,
+        ...(detail.payer !== undefined ? { payer: detail.payer } : {}),
         ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
         ...(detail.settlement === 'settled' ? { settled: true } : {}),
       });
@@ -1763,6 +1770,7 @@ async function payAndDeliver(
       await appendPaidRecord(
         deps.ctx.dataDir,
         paidRecord(call, built.url, call.sent, leftAtomic, {
+          ...(detail.payer !== undefined ? { payer: detail.payer } : {}),
           ...(detail.authorization !== undefined ? { authorization: detail.authorization } : {}),
           ...(detail.settlement === 'settled' ? { settled: true } : {}),
           savedFiles: [],
@@ -1839,6 +1847,8 @@ export interface Delivered {
 export interface DeliveredMoney {
   providerAtomic: bigint;
   txHash?: string;
+  /** The wallet that signed the payment. */
+  payer?: string;
   authorization?: SignedAuthorization;
   /** Append the call's row; finish the row a job wrote when it was paid,
    *  found by its nonce; keep a job on the user's account to one row, found
@@ -1964,6 +1974,7 @@ export async function deliverResult(
       deps.ctx.dataDir,
       paidRecord(call, built.url, call.sent, providerAtomic, {
         ...(money.txHash !== undefined ? { txHash: money.txHash } : {}),
+        ...(money.payer !== undefined ? { payer: money.payer } : {}),
         ...(money.authorization !== undefined ? { authorization: money.authorization } : {}),
         savedFiles,
         ...(account !== undefined ? { account: account.source } : {}),
@@ -2079,6 +2090,8 @@ interface SubmitSeen {
   /** The chain already showed the submit's authorization used (`runPay`
    *  read it when the paid leg was cut off). */
   settled?: boolean;
+  /** The wallet that signed the submit's payment. */
+  payer?: string;
   authorization?: SignedAuthorization;
 }
 
@@ -2114,6 +2127,7 @@ async function startJob(
       deps.ctx.dataDir,
       paidRecord(call, built.url, call.sent, providerAtomic, {
         ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
+        ...(submit.payer !== undefined ? { payer: submit.payer } : {}),
         ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
         ...(submit.settled === true ? { settled: true } : {}),
         savedFiles: [],
@@ -2188,6 +2202,7 @@ async function startJob(
     submittedAt: new Date(submit.submittedAt).toISOString(),
     expiresAt: new Date(submit.submittedAt + job.spec.keepH * 3_600_000).toISOString(),
     amountAtomic: providerAtomic.toString(),
+    ...(submit.payer !== undefined ? { payer: submit.payer } : {}),
     ...(submit.authorization !== undefined ? { authorization: submit.authorization } : {}),
     ...(submit.txHash !== undefined ? { txHash: submit.txHash } : {}),
     ...(submit.settled === true ? { settled: true } : {}),
@@ -2251,25 +2266,29 @@ function failedNextStep(settled: boolean): string {
     : 'Tell the user. The payment is in `tenjin payments`; one the seller never settles is given back to the daily budget once its authorization expires. A new call pays again.';
 }
 
-/** The poll's seams, who is told of each poll, and the wallet a seller's
- *  sign-in challenge is answered with: the one the provider leg pays with,
- *  and only when it is the one that signed this take's submit. */
+/** The poll's seams, who is told of each poll, and, for a take's polls, the
+ *  wallet a seller's sign-in challenge is answered with: the one the provider
+ *  leg pays with, and only when it is the one that signed this take's submit
+ *  (its payer, else, on a take from before payers were kept, its
+ *  authorization's `from`). */
 function pollDeps(deps: RequestToolDeps, take?: JobTake): PollDeps {
   const provider = deps.provider ?? deps.payDeps?.provider;
-  const from = take?.authorization?.from;
+  const from = take !== undefined ? payerOf(take) : undefined;
   return {
     ...(deps.pollTransport !== undefined ? { transport: deps.pollTransport } : {}),
     ...(deps.payDeps?.destination !== undefined ? { destination: deps.payDeps.destination } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     ...(deps.onPoll !== undefined ? { onPoll: deps.onPoll } : {}),
-    signIn: (challenge, url) =>
-      signInForPoll(challenge, url, deps.ctx, {
-        ...(provider !== undefined ? { provider } : {}),
-        ...(take !== undefined && from !== undefined
-          ? { paidBy: { from, url: take.call.url } }
-          : {}),
-      }),
+    ...(take !== undefined
+      ? {
+          signIn: (challenge: string, url: string) =>
+            signInForPoll(challenge, url, deps.ctx, {
+              ...(provider !== undefined ? { provider } : {}),
+              paidBy: { ...(from !== undefined ? { from } : {}), url: take.call.url },
+            }),
+        }
+      : {}),
   };
 }
 
@@ -2786,6 +2805,7 @@ export function paidRecord(
   amountAtomic: bigint,
   opts: {
     txHash?: string;
+    payer?: string;
     authorization?: SignedAuthorization;
     settled?: boolean;
     savedFiles: string[];
@@ -2813,6 +2833,7 @@ export function paidRecord(
           ? 'settled'
           : 'unknown',
     savedFiles: opts.savedFiles,
+    ...(opts.payer !== undefined ? { payer: opts.payer } : {}),
     ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
   };
 }

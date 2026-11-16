@@ -39,6 +39,7 @@ import {
   isCanonicalUsdc,
   noPayableRequirement,
   selectPayableRequirement,
+  signsEip3009,
 } from '../lib/x402-pay';
 import type { x402Client, x402HTTPClient } from '@x402/core/client';
 import type { TenjinSigner } from '../lib/wallet/provider';
@@ -51,6 +52,7 @@ import {
   recordedSent,
   writeAll,
   type Settlement,
+  type SignedAuthorization,
 } from '../router/paid';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -429,7 +431,9 @@ async function executePay(
           fix:
             answer.refused === 'unpaid'
               ? 'Nothing was signed or paid. This seller returns the result only to the wallet that paid for it; sign in from that wallet.'
-              : 'Nothing was signed or paid.',
+              : answer.refused === 'payer_unknown'
+                ? 'Nothing was signed or paid. The payment was recorded before this CLI kept the wallet that paid, so it cannot show this wallet paid; `tenjin payments` lists it.'
+                : 'Nothing was signed or paid.',
           details: { status: 402, reason: `sign_in_${answer.refused}`, signIn: true },
         },
       );
@@ -706,6 +710,7 @@ async function executePay(
       ...(entry.txHash !== undefined ? { txHash: entry.txHash } : {}),
       settlement: entry.settlement,
       savedFiles: entry.savedFiles ?? [],
+      payer: payment.payer,
       ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
     });
   };
@@ -761,6 +766,7 @@ async function executePay(
             statusUrl,
             amountAtomic: payment.amountAtomic.toString(),
             settlement,
+            payer: payment.payer,
             ...(payment.authorization !== undefined
               ? { authorization: payment.authorization }
               : {}),
@@ -777,6 +783,7 @@ async function executePay(
       details: {
         amountAtomic: payment.amountAtomic.toString(),
         settlement,
+        payer: payment.payer,
         ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       },
     });
@@ -806,6 +813,7 @@ async function executePay(
       warnings,
       amountAtomic: payment.amountAtomic,
       requirement: effectiveRequirement,
+      payer: payment.payer,
       ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
       ...(registry !== undefined ? { registry } : {}),
       ...(caveat !== undefined ? { caveat } : {}),
@@ -855,6 +863,7 @@ async function executePay(
       ...(refusal?.reason !== undefined ? { settlementError: refusal.reason } : {}),
       amountAtomic: payment.amountAtomic.toString(),
       settlement,
+      payer: payment.payer,
       ...(payment.authorization !== undefined ? { authorization: payment.authorization } : {}),
     },
   });
@@ -1309,7 +1318,16 @@ function noMatchingEntry(challenge: PaymentRequired, terms: AdvertisedTerms | un
   // No terms, or terms that pinned no chain and no token: the 402 simply
   // advertises nothing this wallet can pay, which the shared refusal already
   // names in the SDK's own vocabulary.
-  if (terms === undefined || (terms.network === undefined && terms.asset === undefined)) {
+  // A Permit2 entry on the terms' chain is the deal, in a transfer this CLI
+  // does not sign: the shared refusal names it.
+  const permit2 = challenge.accepts.some(
+    (a) => !signsEip3009(a) && (terms?.network === undefined || a.network === terms.network),
+  );
+  if (
+    terms === undefined ||
+    (terms.network === undefined && terms.asset === undefined) ||
+    permit2
+  ) {
     return noPayableRequirement(challenge.accepts);
   }
   const advertised = challenge.accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
@@ -1444,7 +1462,9 @@ type DeliverOpts = {
       paid: true;
       amountAtomic: bigint;
       requirement: PaymentRequirements;
-      authorization?: { from: string; nonce: string; validBefore: string };
+      /** The wallet that signed it (`BuiltPayment.payer`). */
+      payer: string;
+      authorization?: SignedAuthorization;
       registry?: string;
       printBody: boolean;
     }
@@ -1542,6 +1562,7 @@ function deliver(url: string, lane: Lane, res: HttpResponse, opts: DeliverOpts):
           payTo: opts.requirement.payTo,
           network: opts.requirement.network,
           asset: opts.requirement.asset,
+          payer: opts.payer,
           ...(opts.authorization !== undefined ? { authorization: opts.authorization } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
         }
@@ -1820,12 +1841,15 @@ export function signInOnlyHeader(
 /**
  * THE ROUTER'S JOB POLLS, SIGNED IN AS A DIRECT PAY IS (tenjin#977): a poll
  * the seller answered 402 with a sign-in challenge and no way to pay gets the
- * headers that answer it, signed for the URL that sent it, by the wallet that
- * paid. The take is that proof: `paidBy` names the wallet that signed its
- * submit and the submit's URL, and the wallet signs only when it is that
- * address and the poll is on that host. A take with no authorization falls
- * back to the paid ledger (a host this wallet paid). Undefined for
- * any other 402, which the poll treats as a seller asking to be paid again.
+ * headers that answer it, when the challenge matches the responding origin,
+ * signed by the wallet that paid. The take is that proof, and the only one:
+ * `paidBy` names the wallet that signed its submit (its recorded payer, else,
+ * on a take from before payers were kept, its authorization's `from`) and
+ * the submit's URL, and the wallet signs only when it is that address and
+ * the poll is on that host. A take that names no payer signs nothing; the
+ * ledger is not asked, since any payment there to the host is not this
+ * take's. Undefined for any other 402, which the poll treats as a seller
+ * asking to be paid again.
  * A wallet that could not be opened is an `error`, which the poll counts and
  * survives, never a refusal that ends a paid take. Never pays: the challenge
  * offers no payment, and none is built. Only a GET poll is handed here: a
@@ -1838,8 +1862,8 @@ export async function signInForPoll(
   ctx: CommandContext,
   deps: {
     provider?: WalletProvider;
-    paidBy?: { from: string; url: string };
-  } = {},
+    paidBy: { from?: string; url: string };
+  },
 ): Promise<
   { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
 > {
@@ -1855,9 +1879,11 @@ export async function signInForPoll(
     const answer = await answerSignInChallenge(challenge, extension, url, {
       address: async () => (await describeOpenable(provider)).address,
       paidHost: async (host, address) =>
-        paidBy !== undefined
-          ? hostOf(paidBy.url) === host && paidBy.from.toLowerCase() === address.toLowerCase()
-          : walletPaidHost(ctx.dataDir, host, address),
+        paidBy.from === undefined
+          ? 'payer_unknown'
+          : hostOf(paidBy.url) === host && paidBy.from.toLowerCase() === address.toLowerCase()
+            ? 'paid'
+            : 'unpaid',
       signer: () => openWallet(provider),
     });
     return 'refused' in answer ? { refused: answer.reason } : answer;

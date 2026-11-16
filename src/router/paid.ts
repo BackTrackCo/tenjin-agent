@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../lib/atomic-json';
 import { resolvePublicDestination, type DestinationOptions } from '../lib/destination';
 import { hasCode } from '../lib/errno';
+import { ADDRESS_RE } from '../lib/ids';
 import { withFileLock } from '../lib/lock';
 import { downloadsDir, paidLedgerPath } from '../lib/paths';
 import { mask } from '../lib/redact';
@@ -33,6 +34,10 @@ export interface SignedAuthorization {
   nonce: string;
   /** Unix seconds; after it the authorization can no longer be used. */
   validBefore: string;
+  /** The CAIP-2 network and the token of the requirement it was signed for.
+   *  A record from before has neither, and was USDC on Base. */
+  network?: string;
+  asset?: string;
 }
 
 export interface PaidRecord {
@@ -56,6 +61,9 @@ export interface PaidRecord {
   txHash?: string;
   settlement: Settlement;
   savedFiles: string[];
+  /** The wallet that signed the payment, whatever its scheme. A record from
+   *  before has none; its `authorization.from` stands in ({@link payerOf}). */
+  payer?: string;
   authorization?: SignedAuthorization;
   /** When reconcile last asked the chain about it, so a slow or rate-limited
    *  RPC is not asked about the same record on every lookup. */
@@ -202,21 +210,39 @@ export const MAX_RECONCILE_CHECKS = 3;
 export const RECHECK_MS = 10 * 60_000;
 const RECONCILE_TIMEOUT_MS = 1_500;
 
+/** The network the configured `rpcUrl` reads: Base, as every balance read
+ *  and the shipped default assume. No other network has an RPC here. */
+const RPC_NETWORK = 'eip155:8453';
+
+/** Whether this machine can read the token this authorization was signed on. */
+export function chainReadable(authorization: SignedAuthorization): boolean {
+  return (authorization.network ?? RPC_NETWORK) === RPC_NETWORK;
+}
+
 /**
- * Whether USDC on Base has used this authorization: true once a facilitator
- * settled it, false while it has not. Null when the RPC could not say.
+ * Whether the token this authorization was signed on has used it: true once a
+ * facilitator settled it, false while it has not. It is read on the
+ * payment's own network and asset; one with no RPC here (Base Sepolia) and an
+ * RPC that could not say are both null, so its settlement stays unknown.
+ *
+ * `authorizationState` is also true for an authorization cancelled with
+ * EIP-3009's `cancelAuthorization`. Used still means transferred here: a
+ * cancellation needs the payer's own signature, only the key holder can make
+ * one, and this CLI never signs one.
  */
 export async function authorizationUsed(
   authorization: SignedAuthorization,
   rpcUrl: string,
   opts: { fetchImpl?: typeof fetch; timeoutMs?: number; blockTag?: string } = {},
 ): Promise<boolean | null> {
+  const asset = authorization.asset ?? USDC_ADDRESS;
+  if (!chainReadable(authorization) || !ADDRESS_RE.test(asset)) return null;
   const result = await rpcCall(
     rpcUrl,
     'eth_call',
     [
       {
-        to: USDC_ADDRESS,
+        to: asset,
         data: `${AUTHORIZATION_STATE_SELECTOR}${authorization.from.slice(2).toLowerCase().padStart(64, '0')}${authorization.nonce.slice(2).toLowerCase()}`,
       },
       opts.blockTag ?? 'latest',
@@ -316,6 +342,7 @@ export async function reconcilePayments(
   const due = open.filter(
     ({ record }) =>
       record.authorization !== undefined &&
+      chainReadable(record.authorization) &&
       Number(record.authorization.validBefore) * 1_000 < now &&
       (record.lastCheckedAt === undefined || now - Date.parse(record.lastCheckedAt) >= recheckMs),
   );
@@ -385,10 +412,10 @@ export async function reconcilePayments(
 
 /**
  * WHAT THE CHAIN SAYS OF A PAID CALL THAT FAILED, read the moment it failed:
- * `settled` once USDC on Base shows the authorization used, so a seller that
- * took the money and returned an error shows as charged. Anything else stays
- * `unknown`: an unused authorization can still be settled until its
- * `validBefore`, so only {@link reconcilePayments}, past that, may call it
+ * `settled` once the payment's own token shows the authorization used, so a
+ * seller that took the money and returned an error shows as charged. Anything
+ * else stays `unknown`: an unused authorization can still be settled until
+ * its `validBefore`, so only {@link reconcilePayments}, past that, may call it
  * not charged.
  */
 export async function chargedOnChain(
@@ -400,28 +427,49 @@ export async function chargedOnChain(
   return (await authorizationUsed(authorization, rpcUrl, opts)) === true ? 'settled' : 'unknown';
 }
 
+/** Who signed a payment: its recorded payer, else, on a record from before
+ *  payers were kept, its EIP-3009 authorization's `from`. */
+export function payerOf(paid: {
+  payer?: string;
+  authorization?: { from: string };
+}): string | undefined {
+  return paid.payer ?? paid.authorization?.from;
+}
+
+/** `paid` when this address paid the host; `payer_unknown` when the only
+ *  record of a payment to it does not say which wallet paid. */
+export type PaidHost = 'paid' | 'unpaid' | 'payer_unknown';
+
 /**
  * WHETHER THIS WALLET PAID THIS HOST, by the paid ledger: a row for the same
- * host (with its port) whose authorization this address signed, that the
+ * host (with its port) that this address signed ({@link payerOf}), that the
  * chain has not shown went unused. There is no time limit. It is what lets a
  * seller's sign-in challenge be signed without asking: that seller already
- * holds this address.
+ * holds this address. A row that names no payer never counts.
  */
 export async function walletPaidHost(
   dataDir: string,
   host: string,
   address: string,
-): Promise<boolean> {
+): Promise<PaidHost> {
   const from = address.toLowerCase();
-  return (await readPaidRecords(dataDir)).some((record) => {
-    if (record.settlement === 'not_charged') return false;
-    if (record.authorization?.from.toLowerCase() !== from) return false;
-    try {
-      return new URL(record.url).host === host;
-    } catch {
-      return false;
-    }
-  });
+  let payerUnknown = false;
+  for (const record of await readPaidRecords(dataDir)) {
+    if (record.settlement === 'not_charged' || record.settlement === 'account') continue;
+    if (hostOf(record.url) !== host) continue;
+    const payer = payerOf(record);
+    if (payer === undefined) payerUnknown = true;
+    else if (payer.toLowerCase() === from) return 'paid';
+  }
+  return payerUnknown ? 'payer_unknown' : 'unpaid';
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Every paid record in the ledger, oldest first; a line that is not one is skipped. */

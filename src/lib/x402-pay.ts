@@ -26,13 +26,27 @@ export interface BuiltPayment {
   headers: Record<string, string>;
   /** The exact amount authorized, atomic USDC (from accepts[0]). */
   amountAtomic: bigint;
-  /** The signed EIP-3009 authorization's identity, when the scheme used one:
-   *  enough to ask the token later whether it was spent. */
-  authorization?: { from: string; nonce: string; validBefore: string };
+  /** The wallet that signed it, read from the signer, never the payload: who
+   *  paid, whatever shape the scheme's payload has. */
+  payer: string;
+  /** The signed EIP-3009 authorization's identity, when the scheme used one,
+   *  with the network and token of the requirement it was signed for: enough
+   *  to ask that token later whether it was spent. */
+  authorization?: {
+    from: string;
+    nonce: string;
+    validBefore: string;
+    network: string;
+    asset: string;
+  };
 }
 
-/** `payload.authorization`'s `from`, `nonce` and `validBefore`, or nothing. */
-function authorizationOf(payload: unknown): BuiltPayment['authorization'] {
+/** `payload.authorization`'s `from`, `nonce` and `validBefore`, on the
+ *  requirement's network and asset, or nothing. */
+function authorizationOf(
+  payload: unknown,
+  requirement: Pick<PaymentRequirements, 'network' | 'asset'>,
+): BuiltPayment['authorization'] {
   const inner = (payload as { payload?: { authorization?: unknown } } | null)?.payload;
   const auth = inner?.authorization;
   if (auth === null || typeof auth !== 'object') return undefined;
@@ -41,7 +55,13 @@ function authorizationOf(payload: unknown): BuiltPayment['authorization'] {
   if (typeof nonce !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(nonce)) return undefined;
   const before = typeof validBefore === 'number' ? String(validBefore) : validBefore;
   if (typeof before !== 'string' || !/^\d+$/.test(before)) return undefined;
-  return { from, nonce, validBefore: before };
+  return {
+    from,
+    nonce,
+    validBefore: before,
+    network: requirement.network,
+    asset: requirement.asset,
+  };
 }
 
 /**
@@ -138,6 +158,7 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
     core.register(network as `${string}:${string}`, new ExactEvmScheme(lazy));
   }
   core.registerPolicy(canonicalUsdcOnly);
+  core.registerPolicy(eip3009Only);
   // The SDK (2.21+) runs this hook on every payment, so every seller gets
   // Tenjin's service code; a seller that declared `builder-code` also gets its
   // own fields echoed. Both are the SDK's own payload.
@@ -155,6 +176,23 @@ export function createPayerClient(getSigner: () => TenjinSigner): {
  */
 export const canonicalUsdcOnly: PaymentPolicy = (_version, requirements) =>
   requirements.filter(isCanonicalUsdc);
+
+/**
+ * EIP-3009 ONLY, until this CLI supports Permit2. The SDK signs a Permit2
+ * transfer for an entry whose `extra.assetTransferMethod` asks for one, and
+ * that cannot settle without a Permit2 allowance this CLI never sets (the
+ * facilitator answers `invalid_exact_evm_permit2_payload_allowance_required`),
+ * so dropping such an entry loses nothing. An entry that names no method is
+ * EIP-3009, as the SDK reads it; any other method is dropped too.
+ */
+export const eip3009Only: PaymentPolicy = (_version, requirements) =>
+  requirements.filter(signsEip3009);
+
+/** Whether the SDK would sign an EIP-3009 authorization for this entry. */
+export function signsEip3009(entry: Pick<PaymentRequirements, 'extra'>): boolean {
+  const method = (entry.extra as Record<string, unknown> | undefined)?.assetTransferMethod;
+  return method === undefined || method === 'eip3009';
+}
 
 /**
  * Whether an entry names canonical USDC on a chain this CLI pays on. Only such
@@ -202,7 +240,8 @@ export function selectPayableRequirement(
  */
 function supportedEntries(paymentRequired: PaymentRequired): PaymentRequirements[] {
   return canonicalUsdcOnly(paymentRequired.x402Version, paymentRequired.accepts).filter(
-    (r) => r.scheme === 'exact' && ALLOWED_USDC_BY_NETWORK[r.network] !== undefined,
+    (r) =>
+      r.scheme === 'exact' && ALLOWED_USDC_BY_NETWORK[r.network] !== undefined && signsEip3009(r),
   );
 }
 
@@ -245,14 +284,21 @@ function sameAsset(a: string, b: string): boolean {
 /** The named refusal when a 402 advertises nothing this wallet can pay. */
 export function noPayableRequirement(accepts: readonly PaymentRequirements[]): CliError {
   const advertised = accepts.map((a) => `${a.scheme}/${a.network}/${a.asset}`);
+  const permit2 = accepts.some(
+    (a) => a.scheme === 'exact' && isCanonicalUsdc(a) && !signsEip3009(a),
+  );
   return new CliError(
     'PAYMENT_FAILED',
     accepts.length === 0
       ? 'The 402 advertised no payment requirements.'
-      : 'The 402 advertises nothing this CLI can pay: it lists no exact-scheme entry in canonical USDC on Base.',
+      : permit2
+        ? 'The 402 asks for a Permit2 transfer, which this CLI does not sign: it pays USDC on Base by EIP-3009 only.'
+        : 'The 402 advertises nothing this CLI can pay: it lists no exact-scheme entry in canonical USDC on Base.',
     {
-      fix: 'Only USDC on Base (eip155:8453), or Base Sepolia for previews, is supported. Nothing was signed.',
-      ...(accepts.length > 0 ? { details: { advertised } } : {}),
+      fix: 'Only USDC on Base (eip155:8453) by EIP-3009, or Base Sepolia for previews, is supported. Nothing was signed.',
+      ...(accepts.length > 0
+        ? { details: { advertised, ...(permit2 ? { reason: 'permit2' } : {}) } }
+        : {}),
     },
   );
 }
@@ -299,7 +345,7 @@ export async function buildExactPayment(
   try {
     const payload = await http.createPaymentPayload(bound);
     headers = http.encodePaymentSignatureHeader(payload);
-    authorization = authorizationOf(payload);
+    authorization = authorizationOf(payload, requirement);
   } catch (err) {
     throw new CliError('PAYMENT_FAILED', 'Could not build the x402 payment authorization.', {
       fix: 'Confirm the wallet is a supported EVM account on the advertised network.',
@@ -310,6 +356,7 @@ export async function buildExactPayment(
   return {
     headers,
     amountAtomic: BigInt(requirement.amount),
+    payer: signer.address,
     ...(authorization !== undefined ? { authorization } : {}),
   };
 }

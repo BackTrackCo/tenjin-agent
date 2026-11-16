@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendPaidRecord,
+  chargedOnChain,
   createUniqueFile,
   maskDeep,
   MAX_SENT_CHARS,
@@ -65,16 +66,16 @@ describe("whether this wallet paid a seller's host", () => {
   // payment to that host, from this wallet, at any time, that the chain has not
   // shown went unused.
   it.each([
-    { name: 'a payment a minute ago', over: {}, expected: true },
+    { name: 'a payment a minute ago', over: {}, expected: 'paid' },
     {
       name: 'a payment a year ago',
       over: { ts: new Date(NOW - 365 * 86_400_000).toISOString() },
-      expected: true,
+      expected: 'paid',
     },
     {
       name: 'one the chain showed unused',
       over: { settlement: 'not_charged' as const },
-      expected: false,
+      expected: 'unpaid',
     },
     {
       name: 'one from another wallet',
@@ -85,13 +86,26 @@ describe("whether this wallet paid a seller's host", () => {
           validBefore: '1',
         },
       },
-      expected: false,
+      expected: 'unpaid',
     },
-    { name: 'one to another host', over: { url: 'https://monid.ai/v1/run' }, expected: false },
+    { name: 'one to another host', over: { url: 'https://monid.ai/v1/run' }, expected: 'unpaid' },
+    // The payer is recorded from the signer, so a payment with no EIP-3009
+    // authorization still names who paid.
     {
-      name: 'one with no authorization on record',
+      name: 'one with a payer and no authorization',
+      over: { payer: WALLET, authorization: undefined },
+      expected: 'paid',
+    },
+    {
+      name: 'one whose payer is another wallet, whatever its authorization says',
+      over: { payer: `0x${'2'.repeat(40)}` },
+      expected: 'unpaid',
+    },
+    // An older row that names no payer is never proof, and says so.
+    {
+      name: 'one that names no payer',
       over: { authorization: undefined },
-      expected: false,
+      expected: 'payer_unknown',
     },
   ])('counts $name: $expected', async ({ over, expected }) => {
     await appendPaidRecord(dir, row(over));
@@ -488,6 +502,60 @@ describe('resolving a settlement left unknown', () => {
       'not json',
     ]);
     expect(after[0]!.reconciledAt).toBe(new Date(NOW).toISOString());
+  });
+
+  // The read was pinned to USDC on Base mainnet while Base Sepolia payments
+  // were accepted: it is made on the payment's own network and token.
+  it('reads the token the authorization was signed on, and leaves a network with no RPC unknown', async () => {
+    const TOKEN = `0x${'c'.repeat(40)}`;
+    await ledger([
+      JSON.stringify(
+        record(1, {
+          authorization: {
+            from: FROM,
+            nonce: nonce(1),
+            validBefore: past,
+            network: 'eip155:8453',
+            asset: TOKEN,
+          },
+        }),
+      ),
+      JSON.stringify(
+        record(2, {
+          authorization: {
+            from: FROM,
+            nonce: nonce(2),
+            validBefore: past,
+            network: 'eip155:84532',
+            asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+          },
+        }),
+      ),
+    ]);
+    const targets: string[] = [];
+    const used = rpc(new Set([nonce(1), nonce(2)]));
+    const outcome = await reconcilePayments(dir, {
+      rpcUrl: RPC,
+      fetchImpl: (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { method: string; params: [{ to: string }] };
+        if (body.method === 'eth_call') targets.push(body.params[0].to);
+        return used(url, init);
+      }) as typeof fetch,
+      now: () => NOW,
+    });
+    expect(targets).toEqual([TOKEN]);
+    expect(outcome).toMatchObject({ checked: 1, settled: 1, unknown: 1 });
+    expect((await read()).map((r) => r.settlement)).toEqual(['settled', 'unknown']);
+    // A failed call on Base Sepolia is not read either: it stays unknown.
+    const sepolia = {
+      from: FROM,
+      nonce: nonce(2),
+      validBefore: future,
+      network: 'eip155:84532',
+      asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    };
+    expect(await chargedOnChain(sepolia, RPC, { fetchImpl: used })).toBe('unknown');
+    expect(targets).toEqual([TOKEN]);
   });
 
   it('asks about at most three per pass, and keeps an unanswered one unknown', async () => {

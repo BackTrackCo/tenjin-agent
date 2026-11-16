@@ -954,6 +954,9 @@ describe('a poll the seller answers with a sign-in challenge', () => {
     });
     for (const poll of seen) expect(paymentOf(poll.request.headers)).toBeUndefined();
     expect(auth.authorize).toHaveBeenCalledTimes(1);
+    // Who paid is kept from the signer, beside the authorization.
+    expect(await readTake(dir, ID, 1)).toMatchObject({ payer: testSigner().address });
+    expect(await ledger()).toMatchObject([{ payer: testSigner().address }]);
   });
 
   it('signs nothing for a challenge bound to another host, and fails the take', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
 import { verifyTypedData } from 'viem';
 import { buildExactPayment, TENJIN_CLI_BUILDER_CODE } from './x402-pay';
@@ -124,6 +124,53 @@ describe('buildExactPayment', () => {
     expect((payload.payload as { authorization: { value: string } }).authorization.value).toBe(
       '2500000',
     );
+  });
+
+  // The SDK signs a Permit2 transfer when the entry asks for one, and it
+  // cannot settle without a Permit2 allowance this CLI never sets.
+  it.each(['permit2', 'something-else'])(
+    'refuses an entry whose transfer method is %s, signing nothing',
+    async (assetTransferMethod) => {
+      const { paymentRequired } = buildPaymentRequired({
+        extra: { name: 'USD Coin', version: '2', assetTransferMethod },
+      });
+      const signer = testSigner();
+      const signTypedData = vi.spyOn(signer, 'signTypedData');
+      const refused = buildExactPayment(paymentRequired, signer);
+      await expect(refused).rejects.toMatchObject({ code: 'PAYMENT_FAILED' });
+      if (assetTransferMethod === 'permit2') {
+        await expect(refused).rejects.toMatchObject({
+          message: expect.stringContaining('Permit2'),
+          details: { reason: 'permit2' },
+        });
+      }
+      expect(signTypedData).not.toHaveBeenCalled();
+    },
+  );
+
+  it('signs an entry that names EIP-3009, as one that names no method', async () => {
+    const { paymentRequired } = buildPaymentRequired({
+      extra: { name: 'USD Coin', version: '2', assetTransferMethod: 'eip3009' },
+    });
+    const built = await buildExactPayment(paymentRequired, testSigner());
+    expect(built.authorization).toBeDefined();
+  });
+
+  // Who paid comes from the signer, so a payload of any shape still names it;
+  // the chain read later targets the network and token it was signed on.
+  it('records the signing wallet, and the network and asset the authorization is for', async () => {
+    const signer = testSigner();
+    const { paymentRequired } = buildPaymentRequired({
+      network: 'eip155:84532',
+      asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    });
+    const built = await buildExactPayment(paymentRequired, signer);
+    expect(built.payer).toBe(signer.address);
+    expect(built.authorization).toMatchObject({
+      from: signer.address,
+      network: 'eip155:84532',
+      asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    });
   });
 
   it('accepts USDC given in a different hex case (checksum compare, not string compare)', async () => {
