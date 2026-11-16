@@ -1186,6 +1186,26 @@ it('hands back a worker that never started as not started, with the free native 
   }
 });
 
+it('promises no free native repeat when a continuation never started', async () => {
+  const f = await ownedClaudeFixture('general-purpose', true);
+  try {
+    const first = await f.call({ offer_id: f.job.id });
+    f.session.turnId = 'followup-turn';
+    const held = await f.capture(first.worker_handle);
+    worker.run.mockRejectedValue(
+      new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' }),
+    );
+    const stopped = await f.call({ offer_id: held.offer_id });
+    expect(stopped.status).toBe('not_started');
+    expect(stopped.nextStep).not.toContain('no second routing fee');
+    expect(stopped.nextStep).toContain('This owned conversation is fenced');
+    // The repeat it must not promise: the continuation is refused, never run again.
+    expect((await f.capture(first.worker_handle, 'repeat-call')).action).toBe('refused');
+  } finally {
+    await f.close();
+  }
+});
+
 it("hands a stopped worker's counts back beside its partial work", async () => {
   const f = await ownedClaudeFixture();
   worker.run.mockImplementation(async (_job, options) => {

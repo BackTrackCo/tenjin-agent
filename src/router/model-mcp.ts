@@ -591,10 +591,11 @@ export function registerModelTool(
                 ...counts(),
                 spend,
                 ...(partial ? { partial } : {}),
-                // An initial offer's held call has a free repeat; a continuation has none.
+                // An initial offer's held call has a free repeat. A continuation has none,
+                // though it runs with the original job's fields.
                 nextStep:
-                  notStarted && executionJob.nativeTool
-                    ? `No worker started: Claude Code did not start within its start-up window. Keep it native: send the original ${executionJob.nativeTool} call again unchanged; that repeat costs no second routing fee.`
+                  notStarted && !resumed && job.nativeTool
+                    ? `No worker started: Claude Code did not start within its start-up window. Keep it native: send the original ${job.nativeTool} call again unchanged; that repeat costs no second routing fee.`
                     : activeConversation
                       ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
                       : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
