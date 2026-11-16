@@ -58,7 +58,12 @@ export interface PaidRecord {
   /** The input or query sent, masked and cut to {@link MAX_SENT_CHARS}. */
   sent: string;
   amountAtomic: string;
+  /** The settlement transaction; only a settled row has one. */
   txHash?: string;
+  /** The tx a seller's payment response named on a call that failed: its
+   *  word that it took the payment, not proof. The row's settlement is what
+   *  the chain shows, so reconcile still resolves it. */
+  reportedTxHash?: string;
   settlement: Settlement;
   savedFiles: string[];
   /** The wallet that signed the payment, whatever its scheme. A record from

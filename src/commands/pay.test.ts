@@ -107,6 +107,28 @@ function chain(used: boolean): { fetch: typeof fetch; asked: () => number } {
   return { fetch: impl, asked: () => asked };
 }
 
+const RPC_URL = 'https://rpc.test';
+
+/** The chain at `nowMs`, answering `authorizationState` with `used`: what
+ *  reconcile reads once a payment's authorization has expired. */
+function chainAt(nowMs: number, used: boolean): { fetch: typeof fetch; asked: () => number } {
+  let asked = 0;
+  const impl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const { method } = JSON.parse(String(init?.body)) as { method: string };
+    if (method === 'eth_getBlockByNumber') {
+      const timestamp = `0x${Math.floor(nowMs / 1000).toString(16)}`;
+      return json(200, { jsonrpc: '2.0', id: 1, result: { number: '0x2a', timestamp } });
+    }
+    asked += 1;
+    return json(200, {
+      jsonrpc: '2.0',
+      id: 1,
+      result: `0x${(used ? 1 : 0).toString(16).padStart(64, '0')}`,
+    });
+  }) as typeof fetch;
+  return { fetch: impl, asked: () => asked };
+}
+
 function fakeAuthorizer(
   decision: SpendAuthorization['decision'],
   reason = 'within_policy',
@@ -1360,21 +1382,68 @@ describe('runPay, a paid call that failed', () => {
     expect(await readPaidRecords(dir)).toMatchObject([{ settlement: 'settled' }]);
   });
 
-  // The seller's own payment response is read first: a seller that says it
-  // settled, naming its tx, is believed, and the chain is not asked.
-  it("calls a failure charged when the seller's payment response names its settlement", async () => {
-    const TX = `0x${'ab'.repeat(32)}`;
-    const settle = Buffer.from(
-      JSON.stringify({ success: true, transaction: TX, network: 'eip155:8453' }),
+  /** A seller's payment response naming its settlement on a failed call. */
+  const claimed = (tx: string) =>
+    Buffer.from(
+      JSON.stringify({ success: true, transaction: tx, network: 'eip155:8453' }),
     ).toString('base64');
+
+  // A SELLER'S RECEIPT IS ITS WORD, NOT PROOF. Any well-formed hash with
+  // `success: true` made a failed call settled for good, with no chain read,
+  // and reconcile reads only unknown rows: an authorization never used stayed
+  // charged, and its amount never came back to the daily budget.
+  it("reads the chain past a seller's claimed settlement, and leaves the row to reconcile", async () => {
+    const TX = `0x${'ab'.repeat(32)}`;
     const { fetch } = scriptedFetch([
       json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
-      json(400, { error: 'Invalid request parameters' }, { 'PAYMENT-RESPONSE': settle }),
+      json(400, { error: 'Invalid request parameters' }, { 'PAYMENT-RESPONSE': claimed(TX) }),
     ]);
     const asked = chain(false);
-    const err = (await runPay({ url: TENJIN_URL }, makeCtx(), {
+    const authorizer = createLocalSpendAuthorizer({
+      dir,
+      policy: { maxAutoSpendAtomic: 10n ** 12n, sessionBudgetAtomic: null, allowlistCreators: [] },
+    });
+    const err = (await runPay({ url: TENJIN_URL, yes: true }, makeCtx(), {
       ...PUBLIC_DNS,
       chainFetch: asked.fetch,
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+      authorizer,
+    }).catch((e: unknown) => e)) as CliError;
+    expect(asked.asked()).toBe(1);
+    expect(err).toMatchObject({
+      code: 'PAYMENT_FAILED',
+      details: { status: 400, settlement: 'unknown', reportedTxHash: TX },
+    });
+    expect(err.message).not.toMatch(/^The payment was charged/);
+    expect(err.message).toContain(TX);
+    expect(err.message).toContain('`tenjin payments`');
+    expect(err.details).not.toHaveProperty('settlementTxHash');
+    const [record] = await readPaidRecords(dir);
+    expect(record).toMatchObject({ settlement: 'unknown', reportedTxHash: TX });
+    expect(record).not.toHaveProperty('txHash');
+    // Past validBefore the chain shows it unused: not charged, its amount back.
+    const expiry = Number(record!.authorization!.validBefore) * 1000;
+    await reconcilePayments(dir, {
+      rpcUrl: RPC_URL,
+      fetchImpl: chainAt(expiry + 1_000, false).fetch,
+      now: () => expiry + 1_000,
+    });
+    expect((await readPaidRecords(dir))[0]).toMatchObject({ settlement: 'not_charged' });
+    expect((await readSpendSummary(dir))!.committedAtomic).toBe('0');
+  });
+
+  // The chain is the proof: a claimed settlement it confirms is charged, and
+  // the tx stays the seller's report, not a settlement this CLI read.
+  it('calls a claimed settlement charged when the chain shows the authorization used', async () => {
+    const TX = `0x${'cd'.repeat(32)}`;
+    const { fetch } = scriptedFetch([
+      json(402, {}, { 'PAYMENT-REQUIRED': buildPaymentRequired().header }),
+      json(400, { error: 'Invalid request parameters' }, { 'PAYMENT-RESPONSE': claimed(TX) }),
+    ]);
+    const err = (await runPay({ url: TENJIN_URL }, makeCtx(), {
+      ...PUBLIC_DNS,
+      chainFetch: chain(true).fetch,
       fetchImpl: fetch,
       provider: testWalletProvider(),
       authorizer: fakeAuthorizer('allow'),
@@ -1382,11 +1451,11 @@ describe('runPay, a paid call that failed', () => {
     expect(err).toMatchObject({
       code: 'PAYMENT_FAILED',
       message: expect.stringMatching(/^The payment was charged, and the endpoint answered 400/),
-      details: { status: 400, settlement: 'settled', settlementTxHash: TX },
+      details: { status: 400, settlement: 'settled', reportedTxHash: TX },
     });
-    expect(err.message).toContain(TX);
-    expect(asked.asked()).toBe(0);
-    expect(await readPaidRecords(dir)).toMatchObject([{ settlement: 'settled', txHash: TX }]);
+    expect(await readPaidRecords(dir)).toMatchObject([
+      { settlement: 'settled', reportedTxHash: TX },
+    ]);
   });
 
   // A seller can settle and still answer 402 insufficient_funds. Charged is
@@ -3266,27 +3335,6 @@ describe('payment hard gates with acknowledged warnings', () => {
  * comes back after it.
  */
 describe('a direct pay the seller refused', () => {
-  const RPC_URL = 'https://rpc.test';
-
-  /** The chain at `nowMs`, answering `authorizationState` with `used`. */
-  function chainAt(nowMs: number, used: boolean): { fetch: typeof fetch; asked: () => number } {
-    let asked = 0;
-    const impl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const { method } = JSON.parse(String(init?.body)) as { method: string };
-      if (method === 'eth_getBlockByNumber') {
-        const timestamp = `0x${Math.floor(nowMs / 1000).toString(16)}`;
-        return json(200, { jsonrpc: '2.0', id: 1, result: { number: '0x2a', timestamp } });
-      }
-      asked += 1;
-      return json(200, {
-        jsonrpc: '2.0',
-        id: 1,
-        result: `0x${(used ? 1 : 0).toString(16).padStart(64, '0')}`,
-      });
-    }) as typeof fetch;
-    return { fetch: impl, asked: () => asked };
-  }
-
   it.each([
     { used: false, committed: '0', settlement: 'not_charged' },
     { used: true, committed: '100000', settlement: 'settled' },

@@ -83,9 +83,11 @@ tenjin pay <url> --json --max-price <usd> [-X <method>] [-d '<json-body>'] [-H '
   payment is exit 4 (\`PAYMENT_FAILED\`): the signed authorization
   already left, so do not retry blindly. Read the provider's error in
   \`details.body\` and, for a refused payment, \`details.paymentError\`; fix the
-  request, and quote again. \`details.settlement: "settled"\` means the
-  seller's payment response or the chain shows the payment was taken: say it
-  was charged, and do not ask for funds.
+  request, and quote again. \`details.settlement: "settled"\` means the chain
+  shows the payment was taken: say it was charged, and do not ask for funds.
+  \`details.reportedTxHash\` with \`"unknown"\` is only the seller's word that it
+  charged: say the seller reports a charge the chain does not show yet, and do
+  not ask for funds.
 
 ## Refusals are answers
 
