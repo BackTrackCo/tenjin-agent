@@ -60,6 +60,42 @@ export type ModelWorkerActivitySnapshot = {
   spend?: ModelWorkerActivitySpend;
 };
 
+const PARTIAL_ROWS = 24;
+const PARTIAL_BYTES = 24 * 1024;
+export type ModelWorkerPartial = {
+  lastText?: string;
+  rows: Omit<ModelWorkerActivityRow, 'id' | 'sequence' | 'elapsedSeconds'>[];
+  omittedRows: number;
+};
+
+/** What a stopped worker hands its parent: its last text and latest rows, from the
+ * already bounded and redacted display projection. Absent when it did nothing. */
+export function partialHandback(
+  snapshot: ModelWorkerActivitySnapshot | null | undefined,
+): ModelWorkerPartial | undefined {
+  if (!snapshot?.rows.length) return undefined;
+  const lastText = [...snapshot.rows]
+    .reverse()
+    .find((row) => row.kind === 'text' && row.text)?.text;
+  const rows = snapshot.rows
+    .slice(-PARTIAL_ROWS)
+    .map(({ kind, state, name, text, inputSummary, outputPreview }) => ({
+      kind,
+      state,
+      ...(name ? { name } : {}),
+      ...(text ? { text } : {}),
+      ...(inputSummary ? { inputSummary } : {}),
+      ...(outputPreview ? { outputPreview } : {}),
+    }));
+  let omittedRows = snapshot.droppedRows + snapshot.rows.length - rows.length;
+  const size = () => Buffer.byteLength(JSON.stringify({ lastText, rows }));
+  while (rows.length > 1 && size() > PARTIAL_BYTES) {
+    rows.shift();
+    omittedRows++;
+  }
+  return { ...(lastText ? { lastText } : {}), rows, omittedRows };
+}
+
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)

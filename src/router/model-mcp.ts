@@ -15,7 +15,7 @@ import { continuationRefusal, ownedModelReference } from './model-continuation';
 import type { ModelConversation, ModelConversationOwner } from './model-conversations';
 import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
 import { realpath } from 'node:fs/promises';
-import { ModelWorkerActivity } from './model-worker-activity';
+import { ModelWorkerActivity, partialHandback } from './model-worker-activity';
 import { ModelWorkerViews } from './model-worker-views';
 import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
 
@@ -582,11 +582,14 @@ export function registerModelTool(
                 abort.signal.aborted ? 'cancelled' : 'unknown',
                 'reservedAtomic' in spend ? spend : undefined,
               );
+              // What the stopped worker already did, so a retry starts from it.
+              const partial = partialHandback(activity?.snapshot());
               return answer({
                 status: abort.signal.aborted ? 'cancelled' : 'unknown',
                 stopReason: workerStop(error),
                 elapsedMs: Date.now() - started,
                 spend,
+                ...(partial ? { partial } : {}),
                 nextStep: activeConversation
                   ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
                   : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',

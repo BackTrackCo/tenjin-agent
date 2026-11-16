@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
-import { ModelWorkerActivity, type ModelWorkerActivityBinding } from './model-worker-activity';
+import {
+  ModelWorkerActivity,
+  partialHandback,
+  type ModelWorkerActivityBinding,
+} from './model-worker-activity';
 
 function fixture() {
   const dir = join(tmpdir(), 'tenjin-worker-activity-' + randomUUID());
@@ -345,4 +349,31 @@ it('contains malformed observations without changing execution-facing state', ()
   expect(() => f.activity.finish('completed')).not.toThrow();
   expect(f.activity.snapshot().state).toBe('completed');
   expect(JSON.stringify(f.activity.snapshot())).not.toContain('private-');
+});
+
+it("hands a stopped worker's last text and latest rows to the parent instead of nothing", () => {
+  const f = fixture();
+  expect(partialHandback(f.activity.snapshot())).toBeUndefined();
+  f.activity.running();
+  f.activity.observe(f.assistant([{ type: 'text', text: 'Reading the diff first.' }]));
+  f.activity.observe(f.tool('diff', 'Bash', { command: 'git diff main' }));
+  f.activity.observe(f.result('diff', [{ type: 'text', text: '+ new line' }]));
+  f.activity.observe(f.assistant([{ type: 'text', text: 'Found one risky change in pay.ts.' }]));
+  f.activity.finish('unknown');
+  const partial = partialHandback(f.activity.snapshot());
+  expect(partial?.lastText).toBe('Found one risky change in pay.ts.');
+  expect(partial?.rows.map((row) => row.kind)).toEqual(['text', 'tool', 'text']);
+  expect(partial?.omittedRows).toBe(0);
+});
+
+it('keeps the partial handback within its byte bound by dropping the oldest rows', () => {
+  const f = fixture();
+  f.activity.running();
+  for (let i = 0; i < 40; i++)
+    f.activity.observe(f.assistant([{ type: 'text', text: `step ${i} ` + 'x'.repeat(900) }]));
+  const partial = partialHandback(f.activity.snapshot())!;
+  expect(Buffer.byteLength(JSON.stringify(partial))).toBeLessThan(25 * 1024);
+  expect(partial.rows.at(-1)?.text).toContain('step 39');
+  expect(partial.lastText).toContain('step 39');
+  expect(partial.omittedRows + partial.rows.length).toBe(40);
 });
