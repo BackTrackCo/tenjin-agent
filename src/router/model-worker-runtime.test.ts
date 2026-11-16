@@ -1053,3 +1053,44 @@ it.each(['/repo/secure-storage', ''])(
     expect(call.options?.sandbox?.filesystem?.denyRead).toContain(credential);
   },
 );
+
+it.each(['auto', 'default'] as const)(
+  'in %s mode routes a would-be prompt to a person only when one can answer',
+  async (mode) => {
+    const owned = {
+      ...job,
+      decision: { ...job.decision, claudePermissionMode: mode },
+    } as unknown as ModelJob;
+    vi.mocked(query).mockImplementation(
+      (call) =>
+        ({
+          async *[Symbol.asyncIterator]() {
+            for await (const message of call.prompt) native.promptMessages.push(message);
+            yield { type: 'system', subtype: 'init', permissionMode: mode, cwd: '/repo' };
+            yield { type: 'result', subtype: 'success', result: 'finished' };
+          },
+          accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+          mcpServerStatus: async () => [],
+          close: native.close,
+        }) as unknown as ReturnType<typeof query>,
+    );
+    await expect(
+      runModelWorker(owned, {
+        ...options(),
+        claudePermissionMode: mode,
+        currentClaudePermissionMode: () => mode,
+      }),
+    ).resolves.toBe('finished');
+    const sent = vi.mocked(query).mock.calls.at(-1)![0].options!;
+    if (mode === 'auto') {
+      // Auto mode: the classifier decides; nothing may wait on a person dialog.
+      expect(sent.permissionPrompts).toBe('none');
+      expect(sent.canUseTool).toBeUndefined();
+      expect(sent.disallowedTools).toContain('AskUserQuestion');
+    } else {
+      expect(sent.permissionPrompts).toBeUndefined();
+      expect(sent.canUseTool).toBeTypeOf('function');
+      expect(sent.disallowedTools).not.toContain('AskUserQuestion');
+    }
+  },
+);

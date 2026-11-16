@@ -403,7 +403,13 @@ async function runQualifiedWorker(
           'mcp__plugin_tenjin_router__subagent',
           'mcp__plugin_tenjin_router__request',
           'mcp__plugin_tenjin_router__approve',
+          // In auto mode nobody answers the worker's questions.
+          ...(permissionMode === 'auto' ? ['AskUserQuestion'] : []),
         ],
+        // Auto mode: the native classifier judges each call that needs a decision,
+        // and a call that would still prompt is denied at once with the reason, as
+        // for a native agent with no approval surface. No worker call waits for a person.
+        ...(permissionMode === 'auto' ? { permissionPrompts: 'none' as const } : {}),
         hooks: {
           PreToolUse: [
             {
@@ -472,22 +478,30 @@ async function runQualifiedWorker(
             },
           ],
         },
-        canUseTool: async (tool, input, context) => {
-          assertCurrentMode();
-          if (permissionMode === 'dontAsk')
-            return {
-              behavior: 'deny',
-              message: 'Inherited dontAsk mode does not authorize a prompt',
-            };
-          const allowed = await options.permission(tool, input, context.signal);
-          assertCurrentMode();
-          return allowed
-            ? { behavior: 'allow', updatedInput: input }
-            : {
-                behavior: 'deny',
-                message: 'User or inherited permission policy declined this action',
-              };
-        },
+        ...(permissionMode === 'auto'
+          ? {}
+          : {
+              canUseTool: async (
+                tool: string,
+                input: Record<string, unknown>,
+                context: { signal: AbortSignal },
+              ) => {
+                assertCurrentMode();
+                if (permissionMode === 'dontAsk')
+                  return {
+                    behavior: 'deny',
+                    message: 'Inherited dontAsk mode does not authorize a prompt',
+                  };
+                const allowed = await options.permission(tool, input, context.signal);
+                assertCurrentMode();
+                return allowed
+                  ? { behavior: 'allow', updatedInput: input }
+                  : {
+                      behavior: 'deny',
+                      message: 'User or inherited permission policy declined this action',
+                    };
+              },
+            }),
       },
     });
     controller.signal.throwIfAborted();
