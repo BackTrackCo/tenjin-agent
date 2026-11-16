@@ -29,6 +29,10 @@ async function fixture(
     cap?: string;
     protocol?: 'messages' | 'responses';
     wire?: string;
+    quote?: string;
+    charge?: string;
+    minDeposit?: string;
+    maxAutoSpendAtomic?: bigint;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'model-transport-'));
@@ -65,9 +69,9 @@ async function fixture(
   };
   const router = new FakeRouter({
     path: `/api/model-proxy/${options.protocol ?? 'messages'}`,
-    amount: '500000',
-    charge: '1000',
-    minDeposit: '50000',
+    amount: options.quote ?? '500000',
+    charge: options.charge ?? '1000',
+    minDeposit: options.minDeposit ?? '50000',
   });
   router.abortAfterSettle = options.drop ?? false;
   let last: Record<string, unknown> | undefined;
@@ -96,7 +100,7 @@ async function fixture(
         invocationId: last?.invocationId,
         state: recoveryState,
         voucherState,
-        actualAtomic: '1000',
+        actualAtomic: options.charge ?? '1000',
         result,
       });
     }
@@ -106,7 +110,11 @@ async function fixture(
       ...(options.protocol === 'responses'
         ? { wire: options.wire ?? 'event: response.completed\ndata: {"owned":"native wire"}\n\n' }
         : { message }),
-      receipt: { invocationId: last.invocationId, quoteAtomic: '500000', actualAtomic: '1000' },
+      receipt: {
+        invocationId: last.invocationId,
+        quoteAtomic: options.quote ?? '500000',
+        actualAtomic: options.charge ?? '1000',
+      },
     };
     router.body = result;
     // Real concurrent responses belong to their request, rather than the
@@ -119,7 +127,10 @@ async function fixture(
   };
   const deps = payerDeps(router, dir, privateKeyToAccount(generatePrivateKey()), {
     fetchImpl,
-    policy: async () => ({ ...TEST_POLICY, maxAutoSpendAtomic: 1000000n }),
+    policy: async () => ({
+      ...TEST_POLICY,
+      maxAutoSpendAtomic: options.maxAutoSpendAtomic ?? 1000000n,
+    }),
   });
   const make = () =>
     new ModelTransport({
@@ -147,6 +158,63 @@ async function fixture(
     },
   };
 }
+
+it('funds a Messages quote from saved job consent while preserving an explicit smaller tool limit', async () => {
+  const f = await fixture({ maxAutoSpendAtomic: 250000n, minDeposit: '500000' });
+  await expect(
+    f.make().messages(f.job, { messages: [] }, new AbortController().signal),
+  ).resolves.toEqual(f.message);
+  expect(f.router.deposits).toBe(1);
+  expect(f.router.paidRequests()).toBe(1);
+  expect((await f.deps.policy()).maxAutoSpendAtomic).toBe(250000n);
+});
+
+it('can consume close to the job ceiling when Messages quotes follow the requested output', async () => {
+  const f = await fixture({ quote: '60000', charge: '40000', maxAutoSpendAtomic: 250000n });
+  const transport = f.make();
+  for (let turn = 0; turn < 24; turn++)
+    await transport.messages(
+      f.job,
+      { messages: [{ role: 'user', content: `Turn ${turn}` }] },
+      new AbortController().signal,
+    );
+  expect(await transport.summary(f.job)).toMatchObject({
+    actualAtomic: '963000',
+    reservedAtomic: '963000',
+    uncertain: [],
+  });
+  await expect(
+    transport.messages(
+      f.job,
+      { messages: [{ role: 'user', content: 'Next turn' }] },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('remaining job ceiling');
+  expect(f.router.paidRequests()).toBe(24);
+});
+
+it.each(['daily', 'creator'] as const)(
+  'retains the %s payment gate when using job consent for inference',
+  async (gate) => {
+    const f = await fixture({ maxAutoSpendAtomic: 250000n, minDeposit: '500000' });
+    f.deps.policy = async () => ({
+      ...TEST_POLICY,
+      ...(gate === 'daily'
+        ? { sessionBudgetAtomic: 1000n }
+        : { allowlistCreators: ['somebody-else'] }),
+    });
+    const transport = f.make();
+    await expect(
+      transport.messages(f.job, { messages: [] }, new AbortController().signal),
+    ).rejects.toThrow();
+    expect(f.router.paidRequests()).toBe(0);
+    expect(await transport.summary(f.job)).toMatchObject({
+      actualAtomic: '3000',
+      reservedAtomic: '3000',
+      uncertain: [],
+    });
+  },
+);
 
 it('uses the real SDK inference lane for multiple turns, reusing credit and replaying locally', async () => {
   const f = await fixture();
@@ -687,7 +755,7 @@ it('releases the job lock during inference and atomically refuses a concurrent o
 it('releases a verified pre-sign policy refusal and permits the same input after policy changes', async () => {
   const f = await fixture();
   const policy = f.deps.policy;
-  f.deps.policy = async () => ({ ...TEST_POLICY, maxAutoSpendAtomic: 1n });
+  f.deps.policy = async () => ({ ...TEST_POLICY, maxAutoSpendAtomic: 0n });
   const body = { messages: [{ role: 'user', content: 'once' }] };
   await expect(f.make().messages(f.job, body, new AbortController().signal)).rejects.toThrow(
     /refused before signing/,

@@ -67,7 +67,7 @@ describe('runConfigList', () => {
     const { data, humanLines } = await runConfigList(makeCtx());
     const d = data as Record<string, { value: unknown; source: string }>;
     expect(d.maxAutoSpend).toMatchObject({
-      value: { atomic: '250000', usd: '0.25' },
+      value: { atomic: '1000000', usd: '1' },
       source: 'default',
     });
     expect(d.sessionBudget).toMatchObject({
@@ -94,7 +94,7 @@ describe('runConfigList', () => {
       '      Automatic picks   off',
       '',
       'Limits',
-      '      $0.25 a call · $5.00 a day',
+      '      $1.00 a call · $5.00 a day',
       '',
       'Every setting: tenjin config --all · How to change: tenjin config --help',
     ]);
@@ -110,7 +110,7 @@ describe('runConfigList', () => {
       'Your settings (saved on this machine, not synced):',
       '  No custom rules: Tenjin uses its defaults.',
       "  Run Tenjin's picks automatically: off.",
-      '  Limits: $0.25 a call, $5.00 a day (Tenjin balance).',
+      '  Limits: $1.00 a call, $5.00 a day (Tenjin balance).',
       '  Change them with `tenjin config --help`.',
     ]);
     expect(all.data).toEqual(data);

@@ -80,7 +80,7 @@ The rules govern only what Tenjin picks on its own: its hook offers and the serv
 
 | Key              | Means                                                                                                                                                                                                        |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `maxAutoSpend`   | The most automatic router spending per call: at least $0.25, the default.                                                                                                                                    |
+| `maxAutoSpend`   | The most automatic router spending per call: $1.00 by default, configurable down to $0.25. Existing saved limits stay unchanged.                                                                             |
 | `sessionBudget`  | The daily budget shared across chats, $5 by default. `0` blocks automatic spending; `none` removes the ceiling.                                                                                              |
 | `sendMaxAmount`  | The cap on each `tenjin wallet send`. Unset, send refuses until you set one; only an explicit `none` allows uncapped sends.                                                                                  |
 | `router.enabled` | `false` pauses Tenjin: every router hook and the request tool stop.                                                                                                                                          |

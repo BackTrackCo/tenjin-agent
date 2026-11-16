@@ -5,18 +5,16 @@ import { MAX_CHANNEL_DEPOSIT_ATOMIC } from './fee';
 import { shownLimits, spendChoiceQuestion, spendOptions } from './spend-question';
 
 describe('the spend question', () => {
-  it('holds the same defaults as the code: $0.25 a call and $5 a day', () => {
-    expect(ROUTER_DEFAULTS).toEqual({ maxAutoSpend: '250000', sessionBudget: '5000000' });
+  it('holds the same defaults as the code: $1 a call and $5 a day', () => {
+    expect(ROUTER_DEFAULTS).toEqual({ maxAutoSpend: '1000000', sessionBudget: '5000000' });
     expect(CONFIG_DEFAULTS.maxAutoSpend).toBe(ROUTER_DEFAULTS.maxAutoSpend);
     expect(CONFIG_DEFAULTS.sessionBudget).toBe(ROUTER_DEFAULTS.sessionBudget);
   });
 
-  it('floors the per-call limit at the largest routing deposit, and defaults it there', () => {
+  it('keeps the per-call floor at the largest routing deposit and the default above it', () => {
     // A deposit the router asks for can reach $0.25: a lower ceiling would refuse it.
     expect(MAX_AUTO_SPEND_FLOOR_ATOMIC).toBe(MAX_CHANNEL_DEPOSIT_ATOMIC);
-    expect(BigInt(ROUTER_DEFAULTS.maxAutoSpend)).toBeGreaterThanOrEqual(
-      MAX_AUTO_SPEND_FLOOR_ATOMIC,
-    );
+    expect(BigInt(ROUTER_DEFAULTS.maxAutoSpend)).toBeGreaterThan(MAX_AUTO_SPEND_FLOOR_ATOMIC);
   });
 
   it('shows the defaults where the file names no limit, and the file where it does', () => {
@@ -36,7 +34,7 @@ describe('the spend question', () => {
   it('offers an agent two answers, each applied by one install command', () => {
     const options = spendOptions('tenjin install');
     expect(options.map((o) => [o.label, o.recommended, o.command])).toEqual([
-      ['Up to $0.25 a call and $5 a day', true, 'tenjin install --yes'],
+      ['Up to $1 a call and $5 a day', true, 'tenjin install --yes'],
       [
         'Set my own limits',
         false,

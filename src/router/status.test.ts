@@ -47,7 +47,7 @@ describe('status, the balance line', () => {
       '● Tenjin is on',
       '',
       'Balance $5.00',
-      'Today $0.00 of $5.00 · up to $0.25 a call',
+      'Today $0.00 of $5.00 · up to $1.00 a call',
       'Accounts none yet tenjin connect fal',
       "Settings Tenjin's defaults tenjin config",
     ]);
@@ -92,7 +92,7 @@ describe('status, the balance line', () => {
       '● Tenjin is on',
       '',
       'Balance $5.00',
-      'Today $0.00 of $5.00 · up to $0.25 a call',
+      'Today $0.00 of $5.00 · up to $1.00 a call',
       'Accounts none yet tenjin connect fal',
       "Settings Tenjin's defaults tenjin config",
     ]);
@@ -105,15 +105,15 @@ describe('status, the balance line', () => {
   });
 
   it('says the balance is low below the per-call limit, as `tenjin balance` does, and how to fund it', async () => {
-    for (const atomic of [0n, 249_999n]) {
+    for (const atomic of [0n, 999_999n]) {
       const result = await status(atomic);
       expect(lines(result).slice(0, 3)).toEqual([
         '! Tenjin is on, but your balance is low',
         '',
-        `Balance ${atomic === 0n ? '$0.00' : '$0.249999'} tenjin fund 5`,
+        `Balance ${atomic === 0n ? '$0.00' : '$0.999999'} tenjin fund 5`,
       ]);
     }
-    const enough = await status(250_000n);
+    const enough = await status(1_000_000n);
     expect(lines(enough)[0]).toBe('● Tenjin is on');
   });
 

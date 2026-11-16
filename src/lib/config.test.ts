@@ -36,6 +36,19 @@ describe('loadConfig', () => {
     expect(cfg.baseUrl).toBe(CONFIG_DEFAULTS.baseUrl);
   });
 
+  it.each([
+    { maxAutoSpend: '0', sessionBudget: '0' },
+    { maxAutoSpend: '250000', sessionBudget: '2000000' },
+    { maxAutoSpend: '500000', sessionBudget: 'none' },
+  ])('keeps explicit spending limits when the code default changes: %j', async (saved) => {
+    await writeFile(configFile(), JSON.stringify(saved));
+    expect(await loadConfig(dir)).toMatchObject(saved);
+    const settings = resolveSettings({ config: await loadRawConfig(dir), flags: {}, env: {} });
+    expect(settings.maxAutoSpend).toEqual({ value: saved.maxAutoSpend, source: 'file' });
+    expect(settings.sessionBudget).toEqual({ value: saved.sessionBudget, source: 'file' });
+    expect(await loadRawConfig(dir)).toEqual(saved);
+  });
+
   it('throws CONFIG_INVALID on malformed JSON', async () => {
     await writeFile(configFile(), '{ not json');
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
@@ -122,7 +135,7 @@ describe('resolveSettings — precedence and provenance', () => {
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.baseUrl).toEqual({ value: CONFIG_DEFAULTS.baseUrl, source: 'default' });
-    expect(s.maxAutoSpend).toEqual({ value: '250000', source: 'default' });
+    expect(s.maxAutoSpend).toEqual({ value: '1000000', source: 'default' });
   });
 
   it('reports file provenance for a file-set key', async () => {

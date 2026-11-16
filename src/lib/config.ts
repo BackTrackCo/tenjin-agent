@@ -349,12 +349,12 @@ export const DEFAULT_BAZAAR_REGISTRIES = [
 
 /**
  * THE TWO SPEND LIMITS, IN EFFECT WHETHER OR NOT ANYONE ANSWERED. The daily
- * budget ($5) is the control; the per-call ceiling ($0.25) is the runaway
+ * budget ($5) is the control; the per-call ceiling ($1) is the runaway
  * guard; the wallet balance is the hard stop. Install asks once, these or your
  * own limits, and an install nobody answered still runs on these. A call
  * priced above the ceiling is approved once, for that call.
  */
-export const DEFAULT_MAX_AUTO_SPEND = '250000';
+export const DEFAULT_MAX_AUTO_SPEND = '1000000';
 export const DEFAULT_SESSION_BUDGET = '5000000';
 
 /** The lowest configurable per-call ceiling, atomic USDC ($0.25). */

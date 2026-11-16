@@ -422,6 +422,21 @@ export class ModelTransport {
     };
     const payer = new Payer({
       ...payerDeps,
+      // Inference has a separately accepted job ceiling. Keep the rolling
+      // budget/creator gates and an explicit automatic-spend stop unchanged.
+      policy: async () => {
+        const policy = await payerDeps.policy();
+        const current = await consent();
+        return {
+          ...policy,
+          maxAutoSpendAtomic:
+            policy.maxAutoSpendAtomic === 0n
+              ? 0n
+              : current.maxJobAtomic < BigInt(job.capAtomic)
+                ? current.maxJobAtomic
+                : BigInt(job.capAtomic),
+        };
+      },
       getSigner: async () => {
         const signer = await payerDeps.getSigner();
         return {

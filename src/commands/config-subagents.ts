@@ -7,6 +7,8 @@ import { resolveContextSettings } from '../lib/settings';
 import type { CommandContext, CommandResult } from '../context';
 import { persist } from './config';
 import { modelConsentSchema } from '../router/model-settings';
+import { modelGithubRepositories } from '../router/model-repositories';
+import { MODEL_MINIMUM_JOB_ATOMIC } from '../router/model-limits';
 
 function retainedRepositories(value: unknown, origin: string): string[] {
   const prior = modelConsentSchema.safeParse(value);
@@ -40,19 +42,25 @@ export async function runConfigSubagents(
   const maxJob = BigInt(parseUsdToAtomic(flags.maxJob));
   const settings = await resolveContextSettings(ctx);
   const routerOrigin = new URL(settings.baseUrl).origin;
-  if (maxJob <= 0n) throw new CliError('USAGE', 'The job ceiling must be positive.');
+  if (maxJob < MODEL_MINIMUM_JOB_ATOMIC)
+    throw new CliError(
+      'USAGE',
+      'The job ceiling must be at least $0.044611 for the current minimum Messages reservation and routing fee. Actual input can require more.',
+    );
   const disclosure = [
-    'Allow Tenjin (using TypeSafe/Jev for routing) to receive this repository’s subagent assignments and bounded parent context. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results.',
+    'Allow Tenjin (using TypeSafe/Jev for routing) to receive subagent assignments and bounded parent context for the named repositories or folder. After acceptance, Tenjin and DeepSeek receive the worker’s applicable native instruction context, accepted assignment and tool results.',
     'Native global, ancestor and repository instructions retain their normal scope; Codex copies its AGENTS hierarchy. This grants no extra tool or filesystem permission. Wallet, login and environment files are excluded; known secrets are masked, not guaranteed anonymous.',
-    'Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. Existing wallet limits apply. Claude’s Messages requests currently reserve about $0.50 minimum; a quote above the job ceiling is refused.',
+    'Proxy replies can be replayed for 24 hours, with expired content removed by bounded cleanup. The saved job ceiling controls inference payments; the daily budget, creator allowlist and an explicit automatic-spend stop still apply. Claude’s usual 32K-output request reserves at least $0.041611 at the current peak tariff, plus input beyond framing. Each call needs its full quote available within the remaining job ceiling; the routing fee can add up to $0.003.',
   ].join('\n\n');
   let repositories = [repository];
+  let githubRepositories: string[] = [];
   await persist(ctx.dataDir, (c) => {
     // The locked merge keeps other explicitly named roots; this list never
     // supplies working directories or grants tool/filesystem permissions.
     repositories = [
       ...new Set([...retainedRepositories(c.router?.subagentConsent, routerOrigin), repository]),
     ];
+    githubRepositories = modelGithubRepositories(repositories);
     return {
       ...c,
       router: {
@@ -63,6 +71,7 @@ export async function runConfigSubagents(
           instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories,
+          githubRepositories,
           maxJobAtomic: maxJob.toString(),
           routerOrigin,
         },
@@ -74,6 +83,7 @@ export async function runConfigSubagents(
       enabled: true,
       repository,
       repositories,
+      githubRepositories,
       maxJobAtomic: maxJob.toString(),
       routerOrigin,
       disclosure,

@@ -24,9 +24,9 @@ export function registerCore(reg: Registration): void {
     .option('--project', 'register the plugin for this project only')
     .option('--no-wallet', 'create no wallet')
     .option('--refresh', 'bring the plugin this machine already has up to this version')
-    .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $0.25 a call)')
+    .option('--yes', 'accept the defaults ($5 daily budget shared across chats, $1.00 a call)')
     .option('--session-budget <usd|none>', 'your own daily budget shared across chats, or none')
-    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (the default)')
+    .option('--max-auto-spend <usd>', 'your own per-call limit, at least 0.25 (default 1.00)')
     .addHelpText(
       'after',
       `
@@ -238,7 +238,7 @@ Examples:
       });
     });
   addGlobalFlags(config.command('subagents <mode>'))
-    .summary('opt in to DeepSeek subagents for one repository, or turn them off')
+    .summary('enable DeepSeek for repositories or a containing folder, or turn it off')
     .option('--repository <path>', 'repository whose data may reach Tenjin and DeepSeek')
     .option('--max-job <USD>', 'total routing and inference ceiling per job')
     .addHelpText(
@@ -635,7 +635,7 @@ Switches
   speed on|off                  also offer faster paid tools
   replacement on|off            run Tenjin's picks automatically (Claude Code)
   fallback on|off               use Tenjin's tool when your account refuses
-  subagents on|off              opt in to DeepSeek for one repository
+  subagents on|off              enable DeepSeek for repositories or a containing folder
 
 Values
   get <key> / set <key> <value>

@@ -122,3 +122,40 @@ it('canonicalizes only previously named available roots without inferring their 
   const saved = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
   expect(saved.router.subagentConsent.repositories).toEqual([old, selected]);
 });
+
+it('records current GitHub origins for selected folders and refreshes aliases without broadening disclosure', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  const workspace = join(dir, 'workspace'),
+    repo = join(workspace, 'repo');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  await writeFile(
+    join(repo, '.git/config'),
+    '[remote "origin"]\nurl = https://private-token@github.com/Acme/repo.git\n',
+  );
+  await runConfigSubagents('on', { repository: workspace, maxJob: '1' }, testCtx(dir));
+  expect(await modelSettings(dir, repo)).toMatchObject({
+    repositories: [workspace],
+    githubRepositories: ['Acme/repo'],
+  });
+  await writeFile(
+    join(repo, '.git/config'),
+    '[remote "origin"]\nurl = git@github.com:Acme/changed.git\n',
+  );
+  expect(await modelSettings(dir, repo)).toMatchObject({
+    repositories: [workspace],
+    githubRepositories: [],
+  });
+  await runConfigSubagents('on', { repository: workspace, maxJob: '1' }, testCtx(dir));
+  expect(await modelSettings(dir, repo)).toMatchObject({ githubRepositories: ['Acme/changed'] });
+  const saved = await readFile(join(dir, 'config.json'), 'utf8');
+  expect(saved).not.toContain('private-token');
+  expect(JSON.parse(saved).router.subagentConsent.repositories).toEqual([workspace]);
+});
+
+it('refuses a job ceiling below the useful reservation floor before saving consent', async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'config-subagents-')));
+  await expect(
+    runConfigSubagents('on', { repository: dir, maxJob: '0.04' }, testCtx(dir)),
+  ).rejects.toMatchObject({ code: 'USAGE' });
+  await expect(readFile(join(dir, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+});

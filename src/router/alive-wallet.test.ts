@@ -59,10 +59,10 @@ describe('the wallet notice at session start', () => {
 
   it('uses the default per-call limit when the config sets none', async () => {
     await wallet();
-    expect(await walletNotice(dir, { read: async () => 30_000n, now: nextDay })).toContain(
-      'Tenjin balance $0.03 · low.',
+    expect(await walletNotice(dir, { read: async () => 300_000n, now: nextDay })).toContain(
+      'Tenjin balance $0.30 · low.',
     );
-    expect(await walletNotice(dir, { read: async () => 300_000n, now: nextDay })).toBeNull();
+    expect(await walletNotice(dir, { read: async () => 1_000_000n, now: nextDay })).toBeNull();
   });
 
   it('reads the balance at most once a day, low or not', async () => {

@@ -3,6 +3,7 @@ import { sep } from 'node:path';
 import { z } from 'zod';
 import { loadRawConfig } from '../lib/config';
 import { routerSettings } from './settings';
+import { modelGithubRepositories } from './model-repositories';
 
 export const modelConsentSchema = z.object({
   routerOrigin: z.url(),
@@ -10,6 +11,9 @@ export const modelConsentSchema = z.object({
   instructions: z.literal('applicable'),
   recipients: z.tuple([z.literal('Tenjin'), z.literal('DeepSeek')]),
   repositories: z.array(z.string()).min(1),
+  githubRepositories: z
+    .array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/))
+    .default([]),
   maxJobAtomic: z.string().regex(/^\d+$/),
 });
 
@@ -39,9 +43,15 @@ export async function modelSettings(dataDir: string, cwd: string) {
   );
   const repositories = [...new Set(roots.filter((path): path is string => path !== null))];
   if (!disclosureCovers(repositories, root) || BigInt(parsed.data.maxJobAtomic) <= 0n) return null;
+  const currentNames = new Set(
+    modelGithubRepositories(repositories).map((name) => name.toLowerCase()),
+  );
   return {
     root,
     repositories,
+    githubRepositories: parsed.data.githubRepositories.filter((name) =>
+      currentNames.has(name.toLowerCase()),
+    ),
     maxJobAtomic: BigInt(parsed.data.maxJobAtomic),
     routerOrigin: parsed.data.routerOrigin,
     context: settings.context.value,

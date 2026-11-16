@@ -47,7 +47,7 @@ const FEE_TERMS =
 const QUESTION = `How much can your agent spend from its balance? ${FEE_TERMS}`;
 const ASK_LINES = [
   `  Ask the person in this session: ${QUESTION}`,
-  '  Up to $0.25 a call and $5 a day (recommended): tenjin install --yes',
+  '  Up to $1 a call and $5 a day (recommended): tenjin install --yes',
   '  Set my own limits: tenjin install --max-auto-spend <usd> --session-budget <usd|none>',
 ];
 /** What Claude Code exports to the commands its agent runs. */
@@ -116,7 +116,7 @@ async function doctorChecks(over: Record<string, unknown> = {}): Promise<{
 }
 
 describe('tenjin install', () => {
-  it('with nobody to answer, writes no limit and the $0.25 and $5 defaults hold', async () => {
+  it('with nobody to answer, writes no limit and the $1 and $5 defaults hold', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ confirm: 'always' }));
     const result = await runRouterInstall({}, ctx(), deps());
     const config = await loadRawConfig(data);
@@ -129,7 +129,7 @@ describe('tenjin install', () => {
         removed: ['confirm'],
         set: [],
         kept: [],
-        effective: { maxAutoSpend: '0.25', sessionBudget: '5' },
+        effective: { maxAutoSpend: '1', sessionBudget: '5' },
       },
       nextSteps: [
         {
@@ -138,7 +138,7 @@ describe('tenjin install', () => {
           options: [
             {
               id: 'default',
-              label: 'Up to $0.25 a call and $5 a day',
+              label: 'Up to $1 a call and $5 a day',
               recommended: true,
               command: 'tenjin install --yes',
             },
@@ -239,7 +239,7 @@ describe('tenjin install', () => {
     expect(text).toContain('task context and your wallet address are sent to Tenjin for routing');
     expect(text).toContain('https://tenjin.sh/privacy');
     expect(text).toContain('https://tenjin.sh/terms');
-    expect(text).toContain('Limits    $0.25 a call · $5.00 a day');
+    expect(text).toContain('Limits    $1.00 a call · $5.00 a day');
     expect(text).toContain('open a new Claude Code session');
     expect(text).not.toContain('this conversation');
     expect(text).not.toContain(ADDRESS);
@@ -422,7 +422,7 @@ function amounts(answers: (string | null)[]) {
 const SELECTOR = `How much can your agent spend from its balance?\n${FEE_TERMS}`;
 
 describe('install asks a person the spend question once', () => {
-  it('"Use the defaults" names the routing fee and writes $0.25 a call and $5 a day', async () => {
+  it('"Use the defaults" names the routing fee and writes $1 a call and $5 a day', async () => {
     const promptLimits = vi.fn(async () => 'approve' as const);
     const promptAmount = amounts([]);
     const result = await runRouterInstall(
@@ -433,10 +433,10 @@ describe('install asks a person the spend question once', () => {
     expect(promptLimits).toHaveBeenCalledWith(SELECTOR);
     expect(promptAmount).not.toHaveBeenCalled();
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '250000',
+      maxAutoSpend: '1000000',
       sessionBudget: '5000000',
     });
-    expect(receipt(result)).toContain('Limits    $0.25 a call · $5.00 a day');
+    expect(receipt(result)).toContain('Limits    $1.00 a call · $5.00 a day');
   });
 
   it('"Set my own limits" asks the daily amount, then the per-call one, and writes both', async () => {
@@ -536,7 +536,7 @@ describe('install asks a person the spend question once', () => {
       expect(config).not.toHaveProperty('maxAutoSpend');
       expect(config).not.toHaveProperty('sessionBudget');
       expect(result.data).toMatchObject({
-        spend: { set: [], kept: [], effective: { maxAutoSpend: '0.25', sessionBudget: '5' } },
+        spend: { set: [], kept: [], effective: { maxAutoSpend: '1', sessionBudget: '5' } },
       });
       // An agent's shell has no terminal: the question goes to the agent instead.
       expect(receipt(result)).toEqual(expect.arrayContaining(ASK_LINES));
@@ -554,7 +554,7 @@ describe('install asks a person the spend question once', () => {
     );
     expect(promptLimits).not.toHaveBeenCalled();
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '250000',
+      maxAutoSpend: '1000000',
       sessionBudget: 'none',
     });
     expect(spendStepOf(result)).toBeUndefined();
@@ -575,7 +575,7 @@ describe('install asks a person the spend question once', () => {
     expect(createWallet).not.toHaveBeenCalled();
     expect(await readFile(manifest, 'utf8')).toBe(before);
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '250000',
+      maxAutoSpend: '1000000',
       sessionBudget: '5000000',
     });
     expect(result.data).toMatchObject({ spend: { set: ['maxAutoSpend', 'sessionBudget'] } });
@@ -695,12 +695,12 @@ describe('the doctor this release registers', () => {
 
   it.each([
     [
-      'an agent-run install nobody answered: the $0.25 and $5 defaults',
+      'an agent-run install nobody answered: the $1 and $5 defaults',
       undefined,
       {
         status: 'ok',
         required: false,
-        detail: 'automatic approval up to 0.25 USD a call, 5 USD daily budget, shared across chats',
+        detail: 'automatic approval up to 1 USD a call, 5 USD daily budget, shared across chats',
       },
     ],
     [
@@ -992,10 +992,10 @@ describe('daily limit readouts', () => {
       const today = receipt(result).find((line) => line.trim().startsWith('Today'));
       expect(today?.replace(/\s+/g, ' ').trim()).toBe(
         sessionBudget === 'none'
-          ? 'Today $0.00, no daily limit · up to $0.25 a call'
+          ? 'Today $0.00, no daily limit · up to $1.00 a call'
           : sessionBudget === '0'
-            ? 'Today automatic payments off ($0.00 a day) · up to $0.25 a call'
-            : 'Today $0.00 of $2.00 · up to $0.25 a call',
+            ? 'Today automatic payments off ($0.00 a day) · up to $1.00 a call'
+            : 'Today $0.00 of $2.00 · up to $1.00 a call',
       );
     },
   );
@@ -1032,7 +1032,7 @@ it('status separates routing deposits in the spend window from the remaining rou
     routingCredit: { remaining: { atomic: '240000' } },
   });
   const shown = receipt(result).map((line) => line.replace(/\s+/g, ' ').trim());
-  expect(shown).toContain('Today $0.30 of $5.00 · up to $0.25 a call');
+  expect(shown).toContain('Today $0.30 of $5.00 · up to $1.00 a call');
 });
 
 it('status warns about ignored retired keys and reports automatic exposure separately', async () => {
@@ -1082,7 +1082,7 @@ describe('install applies the spend answer an agent relays, in one command', () 
   it('takes none for the daily limit, and the default for a limit left out', async () => {
     await runRouterInstall({ sessionBudget: 'none' }, ctx(), deps());
     expect(await loadRawConfig(data)).toMatchObject({
-      maxAutoSpend: '250000',
+      maxAutoSpend: '1000000',
       sessionBudget: 'none',
     });
   });

@@ -419,7 +419,7 @@ export async function runRouterInstall(
   }
   // The install's gate: a refresh, `--json`, or a run with no terminal on
   // either side asks nothing. An agent's install is that run: its shell has no
-  // terminal. Install then writes no spend limit, the defaults ($0.25 a call,
+  // terminal. Install then writes no spend limit, the defaults ($1 a call,
   // $5 a day) hold as they do for any key the file leaves out, and its output hands
   // the question to whoever ran it (see {@link spendApproval}).
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);

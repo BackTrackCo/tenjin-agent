@@ -1,6 +1,7 @@
 import {
   MODEL_CODEX_TASK_BYTES,
   MODEL_EXPECTED_SPEND_ATOMIC,
+  MODEL_MINIMUM_JOB_ATOMIC,
   MODEL_ROUTE_BODY_BYTES,
   MODEL_ROUTE_ENVELOPE_BYTES,
 } from './model-limits';
@@ -371,6 +372,7 @@ export class ModelHandoff {
         version: 2,
         repository: settings.root,
         repositories: latest.repositories,
+        githubRepositories: latest.githubRepositories,
         routerOrigin: settings.routerOrigin,
         recipients: ['Tenjin', 'DeepSeek'],
       },
@@ -422,7 +424,7 @@ export class ModelHandoff {
     if (
       Buffer.byteLength(JSON.stringify(admission)) + MODEL_ROUTE_ENVELOPE_BYTES >
         MODEL_ROUTE_BODY_BYTES ||
-      settings.maxJobAtomic < MODEL_ROUTING_FEE_CEILING_ATOMIC
+      settings.maxJobAtomic < MODEL_MINIMUM_JOB_ATOMIC
     )
       return native();
     const input = { ...admission, jobId: job.id };
@@ -492,6 +494,7 @@ export class ModelHandoff {
         version: 2,
         repository: consent.root,
         repositories: consent.repositories,
+        githubRepositories: consent.githubRepositories,
         routerOrigin: consent.routerOrigin,
         recipients: ['Tenjin', 'DeepSeek'],
       },

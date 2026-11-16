@@ -86,7 +86,7 @@ const KEY_WIDTH = Math.max(
  */
 const KEY_DESCRIPTIONS: Record<string, string> = {
   maxAutoSpend:
-    'automatic router limit per call, the runaway guard: at least 0.25 (the default); router.enabled false turns the router off',
+    'automatic router limit per call, the runaway guard: default 1.00, at least 0.25; router.enabled false turns the router off',
   sessionBudget:
     'automatic router daily budget shared across chats (5 by default): 0 blocks automatic spend, none removes the ceiling',
   sendMaxAmount:
@@ -612,7 +612,7 @@ export interface RouterDefaultsResult {
 /** Remove/report retired keys in the same locked write. Refresh preserves absent
  * current settings; a fresh install fills only missing automatic limits, with the
  * values the person approved or chose. A key `limits` leaves out stays absent,
- * and the code default ($0.25 a call, $5 a day) holds for it: that is an install
+ * and the code default ($1 a call, $5 a day) holds for it: that is an install
  * nobody answered. A key in `chosen` is an amount the
  * user named for this install (`--max-auto-spend`, `--session-budget`), so it
  * replaces what the file holds. */

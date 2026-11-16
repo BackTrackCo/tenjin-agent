@@ -29,6 +29,10 @@ async function continuationFixture(multiple = false) {
     configDir = join(dir, 'claude');
   await mkdir(repo);
   await mkdir(join(repo, '.git'));
+  await writeFile(
+    join(repo, '.git/config'),
+    '[remote "origin"]\nurl = git@github.com:Acme/repo.git\n',
+  );
   await mkdir(configDir);
   const sibling = join(dir, 'sibling');
   await mkdir(sibling);
@@ -51,6 +55,7 @@ async function continuationFixture(multiple = false) {
           instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: multiple ? [repo, sibling] : [repo],
+          githubRepositories: ['Acme/repo'],
           maxJobAtomic: '1000000',
           routerOrigin: 'http://localhost:3939',
         },
@@ -143,7 +148,7 @@ it('shows every explicit disclosure anchor and refuses a continuation whose nati
   ).toMatchObject({
     action: 'offer',
     workspace: f.workspace,
-    consent: { repositories: [f.session.cwd, f.sibling] },
+    consent: { repositories: [f.session.cwd, f.sibling], githubRepositories: ['Acme/repo'] },
   });
   vi.mocked(qualifiedModelWorker).mockResolvedValue({
     path: '/fixture/worker',
@@ -282,6 +287,10 @@ it('routes the complete resubmitted task with owned parent context once, and pre
   const repo = join(dir, 'repo');
   await mkdir(repo);
   await mkdir(join(repo, '.git'));
+  await writeFile(
+    join(repo, '.git/config'),
+    '[remote "origin"]\nurl = git@github.com:Acme/repo.git\n',
+  );
   const instructionFile = join(repo, 'AGENTS.md');
   await writeFile(instructionFile, 'Ask before publishing. Keep guarded Neon jobs native.');
   const instructionContext = await makeInstructionContext({
@@ -312,6 +321,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
           instructions: 'applicable',
           recipients: ['Tenjin', 'DeepSeek'],
           repositories: [repo],
+          githubRepositories: ['Acme/repo'],
           maxJobAtomic: '1000000',
           routerOrigin: 'http://localhost:3939',
         },
@@ -379,6 +389,7 @@ it('routes the complete resubmitted task with owned parent context once, and pre
     consent: {
       version: 2,
       repository: repo,
+      githubRepositories: ['Acme/repo'],
       routerOrigin: 'http://localhost:3939',
       recipients: ['Tenjin', 'DeepSeek'],
     },
@@ -493,4 +504,32 @@ it('consumes the server canonical offer contract without enabling an alias or pr
   expect(
     modelOfferSchema.safeParse({ ...offer, endpoint: 'https://elsewhere.test/messages' }).success,
   ).toBe(false);
+});
+
+it('keeps a legacy undersized job native before purchasing model routing', async () => {
+  const f = await continuationFixture();
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  config.router.subagentConsent.maxJobAtomic = '40000';
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  const transcript = join(dir, 'parent.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: 'root',
+      message: { role: 'user', content: 'Read the fixture and report its facts.' },
+    }) + '\n',
+  );
+  expect(
+    await f.model.capture({ ...f.session, turnId: 'tiny', transcript }, 'tiny-call', {
+      prompt: 'Read the fixture.',
+    }),
+  ).toMatchObject({ action: 'native' });
+  expect(f.route).not.toHaveBeenCalled();
+  config.router.subagentConsent.maxJobAtomic = '1000000';
+  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
+  await f.model.capture({ ...f.session, turnId: 'control', transcript }, 'control-call', {
+    prompt: 'Read the fixture.',
+  });
+  expect(f.route).toHaveBeenCalledTimes(1);
 });
