@@ -18,7 +18,10 @@ export function nativeRetryReference(input: Record<string, unknown>, tool: strin
   if (
     tool !== 'Agent' ||
     !match ||
-    Object.keys(input).some((key) => !['prompt', 'description', 'subagent_type'].includes(key)) ||
+    Object.keys(input).some(
+      (key) => !['prompt', 'description', 'subagent_type', 'run_in_background'].includes(key),
+    ) ||
+    (Object.hasOwn(input, 'run_in_background') && input.run_in_background !== false) ||
     input.subagent_type !== `tenjin-native-${match?.[1]}` ||
     (input.description !== undefined && typeof input.description !== 'string')
   )

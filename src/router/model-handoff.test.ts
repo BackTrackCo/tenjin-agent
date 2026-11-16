@@ -168,6 +168,7 @@ it('restores the entire held native call and consumes its future call ID once wi
       prompt: `tenjin-native:${f.job.id}`,
       description: 'Keep native',
       subagent_type: `tenjin-native-${f.job.id}`,
+      run_in_background: false,
     },
     undefined,
     'Agent',
@@ -179,6 +180,16 @@ it('restores the entire held native call and consumes its future call ID once wi
     tool: 'Agent',
     input: f.native,
   });
+  expect(
+    await f.model.capture(
+      f.session,
+      'future-call',
+      { ...f.native, run_in_background: false },
+      undefined,
+      'Agent',
+      true,
+    ),
+  ).toMatchObject({ action: 'refused', started: false });
   expect(
     await f.model.capture(
       f.session,

@@ -68,12 +68,13 @@ const inputOf = (chunks: TurnStepChunk[]) =>
       .map((c) => c.json)
       .join(''),
   ) as Record<string, unknown>;
-const reply = (input = ORIGINAL, extra: Record<string, unknown> = {}) =>
+const reply = (input: Record<string, unknown> = ORIGINAL, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ action: 'native_retry', offer_id: OFFER, tool: 'Agent', input, ...extra });
 
-test('short veto arguments are restored before tool dispatch with the new call id and exact full input', async ($, on) => {
+test('an explicit foreground shortcut restores the exact saved foreground call before tool dispatch', async ($, on) => {
   setup(on);
-  const originalChunks = response(on, ALIAS, 'native_retry_exact');
+  const alias = { ...ALIAS, run_in_background: false };
+  const originalChunks = response(on, alias, 'native_retry_exact');
   const captures: unknown[] = [];
   on('tool.call', { tool: MCP }, async (_$, e) => {
     captures.push(e.capture);
@@ -111,7 +112,7 @@ test('short veto arguments are restored before tool dispatch with the new call i
     {
       session_id: SESSION,
       tool_use_id: 'native_retry_exact',
-      input: ALIAS,
+      input: alias,
       tool: 'Agent',
       native_replay: true,
     },
@@ -126,7 +127,7 @@ test('short veto arguments are restored before tool dispatch with the new call i
     {
       session_id: SESSION,
       tool_use_id: 'native_retry_exact',
-      input: ALIAS,
+      input: alias,
       tool: 'Agent',
       native_replay: true,
     },
@@ -139,6 +140,86 @@ test('short veto arguments are restored before tool dispatch with the new call i
     },
   ]);
   expect(native).toEqual([{ tool: 'Agent', tool_use_id: 'native_retry_exact', ...ORIGINAL }]);
+});
+
+test('an incidental foreground shortcut field never becomes an omitted saved native option', async ($, on) => {
+  setup(on);
+  const alias = { ...ALIAS, run_in_background: false };
+  const saved: Record<string, unknown> = { ...ORIGINAL };
+  delete saved.run_in_background;
+  response(on, alias, 'native_retry_omitted_background');
+  const captures: unknown[] = [];
+  on('tool.call', { tool: MCP }, (_$, e) => {
+    captures.push(e.capture);
+    return {
+      result:
+        (e.capture as { input: { prompt: string } }).input.prompt === alias.prompt
+          ? reply(saved)
+          : '{"action":"native"}',
+    };
+  });
+  let dispatched: unknown;
+  on('tool.call', { tool: 'Agent' }, (_$, e) => {
+    dispatched = e;
+    return { result: 'native result' as never };
+  });
+  const { chunks } = await collect($);
+  expect(inputOf(chunks)).toEqual(saved);
+  expect(Object.hasOwn(inputOf(chunks), 'run_in_background')).toBe(false);
+  await $.tool.call({
+    tool: 'Agent',
+    tool_use_id: 'native_retry_omitted_background',
+    ...inputOf(chunks),
+  });
+  expect(dispatched).toEqual({
+    tool: 'Agent',
+    tool_use_id: 'native_retry_omitted_background',
+    ...saved,
+  });
+  expect(captures).toEqual([
+    {
+      session_id: SESSION,
+      tool_use_id: 'native_retry_omitted_background',
+      input: alias,
+      tool: 'Agent',
+      native_replay: true,
+    },
+    {
+      session_id: SESSION,
+      tool_use_id: 'native_retry_omitted_background',
+      input: saved,
+      tool: 'Agent',
+      native_replay: true,
+    },
+  ]);
+});
+
+test('a foreground shortcut cannot downgrade a background original into a native foreground call', async ($, on) => {
+  setup(on);
+  const alias = { ...ALIAS, run_in_background: false };
+  response(on, alias, 'native_retry_background_original');
+  on('tool.call', { tool: MCP }, () => ({
+    result: reply({ ...ORIGINAL, run_in_background: true }),
+  }));
+  let ran = false;
+  on('tool.call', { tool: 'Agent' }, () => {
+    ran = true;
+    return { result: 'unsafe' as never };
+  });
+  const { chunks } = await collect($);
+  expect(inputOf(chunks)).toEqual(alias);
+  expect(
+    JSON.stringify(
+      (
+        await $.tool.call({
+          tool: 'Agent',
+          tool_use_id: 'native_retry_background_original',
+          ...inputOf(chunks),
+        })
+      ).result,
+    ),
+  ).toContain('No native child started');
+  expect(ran).toBe(false);
 });
 
 test('argument rewriting leaves opaque engine references and other tool blocks in their original order', () => {
@@ -235,6 +316,9 @@ test('retired and mixed shortcuts stay held without a lookup or native child', a
     { description: 'Keep native', prompt: ALIAS.prompt, subagent_type: 'general-purpose' },
     { ...ALIAS, resume: `tenjin-offer-${OFFER}` },
     { ...ALIAS, model: 'sonnet' },
+    { ...ALIAS, run_in_background: true },
+    { ...ALIAS, run_in_background: false, name: 'teammate' },
+    { ...ALIAS, run_in_background: false, team_name: 'team' },
     { ...ALIAS, subagent_type: 'tenjin-native-foreign' },
     { ...ALIAS, prompt: 'A changed assignment' },
   ];
@@ -486,6 +570,10 @@ test('an oversized recognized shortcut cannot be stripped into a native retry by
 
 test('reserved marker parsing never treats ordinary mentions as a control request', () => {
   expect(nativeRetryReference(ALIAS, 'Agent')).toEqual({ owned: true, id: OFFER });
+  expect(nativeRetryReference({ ...ALIAS, run_in_background: false }, 'Agent')).toEqual({
+    owned: true,
+    id: OFFER,
+  });
   for (const input of [
     { ...ALIAS, prompt: `  TENJIN-NATIVE:${OFFER} ` },
     { ...ALIAS, prompt: 'tenjin-native:not-a-job' },
@@ -495,7 +583,8 @@ test('reserved marker parsing never treats ordinary mentions as a control reques
     { ...ALIAS, subagent_type: 'general-purpose' },
     { ...ALIAS, subagent_type: undefined },
     { ...ALIAS, subagent_type: `tenjin-native-f30fcbad-15d3-4515-86d5-5856048032bf` },
-    { ...ALIAS, run_in_background: false },
+    { ...ALIAS, run_in_background: true },
+    { ...ALIAS, run_in_background: undefined },
     { ...ALIAS, resume: 'native-agent' },
     { ...ALIAS, resume: `tenjin-offer-${OFFER}`, subagent_type: 'Explore' },
     { ...ALIAS, resume: `tenjin-offer-${OFFER}` },
