@@ -16,9 +16,9 @@ let paymentSent = false;
 const guarded = new WeakSet<Writable>();
 
 /**
- * A payment's authorization left this process: an output failure after it is
- * said to follow a payment, and points to where the payment is recorded.
- * `runPay` calls it once the paid leg is sent.
+ * A payment's authorization left this process: an output failure after it
+ * says the authorization was sent and may have charged, and points to
+ * `tenjin payments` to check. `runPay` calls it once the paid leg is sent.
  */
 export function notePaymentSent(): void {
   paymentSent = true;
@@ -70,8 +70,9 @@ function noteWriteError(stream: keyof Stdio, err: unknown): void {
  * own. With output lost, it is said on stderr when stderr is not the stream
  * that failed, and the exit is nonzero: the command's own failing code, else
  * 4 after a payment (a failure after an approved spend) and 1 otherwise.
- * After a payment the line says the payment completed and where it is
- * recorded, so the reader looks there before paying again.
+ * After a payment the line says the authorization was sent and may have
+ * charged, so the reader checks `tenjin payments` before paying again. It
+ * claims no charge and no saved record, since neither is known here.
  */
 export async function exitCodeAfter(code: number, stdio: Stdio = STDIO): Promise<number> {
   if (lost === undefined) return code;
@@ -85,7 +86,7 @@ export async function exitCodeAfter(code: number, stdio: Stdio = STDIO): Promise
 function lostOutputLine(err: unknown): string {
   const why = err instanceof Error ? err.message : String(err);
   return paymentSent
-    ? `tenjin: the output could not be written (${why}) after a payment was made. The payment is recorded in \`tenjin payments\`; check there before paying again.\n`
+    ? `tenjin: the output could not be written (${why}) after a payment authorization was sent, so you may have been charged. Check \`tenjin payments\` before paying again.\n`
     : `tenjin: the output could not be written (${why}).\n`;
 }
 

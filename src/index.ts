@@ -90,9 +90,10 @@ if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] =
 
 // Stdio's errors are taken before the command writes anything, so a reader
 // that already went away (EPIPE) never turns its exit code into a crash, and
-// output lost any other way (a full disk) exits nonzero, said on stderr; what
-// it printed reaches the reader before the exit, since on a pipe an exit
-// before stdout drains cuts a large body off (lib/flush-stdio).
+// a write error Node reports any other way (a full disk) exits nonzero, said
+// on stderr. Output queued on a pipe drains before the exit, since an exit
+// before stdout drains cuts a large body off (lib/flush-stdio). A short write
+// Node reports as a success is not seen here.
 const { exitAfter } = await import('./lib/flush-stdio');
 await exitAfter(async () => {
   // After the status line, which sends no request, and the alive leg, which

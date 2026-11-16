@@ -154,12 +154,14 @@ describe('exitAfter, the bin running a command', () => {
       expect(stderr).not.toContain('tenjin payments');
     });
 
-    it('says a payment was made and where it is recorded, and exits 4', async () => {
+    it('says a payment authorization was sent and may have charged, and exits 4', async () => {
       const { code, stderr } = await run(binOrder(1_000, 0, { paid: true }), {
         full: await fullFile(),
       });
       expect(code).toBe(4);
-      expect(stderr).toContain('after a payment was made');
+      expect(stderr).toContain(
+        'after a payment authorization was sent, so you may have been charged',
+      );
       expect(stderr).toContain('`tenjin payments`');
     });
 
