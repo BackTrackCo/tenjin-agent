@@ -128,7 +128,7 @@ export function withBuilderCode(
 /**
  * A SELLER'S OWN SIGN-IN CHALLENGE, as Monid answers a poll of a run it was
  * paid for (live shape, 2026-11-09): a 402 with no payment option, the
- * seller's nonce and a five-minute expiry, bound to the URL that sent it
+ * seller's nonce and a five-minute expiry, matching the responding origin
  * unless `over` names another domain or uri.
  */
 export function buildSignInChallenge(

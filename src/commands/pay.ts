@@ -394,9 +394,9 @@ async function executePay(
   }
   // A SELLER THAT ASKS ONLY FOR A SIGN-IN: a 402 offering no payment, with
   // its own sign-in-with-x challenge, as Monid answers a poll of a run it was
-  // paid for. It is signed only for a GET, as a poll is, for the URL that
-  // sent it and a host this wallet paid, and nothing is paid on this
-  // path. A write behind a sign-in could spend the wallet's credit with the
+  // paid for. It is signed only for a GET, as a poll is, when the challenge
+  // matches the responding origin and the ledger shows this wallet paid
+  // that host, and nothing is paid on this path. A write behind a sign-in could spend the wallet's credit with the
   // seller off-protocol, so it is refused unsigned. The router's provider leg
   // never takes it: its job polls answer the same challenge in
   // `router/jobs.ts`, through {@link signInForPoll}.

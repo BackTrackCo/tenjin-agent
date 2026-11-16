@@ -26,9 +26,10 @@ import { MAX_MEDIA_BYTES, pinnedHttp, type PinnedTarget } from './paid';
  * A GET POLL MAY SIGN IN. A seller that answers a poll 402 with no way to pay
  * and its own sign-in-with-x challenge (Monid's runs) is asked again once,
  * with that challenge signed, through `deps.signIn`: the same rules as a
- * direct pay's sign-in (a GET, the URL that sent it, the wallet that paid,
- * nothing paid). A POST poll's challenge is refused unsigned, and the take
- * fails.
+ * direct pay's sign-in (a GET, a challenge that matches the responding
+ * origin, the wallet that paid, nothing paid); the take, not the ledger,
+ * names that wallet. A POST poll's challenge is refused unsigned, and the
+ * take fails.
  *
  * WHAT A POLL MAY TOUCH. The URL is the submit's own host, over HTTPS; it is
  * checked when the job starts and again before every poll, resolved to a
