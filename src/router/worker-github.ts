@@ -166,3 +166,23 @@ export function redactWorkerSecrets(text: string, secrets: readonly string[]): s
   for (const secret of secrets) if (secret) out = out.split(secret).join(REDACTED_GITHUB_TOKEN);
   return out;
 }
+
+/**
+ * The same removal over every key and string of a worker SDK message, for the
+ * activity copy that feeds the viewer, the plugin's progress file and a stopped
+ * worker's partial handback. `mask()` there knows token shapes, not this job's
+ * literal values.
+ */
+export function redactWorkerMessage(message: unknown, secrets: readonly string[]): unknown {
+  if (!secrets.some(Boolean)) return message;
+  const walk = (value: unknown): unknown => {
+    if (typeof value === 'string') return redactWorkerSecrets(value, secrets);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value !== null && typeof value === 'object')
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [redactWorkerSecrets(key, secrets), walk(item)]),
+      );
+    return value;
+  };
+  return walk(message);
+}

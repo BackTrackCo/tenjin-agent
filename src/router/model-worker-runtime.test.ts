@@ -368,6 +368,34 @@ it('observes actual worker messages without changing the result or leaking them 
   ]);
 });
 
+it("keeps the job's GitHub token out of the activity, whose rows reach the progress file and a partial handback", async () => {
+  const events = [
+    {
+      type: 'user',
+      uuid: 'printed-token',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'env-1', content: `GH_TOKEN=${GITHUB_TOKEN}` },
+        ],
+      },
+    },
+  ];
+  sdkResult(
+    { subtype: 'success', result: `pushed with ${GITHUB_TOKEN}` },
+    undefined,
+    undefined,
+    events,
+  );
+  const activity = { running: vi.fn(), observe: vi.fn() };
+  await expect(runModelWorker(job, { ...options(), activity })).resolves.toBe(
+    'pushed with [redacted GitHub token]',
+  );
+  const observed = JSON.stringify(activity.observe.mock.calls);
+  expect(observed).not.toContain(GITHUB_TOKEN);
+  expect(observed).toContain('GH_TOKEN=[redacted GitHub token]');
+});
+
 it('completes and drains the worker when the activity observer fails', async () => {
   sdkResult({ subtype: 'success', result: 'finished' });
   const activity = {

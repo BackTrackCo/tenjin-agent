@@ -57,6 +57,7 @@ import {
 } from './claude-workspace';
 import {
   prepareWorkerGithub,
+  redactWorkerMessage,
   redactWorkerSecrets,
   WORKER_ALLOWED_DOMAINS,
   workerTokenValues,
@@ -683,7 +684,8 @@ async function runQualifiedWorker(
       }
       if (activityReady) {
         try {
-          options.activity?.observe(message);
+          // Rows reach the progress file, the viewer and a partial handback: drop the job's token values first.
+          options.activity?.observe(redactWorkerMessage(message, secrets));
         } catch {
           // The SDK remains the owner of complete worker history.
         }
