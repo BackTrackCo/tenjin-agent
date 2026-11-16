@@ -23,6 +23,8 @@ The Claude worker retains native settings, rules, hooks, MCPs, CLIs and tool per
 
 Worker file tools and commands cannot read credential-bearing native config, history or private controller data. Ordinary skill, agent, command and support files remain usable under the current native permissions.
 
+The worker keeps the permission mode the parent had when the offer was accepted, for the whole job; a later prompt, mode switch or `cd` in the parent does not stop it. In auto mode the worker's own classifier judges each call that needs a decision, and a call that would still need a person is denied with its reason, so the worker never waits on you. In default mode it asks you, with Allow once, Allow for this job or Deny. In every mode it never runs keychain or git credential probes, `gh auth token`, a push to `main` or `master`, a force push, a branch deletion or a merge. A worker that stops early returns its last text and recent activity to the parent.
+
 ## Accept, cancel and continue
 
 The parent calls its native subagent tool normally. Every offer carries the full parent policy and starts no worker. Accept with `subagent({offer_id})`; Claude preloads this tool so acceptance needs no ToolSearch turn. To decline an initial Claude Agent offer, the parent can call Agent with only `description: "Keep native"`, `prompt: "tenjin-native:<offer_id>"` and matching `subagent_type: "tenjin-native-<offer_id>"`. Tenjin restores the exact saved native call before tool-call hooks and permission checks. Retrying the complete original call also works, including for legacy Task calls. Saved consent covers its stated disclosure/inference scope; binding restrictions, repository risk judgment and normal tool asks still apply.
