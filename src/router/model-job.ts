@@ -5,7 +5,6 @@ import { z } from 'zod';
 import { withFileLock } from '../lib/lock';
 import { canonicalHash } from '../lib/request-schema';
 import { readJsonFile, writePrivate } from './store-files';
-import { nativeRetryReference } from './model-native-retry';
 
 const jobSchema = z.object({
   id: z.uuid(),
@@ -16,16 +15,6 @@ const jobSchema = z.object({
   task: z.string(),
   native: z.record(z.string(), z.unknown()),
   nativeTool: z.enum(['Agent', 'Task']).optional(),
-  nativeReplaySupported: z.literal(true).optional(),
-  nativeReplay: z
-    .object({
-      callId: z.string().min(1),
-      tool: z.enum(['Agent', 'Task']),
-      inputHash: z.string().regex(/^[0-9a-f]{64}$/),
-      epoch: z.uuid(),
-      consumed: z.boolean(),
-    })
-    .optional(),
   decision: z.record(z.string(), z.unknown()),
   capAtomic: z.string().regex(/^\d+$/),
   state: z.enum([
@@ -45,6 +34,27 @@ const jobSchema = z.object({
 export type ModelJob = z.infer<typeof jobSchema>;
 export const modelJobSchema = jobSchema;
 type NewJob = Omit<ModelJob, 'id' | 'state' | 'expiresAt'>;
+/** A held call whose offer never ran to completion: its unchanged repeat keeps it native. */
+const REPEATABLE: readonly ModelJob['state'][] = ['offered', 'cancelled', 'unknown'];
+
+/**
+ * What "unchanged" means for a repeated Agent call. Every field counts and key
+ * order does not. Whitespace around a top-level string is ignored; whitespace
+ * inside it is not. A field set to null or false, and `subagent_type:
+ * "general-purpose"`, mean the same as leaving the field out.
+ */
+function repeatKey(native: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(native).flatMap(([key, raw]) => {
+      const value = typeof raw === 'string' ? raw.trim() : raw;
+      return value === null ||
+        value === false ||
+        (key === 'subagent_type' && value === 'general-purpose')
+        ? []
+        : [[key, value]];
+    }),
+  );
+}
 
 /** One active foreground delegation per root turn; immutable calls, atomic selection. */
 export class ModelJobStore {
@@ -59,18 +69,17 @@ export class ModelJobStore {
   private window(sessionId: string, turnId: string) {
     return join(this.dir, `window-${canonicalHash({ sessionId, turnId })}.json`);
   }
-  private replayPath(callId: string) {
-    return join(this.dir, `replay-${canonicalHash({ callId })}.json`);
-  }
-  private async replayIndex(callId: string) {
-    const path = this.replayPath(callId);
-    try {
-      await lstat(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
-    }
-    return (await readJsonFile(path, 1000)) ?? {};
+  /** The latest held Claude call with this content in this session and root, in any turn. */
+  private repeatPath(
+    sessionId: string,
+    root: string,
+    tool: string,
+    native: Record<string, unknown>,
+  ) {
+    return join(
+      this.dir,
+      `repeat-${canonicalHash({ sessionId, root, tool, native: repeatKey(native) })}.json`,
+    );
   }
   private async locked<T>(fn: () => Promise<T>) {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -115,13 +124,13 @@ export class ModelJobStore {
       await writePrivate(this.path(job.id), serialized);
       await writePrivate(
         this.window(input.sessionId, input.turnId),
-        JSON.stringify({
-          id: job.id,
-          replayEpoch: z.uuid().safeParse(previous?.replayEpoch).success
-            ? previous!.replayEpoch
-            : randomUUID(),
-        }),
+        JSON.stringify({ id: job.id }),
       );
+      if (input.nativeTool)
+        await writePrivate(
+          this.repeatPath(input.sessionId, input.root, input.nativeTool, input.native),
+          JSON.stringify({ id: job.id }),
+        );
       return job;
     });
   }
@@ -151,28 +160,13 @@ export class ModelJobStore {
     turn: string,
     state: 'cancelling' | 'cancelled' = 'cancelled',
   ): Promise<void> {
-    const path = this.window(session, turn);
     try {
-      await lstat(path);
+      await lstat(this.window(session, turn));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw error;
     }
     return this.locked(async () => {
-      try {
-        await lstat(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-        throw error;
-      }
-      const window = await readJsonFile(path, 1000);
-      await writePrivate(
-        path,
-        JSON.stringify({
-          ...(typeof window?.id === 'string' ? { id: window.id } : {}),
-          replayEpoch: randomUUID(),
-        }),
-      );
       const job = await this.pending(session, turn);
       if (!job || ['native', 'completed', 'cancelled', 'unknown'].includes(job.state)) return;
       await writePrivate(this.path(job.id), JSON.stringify({ ...job, state }));
@@ -208,145 +202,60 @@ export class ModelJobStore {
       return job;
     });
   }
+  /** Codex: the held call retried unchanged in its own turn passes the hold once. */
   async nativeRetry(
     session: string,
     turn: string,
     native: Record<string, unknown>,
-    comparable: (value: Record<string, unknown>) => unknown = (value) => value,
-    tool?: 'Agent' | 'Task',
+    comparable: (value: Record<string, unknown>) => unknown,
   ): Promise<boolean> {
     return this.locked(async () => {
       const window = await readJsonFile(this.window(session, turn), 1000);
       if (typeof window?.id !== 'string') return false;
       const job = await this.read(window.id);
-      const selectedRetry =
-        job?.state === 'native' &&
-        job.sessionId === session &&
-        job.turnId === turn &&
-        job.nativeReplay !== undefined &&
-        !job.nativeReplay.consumed &&
-        tool !== undefined &&
-        job.nativeTool === tool &&
-        job.nativeReplay.tool === tool &&
-        canonicalHash(job.native) === job.nativeReplay.inputHash;
       if (
         !job ||
-        (!selectedRetry &&
-          !['awaiting_prompt', 'offered', 'unknown', 'cancelled'].includes(job.state)) ||
+        !['awaiting_prompt', ...REPEATABLE].includes(job.state) ||
         canonicalHash(comparable(job.native)) !== canonicalHash(comparable(native))
       )
         return false;
-      job.state = 'native';
-      if (selectedRetry) job.nativeReplay!.consumed = true;
-      await writePrivate(this.path(job.id), JSON.stringify(job));
+      await writePrivate(this.path(job.id), JSON.stringify({ ...job, state: 'native' }));
       return true;
     });
   }
-  /** Select the saved initial native call once, competing with acceptance under the same lock. */
-  async chooseNative(
-    id: string,
+  /**
+   * Claude: the parent keeps an offered call native by sending it again
+   * unchanged. Matched by content, never by call ID, so the host's permission
+   * review sees the call that runs. Once per offer: a match ends the offer, so
+   * it cannot be accepted after, and a later repeat is a new call. It matches
+   * in the same session and workspace root, for the rest of the offer's turn,
+   * and in a later turn until the offer expires.
+   */
+  async nativeRepeat(
     session: string,
     turn: string,
     root: string,
     tool: 'Agent' | 'Task',
-    replayCallId: string,
-  ): Promise<ModelJob | null> {
+    native: Record<string, unknown>,
+  ): Promise<boolean> {
     return this.locked(async () => {
-      const job = await this.pending(session, turn);
-      const window = await readJsonFile(this.window(session, turn), 1000);
+      const index = await readJsonFile(this.repeatPath(session, root, tool, native), 1000);
+      const job = z.uuid().safeParse(index?.id).success
+        ? await this.read(index!.id as string)
+        : null;
       if (
         !job ||
-        job.id !== id ||
+        job.sessionId !== session ||
         job.root !== root ||
         job.nativeTool !== tool ||
-        job.nativeReplaySupported !== true ||
-        job.state !== 'offered' ||
-        !replayCallId ||
-        !z.uuid().safeParse(window?.replayEpoch).success ||
-        job.expiresAt <= Date.now() ||
-        job.decision.workerHandle !== undefined ||
-        job.native.resume !== undefined ||
-        typeof job.native.prompt !== 'string' ||
-        !job.native.prompt.trim() ||
-        nativeRetryReference(job.native, tool).owned ||
-        ['tool', 'tool_use_id', 'agentId'].some((key) => key in job.native)
+        !REPEATABLE.includes(job.state) ||
+        (job.turnId !== turn && job.expiresAt <= Date.now()) ||
+        canonicalHash(repeatKey(job.native)) !== canonicalHash(repeatKey(native))
       )
-        return null;
-      if (await this.replayIndex(replayCallId)) return null;
-      const selected = {
-        ...job,
-        state: 'native' as const,
-        nativeReplay: {
-          callId: replayCallId,
-          tool,
-          inputHash: canonicalHash(job.native),
-          epoch: window!.replayEpoch as string,
-          consumed: false,
-        },
-      };
-      await writePrivate(this.path(job.id), JSON.stringify(selected));
-      await writePrivate(this.replayPath(replayCallId), JSON.stringify({ id: job.id }));
-      return selected;
-    });
-  }
-  /** Recognize saved call IDs before any failure path can fall through natively. */
-  async ownsNativeReplay(session: string, turn: string, callId: string): Promise<boolean> {
-    try {
-      if (await this.replayIndex(callId)) return true;
-      return (await this.pending(session, turn))?.nativeReplay?.callId === callId;
-    } catch {
+        return false;
+      await writePrivate(this.path(job.id), JSON.stringify({ ...job, state: 'native' }));
       return true;
-    }
-  }
-
-  /** The expanded call still crosses every host hook; this only prevents another Tenjin lookup. */
-  async consumeNativeReplay(
-    session: string,
-    turn: string,
-    root: string,
-    tool: 'Agent' | 'Task' | 'SendMessage',
-    callId: string,
-    native: Record<string, unknown>,
-  ): Promise<'allow' | 'refused' | 'none'> {
-    try {
-      return await this.locked(async () => {
-        if (!callId) return 'refused';
-        const index = await this.replayIndex(callId);
-        if (!index) {
-          const pending = await this.pending(session, turn);
-          return pending?.nativeReplay?.callId === callId ? 'refused' : 'none';
-        }
-        if (typeof index.id !== 'string') return 'refused';
-        const job = await this.read(index.id);
-        const replay = job?.nativeReplay;
-        const window = await readJsonFile(this.window(session, turn), 1000);
-        if (
-          !job ||
-          job.sessionId !== session ||
-          job.turnId !== turn ||
-          job.root !== root ||
-          job.nativeTool !== tool ||
-          job.state !== 'native' ||
-          job.expiresAt <= Date.now() ||
-          !replay ||
-          !z.uuid().safeParse(window?.replayEpoch).success ||
-          replay.epoch !== window?.replayEpoch ||
-          replay.tool !== tool ||
-          replay.callId !== callId ||
-          replay.consumed ||
-          canonicalHash(job.native) !== replay.inputHash ||
-          canonicalHash(native) !== replay.inputHash
-        )
-          return 'refused';
-        await writePrivate(
-          this.path(job.id),
-          JSON.stringify({ ...job, nativeReplay: { ...replay, consumed: true } }),
-        );
-        return 'allow';
-      });
-    } catch {
-      return 'refused';
-    }
+    });
   }
   async finish(id: string, state: 'completed' | 'cancelled' | 'unknown', result?: string) {
     return this.locked(async () => {

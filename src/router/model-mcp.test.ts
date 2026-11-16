@@ -420,7 +420,7 @@ it('reports a harness stop while retaining uncertain spend and refusing repeated
   }
 });
 
-async function ownedClaudeFixture(agentType = 'general-purpose', nativeReplay = false) {
+async function ownedClaudeFixture(agentType = 'general-purpose', heldAgentCall = false) {
   dir = await realpath(await mkdtemp(join(tmpdir(), 'owned-model-continuation-')));
   const repo = join(dir, 'repo'),
     configDir = join(dir, 'native-config');
@@ -503,7 +503,7 @@ async function ownedClaudeFixture(agentType = 'general-purpose', nativeReplay = 
       task: 'Implement the selected change.',
       native: {
         subagent_type: agentType,
-        ...(nativeReplay
+        ...(heldAgentCall
           ? {
               prompt: 'Preserve `pnpm check` exactly.\nReturn JSON.\nFINAL LINE',
               description: 'Original description',
@@ -511,9 +511,7 @@ async function ownedClaudeFixture(agentType = 'general-purpose', nativeReplay = 
             }
           : {}),
       },
-      ...(nativeReplay
-        ? { nativeTool: 'Agent' as const, nativeReplaySupported: true as const }
-        : {}),
+      ...(heldAgentCall ? { nativeTool: 'Agent' as const } : {}),
       capAtomic: '1000000',
       decision: {},
     },
@@ -574,108 +572,23 @@ async function ownedClaudeFixture(agentType = 'general-purpose', nativeReplay = 
   };
 }
 
-it('selects a short native veto and consumes its exact expanded call once without inference or another route', async () => {
+it('runs the unchanged Agent repeat of an offer natively through capture, once, with no route or worker', async () => {
   const f = await ownedClaudeFixture('Explore', true);
-  const capture = (input: Record<string, unknown>, id = 'future-native-call') =>
+  const capture = (id: string) =>
     f.call({
       capture: {
         session_id: f.session.sessionId,
         tool_use_id: id,
         tool: 'Agent',
-        native_replay: true,
-        input,
+        input: f.job.native,
       },
     });
   try {
-    const selected = await capture({
-      prompt: `tenjin-native:${f.job.id}`,
-      description: 'Keep native',
-      subagent_type: `tenjin-native-${f.job.id}`,
-    });
-    expect(selected).toEqual({
-      action: 'native_retry',
-      offer_id: f.job.id,
-      tool: 'Agent',
-      input: f.job.native,
-    });
-    vi.stubEnv('TENJIN_MODEL_WORKER', '1');
-    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
-    vi.stubEnv('TENJIN_MODEL_WORKER', '0');
-    expect(await capture(f.job.native)).toEqual({ action: 'native' });
-    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
+    expect(await capture('repeat-call')).toEqual({ action: 'native' });
+    expect(await f.store.accept(f.job.id, f.session.sessionId, f.session.turnId)).toBeNull();
     expect(f.route).not.toHaveBeenCalled();
     expect(worker.run).not.toHaveBeenCalled();
   } finally {
-    await f.close();
-  }
-});
-
-it('refuses a selected replay before lifecycle execution after interruption or transport failure', async () => {
-  const f = await ownedClaudeFixture('general-purpose', true);
-  const capture = (input: Record<string, unknown>) =>
-    f.call({
-      capture: {
-        session_id: f.session.sessionId,
-        tool_use_id: 'future-native-call',
-        tool: 'Agent',
-        native_replay: true,
-        input,
-      },
-    });
-  try {
-    expect(
-      await capture({
-        prompt: `tenjin-native:${f.job.id}`,
-        subagent_type: `tenjin-native-${f.job.id}`,
-      }),
-    ).toMatchObject({
-      action: 'native_retry',
-    });
-    await f.model.fence(f.session);
-    f.getTransport.mockRejectedValue(new Error('offline'));
-    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
-    expect(f.route).not.toHaveBeenCalled();
-    expect(worker.run).not.toHaveBeenCalled();
-  } finally {
-    await f.close();
-  }
-});
-
-it('durably fences a saved native replay on a fresh MCP instance even when transport initialization fails', async () => {
-  const f = await ownedClaudeFixture('general-purpose', true);
-  const capture = (input: Record<string, unknown>) =>
-    f.call({
-      capture: {
-        session_id: f.session.sessionId,
-        tool_use_id: 'future-native-call',
-        tool: 'Agent',
-        native_replay: true,
-        input,
-      },
-    });
-  const freshServer = new McpServer({ name: 'offline-test', version: '1' });
-  const fresh = registerModelTool(freshServer, {
-    dataDir: dir,
-    harness: 'claude',
-    session: () => f.session,
-    transport: async () => {
-      throw new Error('offline transport');
-    },
-  });
-  try {
-    expect(
-      await capture({
-        prompt: `tenjin-native:${f.job.id}`,
-        subagent_type: `tenjin-native-${f.job.id}`,
-      }),
-    ).toMatchObject({ action: 'native_retry' });
-    await expect(fresh.fence(f.session)).rejects.toThrow('offline transport');
-    expect(await capture(f.job.native)).toMatchObject({ action: 'refused', started: false });
-    expect(f.route).not.toHaveBeenCalled();
-    expect(worker.run).not.toHaveBeenCalled();
-  } finally {
-    await fresh.shutdown();
-    await freshServer.close();
     await f.close();
   }
 });

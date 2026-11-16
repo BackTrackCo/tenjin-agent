@@ -19,7 +19,6 @@ import { ModelWorkerActivity, activityAnswer, partialHandback } from './model-wo
 import { startWorkerProgress } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
-import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
 
 type ActiveConversation = {
   handle: string;
@@ -151,7 +150,6 @@ export function registerModelTool(
             session_id: z.string(),
             tool_use_id: z.string(),
             tool: z.enum(['Agent', 'Task', 'SendMessage']).optional(),
-            native_replay: z.literal(true).optional(),
             input: z.record(z.string(), z.unknown()),
           })
           .optional(),
@@ -163,26 +161,11 @@ export function registerModelTool(
       let ownedContinuation = args.capture
         ? ownedModelReference(args.capture.input, args.capture.tool ?? 'Agent').owned
         : false;
-      let ownedRetry = args.capture
-        ? nativeRetryReference(args.capture.input, args.capture.tool ?? 'Agent').owned
-        : false;
       const unavailable = (reason: string) =>
-        answer(
-          ownedRetry
-            ? nativeRetryRefusal(reason)
-            : ownedContinuation
-              ? continuationRefusal(reason)
-              : { action: 'native', reason },
-        );
+        answer(ownedContinuation ? continuationRefusal(reason) : { action: 'native', reason });
       const session = options.session();
       const ownedSessionId = session?.sessionId;
       const ownedTurnId = session?.turnId;
-      if (args.capture)
-        ownedRetry ||= await jobs.ownsNativeReplay(
-          ownedSessionId ?? '',
-          ownedTurnId ?? '',
-          args.capture.tool_use_id,
-        );
       const currentClaudeMode = () => {
         const current = options.session();
         return current?.sessionId === ownedSessionId && current?.turnId === ownedTurnId
@@ -237,7 +220,6 @@ export function registerModelTool(
                   args.capture.input,
                   signal,
                   args.capture.tool,
-                  args.capture.native_replay === true,
                 ),
               );
             } catch {

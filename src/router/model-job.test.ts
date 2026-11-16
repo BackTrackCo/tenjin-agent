@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -9,31 +9,30 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-async function initialNativeJob() {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-native-choice-'));
+const HELD = {
+  prompt: 'Read the exact command.\nReturn JSON.\nFINAL LINE',
+  description: 'Original description',
+  model: 'sonnet',
+};
+
+async function heldAgentCall() {
+  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-repeat-'));
   const store = new ModelJobStore(dir);
-  const input = {
+  const job = await store.offer({
     sessionId: 'root',
     turnId: 'turn',
     callId: 'original-call',
-    task: 'Read the exact command.\nReturn JSON.\nFINAL LINE',
+    task: HELD.prompt,
     root: '/repo',
-    native: {
-      prompt: 'Read the exact command.\nReturn JSON.\nFINAL LINE',
-      description: 'Original description',
-      subagent_type: 'Explore',
-      model: 'sonnet',
-      max_turns: 73,
-    },
-    nativeTool: 'Agent' as const,
-    nativeReplaySupported: true as const,
-    decision: { action: 'model', routerOrigin: 'https://router.example' },
+    native: HELD,
+    nativeTool: 'Agent',
+    decision: { action: 'model' },
     capAtomic: '1000000',
-  };
-  return { store, input, job: await store.offer(input) };
+  });
+  return { store, job };
 }
 
-it('does not persist replay windows for turns with no delegation', async () => {
+it('does not persist windows for turns with no delegation', async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-model-unused-fence-'));
   const store = new ModelJobStore(dir);
   await store.fence('unused-session', 'unused-turn', 'cancelling');
@@ -41,251 +40,69 @@ it('does not persist replay windows for turns with no delegation', async () => {
   expect(await readdir(dir)).toEqual([]);
 });
 
-it('restores exactly one saved initial call and checks every native-choice owner binding', async () => {
-  const { store, input, job } = await initialNativeJob();
-  for (const [id, session, turn, root, tool] of [
-    ['00000000-0000-4000-8000-000000000001', 'root', 'turn', '/repo', 'Agent'],
-    [job.id, 'foreign', 'turn', '/repo', 'Agent'],
-    [job.id, 'root', 'foreign', '/repo', 'Agent'],
-    [job.id, 'root', 'turn', '/sibling', 'Agent'],
-    [job.id, 'root', 'turn', '/repo', 'Task'],
-  ] as const)
-    expect(await store.chooseNative(id, session, turn, root, tool, 'future-call')).toBeNull();
-  expect(
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call'),
-  ).toMatchObject({
-    state: 'native',
-    native: input.native,
-  });
-  expect(
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call'),
-  ).toBeNull();
+it('keeps a held Agent call native once when it is sent again unchanged, in a later turn too', async () => {
+  const { store, job } = await heldAgentCall();
+  // Key order, surrounding whitespace and fields at their defaults leave the call unchanged.
+  const repeat = {
+    model: 'sonnet',
+    description: ' Original description',
+    prompt: `${HELD.prompt}\n`,
+    subagent_type: 'general-purpose',
+    run_in_background: false,
+  };
+  expect(await store.nativeRepeat('root', 'later-turn', '/repo', 'Agent', repeat)).toBe(true);
+  expect(await store.nativeRepeat('root', 'later-turn', '/repo', 'Agent', repeat)).toBe(false);
+  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(false);
   expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
 });
 
-it('serializes short native selection against acceptance across stores with exactly one winner', async () => {
-  const { store, job } = await initialNativeJob();
-  const other = new ModelJobStore(dir);
-  const outcomes = await Promise.all([
-    store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call'),
-    other.accept(job.id, 'root', 'turn'),
-  ]);
-  expect(outcomes.filter(Boolean)).toHaveLength(1);
-  expect((await store.pending('root', 'turn'))?.state).toBe(outcomes[0] ? 'native' : 'running');
+it('treats a changed, foreign, other-root or other-tool call as a new call and leaves the repeat unused', async () => {
+  const { store } = await heldAgentCall();
+  for (const [session, root, tool, native] of [
+    ['root', '/repo', 'Agent', { ...HELD, prompt: HELD.prompt.replace('exact', 'whole') }],
+    ['root', '/repo', 'Agent', { ...HELD, prompt: HELD.prompt.replace('\n', '\n\n') }],
+    ['root', '/repo', 'Agent', { ...HELD, description: 'Another description' }],
+    ['root', '/repo', 'Agent', { prompt: HELD.prompt, description: HELD.description }],
+    ['root', '/repo', 'Agent', { ...HELD, subagent_type: 'Explore' }],
+    ['root', '/repo', 'Agent', { ...HELD, run_in_background: true }],
+    ['root', '/repo', 'Task', HELD],
+    ['root', '/sibling', 'Agent', HELD],
+    ['foreign', '/repo', 'Agent', HELD],
+  ] as const)
+    expect(await store.nativeRepeat(session, 'turn', root, tool, native)).toBe(false);
+  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(true);
 });
 
-it.each([false, true])(
-  'allows an exact full retry once after a failed short replay (fenced: %s)',
-  async (fenced) => {
-    const { store, input, job } = await initialNativeJob();
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call');
-    if (fenced) await store.fence('root', 'turn');
-    expect(await store.nativeRetry('root', 'turn', input.native)).toBe(false);
-    expect(await store.nativeRetry('root', 'turn', input.native, undefined, 'Task')).toBe(false);
-    expect(
-      await store.nativeRetry(
-        'root',
-        'turn',
-        { ...input.native, max_turns: 1 },
-        undefined,
-        'Agent',
-      ),
-    ).toBe(false);
-    expect(await store.nativeRetry('root', 'turn', input.native, undefined, 'Agent')).toBe(true);
-    expect(await store.nativeRetry('root', 'turn', input.native, undefined, 'Agent')).toBe(false);
-    expect(
-      await store.consumeNativeReplay(
-        'root',
-        'turn',
-        '/repo',
-        'Agent',
-        'future-call',
-        input.native,
-      ),
-    ).toBe('refused');
-    expect(await store.accept(job.id, 'root', 'turn')).toBeNull();
-  },
-);
-
-it('serializes an exact full retry against the pre-stream replay without duplicate native execution', async () => {
-  const { store, input, job } = await initialNativeJob();
-  await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call');
-  const outcomes = await Promise.all([
-    store.nativeRetry('root', 'turn', input.native, undefined, 'Agent'),
-    new ModelJobStore(dir).consumeNativeReplay(
-      'root',
-      'turn',
-      '/repo',
-      'Agent',
-      'future-call',
-      input.native,
-    ),
-  ]);
-  expect(outcomes.filter((value) => value === true || value === 'allow')).toHaveLength(1);
-  expect(
-    await store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'future-call', input.native),
-  ).toBe('refused');
-});
-
-it('permits exactly one full replay and refuses changed owner, tool or arguments without consuming it', async () => {
-  const { store, input, job } = await initialNativeJob();
-  await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call');
-  const attempts = [
-    ['foreign', 'turn', '/repo', 'Agent', input.native],
-    ['root', 'foreign', '/repo', 'Agent', input.native],
-    ['root', 'turn', '/other', 'Agent', input.native],
-    ['root', 'turn', '/repo', 'Task', input.native],
-    ['root', 'turn', '/repo', 'Agent', { ...input.native, prompt: 'truncated' }],
-    ['root', 'turn', '/repo', 'Agent', { ...input.native, max_turns: 1 }],
-  ] as const;
-  for (const [session, turn, root, tool, native] of attempts)
-    expect(await store.consumeNativeReplay(session, turn, root, tool, 'future-call', native)).toBe(
-      'refused',
-    );
-  const competing = await Promise.all([
-    store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'future-call', input.native),
-    new ModelJobStore(dir).consumeNativeReplay(
-      'root',
-      'turn',
-      '/repo',
-      'Agent',
-      'future-call',
-      input.native,
-    ),
-  ]);
-  expect(competing.sort()).toEqual(['allow', 'refused']);
-  expect(
-    await store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'unrelated', input.native),
-  ).toBe('none');
-});
-
-it.each([false, true])(
-  'keeps a selected replay one-shot after the pending window rotates (already consumed: %s)',
-  async (consumed) => {
-    const { store, input, job } = await initialNativeJob();
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'old-replay');
-    if (consumed)
-      expect(
-        await store.consumeNativeReplay(
-          'root',
-          'turn',
-          '/repo',
-          'Agent',
-          'old-replay',
-          input.native,
-        ),
-      ).toBe('allow');
-    const next = await store.offer({ ...input, callId: 'next-call' });
-    expect(
-      await store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'old-replay', input.native),
-    ).toBe(consumed ? 'refused' : 'allow');
-    expect(
-      await store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'old-replay', input.native),
-    ).toBe('refused');
-    expect(
-      await store.chooseNative(next.id, 'root', 'turn', '/repo', 'Agent', 'old-replay'),
-    ).toBeNull();
-    expect((await store.pending('root', 'turn'))?.id).toBe(next.id);
-  },
-);
-
-it('durably fences older replay tickets across window rotation and permits a fresh later choice', async () => {
-  const { store, input, job } = await initialNativeJob();
-  await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'before-cancel');
-  await store.offer({ ...input, callId: 'rotated' });
-  await store.fence('root', 'turn');
-  const restarted = new ModelJobStore(dir);
-  expect(
-    await restarted.consumeNativeReplay(
-      'root',
-      'turn',
-      '/repo',
-      'Agent',
-      'before-cancel',
-      input.native,
-    ),
-  ).toBe('refused');
-  // Legacy full retries still finish the cancelled window without a marker.
-  expect(await restarted.nativeRetry('root', 'turn', input.native)).toBe(true);
-  const next = await restarted.offer({ ...input, callId: 'fresh-after-cancel' });
-  expect(
-    await restarted.chooseNative(next.id, 'root', 'turn', '/repo', 'Agent', 'after-cancel'),
-  ).not.toBeNull();
-  expect(
-    await restarted.consumeNativeReplay(
-      'root',
-      'turn',
-      '/repo',
-      'Agent',
-      'after-cancel',
-      input.native,
-    ),
-  ).toBe('allow');
-});
-
-it('refuses changed saved arguments and missing window generations for an indexed replay', async () => {
-  const { store, input, job } = await initialNativeJob();
-  await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call');
-  const path = join(dir, 'model-jobs', `${job.id}.json`);
-  const saved = await readFile(path, 'utf8');
-  const changed = JSON.parse(saved);
-  changed.native.description = 'changed after selection';
-  await writeFile(path, JSON.stringify(changed));
-  expect(await store.nativeRetry('root', 'turn', changed.native, undefined, 'Agent')).toBe(false);
-  expect(
-    await store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'future-call', input.native),
-  ).toBe('refused');
-  await writeFile(path, saved);
-  const names = await readdir(join(dir, 'model-jobs'));
-  const windowPath = join(
-    dir,
-    'model-jobs',
-    names.find((name) => name.startsWith('window-'))!,
-  );
-  const windowState = JSON.parse(await readFile(windowPath, 'utf8'));
-  delete windowState.replayEpoch;
-  await writeFile(windowPath, JSON.stringify(windowState));
-  expect(
-    await store.consumeNativeReplay('root', 'turn', '/repo', 'Agent', 'future-call', input.native),
-  ).toBe('refused');
-});
-
-it('refuses an expired ID and an old ID after a later call owns the window', async () => {
-  const { store, input, job } = await initialNativeJob();
-  const now = Date.now();
+it('lasts for the rest of the offer turn, and in later turns only until the offer expires', async () => {
+  const { store, job } = await heldAgentCall();
   vi.spyOn(Date, 'now').mockReturnValue(job.expiresAt);
-  expect(
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call'),
-  ).toBeNull();
-  vi.spyOn(Date, 'now').mockReturnValue(now);
-  await store.accept(job.id, 'root', 'turn');
-  await store.finish(job.id, 'completed');
-  const next = await store.offer({ ...input, callId: 'next-call' });
-  expect(
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call'),
-  ).toBeNull();
-  expect(
-    await store.chooseNative(next.id, 'root', 'turn', '/repo', 'Agent', 'next-future-call'),
-  ).not.toBeNull();
+  expect(await store.nativeRepeat('root', 'later-turn', '/repo', 'Agent', HELD)).toBe(false);
+  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(true);
 });
 
 it.each([
-  { name: 'legacy unbound call', nativeTool: undefined },
-  { name: 'continuation', decision: { workerHandle: 'tenjin-worker-owned' } },
-  { name: 'resume address', native: { prompt: 'X', resume: 'tenjin-worker-owned' } },
-  { name: 'reserved tool', native: { prompt: 'X', tool: 'Bash' } },
-  { name: 'reserved call ID', native: { prompt: 'X', tool_use_id: 'old-call' } },
-  { name: 'reserved agent ID', native: { prompt: 'X', agentId: 'child' } },
-  { name: 'recursive marker', native: { prompt: 'tenjin-native:unavailable' } },
-])('never replays a $name by short ID', async ({ name: _name, ...overrides }) => {
-  const { store, input } = await initialNativeJob();
-  await store.fence('root', 'turn');
-  const other = new ModelJobStore(dir);
-  const job = await other.offer({ ...input, ...overrides, turnId: 'separate', callId: 'separate' });
-  expect(
-    await store.chooseNative(job.id, 'root', 'separate', '/repo', 'Agent', 'future-call'),
-  ).toBeNull();
+  { name: 'cancelled before acceptance', steps: ['fence'], matches: true },
+  { name: 'running', steps: ['accept'], matches: false },
+  { name: 'failed after acceptance', steps: ['accept', 'unknown'], matches: true },
+  { name: 'completed', steps: ['accept', 'completed'], matches: false },
+] as const)('repeats a $name offer natively: $matches', async ({ steps, matches }) => {
+  const { store, job } = await heldAgentCall();
+  for (const step of steps)
+    if (step === 'fence') await store.fence('root', 'turn');
+    else if (step === 'accept') await store.accept(job.id, 'root', 'turn');
+    else await store.finish(job.id, step);
+  expect(await store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD)).toBe(matches);
 });
+
+it('lets exactly one of a repeat and an acceptance win across stores', async () => {
+  const { store, job } = await heldAgentCall();
+  const outcomes = await Promise.all([
+    store.nativeRepeat('root', 'turn', '/repo', 'Agent', HELD),
+    new ModelJobStore(dir).accept(job.id, 'root', 'turn'),
+  ]);
+  expect(outcomes.filter(Boolean)).toHaveLength(1);
+});
+
 it('claims acceptance once across processes and refuses a foreign root or changed task', async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-model-jobs-'));
   const a = new ModelJobStore(dir),
@@ -303,25 +120,6 @@ it('claims acceptance once across processes and refuses a foreign root or change
   expect(await b.accept(job.id, 's2', 't1')).toBeNull();
   const claims = await Promise.all([a.accept(job.id, 's1', 't1'), b.accept(job.id, 's1', 't1')]);
   expect(claims.filter(Boolean)).toHaveLength(1);
-  expect(await a.nativeRetry('s1', 't1', { prompt: 'Read B' })).toBe(false);
-  expect(await a.nativeRetry('s1', 't1', { prompt: 'Read exactly A' })).toBe(false);
-});
-it('allows the unchanged native retry only once after an offer, and fences acceptance', async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-jobs-'));
-  const store = new ModelJobStore(dir);
-  const job = await store.offer({
-    sessionId: 's',
-    turnId: 't',
-    callId: 'c',
-    task: 'X',
-    root: '/repo',
-    native: { prompt: 'X' },
-    decision: {},
-    capAtomic: '1',
-  });
-  expect(await store.nativeRetry('s', 't', { prompt: 'X' })).toBe(true);
-  expect(await store.nativeRetry('s', 't', { prompt: 'X' })).toBe(false);
-  expect(await store.accept(job.id, 's', 't')).toBeNull();
 });
 it('binds one Codex plaintext submission and fences stale selection on interruption', async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-model-jobs-'));

@@ -135,167 +135,57 @@ async function continuationFixture(multiple = false) {
   };
 }
 
-async function nativeReplayFixture() {
+it('names one keep-native path and runs the unchanged repeat natively with no second route', async () => {
   const f = await continuationFixture();
-  const native = {
-    prompt:
-      'Read the whole fixture. Run `pnpm test -- --reporter=json`.\nReturn exactly {"ok":true}.\nFINAL LINE',
-    description: 'Original complete assignment',
+  const transcript = join(dir, 'parent.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: 'root',
+      message: { role: 'user', content: 'Read the fixture and preserve its final line.' },
+    }) + '\n',
+  );
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+  }));
+  const session = { ...f.session, transcript };
+  const held = {
+    description: 'Read the fixture',
+    prompt: 'Read the fixture.\nFINAL LINE',
     subagent_type: 'Explore',
-    model: 'sonnet',
-    max_turns: 73,
   };
-  const job = await f.model.store.offer({
-    sessionId: f.session.sessionId,
-    turnId: f.session.turnId,
-    callId: 'original-call',
-    root: f.session.cwd,
-    task: native.prompt,
-    native,
-    nativeTool: 'Agent',
-    nativeReplaySupported: true,
-    decision: f.initial.decision,
-    capAtomic: '1000000',
-  });
-  vi.mocked(qualifiedModelWorker).mockClear();
-  return { ...f, native, job };
-}
-
-it('restores the entire held native call and consumes its future call ID once without routing or qualification', async () => {
-  const f = await nativeReplayFixture();
-  const result = await f.model.capture(
-    f.session,
-    'future-call',
-    {
-      prompt: `tenjin-native:${f.job.id}`,
-      description: 'Keep native',
-      subagent_type: `tenjin-native-${f.job.id}`,
-      run_in_background: false,
-    },
+  const changed = { ...held, prompt: 'Read the whole fixture.\nFINAL LINE' };
+  const first = await f.model.capture(session, 'held-call', held);
+  expect(first).toMatchObject({ action: 'offer', parentPolicy });
+  const instruction = 'instruction' in first ? String(first.instruction) : '';
+  expect(instruction).toContain('with subagent({offer_id})');
+  expect(instruction).toContain(
+    'To keep it native, send the original Agent call again unchanged; that repeat costs no second routing fee.',
+  );
+  expect(instruction).not.toContain('tenjin-native');
+  expect(f.route.mock.calls[0]?.[0]).not.toHaveProperty('expectedSpendAtomic');
+  // The person typed while the parent worked, so its next calls land in a later turn.
+  const later = { ...session, turnId: 'typed-turn' };
+  expect(await f.model.capture(later, 'changed-call', changed)).toMatchObject({ action: 'offer' });
+  expect(await f.model.capture(later, 'repeat-call', held)).toEqual({ action: 'native' });
+  expect(await f.model.capture(later, 'changed-repeat', changed)).toEqual({ action: 'native' });
+  expect(f.route).toHaveBeenCalledTimes(2);
+  // Once per offer: the same call again is a new call, offered and routed again.
+  expect(await f.model.capture(later, 'second-repeat', held)).toMatchObject({ action: 'offer' });
+  expect(f.route).toHaveBeenCalledTimes(3);
+  const task = await f.model.capture(
+    { ...later, turnId: 'task-turn' },
+    'task-call',
+    { prompt: 'Read the task fixture.' },
     undefined,
-    'Agent',
-    true,
+    'Task',
   );
-  expect(result).toEqual({
-    action: 'native_retry',
-    offer_id: f.job.id,
-    tool: 'Agent',
-    input: f.native,
-  });
-  expect(
-    await f.model.capture(
-      f.session,
-      'future-call',
-      { ...f.native, run_in_background: false },
-      undefined,
-      'Agent',
-      true,
-    ),
-  ).toMatchObject({ action: 'refused', started: false });
-  expect(
-    await f.model.capture(
-      f.session,
-      'future-call',
-      { ...f.native, prompt: 'truncated' },
-      undefined,
-      'Agent',
-      true,
-    ),
-  ).toMatchObject({ action: 'refused', started: false });
-  expect(
-    await f.model.capture(
-      f.session,
-      'future-call',
-      { ...f.native, subagent_type: 'general-purpose' },
-      undefined,
-      'Agent',
-      true,
-    ),
-  ).toMatchObject({ action: 'refused', started: false });
-  expect(
-    await f.model.capture(f.session, 'future-call', f.native, undefined, 'Agent', true),
-  ).toEqual({ action: 'native' });
-  expect(
-    await f.model.capture(f.session, 'future-call', f.native, undefined, 'Agent', true),
-  ).toMatchObject({ action: 'refused', started: false });
-  expect(f.route).not.toHaveBeenCalled();
-  expect(qualifiedModelWorker).not.toHaveBeenCalled();
-});
-
-it('refuses an initial marker from an old hook, another owner, wrong tool or revoked consent before selecting', async () => {
-  const f = await nativeReplayFixture();
-  const marker = {
-    prompt: `tenjin-native:${f.job.id}`,
-    subagent_type: `tenjin-native-${f.job.id}`,
-  };
-  for (const [session, tool, supported] of [
-    [f.session, 'Agent', false],
-    [{ ...f.session, sessionId: 'foreign' }, 'Agent', true],
-    [{ ...f.session, turnId: 'foreign' }, 'Agent', true],
-    [{ ...f.session, harness: 'codex' }, 'Agent', true],
-    [{ ...f.session, claudePermissionMode: undefined }, 'Agent', true],
-    [f.session, 'Task', true],
-  ] as const)
-    expect(
-      await f.model.capture(session, 'future-call', marker, undefined, tool, supported),
-    ).toMatchObject({ action: 'refused', started: false });
-  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
-  config.router.subagents = false;
-  await writeFile(join(dir, 'config.json'), JSON.stringify(config));
-  expect(
-    await f.model.capture(f.session, 'future-call', marker, undefined, 'Agent', true),
-  ).toMatchObject({ action: 'refused', started: false });
-  expect((await f.model.store.pending(f.session.sessionId, f.session.turnId))?.state).toBe(
-    'offered',
+  expect('instruction' in task ? task.instruction : '').toContain(
+    'send the original Task call again unchanged',
   );
-  expect(f.route).not.toHaveBeenCalled();
-  expect(qualifiedModelWorker).not.toHaveBeenCalled();
 });
-
-it.each([
-  { tool: 'Agent' as const, supported: false, advertised: false },
-  { tool: 'Agent' as const, supported: true, advertised: true },
-  { tool: 'Task' as const, supported: true, advertised: false },
-])(
-  'advertises the native shortcut only to a capable qualified host while preserving the full parent policy: %j',
-  async ({ tool, supported, advertised }) => {
-    const f = await continuationFixture();
-    const transcript = join(dir, 'parent.jsonl');
-    await writeFile(
-      transcript,
-      JSON.stringify({
-        type: 'user',
-        sessionId: 'root',
-        message: { role: 'user', content: 'Read the fixture and preserve its final line.' },
-      }) + '\n',
-    );
-    f.route.mockImplementation(async (input: { jobId: string }) => ({
-      ...offer,
-      jobId: input.jobId,
-    }));
-    const result = await f.model.capture(
-      { ...f.session, transcript },
-      'initial-call',
-      { prompt: 'Read the fixture.\nFINAL LINE', subagent_type: 'Explore' },
-      undefined,
-      tool,
-      supported,
-    );
-    expect(result).toMatchObject({ action: 'offer', parentPolicy });
-    const instruction =
-      result && 'instruction' in result && typeof result.instruction === 'string'
-        ? result.instruction
-        : '';
-    expect(instruction).toContain('You retain the final veto.');
-    expect(instruction.includes('tenjin-native:')).toBe(advertised);
-    if (advertised)
-      expect(instruction).toContain(
-        'call Agent({"description":"Keep native","prompt":"tenjin-native:',
-      );
-    expect(f.route).toHaveBeenCalledTimes(1);
-    expect(f.route.mock.calls[0]?.[0]).not.toHaveProperty('expectedSpendAtomic');
-  },
-);
 
 it('keeps native tool guidance aligned with the complete Codex resubmission brief', async () => {
   const hook = await readFile(
