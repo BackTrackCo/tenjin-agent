@@ -7,11 +7,6 @@ import {
   rememberModelOffer,
   translateViewerContinuation,
 } from './model-viewer';
-import {
-  blockedNativeRetry,
-  expandedNativeRetry,
-  nativeRetryReference,
-} from './model-native-retry';
 
 /**
  * THE TENJIN MOD: one line per paid lookup, drawn from documented props only.
@@ -115,16 +110,6 @@ export const register: Register = (on) => {
   on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async ($, e, next) => {
     const { tool_use_id, ...raw } = e;
     delete (raw as Json).tool;
-    if (nativeRetryReference(raw, e.tool).owned || (await blockedNativeRetry($, tool_use_id)))
-      return {
-        result: heldModelResult(
-          e.tool,
-          raw,
-          'Tenjin native retry is unavailable. No native child started. Do not execute the retry marker as an assignment.',
-          'tenjin-unavailable',
-        ),
-      };
-    const replay = await expandedNativeRetry($, tool_use_id);
     const translated = await translateViewerContinuation($, e.tool, raw);
     const input = translated.input;
     const owned = translated.owned || ownedContinuationAddress(input, e.tool);
@@ -132,45 +117,27 @@ export const register: Register = (on) => {
       result: heldModelResult(
         e.tool,
         input,
-        replay
-          ? 'Tenjin native retry is unavailable. No native child started.'
-          : 'Tenjin continuation is unavailable. No continuation started. Do not retry this owned handle through native tools.',
+        'Tenjin continuation is unavailable. No continuation started. Do not retry this owned handle through native tools.',
         'tenjin-unavailable',
       ),
     });
     if (translated.unavailable) return unavailable();
-    if (e.tool === 'SendMessage' && !owned && !replay) return next(e);
+    if (e.tool === 'SendMessage' && !owned) return next(e);
     try {
       const data = await tenjinDataDir($);
       const router = data
         ? asRecord((await readJson($, `${data}/config.json`))?.router)
         : undefined;
-      if (
-        !replay &&
-        (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
-      )
+      if (router?.subagents !== true || (await $.env.get('TENJIN_MODEL_WORKER')) === '1')
         return owned ? unavailable() : next(e);
+      // A held call is never rewritten: the parent keeps it native by sending it
+      // again unchanged, and that repeat runs here as it was reviewed.
       const response = await $.tool.call({
         tool: 'mcp__plugin_tenjin_router__subagent',
-        capture: {
-          session_id: await $.session.id(),
-          tool_use_id,
-          input,
-          tool: e.tool,
-          ...(e.tool === 'Agent' &&
-          !owned &&
-          input.agentId === undefined &&
-          input.resume === undefined
-            ? { native_replay: true }
-            : {}),
-        },
+        capture: { session_id: await $.session.id(), tool_use_id, input, tool: e.tool },
       });
       const text = textOf(response.result) ?? response.text;
       const offer = asRecord(parseJson(text));
-      if (replay)
-        return offer?.action === 'native' && Object.keys(offer).length === 1
-          ? next(e)
-          : unavailable();
       if (
         offer?.action === 'refused' &&
         offer.started === false &&
@@ -217,15 +184,7 @@ export const register: Register = (on) => {
     } catch {
       /* An owned handle must never reach a native executor, including on local failure. */
     }
-    return owned || replay ? unavailable() : next(e);
-  }).catch(async ($, e, next) => {
-    if (
-      nativeRetryReference(e as Json, e.tool).owned ||
-      (await blockedNativeRetry($, e.tool_use_id)) ||
-      (await expandedNativeRetry($, e.tool_use_id))
-    )
-      return { deny: 'Tenjin native retry is unavailable. No native child started.' };
-    return next(e);
+    return owned ? unavailable() : next(e);
   });
 
   on('tool.call', { tool: REQUEST_TOOL }, async ($, e, next) => {

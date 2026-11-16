@@ -1,4 +1,4 @@
-import type { On } from 'claude-code';
+import type { On, TurnStepChunk, TurnStepResult } from 'claude-code';
 import { expect, test } from 'claude-code/testing';
 import { DATA, OFFER, SESSION, SURFACES, machine, shownLines } from './fixtures';
 
@@ -55,7 +55,6 @@ test('a real action offer holds Agent and reaches the parent without a legacy st
       tool_use_id: 'agent_offer',
       input: ASSIGNMENT,
       tool: 'Agent',
-      native_replay: true,
     },
   ]);
   expect(ran).toEqual([]);
@@ -315,43 +314,80 @@ test('a validated local refusal preserves its actionable reason without native f
   expect(ran).toEqual([]);
 });
 
-test('a durable replay refusal holds a full native call even without a local observation of its id', async ($, on) => {
+test('the unchanged repeat of an offered Agent call runs natively exactly as the parent sent it', async ($, on) => {
   const { files } = machine(on);
   enabled(files);
-  // A fresh mod has no marker or expanded-ID observation. Only the local backend's
-  // durable replay index knows this complete call ID was already consumed.
-  const refusal = {
-    action: 'refused',
-    started: false,
-    reason: 'Native replay changed, expired, foreign, interrupted or already used',
-    instruction: 'No native retry started. Use the complete original native call if appropriate.',
-  };
-  const captured: unknown[] = [];
+  const asked: unknown[] = [];
   on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
-    captured.push(e.capture);
-    return { result: JSON.stringify(refusal) };
+    asked.push(e.capture);
+    const reply = asked.length === 1 ? offered : '{"action":"native"}';
+    return { result: reply, text: reply };
   });
-  const ran = native(on);
-  const result = await $.tool.call({
-    tool: 'Agent',
-    tool_use_id: 'persisted_replay_after_mod_reload',
-    ...ASSIGNMENT,
+  const ran: Record<string, unknown>[] = [];
+  on('tool.call', { tool: ['Agent', 'Task', 'SendMessage'] }, async (_$, e) => {
+    ran.push(e);
+    return { result: 'native child result' as never };
   });
-  expect(captured).toEqual([
-    {
+  const held = await $.tool.call({ tool: 'Agent', tool_use_id: 'offered_call', ...ASSIGNMENT });
+  expect(held.result).toMatchObject({ agentId: `tenjin-offer-${OFFER}` });
+  const repeat = await $.tool.call({ tool: 'Agent', tool_use_id: 'repeat_call', ...ASSIGNMENT });
+  expect(repeat.result).toBe('native child result');
+  expect(asked).toEqual(
+    ['offered_call', 'repeat_call'].map((tool_use_id) => ({
       session_id: SESSION,
-      tool_use_id: 'persisted_replay_after_mod_reload',
+      tool_use_id,
       input: ASSIGNMENT,
       tool: 'Agent',
-      native_replay: true,
-    },
-  ]);
-  expect(result.result).toMatchObject({
-    status: 'completed',
-    content: [{ type: 'text', text: JSON.stringify(refusal) }],
-    canContinueAgent: false,
+    })),
+  );
+  expect(ran).toHaveLength(1);
+  const { tool, tool_use_id, ...input } = ran[0]!;
+  expect({ tool, tool_use_id, input }).toEqual({
+    tool: 'Agent',
+    tool_use_id: 'repeat_call',
+    input: ASSIGNMENT,
   });
-  expect(ran).toEqual([]);
+});
+
+test('the main loop step reaches the engine unrewritten, so auto mode reviews the call that runs', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  const asked: unknown[] = [];
+  on('tool.call', { tool: SUBAGENT }, async (_$, e) => {
+    asked.push(e.capture);
+    return { result: '{"action":"native"}' };
+  });
+  // A keep-native marker from an older offer is now an ordinary call: nothing expands it.
+  const marker = {
+    description: 'Keep native',
+    prompt: `tenjin-native:${OFFER}`,
+    subagent_type: `tenjin-native-${OFFER}`,
+  };
+  const json = JSON.stringify(marker);
+  const chunks: TurnStepChunk[] = [
+    { kind: 'tool', index: 0, id: 'marker_call', name: 'Agent' },
+    { kind: 'input', index: 0, json: json.slice(0, 20) },
+    { kind: 'input', index: 0, json: json.slice(20) },
+    { kind: 'stop', stopReason: 'tool_use', usage: null },
+  ];
+  on('turn.step', async function* (_$, e): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+    for (const chunk of chunks) yield chunk;
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [{ name: 'Agent', input: marker }],
+      stopReason: 'tool_use',
+      usage: null,
+    };
+  });
+  const stream = $.turn.step({ turnId: 'main-turn', index: 0, model: 'inherit', messageCount: 0 });
+  const seen: TurnStepChunk[] = [];
+  let item = await stream.next();
+  for (; !item.done; item = await stream.next()) seen.push(item.value);
+  expect(seen).toEqual(chunks);
+  expect(item.value.toolUses).toEqual([{ name: 'Agent', input: marker }]);
+  expect(asked).toEqual([]);
 });
 
 test('ordinary native addresses and mentions in message text retain native behavior', async ($, on) => {
