@@ -1111,6 +1111,85 @@ describe('a poll the seller answers with a sign-in challenge', () => {
     expect(opened).not.toContain(other.address);
     expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'done' });
   });
+
+  /** Two takes of MONID, each its own run, polled by URL: `blockedRuns`
+   *  answer the sign-in challenge, the rest are still running. Each poll
+   *  switches this machine to another wallet, after both submits were paid
+   *  by `payer`. */
+  function twoTakes(blockedRuns: string[]) {
+    const counted = { ...MONID, takes: { max: 5 } };
+    let submitted = 0;
+    const { fetchImpl } = submit(counted, () => {
+      submitted += 1;
+      const url = `https://x402.monid.ai/v1/runs/R${submitted}`;
+      return json(202, { runId: `R${submitted}`, status: 'RUNNING', pollUrl: url });
+    });
+    const payer = testSigner();
+    const other = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`));
+    let current = payer;
+    const run = deps(fetchImpl, async (target, request, signal) => {
+      current = other;
+      const url = target.url.toString();
+      const answer: Answer = blockedRuns.includes(url.split('/').pop()!)
+        ? {
+            status: 402,
+            body: {},
+            headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(url).header },
+          }
+        : { status: 200, body: { status: 'RUNNING' } };
+      return polls([answer]).transport(target, request, signal);
+    });
+    run.payDeps.provider = {
+      ...testWalletProvider(),
+      describe: () => testWalletProvider(current).describe(),
+      getSigner: async () => current,
+    };
+    return { counted, run, payer };
+  }
+
+  // Two takes that both need the wallet that paid, after a switch: each take
+  // said so, but the set answered no error and told the agent to poll again,
+  // which cannot move either of them.
+  it('answers a set whose every running take needs the wallet that paid as that error', async () => {
+    const { counted, run, payer } = twoTakes(['R1', 'R2']);
+    await storeSpecs(dir, [counted]);
+    for (const result of [
+      await runRequestTool({ id: ID, input: INPUT, count: 2 }, run),
+      await runRequestTool({ job: ID }, run),
+    ]) {
+      expect(result.isError).toBe(true);
+      expect(result.envelope).toMatchObject({
+        status: 'running',
+        job: ID,
+        reasonCode: 'sign_in_wallet',
+      });
+      const nextStep = String(result.envelope.nextStep);
+      expect(nextStep).toContain(`paid by the wallet ${payer.address}`);
+      expect(nextStep).toContain(`request({job: "${ID}"})`);
+      expect(nextStep).not.toContain('in a minute or two');
+      expect(result.summary).toContain(nextStep);
+    }
+  });
+
+  // A take that can still finish keeps its poll line beside the wallet line.
+  it('keeps polling guidance for a take that can move, and names the wallet for one that cannot', async () => {
+    const { counted, run, payer } = twoTakes(['R1']);
+    await storeSpecs(dir, [counted]);
+    const result = await runRequestTool({ id: ID, input: INPUT, count: 2 }, run);
+    expect(result.isError).toBe(false);
+    expect(result.envelope).toMatchObject({ status: 'running', job: ID });
+    expect(result.envelope).not.toHaveProperty('reasonCode');
+    const results = result.envelope.results as Record<string, unknown>[];
+    const blocked = results.filter((take) => take.reasonCode === 'sign_in_wallet');
+    expect(blocked).toHaveLength(1);
+    const nextStep = String(result.envelope.nextStep);
+    expect(nextStep).toContain(
+      `Call request({job: "${ID}"}) in a minute or two for what is still running`,
+    );
+    expect(nextStep).toContain(
+      `take ${String(blocked[0]!.take)} was paid by the wallet ${payer.address}`,
+    );
+  });
 });
 
 describe("AiSpace's queue, polled free with the queue id", () => {
