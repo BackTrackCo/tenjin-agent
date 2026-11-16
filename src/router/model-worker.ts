@@ -65,9 +65,11 @@ import {
 } from './worker-github';
 import { envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
 import {
+  ModelWorkerStopped,
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
+  workerStartupMs,
   WORKER_EMERGENCY_TURNS,
 } from './model-worker-control';
 
@@ -132,6 +134,8 @@ export async function runModelWorker(
     claudePermissionMode?: ClaudeWorkerPermissionMode;
     currentClaudePermissionMode?: () => unknown;
     claudeSession?: ClaudeWorkerSession;
+    /** Tests only: the start-up window, which otherwise matches native Claude Code's. */
+    startupMs?: number;
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
@@ -304,11 +308,16 @@ async function runQualifiedWorker(
   }
   const denyInitialization = () => initialized(false);
   controller.signal.addEventListener('abort', denyInitialization, { once: true });
-  const initTimer = setTimeout(() => {
-    initialized(false);
-    controller.abort(new Error('Native Claude permission mode initialization timed out'));
-    worker?.close();
-  }, 10_000);
+  // The native allowance (MCP_TIMEOUT, 30 s by default), not a fixed 10 s: a loaded
+  // machine starts Claude Code slowly, and a missed start leaves the routing fee paid.
+  const initTimer = setTimeout(
+    () => {
+      initialized(false);
+      controller.abort(new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' }));
+      worker?.close();
+    },
+    options.startupMs ?? workerStartupMs(process.env),
+  );
   initTimer.unref();
   const bridge = createServer((req, res) => {
     const handle = async () => {
@@ -796,6 +805,9 @@ async function runQualifiedWorker(
     envFiles.close();
   }
   if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
+  // A child that never started reports that, whatever the SDK threw on the way out.
+  const stopped = controller.signal.reason;
+  if (stopped instanceof ModelWorkerStopped && stopped.stop.kind === 'not_started') throw stopped;
   if (executionFailure) throw executionFailure.error;
   return redactAll(result!);
 }

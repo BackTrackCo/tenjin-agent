@@ -4,8 +4,18 @@ import {
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
+  workerStartupMs,
   workerStop,
 } from './model-worker-control';
+
+it("gives the worker's Claude Code the start-up time native Claude Code gives an MCP server", () => {
+  expect(workerStartupMs({})).toBe(30_000);
+  expect(workerStartupMs({ MCP_TIMEOUT: '90000' })).toBe(90_000);
+  for (const invalid of ['0', '-5', 'soon', '1.5'])
+    expect(workerStartupMs({ MCP_TIMEOUT: invalid })).toBe(30_000);
+  // Never past the job's own wall time: the window is part of it.
+  expect(workerStartupMs({ MCP_TIMEOUT: String(10 ** 9) })).toBe(40 * 60 * 1000);
+});
 
 afterEach(() => vi.useRealTimers());
 

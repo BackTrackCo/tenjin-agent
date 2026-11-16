@@ -571,16 +571,24 @@ export function registerModelTool(
               );
               // What the stopped worker already did, so a retry starts from it.
               const partial = partialHandback(activity?.snapshot());
+              const stop = workerStop(error);
+              // Claude Code did not start in its window: nothing ran, no inference was bought,
+              // and the unchanged repeat of the offered call runs native with no second fee.
+              const notStarted = !abort.signal.aborted && stop?.kind === 'not_started';
               return answer({
-                status: abort.signal.aborted ? 'cancelled' : 'unknown',
-                stopReason: workerStop(error),
+                status: abort.signal.aborted ? 'cancelled' : notStarted ? 'not_started' : 'unknown',
+                stopReason: stop,
                 elapsedMs: Date.now() - started,
                 ...counts(),
                 spend,
                 ...(partial ? { partial } : {}),
-                nextStep: activeConversation
-                  ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
-                  : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
+                // An initial offer's held call has a free repeat; a continuation has none.
+                nextStep:
+                  notStarted && executionJob.nativeTool
+                    ? `No worker started: Claude Code did not start within its start-up window. Keep it native: send the original ${executionJob.nativeTool} call again unchanged; that repeat costs no second routing fee.`
+                    : activeConversation
+                      ? 'Inspect pending invocation receipts; do not rebuy an uncertain turn. This owned conversation is fenced. Do not pass its handle to native tools; explicitly create a fresh native assignment with the needed context if required.'
+                      : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
               });
             } finally {
               // Not awaited: removing a display file never delays the handback.

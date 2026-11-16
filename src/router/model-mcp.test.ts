@@ -1143,6 +1143,23 @@ it('reports native tool-use and token counts and keeps the live file only while 
   }
 });
 
+it('hands back a worker that never started as not started, with the free native repeat next', async () => {
+  const f = await ownedClaudeFixture('general-purpose', true);
+  worker.run.mockRejectedValue(
+    new ModelWorkerStopped({ kind: 'not_started', reason: 'startup_timeout' }),
+  );
+  try {
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+      status: 'not_started',
+      stopReason: { kind: 'not_started', reason: 'startup_timeout' },
+      nextStep:
+        'No worker started: Claude Code did not start within its start-up window. Keep it native: send the original Agent call again unchanged; that repeat costs no second routing fee.',
+    });
+  } finally {
+    await f.close();
+  }
+});
+
 it("hands a stopped worker's counts back beside its partial work", async () => {
   const f = await ownedClaudeFixture();
   worker.run.mockImplementation(async (_job, options) => {

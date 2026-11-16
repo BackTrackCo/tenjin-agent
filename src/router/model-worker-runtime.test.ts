@@ -813,8 +813,28 @@ it("reads its working directories' env files natively, and only their placeholde
   }
 });
 
+it('ends a worker whose Claude Code never starts in its window as not started', async () => {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        // A child that never answers: no initialize response, no init message.
+        async *[Symbol.asyncIterator]() {
+          yield await new Promise<never>(() => undefined);
+        },
+        accountInfo: () => new Promise(() => undefined),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      }) as unknown as ReturnType<typeof query>,
+  );
+  const error = await runModelWorker(job, { ...options(), startupMs: 20 }).catch(
+    (caught: unknown) => caught,
+  );
+  expect(workerStop(error)).toEqual({ kind: 'not_started', reason: 'startup_timeout' });
+  expect(native.close).toHaveBeenCalled();
+});
+
 it('finishes GitHub setup before the native initialization window starts', async () => {
-  // gh auth token can wait on the keychain; it must not eat the 10 s window for init.
+  // gh auth token can wait on the keychain; it must not eat the start-up window.
   vi.useFakeTimers();
   try {
     let release!: () => void;
@@ -833,7 +853,8 @@ it('finishes GitHub setup before the native initialization window starts', async
     );
     sdkResult({ subtype: 'success', result: 'done' });
     const run = runModelWorker(job, options());
-    await vi.advanceTimersByTimeAsync(11_000);
+    // Longer than the whole 30 s window: setup time is not taken from it.
+    await vi.advanceTimersByTimeAsync(31_000);
     release();
     await expect(run).resolves.toBe('done');
     expect(native.githubClose).toHaveBeenCalledOnce();
