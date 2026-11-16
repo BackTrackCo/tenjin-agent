@@ -1093,6 +1093,32 @@ it('fences and drains a running Claude continuation before refusing duplicate ac
   }
 });
 
+it('cancels a running Claude worker by its offer after a later parent prompt changed the turn', async () => {
+  const f = await ownedClaudeFixture();
+  let started!: () => void;
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  worker.run.mockImplementation(async (_job, options) => {
+    started();
+    await new Promise<void>((resolve) =>
+      options.signal.addEventListener('abort', () => resolve(), { once: true }),
+    );
+    throw new Error('cancelled');
+  });
+  try {
+    const running = f.call({ offer_id: f.job.id });
+    await began;
+    f.session.turnId = 'later-turn';
+    expect(await f.call({ cancel: randomUUID() })).toEqual({ status: 'not_owned' });
+    expect(await f.call({ cancel: f.job.id })).toEqual({ status: 'cancelled' });
+    expect((await running).status).toBe('cancelled');
+    expect((await f.store.pending('root', 'first-turn'))?.state).toBe('cancelled');
+  } finally {
+    await f.close();
+  }
+});
+
 it('reports native tool-use and token counts and keeps the live file only while the worker runs', async () => {
   const f = await ownedClaudeFixture();
   const path = workerProgressPath(dir, 'root', f.job.id);

@@ -43,7 +43,13 @@ export function registerModelTool(
   const lifecycle = new ModelLifecycle();
   const controllers = new Map<
     string,
-    { abort: AbortController; done: Promise<unknown>; conversation?: ActiveConversation }
+    {
+      abort: AbortController;
+      done: Promise<unknown>;
+      /** The session and turn the job was accepted in: a later parent turn still cancels it. */
+      session: ModelSession;
+      conversation?: ActiveConversation;
+    }
   >();
   const views = new ModelWorkerViews();
   const jobs = new ModelJobStore(options.dataDir);
@@ -185,9 +191,12 @@ export function registerModelTool(
       )
         return unavailable('Use one subagent operation');
       if (args.cancel) {
-        const pending = await (await getHandoff()).store.pending(session.sessionId, session.turnId);
+        // A worker outlives the parent turn that accepted it, so it is found by its own turn.
+        const running = controllers.get(args.cancel)?.session;
+        const owned = running?.sessionId === session.sessionId ? running : session;
+        const pending = await (await getHandoff()).store.pending(owned.sessionId, owned.turnId);
         if (pending?.id !== args.cancel) return answer({ status: 'not_owned' });
-        await fence(session);
+        await fence(owned);
         return answer({ status: 'cancelled' });
       }
       if (args.offer_id && options.harness === 'claude') {
@@ -601,6 +610,7 @@ export function registerModelTool(
           controllers.set(job.id, {
             abort,
             done,
+            session: { ...session, sessionId: job.sessionId, turnId: job.turnId },
             ...(activeConversation ? { conversation: activeConversation } : {}),
           });
           return done;
