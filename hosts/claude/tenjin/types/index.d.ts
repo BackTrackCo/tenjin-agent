@@ -55,12 +55,36 @@ export type TenjinModelActivity = {
     outputPreview?: string;
     elapsedSeconds?: number;
   }[];
+  /** Tool calls the worker made, as a native subagent row counts them. */
+  toolUses?: number;
+  /** The latest worker turn's tokens, as a native subagent row counts them. */
+  tokens?: number;
+  /** While running, what has settled so far; once ended, the final accounting. */
   spend?: { reservedAtomic: string; actualAtomic: string; uncertain: string[] };
+};
+
+/** One accept call's live row, kept by its offer id while the worker runs. Display only. */
+export type TenjinModelWorker = {
+  offerId: string;
+  /** The held Agent call's description, cleaned. */
+  title: string;
+  /** When the accept call started, on the plugin's clock. */
+  startedAt: number;
+  elapsedMs: number;
+  state: TenjinModelActivity['state'];
+  toolUses?: number;
+  tokens?: number;
+  /** Settled so far, in atomic USDC; never a quote. */
+  spentAtomic?: string;
+  /** The worker's latest step, as a native row names it: `Read(src/a.ts)`. */
+  current?: string;
 };
 
 export type TenjinModelViewerRecord = {
   offerId: string;
   ordinal: number;
+  /** The held Agent call's description, cleaned, for the live row. */
+  title?: string;
   description: string;
   profile: 'general-purpose' | 'Explore';
   active: boolean;
@@ -97,6 +121,8 @@ declare module 'claude-code' {
       /** Start time of the latest root turn, used to reject an older offer. */
       lastTurnStart: number;
       modelViewers: TenjinModelViewerState;
+      /** By offer id: an accept call's live row while its worker runs. */
+      modelWorkers: StateFamily<TenjinModelWorker>;
     };
   }
 }

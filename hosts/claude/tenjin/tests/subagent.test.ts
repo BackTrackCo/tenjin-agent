@@ -1,6 +1,6 @@
 import type { On } from 'claude-code';
 import { expect, test } from 'claude-code/testing';
-import { DATA, OFFER, SESSION, machine } from './fixtures';
+import { DATA, OFFER, SESSION, SURFACES, machine, shownLines } from './fixtures';
 
 const SUBAGENT = 'mcp__plugin_tenjin_router__subagent';
 const WORKER = 'tenjin-worker-f30fcbad-15d3-4515-86d5-5856048032bf';
@@ -375,4 +375,88 @@ test('ordinary native addresses and mentions in message text retain native behav
   expect(asked).toEqual([
     { session_id: SESSION, tool_use_id: 'native_resume', input, tool: 'Agent' },
   ]);
+});
+
+test('a held Agent call draws as the offer it is, never as a finished subagent with zero counts', async ($, on) => {
+  const { files } = machine(on);
+  enabled(files);
+  let answer: unknown = offered;
+  on('tool.call', { tool: SUBAGENT }, async () => ({ result: answer as string }));
+  native(on);
+  on('ui.render', { component: 'ToolUse' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine row'] }),
+  );
+  on('ui.render', { component: 'ToolResult' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine result'] }),
+  );
+  const offer = (await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_offer', ...ASSIGNMENT }))
+    .result;
+  answer = JSON.stringify({
+    action: 'refused',
+    started: false,
+    reason: 'Original accounting is missing.',
+    instruction: 'No worker started.',
+  });
+  const refused = (await $.tool.call({ tool: 'Agent', tool_use_id: 'agent_held', ...ASSIGNMENT }))
+    .result;
+  const row = (id: string, output: unknown) => ({
+    tool_use_id: id,
+    tool: 'Agent',
+    input: ASSIGNMENT,
+    isRunning: false,
+    isErrored: false,
+    isInterrupted: false,
+    output,
+  });
+  for (const surface of SURFACES) {
+    for (const [props, shown] of [
+      [
+        row('agent_offer', offer),
+        '⏺Agent(Read the selected file) · Tenjin offered DeepSeek · cap $1.00',
+      ],
+      [row('agent_held', refused), '⏺Agent(Read the selected file) · Tenjin held it · not started'],
+    ] as const) {
+      const drawn = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props });
+      const lines = (await shownLines(drawn)).join('');
+      expect(lines).toBe(shown);
+      expect(lines).not.toMatch(/Done|tool uses|tokens/);
+      await drawn.unmount();
+      const result = {
+        tool_use_id: props.tool_use_id,
+        tool: 'Agent',
+        output: props.output,
+        isErrored: false,
+      };
+      const compact = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'ToolResult',
+        props: result,
+      });
+      expect(await shownLines(compact)).toEqual([]);
+      await compact.unmount();
+      const full = await $.ui.mount({
+        plugin: 'tenjin',
+        surface,
+        component: 'ToolResult',
+        props: { ...result, isExpanded: true },
+      });
+      expect(await shownLines(full)).toEqual(['engine result']);
+      await full.unmount();
+    }
+    // A subagent that really ran keeps the engine's own row and result.
+    const ran = row('native_agent', {
+      ...(offer as Record<string, unknown>),
+      agentId: 'a1b2c3',
+      totalToolUseCount: 4,
+    });
+    const nativeRow = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: ran,
+    });
+    expect(await shownLines(nativeRow)).toEqual(['engine row']);
+    await nativeRow.unmount();
+  }
 });

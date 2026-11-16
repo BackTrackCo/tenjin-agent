@@ -6,12 +6,18 @@ import type {
   TurnStepResult,
 } from 'claude-code';
 import { update } from 'claude-code';
-import { asRecord as record, subagentsEnabled as enabled } from './hook-data';
+import {
+  asRecord as record,
+  subagentsEnabled as enabled,
+  tenjinDataDir,
+  textOf,
+} from './hook-data';
 import { clearNativeRetries, normalizeNativeRetry } from './model-native-retry';
 import type {
   TenjinModelActivity,
   TenjinModelViewerRecord,
   TenjinModelViewerState,
+  TenjinModelWorker,
 } from '../types';
 
 // Source candidate: the production native ordering, permissions and Remote Control gate is separate.
@@ -20,6 +26,17 @@ const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
 const SERVER = 'plugin:tenjin:router';
 const LIVE_MESSAGE = 'DeepSeek worker activity\n';
 const STATE = { plugin: 'tenjin', key: 'modelViewers' } as const;
+const WORKERS = { plugin: 'tenjin', key: 'modelWorkers' } as const;
+/** How often a running worker's row reads its activity file and its clock moves. */
+const POLL_MS = 1000;
+/** How long retirement waits for a viewer still starting, so it binds first. */
+const SPAWN_WAIT_MS = 10_000;
+/**
+ * Offers whose accept call is in flight in this module, newest last: the
+ * spinner names the worker's step while one runs. A reload forgets them, and
+ * the spinner is then the engine's own until the next accept.
+ */
+const liveWorkers = new Set<string>();
 const ALIASES = 'deepseek-viewer-alias-v1:';
 const SERIAL = 'deepseek-viewer-serial-v1';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -152,12 +169,26 @@ async function retireViewer($: Dollar, binding: ViewerBinding): Promise<void> {
     return state;
   });
 }
+async function hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 async function aliasKey(nativeId: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(nativeId));
-  return (
-    ALIASES +
-    Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
-  );
+  return ALIASES + (await hex(nativeId));
+}
+/** The held Agent call's description as a row may show it: never a secret, URL or address. */
+function titleOf(input: Json | undefined, fallback: string): string {
+  const raw = typeof input?.description === 'string' ? input.description : fallback;
+  return /secret|password|token|api.key|bearer|https?:|0x[0-9a-f]{32}/i.test(raw)
+    ? fallback
+    : clean(raw, 64) || fallback;
+}
+/** Where the CLI keeps a running worker's display activity (`model-worker-progress.ts`). */
+async function progressPath($: Dollar, offerId: string): Promise<string | undefined> {
+  const data = await tenjinDataDir($);
+  if (!data) return undefined;
+  const session = await $.session.id();
+  return `${data}/progress/model-workers/${await hex(session)}-${await hex(offerId)}.json`;
 }
 async function readAlias($: Dollar, nativeId: unknown): Promise<Alias | undefined> {
   if (!short(nativeId)) return;
@@ -206,11 +237,7 @@ export async function rememberModelOffer(
     const profile = nativeInput.subagent_type ?? 'general-purpose';
     if (profile !== 'general-purpose' && profile !== 'Explore') return;
     const priorSerial = await serial($);
-    const rawTitle =
-      typeof nativeInput.description === 'string' ? nativeInput.description : profile;
-    const title = /secret|password|token|api.key|bearer|https?:|0x[0-9a-f]{32}/i.test(rawTitle)
-      ? profile
-      : clean(rawTitle, 64);
+    const title = titleOf(nativeInput, profile);
     await registerType($);
     const current = await change($, (state) => {
       if (state.records.some((r) => r.offerId === offerId)) return;
@@ -226,6 +253,7 @@ export async function rememberModelOffer(
         offerId,
         ordinal,
         profile,
+        title,
         description: 'DeepSeek #' + ordinal + ' · ' + title,
         active: false,
       });
@@ -305,6 +333,12 @@ function activityOf(response: unknown, offerId: string): TenjinModelActivity | u
         ? Number(a.droppedRows)
         : 0) + (Array.isArray(a.rows) ? Math.max(0, a.rows.length - 24) : 0),
     rows,
+    ...(Number.isSafeInteger(a.toolUses) && Number(a.toolUses) >= 0
+      ? { toolUses: Number(a.toolUses) }
+      : {}),
+    ...(Number.isSafeInteger(a.tokens) && Number(a.tokens) >= 0
+      ? { tokens: Number(a.tokens) }
+      : {}),
     ...(validSpend
       ? {
           spend: {
@@ -357,6 +391,84 @@ async function refresh($: Dollar, offerId: string, isCurrent = () => true): Prom
   // The bounded UI window must not silently discard across-day continuation identity.
   await $.store.set(await aliasKey(alias.nativeId), alias);
   return true;
+}
+
+/** The one input a native row shows for a step: a path, under the session's folder when it is. */
+function targetOf(summary: string | undefined, cwd: string): string | undefined {
+  if (!summary) return undefined;
+  const fields = json(summary);
+  const value = fields
+    ? Object.values(fields).find((v) => typeof v === 'string' && v.length > 0 && !v.startsWith('['))
+    : /^[[{]/.test(summary)
+      ? undefined
+      : summary;
+  if (typeof value !== 'string') return undefined;
+  const shown = Array.from(
+    clean(cwd && value.startsWith(cwd + '/') ? value.slice(cwd.length + 1) : value, 400),
+  );
+  return shown.length <= 48 ? shown.join('') : '…' + shown.slice(-47).join('');
+}
+/** The worker's latest step as a native subagent row names one: `Read(src/a.ts)`. */
+function stepOf(activity: TenjinModelActivity, cwd: string): string | undefined {
+  const latest = activity.rows.at(-1);
+  if (latest?.kind === 'status' && latest.state === 'running' && latest.text) return latest.text;
+  const tool = [...activity.rows].reverse().find((r) => r.kind === 'tool' && r.name);
+  if (!tool?.name) return undefined;
+  const target = targetOf(tool.inputSummary, cwd);
+  return target ? tool.name + '(' + target + ')' : tool.name;
+}
+/** The viewer's band takes the newest activity the live file carried. Display only. */
+async function showActivity($: Dollar, data: TenjinModelActivity): Promise<void> {
+  const known = (await $.state.get(STATE)).value?.records.find((r) => r.offerId === data.offerId);
+  if (!known || (known.activity && known.activity.sequence >= data.sequence)) return;
+  await change($, (state) => {
+    const r = state.records.find((r) => r.offerId === data.offerId);
+    if (
+      !r ||
+      (r.workerHandle && r.workerHandle !== data.workerHandle) ||
+      (r.generation && r.generation !== data.generation) ||
+      (r.activity && r.activity.sequence >= data.sequence)
+    )
+      return;
+    r.workerHandle = data.workerHandle;
+    r.generation = data.generation;
+    r.profile = data.nativeProfile;
+    r.activity = data;
+    r.inspectionUnavailable = !r.active && ['starting', 'running'].includes(data.state);
+  });
+}
+/**
+ * One tick of a running worker's row: its clock, and what the CLI's live file
+ * says it has done. A file read, never an MCP call, so it does not wait on the
+ * accept call that holds the connection.
+ */
+async function pollWorker($: Dollar, offerId: string, path: string, cwd: string): Promise<void> {
+  const ref = { ...WORKERS, id: offerId };
+  const held = (await $.state.get(ref)).value;
+  if (!held) return;
+  const now = await $.clock.now();
+  let activity: TenjinModelActivity | undefined;
+  try {
+    activity = activityOf(await $.fs.read(path), offerId);
+  } catch {
+    // Not written yet, or already removed: the clock still moves.
+  }
+  const step = activity ? stepOf(activity, cwd) : undefined;
+  const live: TenjinModelWorker = {
+    ...held,
+    elapsedMs: Math.max(0, now - held.startedAt),
+    ...(activity
+      ? {
+          state: activity.state,
+          ...(activity.toolUses !== undefined ? { toolUses: activity.toolUses } : {}),
+          ...(activity.tokens !== undefined ? { tokens: activity.tokens } : {}),
+          ...(activity.spend ? { spentAtomic: activity.spend.actualAtomic } : {}),
+          ...(step ? { current: step } : {}),
+        }
+      : {}),
+  };
+  if (JSON.stringify(live) !== JSON.stringify(held)) await $.state.set(ref, live);
+  if (activity) await showActivity($, activity);
 }
 
 function displayPreview(message: string, content: string): boolean {
@@ -557,8 +669,31 @@ async function* finish(
 }
 function dollars(atomic: string): string {
   const padded = atomic.padStart(7, '0');
-  const fraction = padded.slice(-6).replace(/0+$/, '');
-  return '$' + padded.slice(0, -6) + (fraction ? '.' + fraction : '');
+  // Whole cents keep two places: `$1.00`, `$0.0043`.
+  const fraction = padded.slice(-6).replace(/0+$/, '').padEnd(2, '0');
+  return '$' + padded.slice(0, -6) + '.' + fraction;
+}
+/** Counts as a native subagent row writes them: `12 tool uses`, `41.2k tokens`, `2m 13s`. */
+function toolUses(count: number): string {
+  return count + (count === 1 ? ' tool use' : ' tool uses');
+}
+function tokens(count: number): string {
+  const compact = (value: number, unit: string) =>
+    (Math.floor(value * 10) / 10).toFixed(1).replace(/\.0$/, '') + unit;
+  return (
+    (count < 1000
+      ? String(count)
+      : count < 1_000_000
+        ? compact(count / 1000, 'k')
+        : compact(count / 1_000_000, 'm')) + ' tokens'
+  );
+}
+function duration(ms: number): string {
+  const seconds = Math.floor(Math.max(0, ms) / 1000);
+  if (seconds < 60) return seconds + 's';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm ' + (seconds % 60) + 's';
+  return Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
 }
 function displayState(item: TenjinModelViewerRecord): string {
   return item.inspectionUnavailable
@@ -627,62 +762,88 @@ export function registerModelViewer(on: On): void {
       )
     )
       return next(e);
+    const offerId = e.offer_id;
     let timer: { cancel(): void } | undefined;
     let binding: ViewerBinding | undefined;
+    let spawned: Promise<void> | undefined;
     let polling = false,
       closed = false,
-      prepared = false;
+      prepared = false,
+      viewerStarted = false;
     try {
       if (await enabled($)) {
         const current = await change($, (state) => {
           prepared = false;
-          const item = state.records.find((r) => r.offerId === e.offer_id);
+          const item = state.records.find((r) => r.offerId === offerId);
           if (!item || item.active || item.nativeId) return;
           item.active = true;
           prepared = true;
         });
-        const item = current?.records.find((r) => r.offerId === e.offer_id);
-        if (current && item) {
-          if (prepared)
-            binding = {
-              parentSessionId: current.parentSessionId,
-              cwd: current.cwd,
-              offerId: item.offerId,
-            };
-          if (prepared && liveViewerGuards.size + pendingViewerSpawns < 16) {
-            // Count the pending spawn until it returns, even after classic-start tags its id.
-            pendingViewerSpawns++;
+        const item = current?.records.find((r) => r.offerId === offerId);
+        if (current && item && prepared)
+          binding = {
+            parentSessionId: current.parentSessionId,
+            cwd: current.cwd,
+            offerId: item.offerId,
+          };
+        // THE LIVE ROW AND THE SPINNER read the CLI's own activity file, so
+        // they need neither the viewer nor a second call on this connection.
+        const [path, cwd, startedAt] = await Promise.all([
+          progressPath($, offerId),
+          current?.cwd ?? $.session.cwd(),
+          $.clock.now(),
+        ]);
+        await $.state.set(
+          { ...WORKERS, id: offerId },
+          {
+            offerId,
+            title: item?.title ?? 'subagent',
+            startedAt,
+            elapsedMs: 0,
+            state: 'starting',
+          },
+        );
+        liveWorkers.delete(offerId);
+        liveWorkers.add(offerId);
+        $.ui.invalidate('ui.render');
+        if (path)
+          timer = $.clock.every(POLL_MS, async () => {
+            if (closed || polling) return;
+            polling = true;
             try {
-              const spawned = await $.agent.spawn({
+              await pollWorker($, offerId, path, cwd);
+            } catch {
+              /* Display only. */
+            } finally {
+              polling = false;
+            }
+          });
+        if (current && item && prepared && liveViewerGuards.size + pendingViewerSpawns < 16) {
+          // Count the pending spawn until it returns, even after classic-start tags its id.
+          pendingViewerSpawns++;
+          // NOT AWAITED: the worker never waits for its viewer to start.
+          spawned = (async () => {
+            try {
+              const viewer = await $.agent.spawn({
                 subagentType: TYPE,
                 description: item.description,
                 prompt: 'Observe only the already owned DeepSeek worker activity.',
                 cwd: current.cwd,
               });
-              if (spawned.agentId) {
+              if (viewer.agentId) {
                 await change($, (state) => {
-                  const r = state.records.find((r) => r.offerId === e.offer_id);
-                  if (r?.active && (!r.nativeId || r.nativeId === spawned.agentId))
-                    r.nativeId = spawned.agentId;
+                  const r = state.records.find((r) => r.offerId === offerId);
+                  if (r?.active && (!r.nativeId || r.nativeId === viewer.agentId))
+                    r.nativeId = viewer.agentId;
                 });
               }
             } catch {
               /* Failed observation cannot start, duplicate or cancel the real worker. */
             } finally {
               pendingViewerSpawns--;
+              viewerStarted = true;
             }
-            timer = $.clock.every(500, async () => {
-              if (closed || polling) return;
-              polling = true;
-              try {
-                await refresh($, e.offer_id as string, () => !closed);
-              } catch {
-                /* Display only. */
-              } finally {
-                polling = false;
-              }
-            });
-          }
+          })();
         }
       }
     } catch {
@@ -694,6 +855,7 @@ export function registerModelViewer(on: On): void {
       closed = true;
       try {
         timer?.cancel();
+        if (liveWorkers.delete(offerId)) $.ui.invalidate('ui.render');
       } catch {
         /* Timer failures do not rewrite the handback. */
       }
@@ -702,8 +864,11 @@ export function registerModelViewer(on: On): void {
           // UI I/O cannot delay or replace the original worker result, even when inspect hangs.
           $.clock.after(0, async () => {
             try {
+              // A viewer still starting binds to its running record before it retires.
+              if (spawned && !viewerStarted)
+                await Promise.race([spawned, $.clock.sleep(SPAWN_WAIT_MS)]);
               if (binding) await retireViewer($, binding);
-              await refresh($, e.offer_id as string);
+              await refresh($, offerId);
             } catch {
               /* The last confirmed rows remain visibly marked unavailable. */
             }
@@ -828,14 +993,27 @@ export function registerModelViewer(on: On): void {
       if (r.inputSummary) details.push(r.inputSummary);
       if (r.outputPreview) details.push(r.outputPreview);
     }
-    const spend = a?.spend
-      ? 'Spent ' +
-        dollars(a.spend.actualAtomic) +
-        ' · reserved ' +
-        dollars(a.spend.reservedAtomic) +
-        (a.spend.uncertain.length ? ' · settlement unresolved' : '')
-      : 'Spend pending';
-    const lines = ['DeepSeek V4.1 Flash 1017 · ' + displayState(item)];
+    const running =
+      !item.inspectionUnavailable && (a?.state === 'starting' || a?.state === 'running');
+    // While it runs, only what has settled: never a reservation that reads as a price.
+    const spend = !a?.spend
+      ? 'Spend pending'
+      : running
+        ? 'Spent ' + dollars(a.spend.actualAtomic) + ' so far'
+        : 'Spent ' +
+          dollars(a.spend.actualAtomic) +
+          ' · reserved ' +
+          dollars(a.spend.reservedAtomic) +
+          (a.spend.uncertain.length ? ' · settlement unresolved' : '');
+    const counts = [
+      a?.toolUses !== undefined ? toolUses(a.toolUses) : undefined,
+      a?.tokens ? tokens(a.tokens) : undefined,
+    ].filter((part): part is string => part !== undefined);
+    const lines = [
+      'DeepSeek V4.1 Flash 1017 · ' +
+        displayState(item) +
+        (counts.length ? ' · ' + counts.join(' · ') : ''),
+    ];
     if (rows > 2) {
       lines.push(
         'Recent activity · up to 24 events' +
@@ -855,4 +1033,188 @@ export function registerModelViewer(on: On): void {
       </Box>
     );
   });
+
+  // THE ROWS. An accept call is one live DeepSeek row that ends in a native
+  // `Done (…)` line; a held Agent call reads as the offer it is, never as a
+  // subagent that finished. Both keep their own row in every view, and the
+  // engine's result block shows only where rows show in full (ctrl+o).
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const { tool, input, output, isInterrupted, isErrored } = e.props;
+    if (tool === ACCEPT) {
+      const offerId = record(input)?.offer_id;
+      if (!short(offerId) || !UUID.test(offerId)) return next(e);
+      const live = (await $.state.get({ ...WORKERS, id: offerId })).value;
+      const head = { name: 'DeepSeek', argument: live?.title ?? 'subagent' };
+      const ui = $.ui.resolve(e);
+      if (output === undefined && !isInterrupted) {
+        const parts = [
+          live?.toolUses ? toolUses(live.toolUses) : undefined,
+          live?.tokens ? tokens(live.tokens) : undefined,
+          live ? duration(live.elapsedMs) : undefined,
+          live?.spentAtomic ? dollars(live.spentAtomic) + ' so far' : undefined,
+        ].filter((part): part is string => part !== undefined);
+        return workerRow(ui, {
+          ...head,
+          state: 'running',
+          ...(parts.length ? { tail: ' · ' + parts.join(' · ') } : {}),
+          under: live?.current ?? (live?.state === 'running' ? 'Working' : 'Starting'),
+        });
+      }
+      const ended = json(textOf(output));
+      const status = ended?.status;
+      if (status === 'completed' || status === 'cancelled' || status === 'unknown') {
+        const word =
+          status === 'completed' ? 'Done' : status === 'cancelled' ? 'Interrupted' : 'Stopped';
+        return workerRow(ui, {
+          ...head,
+          state: status === 'completed' ? 'done' : 'error',
+          under: word + ' (' + doneParts(ended!, live).join(' · ') + ')',
+        });
+      }
+      return workerRow(ui, {
+        ...head,
+        state: isInterrupted || isErrored ? 'error' : 'held',
+        under: isInterrupted ? 'Interrupted' : 'Not started',
+      });
+    }
+    if (tool === 'Agent' || tool === 'Task') {
+      const held = heldOffer(output);
+      if (!held) return next(e);
+      return workerRow($.ui.resolve(e), {
+        state: 'held',
+        name: tool,
+        argument: titleOf(record(input), 'subagent'),
+        tail:
+          held === 'unavailable'
+            ? ' · Tenjin held it · not started'
+            : ' · Tenjin offered DeepSeek' +
+              (held.capAtomic ? ' · cap ' + dollars(held.capAtomic) : ''),
+      });
+    }
+    return next(e);
+  });
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const { tool, output, isExpanded } = e.props;
+    if (isExpanded === true) return next(e);
+    const ours =
+      tool === ACCEPT
+        ? acceptAnswer(json(textOf(output)))
+        : (tool === 'Agent' || tool === 'Task') && heldOffer(output) !== undefined;
+    if (!ours) return next(e);
+    const { Box } = $.ui.resolve(e);
+    return <Box display="none" />;
+  });
+  // THE SPINNER names the worker's step while an accept call runs, in place
+  // of whatever state label the host last left there.
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    const offerId = [...liveWorkers].at(-1);
+    if (offerId === undefined) return next(e);
+    const live = (await $.state.get({ ...WORKERS, id: offerId })).value;
+    const step = live?.current ?? (live?.state === 'running' ? 'working' : 'starting');
+    return next({ ...e, props: { ...e.props, message: clean('DeepSeek · ' + step, 120) } });
+  });
+}
+
+type Elements = ReturnType<Dollar['ui']['resolve']>;
+type WorkerRow = {
+  state: 'running' | 'done' | 'error' | 'held';
+  name: string;
+  argument?: string;
+  tail?: string;
+  under?: string;
+};
+/** A tool row as the engine draws one: the dot, the name bold, the input in
+ *  parentheses, a dim tail, and one dim line under it. */
+function workerRow({ Box, Text }: Elements, row: WorkerRow) {
+  const dot =
+    row.state === 'done'
+      ? { color: 'success' }
+      : row.state === 'error'
+        ? { color: 'error' }
+        : { dimColor: true };
+  const head = (
+    <Box key="head" flexDirection="row">
+      <Box minWidth={2}>
+        <Text {...dot}>⏺</Text>
+      </Box>
+      <Box flexShrink={0}>
+        <Text bold wrap="truncate-end">
+          {row.name}
+        </Text>
+      </Box>
+      <Box flexWrap="nowrap">
+        <Text wrap="truncate-end">
+          {row.argument !== undefined ? '(' + row.argument + ')' : ''}
+        </Text>
+        <Text dimColor>{row.tail ?? ''}</Text>
+      </Box>
+    </Box>
+  );
+  const under =
+    row.under === undefined
+      ? []
+      : [
+          <Box key="under" flexDirection="row">
+            <Text dimColor>{'  ⎿  '}</Text>
+            <Text dimColor wrap="truncate-end">
+              {clean(row.under, 400)}
+            </Text>
+          </Box>,
+        ];
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {[head, ...under]}
+    </Box>
+  );
+}
+/** An accept call's own answer, which its live row already says: a worker
+ *  handback (it carries `elapsedMs`) or a refusal to start one. A cancel's
+ *  short status is not one, and keeps the engine's result block. */
+function acceptAnswer(answer: Json | undefined): boolean {
+  return typeof answer?.elapsedMs === 'number' || typeof answer?.action === 'string';
+}
+/** The `Done (…)` line's counts, from the handback, as a native subagent's: uses, tokens, time, then spend. */
+function doneParts(ended: Json, live: TenjinModelWorker | undefined): string[] {
+  const count = (value: unknown) =>
+    Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+  const uses = count(ended.toolUses) ?? live?.toolUses ?? 0;
+  const used = count(ended.tokens) ?? live?.tokens;
+  const elapsed = count(ended.elapsedMs);
+  const spend = record(ended.spend);
+  const actual =
+    typeof spend?.actualAtomic === 'string' && /^\d{1,30}$/.test(spend.actualAtomic)
+      ? spend.actualAtomic
+      : undefined;
+  const unresolved = Array.isArray(spend?.uncertain) && spend.uncertain.length > 0;
+  return [
+    toolUses(uses),
+    ...(used !== undefined ? [tokens(used)] : []),
+    ...(elapsed !== undefined ? [duration(elapsed)] : []),
+    ...(actual !== undefined
+      ? [dollars(actual) + (unresolved ? ' · settlement unresolved' : '')]
+      : spend?.accounting === 'unknown'
+        ? ['spend unknown']
+        : []),
+  ];
+}
+/**
+ * A held Agent call's result as the local hook made it (`register.tsx`): an
+ * offer, with its cap when the offer named one, or a call held and not started.
+ * The fabricated `completed` shape stays, as the Agent output schema has no
+ * other that carries the offer to the parent; only its drawing changes.
+ */
+function heldOffer(output: unknown): { capAtomic?: string } | 'unavailable' | undefined {
+  const result = record(output);
+  if (
+    result?.status !== 'completed' ||
+    result.totalToolUseCount !== 0 ||
+    typeof result.agentId !== 'string'
+  )
+    return undefined;
+  if (result.agentId === 'tenjin-unavailable') return 'unavailable';
+  if (!/^tenjin-offer-/.test(result.agentId) || !UUID.test(result.agentId.slice(13)))
+    return undefined;
+  const offer = json(textOf(result.content));
+  const cap = offer?.capAtomic;
+  return typeof cap === 'string' && /^[1-9][0-9]{0,29}$/.test(cap) ? { capAtomic: cap } : {};
 }

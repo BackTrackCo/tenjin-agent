@@ -1,7 +1,7 @@
 import type { AgentInfo, On, ToolCallResult, TurnStepChunk, TurnStepResult } from 'claude-code';
 import { expect, mock, test, type TestBody } from 'claude-code/testing';
 import type { TenjinModelViewerState } from '../types';
-import { DATA, NOW, OFFER, SESSION, SURFACES, shownLines } from './fixtures';
+import { DATA, NOW, OFFER, SESSION, SURFACES, sha256Hex, shownLines, toolRow } from './fixtures';
 
 const ACCEPT = 'mcp__plugin_tenjin_router__subagent';
 const LIVE_MESSAGE = 'DeepSeek worker activity\n';
@@ -24,10 +24,6 @@ function setup(_$: Engine, on: On) {
   const files = new Map<string, string>();
   const clock = mock.clock(on, { now: NOW });
   mock.env(on, { HOME: '/home/test' });
-  on('fs.read', (_$, e) => {
-    const text = files.get(e.path);
-    return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
-  });
   files.set(DATA + '/config.json', JSON.stringify({ router: { subagents: true } }));
   const store = new Map<string, unknown>();
   const state = {
@@ -61,6 +57,7 @@ function setup(_$: Engine, on: On) {
     nativeCalls: [] as unknown[],
     accepted: 0,
     snapshot: undefined as TenjinModelViewerState | undefined,
+    liveFile: true,
     work: (() => ({ result: 'actual worker result' })) as () =>
       ToolCallResult | Promise<ToolCallResult>,
   };
@@ -117,6 +114,52 @@ function setup(_$: Engine, on: On) {
     // No core child starts in this virtual engine; the public contract strips hook-minted ids.
     return { model: 'inherit' };
   });
+  // What the CLI reports for the owned worker, through MCP or its live file alike.
+  const activity = () => ({
+    status: 'activity',
+    activity: {
+      version: 1,
+      offerId: state.offer,
+      workerHandle: WORKER,
+      generation: 'owned-generation',
+      nativeProfile: state.nativeProfile,
+      sequence: state.phase === 'running' ? 2 : 3,
+      state: state.phase,
+      droppedRows: 8,
+      toolUses: 1,
+      tokens: 41_234,
+      rows: [
+        {
+          id: 'tool-actual',
+          sequence: 1,
+          kind: 'tool',
+          name: 'Read',
+          state: 'completed',
+          inputSummary: '/repo/src/example.ts',
+          outputPreview: 'export const answer = 42;',
+        },
+        { id: 'not-a-row', kind: 'thinking', text: 'PRIVATE_RAW_THINKING' },
+      ],
+      spend: {
+        actualAtomic: '4300',
+        reservedAtomic: '8000',
+        uncertain: [],
+        extra: 'PRIVATE_SPEND',
+      },
+      auth: 'PRIVATE_AUTH',
+    },
+  });
+  // The live file the CLI writes while the accept call runs (`model-worker-progress.ts`).
+  on('fs.read', async (_$, e) => {
+    if (
+      state.liveFile &&
+      e.path ===
+        `${DATA}/progress/model-workers/${await sha256Hex(state.parentSessionId)}-${await sha256Hex(state.offer)}.json`
+    )
+      return { value: JSON.stringify(activity()) };
+    const text = files.get(e.path);
+    return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text };
+  });
   on('mcp.call', async (_$, e) => {
     if (e.tool === 'subagent') {
       state.cancellations.push(e.args);
@@ -148,38 +191,7 @@ function setup(_$: Engine, on: On) {
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify({
-              status: 'activity',
-              activity: {
-                version: 1,
-                offerId: state.offer,
-                workerHandle: WORKER,
-                generation: 'owned-generation',
-                nativeProfile: state.nativeProfile,
-                sequence: state.phase === 'running' ? 2 : 3,
-                state: state.phase,
-                droppedRows: 8,
-                rows: [
-                  {
-                    id: 'tool-actual',
-                    sequence: 1,
-                    kind: 'tool',
-                    name: 'Read',
-                    state: 'completed',
-                    inputSummary: '/repo/src/example.ts',
-                    outputPreview: 'export const answer = 42;',
-                  },
-                  { id: 'not-a-row', kind: 'thinking', text: 'PRIVATE_RAW_THINKING' },
-                ],
-                spend: {
-                  actualAtomic: '4300',
-                  reservedAtomic: '8000',
-                  uncertain: [],
-                  extra: 'PRIVATE_SPEND',
-                },
-                auth: 'PRIVATE_AUTH',
-              },
-            }),
+            text: JSON.stringify(activity()),
           },
         ],
       },
@@ -450,7 +462,7 @@ test('viewer type metadata never grants a mismatched child offer authority or in
   expect(f.state.cancellations).toEqual([]);
 });
 
-test('private polling renders actual activity and authoritative spend without trace in the handback', async ($, on) => {
+test('the live file renders actual activity and settled spend with no MCP read while the worker runs', async ($, on) => {
   const f = setup($, on);
   let release: () => void = () => undefined;
   const blocked = new Promise<void>((resolve) => {
@@ -462,7 +474,7 @@ test('private polling renders actual activity and authoritative spend without tr
   };
   await remember($);
   const { running } = await startWithViewer($, f);
-  await f.clock.advance(500);
+  await f.clock.advance(1000);
   expect(JSON.stringify(f.state.snapshot)).not.toContain('PRIVATE_');
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({
@@ -475,14 +487,18 @@ test('private polling renders actual activity and authoritative spend without tr
     expect(shown).toContain('Read');
     expect(shown).toContain('/repo/src/example.ts');
     expect(shown).toContain('export const answer = 42;');
-    expect(shown).toContain('$0.0043');
-    expect(shown).toContain('$0.008');
+    // While it runs, only what has settled, never the reservation.
+    expect(shown).toContain('Spent $0.0043 so far');
+    expect(shown).not.toContain('$0.008');
+    expect(shown).toContain('1 tool use · 41.2k tokens');
     expect(shown).toContain('24');
     expect(shown).toContain('8 earlier');
     expect(shown).not.toContain('PRIVATE_RAW_THINKING');
     expect(shown).not.toContain('PRIVATE_AUTH');
     await ui.unmount();
   }
+  // Nothing waited on a second call over the connection the accept call holds.
+  expect(f.state.inspections).toBe(0);
   release();
   expect((await running).result).toBe('only parent answer');
   await f.clock.settle();
@@ -503,7 +519,7 @@ test('only the selected owned native viewer receives the bounded activity panel'
   };
   await remember($);
   const { running, firstStep } = await startWithViewer($, f);
-  await f.clock.advance(500);
+  await f.clock.advance(1000);
   const polls = f.state.inspections;
   for (const surface of SURFACES) {
     const owned = await $.ui.mount({
@@ -877,7 +893,7 @@ for (const terminal of ['completed', 'cancelled'] as const) {
       };
       await remember($);
       const { running } = await startWithViewer($, f);
-      await f.clock.advance(500);
+      await f.clock.advance(1000);
       expect(f.state.snapshot?.records[0]?.activity?.state).toBe('running');
       f.state.statFails = true;
       if (terminal === 'cancelled') await complete($, 'native-viewer-1');
@@ -987,7 +1003,7 @@ test('failed final inspection labels the cached activity unavailable instead of 
   };
   await remember($);
   const { running } = await startWithViewer($, f);
-  await f.clock.advance(500);
+  await f.clock.advance(1000);
   f.state.inspectionFails = true;
   release();
   await running;
@@ -1076,4 +1092,171 @@ test('the first durable viewer alias survives more than sixteen completed viewer
     subagent_type: 'Explore',
   });
   expect(f.state.snapshot?.records.length).toBeLessThanOrEqual(16);
+});
+
+test('the worker starts before its viewer does, and the viewer still binds to its running record', async ($, on) => {
+  const f = setup($, on);
+  let release: () => void = () => undefined;
+  f.state.spawnBlocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.work = () => ({ result: 'fast worker answer' });
+  await remember($);
+  // The viewer's spawn has not returned, and the worker has already answered.
+  const result = await $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  expect(result.result).toBe('fast worker answer');
+  expect(f.state.calls).toBe(1);
+  expect(f.state.snapshot?.records[0]?.active).toBe(true);
+  await $.classic.SubagentStart({ agent_id: 'native-viewer-1', agent_type: TYPE });
+  expect((await step($, 'native-viewer-1')).answer).toContain(LIVE_MESSAGE);
+  release();
+  await f.clock.settle();
+  expect(f.state.snapshot?.records[0]).toMatchObject({
+    active: false,
+    nativeId: 'native-viewer-1',
+  });
+  expect(f.state.nativeSteps).toBe(0);
+});
+
+test('an accept call is one live DeepSeek row that ends in a native Done line, and the spinner names its step', async ($, on) => {
+  const f = setup($, on);
+  const spinners: { message: string | null }[] = [];
+  on('ui.render', { component: 'Spinner' }, ($, e) => {
+    spinners.push(e.props);
+    return $.ui.resolve(e).Text({ children: ['engine spinner'] });
+  });
+  on('ui.render', { component: 'ToolResult' }, ($, e) =>
+    $.ui.resolve(e).Text({ children: ['engine result'] }),
+  );
+  const spinner = {
+    word: 'Sauteing',
+    message: 'running PermissionRequest hook',
+    suffix: '…',
+    mode: 'tool-use' as const,
+  };
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const handback = JSON.stringify({
+    status: 'completed',
+    label: 'DeepSeek V4.1 Flash 1017',
+    elapsedMs: 133_000,
+    toolUses: 12,
+    tokens: 41_234,
+    spend: { reservedAtomic: '50000', actualAtomic: '39000', uncertain: [] },
+    result: 'worker report',
+  });
+  f.state.work = async () => {
+    await blocked;
+    return { result: handback, text: handback };
+  };
+  await remember($);
+  const running = $.tool.call({ tool: ACCEPT, offer_id: OFFER, tool_use_id: 'parent_accept' });
+  await f.clock.advance(1000);
+  const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
+  for (const surface of SURFACES) {
+    const row = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolUse',
+      props: accept,
+    });
+    expect((await shownLines(row)).join('')).toBe(
+      '⏺DeepSeek(Read selected source) · 1 tool use · 41.2k tokens · 1s · $0.0043 so far  ⎿  Read(src/example.ts)',
+    );
+    await row.unmount();
+    const turn = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'Spinner',
+      props: spinner,
+    });
+    expect(spinners.at(-1)?.message).toBe('DeepSeek · Read(src/example.ts)');
+    await turn.unmount();
+  }
+  expect(f.state.inspections).toBe(0);
+  release();
+  expect((await running).text).toBe(handback);
+  await f.clock.settle();
+  const done = { ...accept, isRunning: false, output: handback };
+  for (const surface of SURFACES) {
+    const row = await $.ui.mount({ plugin: 'tenjin', surface, component: 'ToolUse', props: done });
+    const lines = await shownLines(row);
+    expect(lines.join('')).toBe(
+      '⏺DeepSeek(Read selected source)  ⎿  Done (12 tool uses · 41.2k tokens · 2m 13s · $0.039)',
+    );
+    const [dot] = await row.findAll({ type: 'Text', text: '⏺' });
+    expect(dot?.props.color).toBe('success');
+    await row.unmount();
+    const result = {
+      tool_use_id: 'parent_accept',
+      tool: ACCEPT,
+      output: handback,
+      isErrored: false,
+    };
+    const compact = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolResult',
+      props: result,
+    });
+    expect(await shownLines(compact)).toEqual([]);
+    await compact.unmount();
+    const full = await $.ui.mount({
+      plugin: 'tenjin',
+      surface,
+      component: 'ToolResult',
+      props: { ...result, isExpanded: true },
+    });
+    expect(await shownLines(full)).toEqual(['engine result']);
+    await full.unmount();
+    // The worker has answered: the spinner is the engine's own again.
+    await (
+      await $.ui.mount({ plugin: 'tenjin', surface, component: 'Spinner', props: spinner })
+    ).unmount();
+    expect(spinners.at(-1)?.message).toBe('running PermissionRequest hook');
+  }
+});
+
+test('a worker that stops, is interrupted or never starts says so, never Done', async ($, on) => {
+  setup($, on);
+  const accept = toolRow('parent_accept', ACCEPT, { offer_id: OFFER });
+  const stopped = JSON.stringify({
+    status: 'unknown',
+    elapsedMs: 3_400,
+    toolUses: 1,
+    tokens: 15,
+    spend: { reservedAtomic: '9000', actualAtomic: '3000', uncertain: ['owned-invocation'] },
+    partial: { rows: [], omittedRows: 0 },
+  });
+  const refused = JSON.stringify({ action: 'native', reason: 'Offer expired' });
+  for (const [props, shown, color] of [
+    [
+      { ...accept, isRunning: false, output: stopped },
+      '⏺DeepSeek(subagent)  ⎿  Stopped (1 tool use · 15 tokens · 3s · $0.003 · settlement unresolved)',
+      'error',
+    ],
+    [
+      { ...accept, isRunning: false, isInterrupted: true },
+      '⏺DeepSeek(subagent)  ⎿  Interrupted',
+      'error',
+    ],
+    [
+      { ...accept, isRunning: false, output: refused },
+      '⏺DeepSeek(subagent)  ⎿  Not started',
+      undefined,
+    ],
+  ] as const) {
+    const row = await $.ui.mount({
+      plugin: 'tenjin',
+      surface: 'terminal',
+      component: 'ToolUse',
+      props,
+    });
+    expect((await shownLines(row)).join('')).toBe(shown);
+    const [dot] = await row.findAll({ type: 'Text', text: '⏺' });
+    expect(dot?.props.color).toBe(color);
+    await row.unmount();
+  }
 });
