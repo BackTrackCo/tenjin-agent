@@ -2,7 +2,13 @@ import { join } from 'node:path';
 import { MAX_AUTO_SPEND_FLOOR_ATOMIC } from '../lib/config';
 import { atomicToUsd, formatUsdDisplay } from '../lib/money';
 import { evaluateSpendPolicy, type PolicyReason, type SpendPolicy } from '../lib/policy';
-import { NO_PAYER, type DecisionRoute } from './decision';
+import {
+  DEPOSIT_DEFERRED,
+  NO_PAYER,
+  TOP_UP_UNAVAILABLE,
+  TOPPING_UP,
+  type DecisionRoute,
+} from './decision';
 import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
 
 /**
@@ -21,22 +27,27 @@ import { agentFixFor, WALLET_REASONS } from './wallet-reasons';
  */
 
 /**
- * THE ROUTING FEE CEILING, atomic USDC ($0.003): the most one routing call
- * pays, and the fee every install so far agreed to. A quote at or below it is
- * paid inside the spend limits; one above it is not paid at all
- * ({@link FEE_ABOVE_CEILING}). A lower price needs no release; a higher one
- * does. A count that has no quote to go on (calls a channel still covers, a
- * funded-enough check) uses it, so it never overstates.
+ * THE ROUTING FEE CEILING, atomic USDC ($0.25): the most one routing answer
+ * pays, and the most one routing deposit holds ({@link MAX_CHANNEL_DEPOSIT_ATOMIC}).
+ * The router quotes each answer its own fee, usually far below this; a quote
+ * at or below it is paid inside the spend limits, and one above it is not
+ * paid at all ({@link FEE_ABOVE_CEILING}). It is a limit, not a price.
  */
-export const ROUTING_FEE_CEILING_ATOMIC = 3_000n;
+export const ROUTING_FEE_CEILING_ATOMIC = 250_000n;
+/**
+ * THE ROUTER'S FIXED QUOTE ($0.003), which it still offers beside a per-answer
+ * quote for the CLIs released before per-answer quotes. This client pays it
+ * only when it is the 402's only routing offer (`routing-quote.ts`). An
+ * estimate with no 402 in hand (doctor's funded-enough check, the fund line
+ * under an empty wallet) sizes from it.
+ */
+export const LEGACY_ROUTING_QUOTE_ATOMIC = 3_000n;
 /** The skip reason for a quote above {@link ROUTING_FEE_CEILING_ATOMIC}. */
 export const FEE_ABOVE_CEILING = 'fee_above_ceiling';
-/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`, and the
- *  one doctor sizes from with no 402. Production announces $0.03, the SDK's
- *  ten-quote default, until the router's update makes it $0.05. */
+/** The deposit hint ($0.05) when a 402 carries no `extra.minDeposit`: the
+ *  production server's own, and the one doctor sizes from with no 402. */
 export const CHANNEL_DEPOSIT_ATOMIC = 50_000n;
-/** The SDK's deposit ceiling, atomic USDC ($0.25): its per-payment cap times
- *  `depositMultiplier` (`routing-payer.ts`). */
+/** Tenjin's maximum deposit per top-up ($0.25), independent of the SDK's larger bound. */
 export const MAX_CHANNEL_DEPOSIT_ATOMIC = 250_000n;
 /** Keep this much USDC outside the routing channel for provider payments. */
 export const ROUTING_WALLET_RESERVE_ATOMIC = 10_000n;
@@ -175,7 +186,8 @@ export type RouteFor = (baseUrl: string) => DecisionRoute;
  * budget ran out (it finishes in the background), or an unlock that did not
  * finish inside the call's budget (it keeps running, and the next call gets
  * its answer), or a balance read before a deposit that failed or ran out of
- * time (nothing was signed or sent).
+ * time (nothing was signed or sent), or a deposit the background top-up has
+ * not made yet.
  *
  * THE WALLET'S OWN REASONS ARE `WALLET_REASONS`, spread in rather than written
  * twice, so a notice names the same cause in the same words as doctor. They
@@ -189,9 +201,9 @@ const WALLET_UNPAID: Record<string, { reason: string; fix: string }> = Object.fr
 const UNPAID: Record<string, { reason: string; fix: string }> = {
   wallet_low: {
     // The least a wallet routes with ({@link routingDepositAtomic}): the
-    // reserve kept for provider payments plus a deposit of one fee at the
-    // ceiling, $0.013.
-    reason: `the wallet holds less than the $${usd(ROUTING_WALLET_RESERVE_ATOMIC + ROUTING_FEE_CEILING_ATOMIC)} Tenjin needs to set aside for routing`,
+    // reserve kept for provider payments plus a deposit of one fixed quote,
+    // $0.013. A dearer answer needs more, so the line says "at least".
+    reason: `the wallet holds less than Tenjin needs to set aside for routing (at least $${usd(ROUTING_WALLET_RESERVE_ATOMIC + LEGACY_ROUTING_QUOTE_ATOMIC)})`,
     fix: `Add funds with \`tenjin fund ${SUGGESTED_FUND_USD}\`.`,
   },
   ...WALLET_UNPAID,
@@ -230,6 +242,9 @@ const NO_FAULT = new Set([
   'deadline_after_payment_sent',
   'unlock_timeout',
   'balance_unreadable',
+  TOPPING_UP,
+  DEPOSIT_DEFERRED,
+  TOP_UP_UNAVAILABLE,
 ]);
 
 /** The reason and fix for an unpaid call, or null when it needs no word. */
@@ -239,15 +254,22 @@ export function unpaid(why: string): { reason: string; fix: string } | null {
 }
 
 /**
- * The one line said when a routing call's deposit went through: the money is
- * funds set aside for the next routing fees, not a lookup it bought. Each fee
- * from it is the router's quote at that call, so the line names the ceiling,
- * the one bound every later call keeps. It still counts toward the daily limit
- * ({@link feeRefusal}).
+ * The deposit notice, on the next hook after a background top-up or on the
+ * routing call that carried it. Each fee is the router's own quote, and the
+ * deposit counts toward spend limits once, when it is sent ({@link feeRefusal}).
  */
 export function depositSentence(amountAtomic: bigint): string {
-  return `Tenjin set aside $${usd(amountAtomic)} for routing. Each routing call costs at most $${usd(ROUTING_FEE_CEILING_ATOMIC)}.`;
+  return `Tenjin set aside $${usd(amountAtomic)} for routing. It counts toward your spend limits.`;
 }
+
+/**
+ * What a call the wallet could not fund says. Routing has not stopped: an
+ * answer that needs no payment can still come, so the line says only that
+ * this answer went unpaid, and opens no checkout (explicit balance, payment
+ * and doctor results keep `unpaid().fix`).
+ */
+export const WALLET_LOW_SENTENCE =
+  'Your balance was too low for this routing fee. Free routing still works.';
 
 /**
  * The one line the user sees, once per session and reason, when a call was not
@@ -274,19 +296,13 @@ export function unpaidSentence(
 ): string | null {
   const u = unpaid(why);
   if (u === null) return null;
-  // An automatic fallback explains the missing funds without reopening checkout.
-  // Explicit balance/payment/doctor results retain `unpaid().fix`.
-  const fix =
-    why === 'wallet_low'
-      ? 'Your usual tools still work.'
-      : reader === 'agent'
-        ? agentFixFor(why, u.fix)
-        : (PERSON_FIX[why] ?? u.fix);
+  if (why === 'wallet_low') return WALLET_LOW_SENTENCE;
+  const fix = reader === 'agent' ? agentFixFor(why, u.fix) : (PERSON_FIX[why] ?? u.fix);
   const reason =
     why === FEE_ABOVE_CEILING && quotedAtomic !== undefined
       ? `the router quoted $${usd(quotedAtomic)} a call, more than this install agreed to pay`
       : u.reason;
-  return `Tenjin could not pay the routing fee (${reason}), so Tenjin is not routing calls until that is fixed. ${fix}`;
+  return `Tenjin could not pay the routing fee (${reason}). Free routing still works. ${fix}`;
 }
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;

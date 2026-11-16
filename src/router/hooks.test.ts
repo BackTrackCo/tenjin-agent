@@ -23,6 +23,7 @@ import {
 import { MCP_SERVER_NAME, REQUEST_TOOL } from './names';
 import { runHookKind } from './hook-command';
 import { readChoices, readSpec, SPEC_TTL_MS } from './specs';
+import { hashNow } from './settings-test-utils';
 import { ROUTE_PAID_PATH, ROUTER_PATH } from './decision';
 import { UNPAID_GATE_TIMEOUT_MS } from './gate';
 import {
@@ -300,6 +301,7 @@ describe('the prompt hook', () => {
       'packet',
       'schemaVersion',
       'sessionId',
+      'settings',
     ]);
     expect(sent.body.budgetMs).toBe(UNPAID_GATE_TIMEOUT_MS);
     expect((sent.body.packet as { pendingCall?: unknown }).pendingCall).toBeUndefined();
@@ -553,6 +555,7 @@ describe('the shortfall hook', () => {
       'packet',
       'schemaVersion',
       'sessionId',
+      'settings',
     ]);
     const packet = sent.body.packet as { pendingCall?: unknown; nativeOutcome?: unknown };
     expect(packet.pendingCall).toEqual({ tool: 'WebFetch', url: 'https://example.test/spec' });
@@ -2432,6 +2435,7 @@ describe('the delegation hook', () => {
         'packet',
         'schemaVersion',
         'sessionId',
+        'settings',
       ]);
       const packet = sent.body.packet as {
         current: { text: string };
@@ -2994,7 +2998,18 @@ describe('a discovered service', () => {
     });
     expect((calls[0] as { body: unknown }).body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+        'mcp',
+      ],
     });
     // The footer names the seller, and the id binds this session for `request`.
     expect(await renderProgress(dir, 'sess-1')).toContain('BlockRun');
@@ -3127,6 +3142,8 @@ describe('a discovered service', () => {
       'headers',
       'note',
       'tolerant',
+      'settings',
+      'mcp',
     ]);
     const fs = await import('node:fs/promises');
     await fs.writeFile(
@@ -3149,6 +3166,8 @@ describe('a discovered service', () => {
       'note',
       'tolerant',
       'bazaar',
+      'settings',
+      'mcp',
     ]);
   });
 
@@ -3439,7 +3458,18 @@ describe('a question to the user', () => {
     expect((body.packet.current as { text: string }).text).toContain('I can get API keys');
     expect(body).toMatchObject({
       sessionId: 'sess-1',
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+        'mcp',
+      ],
     });
   });
 
@@ -3698,5 +3728,193 @@ describe('an offer the host ignored', () => {
       now: () => T + 16 * 60_000,
     });
     expect(later.reports).toEqual([]);
+  });
+});
+
+/**
+ * THE USER'S SETTINGS ON EVERY HOOK (plan 36): the rules ride beside the
+ * packet, read for each event; an offer is kept with the hash its answer
+ * echoed; and an answer decided under other rules offers nothing.
+ */
+describe('the hooks and the user settings', () => {
+  const fixtureOf = (name: string) =>
+    JSON.parse(
+      readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8'),
+    ) as Record<string, unknown> & {
+      settingsHash?: string;
+      decision: { id: string; specs?: unknown[] };
+    };
+  const BLOCK = { kind: 'task', id: 'crypto price quote' };
+  async function saveRules(router: Record<string, unknown>): Promise<string> {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(dir, 'config.json'), JSON.stringify({ ...ROUTER_POLICY, router }));
+    return hashNow(dir);
+  }
+  const hook = (fetchImpl: typeof fetch, warn: (line: string) => void = () => undefined) => ({
+    dataDir: dir,
+    baseUrl: BASE,
+    fetchImpl,
+    warn,
+  });
+
+  it('sends the saved rules beside the packet, with the settings token', async () => {
+    const hash = await saveRules({ policy: { version: 1, block: [BLOCK] } });
+    const { fetchImpl, calls } = router(NATIVE);
+    await runPromptHook(promptEvent('check the BTC price'), hook(fetchImpl));
+    const body = (calls[0] as { body: Record<string, unknown> }).body;
+    expect(body.settings).toEqual({
+      version: 1,
+      hash,
+      policy: { block: [BLOCK] },
+      sources: ['tenjin'],
+    });
+    expect(body.accepts).toContain('settings');
+    expect((body.packet as Record<string, unknown>).settings).toBeUndefined();
+  });
+
+  it('keeps each shown spec with the hash its answer echoed', async () => {
+    const hash = await saveRules({});
+    const answer = { ...fixtureOf('wire-hook-execute-settings.json'), settingsHash: hash };
+    const { fetchImpl } = router(answer);
+    const out = await runPromptHook(promptEvent('research x402 agent payments'), hook(fetchImpl));
+    expect(out).toMatchObject({ action: 'execute' });
+    expect((await readSpec(dir, answer.decision.id))?.settingsHash).toBe(hash);
+  });
+
+  it('offers nothing from an answer decided under other rules', async () => {
+    await saveRules({ policy: { version: 1, block: [BLOCK] } });
+    const lines: string[] = [];
+    // The fixture's hash names other rules than these.
+    const stale = router(fixtureOf('wire-hook-execute-settings.json'));
+    const out = await runPromptHook(
+      promptEvent('research x402 agent payments'),
+      hook(stale.fetchImpl, (line) => lines.push(line)),
+    );
+    expect(out.response).toBeNull();
+    expect(lines.join('\n')).toContain('did not confirm it applied your Tenjin settings');
+    // And none from a router that applied no rules at all.
+    const { decision } = fixtureOf('wire-hook-execute-settings.json');
+    const old = router({ schemaVersion: 1, routerVersion: 'v', decision });
+    expect(
+      (await runPromptHook(promptEvent('research it'), hook(old.fetchImpl))).response,
+    ).toBeNull();
+    expect(await readSpec(dir, decision.id)).toBeNull();
+  });
+
+  it('routes nothing while the saved rules cannot be read', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ ...ROUTER_POLICY, router: { policy: { version: 1, include: [] } } }),
+    );
+    const lines: string[] = [];
+    const { fetchImpl, calls } = router(EXECUTE);
+    const out = await runPromptHook(
+      promptEvent('check the BTC price'),
+      hook(fetchImpl, (line) => lines.push(line)),
+    );
+    expect(out.response).toBeNull();
+    expect(calls).toEqual([]);
+    expect(lines.join('\n')).toContain("your Tenjin settings can't be read");
+  });
+});
+
+/**
+ * A SERVICE ON A CONNECTED ACCOUNT (plan 37): its line is shown like any
+ * offer's, with no spend check (the user's own plan pays), and its spec is
+ * kept. Where this machine can't run it (the account was found to lack a
+ * tool its call makes), nothing is offered: the hook stays silent.
+ */
+describe('an offer led by a connected account', () => {
+  const answer = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL('./fixtures/wire-hook-execute-account.json', import.meta.url)),
+      'utf8',
+    ),
+  ) as {
+    settingsHash: string;
+    decision: { id: string; hint: string } & Record<string, unknown>;
+  };
+
+  /** Apify, fal and Firecrawl connected here, with the preference connecting
+   *  Apify writes: the settings the fixture's answer was decided under. */
+  async function connectApify(missingTools: string[] = [], over: Record<string, unknown> = {}) {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({
+        ...ROUTER_POLICY,
+        ...over,
+        router: {
+          policy: {
+            version: 1,
+            prefer: [{ scope: { kind: 'global' }, targets: [{ kind: 'source', id: 'apify' }] }],
+          },
+          sources: [
+            { id: 'apify', label: 'Apify', mcpUrl: 'https://mcp.apify.com', mapped: true },
+            { id: 'fal', label: 'fal', mcpUrl: 'https://mcp.fal.ai/mcp-relay', mapped: true },
+            {
+              id: 'firecrawl',
+              label: 'Firecrawl',
+              mcpUrl: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+              mapped: true,
+            },
+          ],
+        },
+      }),
+    );
+    await mkdir(join(dir, 'sources'), { recursive: true });
+    // Each sign-in's plaintext header: the tools the connect-time check found
+    // the account lacks.
+    for (const id of ['apify', 'fal', 'firecrawl']) {
+      await writeFile(
+        join(dir, 'sources', `${id}.json`),
+        JSON.stringify({ header: { id, missingTools: id === 'apify' ? missingTools : [] } }),
+      );
+    }
+  }
+
+  it('shows its line, with no spend check, and keeps its spec', async () => {
+    // A wallet that cannot sign still shows it: the account's plan pays.
+    await connectApify([], { maxAutoSpend: '0' });
+    const { fetchImpl, calls } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(calls).toHaveLength(1);
+    expect(
+      (calls[0] as { body: { settings: { sources: string[] } } }).body.settings.sources,
+    ).toEqual(['tenjin', 'apify', 'fal', 'firecrawl']);
+    expect(out).toMatchObject({ action: 'execute', id: answer.decision.id });
+    expect(JSON.stringify(out.response)).toContain('your Apify account');
+    const { readKeptSpec } = await import('./specs');
+    const kept = await readKeptSpec(dir, answer.decision.id);
+    expect(kept).toMatchObject({
+      account: true,
+      spec: { source: 'apify', settingsHash: answer.settingsHash },
+    });
+    // Never a spec the balance pays, for a reader that runs only those.
+    expect(await readSpec(dir, answer.decision.id)).toBeNull();
+    expect(await renderProgress(dir, 'sess-1')).toBe(
+      'x402 · prompt: account lookup offered (Apify)',
+    );
+  });
+
+  it('offers nothing, with nothing kept, where the account lacks a tool its call makes', async () => {
+    // A wallet that cannot sign: nothing else is offered in its place, and
+    // the hook asks the router nothing more.
+    await connectApify(['get-dataset-items'], { maxAutoSpend: '0' });
+    const { fetchImpl, calls } = router(answer);
+    const out = await runPromptHook(promptEvent('find coffee shops in Austin'), {
+      dataDir: dir,
+      baseUrl: BASE,
+      fetchImpl,
+    });
+    expect(out).toEqual({ response: null, action: 'execute', withheld: true });
+    expect(calls).toHaveLength(1);
+    const { readKeptSpec } = await import('./specs');
+    expect(await readKeptSpec(dir, answer.decision.id)).toBeNull();
   });
 });

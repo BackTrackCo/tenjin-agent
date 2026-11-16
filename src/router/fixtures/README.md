@@ -12,7 +12,7 @@ no copy.
 Change them in the same change as the client and server code that reads and
 writes them. `harness/` is the exception: harness events (what Claude Code
 hands a router hook) that only this client reads. `ROUTER_VERSION` is
-`2026-10-24.1`.
+`2026-10-29.2`.
 
 The service ids these fixtures name (`capabilityId`, a browse row's `id`,
 `tool`, a `discovered:tenjin:` id) resolve against `tenjin`'s test catalog,
@@ -38,6 +38,7 @@ below). Selected `{tool, query}` bypasses that fee gate and makes no model decis
 | free tool | `{schemaVersion, tool, query, accepts}`                                        | `execute` for the selected free service, or `needs_input`; no routing decision or payment                                   |
 | outcome   | `{schemaVersion, id, status, reason?, httpStatus?, ms?, via?}`                 | an empty 204                                                                                                                |
 | forget    | `{schemaVersion, forget: "samples"}`                                           | an empty 204                                                                                                                |
+| warm      | `{schemaVersion, warm: true, accepts, harness?}`                               | `{schemaVersion, routerVersion, warm: true}`: paid route only, no gate, settles at 0; a deposit, or a voucher if none due   |
 
 `improve: true` rides the hook and tool forms only while the person has turned
 on "Help improve routing" (`router.improve`, off by default, enabled explicitly
@@ -137,11 +138,11 @@ gate is offered only the tasks whose capabilities a client runs.
 - `headers` (client side only, until tenjin#988 lands): a spec carries
   `request.headers`, fixed headers the catalog sets on a service's call (a
   provider's beta opt-in), and the pins those headers unlock.
-- `tolerant` (client side only, until the server reads it): the client reads
-  answers as below (Reading an answer): it drops a field it does not know and
-  honors `requires`. Every field added after it, `requires` included, goes
-  only to a client that sends it; any other client, every release before it
-  among them, reads strictly and gets today's shape.
+- `tolerant`: the client reads answers as below (Reading an answer): it drops
+  a field it does not know and honors `requires`. Every field added after it
+  goes only to a client that sends it (see The warm and tolerant exchanges);
+  any other client, every release before it among them, reads strictly and
+  gets today's shape.
 
 A client that does not send a token never sees its fields, so every answer to
 it is byte for byte the shape above.
@@ -170,9 +171,94 @@ The client reads every answer as a tolerant reader (RFC 9413, and only that):
   `requires_unmet` and the missing tokens in `missing`. A spec it cannot run
   that the line does not name is only dropped. This
   client has `catalog`, `spec`, `label`, `fields`, `jobs`, `headers`, `note`,
-  `tolerant` and `bazaar`. Send `requires` for a field whose absence changes what the
+  `tolerant`, `bazaar`, `settings` and `mcp`. Send `requires` for a field whose absence changes what the
   call is (a header it must send, a new kind of payment or streaming); a
   field a client may ignore needs none.
+
+## The settings
+
+`settings` (plan 36) rides every routing form, the hook `{packet}`, the tool
+`{query, id?}`, `{browse}` and `{tool, query?}`, as an `accepts` token and a
+`settings` field beside the other fields (never inside the packet), also when
+the user has no rules. Not on the outcome report, `forget` or the identities
+read. The field is `{version: 1, hash, policy, replacement?, sources}`:
+
+- `policy`: `block` (typed targets `{kind, id}`, `kind` one of `category`,
+  `task`, `provider`, `seller`, `service`, `source`), `only` (`{scope,
+dimension, targets}`), `prefer` (`{scope, targets}`) and `preferSpeed:
+true`, each omitted when empty or off. A scope is `{kind: "global"}`, a
+  task or a category. This client writes `only` rules for the global scope or
+  one task, capability (category and task) rules globally, and preferences
+  that list one kind; a global preference lists sources only.
+- `replacement`: `{mode: "when-routed", providers?}`, omitted when off;
+  absent `providers` means every eligible provider.
+- `sources`: the sources usable on this machine, exactly `["tenjin"]` until
+  accounts land.
+- `hash`: the client's alone, `"sha256:" + hex(sha256(canonical JSON of
+{version, policy, replacement, sources}))`, keys sorted at every depth, no
+  whitespace, arrays in order. The server never recomputes it.
+
+The rules govern only what Tenjin picks on its own: hook offers and the
+service picked for a `{query}`. `{browse}`, `{tool}`, `{tool, query}` and a
+spec read by its id run whatever they say.
+
+An answer to a client that sends `settings` lists it in `honored` when the
+server applied them, and then carries the request's hash verbatim as
+top-level `settingsHash` (hook, lookup and browse answers). The client keeps
+it with every spec and quote, and refuses any call whose hash differs from
+the rules saved now, or that has none while a rule is saved, before provider
+HTTP or signing; it never routes again on its own. When the rules leave Tenjin
+nothing to pick on its own, the answer is the ordinary `native` one, with
+nothing said about them.
+
+`bound: {id, input}` rides a hook `execute` or `discovered` for a pending
+WebSearch or WebFetch only while `replacement.mode` is `when-routed`, the pick
+fits `replacement.providers` and every required field is filled from that
+call's own query or URL: the offer id to run and its complete input. The
+client's swap runs it unchanged through the ordinary executor and its check.
+
+The free identities read is `{schemaVersion: 1, identities: true, accepts}`
+on `POST /api/x402-router`, answered with every id a setting can name and its
+label: `categories` (with their `tasks`), `tasks` (with their `category`, and
+`speed: true` on a task the speed preference changes),
+`providers`, `sellers`, `services` (with `task`, `providers` and `seller`) and
+`sources`. No gate, no model and no payment. `tenjin config` resolves typed
+names against it and names saved rules by it.
+
+## Your own accounts
+
+`mcp` (plan 37) rides in `accepts` beside `settings`, on every form that sends
+them and on the identities read. A call on a connected account is offered only
+for an account the settings' `sources` names: `tenjin` and every account
+connected on this machine that the identities read listed as connectable (an
+address connected by its URL alone is never named). The hash covers them, so
+connecting or disconnecting refuses every offer decided before it.
+
+- **An account spec** carries a top-level `source` (the account's id, never
+  `tenjin`), `mcp` (the tool, its `args` template, how its `result` is read, and
+  `next` with an optional `when` and `poll`) in place of a paid spec's price and
+  request, and `requires: ["mcp"]`. No URL, credential or price
+  rides with it: the client calls the server it connected for `source`. A value
+  that is exactly `{field}` is that input field's value; exactly
+  `{result.<path>}`, in a follow-up only, the first call's result at that path;
+  anything else is sent as written. The call that bills is sent once; only
+  `poll` repeats. Each call is bounded at 8192 bytes.
+- **An `execute` led by one** has no `endpoint`, `providerPriceAtomic` `"0"`,
+  the lead alone in `specs`, and never `augment`. Where this machine's
+  connect-time check found the account lacks a tool the call makes, the hook
+  offers nothing.
+- **The re-ask** follows an account's refusal, or a job of its that failed:
+  the client's usual envelope with `refused`, the refused offer's id, and no
+  query, on the paid route. The router routes that offer's own turn again on
+  Tenjin's own tools alone (`settings.sources` is only `tenjin` for this one
+  answer, so no connected account answers it), under the rest of the settings
+  sent, and answers as it answers a query: `wire-refused-offer.json` while the offer's
+  row is live (Tenjin's Firecrawl page read under a fresh id, with the hash the
+  client sent), `wire-refused-native.json` after it is gone.
+- **The identities read** gives an `mcp` client `connectable` on each account's
+  `sources` row (`mcpUrl`, `signIn`, `keyScheme` for a key sign-in, and
+  `expectTools`, every tool its maps call), and lists the account's services
+  (`<account>.<key>`, sold by the account) with their tasks and providers.
 
 ## The harness
 
@@ -196,17 +282,19 @@ clients without it get `spec_missing`, pointing at `request({query})`.
 
 ## The paid path
 
-`POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms,
+`POST /api/x402-router/route` takes the hook and the tool's `{query, id?}` forms and `warm`,
 behind x402
-`batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). The 402 is the
-only price: this client pays any quote at or below its ceiling of 3000 atomic
-USDC (`ROUTING_FEE_CEILING_ATOMIC` in `fee.ts`) inside the user's spend limits,
-pays nothing above it, and pins no payee. With the fee `off`, the route answers
-with no 402. An answer from
-a completed Jev gate settles that fee; any other answer settles at 0, which
+`batch-settlement` at 3000 atomic USDC (`maxTimeoutSeconds` 15). A 402 can
+also carry the answer's own quote as a first offer, with 3000 as the second.
+The 402 is the only price: this client pays the answer's own quote ahead of
+3000, at or below its current routing limit (`ROUTING_FEE_CEILING_ATOMIC`
+in `fee.ts`) inside the user's spend limits, pays nothing above it, and pins no
+payee. With the fee `off`, the route answers with no 402. An answer from
+a completed Jev gate settles that fee; `warm` and any other answer settle at 0, which
 `PAYMENT-RESPONSE` shows as `chargedAmount: "0"`. An outcome report or an
-`{id, input}` there is a 400. A new channel's deposit rides its first paid
-call. The free route answers `{packet}` and `{query}` with `native` and the
+`{id, input}` there is a 400. Ordinary routing fees are funded through `warm` (below); a dear per-answer quote can carry its own inline deposit. The free route
+answers
+`{packet}` and `{query}` with `native` and the
 `fee_required` diagnostic, telling the agent to update tenjin-cli. Outcome
 reports, `browse` and `tool` stay on the free route.
 
@@ -383,59 +471,100 @@ default. The client runs each chosen option from its own spec as its own
 payment and reports each outcome under that option's id. Without `catalog` or
 `"choices"` the answer is unchanged: no `choices`, and at most four specs.
 
+## The warm and tolerant exchanges
+
+- **`warm`** (`wire-warm-request.json`, `wire-warm.json`): the client's
+  background top-up that normally carries deposits. A quote above $0.003 can carry its own inline deposit. The server
+  answers it with no gate, so it settles at 0. Its payment is a deposit, or a
+  voucher when another process already funded the channel, so the server takes
+  either. A server without the form answers 400, and the client lets the
+  deposit ride its next paid call for an hour.
+- **`tolerant`** (`wire-tool-request-by-id-tolerant.json`,
+  `wire-lookup-spec-tolerant.json`): a client whose `accepts` lists `tolerant`
+  also gets `honored` (the request fields the answer used) and, on a spec,
+  `requires`, `timeoutS` and `maxBytes` where the service sets them. Other
+  clients get the same answer without them.
+
 ## The set
 
-| file                                       | what it pins                                                                              |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `wire-hook-execute.json`                   | hook answer for the free docs lookup: no spec, the `request({query, id})` line            |
-| `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                              |
-| `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                                   |
-| `wire-lookup-native.json`                  | tool answer: native, with diagnostics                                                     |
-| `wire-lookup-needs-input.json`             | tool answer: a named missing argument                                                     |
-| `wire-lookup-expired-id.json`              | tool answer after a dead id, carrying the plain `note`: the free docs lookup's `execute`  |
-| `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`       |
-| `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`            |
-| `wire-hook-request-ask.json`               | the hook before a question to the user, with `sessionId` and `accepts`                    |
-| `wire-hook-discovered.json`                | hook answer: an open-Bazaar service, its candidate, its spec and the `hint`               |
-| `wire-lookup-discovered.json`              | tool fallback answer: the same `discovered` shape with a fresh id                         |
-| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec |
-| `wire-hook-execute-headers.json`           | the same for a `headers` client: the Exa spec with its `Exa-Beta` header (tenjin#988)     |
-| `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along             |
-| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                    |
-| `wire-outcome-result.json`                 | the same report with the caller's verdict, `result`                                       |
-| `wire-outcome-chose-other.json`            | a report that the caller used another service, named by `host`                            |
-| `wire-outcome-unpaid.json`                 | a call stopped before anything was signed, with its `reason`                              |
-| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                          |
-| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id and its skeleton line, no `input`     |
-| `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`          |
-| `wire-hook-request-choices.json`           | the hook from a client that accepts `choices`                                             |
-| `wire-hook-discovered-choices.json`        | hook answer: a compare group's options, each under its own id and spec, and the one line  |
-| `wire-lookup-discovered-choices.json`      | tool fallback answer: the same `choices` shape with fresh ids                             |
-| `wire-hook-execute-labelled.json`          | hook answer for a `label` and `fields` client: the label, the short line, the fields      |
-| `wire-hook-execute-augment.json`           | the free docs lookup before a search, for a `fields` client: `augment` and `augmentUrl`   |
-| `wire-hook-execute-note.json`              | the same for a `fields` and `note` client: `note`, the after-search line, no `augmentUrl` |
-| `wire-browse-request.json`                 | a browse of the tool list                                                                 |
-| `wire-browse.json`                         | the browse answer: its rows                                                               |
-| `wire-tool-request-by-id.json`             | a browse row's id sent as `tool`                                                          |
-| `wire-lookup-spec-by-id.json`              | tool answer for it: the row's spec under a fresh id, labelled, with the fields            |
-| `wire-outcome-via.json`                    | an outcome report naming the path that made the call, `via`                               |
-| `wire-hook-request-catalog.json`           | the hook from a client that sends `catalog` (and `bazaar`)                                |
-| `wire-hook-discovered-catalog.json`        | hook answer: a former list service as `discovered` under its catalog id, with its fields  |
-| `wire-hook-request-harness.json`           | the native hook from a Codex client: `harness`, before a Reddit thread fetch              |
-| `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                     |
-| `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids     |
-| `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`   |
-| `wire-hook-request-improve.json`           | the hook from an install that turned on "Help improve routing": `improve`                 |
-| `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`     |
-| `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                    |
-| `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                              |
+| file                                       | what it pins                                                                                   |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `wire-hook-execute.json`                   | hook answer for the free docs lookup: no spec, the `request({query, id})` line                 |
+| `wire-hook-native.json`                    | hook answer: the host's own tools are enough                                                   |
+| `wire-hook-needs-input.json`               | hook answer: the turn names no task a capability serves                                        |
+| `wire-lookup-native.json`                  | tool answer: native, with diagnostics                                                          |
+| `wire-lookup-needs-input.json`             | tool answer: a named missing argument                                                          |
+| `wire-lookup-expired-id.json`              | tool answer after a dead id, carrying the plain `note`: the free docs lookup's `execute`       |
+| `wire-hook-request-native-shortfall.json`  | the native hook after WebFetch fell short: `nativeOutcome` beside its `pendingCall`            |
+| `wire-hook-request-native-no-content.json` | the native hook after WebFetch answered 200 with only the page shell: `reason`                 |
+| `wire-hook-request-ask.json`               | the hook before a question to the user, with `sessionId` and `accepts`                         |
+| `wire-hook-discovered.json`                | hook answer: an open-Bazaar service, its candidate, its spec and the `hint`                    |
+| `wire-lookup-discovered.json`              | tool fallback answer: the same `discovered` shape with a fresh id                              |
+| `wire-hook-execute-spec.json`              | hook answer for a client that accepts `spec`: the call with the held search, the Exa spec      |
+| `wire-hook-execute-headers.json`           | the same for a `headers` client: the Exa spec with its `Exa-Beta` header (tenjin#988)          |
+| `wire-hook-discovered-spec.json`           | the same for a list service: the call with its skeleton, the spec rides along                  |
+| `wire-outcome-request.json`                | the outcome report a client sends after running a spec                                         |
+| `wire-outcome-result.json`                 | the same report with the caller's verdict, `result`                                            |
+| `wire-outcome-chose-other.json`            | a report that the caller used another service, named by `host`                                 |
+| `wire-outcome-unpaid.json`                 | a call stopped before anything was signed, with its `reason`                                   |
+| `wire-tool-request-spec.json`              | the tool call from a spec client: a query, no id                                               |
+| `wire-lookup-spec.json`                    | tool answer for it: Wolfram's spec under a fresh id and its skeleton line, no `input`          |
+| `wire-lookup-spec-skeleton.json`           | tool answer for a spec with more to fill (Apollo): the skeleton line, no `input`               |
+| `wire-hook-request-choices.json`           | the hook from a client that accepts `choices`                                                  |
+| `wire-hook-discovered-choices.json`        | hook answer: a compare group's options, each under its own id and spec, and the one line       |
+| `wire-lookup-discovered-choices.json`      | tool fallback answer: the same `choices` shape with fresh ids                                  |
+| `wire-hook-execute-labelled.json`          | hook answer for a `label` and `fields` client: the label, the short line, the fields           |
+| `wire-hook-execute-augment.json`           | the free docs lookup before a search, for a `fields` client: `augment` and `augmentUrl`        |
+| `wire-hook-execute-note.json`              | the same for a `fields` and `note` client: `note`, the after-search line, no `augmentUrl`      |
+| `wire-browse-request.json`                 | a browse of the tool list                                                                      |
+| `wire-browse.json`                         | the browse answer: its rows                                                                    |
+| `wire-tool-request-by-id.json`             | a browse row's id sent as `tool`                                                               |
+| `wire-lookup-spec-by-id.json`              | tool answer for it: the row's spec under a fresh id, labelled, with the fields                 |
+| `wire-outcome-via.json`                    | an outcome report naming the path that made the call, `via`                                    |
+| `wire-hook-request-catalog.json`           | the hook from a client that sends `catalog` (and `bazaar`)                                     |
+| `wire-hook-discovered-catalog.json`        | hook answer: a former list service as `discovered` under its catalog id, with its fields       |
+| `wire-hook-request-harness.json`           | the native hook from a Codex client: `harness`, before a Reddit thread fetch                   |
+| `wire-tool-request-catalog.json`           | the tool call from a `catalog` client: a query, no id                                          |
+| `wire-lookup-discovered-catalog.json`      | tool answer for it: two former list services as `discovered`, under their catalog ids          |
+| `wire-lookup-spec-job.json`                | a row's spec for a `catalog`, `spec`, `jobs` client: `job`, `takes`, the line's `count`        |
+| `wire-hook-request-improve.json`           | the hook from an install that turned on "Help improve routing": `improve`                      |
+| `wire-hook-request-quoted.json`            | the hook with a pasted block in `current.quoted` and the user's own link in `ownUrls`          |
+| `wire-forget-request.json`                 | the `forget` form, sent once when "Help improve routing" is turned off                         |
+| `wire-outcome-ignored.json`                | an offer shown and never taken: `ignored`, with its `reason`                                   |
+| `wire-hook-request-settings.json`          | the native hook from a `settings` client: rules, automatic use, sources and their hash         |
+| `wire-hook-execute-settings.json`          | hook answer under those settings: `honored` and the echoed `settingsHash`                      |
+| `wire-hook-execute-bound.json`             | the same offer for a pending search with automatic use on: `bound`, the id and its input       |
+| `wire-tool-request-by-id-settings.json`    | a browse row's id sent as `tool` with `settings`                                               |
+| `wire-lookup-spec-settings.json`           | tool answer for it: the row's spec with the echoed `settingsHash`                              |
+| `wire-browse-request-settings.json`        | a browse of the tool list with `settings`                                                      |
+| `wire-browse-settings.json`                | the browse answer: every row the client can run, unfiltered by them, with the echoed hash      |
+| `wire-identities-request.json`             | the free identities read                                                                       |
+| `wire-identities.json`                     | its answer: every id a setting can name, with its label                                        |
+| `wire-warm-request.json`                   | the paid route's `warm` call; its payment is a deposit when one is due, else a voucher         |
+| `wire-warm.json`                           | the `warm` answer: no decision                                                                 |
+| `wire-tool-request-by-id-tolerant.json`    | a browse row's id from a `tolerant` client (and `jobs`, `label`, `fields`)                     |
+| `wire-lookup-spec-tolerant.json`           | tool answer for it: `honored`, and the row's spec with its `job` and `requires: ["jobs"]`      |
+| `wire-hook-request-account.json`           | the prompt hook from a machine with Apify, fal and Firecrawl connected: `mcp`, their `sources` |
+| `wire-hook-execute-account.json`           | hook answer: an Apify map leads alone, no endpoint                                             |
+| `wire-hook-request-account-fetch.json`     | the native hook before a WebFetch, Firecrawl connected and automatic use on                    |
+| `wire-hook-execute-account-bound.json`     | hook answer for it: the Firecrawl map with `bound`                                             |
+| `wire-tool-request-account.json`           | a query from a machine whose images preference names fal                                       |
+| `wire-lookup-spec-account.json`            | tool answer for it: the fal map's spec                                                         |
+| `wire-tool-request-account-by-id.json`     | the fal map, named by its id as `tool`                                                         |
+| `wire-lookup-spec-account-by-id.json`      | tool answer for it: the fal map's spec under a fresh offer id                                  |
+| `wire-tool-request-only-accounts.json`     | a query with Tenjin's own tools turned off and only the fal map left                           |
+| `wire-refused-request.json`                | the re-ask after Firecrawl refused the bound offer: `refused`, no query                        |
+| `wire-refused-offer.json`                  | its answer while the offer's row is live: Tenjin's Firecrawl page read, a fresh id             |
+| `wire-refused-native.json`                 | its answer once the row is gone: the ordinary native, naming no rule                           |
+| `wire-identities-mcp.json`                 | the identities read for an `mcp` client: each account's `connectable` and its services         |
+| `oauth-client-metadata.json`               | Tenjin's client document a sign-in names, served at `tenjin.sh/oauth/client-metadata.json`     |
 
 Two rules the fixtures exist to hold:
 
 - **In an offer, the line and its `specs` name the same ids.** A caller cannot
   approve one service and run another. A compare choice's line names the
   decision's id and `choices` names the rest, each with its spec.
-- **Every non-execute answer carries `diagnostics`, nested inside `decision`.**
+- **Every non-execute decision carries `diagnostics`, nested inside it.**
   That is the intended shape: they sit on the union's non-execute arms so a
   contractless outcome without diagnostics does not typecheck.
 
@@ -447,38 +576,44 @@ caller's own, to the provider.
 
 Take these from here; do not re-derive them.
 
-| field                           | bound                                                                                                                                                                                                       |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`                 | exactly `1`, on every request and response                                                                                                                                                                  |
-| hook vs native hook             | read from `packet.pendingCall`; there is no `source` field                                                                                                                                                  |
-| `packet` serialized             | 16384 bytes, refused rather than truncated                                                                                                                                                                  |
-| `packet.history`                | 6 messages                                                                                                                                                                                                  |
-| message `text`                  | 16000 characters                                                                                                                                                                                            |
-| `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                             |
-| `packet.ownUrls`                | optional; 8 entries, each 2000 characters, each one of `literalUrls`                                                                                                                                        |
-| `packet.current.quoted`         | optional; 1 to 8 blocks, each 1 to 16000 characters, inside the packet's 16384 bytes                                                                                                                        |
-| `improve`                       | optional; `true` only, on the hook and tool forms                                                                                                                                                           |
-| `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                          |
-| `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                |
-| `accepts`                       | up to 16 strings, each 1-32 characters; `spec` is required; the server also reads `catalog`, `label`, `fields`, `jobs`, `discovered` (the list), `bazaar` (the open Bazaar) and `choices` (compare options) |
-| `browse`                        | 0 to 8000 characters                                                                                                                                                                                        |
-| `tool`                          | 1 to 200 characters, a browse row's `id`                                                                                                                                                                    |
-| `label`                         | 1 to 32 characters on a spec or an `execute`; up to 120 on a browse row (a list entry's upstream)                                                                                                           |
-| `via`                           | a lowercase token, 1 to 32 characters, letters and `_`                                                                                                                                                      |
-| `harness`                       | a lowercase token, 1 to 32 characters, starting with a letter, then letters, digits, `_` and `-`                                                                                                            |
-| `sessionId`                     | 1 to 200 characters, hook call only                                                                                                                                                                         |
-| `pendingCall.query` / `.url`    | 1 to 4000 characters                                                                                                                                                                                        |
-| `pendingCall.question`          | 1 to 4000 characters                                                                                                                                                                                        |
-| `packet.nativeOutcome`          | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content`                                    |
-| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                                                                                                                                                                          |
-| `job`                           | integers `everyS` 1 to 30, `maxWaitS` 1 to 600, `keepH` 1 to 48; a field name 1 to 64 of `[A-Za-z0-9_]`, no leading digit; a header 1 to 64 of `[A-Za-z0-9-]`; `httpStatus` and `values` 1 to 8 entries     |
-| `takes.max`                     | 2 to 5                                                                                                                                                                                                      |
-| `requires`                      | up to 16 tokens, each matching `^[a-z][a-z0-9_-]{0,31}$`                                                                                                                                                    |
-| `timeoutS`                      | an integer, 1 to 120                                                                                                                                                                                        |
-| `maxBytes`                      | an integer, 1 to 209715200                                                                                                                                                                                  |
-| `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                  |
-| `id`                            | a uuid the server minted; a client never invents one                                                                                                                                                        |
-| id lifetime                     | 15 minutes from the hook call that created it                                                                                                                                                               |
+| field                           | bound                                                                                                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `schemaVersion`                 | exactly `1`, on every request and response                                                                                                                                                                         |
+| hook vs native hook             | read from `packet.pendingCall`; there is no `source` field                                                                                                                                                         |
+| `packet` serialized             | 16384 bytes, refused rather than truncated                                                                                                                                                                         |
+| `packet.history`                | 6 messages                                                                                                                                                                                                         |
+| message `text`                  | 16000 characters                                                                                                                                                                                                   |
+| `packet.literalUrls`            | 8 entries, each 2000 characters                                                                                                                                                                                    |
+| `packet.ownUrls`                | optional; 8 entries, each 2000 characters, each one of `literalUrls`                                                                                                                                               |
+| `packet.current.quoted`         | optional; 1 to 8 blocks, each 1 to 16000 characters, inside the packet's 16384 bytes                                                                                                                               |
+| `improve`                       | optional; `true` only, on the hook and tool forms                                                                                                                                                                  |
+| `query`                         | 1 to 8000 characters; optional only when `input` and `id` are sent                                                                                                                                                 |
+| `input`                         | a JSON object, at most 16384 bytes serialized; only with an `id`, and answered `needs_input`                                                                                                                       |
+| `accepts`                       | up to 16 strings, each 1-32 characters; `spec` is required; the server also reads `catalog`, `label`, `fields`, `jobs`, `discovered` (the list), `bazaar` (the open Bazaar) and `choices` (compare options)        |
+| `browse`                        | 0 to 8000 characters                                                                                                                                                                                               |
+| `tool`                          | 1 to 200 characters, a browse row's `id`                                                                                                                                                                           |
+| `label`                         | 1 to 32 characters on a spec or an `execute`; up to 120 on a browse row (a list entry's upstream)                                                                                                                  |
+| `via`                           | a lowercase token, 1 to 32 characters, letters and `_`                                                                                                                                                             |
+| `harness`                       | a lowercase token, 1 to 32 characters, starting with a letter, then letters, digits, `_` and `-`                                                                                                                   |
+| `sessionId`                     | 1 to 200 characters, hook call only                                                                                                                                                                                |
+| `pendingCall.query` / `.url`    | 1 to 4000 characters                                                                                                                                                                                               |
+| `pendingCall.question`          | 1 to 4000 characters                                                                                                                                                                                               |
+| `packet.nativeOutcome`          | optional; only with a `pendingCall`; at least one of `code` (0 to 999), `bytes` (0 or more), `error` (1 to 1000 characters); `reason` optional, one of `no_main_content`                                           |
+| `gateHint.turnId` / `.lookupId` | 1 to 64 characters                                                                                                                                                                                                 |
+| `job`                           | integers `everyS` 1 to 30, `maxWaitS` 1 to 600, `keepH` 1 to 48; a field name 1 to 64 of `[A-Za-z0-9_]`, no leading digit; a header 1 to 64 of `[A-Za-z0-9-]`; `httpStatus` and `values` 1 to 8 entries            |
+| `takes.max`                     | 2 to 5                                                                                                                                                                                                             |
+| `requires`                      | up to 16 tokens, each matching `^[a-z][a-z0-9_-]{0,31}$`                                                                                                                                                           |
+| `timeoutS`                      | an integer, 1 to 120                                                                                                                                                                                               |
+| `maxBytes`                      | an integer, 1 to 209715200                                                                                                                                                                                         |
+| `diagnostics.missing`           | 60 entries, each non-empty                                                                                                                                                                                         |
+| `settings`                      | at most 64 block targets, 32 only entries, 64 prefer entries, 16 targets per entry, 16 sources; a target id 1 to 120 characters; past a bound the server ignores the whole field and does not list it in `honored` |
+| `settingsHash`                  | `^sha256:[0-9a-f]{64}$`, the request's own, verbatim                                                                                                                                                               |
+| `bound.input`                   | a JSON object, at most 16384 bytes serialized                                                                                                                                                                      |
+| `source` (an account spec)      | `^[a-z0-9][a-z0-9-]{0,47}$`, never `tenjin`                                                                                                                                                                        |
+| `mcp`                           | at most 8192 bytes serialized; a tool name `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`; `poll.everyS` 1 to 30, `poll.maxWaitS` 1 to 600; a state path up to 4 dotted names, 1 to 8 values                                |
+| `connectable`                   | `mcpUrl` https with no credentials, query, fragment or trailing slash; `signIn` 1 to 2 of `oauth`, `key`; `keyScheme` `Bearer` or `Key`, only with `key`; `expectTools` 1 to 64, each once                         |
+| `id`                            | a uuid the server minted; a client never invents one                                                                                                                                                               |
+| id lifetime                     | 15 minutes from the hook call that created it                                                                                                                                                                      |
 
 Expired packets are unreadable after 15 minutes (the route refuses an expired id) and are deleted by the next router request or the daily cleanup, whichever comes first; a discovery run's search text (built from the user's words) is cleared at the same expiry.
 

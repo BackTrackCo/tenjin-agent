@@ -3,7 +3,8 @@ import { CliError } from '../lib/errors';
 import { toMoney } from '../lib/money';
 import type { SpendPolicy } from '../lib/policy';
 import { admitPlan, type PlanSlot } from '../lib/spend-plan';
-import { ALL_CHOICES, type Choices, type OfferSpec, type SpecOutcome } from './decision';
+import { ALL_CHOICES, type Choices, type SpecOutcome } from './decision';
+import { settingsRefusal } from './settings-check';
 import { choicesOf, planStop, takesOf, type PlanWords, type QuotedCall } from './plan';
 import { SILENT_FOOTER, type LookupFooter } from './progress';
 import {
@@ -13,6 +14,7 @@ import {
   settleSpecPayment,
   type EarlierPayment,
   type KeptChoices,
+  type KeptSpec,
 } from './specs';
 import {
   alreadyPaid,
@@ -24,6 +26,7 @@ import {
   prepareSpec,
   reportOutcome,
   runningJob,
+  settingsFail,
   specTerms,
   type FailStatus,
   type PreparedSpec,
@@ -424,7 +427,7 @@ export async function runChoiceSet(
   footer: LookupFooter,
   reportDeps: ReportDeps,
   settings: { policy: SpendPolicy; rpcUrl: string },
-  approved?: { specs: OfferSpec[]; keys: string[]; slots: PlanSlot[] },
+  approved?: { specs: KeptSpec[]; keys: string[]; slots: PlanSlot[] },
 ): Promise<RequestToolResult> {
   const { dataDir } = deps.ctx;
   const { choices } = kept;
@@ -459,7 +462,7 @@ export async function runChoiceSet(
     );
   }
 
-  const specs: OfferSpec[] = [];
+  const specs: KeptSpec[] = [];
   const prepared: { option: (typeof choices.options)[number]; checked: PreparedSpec }[] = [];
   for (const [index, option] of choices.options.entries()) {
     const named = `${option.label} (choice ${JSON.stringify(option.key)})`;
@@ -484,6 +487,17 @@ export async function runChoiceSet(
       });
     }
     prepared.push({ option, checked: checked.prepared });
+  }
+  // THE WHOLE SET, BEFORE ANY OPTION IS PRICED OR PAID: one option decided
+  // under other rules than the ones saved now refuses them all, so the set
+  // never shrinks into a different charge. Each option's call checks again.
+  const stale = await settingsRefusal(
+    dataDir,
+    specs.map((spec) => spec.settingsHash),
+  );
+  if (stale !== null) {
+    await footer.done('needs_input');
+    return settingsFail(stale);
   }
 
   // A quote the user approved runs only the options it covered.
@@ -593,7 +607,7 @@ const TAKES_NEXT_STEP =
  */
 export async function runCount(
   id: string,
-  spec: OfferSpec,
+  spec: KeptSpec,
   input: Record<string, unknown>,
   count: number,
   deps: RequestToolDeps,
@@ -611,6 +625,13 @@ export async function runCount(
     await footer.done(status);
     return fail(status, reason, extras);
   };
+  // Every take was decided under one answer's rules, checked before the
+  // price is asked; each take's own call checks them again.
+  const stale = await settingsRefusal(deps.ctx.dataDir, [spec.settingsHash]);
+  if (stale !== null) {
+    await footer.done('needs_input');
+    return settingsFail(stale);
+  }
   const checked = await prepareSpec(id, spec, input, footer, reportDeps);
   if ('refused' in checked) return checked.refused;
   const steps: TakeStep[] = Array.from({ length: count }, (_, index) => {

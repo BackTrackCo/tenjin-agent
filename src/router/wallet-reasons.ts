@@ -121,11 +121,11 @@ export const WALLET_CLASS: ReadonlySet<string> = new Set<string>([
   'wallet_low',
 ]);
 
-/** One-time line once a paid call succeeds after an unlock reason was told. */
+/** The observer confirmed that the wallet can sign. */
 export const WALLET_UNLOCKED = 'Tenjin wallet unlocked.';
 
-/** One-time line once a paid call succeeds after `wallet_low` was told. */
-export const WALLET_FUNDED = 'Tenjin wallet funded.';
+/** A signed routing payment worked after a wallet warning; no new funds are inferred. */
+export const PAID_ROUTING_RESTORED = 'Paid routing is working again.';
 
 /** Doctor's session-row detail when this shell signs and no served router was seen. */
 export const NO_SESSION_CHECKED = 'this shell passes; no running Claude session checked';
@@ -189,10 +189,9 @@ export function agentFixOf(err: { fix?: string | undefined }): string {
 
 /**
  * The line that clears a wallet notice told earlier in the session, once a
- * paid call succeeds: funded for `wallet_low`, unlocked for any unlock reason
- * or the unclassified fallback, null for anything else (no wallet news).
+ * paid call succeeds. It proves paid routing works, not that money was added
+ * or the wallet was repaired; null for anything else.
  */
 export function walletClearedSentence(previousWhy: string): string | null {
-  if (previousWhy === 'wallet_low') return WALLET_FUNDED;
-  return WALLET_CLASS.has(previousWhy) ? WALLET_UNLOCKED : null;
+  return WALLET_CLASS.has(previousWhy) ? PAID_ROUTING_RESTORED : null;
 }

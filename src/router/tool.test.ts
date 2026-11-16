@@ -15,6 +15,7 @@ import { MAX_BODY_BYTES } from '../lib/request-schema';
 import { failureOutcome, runRequestTool } from './tool';
 import { extensionFor, readPaidRecords, type MediaTransport } from './paid';
 import { readSpec, SPEC_TTL_MS, storeChoices, storeSpecs } from './specs';
+import { wireSettings } from './settings-wire';
 import { claimIgnored, noteShown } from './untaken';
 import {
   DEADLINE_AFTER_PAYMENT_SENT,
@@ -28,6 +29,7 @@ import { httpRequest, type HttpRequestOptions } from '../lib/http';
 import { bindDecision, claimRedirect, noteSession, renderProgress } from './progress';
 import { unlockDetails } from '../lib/wallet-unlock';
 import { ASK_FOR_REPAIR, REPAIR_CLAUSE, WALLET_REASONS } from './wallet-reasons';
+import { TERMS_CHANGED_SENTENCE } from './terms-notice';
 
 // Pass-through, so a refusal's typed details stay observable after the tool
 // folds the error into its envelope.
@@ -204,6 +206,9 @@ function providerLegs(body: unknown = { data: { BTC: 1 } }): Leg[] {
     { url: PROVIDER, status: 200, body },
   ];
 }
+
+/** The settings field a user with no rules sends on every routing call. */
+const NO_RULES = wireSettings(undefined, { mode: 'off' });
 
 describe('the request tool, one decision and one payment per lookup', () => {
   it('sends the query and the turn id, and pays the provider once', async () => {
@@ -383,7 +388,7 @@ describe('routing outcomes that buy nothing', () => {
       { ...deps(fetchImpl), route },
     );
     expect(first.summary.split('\n').at(-1)).toBe(
-      'Tenjin set aside $0.05 for routing. Each routing call costs at most $0.003.',
+      'Tenjin set aside $0.05 for routing. It counts toward your spend limits.',
     );
     deposited = 0n;
     const next = await runRequestTool(
@@ -1062,7 +1067,18 @@ describe('a discovered service', () => {
     });
     expect(calls).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toMatchObject({
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+        'mcp',
+      ],
     });
     expect(auth.authorize).not.toHaveBeenCalled();
   });
@@ -2086,8 +2102,20 @@ describe('an offer with a request spec', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       schemaVersion: 1,
       query,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+        'mcp',
+      ],
       harness: 'claude',
+      settings: NO_RULES,
     });
     // The next call runs from the kept spec: no second decision.
     const ran = await runRequestTool({ id: PICKED, input: { symbol: 'BTC' } }, deps(fetchImpl));
@@ -2173,8 +2201,20 @@ describe('an offer with a request spec', () => {
       schemaVersion: 1,
       query: 'BTC price',
       id: SPEC_ID,
-      accepts: ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'],
+      accepts: [
+        'catalog',
+        'spec',
+        'label',
+        'fields',
+        'jobs',
+        'headers',
+        'note',
+        'tolerant',
+        'settings',
+        'mcp',
+      ],
       harness: 'claude',
+      settings: NO_RULES,
     });
   });
 });
@@ -2540,7 +2580,18 @@ describe('the tool list, read for free', () => {
     ) as Record<string, unknown>;
   const BROWSE = wire('wire-browse.json');
   const BY_ID = wire('wire-lookup-spec-by-id.json');
-  const ACCEPTS = ['catalog', 'spec', 'label', 'fields', 'jobs', 'headers', 'note', 'tolerant'];
+  const ACCEPTS = [
+    'catalog',
+    'spec',
+    'label',
+    'fields',
+    'jobs',
+    'headers',
+    'note',
+    'tolerant',
+    'settings',
+    'mcp',
+  ];
   /** A paid routing path that must never be asked. */
   const route = vi.fn((): never => {
     throw new Error('the paid routing path was asked');
@@ -2770,6 +2821,7 @@ describe('the tool list, read for free', () => {
       browse: 'live crypto prices',
       accepts: ACCEPTS,
       harness: 'claude',
+      settings: NO_RULES,
     });
     expect(route).not.toHaveBeenCalled();
     expect(auth.authorize).not.toHaveBeenCalled();
@@ -2873,6 +2925,8 @@ describe('the tool list, read for free', () => {
         { ...deps(listed.fetchImpl), route, harness },
       );
       expect(browsed.envelope.status).toBe('browse');
+      expect(browsed.summary).not.toContain(TERMS_CHANGED_SENTENCE);
+      await expect(stat(join(dir, 'router', 'terms'))).rejects.toMatchObject({ code: 'ENOENT' });
       expect(JSON.parse(listed.calls[0]!.body!)).toMatchObject({
         browse: 'crypto prices',
         harness,
@@ -2889,8 +2943,19 @@ describe('the tool list, read for free', () => {
         tool: 'cmc-quotes',
         accepts: [...ACCEPTS, 'free-query'],
         harness,
+        settings: NO_RULES,
       });
       expect(route).not.toHaveBeenCalled();
+
+      const inspected = await runRequestTool(
+        { id: decision.id },
+        { ...deps(net([]).fetchImpl), route, harness },
+      );
+      expect(inspected.envelope.status).toBe('spec');
+      for (const result of [shown, inspected]) {
+        expect(result.summary).not.toContain(TERMS_CHANGED_SENTENCE);
+      }
+      await expect(stat(join(dir, 'router', 'terms'))).rejects.toMatchObject({ code: 'ENOENT' });
 
       const second = net([...providerLegs(), { url: ROUTER, status: 200, body: {} }]);
       const ran = await runRequestTool(
@@ -2904,6 +2969,8 @@ describe('the tool list, read for free', () => {
         status: 'fulfilled',
         cost: ['provider price 0.01 USD'],
       });
+      expect(ran.summary).not.toContain(TERMS_CHANGED_SENTENCE);
+      await expect(stat(join(dir, 'router', 'terms'))).rejects.toMatchObject({ code: 'ENOENT' });
       // The footer names the service by its label, and the ledger keeps it.
       expect(await renderProgress(dir, 'sess-1')).toBe(
         'x402 · request: fulfilled CoinMarketCap quotes · {"symbol":"BTC,ETH","convert":"USD"} · $0.01',
