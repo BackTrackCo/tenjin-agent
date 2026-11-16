@@ -89,7 +89,8 @@ if (process.argv.length === 4 && process.argv[2] === 'hook' && process.argv[3] =
 }
 
 // Stdio's errors are taken before the command writes anything, so a reader
-// that already went away (EPIPE) never turns its exit code into a crash; what
+// that already went away (EPIPE) never turns its exit code into a crash, and
+// output lost any other way (a full disk) exits nonzero, said on stderr; what
 // it printed reaches the reader before the exit, since on a pipe an exit
 // before stdout drains cuts a large body off (lib/flush-stdio).
 const { exitAfter } = await import('./lib/flush-stdio');

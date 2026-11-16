@@ -7,6 +7,7 @@ import { verifyAgainstRegistries, type RegistryVerification } from '../lib/bazaa
 import type { readUsdcBalance } from '../lib/usdc-balance';
 import { assertPublicDestination, type DestinationOptions } from '../lib/destination';
 import { CliError } from '../lib/errors';
+import { notePaymentSent } from '../lib/flush-stdio';
 import { paymentShortOfFunds } from '../lib/payment-failure';
 import { validateResultBody, type ResultCheck } from '../lib/request-schema';
 import { fetchFailureToCliError, httpRequest, requestHeaderProblem } from '../lib/http';
@@ -687,6 +688,8 @@ async function executePay(
     mode,
     ...(payment.authorization !== undefined ? { nonce: payment.authorization.nonce } : {}),
   });
+  // From here, output this process loses follows a payment (lib/flush-stdio).
+  notePaymentSent();
   // EVERY DIRECT PAY THAT SIGNED goes in the paid ledger, as a `request`
   // call does (a router leg is recorded by `request` itself): a delivered one
   // with the file it saved, so a seller's later sign-in challenge can be
