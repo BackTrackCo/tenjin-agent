@@ -2416,7 +2416,10 @@ async function finishTake(
         status: 'running',
         ...(take.httpStatus !== undefined ? { httpStatus: take.httpStatus } : {}),
       },
-      result: runningResult(take, call, opts.kept, answer.reason),
+      result:
+        answer.otherWallet !== undefined
+          ? otherWalletResult(take, call, opts.kept, answer.otherWallet)
+          : runningResult(take, call, opts.kept, answer.reason),
     };
   }
   const reason = `${
@@ -2497,6 +2500,37 @@ function runningResult(
       ...(note !== undefined ? { note } : {}),
       nextStep,
       providerContentUntrusted: true,
+    },
+  };
+}
+
+/**
+ * A TAKE THE SELLER KEEPS FOR THE WALLET THAT PAID IT, polled while this
+ * machine holds another: nothing was signed and nothing ended, so the take
+ * stays running for that wallet. An error the user can fix, with the wallet
+ * that paid named, never a failure stored on the take: one stored ended the
+ * job, and a resume with the right wallet answered it without polling.
+ */
+function otherWalletResult(
+  take: JobTake,
+  call: DeliverCall,
+  kept: boolean,
+  wallet: { paidBy: string; current: string },
+): RequestToolResult {
+  const running = runningResult(take, call, kept);
+  const reason = `${supplierOf(take.call.url)} returns this result only to the wallet that paid for it (${wallet.paidBy}), and this machine's wallet is now ${wallet.current}, so nothing was signed. The job is still running; nothing more was paid.`;
+  const nextStep = kept
+    ? `Tell the user this job was paid by the wallet ${wallet.paidBy}. Once this machine uses that wallet again, call request({job: ${JSON.stringify(take.offerId)}}); nothing more is paid. Do not call request again for a new result: it would pay again.`
+    : String(running.envelope.nextStep);
+  return {
+    isError: true,
+    summary: `${reason} ${nextStep}`,
+    envelope: {
+      ...running.envelope,
+      reason,
+      reasonCode: 'sign_in_wallet',
+      paidBy: wallet.paidBy,
+      nextStep,
     },
   };
 }

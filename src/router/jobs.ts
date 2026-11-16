@@ -199,7 +199,14 @@ export type PollAnswer =
       bytes?: Uint8Array;
       contentType: string;
     }
-  | { state: 'running'; status?: number; reason?: string }
+  | {
+      state: 'running';
+      status?: number;
+      reason?: string;
+      /** The seller keeps the result for the wallet that paid, and this
+       *  machine's wallet is now another: nothing was signed. */
+      otherWallet?: { paidBy: string; current: string };
+    }
   | {
       state: 'failed';
       status?: number;
@@ -214,13 +221,19 @@ export type PollAnswer =
  * PAYMENT-REQUIRED header and the poll URL, it returns the headers that
  * answer it, why it was not signed (`refused`, which ends the take), why the
  * wallet could not sign this time (`error`, a poll error the take survives),
- * or undefined when the 402 is not a sign-in challenge. It never pays.
+ * that this machine's wallet is not the one that paid (`otherWallet`, which
+ * stops polling and leaves the take running), or undefined when the 402 is
+ * not a sign-in challenge. It never pays.
  */
 export type PollSignIn = (
   paymentRequiredHeader: string,
   url: string,
 ) => Promise<
-  { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
+  | { headers: Record<string, string> }
+  | { refused: string }
+  | { error: string }
+  | { otherWallet: { paidBy: string; current: string } }
+  | undefined
 >;
 
 export interface PollDeps {
@@ -248,7 +261,9 @@ export interface PolledTake {
  * later one half as long again as the last, up to {@link MAX_POLL_INTERVAL_MS}.
  * A 402 with a sign-in challenge and no way to pay is answered with a
  * sign-in, once per GET poll, and a wallet that could not sign counts as a
- * poll error; on a POST poll it is refused unsigned and the take fails. Any
+ * poll error; on a POST poll it is refused unsigned and the take fails. A
+ * wallet other than the one that paid stops the call `running`: nothing is
+ * signed, and the take waits for that wallet. Any
  * other 402, or one after a sign-in, is a seller asking to be paid
  * again for a result already paid for: no payment is signed, and the take
  * fails. A 404 or 410 is a job the seller no
@@ -281,6 +296,16 @@ export async function pollUntil(
     wait = interval;
     interval = Math.min(Math.round(interval * BACKOFF), MAX_POLL_INTERVAL_MS);
     if (answer.kind === 'refused') return { state: 'failed', reason: answer.reason };
+    // ANOTHER WALLET THAN THE ONE THAT PAID: no poll can fix that, and
+    // nothing ended at the seller, so the take stays running for that wallet.
+    if (answer.kind === 'wallet') {
+      return {
+        state: 'running',
+        status: 402,
+        reason: `the seller returns the result only to the wallet that paid for it, ${answer.paidBy}, and this machine's wallet is now ${answer.current}; nothing was signed`,
+        otherWallet: { paidBy: answer.paidBy, current: answer.current },
+      };
+    }
     const status = answer.kind === 'answer' ? answer.status : undefined;
     if (status !== undefined) last = status;
     const transient =
@@ -425,7 +450,8 @@ type Attempt =
       signInRefusal?: string;
     }
   | { kind: 'error'; reason: string }
-  | { kind: 'refused'; reason: string };
+  | { kind: 'refused'; reason: string }
+  | { kind: 'wallet'; paidBy: string; current: string };
 
 /**
  * ONE POLL, SIGNED IN WHEN THE SELLER ASKS: a 402 to a GET that carries a
@@ -466,6 +492,7 @@ async function pollSignedIn(take: PolledTake, deps: PollDeps): Promise<Attempt> 
   if ('refused' in answer) {
     return { ...first, signIn: 'refused', signInRefusal: sellerLine(answer.refused) };
   }
+  if ('otherWallet' in answer) return { kind: 'wallet', ...answer.otherWallet };
   const signed = await pollOnce(take, deps, answer.headers);
   return signed.kind === 'answer' ? { ...signed, signIn: 'sent' } : signed;
 }

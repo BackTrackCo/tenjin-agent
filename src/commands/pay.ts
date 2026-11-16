@@ -1874,6 +1874,14 @@ export function signInOnlyHeader(
   return extension !== undefined ? { challenge, extension } : undefined;
 }
 
+/** What a poll's sign-in comes to (`PollSignIn` in `router/jobs.ts`). */
+export type PollSignInAnswer =
+  | { headers: Record<string, string> }
+  | { refused: string }
+  | { error: string }
+  | { otherWallet: { paidBy: string; current: string } }
+  | undefined;
+
 /**
  * THE ROUTER'S JOB POLLS, SIGNED IN AS A DIRECT PAY IS (tenjin#977): a poll
  * the seller answered 402 with a sign-in challenge and no way to pay gets the
@@ -1884,8 +1892,10 @@ export function signInOnlyHeader(
  * the submit's URL, and the wallet signs only when it is that address and
  * the poll is on that host. A take that names no payer signs nothing; the
  * ledger is not asked, since any payment there to the host is not this
- * take's. Undefined for any other 402, which the poll treats as a seller
- * asking to be paid again.
+ * take's. A wallet switched since the submit signs nothing either, and is
+ * `otherWallet`, naming the wallet that paid: the take is still the seller's
+ * to finish, for that wallet. Undefined for any other 402, which the poll
+ * treats as a seller asking to be paid again.
  * A wallet that could not be opened is an `error`, which the poll counts and
  * survives, never a refusal that ends a paid take. Never pays: the challenge
  * offers no payment, and none is built. Only a GET poll is handed here: a
@@ -1900,9 +1910,7 @@ export async function signInForPoll(
     provider?: WalletProvider;
     paidBy: { from?: string; url: string };
   },
-): Promise<
-  { headers: Record<string, string> } | { refused: string } | { error: string } | undefined
-> {
+): Promise<PollSignInAnswer> {
   const read = signInOnlyHeader(paymentRequiredHeader);
   if (read === undefined) return undefined;
   const { challenge, extension } = read;
@@ -1912,17 +1920,36 @@ export async function signInForPoll(
       ctx,
       deps.provider !== undefined ? { provider: deps.provider } : {},
     );
+    // The wallet this machine holds now, as described and as opened.
+    let current: string | undefined;
     const answer = await answerSignInChallenge(challenge, extension, url, {
-      address: async () => (await describeOpenable(provider)).address,
+      address: async () => (current = (await describeOpenable(provider)).address),
       paidHost: async (host, address) =>
         paidBy.from === undefined
           ? 'payer_unknown'
           : hostOf(paidBy.url) === host && paidBy.from.toLowerCase() === address.toLowerCase()
             ? 'paid'
             : 'unpaid',
-      signer: () => openWallet(provider),
+      signer: async () => {
+        const signer = await openWallet(provider);
+        current = signer.address;
+        return signer;
+      },
     });
-    return 'refused' in answer ? { refused: answer.reason } : answer;
+    if (!('refused' in answer)) return answer;
+    // A WALLET SWITCHED SINCE THE SUBMIT is this machine's state, not the
+    // seller's answer: nothing is signed with it, and the take waits for the
+    // wallet that paid.
+    if (
+      answer.refused === 'unpaid' &&
+      paidBy.from !== undefined &&
+      current !== undefined &&
+      hostOf(paidBy.url) === hostOf(url) &&
+      current.toLowerCase() !== paidBy.from.toLowerCase()
+    ) {
+      return { otherWallet: { paidBy: paidBy.from, current } };
+    }
+    return { refused: answer.reason };
   } catch (err) {
     return {
       error: `the wallet could not be opened (${sellerLine(err instanceof Error ? err.message : String(err)) || 'no reason given'})`,

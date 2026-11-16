@@ -1137,8 +1137,19 @@ describe('signInForPoll, a router poll the seller answers with a sign-in', () =>
     expect(parseSIWxHeader(header!)).toMatchObject({ nonce: challenge.nonce, address: PAYER });
   });
 
+  // A wallet switched since the submit: nothing is signed, and the answer
+  // names the wallet that paid, so the take can wait for it.
+  it('signs nothing for a take another wallet paid, and names that wallet', async () => {
+    const getSigner = vi.fn(async () => testSigner());
+    const answer = await signInForPoll(buildSignInChallenge(POLL_URL).header, POLL_URL, makeCtx(), {
+      provider: { ...testWalletProvider(), getSigner },
+      paidBy: { from: OTHER, url: SUBMIT_URL },
+    });
+    expect(answer).toEqual({ otherWallet: { paidBy: OTHER, current: PAYER } });
+    expect(getSigner).not.toHaveBeenCalled();
+  });
+
   it.each([
-    { name: 'a take another wallet paid', paidBy: { from: OTHER, url: SUBMIT_URL } },
     {
       name: 'a take paid on another host',
       paidBy: { from: PAYER, url: 'https://elsewhere.example/v1/run' },

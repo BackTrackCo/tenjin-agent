@@ -1048,22 +1048,29 @@ describe('a poll the seller answers with a sign-in challenge', () => {
   });
 
   // The take is the proof of payment: a wallet switched since the submit is
-  // not the one that paid, and signs nothing.
-  it('signs nothing with a wallet other than the one that paid the take', async () => {
+  // not the one that paid, and signs nothing. That is this machine's state,
+  // not the seller's: it was stored as the take's failure, and switching back
+  // answered that failure without polling.
+  it('signs nothing with another wallet, keeps the take running, and resumes with the one that paid', async () => {
     await storeSpecs(dir, [MONID]);
     const { fetchImpl } = submit(MONID, started);
+    const challenge = {
+      status: 402,
+      body: {},
+      headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
+    };
     const { transport, seen } = polls([
-      {
-        status: 402,
-        body: {},
-        headers: { 'PAYMENT-REQUIRED': buildSignInChallenge(RUN_URL).header },
-      },
+      challenge,
+      challenge,
+      challenge,
+      { status: 200, body: { runId: 'R1', status: 'COMPLETED', output: { rounds: 3 } } },
     ]);
+    const payer = testSigner();
     const other = testSigner(privateKeyToAccount(`0x${'11'.repeat(32)}`));
-    let current = testSigner();
+    let current = payer;
     const opened: string[] = [];
     const run = deps(fetchImpl, async (target, request, signal) => {
-      current = other;
+      if (seen.length === 0) current = other;
       return transport(target, request, signal);
     });
     run.payDeps.provider = {
@@ -1075,9 +1082,32 @@ describe('a poll the seller answers with a sign-in challenge', () => {
       },
     };
     const result = await runRequestTool({ id: ID, input: INPUT }, run);
-    expect(result.envelope).toMatchObject({ status: 'failed', job: ID, providerStatus: 402 });
+    expect(result.isError).toBe(true);
+    expect(result.envelope).toMatchObject({
+      status: 'running',
+      job: ID,
+      reasonCode: 'sign_in_wallet',
+      paidBy: payer.address,
+    });
+    expect(String(result.envelope.reason)).toContain(other.address);
+    expect(String(result.envelope.nextStep)).toContain(`request({job: "${ID}"})`);
     expect(seen).toHaveLength(1);
     expect(opened).not.toContain(other.address);
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'running' });
+
+    // Still the other wallet: refused again, still running, nothing signed.
+    const again = await runRequestTool({ job: ID }, run);
+    expect(again.envelope).toMatchObject({ status: 'running', reasonCode: 'sign_in_wallet' });
+    expect(signIns(seen)).toEqual([undefined, undefined]);
+
+    // Back on the wallet that paid: the resume polls, signs in, and delivers.
+    current = payer;
+    const resumed = await runRequestTool({ job: ID }, run);
+    expect(resumed.envelope).toMatchObject({ status: 'fulfilled', job: ID });
+    expect(signIns(seen).slice(0, 3)).toEqual([undefined, undefined, undefined]);
+    expect(parseSIWxHeader(signIns(seen)[3]!)).toMatchObject({ address: payer.address });
+    expect(opened).not.toContain(other.address);
+    expect(await readTake(dir, ID, 1)).toMatchObject({ state: 'done' });
   });
 });
 
