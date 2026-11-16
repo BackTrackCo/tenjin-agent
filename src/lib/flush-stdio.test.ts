@@ -18,14 +18,31 @@ const MODULE = pathToFileURL(fileURLToPath(new URL('./flush-stdio.ts', import.me
 const STRIP = (process.features as { typescript?: unknown }).typescript
   ? []
   : ['--experimental-strip-types'];
-/** The module's own imports are extensionless, as the bundler takes them: a
- *  resolve hook in the child finds the `.ts` file behind each. */
-const RESOLVE_TS = `export async function resolve(specifier, context, next) {
-  try { return await next(specifier, context); } catch (err) {
+/**
+ * The module's own imports are extensionless, as the bundler takes them: a
+ * resolve hook in the child finds the `.ts` file behind each. It runs in the
+ * child's own thread (`registerHooks`, Node 22.15+). Node 22's off-thread
+ * `register` hooks do not hold the event loop open while an `import()` waits
+ * on them, so a command whose stdout had already closed, with nothing else
+ * pending, ended in exit 13 before it returned. `register` stays only for
+ * builds without `registerHooks`. The bundled bin has no hooks at all.
+ */
+const RESOLVE_TS = `function resolve(specifier, context, next) {
+  const retry = (err) => {
     if (err?.code === 'ERR_MODULE_NOT_FOUND' && /^\\.\\.?\\//.test(specifier)) return next(specifier + '.ts', context);
     throw err;
+  };
+  try {
+    const found = next(specifier, context);
+    return typeof found?.then === 'function' ? found.catch(retry) : found;
+  } catch (err) {
+    return retry(err);
   }
 }`;
+const HOOKS = `import * as nodeModule from 'node:module';
+   ${RESOLVE_TS}
+   if (typeof nodeModule.registerHooks === 'function') nodeModule.registerHooks({ resolve });
+   else nodeModule.register('data:text/javascript,' + encodeURIComponent('export ' + resolve.toString()));`;
 
 let dir: string;
 beforeEach(async () => {
@@ -85,8 +102,7 @@ const binOrder = (
   code: number,
   opts: { closed?: boolean; paid?: boolean } = {},
 ): string =>
-  `import { register } from 'node:module';
-   register('data:text/javascript,' + encodeURIComponent(${JSON.stringify(RESOLVE_TS)}));
+  `${HOOKS}
    const { exitAfter, notePaymentSent } = await import(${JSON.stringify(MODULE)});
    await exitAfter(async () => {
      await new Promise((go) => process.stdin.once('data', go));
