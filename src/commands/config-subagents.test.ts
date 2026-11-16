@@ -5,6 +5,7 @@ import { afterEach, expect, it } from 'vitest';
 import { testCtx } from '../context-test-utils';
 import { runConfigSubagents } from './config-subagents';
 import { modelSettings } from '../router/model-settings';
+import { currentModelGithubRepositories } from '../router/model-repositories';
 
 let dir: string;
 afterEach(async () => {
@@ -141,10 +142,9 @@ it('records current GitHub origins for selected folders and refreshes aliases wi
     join(repo, '.git/config'),
     '[remote "origin"]\nurl = git@github.com:Acme/changed.git\n',
   );
-  expect(await modelSettings(dir, repo)).toMatchObject({
-    repositories: [workspace],
-    githubRepositories: [],
-  });
+  const current = (await modelSettings(dir, repo))!;
+  expect(current.repositories).toEqual([workspace]);
+  expect(currentModelGithubRepositories(current)).toEqual([]);
   await runConfigSubagents('on', { repository: workspace, maxJob: '1' }, testCtx(dir));
   expect(await modelSettings(dir, repo)).toMatchObject({ githubRepositories: ['Acme/changed'] });
   const saved = await readFile(join(dir, 'config.json'), 'utf8');

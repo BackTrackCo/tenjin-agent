@@ -330,6 +330,8 @@ export function renderMarketplace(version?: string): Record<string, unknown> {
 export const PLUGIN_FILES = [
   '.mcp.json',
   'types/index.d.ts',
+  'hooks/hook-data.ts',
+  'hooks/native-retry-reference.ts',
   'hooks/model-native-retry.ts',
   'hooks/model-viewer.tsx',
   'hooks/register.tsx',
@@ -348,6 +350,8 @@ export const MOD_TYPES = 'types/index.d.ts';
  */
 export const MOD_FILES = [
   MOD_TYPES,
+  'hooks/hook-data.ts',
+  'hooks/native-retry-reference.ts',
   'hooks/model-native-retry.ts',
   'hooks/model-viewer.tsx',
   'hooks/register.tsx',

@@ -201,6 +201,27 @@ test('the original general-purpose profile comes only from the private saved-inp
   expect(inputOf(chunks).subagent_type).toBe('general-purpose');
 });
 
+test('a non-text MCP block cannot supply the native retry envelope through a text property', async ($, on) => {
+  setup(on);
+  response(on, ALIAS, 'native_retry_nontext_block');
+  on('tool.call', { tool: MCP }, () => ({
+    result: { content: [{ type: 'image', text: reply() }] } as never,
+    text: 'No text contract was returned.',
+  }));
+  const { chunks } = await collect($);
+  expect(inputOf(chunks)).toEqual(ALIAS);
+});
+
+test('empty MCP text content retains the native response text fallback', async ($, on) => {
+  setup(on);
+  response(on, ALIAS, 'native_retry_empty_content');
+  on('tool.call', { tool: MCP }, () => ({
+    result: { content: [{ type: 'text', text: '' }] } as never,
+    text: reply(),
+  }));
+  expect(inputOf((await collect($)).chunks)).toEqual(ORIGINAL);
+});
+
 test('retired and mixed shortcuts stay held without a lookup or native child', async ($, on) => {
   setup(on);
   const variants: Record<string, unknown>[] = [
@@ -309,6 +330,7 @@ test('failed local resolution cannot become a native call when a prior hook stri
     tool_use_id: 'native_retry_failed',
     ...ALIAS,
     prompt: 'A prior mod changed this prompt',
+    subagent_type: 'Explore',
   });
   expect(JSON.stringify(held.result)).toContain('No native child started');
   expect(ran).toBe(false);
@@ -463,7 +485,7 @@ test('an oversized recognized shortcut cannot be stripped into a native retry by
 });
 
 test('reserved marker parsing never treats ordinary mentions as a control request', () => {
-  expect(nativeRetryReference(ALIAS, 'Agent')).toEqual({ owned: true, offerId: OFFER });
+  expect(nativeRetryReference(ALIAS, 'Agent')).toEqual({ owned: true, id: OFFER });
   for (const input of [
     { ...ALIAS, prompt: `  TENJIN-NATIVE:${OFFER} ` },
     { ...ALIAS, prompt: 'tenjin-native:not-a-job' },
@@ -488,5 +510,5 @@ test('reserved marker parsing never treats ordinary mentions as a control reques
   expect(
     nativeRetryReference({ prompt: `Explain the literal marker tenjin-native:${OFFER}.` }, 'Agent'),
   ).toEqual({ owned: false });
-  expect(nativeRetryReference({ prompt: ALIAS.prompt }, 'SendMessage')).toEqual({ owned: false });
+  expect(nativeRetryReference({ prompt: ALIAS.prompt }, 'SendMessage')).toEqual({ owned: true });
 });

@@ -1,4 +1,5 @@
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code';
+import { asRecord, parseJson, readJson, tenjinDataDir, textOf } from './hook-data';
 
 import type { TenjinHeld, TenjinRow } from '../types';
 import {
@@ -944,16 +945,6 @@ function envelopeOf(text: string | undefined): Json | undefined {
 }
 
 /** A stored result's text: a string, or MCP content blocks bare or in `content`. */
-function textOf(output: unknown): string | undefined {
-  if (typeof output === 'string') return output;
-  const blocks = Array.isArray(output) ? output : asRecord(output)?.content;
-  if (!Array.isArray(blocks)) return undefined;
-  return blocks
-    .map((block) => asRecord(block)?.text)
-    .filter((text) => typeof text === 'string')
-    .join('');
-}
-
 /** USDC has 6 decimals; whole cents keep two. */
 function usd(atomic: bigint): string {
   const fraction = (atomic % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
@@ -962,30 +953,6 @@ function usd(atomic: bigint): string {
 
 function atomicOf(value: unknown): string | undefined {
   return typeof value === 'string' && /^\d{1,30}$/.test(value) ? value : undefined;
-}
-
-async function tenjinDataDir($: Dollar): Promise<string | null> {
-  const override = await $.env.get('TENJIN_DATA_DIR');
-  if (override !== undefined && override.length > 0) return override;
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'));
-  return home !== undefined && home.length > 0 ? `${home}/.tenjin` : null;
-}
-
-async function readJson($: Dollar, path: string): Promise<Json | null> {
-  try {
-    return asRecord(parseJson(await $.fs.read(path))) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function parseJson(text: unknown): unknown {
-  if (typeof text !== 'string') return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
 }
 
 /** Reserve address fields only; backend validation owns identity and follow-up semantics. */
@@ -1044,12 +1011,6 @@ function heldOfferContext(offer: Json, continuation = false): string[] | undefin
   return [
     `${continuation ? 'This local Tenjin hook held the continuation; no continuation started.' : 'This local Tenjin hook held the Agent call; no worker started.'} The user has installed Tenjin and enabled DeepSeek routing. The offer's parentPolicy is local Tenjin guidance. Apply the full assignment and repository/configuration risk rules, binding model/privacy restrictions, and your final veto.`,
   ];
-}
-
-function asRecord(value: unknown): Json | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Json)
-    : undefined;
 }
 
 async function sha256Hex(text: string): Promise<string> {

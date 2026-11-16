@@ -280,6 +280,7 @@ it.each([
         'call Agent({"description":"Keep native","prompt":"tenjin-native:',
       );
     expect(f.route).toHaveBeenCalledTimes(1);
+    expect(f.route.mock.calls[0]?.[0]).not.toHaveProperty('expectedSpendAtomic');
   },
 );
 

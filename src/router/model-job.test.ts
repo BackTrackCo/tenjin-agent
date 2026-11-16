@@ -33,21 +33,26 @@ async function initialNativeJob() {
   return { store, input, job: await store.offer(input) };
 }
 
+it('does not persist replay windows for turns with no delegation', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'tenjin-model-unused-fence-'));
+  const store = new ModelJobStore(dir);
+  await store.fence('unused-session', 'unused-turn', 'cancelling');
+  await store.fence('unused-session', 'unused-turn');
+  expect(await readdir(dir)).toEqual([]);
+});
+
 it('restores exactly one saved initial call and checks every native-choice owner binding', async () => {
   const { store, input, job } = await initialNativeJob();
-  for (const [id, session, turn, root, tool, profile] of [
-    ['00000000-0000-4000-8000-000000000001', 'root', 'turn', '/repo', 'Agent', 'Explore'],
-    [job.id, 'foreign', 'turn', '/repo', 'Agent', 'Explore'],
-    [job.id, 'root', 'foreign', '/repo', 'Agent', 'Explore'],
-    [job.id, 'root', 'turn', '/sibling', 'Agent', 'Explore'],
-    [job.id, 'root', 'turn', '/repo', 'Task', 'Explore'],
-    [job.id, 'root', 'turn', '/repo', 'Agent', 'general-purpose'],
+  for (const [id, session, turn, root, tool] of [
+    ['00000000-0000-4000-8000-000000000001', 'root', 'turn', '/repo', 'Agent'],
+    [job.id, 'foreign', 'turn', '/repo', 'Agent'],
+    [job.id, 'root', 'foreign', '/repo', 'Agent'],
+    [job.id, 'root', 'turn', '/sibling', 'Agent'],
+    [job.id, 'root', 'turn', '/repo', 'Task'],
   ] as const)
-    expect(
-      await store.chooseNative(id, session, turn, root, tool, 'future-call', profile),
-    ).toBeNull();
+    expect(await store.chooseNative(id, session, turn, root, tool, 'future-call')).toBeNull();
   expect(
-    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call', 'Explore'),
+    await store.chooseNative(job.id, 'root', 'turn', '/repo', 'Agent', 'future-call'),
   ).toMatchObject({
     state: 'native',
     native: input.native,

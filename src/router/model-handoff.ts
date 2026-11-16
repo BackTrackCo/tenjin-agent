@@ -1,6 +1,5 @@
 import {
   MODEL_CODEX_TASK_BYTES,
-  MODEL_EXPECTED_SPEND_ATOMIC,
   MODEL_MINIMUM_JOB_ATOMIC,
   MODEL_ROUTE_BODY_BYTES,
   MODEL_ROUTE_ENVELOPE_BYTES,
@@ -12,6 +11,7 @@ import { mask } from '../lib/redact';
 import { buildPromptPacket } from './context';
 import { ModelJobStore } from './model-job';
 import { modelSettings } from './model-settings';
+import { currentModelGithubRepositories } from './model-repositories';
 import type { ModelTransport } from './model-transport';
 import type { CodexModelPolicy } from './codex-model-gates';
 import type { ModelJob } from './model-job';
@@ -429,7 +429,7 @@ export class ModelHandoff {
         version: 2,
         repository: settings.root,
         repositories: latest.repositories,
-        githubRepositories: latest.githubRepositories,
+        githubRepositories: currentModelGithubRepositories(latest),
         routerOrigin: settings.routerOrigin,
         recipients: ['Tenjin', 'DeepSeek'],
       },
@@ -476,7 +476,6 @@ export class ModelHandoff {
       accepts: ['deepseek-flash'],
       subagentTask: mask(task),
       parentContext,
-      expectedSpendAtomic: MODEL_EXPECTED_SPEND_ATOMIC,
     };
     if (
       Buffer.byteLength(JSON.stringify(admission)) + MODEL_ROUTE_ENVELOPE_BYTES >
@@ -551,7 +550,7 @@ export class ModelHandoff {
         version: 2,
         repository: consent.root,
         repositories: consent.repositories,
-        githubRepositories: consent.githubRepositories,
+        githubRepositories: currentModelGithubRepositories(consent),
         routerOrigin: consent.routerOrigin,
         recipients: ['Tenjin', 'DeepSeek'],
       },

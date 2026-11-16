@@ -2,7 +2,6 @@ export const MODEL_ROUTE_BODY_BYTES = 16_384;
 export const MODEL_ROUTE_ENVELOPE_BYTES = 64;
 export const MODEL_CODEX_TASK_BYTES = 16_000;
 export const MODEL_NATIVE_TEXT_BYTES = 256_000;
-export const MODEL_EXPECTED_SPEND_ATOMIC = '20000';
 /** Necessary floor at tariff deepseek-flash-1017-2026-11-13: 32K output,
  *  4096 framing input, peak rates, separately rounded 5% proxy fee, plus route.
  *  Actual system/tools/history increase the quote; this is not a sufficiency guarantee. */

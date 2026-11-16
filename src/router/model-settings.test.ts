@@ -1,10 +1,12 @@
 import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { modelSettings } from './model-settings';
+import * as repositories from './model-repositories';
 let dir: string;
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 async function fixture(router: Record<string, unknown>) {
@@ -57,6 +59,7 @@ it('keeps the actual cwd beneath an explicitly selected workspace and lets a pro
       },
     }),
   );
+  const discover = vi.spyOn(repositories, 'modelGithubRepositories');
   const nested = join(repo, 'nested');
   await mkdir(nested);
   expect(await modelSettings(data, nested)).toMatchObject({
@@ -75,4 +78,5 @@ it('keeps the actual cwd beneath an explicitly selected workspace and lets a pro
   );
   expect(await modelSettings(data, repo)).toBeNull();
   expect(await modelSettings(data, nested)).toBeNull();
+  expect(discover).not.toHaveBeenCalled();
 });

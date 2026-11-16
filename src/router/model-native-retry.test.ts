@@ -10,7 +10,7 @@ it('recognizes only exact whole-prompt initial native retry references', () => {
   expect(nativeRetryReference({ prompt, subagent_type }, 'Agent')).toEqual({ owned: true, id });
   expect(
     nativeRetryReference({ prompt, subagent_type, description: 'Keep native' }, 'Task'),
-  ).toEqual({ owned: true, id });
+  ).toMatchObject({ owned: true, error: expect.any(String) });
   expect(nativeRetryReference({ prompt: `Read the literal string ${prompt}.` }, 'Agent')).toEqual({
     owned: false,
   });

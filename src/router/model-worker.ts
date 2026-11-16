@@ -39,6 +39,7 @@ import {
   type ClaudeWorkerSession,
 } from './claude-worker-session';
 import { claudeWorkerProcess } from './claude-worker-process';
+import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
 import {
   resolveClaudeWorkspace,
   savedClaudeWorkspace,
@@ -84,12 +85,12 @@ export async function qualifiedModelWorker(
   if (!claudeManagedProviderCompatible(resolved)) return null;
   if (claudePermissionMode === 'auto' && effective.permissions?.disableAutoMode === 'disable')
     return null;
-  if (effective.sandbox?.filesystem?.disabled || effective.sandbox?.excludedCommands?.length)
-    return null;
   const disclosure = await modelSettings(dataDir, cwd);
   const claudeWorkspace =
     disclosure && (await resolveClaudeWorkspace(cwd, effective, disclosure.repositories));
-  return claudeWorkspace ? { ...state.binary, claudeWorkspace } : null;
+  return claudeWorkspace && claudeWorkerSandboxCompatible([cwd, claudeWorkspace.root], resolved)
+    ? { ...state.binary, claudeWorkspace }
+    : null;
 }
 
 /** Runs a qualified worker without changing the parent process or provider. */
@@ -178,7 +179,11 @@ async function runQualifiedWorker(
     const current =
       disclosure &&
       (await resolveClaudeWorkspace(job.root, resolved.effective, disclosure.repositories));
-    if (!current || !sameClaudeWorkspace(workspace, current))
+    if (
+      !current ||
+      !claudeWorkerSandboxCompatible([job.root, current.root], resolved) ||
+      !sameClaudeWorkspace(workspace, current)
+    )
       throw new Error('Owned Claude workspace scope changed or disclosure was revoked');
     return resolved;
   };
@@ -334,9 +339,6 @@ async function runQualifiedWorker(
         permissionMode,
         ...session?.query,
         settingSources: ['user', 'project', 'local'],
-        // Native worktree and sandbox, fail closed when unavailable. No bypass mode.
-        // Preserve the parent's workspace, including uncommitted changes.
-        // The SDK sandbox isolates execution; native worktree-only calls stay native.
         settings: {
           // Auto memory is undeclared input outside this job's disclosure scope.
           // Native settings, instruction files and owned session history still load.

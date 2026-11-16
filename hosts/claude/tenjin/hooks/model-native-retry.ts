@@ -1,51 +1,21 @@
 import type { EngineInterface, HookStream, TurnStepChunk, TurnStepResult } from 'claude-code';
+import { asRecord as record, subagentsEnabled as enabled, textOf } from './hook-data';
+import { nativeRetryReference } from './native-retry-reference';
+export { nativeRetryReference } from './native-retry-reference';
 
 type Json = Record<string, unknown>;
 type Dollar = EngineInterface;
 type NativeTool = 'Agent' | 'Task';
-type RetryReference = { owned: false } | { owned: true; offerId?: string };
 type ToolChunk = Extract<TurnStepChunk, { kind: 'tool' }>;
 type InputChunk = Extract<TurnStepChunk, { kind: 'input' }>;
 
 const MAX_BUFFER_BYTES = 512 * 1024;
 const MAX_BUFFER_CHUNKS = 4096;
-const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
-const RETRY = new RegExp(`^tenjin-native:(${UUID})$`);
-const RESERVED = /^\s*tenjin-native\s*:/i;
-const RESERVED_RESUME = /^\s*tenjin-offer-/i;
-const RESERVED_TYPE = /^\s*tenjin-native-/i;
 // These are interception observations, not execution authority. Every replay still consumes
 // a session/turn/input-bound ticket in the local backend before native dispatch.
 const failed = new Map<string, Set<string>>();
 const expanded = new Map<string, Set<string>>();
 const isNative = (tool: string): tool is NativeTool => tool === 'Agent' || tool === 'Task';
-const record = (value: unknown): Json | undefined =>
-  value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Json)
-    : undefined;
-
-/** A reserved control prompt is never a literal native assignment. */
-export function nativeRetryReference(input: Json, tool: string): RetryReference {
-  if (
-    !isNative(tool) ||
-    !(
-      (typeof input.prompt === 'string' && RESERVED.test(input.prompt)) ||
-      (typeof input.resume === 'string' && RESERVED_RESUME.test(input.resume)) ||
-      (typeof input.subagent_type === 'string' && RESERVED_TYPE.test(input.subagent_type))
-    )
-  )
-    return { owned: false };
-  const match = typeof input.prompt === 'string' ? RETRY.exec(input.prompt) : null;
-  if (
-    tool !== 'Agent' ||
-    !match ||
-    Object.keys(input).some((key) => !['prompt', 'description', 'subagent_type'].includes(key)) ||
-    input.subagent_type !== `tenjin-native-${match?.[1]}` ||
-    (input.description !== undefined && typeof input.description !== 'string')
-  )
-    return { owned: true };
-  return { owned: true, offerId: match[1] };
-}
 
 function responseInput(value: unknown, id: string, tool: NativeTool): Json | undefined {
   const reply = record(value);
@@ -72,18 +42,6 @@ function responseInput(value: unknown, id: string, tool: NativeTool): Json | und
   )
     return undefined;
   return input;
-}
-
-function textOf(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  const content = record(value)?.content;
-  if (!Array.isArray(content)) return undefined;
-  const text = content
-    .map((part) => record(part))
-    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part) => part!.text as string)
-    .join('');
-  return text || undefined;
 }
 
 function sizeOf(chunk: TurnStepChunk): number {
@@ -123,17 +81,6 @@ export async function expandedNativeRetry($: Dollar, id: unknown) {
   return contains($, expanded, id);
 }
 
-async function enabled($: Dollar): Promise<boolean> {
-  if ((await $.env.get('TENJIN_MODEL_WORKER')) === '1') return false;
-  const override = await $.env.get('TENJIN_DATA_DIR');
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'));
-  const dir = override || (home ? home + '/.tenjin' : undefined);
-  return (
-    dir !== undefined &&
-    record(JSON.parse(await $.fs.read(dir + '/config.json'))?.router)?.subagents === true
-  );
-}
-
 async function remember($: Dollar, id: string) {
   const session = await $.session.id();
   const calls = failed.get(session) ?? new Set<string>();
@@ -165,7 +112,7 @@ async function normalize($: Dollar, chunks: TurnStepChunk[], permit: boolean) {
     let forget: (() => boolean) | undefined;
     try {
       forget = await remember($, tool.id);
-      if (!permit || !ref.offerId || !isNative(tool.name)) continue;
+      if (!permit || !ref.id || !isNative(tool.name)) continue;
       const response = await $.tool.call({
         tool: 'mcp__plugin_tenjin_router__subagent',
         capture: {
@@ -177,7 +124,7 @@ async function normalize($: Dollar, chunks: TurnStepChunk[], permit: boolean) {
         },
       });
       const text = textOf(response.result) ?? response.text;
-      const original = responseInput(JSON.parse(text ?? ''), ref.offerId, tool.name);
+      const original = responseInput(JSON.parse(text ?? ''), ref.id, tool.name);
       if (!original) continue;
       const session = await $.session.id();
       const calls = expanded.get(session) ?? new Set<string>();

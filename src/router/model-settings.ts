@@ -3,7 +3,6 @@ import { sep } from 'node:path';
 import { z } from 'zod';
 import { loadRawConfig } from '../lib/config';
 import { routerSettings } from './settings';
-import { modelGithubRepositories } from './model-repositories';
 
 export const modelConsentSchema = z.object({
   routerOrigin: z.url(),
@@ -43,15 +42,10 @@ export async function modelSettings(dataDir: string, cwd: string) {
   );
   const repositories = [...new Set(roots.filter((path): path is string => path !== null))];
   if (!disclosureCovers(repositories, root) || BigInt(parsed.data.maxJobAtomic) <= 0n) return null;
-  const currentNames = new Set(
-    modelGithubRepositories(repositories).map((name) => name.toLowerCase()),
-  );
   return {
     root,
     repositories,
-    githubRepositories: parsed.data.githubRepositories.filter((name) =>
-      currentNames.has(name.toLowerCase()),
-    ),
+    githubRepositories: parsed.data.githubRepositories,
     maxJobAtomic: BigInt(parsed.data.maxJobAtomic),
     routerOrigin: parsed.data.routerOrigin,
     context: settings.context.value,

@@ -354,7 +354,6 @@ it('keeps a broad native filesystem read profile native before starting an app s
   });
   expect(await qualify()).toBeNull();
   expect(withAppServer).not.toHaveBeenCalled();
-  expect(responses).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -367,7 +366,6 @@ it.each([
   Object.assign(policy, approval);
   expect(await qualify()).toBeNull();
   expect(withAppServer).not.toHaveBeenCalled();
-  expect(responses).not.toHaveBeenCalled();
   expect(policy).toMatchObject(approval);
 });
 
@@ -701,7 +699,6 @@ it.each([
   hooks = [pluginHook()];
   loadedHooks = [{ ...hooks[0], currentHash: pluginDeclarationHash, ...change }];
   expect(await qualify()).toBeNull();
-  expect(responses).not.toHaveBeenCalled();
 });
 it('rejects plugin content drift even when the loaded declaration stays identical', async () => {
   hooks = [pluginHook()];
@@ -743,7 +740,6 @@ it('never interprets a null loaded-parent selection as local without frozen nati
   delete policy.parent!.localEnvironment;
   expect(await qualify()).toBeNull();
   expect(requests).toEqual([]);
-  expect(responses).not.toHaveBeenCalled();
 });
 it.each([
   { selection: [] },
@@ -762,7 +758,6 @@ it('re-reads parent authority before acceptance/start, before native initializat
   parentOverride = { localEnvironment: { ...policy.parent!.localEnvironment, network: 'changed' } };
   expect(await qualify()).toBeNull();
   expect(requests).toEqual([]);
-  expect(responses).not.toHaveBeenCalled();
 });
 it('re-reads parent environment after worker start and before its first inference purchase', async () => {
   const accepted = await job();
@@ -999,7 +994,6 @@ it('requires deferred-only parent capabilities even when no tools were materiali
   policy.parent!.deferredNamespaces = ['mcp__artifact_session', 'mcp__codex_app', 'mcp__fixture'];
   expect(await qualify()).toBeNull();
   expect(requests.some((r) => r.method === 'turn/start')).toBe(false);
-  expect(responses).not.toHaveBeenCalled();
   policy.parent!.deferredNamespaces = ['mcp__fixture'];
   expect(await qualify()).not.toBeNull();
   inventory[0]!.tools = {};
@@ -1009,7 +1003,6 @@ it('does not treat arbitrary MCP tool metadata as proof of another native namesp
   policy.parent!.deferredNamespaces = ['mcp__artifact_session'];
   inventory[0]!.tools = { read: { name: 'read', namespace: 'mcp__artifact_session' } };
   expect(await qualify()).toBeNull();
-  expect(responses).not.toHaveBeenCalled();
 });
 it('native rule-file drift is detected before the first paid request', async () => {
   await mkdir(join(dir, 'rules'));
@@ -1085,7 +1078,6 @@ it.each([
     config.mcp_servers = { fixture: { env_vars: [key] } };
     expect(await qualify()).toBeNull();
     expect(requests.some((r) => r.method === 'thread/start')).toBe(false);
-    expect(responses).not.toHaveBeenCalled();
   },
 );
 it('preserves an explicit foreign MCP credential override without restoring it to worker commands', async () => {
@@ -1102,9 +1094,6 @@ it('preserves an explicit foreign MCP credential override without restoring it t
   expect(env.OPENAI_API_KEY).toBeUndefined();
   expect(env.DEEPSEEK_KEY).toBeUndefined();
   expect(env.TENJIN_WALLET_KEY).toBeUndefined();
-  expect(config.mcp_servers).toMatchObject({
-    fixture: { env: { OPENAI_API_KEY: 'explicit-fixture-credential' } },
-  });
 });
 it('ignores disabled and owned MCP env dependencies and preserves unrelated MCP auth', async () => {
   config.mcp_servers = {

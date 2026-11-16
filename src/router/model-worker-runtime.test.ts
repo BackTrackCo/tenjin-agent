@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk/core';
 import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { readClaudeCode, meetsFloor } from './claude-cli';
-import { runModelWorker } from './model-worker';
+import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { modelSettings } from './model-settings';
 import { workerStop } from './model-worker-control';
 import type { ModelJob } from './model-job';
@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { realpath } from 'node:fs/promises';
 
 const native = vi.hoisted(() => ({
   close: vi.fn(),
@@ -36,7 +37,7 @@ vi.mock('node:child_process', async (original) => ({
 }));
 vi.mock('node:fs/promises', async (original) => ({
   ...(await original<typeof import('node:fs/promises')>()),
-  realpath: async (path: unknown) => String(path),
+  realpath: vi.fn(async (path: unknown) => String(path)),
   stat: async () => ({ isDirectory: () => true }),
 }));
 vi.mock('node:http', async (original) => ({
@@ -65,6 +66,7 @@ beforeEach(() => {
   } as never);
   vi.mocked(meetsFloor).mockReturnValue(true);
   vi.mocked(resolveSettings).mockResolvedValue({ effective: {} } as never);
+  vi.mocked(realpath).mockImplementation(async (path) => String(path));
   vi.mocked(modelSettings).mockResolvedValue({ root: '/repo', repositories: ['/repo'] } as never);
 });
 
@@ -143,6 +145,94 @@ function authenticationQuery(account: Promise<unknown>) {
   });
   return pendingPrompt;
 }
+
+const incompatibleSandboxes = [
+  { sandbox: { filesystem: { disabled: true } } },
+  { sandbox: { excludedCommands: ['git'] } },
+  { sandbox: { filesystem: { allowManagedReadPathsOnly: true } } },
+];
+
+it.each(incompatibleSandboxes)(
+  'keeps an unconfined shell configuration native before creating a worker: %j',
+  async (effective) => {
+    vi.mocked(resolveSettings).mockResolvedValue({ effective } as never);
+    expect(await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data')).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+    expect(native.promptMessages).toEqual([]);
+  },
+);
+
+it.each(['*', '?', '[', ']'])(
+  'keeps a startup path containing %s native before creating a worker',
+  async (glob) => {
+    const root = `/client ${glob}archive`;
+    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+    expect(await qualifiedModelWorker(root, 'general-purpose', undefined, '/data')).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  },
+);
+
+it('keeps a managed read-path restriction native even when the merged setting is false', async () => {
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: { sandbox: { filesystem: { allowManagedReadPathsOnly: false } } },
+    sources: [
+      {
+        source: 'managed',
+        settings: { sandbox: { filesystem: { allowManagedReadPathsOnly: true } } },
+      },
+    ],
+  } as never);
+  expect(await qualifiedModelWorker('/repo', 'general-purpose', undefined, '/data')).toBeNull();
+});
+
+it('checks the physical startup directory when a harmless alias hides glob characters', async () => {
+  vi.mocked(realpath).mockImplementation(async (path) =>
+    String(path) === '/repo-alias' ? '/client[archive]' : String(path),
+  );
+  vi.mocked(modelSettings).mockResolvedValue({
+    root: '/client[archive]',
+    repositories: ['/client[archive]'],
+  } as never);
+  expect(
+    await qualifiedModelWorker('/repo-alias', 'general-purpose', undefined, '/data'),
+  ).toBeNull();
+  expect(query).not.toHaveBeenCalled();
+});
+
+it('preserves ordinary startup spaces and explicitly false confinement exceptions', async () => {
+  const root = '/client archive';
+  vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: {
+      sandbox: {
+        filesystem: { disabled: false, allowManagedReadPathsOnly: false },
+        excludedCommands: [],
+      },
+    },
+    sources: [
+      {
+        source: 'managed',
+        settings: { sandbox: { filesystem: { allowManagedReadPathsOnly: false } } },
+      },
+    ],
+  } as never);
+  expect(await qualifiedModelWorker(root, 'general-purpose', undefined, '/data')).toMatchObject({
+    claudeWorkspace: { root },
+  });
+});
+
+it.each(incompatibleSandboxes)(
+  'refuses a newly incompatible shell configuration before releasing an assignment: %j',
+  async (effective) => {
+    vi.mocked(resolveSettings)
+      .mockResolvedValueOnce({ effective: {} } as never)
+      .mockResolvedValue({ effective } as never);
+    await expect(runModelWorker(job, options())).rejects.toThrow(/workspace scope|sandbox/);
+    expect(query).not.toHaveBeenCalled();
+    expect(native.promptMessages).toEqual([]);
+    expect(native.bridgeClose).toHaveBeenCalled();
+  },
+);
 
 it.each([undefined, 'gateway', 'bedrock'])(
   'never releases the original task to an unqualified initialized provider: %s',
@@ -451,74 +541,93 @@ it('applies native settings-source and project MCP credential guards while prese
     expect(paths).not.toContain(file);
 });
 
-it.each(['native scope', 'disclosure'] as const)(
-  'denies the next native tool when %s changes during an activation',
-  async (change) => {
-    let decision: unknown;
-    sdkResult({ subtype: 'success', result: 'guarded fixture' }, undefined, async () => {
-      if (change === 'native scope')
-        vi.mocked(resolveSettings).mockResolvedValue({
-          effective: { permissions: { additionalDirectories: ['/sibling'] } },
-        } as never);
-      else vi.mocked(modelSettings).mockResolvedValue(null);
-      const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
-      decision = await hook!(
-        {
-          hook_event_name: 'PreToolUse',
-          tool_name: 'Read',
-          tool_input: { file_path: '/repo/a.ts' },
-          tool_use_id: 'next',
-        } as never,
-        undefined,
-        { signal: new AbortController().signal },
-      );
-    });
-    await runModelWorker(job, options());
-    expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
-  },
-);
-
-it('stops a paid bridge request after disclosure revocation before invoking transport', async () => {
-  const messages = vi.fn();
-  sdkResult({ subtype: 'success', result: 'not a valid completion' }, undefined, async () => {
-    vi.mocked(modelSettings).mockResolvedValue(null);
-    const call = vi.mocked(query).mock.calls[0]![0];
-    const handle = native.createServer.mock.calls[0]![0] as (
-      request: unknown,
-      response: unknown,
-    ) => void;
-    await new Promise<void>((complete) =>
-      handle(
-        {
-          method: 'POST',
-          url: '/v1/messages',
-          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
-          async *[Symbol.asyncIterator]() {
-            yield Buffer.from(
-              JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
-            );
-          },
-        },
-        {
-          headersSent: false,
-          destroyed: false,
-          writeHead() {
-            return this;
-          },
-          end(_body: string, done?: () => void) {
-            done?.();
-            complete();
-            return this;
-          },
-        },
-      ),
+it.each([
+  'native scope',
+  'disclosure',
+  'disabled sandbox',
+  'managed read scope',
+  'excluded command',
+] as const)('denies the next native tool when %s changes during an activation', async (change) => {
+  let decision: unknown;
+  sdkResult({ subtype: 'success', result: 'guarded fixture' }, undefined, async () => {
+    if (change === 'native scope')
+      vi.mocked(resolveSettings).mockResolvedValue({
+        effective: { permissions: { additionalDirectories: ['/sibling'] } },
+      } as never);
+    else if (change === 'disclosure') vi.mocked(modelSettings).mockResolvedValue(null);
+    else
+      vi.mocked(resolveSettings).mockResolvedValue({
+        effective:
+          change === 'disabled sandbox'
+            ? { sandbox: { filesystem: { disabled: true } } }
+            : change === 'excluded command'
+              ? { sandbox: { excludedCommands: ['node'] } }
+              : { sandbox: { filesystem: { allowManagedReadPathsOnly: true } } },
+      } as never);
+    const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
+    decision = await hook!(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: '/repo/a.ts' },
+        tool_use_id: 'next',
+      } as never,
+      undefined,
+      { signal: new AbortController().signal },
     );
   });
-  await expect(
-    runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
-  ).rejects.toThrow(/workspace scope changed|disclosure was revoked/);
-  expect(messages).not.toHaveBeenCalled();
+  await runModelWorker(job, options());
+  expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
 });
+
+it.each(['disclosure', 'managed read scope'] as const)(
+  'stops a paid bridge request after %s revocation before invoking transport',
+  async (change) => {
+    const messages = vi.fn();
+    sdkResult({ subtype: 'success', result: 'not a valid completion' }, undefined, async () => {
+      if (change === 'disclosure') vi.mocked(modelSettings).mockResolvedValue(null);
+      else
+        vi.mocked(resolveSettings).mockResolvedValue({
+          effective: { sandbox: { filesystem: { allowManagedReadPathsOnly: true } } },
+        } as never);
+      const call = vi.mocked(query).mock.calls[0]![0];
+      const handle = native.createServer.mock.calls[0]![0] as (
+        request: unknown,
+        response: unknown,
+      ) => void;
+      await new Promise<void>((complete) =>
+        handle(
+          {
+            method: 'POST',
+            url: '/v1/messages',
+            headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+            async *[Symbol.asyncIterator]() {
+              yield Buffer.from(
+                JSON.stringify({ model: 'deepseek-flash', messages: [], max_tokens: 32000 }),
+              );
+            },
+          },
+          {
+            headersSent: false,
+            destroyed: false,
+            writeHead() {
+              return this;
+            },
+            end(_body: string, done?: () => void) {
+              done?.();
+              complete();
+              return this;
+            },
+          },
+        ),
+      );
+    });
+    await expect(
+      runModelWorker(job, { ...options(), transport: { messages } as unknown as ModelTransport }),
+    ).rejects.toThrow(/workspace scope changed|disclosure was revoked/);
+    expect(messages).not.toHaveBeenCalled();
+  },
+);
 
 it('persists and resumes an exact owned SDK identity without changing the string result contract', async () => {
   const sessionId = '11111111-2222-4333-8444-555555555555';

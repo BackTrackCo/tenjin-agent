@@ -6,6 +6,7 @@ import type {
   TurnStepResult,
 } from 'claude-code';
 import { update } from 'claude-code';
+import { asRecord as record, subagentsEnabled as enabled } from './hook-data';
 import { clearNativeRetries, normalizeNativeRetry } from './model-native-retry';
 import type {
   TenjinModelActivity,
@@ -50,10 +51,6 @@ type Alias = {
   ordinal: number;
 };
 
-const record = (value: unknown): Json | undefined =>
-  value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Json)
-    : undefined;
 const short = (value: unknown, max = 200): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= max;
 function clean(value: string, bytes = 512): string {
@@ -88,16 +85,7 @@ function body(value: unknown): Json | undefined {
   }
   return undefined;
 }
-async function enabled($: Dollar): Promise<boolean> {
-  if ((await $.env.get('TENJIN_MODEL_WORKER')) === '1') return false;
-  const override = await $.env.get('TENJIN_DATA_DIR');
-  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'));
-  const dir = override || (home ? home + '/.tenjin' : undefined);
-  return (
-    dir !== undefined &&
-    record(json(await $.fs.read(dir + '/config.json'))?.router)?.subagents === true
-  );
-}
+
 async function scope($: Dollar) {
   const parentSessionId = await $.session.id();
   const cwd = (await $.fs.stat(await $.session.cwd(), { resolve: true })).realPath;

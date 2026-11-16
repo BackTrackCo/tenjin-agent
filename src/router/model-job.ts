@@ -151,8 +151,20 @@ export class ModelJobStore {
     turn: string,
     state: 'cancelling' | 'cancelled' = 'cancelled',
   ): Promise<void> {
+    const path = this.window(session, turn);
+    try {
+      await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
     return this.locked(async () => {
-      const path = this.window(session, turn);
+      try {
+        await lstat(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw error;
+      }
       const window = await readJsonFile(path, 1000);
       await writePrivate(
         path,
@@ -238,7 +250,6 @@ export class ModelJobStore {
     root: string,
     tool: 'Agent' | 'Task',
     replayCallId: string,
-    profile?: string,
   ): Promise<ModelJob | null> {
     return this.locked(async () => {
       const job = await this.pending(session, turn);
@@ -258,8 +269,7 @@ export class ModelJobStore {
         typeof job.native.prompt !== 'string' ||
         !job.native.prompt.trim() ||
         nativeRetryReference(job.native, tool).owned ||
-        ['tool', 'tool_use_id', 'agentId'].some((key) => key in job.native) ||
-        (profile !== undefined && profile !== (job.native.subagent_type ?? 'general-purpose'))
+        ['tool', 'tool_use_id', 'agentId'].some((key) => key in job.native)
       )
         return null;
       if (await this.replayIndex(replayCallId)) return null;

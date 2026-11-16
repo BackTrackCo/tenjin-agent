@@ -1186,6 +1186,8 @@ describe('setupRuntime', () => {
         'hooks/register.tsx': 'export default function register() {}\n',
         'hooks/model-viewer.tsx': 'export {};\n',
         'hooks/model-native-retry.ts': 'export {};\n',
+        'hooks/hook-data.ts': 'export {};\n',
+        'hooks/native-retry-reference.ts': 'export {};\n',
       };
       const pkg = npmPackage(
         '0.1.0-alpha.32',
