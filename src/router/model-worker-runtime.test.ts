@@ -5,6 +5,7 @@ import { readClaudeCode, meetsFloor } from './claude-cli';
 import { qualifiedModelWorker, runModelWorker } from './model-worker';
 import { modelSettings } from './model-settings';
 import { workerStop } from './model-worker-control';
+import { prepareWorkerGithub } from './worker-github';
 import type { ModelJob } from './model-job';
 import type { ModelTransport } from './model-transport';
 import { spawn } from 'node:child_process';
@@ -19,7 +20,25 @@ const native = vi.hoisted(() => ({
   bridgeClose: vi.fn(),
   createServer: vi.fn(),
   promptMessages: [] as unknown[],
+  githubClose: vi.fn(async () => undefined),
   worktrees: [] as string[],
+}));
+// A fixture token, shaped like a GitHub OAuth token so the bridge test is realistic.
+const GITHUB_TOKEN = `gho_${'A1b2'.repeat(9)}`;
+vi.mock('./worker-github', async (original) => ({
+  ...(await original<typeof import('./worker-github')>()),
+  prepareWorkerGithub: vi.fn(async () => ({
+    directory: '/job',
+    env: {
+      GH_TOKEN: GITHUB_TOKEN,
+      GH_CONFIG_DIR: '/job/gh',
+      GIT_CONFIG_GLOBAL: '/job/gitconfig',
+      XDG_CACHE_HOME: '/job/cache',
+    },
+    secrets: [GITHUB_TOKEN],
+    authenticated: true,
+    close: native.githubClose,
+  })),
 }));
 vi.mock('./claude-workspace', async (original) => ({
   ...(await original<typeof import('./claude-workspace')>()),
@@ -553,6 +572,117 @@ it('gives the worker every consented repository and its worktrees, and denies a 
   );
   expect(call.options?.sandbox?.filesystem?.denyRead).toContain('/elsewhere');
   expect(call.options?.sandbox?.filesystem?.denyWrite).toContain('/elsewhere');
+});
+
+it('runs gh and git with a per-job token and config, an allowlisted network and a token-free bridge', async () => {
+  const messages = vi.fn(async () => ({ fixture: true }));
+  vi.mocked(query).mockImplementation((call) => {
+    let complete!: () => void;
+    const forwarded = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const handle = native.createServer.mock.calls[0]![0] as (
+      request: unknown,
+      response: unknown,
+    ) => void;
+    handle(
+      {
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(
+            JSON.stringify({
+              model: 'deepseek-flash',
+              max_tokens: 32000,
+              messages: [
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'tool_result', tool_use_id: 't', content: `GH_TOKEN=${GITHUB_TOKEN}` },
+                  ],
+                },
+              ],
+            }),
+          );
+        },
+      },
+      {
+        headersSent: false,
+        destroyed: false,
+        writeHead() {
+          return this;
+        },
+        end(_body: string, done?: () => void) {
+          done?.();
+          complete();
+          return this;
+        },
+      },
+    );
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: '/repo' };
+        await forwarded;
+        yield { type: 'result', subtype: 'success', result: `pushed with ${GITHUB_TOKEN}` };
+      },
+      accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+      mcpServerStatus: async () => [],
+      close: native.close,
+    } as unknown as ReturnType<typeof query>;
+  });
+  const result = await runModelWorker(job, {
+    ...options(),
+    transport: { messages } as unknown as ModelTransport,
+  });
+  // Nothing sent on to Tenjin and DeepSeek, nor handed back, carries the token.
+  expect(JSON.stringify(messages.mock.calls)).not.toContain(GITHUB_TOKEN);
+  expect(JSON.stringify(messages.mock.calls)).toContain('GH_TOKEN=[redacted GitHub token]');
+  expect(result).toBe('pushed with [redacted GitHub token]');
+  const call = vi.mocked(query).mock.calls[0]![0];
+  expect(call.options?.env).toMatchObject({
+    GH_TOKEN: GITHUB_TOKEN,
+    GH_CONFIG_DIR: '/job/gh',
+    GIT_CONFIG_GLOBAL: '/job/gitconfig',
+    NODE_USE_ENV_PROXY: '1',
+  });
+  const sandbox = call.options?.sandbox;
+  expect(sandbox?.network?.allowedDomains).toEqual(
+    expect.arrayContaining(['github.com', 'api.github.com', 'registry.npmjs.org']),
+  );
+  // Only on macOS: gh verifies TLS through the system trust service.
+  expect(sandbox?.enableWeakerNetworkIsolation === true).toBe(process.platform === 'darwin');
+  expect(sandbox?.filesystem).toMatchObject({ allowRead: ['/job'], allowWrite: ['/job'] });
+  expect(native.githubClose).toHaveBeenCalledOnce();
+});
+
+it('finishes GitHub setup before the native initialization window starts', async () => {
+  // gh auth token can wait on the keychain; it must not eat the 10 s window for init.
+  vi.useFakeTimers();
+  try {
+    let release!: () => void;
+    vi.mocked(prepareWorkerGithub).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              directory: '/job',
+              env: {},
+              secrets: [],
+              authenticated: false,
+              close: native.githubClose,
+            });
+        }),
+    );
+    sdkResult({ subtype: 'success', result: 'done' });
+    const run = runModelWorker(job, options());
+    await vi.advanceTimersByTimeAsync(11_000);
+    release();
+    await expect(run).resolves.toBe('done');
+    expect(native.githubClose).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it.each(['additional directory', 'read exception', 'write exception'] as const)(

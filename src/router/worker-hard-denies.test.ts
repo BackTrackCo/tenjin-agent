@@ -12,6 +12,8 @@ it.each([
   'gh auth status --show-token',
   'GH_PAGER= gh auth token | cat',
   'echo $(gh auth token)',
+  // With a per-job GH_TOKEN this prints it, just as gh auth token does.
+  'printf "protocol=https\\nhost=github.com\\n" | gh auth git-credential get',
 ])('denies a credential probe a sandbox does not stop: %s', (command) => {
   expect(bash(command)).toBeDefined();
 });

@@ -55,6 +55,13 @@ import {
   type ClaudeWorkspace,
 } from './claude-workspace';
 import {
+  prepareWorkerGithub,
+  redactWorkerSecrets,
+  WORKER_ALLOWED_DOMAINS,
+  workerTokenValues,
+  type WorkerGithub,
+} from './worker-github';
+import {
   withWorkerDeadline,
   WorkerRepeatReminder,
   workerResultError,
@@ -225,8 +232,20 @@ async function runQualifiedWorker(
       ...workspace.writeExceptions,
     ]),
   ];
-  options.signal.throwIfAborted();
-  assertCurrentMode();
+  // Before the native init timer starts: `gh auth token` may wait on the keychain. A setup
+  // failure leaves the worker without GitHub access, never without its job.
+  const github: WorkerGithub | undefined = await prepareWorkerGithub(process.env).catch(
+    () => undefined,
+  );
+  // Literal GitHub token values; the bridge removes them before anything leaves.
+  let secrets: readonly string[] = github?.secrets ?? [];
+  try {
+    options.signal.throwIfAborted();
+    assertCurrentMode();
+  } catch (error) {
+    await github?.close().catch(() => undefined);
+    throw error;
+  }
   const controller = new AbortController();
   const cancel = () => controller.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
@@ -286,7 +305,9 @@ async function runQualifiedWorker(
           if (size > 8 * 1024 * 1024) throw new Error('Worker request too large');
           chunks.push(chunk);
         }
-        const raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+        const raw = JSON.parse(
+          redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
+        ) as Record<string, unknown>;
         const messages = workerMessages(raw);
         assertCurrentMode();
         const message = await options.transport.messages(job, messages, controller.signal);
@@ -353,6 +374,8 @@ async function runQualifiedWorker(
         workingDirectories: [...workspace.workingDirectories, ...worktrees],
       },
     );
+    // A GitHub token in the person's settings env reaches the worker's commands too.
+    secrets = [...new Set([...secrets, ...workerTokenValues(resolved.effective.env ?? {})])];
     const dropped = workspace.droppedDirectories;
     if (
       !claudeManagedProviderCompatible(resolved) ||
@@ -371,7 +394,15 @@ async function runQualifiedWorker(
         spawnClaudeCodeProcess: nativeProcess.spawn,
         cwd: job.root,
         additionalDirectories: [...workspace.workingDirectories.slice(1), ...worktrees],
-        env,
+        env: {
+          ...env,
+          // Sandboxed commands reach the network only through the sandbox proxy; Node's
+          // fetch ignores the proxy variables unless told, and fails DNS instead.
+          NODE_USE_ENV_PROXY: '1',
+          ...github?.env,
+          TENJIN_WORKER_GITHUB_TOKEN: undefined,
+          TENJIN_WORKER_GITHUB_TOKEN_FILE: undefined,
+        },
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         model: CLAUDE_DEEPSEEK_WORKER_MODEL,
         ...(job.native.subagent_type === 'Explore' ? { agent: 'Explore' } : {}),
@@ -423,7 +454,14 @@ async function runQualifiedWorker(
           enabled: true,
           allowUnsandboxedCommands: false,
           failIfUnavailable: true,
+          // Other hosts ask in default mode and are denied where no one answers.
+          network: { allowedDomains: [...WORKER_ALLOWED_DOMAINS] },
+          // gh is a Go program: on macOS it verifies TLS through the trust service only.
+          ...(github?.authenticated && process.platform === 'darwin'
+            ? { enableWeakerNetworkIsolation: true }
+            : {}),
           filesystem: {
+            ...(github ? { allowRead: [github.directory], allowWrite: [github.directory] } : {}),
             denyRead: [
               ...privatePaths.paths,
               ...protectedRoots.flatMap((root) => [
@@ -690,10 +728,11 @@ async function runQualifiedWorker(
     await new Promise<void>((resolve) => bridge.close(() => resolve()));
     options.signal.removeEventListener('abort', cancel);
     closeFailure = await processClosed;
+    await github?.close().catch(() => undefined);
   }
   if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
   if (executionFailure) throw executionFailure.error;
-  return result!;
+  return redactWorkerSecrets(result!, secrets);
 }
 
 /** Native settings and MCP config of repositories nested in a worker root. */

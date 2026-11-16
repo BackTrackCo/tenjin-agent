@@ -77,7 +77,9 @@ function gitDeny(args: string[]): string | undefined {
 
 function ghDeny(args: string[]): string | undefined {
   const [group, action] = args;
-  if (group === 'auth' && action === 'token') return 'GitHub tokens are not shown to the worker.';
+  // git's own credential helper call never passes through here; only a direct one does.
+  if (group === 'auth' && (action === 'token' || action === 'git-credential'))
+    return 'GitHub tokens are not shown to the worker.';
   if (group === 'auth' && args.some((arg) => arg === '-t' || arg === '--show-token'))
     return 'GitHub tokens are not shown to the worker.';
   if (group === 'pr' && action === 'merge') return 'The worker may not merge pull requests.';
