@@ -57,8 +57,64 @@ export type ModelWorkerActivitySnapshot = {
   state: 'starting' | 'running' | 'completed' | 'cancelled' | 'unknown';
   droppedRows: number;
   rows: ModelWorkerActivityRow[];
+  /** Tool calls the worker made, counted past the bounded rows. */
+  toolUses: number;
+  /** The latest worker turn's input, cache and output tokens, as a native
+   * subagent counts its own: one turn's usage, never a running sum. */
+  tokens: number;
+  /** While running, what has settled so far; once terminal, the controller's final accounting. */
   spend?: ModelWorkerActivitySpend;
 };
+
+/** What `subagent_activity` answers and the progress file holds: display data only. */
+export function activityAnswer(
+  snapshot: ModelWorkerActivitySnapshot,
+  options: { rows: boolean; maxRows?: number },
+) {
+  const rows = !options.rows
+    ? undefined
+    : options.maxRows === undefined
+      ? snapshot.rows
+      : snapshot.rows.slice(-options.maxRows);
+  return {
+    status: 'activity' as const,
+    activity: {
+      version: snapshot.version,
+      offerId: snapshot.binding.offerId,
+      workerHandle: snapshot.binding.workerHandle,
+      nativeProfile: snapshot.binding.nativeProfile,
+      generation: snapshot.binding.generation,
+      sequence: snapshot.sequence,
+      state: snapshot.state,
+      toolUses: snapshot.toolUses,
+      tokens: snapshot.tokens,
+      ...(rows
+        ? { droppedRows: snapshot.droppedRows + snapshot.rows.length - rows.length, rows }
+        : {}),
+      ...(snapshot.spend ? { spend: snapshot.spend } : {}),
+    },
+  };
+}
+
+/** One turn's usage as a native subagent's token count reads it, or undefined. */
+function usageTokens(value: unknown): number | undefined {
+  const usage = object(value);
+  if (!usage || (typeof usage.input_tokens !== 'number' && typeof usage.output_tokens !== 'number'))
+    return undefined;
+  let total = 0;
+  for (const key of [
+    'input_tokens',
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+    'output_tokens',
+  ]) {
+    const count = usage[key];
+    if (count === undefined || count === null) continue;
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return undefined;
+    total += count;
+  }
+  return Number.isSafeInteger(total) ? total : undefined;
+}
 
 const PARTIAL_ROWS = 24;
 const PARTIAL_BYTES = 24 * 1024;
@@ -184,6 +240,8 @@ export class ModelWorkerActivity {
       state: 'starting',
       droppedRows: 0,
       rows: [],
+      toolUses: 0,
+      tokens: 0,
     };
     const { parentSessionId, root, configDir, workerHandle } = this.value.binding;
     this.key = canonicalHash({
@@ -222,11 +280,32 @@ export class ModelWorkerActivity {
     this.value.state = state;
     this.value.sequence++;
     const parsed = spendSchema.safeParse(spend);
+    // A running figure never stands in for final accounting the controller could not read.
     if (parsed.success) this.value.spend = parsed.data;
+    else delete this.value.spend;
     for (const row of this.value.rows) {
       if (row.state === 'running') row.state = state === 'completed' ? 'unknown' : state;
     }
     this.boundSnapshot();
+  }
+
+  /**
+   * What has settled so far while the worker runs, read from the job's own
+   * accounting. Display only: it never changes what is charged, reserved or settled.
+   */
+  spending(spend: unknown, generation = this.value.binding.generation): void {
+    try {
+      if (!this.current(generation) || this.terminal()) return;
+      const parsed = spendSchema.safeParse(spend);
+      if (!parsed.success) return;
+      if (this.value.spend && canonicalHash(this.value.spend) === canonicalHash(parsed.data))
+        return;
+      this.value.spend = parsed.data;
+      this.value.sequence++;
+      this.boundSnapshot();
+    } catch {
+      // A display figure is optional.
+    }
   }
 
   /** The SDK owns complete history; this retains only bounded, redacted display data. */
@@ -247,6 +326,11 @@ export class ModelWorkerActivity {
         const msg = object(event.message);
         if (!msg || !Array.isArray(msg.content)) return;
         const messageId = typeof msg.id === 'string' ? msg.id.slice(0, 200) : event.uuid;
+        const tokens = usageTokens(msg.usage);
+        if (tokens !== undefined && tokens !== this.value.tokens) {
+          this.value.tokens = tokens;
+          this.value.sequence++;
+        }
         for (const raw of msg.content.slice(0, 64)) {
           const block = object(raw);
           if (!block) continue;
@@ -258,6 +342,7 @@ export class ModelWorkerActivity {
           ) {
             const key = 'tool:' + canonicalHash(block.id);
             if (!this.remember('block:' + key)) continue;
+            this.value.toolUses++;
             this.add({
               id: key,
               kind: 'tool',

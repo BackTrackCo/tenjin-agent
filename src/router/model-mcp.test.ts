@@ -57,6 +57,7 @@ import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { MODEL_WORKER_HANDLE_PREFIX, ModelConversationStore } from './model-conversations';
 import type { ModelJob } from './model-job';
 import { nativeWorkspaceModelConsent } from './model-settings';
+import { workerProgressPath } from './model-worker-progress';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ getSessionInfo: vi.fn() }));
 
@@ -1174,6 +1175,84 @@ it('fences and drains a running Claude continuation before refusing duplicate ac
       )?.state,
     ).toBe('cancelled');
     expect(worker.run).toHaveBeenCalledTimes(2);
+  } finally {
+    await f.close();
+  }
+});
+
+it('reports native tool-use and token counts and keeps the live file only while the worker runs', async () => {
+  const f = await ownedClaudeFixture();
+  const path = workerProgressPath(dir, 'root', f.job.id);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  worker.run.mockImplementation(async (_job, options) => {
+    options.activity.running();
+    options.activity.observe({
+      type: 'assistant',
+      uuid: 'turn-one',
+      session_id: options.claudeSession.sessionId,
+      message: {
+        id: 'message-1',
+        usage: { input_tokens: 1200, cache_read_input_tokens: 30_000, output_tokens: 34 },
+        content: [{ type: 'tool_use', id: 'read-1', name: 'Read', input: {} }],
+      },
+    });
+    started();
+    await blocked;
+    return 'completed fixture';
+  });
+  try {
+    const accepted = f.call({ offer_id: f.job.id });
+    await ready;
+    await vi.waitFor(async () =>
+      expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+        status: 'activity',
+        activity: { offerId: f.job.id },
+      }),
+    );
+    release();
+    expect(await accepted).toMatchObject({
+      status: 'completed',
+      toolUses: 1,
+      tokens: 31_234,
+      spend: { actualAtomic: '3000' },
+    });
+    await vi.waitFor(async () => expect(readFile(path, 'utf8')).rejects.toThrow());
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
+it("hands a stopped worker's counts back beside its partial work", async () => {
+  const f = await ownedClaudeFixture();
+  worker.run.mockImplementation(async (_job, options) => {
+    options.activity.running();
+    options.activity.observe({
+      type: 'assistant',
+      uuid: 'turn-one',
+      session_id: options.claudeSession.sessionId,
+      message: {
+        id: 'message-1',
+        usage: { input_tokens: 10, output_tokens: 5 },
+        content: [{ type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} }],
+      },
+    });
+    throw new ModelWorkerStopped({ kind: 'harness_limit', reason: 'turn_guard', turns: 3 });
+  });
+  try {
+    expect(await f.call({ offer_id: f.job.id })).toMatchObject({
+      status: 'unknown',
+      toolUses: 1,
+      tokens: 15,
+      partial: { rows: [expect.objectContaining({ name: 'Bash' })] },
+    });
   } finally {
     await f.close();
   }

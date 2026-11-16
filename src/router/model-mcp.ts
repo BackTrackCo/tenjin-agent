@@ -15,7 +15,8 @@ import { continuationRefusal, ownedModelReference } from './model-continuation';
 import type { ModelConversation, ModelConversationOwner } from './model-conversations';
 import { savedClaudeWorkspace, sameClaudeWorkspace } from './claude-workspace';
 import { realpath } from 'node:fs/promises';
-import { ModelWorkerActivity, partialHandback } from './model-worker-activity';
+import { ModelWorkerActivity, activityAnswer, partialHandback } from './model-worker-activity';
+import { startWorkerProgress } from './model-worker-progress';
 import { workerPermissionAnswer, workerPermissionForm } from './model-worker-prompt';
 import { ModelWorkerViews } from './model-worker-views';
 import { nativeRetryReference, nativeRetryRefusal } from './model-native-retry';
@@ -130,20 +131,7 @@ export function registerModelTool(
           activity.binding.configDir !== configDir
         )
           return answer({ status: 'unavailable' });
-        return answer({
-          status: 'activity',
-          activity: {
-            version: activity.version,
-            offerId: activity.binding.offerId,
-            workerHandle: activity.binding.workerHandle,
-            nativeProfile: activity.binding.nativeProfile,
-            generation: activity.binding.generation,
-            sequence: activity.sequence,
-            state: activity.state,
-            ...(!args.follow ? { droppedRows: activity.droppedRows, rows: activity.rows } : {}),
-            ...(activity.spend ? { spend: activity.spend } : {}),
-          },
-        });
+        return answer(activityAnswer(activity, { rows: !args.follow }));
       },
     );
   server.registerTool(
@@ -477,6 +465,31 @@ export function registerModelTool(
               // Activity is optional display data, never execution authority.
             }
           }
+          let progress: { stop: () => Promise<void> } | undefined;
+          if (activity) {
+            try {
+              // The plugin draws the live row from this file, not from a second
+              // MCP call on the connection this accept call holds.
+              progress = startWorkerProgress({
+                dataDir: options.dataDir,
+                parentSessionId: session.sessionId,
+                offerId: job.id,
+                activity,
+                spend: () => transport.summary(executionJob),
+              });
+            } catch {
+              // Display only.
+            }
+          }
+          // What a native subagent's result reports, beside the time and spend.
+          const counts = () => {
+            try {
+              const shown = activity?.snapshot();
+              return shown ? { toolUses: shown.toolUses, tokens: shown.tokens } : {};
+            } catch {
+              return {};
+            }
+          };
           const done = (async () => {
             try {
               signal.throwIfAborted();
@@ -521,6 +534,7 @@ export function registerModelTool(
                 status: 'completed',
                 label: 'DeepSeek V4.1 Flash 1017',
                 elapsedMs: Date.now() - started,
+                ...counts(),
                 spend: await transport
                   .summary(executionJob)
                   .catch(() => ({ accounting: 'unknown' })),
@@ -579,6 +593,7 @@ export function registerModelTool(
                 status: abort.signal.aborted ? 'cancelled' : 'unknown',
                 stopReason: workerStop(error),
                 elapsedMs: Date.now() - started,
+                ...counts(),
                 spend,
                 ...(partial ? { partial } : {}),
                 nextStep: activeConversation
@@ -586,6 +601,8 @@ export function registerModelTool(
                   : 'Inspect pending invocation receipts; do not rebuy an uncertain turn. Once quiesced, retry the original native Agent call unchanged.',
               });
             } finally {
+              // Not awaited: removing a display file never delays the handback.
+              void progress?.stop().catch(() => undefined);
               views.finished(job.id);
               controllers.delete(job.id);
               signal.removeEventListener('abort', stop);

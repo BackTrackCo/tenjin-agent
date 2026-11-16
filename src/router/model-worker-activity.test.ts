@@ -377,3 +377,58 @@ it('keeps the partial handback within its byte bound by dropping the oldest rows
   expect(partial.lastText).toContain('step 39');
   expect(partial.omittedRows + partial.rows.length).toBe(40);
 });
+
+it('counts every tool use past the row bound and reads tokens from the latest turn, never a sum', () => {
+  const f = fixture();
+  f.activity.running();
+  const usage = { input_tokens: 900, cache_read_input_tokens: 40_000, output_tokens: 300 };
+  const turn = f.event('assistant', {
+    message: {
+      id: 'turn-1',
+      usage,
+      content: [{ type: 'tool_use', id: 'first', name: 'Read', input: {} }],
+    },
+  });
+  f.activity.observe(turn);
+  // A replayed event is one turn, not two.
+  f.activity.observe(turn);
+  expect(f.activity.snapshot()).toMatchObject({ toolUses: 1, tokens: 41_200 });
+  for (let at = 0; at < 140; at++) f.activity.observe(f.tool('bulk-' + at));
+  f.activity.observe(
+    f.event('assistant', {
+      message: {
+        id: 'turn-2',
+        usage: { ...usage, cache_creation_input_tokens: 2_000, output_tokens: 500 },
+        content: [{ type: 'text', text: 'Summarising.' }],
+      },
+    }),
+  );
+  const shown = f.activity.snapshot();
+  expect(shown.rows.length).toBeLessThan(141);
+  expect(shown.toolUses).toBe(141);
+  expect(shown.tokens).toBe(43_400);
+  // A usage the SDK could not have sent leaves the last count standing.
+  f.activity.observe(
+    f.event('assistant', {
+      message: { id: 'turn-3', usage: { input_tokens: -1, output_tokens: 1 }, content: [] },
+    }),
+  );
+  expect(f.activity.snapshot().tokens).toBe(43_400);
+});
+
+it('shows settled spend while running, and drops it when final accounting is unreadable', () => {
+  const f = fixture();
+  f.activity.running();
+  const settled = { reservedAtomic: '8000', actualAtomic: '4300', uncertain: ['call-two'] };
+  f.activity.spending(settled);
+  const sequence = f.activity.snapshot().sequence;
+  expect(f.activity.snapshot().spend).toEqual(settled);
+  f.activity.spending({ ...settled });
+  f.activity.spending({ accounting: 'unknown' });
+  expect(f.activity.snapshot().sequence).toBe(sequence);
+  expect(f.activity.snapshot().spend).toEqual(settled);
+  f.activity.finish('unknown', undefined);
+  expect(f.activity.snapshot().spend).toBeUndefined();
+  f.activity.spending(settled);
+  expect(f.activity.snapshot().spend).toBeUndefined();
+});
