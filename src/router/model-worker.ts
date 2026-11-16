@@ -40,6 +40,7 @@ import {
 } from './claude-worker-session';
 import { claudeWorkerProcess } from './claude-worker-process';
 import { claudeWorkerSandboxCompatible } from './claude-worker-sandbox';
+import { workerHardDeny } from './worker-hard-denies';
 import {
   resolveClaudeWorkspace,
   savedClaudeWorkspace,
@@ -414,7 +415,20 @@ async function runQualifiedWorker(
           PreToolUse: [
             {
               hooks: [
-                async () => {
+                async (input) => {
+                  // The floor under the classifier: denied in every mode.
+                  const floor =
+                    input.hook_event_name === 'PreToolUse'
+                      ? workerHardDeny(input.tool_name, input.tool_input)
+                      : undefined;
+                  if (floor)
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: `${floor} This call was not run.`,
+                      },
+                    };
                   try {
                     assertCurrentMode();
                     await assertCurrentWorkspace();

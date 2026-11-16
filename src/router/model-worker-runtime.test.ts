@@ -1094,3 +1094,33 @@ it.each(['auto', 'default'] as const)(
     }
   },
 );
+
+it('denies credential probes and pushes to main in the worker hook whatever the mode', async () => {
+  const decisions: unknown[] = [];
+  sdkResult({ subtype: 'success', result: 'floor fixture' }, undefined, async () => {
+    const hook = vi.mocked(query).mock.calls[0]![0].options?.hooks?.PreToolUse?.[0]?.hooks[0];
+    for (const command of [
+      'security find-generic-password -s gh:github.com',
+      'git push origin main',
+      'git push origin A1igator/fix',
+    ])
+      decisions.push(
+        await hook!(
+          {
+            hook_event_name: 'PreToolUse',
+            tool_name: 'Bash',
+            tool_input: { command },
+            tool_use_id: command,
+          } as never,
+          undefined,
+          { signal: new AbortController().signal },
+        ),
+      );
+  });
+  await runModelWorker(job, options());
+  expect(decisions[0]).toMatchObject({
+    hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: /not run/ },
+  });
+  expect(decisions[1]).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  expect(decisions[2]).toEqual({});
+});
