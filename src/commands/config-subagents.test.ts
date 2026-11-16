@@ -52,7 +52,10 @@ it('records explicit accepted-worker instruction consent while preserving wallet
     },
   });
   expect(JSON.stringify(result.data)).toContain('After acceptance');
-  expect(JSON.stringify(result.data)).toContain('no extra tool or filesystem permission');
+  // The consent text names what a named directory grants: a Claude worker's working directory.
+  expect(JSON.stringify(result.data)).toContain(
+    'A Claude worker may read and write in every named directory',
+  );
   expect(JSON.stringify(result.data)).not.toContain(
     'TypeSafe/Jev for routing) to receive this repository’s subagent assignments, bounded parent context and applicable',
   );
