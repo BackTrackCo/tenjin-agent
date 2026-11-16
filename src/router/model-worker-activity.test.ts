@@ -1,51 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  realpath,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
-import { writePrivate } from './store-files';
-import {
-  ModelWorkerActivity,
-  readModelWorkerActivity,
-  type ModelWorkerActivityBinding,
-} from './model-worker-activity';
+import { join } from 'node:path';
+import { expect, it } from 'vitest';
+import { ModelWorkerActivity, type ModelWorkerActivityBinding } from './model-worker-activity';
 
-const directories: string[] = [];
-const activities: ModelWorkerActivity[] = [];
-afterEach(async () => {
-  await Promise.all(activities.splice(0).map((activity) => activity.flush()));
-  await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-  vi.useRealTimers();
-});
-
-async function snapshotFile(dataDir: string) {
-  const dir = join(dataDir, 'model-worker-activity');
-  const files = (await readdir(dir)).filter((file) => file.endsWith('.json'));
-  expect(files).toHaveLength(1);
-  return join(dir, files[0]!);
-}
-
-async function fixture(write?: (path: string, data: string) => Promise<void>) {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'tenjin-worker-activity-')));
-  directories.push(dir);
+function fixture() {
+  const dir = join(tmpdir(), 'tenjin-worker-activity-' + randomUUID());
   const dataDir = join(dir, 'data');
-  const root = join(dir, 'repo');
-  const configDir = join(dir, 'native');
-  await Promise.all([root, configDir, dataDir].map((path) => mkdir(path)));
   const binding: ModelWorkerActivityBinding = {
     parentSessionId: randomUUID(),
-    root,
-    configDir,
+    root: join(dir, 'repo'),
+    configDir: join(dir, 'native'),
     offerId: randomUUID(),
     workerHandle: 'tenjin-worker-' + randomUUID(),
     nativeProfile: 'general-purpose',
@@ -53,8 +18,7 @@ async function fixture(write?: (path: string, data: string) => Promise<void>) {
     sdkSessionId: randomUUID(),
     generation: randomUUID(),
   };
-  const activity = new ModelWorkerActivity({ dataDir, binding, ...(write ? { write } : {}) });
-  activities.push(activity);
+  const activity = new ModelWorkerActivity({ dataDir, binding });
   const event = (type: string, fields: Record<string, unknown> = {}) => ({
     type,
     uuid: randomUUID(),
@@ -66,7 +30,7 @@ async function fixture(write?: (path: string, data: string) => Promise<void>) {
   const tool = (
     toolId = 'read-one',
     name = 'Read',
-    input: unknown = { file_path: join(root, 'index.ts') },
+    input: unknown = { file_path: join(binding.root, 'index.ts') },
   ) => assistant([{ type: 'tool_use', id: toolId, name, input }]);
   const result = (toolId: string, content: unknown, isError = false) =>
     event('user', {
@@ -77,16 +41,15 @@ async function fixture(write?: (path: string, data: string) => Promise<void>) {
   return { dir, dataDir, binding, activity, event, assistant, tool, result };
 }
 
-it('persists actual tool activity privately and updates a result without creating another row', async () => {
-  const f = await fixture();
+it('records actual tool activity and updates a result without creating another row', () => {
+  const f = fixture();
   f.activity.running();
   f.activity.observe(f.tool());
   f.activity.observe(
     f.event('tool_progress', { tool_use_id: 'read-one', elapsed_time_seconds: 2 }),
   );
   f.activity.observe(f.result('read-one', [{ type: 'text', text: 'export const answer = 42;' }]));
-  await f.activity.flush();
-  const read = await readModelWorkerActivity(f.dataDir, f.binding);
+  const read = f.activity.snapshot();
   expect(read?.state).toBe('running');
   expect(read?.rows).toMatchObject([
     {
@@ -98,15 +61,10 @@ it('persists actual tool activity privately and updates a result without creatin
     },
   ]);
   expect(read?.rows[0]?.inputSummary).toContain(join(f.binding.root, 'index.ts'));
-  if (process.platform !== 'win32') {
-    const file = await snapshotFile(f.dataDir);
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
-  }
 });
 
-it('never persists thinking, authentication, system prompts, raw commands or secret input values', async () => {
-  const f = await fixture();
+it('never includes thinking, authentication, system prompts, raw commands or secret input values', () => {
+  const f = fixture();
   f.activity.observe(f.event('system', { subtype: 'init', system: 'private-system-prompt' }));
   f.activity.observe(f.event('auth_status', { output: ['private-auth-output'] }));
   f.activity.observe(
@@ -124,8 +82,7 @@ it('never persists thinking, authentication, system prompts, raw commands or sec
     }),
   );
   f.activity.observe(f.result('shell-one', '{"api_key":"PrivateResultValue123","status":"ok"}'));
-  await f.activity.flush();
-  const serialized = JSON.stringify(await readModelWorkerActivity(f.dataDir, f.binding));
+  const serialized = JSON.stringify(f.activity.snapshot());
   for (const secret of [
     'private-system-prompt',
     'private-auth-output',
@@ -143,8 +100,8 @@ it('never persists thinking, authentication, system prompts, raw commands or sec
   expect(serialized).toContain('redacted');
 });
 
-it('omits full SDK and tool errors while retaining the actual failed-tool outcome', async () => {
-  const f = await fixture();
+it('omits full SDK and tool errors while retaining the actual failed-tool outcome', () => {
+  const f = fixture();
   f.activity.observe(f.tool());
   f.activity.observe(
     f.event('assistant', {
@@ -160,8 +117,8 @@ it('omits full SDK and tool errors while retaining the actual failed-tool outcom
   expect(snapshot.rows[0]?.outputPreview).toContain('Tool reported an error');
 });
 
-it('removes OSC links, cursor controls, CR, backspace and BEL before terminal display', async () => {
-  const f = await fixture();
+it('removes OSC links, cursor controls, CR, backspace and BEL before terminal display', () => {
+  const f = fixture();
   const terminalText =
     '\u001b]8;;https://private.example/hidden-metadata\u0007link\u001b]8;;\u0007' +
     '\nfirst\rforged\b\tline\u009b31mred\u001b[0m\u0007';
@@ -172,8 +129,7 @@ it('removes OSC links, cursor controls, CR, backspace and BEL before terminal di
     }),
   );
   f.activity.observe(f.result('read-control', terminalText));
-  await f.activity.flush();
-  const snapshot = await readModelWorkerActivity(f.dataDir, f.binding);
+  const snapshot = f.activity.snapshot();
   expect(snapshot?.rows[0]?.text).toBe('link\nfirstforged\tlinered');
   expect(snapshot?.rows[1]).toMatchObject({
     name: 'Read',
@@ -191,8 +147,8 @@ it('removes OSC links, cursor controls, CR, backspace and BEL before terminal di
     expect(text ?? '').not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
 });
 
-it('ignores partial thinking/text frames and deduplicates completed blocks and replayed UUIDs', async () => {
-  const f = await fixture();
+it('ignores partial thinking/text frames and deduplicates completed blocks and replayed UUIDs', () => {
+  const f = fixture();
   f.activity.observe(
     f.event('stream_event', {
       event: {
@@ -221,8 +177,8 @@ it('ignores partial thinking/text frames and deduplicates completed blocks and r
   expect(f.activity.snapshot()).toEqual(done);
 });
 
-it('refuses foreign sessions and stale generations without consuming legitimate event IDs', async () => {
-  const f = await fixture();
+it('refuses foreign sessions and stale generations without consuming legitimate event IDs', () => {
+  const f = fixture();
   const tool = f.tool();
   f.activity.observe({ ...tool, session_id: randomUUID() });
   f.activity.observe(tool, 'old-generation');
@@ -231,17 +187,10 @@ it('refuses foreign sessions and stale generations without consuming legitimate 
   expect(f.activity.snapshot()).toMatchObject({ sequence: 0, state: 'starting', rows: [] });
   f.activity.observe(tool);
   expect(f.activity.snapshot().rows).toHaveLength(1);
-  await f.activity.flush();
-  expect(
-    await readModelWorkerActivity(f.dataDir, { ...f.binding, generation: 'old-generation' }),
-  ).toBeNull();
-  expect(
-    await readModelWorkerActivity(f.dataDir, { ...f.binding, parentSessionId: 'foreign' }),
-  ).toBeNull();
 });
 
-it('never reopens a cancelled activation on late tool results, status or completion', async () => {
-  const f = await fixture();
+it('never reopens a cancelled activation on late tool results, status or completion', () => {
+  const f = fixture();
   f.activity.running();
   f.activity.observe(f.tool());
   f.activity.finish('cancelled', {
@@ -263,8 +212,8 @@ it('never reopens a cancelled activation on late tool results, status or complet
   });
 });
 
-it('takes financial totals only from the controller, never SDK estimates or result events', async () => {
-  const f = await fixture();
+it('takes financial totals only from the controller, never SDK estimates or result events', () => {
+  const f = fixture();
   f.activity.observe(
     f.event('result', {
       subtype: 'success',
@@ -277,8 +226,8 @@ it('takes financial totals only from the controller, never SDK estimates or resu
   expect(f.activity.snapshot().spend?.actualAtomic).toBe('3900');
 });
 
-it('bounds accumulated Unicode content, row count and fields without truncating execution inputs', async () => {
-  const f = await fixture();
+it('bounds accumulated Unicode content, row count and fields without truncating execution inputs', () => {
+  const f = fixture();
   const original = '界'.repeat(2000);
   for (let n = 0; n < 300; n++)
     f.activity.observe(f.assistant([{ type: 'text', text: original + n }]));
@@ -294,8 +243,8 @@ it('bounds accumulated Unicode content, row count and fields without truncating 
   expect(f.activity.snapshot().rows.at(-1)?.text).toContain('large content omitted');
 });
 
-it('tracks native compaction without persisting its surrounding system data', async () => {
-  const f = await fixture();
+it('tracks native compaction without retaining its surrounding system data', () => {
+  const f = fixture();
   f.activity.observe(
     f.event('system', { subtype: 'status', status: 'compacting', extra: 'private-status-detail' }),
   );
@@ -313,83 +262,11 @@ it('tracks native compaction without persisting its surrounding system data', as
   expect(JSON.stringify(f.activity.snapshot())).not.toContain('private-');
 });
 
-it('keeps display writes coalesced and non-blocking while the sink is slow', async () => {
-  let release!: () => void;
-  let started!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const firstWrite = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  const written: string[] = [];
-  const write = vi.fn(async (_path: string, data: string) => {
-    written.push(data);
-    if (written.length === 1) {
-      started();
-      await gate;
-    }
-  });
-  const f = await fixture(write);
-  await firstWrite;
-  for (let n = 0; n < 50; n++)
-    f.activity.observe(f.assistant([{ type: 'text', text: 'step ' + n }]));
-  f.activity.finish('completed');
-  expect(f.activity.snapshot().state).toBe('completed');
-  expect(write).toHaveBeenCalledTimes(1);
-  release();
-  await f.activity.flush();
-  expect(write).toHaveBeenCalledTimes(2);
-  expect(JSON.parse(written.at(-1)!).state).toBe('completed');
-});
-
-it('replaces the one per-worker projection on resume and fences an older queued write', async () => {
-  let started!: () => void;
-  let release!: () => void;
-  const firstWrite = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const f = await fixture(async (path, data) => {
-    started();
-    await gate;
-    await writePrivate(path, data);
-  });
-  await firstWrite;
-  f.activity.finish('completed');
-  const next = {
-    ...f.binding,
-    offerId: randomUUID(),
-    continuationId: randomUUID(),
-    generation: randomUUID(),
-  };
-  const resumed = new ModelWorkerActivity({ dataDir: f.dataDir, binding: next });
-  activities.push(resumed);
-  resumed.running();
-  resumed.observe({
-    type: 'assistant',
-    uuid: randomUUID(),
-    session_id: next.sdkSessionId,
-    message: { id: randomUUID(), content: [{ type: 'text', text: 'current activation' }] },
-  });
-  release();
-  await Promise.all([f.activity.flush(), resumed.flush()]);
-  expect(await readModelWorkerActivity(f.dataDir, f.binding)).toBeNull();
-  expect(await readModelWorkerActivity(f.dataDir, next)).toMatchObject({
-    binding: next,
-    state: 'running',
-    rows: [{ text: 'current activation' }],
-  });
-  await snapshotFile(f.dataDir);
-});
-
-it('finishes the previous in-memory row after resume claims disk without altering the new activation', async () => {
-  const f = await fixture();
+it('a resumed activation fences late events on the previous one without changing either history', () => {
+  const f = fixture();
   f.activity.running();
   f.activity.observe(f.tool());
-  await f.activity.flush();
+  const old = f.activity.snapshot();
   const next = {
     ...f.binding,
     offerId: randomUUID(),
@@ -397,62 +274,67 @@ it('finishes the previous in-memory row after resume claims disk without alterin
     generation: randomUUID(),
   };
   const resumed = new ModelWorkerActivity({ dataDir: f.dataDir, binding: next });
-  activities.push(resumed);
+  resumed.running();
+  resumed.observe(f.assistant([{ type: 'text', text: 'current activation' }]));
+  const current = resumed.snapshot();
+  const late = f.assistant([{ type: 'text', text: 'late old activation' }]);
+  f.activity.observe(late);
+  f.activity.observe(f.result('read-one', 'late result'));
+  f.activity.running();
+  expect(f.activity.snapshot()).toEqual(old);
+  expect(resumed.snapshot()).toEqual(current);
+  // Refused stale observations do not consume event identity in the current activation.
+  resumed.observe(late);
+  expect(resumed.snapshot().rows).toMatchObject([
+    { text: 'current activation' },
+    { text: 'late old activation' },
+  ]);
+});
+
+it('finishes the previous row after resume without altering the new activation', () => {
+  const f = fixture();
+  f.activity.running();
+  f.activity.observe(f.tool());
+  const next = {
+    ...f.binding,
+    offerId: randomUUID(),
+    continuationId: randomUUID(),
+    generation: randomUUID(),
+  };
+  const resumed = new ModelWorkerActivity({ dataDir: f.dataDir, binding: next });
   resumed.running();
   // The native completion is durable, but the old controller's display callback was delayed.
   f.activity.finish('completed', { reservedAtomic: '4100', actualAtomic: '3900', uncertain: [] });
   expect(f.activity.snapshot()).toMatchObject({
     state: 'completed',
+    rows: [{ name: 'Read', state: 'unknown' }],
     spend: { actualAtomic: '3900' },
   });
-  await Promise.all([f.activity.flush(), resumed.flush()]);
-  expect(await readModelWorkerActivity(f.dataDir, next)).toMatchObject({
-    binding: next,
-    state: 'running',
-    rows: [],
-  });
-  expect((await readModelWorkerActivity(f.dataDir, next))?.spend).toBeUndefined();
-  expect(await readModelWorkerActivity(f.dataDir, f.binding)).toBeNull();
+  expect(resumed.snapshot()).toMatchObject({ binding: next, state: 'running', rows: [] });
+  expect(resumed.snapshot().spend).toBeUndefined();
   f.activity.finish('cancelled');
   expect(f.activity.snapshot().state).toBe('completed');
 });
 
-it('checks the controller generation inside the UI lock and treats revocation/errors as display-only', async () => {
-  const f = await fixture();
-  await f.activity.flush();
-  const binding = { ...f.binding, generation: randomUUID() };
-  const write = vi.fn(async () => undefined);
-  const observer = new ModelWorkerActivity({
-    dataDir: f.dataDir,
-    binding,
-    write,
-    isCurrentBinding: async () => false,
+it('keeps identical worker identities independent in separate Tenjin data namespaces', () => {
+  const f = fixture();
+  const other = new ModelWorkerActivity({
+    dataDir: join(f.dir, 'other-data'),
+    binding: f.binding,
   });
-  activities.push(observer);
-  observer.observe(f.tool());
-  await observer.flush();
-  expect(write).not.toHaveBeenCalled();
-  expect(await readModelWorkerActivity(f.dataDir, f.binding)).toBeNull();
-  expect(observer.snapshot().rows).toHaveLength(1);
-  const unavailable = new ModelWorkerActivity({
-    dataDir: f.dataDir,
-    binding: { ...binding, generation: randomUUID() },
-    write,
-    isCurrentBinding: async () => {
-      throw new Error('private-validator-error');
-    },
+  f.activity.running();
+  other.running();
+  f.activity.observe(f.assistant([{ type: 'text', text: 'first store' }]));
+  other.observe(f.assistant([{ type: 'text', text: 'second store' }]));
+  expect(f.activity.snapshot()).toMatchObject({
+    state: 'running',
+    rows: [{ text: 'first store' }],
   });
-  activities.push(unavailable);
-  unavailable.finish('unknown');
-  await unavailable.flush();
-  expect(write).not.toHaveBeenCalled();
-  expect(unavailable.snapshot().state).toBe('unknown');
+  expect(other.snapshot()).toMatchObject({ state: 'running', rows: [{ text: 'second store' }] });
 });
 
-it('swallows persistence and malformed-observation failures without changing execution-facing state', async () => {
-  const f = await fixture(async () => {
-    throw new Error('private-write-error');
-  });
+it('contains malformed observations without changing execution-facing state', () => {
+  const f = fixture();
   const malformed = Object.defineProperty({}, 'type', {
     get() {
       throw new Error('private-event-error');
@@ -461,30 +343,6 @@ it('swallows persistence and malformed-observation failures without changing exe
   expect(() => f.activity.observe(malformed)).not.toThrow();
   f.activity.observe(f.tool());
   expect(() => f.activity.finish('completed')).not.toThrow();
-  await expect(f.activity.flush()).resolves.toBeUndefined();
   expect(f.activity.snapshot().state).toBe('completed');
   expect(JSON.stringify(f.activity.snapshot())).not.toContain('private-');
-});
-
-it('rejects symlink snapshots, oversized files and stored ownership/generation substitutions', async () => {
-  const f = await fixture();
-  await f.activity.flush();
-  const file = await snapshotFile(f.dataDir);
-  const original = await readFile(file, 'utf8');
-  const elsewhere = join(f.dir, 'elsewhere.json');
-  await writeFile(elsewhere, original);
-  await rm(file);
-  await symlink(elsewhere, file);
-  expect(await readModelWorkerActivity(f.dataDir, f.binding)).toBeNull();
-  await rm(file);
-  await writeFile(
-    file,
-    JSON.stringify({
-      ...JSON.parse(original),
-      binding: { ...f.binding, generation: 'substituted' },
-    }),
-  );
-  expect(await readModelWorkerActivity(f.dataDir, f.binding)).toBeNull();
-  await writeFile(file, ' '.repeat(200_000));
-  expect(await readModelWorkerActivity(f.dataDir, f.binding)).toBeNull();
 });

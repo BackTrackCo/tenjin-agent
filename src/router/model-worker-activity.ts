@@ -1,23 +1,15 @@
-import { mkdir } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { z } from 'zod';
 import { mask } from '../lib/redact';
 import { canonicalHash } from '../lib/request-schema';
-import { withFileLock } from '../lib/lock';
-import { PRIVATE, readJsonFile, writePrivate } from './store-files';
 
 const MAX_ROWS = 128;
 const MAX_BYTES = 128 * 1024;
 const MAX_FIELD_BYTES = 1024;
 const MAX_SEEN = 1024;
-const latestWriters = new Map<string, { token: symbol; generation: string }>();
-const writeTails = new Map<string, Promise<void>>();
+const latestActivations = new Map<string, symbol>();
 const id = z.string().min(1).max(200);
-const displayField = z
-  .string()
-  .max(MAX_FIELD_BYTES)
-  .refine((value) => Buffer.byteLength(value) <= MAX_FIELD_BYTES);
 const location = z.string().min(1).max(2000).refine(isAbsolute);
 const bindingSchema = z
   .object({
@@ -39,21 +31,17 @@ const bindingSchema = z
   })
   .strict();
 export type ModelWorkerActivityBinding = z.infer<typeof bindingSchema>;
-const stateSchema = z.enum(['starting', 'running', 'completed', 'cancelled', 'unknown']);
-const rowSchema = z
-  .object({
-    id,
-    sequence: z.number().int().nonnegative(),
-    kind: z.enum(['text', 'tool', 'status', 'compaction']),
-    state: z.enum(['running', 'completed', 'error', 'cancelled', 'unknown']),
-    text: displayField.optional(),
-    name: z.string().max(120).optional(),
-    inputSummary: displayField.optional(),
-    outputPreview: displayField.optional(),
-    elapsedSeconds: z.number().nonnegative().finite().optional(),
-  })
-  .strict();
-export type ModelWorkerActivityRow = z.infer<typeof rowSchema>;
+export type ModelWorkerActivityRow = {
+  id: string;
+  sequence: number;
+  kind: 'text' | 'tool' | 'status' | 'compaction';
+  state: 'running' | 'completed' | 'error' | 'cancelled' | 'unknown';
+  text?: string;
+  name?: string;
+  inputSummary?: string;
+  outputPreview?: string;
+  elapsedSeconds?: number;
+};
 const spendSchema = z
   .object({
     reservedAtomic: z.string().regex(/^\d{1,30}$/),
@@ -61,19 +49,16 @@ const spendSchema = z
     uncertain: z.array(id).max(128),
   })
   .strict();
-const snapshotSchema = z
-  .object({
-    version: z.literal(1),
-    binding: bindingSchema,
-    sequence: z.number().int().nonnegative(),
-    state: stateSchema,
-    droppedRows: z.number().int().nonnegative(),
-    rows: z.array(rowSchema).max(MAX_ROWS),
-    spend: spendSchema.optional(),
-  })
-  .strict();
-export type ModelWorkerActivitySnapshot = z.infer<typeof snapshotSchema>;
 export type ModelWorkerActivitySpend = z.infer<typeof spendSchema>;
+export type ModelWorkerActivitySnapshot = {
+  version: 1;
+  binding: ModelWorkerActivityBinding;
+  sequence: number;
+  state: 'starting' | 'running' | 'completed' | 'cancelled' | 'unknown';
+  droppedRows: number;
+  rows: ModelWorkerActivityRow[];
+  spend?: ModelWorkerActivitySpend;
+};
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -144,62 +129,17 @@ function validBinding(binding: ModelWorkerActivityBinding): ModelWorkerActivityB
   return parsed;
 }
 
-function activityPath(dataDir: string, binding: ModelWorkerActivityBinding): string {
-  const { parentSessionId, root, configDir, workerHandle } = binding;
-  return join(
-    dataDir,
-    'model-worker-activity',
-    canonicalHash({ parentSessionId, root, configDir, workerHandle }) + '.json',
-  );
-}
-
-async function serializeWrite(path: string, write: () => Promise<void>): Promise<void> {
-  const previous = writeTails.get(path) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(write);
-  writeTails.set(path, next);
-  try {
-    await next;
-  } finally {
-    if (writeTails.get(path) === next) writeTails.delete(path);
-  }
-}
-
-/** Read only an exact controller-owned activation, never an arbitrary session or transcript path. */
-export async function readModelWorkerActivity(
-  dataDir: string,
-  binding: ModelWorkerActivityBinding,
-): Promise<ModelWorkerActivitySnapshot | null> {
-  try {
-    const expected = validBinding(binding);
-    const path = activityPath(dataDir, expected);
-    const active = latestWriters.get(path);
-    if (active && active.generation !== expected.generation) return null;
-    const parsed = snapshotSchema.safeParse(await readJsonFile(path, MAX_BYTES));
-    if (!parsed.success || canonicalHash(parsed.data.binding) !== canonicalHash(expected))
-      return null;
-    return parsed.data;
-  } catch {
-    return null;
-  }
-}
-
 /** A private, bounded display projection. No observation failure affects worker execution. */
 export class ModelWorkerActivity {
   private value: ModelWorkerActivitySnapshot;
   private seen = new Set<string>();
-  private queued: string | undefined;
-  private writing: Promise<void> | undefined;
-  private readonly path: string;
-  private readonly writerToken = Symbol();
-  private readonly write: (path: string, data: string) => Promise<void>;
-  private readonly isCurrentBinding: () => Promise<boolean>;
+  private readonly key: string;
+  private readonly activationToken = Symbol();
 
   constructor(options: {
+    /** In-memory namespace only; activity never reads or writes this directory. */
     dataDir: string;
     binding: ModelWorkerActivityBinding;
-    write?: (path: string, data: string) => Promise<void>;
-    /** Controller-owned current-conversation check; observation never acquires financial locks. */
-    isCurrentBinding?: () => Promise<boolean>;
   }) {
     this.value = {
       version: 1,
@@ -209,16 +149,18 @@ export class ModelWorkerActivity {
       droppedRows: 0,
       rows: [],
     };
-    this.path = activityPath(options.dataDir, this.value.binding);
-    this.write = options.write ?? writePrivate;
-    this.isCurrentBinding = options.isCurrentBinding ?? (async () => true);
-    latestWriters.delete(this.path);
-    latestWriters.set(this.path, {
-      token: this.writerToken,
-      generation: this.value.binding.generation,
+    const { parentSessionId, root, configDir, workerHandle } = this.value.binding;
+    this.key = canonicalHash({
+      dataDir: resolve(options.dataDir),
+      parentSessionId,
+      root,
+      configDir,
+      workerHandle,
     });
-    if (latestWriters.size > 128) latestWriters.delete(latestWriters.keys().next().value!);
-    this.publish();
+    latestActivations.delete(this.key);
+    latestActivations.set(this.key, this.activationToken);
+    if (latestActivations.size > 128)
+      latestActivations.delete(latestActivations.keys().next().value!);
   }
 
   snapshot(): ModelWorkerActivitySnapshot {
@@ -229,7 +171,7 @@ export class ModelWorkerActivity {
     if (!this.current(generation) || this.value.state !== 'starting') return;
     this.value.state = 'running';
     this.value.sequence++;
-    this.publish();
+    this.boundSnapshot();
   }
 
   /** Only the controller supplies terminal state and authoritative payment accounting. */
@@ -238,8 +180,8 @@ export class ModelWorkerActivity {
     spend?: ModelWorkerActivitySpend,
     generation = this.value.binding.generation,
   ): void {
-    // A completed controller may finish after a new resume owns the disk projection.
-    // Its old in-memory row must still end; it may never overwrite the newer file.
+    // A completed controller may finish after a resume owns the current activation.
+    // Its old row must still end without changing the newer activation.
     if (generation !== this.value.binding.generation || this.terminal()) return;
     this.value.state = state;
     this.value.sequence++;
@@ -248,10 +190,10 @@ export class ModelWorkerActivity {
     for (const row of this.value.rows) {
       if (row.state === 'running') row.state = state === 'completed' ? 'unknown' : state;
     }
-    this.publish();
+    this.boundSnapshot();
   }
 
-  /** SDK messages stay in memory; only an allowlisted, redacted projection is persisted. */
+  /** The SDK owns complete history; this retains only bounded, redacted display data. */
   observe(message: unknown, generation = this.value.binding.generation): void {
     try {
       if (!this.current(generation) || this.terminal()) return;
@@ -315,7 +257,7 @@ export class ModelWorkerActivity {
               ? 'Tool reported an error; inspect its native history for details.'
               : toolPreview(block.content);
           row.sequence = ++this.value.sequence;
-          this.publish();
+          this.boundSnapshot();
         }
       } else if (
         event.type === 'tool_progress' &&
@@ -336,7 +278,7 @@ export class ModelWorkerActivity {
           return;
         row.elapsedSeconds = event.elapsed_time_seconds;
         row.sequence = ++this.value.sequence;
-        this.publish();
+        this.boundSnapshot();
       } else if (event.type === 'system' && event.subtype === 'compact_boundary') {
         for (const row of this.value.rows)
           if (row.kind === 'status' && row.state === 'running') row.state = 'completed';
@@ -375,7 +317,7 @@ export class ModelWorkerActivity {
   private current(generation = this.value.binding.generation): boolean {
     return (
       generation === this.value.binding.generation &&
-      latestWriters.get(this.path)?.token === this.writerToken
+      latestActivations.get(this.key) === this.activationToken
     );
   }
 
@@ -388,12 +330,11 @@ export class ModelWorkerActivity {
 
   private add(row: Omit<ModelWorkerActivityRow, 'sequence'>): void {
     this.value.rows.push({ ...row, sequence: ++this.value.sequence });
-    this.publish();
+    this.boundSnapshot();
   }
 
-  private publish(): void {
+  private boundSnapshot(): void {
     try {
-      if (!this.current()) return;
       let serialized = JSON.stringify(this.value);
       while (this.value.rows.length > MAX_ROWS || Buffer.byteLength(serialized) > MAX_BYTES) {
         if (!this.value.rows.length) return;
@@ -401,46 +342,8 @@ export class ModelWorkerActivity {
         this.value.droppedRows++;
         serialized = JSON.stringify(this.value);
       }
-      this.queued = serialized;
-      this.pump();
     } catch {
       // Never change the execution result because a display snapshot is unavailable.
     }
-  }
-
-  private pump(): void {
-    if (this.writing) return;
-    this.writing = (async () => {
-      while (this.queued !== undefined) {
-        const data = this.queued;
-        this.queued = undefined;
-        try {
-          if (!this.current()) continue;
-          await serializeWrite(this.path, async () => {
-            if (!this.current()) return;
-            await mkdir(dirname(this.path), { recursive: true, mode: PRIVATE.dirMode });
-            // Display-only per-worker locks; never wallet/job financial locks.
-            await withFileLock(
-              this.path + '.lock',
-              async () => {
-                if (!this.current() || !(await this.isCurrentBinding()) || !this.current()) return;
-                await this.write(this.path, data);
-              },
-              { timeoutMs: 500 },
-            );
-          });
-        } catch {
-          // A later observation can repair display persistence; there is no worker retry.
-        }
-      }
-    })().finally(() => {
-      this.writing = undefined;
-      if (this.queued !== undefined) this.pump();
-    });
-  }
-
-  /** For shutdown/tests only; the inference loop never waits for the viewer. */
-  async flush(): Promise<void> {
-    while (this.writing) await this.writing;
   }
 }

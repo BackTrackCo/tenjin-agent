@@ -89,9 +89,7 @@ export class ModelWorkerViews {
     const entries = [...this.entries.values()];
     this.entries.clear();
     for (const entry of entries) this.resolve(entry, null);
-    this.stopping = Promise.allSettled(
-      entries.map((entry) => Promise.resolve().then(() => entry.activity?.flush())),
-    ).then(() => undefined);
+    this.stopping = Promise.resolve();
     return this.stopping;
   }
 

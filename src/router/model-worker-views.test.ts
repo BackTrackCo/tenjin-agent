@@ -8,12 +8,10 @@ import { ModelWorkerViews } from './model-worker-views';
 
 const directories: string[] = [];
 const registries: ModelWorkerViews[] = [];
-const activities: ModelWorkerActivity[] = [];
 beforeEach(() => vi.useFakeTimers());
 afterEach(async () => {
   await Promise.allSettled(registries.splice(0).map((registry) => registry.shutdown()));
   vi.restoreAllMocks();
-  await Promise.allSettled(activities.splice(0).map((activity) => activity.flush()));
   vi.useRealTimers();
   await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -37,9 +35,7 @@ async function fixture() {
         nativeProfile: 'general-purpose',
         generation: randomUUID(),
       },
-      write: async () => undefined,
     });
-    activities.push(result);
     return result;
   };
   return { views, activity };
@@ -204,14 +200,9 @@ it('contains snapshot failures and never turns the display failure into an execu
   expect(finish).not.toHaveBeenCalled();
 });
 
-it('shutdown resolves waiters, joins flush once and never invokes worker completion or later factories', async () => {
+it('shutdown resolves waiters once and never invokes worker completion or later factories', async () => {
   const f = await fixture();
   const activity = f.views.begin('active', f.activity)!;
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const flush = vi.spyOn(activity, 'flush').mockImplementation(async () => gate);
   const finish = vi.spyOn(activity, 'finish');
   const active = f.views.follow('active', new AbortController().signal);
   const pending = f.views.follow('pending', new AbortController().signal);
@@ -220,20 +211,11 @@ it('shutdown resolves waiters, joins flush once and never invokes worker complet
   await expect(active).resolves.toBeNull();
   await expect(pending).resolves.toBeNull();
   expect(vi.getTimerCount()).toBe(0);
-  expect(flush).toHaveBeenCalledOnce();
   expect(finish).not.toHaveBeenCalled();
   const create = vi.fn(f.activity);
   expect(f.views.begin('after-shutdown', create)).toBeUndefined();
   expect(f.views.get('active')).toBeUndefined();
   await expect(f.views.follow('active', new AbortController().signal)).resolves.toBeNull();
   expect(create).not.toHaveBeenCalled();
-  release();
   await expect(shutdown).resolves.toBeUndefined();
-});
-
-it('shutdown absorbs observation flush failures', async () => {
-  const f = await fixture();
-  const activity = f.views.begin('flush-failure', f.activity)!;
-  vi.spyOn(activity, 'flush').mockRejectedValue(new Error('private-flush-error'));
-  await expect(f.views.shutdown()).resolves.toBeUndefined();
 });

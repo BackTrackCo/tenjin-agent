@@ -462,13 +462,6 @@ export function registerModelTool(
                       sdkSessionId,
                       generation: randomUUID(),
                     },
-                    isCurrentBinding: async () => {
-                      const current = await model.conversations.lookup(owned.handle, owned.owner);
-                      return (
-                        current?.sdkSessionId === sdkSessionId &&
-                        current.currentContinuationId === owned.continuationId
-                      );
-                    },
                   }),
               );
             } catch {
