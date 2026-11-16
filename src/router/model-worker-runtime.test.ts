@@ -11,9 +11,9 @@ import type { ModelTransport } from './model-transport';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 
 const native = vi.hoisted(() => ({
   close: vi.fn(),
@@ -59,11 +59,19 @@ vi.mock('node:child_process', async (original) => ({
   ...(await original<typeof import('node:child_process')>()),
   spawn: vi.fn(),
 }));
-vi.mock('node:fs/promises', async (original) => ({
-  ...(await original<typeof import('node:fs/promises')>()),
-  realpath: vi.fn(async (path: unknown) => String(path)),
-  stat: async () => ({ isDirectory: () => true }),
-}));
+vi.mock('node:fs/promises', async (original) => {
+  const actual = await original<typeof import('node:fs/promises')>();
+  const { tmpdir } = await import('node:os');
+  return {
+    ...actual,
+    realpath: vi.fn(async (path: unknown) => String(path)),
+    // Fixture paths such as /repo are directories; a real temporary folder is itself.
+    stat: async (path: unknown) =>
+      String(path).startsWith(tmpdir())
+        ? actual.stat(String(path))
+        : { isDirectory: () => true, isFile: () => false },
+  };
+});
 vi.mock('node:http', async (original) => ({
   ...(await original<typeof import('node:http')>()),
   createServer: (handle: unknown) => {
@@ -554,14 +562,17 @@ it('keeps native sibling working directories distinct from read-only and shell-w
       blockWritesOutsideWorkingDirectories: true,
     },
   });
-  expect(call.options?.settings).toHaveProperty(
-    'permissions.deny',
-    expect.arrayContaining([
-      'Read(//sibling/**/.env*)',
-      'Read(//read-only/**/.env*)',
-      'Read(//shell-write/**/.env*)',
-    ]),
+  // Env files in a working directory follow the native defaults; in an exception they stay private.
+  const deny = (call.options?.settings as { permissions: { deny: string[] } }).permissions.deny;
+  expect(deny.filter((rule) => rule.startsWith('Read(//sibling') && rule.includes('.env'))).toEqual(
+    [],
   );
+  expect(deny).toEqual(
+    expect.arrayContaining(['Read(//read-only/**/.env*)', 'Write(//shell-write/**/.env*)']),
+  );
+  const denyRead = call.options?.sandbox?.filesystem?.denyRead ?? [];
+  expect(denyRead.filter((path) => /^\/(repo|sibling)\/.*\.env/.test(path))).toEqual([]);
+  expect(denyRead).toEqual(expect.arrayContaining(['/read-only/**/.env*', '/shell-write/.env*']));
 });
 
 it('gives the worker every consented repository and its worktrees, and denies a dropped directory', async () => {
@@ -694,6 +705,112 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
   expect(sandbox?.enableWeakerNetworkIsolation === true).toBe(process.platform === 'darwin');
   expect(sandbox?.filesystem).toMatchObject({ allowRead: ['/job'], allowWrite: ['/job'] });
   expect(native.githubClose).toHaveBeenCalledOnce();
+});
+
+it("reads its working directories' env files natively, and only their placeholders leave", async () => {
+  const root = await mkdtemp(join(tmpdir(), 'worker-env-'));
+  const password = 'Zq8-v3ry-s3cret-pw';
+  const url = `postgres://app:${password}@db.internal:5432/app`;
+  const keyLine = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj';
+  const file = [
+    `POSTGRES_URL="${url}"`,
+    `export SIGNING_KEY="-----BEGIN PRIVATE KEY-----\n${keyLine}\n-----END PRIVATE KEY-----"`,
+    'NODE_ENV=development',
+    'PORT=3000',
+  ].join('\n');
+  try {
+    await writeFile(join(root, '.env.local'), file);
+    vi.mocked(modelSettings).mockResolvedValue({ root, repositories: [root] } as never);
+    const workspace = {
+      version: 1,
+      root,
+      workingDirectories: [root],
+      workingDirectorySpellings: [root],
+      readExceptions: [],
+      writeExceptions: [],
+    };
+    const shown = `$ cat .env.local\n${file}\nconnecting to ${url}\nlistening on localhost:3000 in development`;
+    const messages = vi.fn(async () => ({ fixture: true }));
+    vi.mocked(query).mockImplementation((call) => {
+      let complete!: () => void;
+      const forwarded = new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      const handle = native.createServer.mock.calls[0]![0] as (
+        request: unknown,
+        response: unknown,
+      ) => void;
+      const result = { type: 'tool_result', tool_use_id: 'cat', content: shown };
+      handle(
+        {
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { 'x-api-key': call.options?.env?.ANTHROPIC_API_KEY },
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from(
+              JSON.stringify({
+                model: 'deepseek-flash',
+                max_tokens: 32000,
+                messages: [{ role: 'user', content: [result] }],
+              }),
+            );
+          },
+        },
+        {
+          headersSent: false,
+          destroyed: false,
+          writeHead() {
+            return this;
+          },
+          end(_body: string, done?: () => void) {
+            done?.();
+            complete();
+            return this;
+          },
+        },
+      );
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'system', subtype: 'init', permissionMode: 'default', cwd: root };
+          yield { type: 'user', uuid: 'cat', message: { role: 'user', content: [result] } };
+          await forwarded;
+          yield { type: 'result', subtype: 'success', result: `connected with ${password}` };
+        },
+        accountInfo: async () => ({ apiProvider: 'firstParty', apiKeySource: 'apiKeyHelper' }),
+        mcpServerStatus: async () => [],
+        close: native.close,
+      } as unknown as ReturnType<typeof query>;
+    });
+    const activity = { running: vi.fn(), observe: vi.fn() };
+    const handedBack = await runModelWorker(
+      { ...job, root, decision: { ...job.decision, claudeWorkspace: workspace } },
+      { ...options(), transport: { messages } as unknown as ModelTransport, activity },
+    );
+    const call = vi.mocked(query).mock.calls[0]![0];
+    // The worker and its commands read the file; native Edit and Write rules decide writes.
+    const deny = (call.options?.settings as { permissions: { deny: string[] } }).permissions.deny;
+    expect(deny.filter((rule) => rule.includes('.env'))).toEqual([]);
+    expect(
+      (call.options?.sandbox?.filesystem?.denyRead ?? []).filter((path) => path.includes('.env')),
+    ).toEqual([]);
+    // Tenjin and DeepSeek, the parent and the activity rows see names, never values.
+    const forwarded = JSON.stringify(messages.mock.calls);
+    const observed = JSON.stringify(activity.observe.mock.calls);
+    for (const text of [forwarded, observed, handedBack]) {
+      expect(text).not.toContain(password);
+      expect(text).not.toContain(keyLine);
+    }
+    for (const text of [forwarded, observed]) {
+      expect(text).toContain('POSTGRES_URL=\\"[env:POSTGRES_URL]\\"');
+      expect(text).toContain('connecting to [env:POSTGRES_URL]');
+      expect(text).toContain('[env:SIGNING_KEY]');
+      // Short common values would corrupt unrelated text: left alone.
+      expect(text).toContain('listening on localhost:3000 in development');
+    }
+    expect(handedBack).toBe('connected with [env:POSTGRES_URL]');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 it('finishes GitHub setup before the native initialization window starts', async () => {

@@ -56,6 +56,10 @@ it('records explicit accepted-worker instruction consent while preserving wallet
   expect(JSON.stringify(result.data)).toContain(
     'A Claude worker may read and write in every named directory',
   );
+  // And that env files there are readable while their values are withheld from Tenjin and DeepSeek.
+  expect(JSON.stringify(result.data)).toContain(
+    'Tenjin replaces their values with [env:NAME] before anything reaches Tenjin or DeepSeek',
+  );
   expect(JSON.stringify(result.data)).not.toContain(
     'TypeSafe/Jev for routing) to receive this repository’s subagent assignments, bounded parent context and applicable',
   );

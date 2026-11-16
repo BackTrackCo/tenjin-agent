@@ -63,6 +63,7 @@ import {
   workerTokenValues,
   type WorkerGithub,
 } from './worker-github';
+import { envDeniedRoots, WorkerEnvSecrets } from './worker-env-secrets';
 import {
   withWorkerDeadline,
   WorkerRepeatReminder,
@@ -134,6 +135,7 @@ export async function runModelWorker(
     activity?: {
       observe: (message: unknown) => void;
       running: () => void;
+      rescrub?: (redact: (text: string) => string) => void;
     };
     permission: (
       tool: string,
@@ -241,10 +243,35 @@ async function runQualifiedWorker(
   );
   // Literal GitHub token values; the bridge removes them before anything leaves.
   let secrets: readonly string[] = github?.secrets ?? [];
+  // Also before the timer: the worker reads its env files as a native subagent does, and
+  // their values are replaced in everything that leaves this process. A scan that stops
+  // short keeps every env file denied.
+  const envFiles = await WorkerEnvSecrets.start([...workspace.workingDirectories, ...worktrees]);
+  const envDenied = new Set(
+    envDeniedRoots(
+      protectedRoots,
+      [...workspace.workingDirectories, ...worktrees],
+      envFiles.scanned,
+    ),
+  );
+  const redactAll = (text: string) => envFiles.redact(redactWorkerSecrets(text, secrets));
+  // A value found late is also removed from activity rows made before it was known.
+  let envValues = envFiles.size;
+  const refreshEnv = async () => {
+    await envFiles.refresh();
+    if (envFiles.size === envValues) return;
+    envValues = envFiles.size;
+    try {
+      options.activity?.rescrub?.(redactAll);
+    } catch {
+      // Display only.
+    }
+  };
   try {
     options.signal.throwIfAborted();
     assertCurrentMode();
   } catch (error) {
+    envFiles.close();
     await github?.close().catch(() => undefined);
     throw error;
   }
@@ -307,11 +334,17 @@ async function runQualifiedWorker(
           if (size > 8 * 1024 * 1024) throw new Error('Worker request too large');
           chunks.push(chunk);
         }
-        const raw = JSON.parse(
-          withholdDroppedDirectories(
-            redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
-            workspace.droppedDirectories,
+        // An env file a command just wrote is read before this request leaves.
+        await refreshEnv();
+        // Env values may need JSON escapes, so they are replaced in the parsed strings.
+        const raw = redactWorkerMessage(
+          JSON.parse(
+            withholdDroppedDirectories(
+              redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
+              workspace.droppedDirectories,
+            ),
           ),
+          envFiles.redact,
         ) as Record<string, unknown>;
         const messages = workerMessages(raw);
         assertCurrentMode();
@@ -434,15 +467,26 @@ async function runQualifiedWorker(
               ...protectedRoots.flatMap((root) => {
                 const absolute = `//${root.replaceAll('\\', '/').replace(/^\/+/, '')}`;
                 const patterns = [
-                  `${absolute}/.env*`,
-                  `${absolute}/**/.env*`,
+                  // Inside the working directories env files are the native defaults' to
+                  // judge; their values never leave. Outside them they stay private.
+                  ...(envDenied.has(root)
+                    ? [
+                        `${absolute}/.env*`,
+                        `${absolute}/**/.env*`,
+                        ...(basename(root).startsWith('.env') ? [absolute] : []),
+                      ]
+                    : []),
                   // A consented workspace holds other repositories' native settings too.
                   ...NESTED_PRIVATE.map((name) => `${absolute}/**/${name}`),
-                  ...(basename(root).startsWith('.env') ? [absolute] : []),
                 ];
                 return ['Read', 'Edit', 'Write'].flatMap((tool) =>
                   patterns.map((pattern) => `${tool}(${pattern})`),
                 );
+              }),
+              // An env file that could not be read in full at start cannot be redacted.
+              ...envFiles.withheld.flatMap((path) => {
+                const absolute = `//${path.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+                return ['Read', 'Edit', 'Write'].map((tool) => `${tool}(${absolute})`);
               }),
               // Native settings still add these; the worker may not use them.
               ...dropped.flatMap((path) => {
@@ -470,11 +514,16 @@ async function runQualifiedWorker(
             denyRead: [
               ...privatePaths.paths,
               ...protectedRoots.flatMap((root) => [
-                `${root}/.env*`,
-                `${root}/**/.env*`,
+                ...(envDenied.has(root)
+                  ? [
+                      `${root}/.env*`,
+                      `${root}/**/.env*`,
+                      ...(basename(root).startsWith('.env') ? [root] : []),
+                    ]
+                  : []),
                 ...NESTED_PRIVATE.map((name) => `${root}/**/${name}`),
-                ...(basename(root).startsWith('.env') ? [root] : []),
               ]),
+              ...envFiles.withheld,
               ...dropped,
             ],
             denyWrite: [...privatePaths.paths, ...dropped],
@@ -506,6 +555,11 @@ async function runQualifiedWorker(
             {
               hooks: [
                 async (input) => {
+                  // An env file read by name is known before its content can be forwarded.
+                  if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'Read')
+                    await envFiles
+                      .add((input.tool_input as { file_path?: unknown } | undefined)?.file_path)
+                      .catch(() => undefined);
                   // The floor under the classifier: denied in every mode.
                   const floor =
                     input.hook_event_name === 'PreToolUse'
@@ -684,8 +738,10 @@ async function runQualifiedWorker(
       }
       if (activityReady) {
         try {
-          // Rows reach the progress file, the viewer and a partial handback: drop the job's token values first.
-          options.activity?.observe(redactWorkerMessage(message, secrets));
+          // Rows reach the progress file, the viewer and a partial handback: drop the job's
+          // token and env values first, including an env file a tool just wrote.
+          if (message.type === 'user') await refreshEnv();
+          options.activity?.observe(redactWorkerMessage(message, redactAll));
         } catch {
           // The SDK remains the owner of complete worker history.
         }
@@ -735,10 +791,13 @@ async function runQualifiedWorker(
     options.signal.removeEventListener('abort', cancel);
     closeFailure = await processClosed;
     await github?.close().catch(() => undefined);
+    // Last look, so the result and a stopped worker's partial lose a late value too.
+    await refreshEnv().catch(() => undefined);
+    envFiles.close();
   }
   if (closeFailure && (!executionFailure || !closeFailure.quiescent)) throw closeFailure.error;
   if (executionFailure) throw executionFailure.error;
-  return redactWorkerSecrets(result!, secrets);
+  return redactAll(result!);
 }
 
 /** Native settings and MCP config of repositories nested in a worker root. */

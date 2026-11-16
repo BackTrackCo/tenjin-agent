@@ -168,19 +168,18 @@ export function redactWorkerSecrets(text: string, secrets: readonly string[]): s
 }
 
 /**
- * The same removal over every key and string of a worker SDK message, for the
- * activity copy that feeds the viewer, the plugin's progress file and a stopped
- * worker's partial handback. `mask()` there knows token shapes, not this job's
- * literal values.
+ * A literal removal over every key and string of a parsed worker request or SDK
+ * message: the job's token values and its env file values. It feeds the bridge,
+ * and the activity copy behind the viewer, the plugin's progress file and a
+ * stopped worker's partial handback, where `mask()` knows only token shapes.
  */
-export function redactWorkerMessage(message: unknown, secrets: readonly string[]): unknown {
-  if (!secrets.some(Boolean)) return message;
+export function redactWorkerMessage(message: unknown, redact: (text: string) => string): unknown {
   const walk = (value: unknown): unknown => {
-    if (typeof value === 'string') return redactWorkerSecrets(value, secrets);
+    if (typeof value === 'string') return redact(value);
     if (Array.isArray(value)) return value.map(walk);
     if (value !== null && typeof value === 'object')
       return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [redactWorkerSecrets(key, secrets), walk(item)]),
+        Object.entries(value).map(([key, item]) => [redact(key), walk(item)]),
       );
     return value;
   };

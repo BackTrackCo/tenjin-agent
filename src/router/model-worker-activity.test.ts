@@ -432,3 +432,20 @@ it('shows settled spend while running, and drops it when final accounting is unr
   f.activity.spending(settled);
   expect(f.activity.snapshot().spend).toBeUndefined();
 });
+
+it('removes a value learned after its row was made from the rows and the partial handback', () => {
+  const f = fixture();
+  f.activity.running();
+  // A command wrote an env file and printed it before Tenjin knew the file.
+  f.activity.observe(f.tool('late', 'Bash', { command: 'cat sub/.env.deep' }));
+  f.activity.observe(f.result('late', [{ type: 'text', text: 'DEEP=late-value-0x5e8d' }]));
+  f.activity.observe(f.assistant([{ type: 'text', text: 'It holds late-value-0x5e8d.' }]));
+  const before = f.activity.snapshot().sequence;
+  f.activity.rescrub((text) => text.split('late-value-0x5e8d').join('[env:DEEP]'));
+  const shown = JSON.stringify(f.activity.snapshot());
+  expect(shown).not.toContain('late-value-0x5e8d');
+  expect(shown).toContain('DEEP=[env:DEEP]');
+  expect(f.activity.snapshot().sequence).toBeGreaterThan(before);
+  f.activity.finish('unknown');
+  expect(partialHandback(f.activity.snapshot())?.lastText).toBe('It holds [env:DEEP].');
+});
