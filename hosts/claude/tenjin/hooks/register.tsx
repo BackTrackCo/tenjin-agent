@@ -944,7 +944,6 @@ function envelopeOf(text: string | undefined): Json | undefined {
   return undefined;
 }
 
-/** A stored result's text: a string, or MCP content blocks bare or in `content`. */
 /** USDC has 6 decimals; whole cents keep two. */
 function usd(atomic: bigint): string {
   const fraction = (atomic % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
