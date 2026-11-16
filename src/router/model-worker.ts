@@ -52,6 +52,7 @@ import {
   resolveClaudeWorkspace,
   savedClaudeWorkspace,
   sameClaudeWorkspace,
+  withholdDroppedDirectories,
   type ClaudeWorkspace,
 } from './claude-workspace';
 import {
@@ -306,7 +307,10 @@ async function runQualifiedWorker(
           chunks.push(chunk);
         }
         const raw = JSON.parse(
-          redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
+          withholdDroppedDirectories(
+            redactWorkerSecrets(Buffer.concat(chunks).toString('utf8'), secrets),
+            workspace.droppedDirectories,
+          ),
         ) as Record<string, unknown>;
         const messages = workerMessages(raw);
         assertCurrentMode();

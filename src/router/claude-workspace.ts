@@ -66,6 +66,23 @@ export function modelClaudeRepositories(scope: ClaudeWorkspace, settings: ModelS
     : settings.repositories;
 }
 
+export const WITHHELD_DIRECTORY = '[withheld directory]';
+
+/**
+ * Native settings still name a dropped directory to the worker's model (its working
+ * directory list), so its path never leaves in a forwarded request. Matched as a whole
+ * path: a longer sibling name, or the same name under another parent, stays as written.
+ */
+export function withholdDroppedDirectories(text: string, dropped: readonly string[]): string {
+  let out = text;
+  for (const path of [...dropped].sort((a, b) => b.length - a.length))
+    for (const spelling of new Set([path, JSON.stringify(path).slice(1, -1)])) {
+      const literal = spelling.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp(`(?<![\\w.-])${literal}(?![\\w.-])`, 'g'), WITHHELD_DIRECTORY);
+    }
+  return out;
+}
+
 /** The sandbox reads these characters in a path as a pattern, not literally. */
 const hasGlob = (path: string) => ['*', '?', '[', ']'].some((char) => path.includes(char));
 const within = (parent: string, path: string) =>

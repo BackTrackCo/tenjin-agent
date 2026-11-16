@@ -8,6 +8,7 @@ import {
   modelClaudeRepositories,
   resolveClaudeWorkspace,
   sameClaudeWorkspace,
+  withholdDroppedDirectories,
 } from './claude-workspace';
 import type { ModelSettings } from './model-settings';
 
@@ -199,4 +200,19 @@ it('native-workspace disclosure cannot retain a raw native alias after its targe
   expect(sameClaudeWorkspace(first!, changed!)).toBe(false);
   expect(await resolveClaudeWorkspace(f.root, {}, undefined as never)).toBeNull();
   expect(await resolveClaudeWorkspace(f.root, {}, 'all' as never)).toBeNull();
+});
+
+it('withholds a dropped directory as a whole path, in plain and JSON-escaped text', () => {
+  const text = JSON.stringify({
+    system: 'Additional working directories:\n  - /x/out\n  - /x/out-kept\n  - /y/x/out',
+    read: '/x/out/secret.txt',
+    quoted: '/x/"q"',
+  });
+  const withheld = withholdDroppedDirectories(text, ['/x/out', '/x/"q"']);
+  expect(JSON.parse(withheld)).toEqual({
+    system:
+      'Additional working directories:\n  - [withheld directory]\n  - /x/out-kept\n  - /y/x/out',
+    read: '[withheld directory]/secret.txt',
+    quoted: '[withheld directory]',
+  });
 });

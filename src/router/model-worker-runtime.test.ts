@@ -576,6 +576,14 @@ it('gives the worker every consented repository and its worktrees, and denies a 
 
 it('runs gh and git with a per-job token and config, an allowlisted network and a token-free bridge', async () => {
   const messages = vi.fn(async () => ({ fixture: true }));
+  // A native directory outside consent: the child still lists it to its model.
+  vi.mocked(resolveSettings).mockResolvedValue({
+    effective: { permissions: { additionalDirectories: ['/elsewhere'] } },
+  } as never);
+  const workspace = {
+    ...(job.decision.claudeWorkspace as object),
+    droppedDirectories: ['/elsewhere'],
+  };
   vi.mocked(query).mockImplementation((call) => {
     let complete!: () => void;
     const forwarded = new Promise<void>((resolve) => {
@@ -595,6 +603,7 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
             JSON.stringify({
               model: 'deepseek-flash',
               max_tokens: 32000,
+              system: 'Additional working directories:\n  - /elsewhere\n  - /elsewhere-kept',
               messages: [
                 {
                   role: 'user',
@@ -631,14 +640,17 @@ it('runs gh and git with a per-job token and config, an allowlisted network and 
       close: native.close,
     } as unknown as ReturnType<typeof query>;
   });
-  const result = await runModelWorker(job, {
-    ...options(),
-    transport: { messages } as unknown as ModelTransport,
-  });
+  const result = await runModelWorker(
+    { ...job, decision: { ...job.decision, claudeWorkspace: workspace } },
+    { ...options(), transport: { messages } as unknown as ModelTransport },
+  );
   // Nothing sent on to Tenjin and DeepSeek, nor handed back, carries the token.
-  expect(JSON.stringify(messages.mock.calls)).not.toContain(GITHUB_TOKEN);
-  expect(JSON.stringify(messages.mock.calls)).toContain('GH_TOKEN=[redacted GitHub token]');
+  const forwarded = JSON.stringify(messages.mock.calls);
+  expect(forwarded).not.toContain(GITHUB_TOKEN);
+  expect(forwarded).toContain('GH_TOKEN=[redacted GitHub token]');
   expect(result).toBe('pushed with [redacted GitHub token]');
+  // Nor the name of a directory outside consent; a longer sibling name is untouched.
+  expect(forwarded).toContain('- [withheld directory]\\n  - /elsewhere-kept');
   const call = vi.mocked(query).mock.calls[0]![0];
   expect(call.options?.env).toMatchObject({
     GH_TOKEN: GITHUB_TOKEN,
