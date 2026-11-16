@@ -187,6 +187,39 @@ it('names one keep-native path and runs the unchanged repeat natively with no se
   );
 });
 
+it('names a withheld native directory in the offer beside its keep-native path and cap', async () => {
+  const f = await continuationFixture();
+  const transcript = join(dir, 'parent.jsonl');
+  await writeFile(
+    transcript,
+    JSON.stringify({
+      type: 'user',
+      sessionId: 'root',
+      message: { role: 'user', content: 'Read the fixture.' },
+    }) + '\n',
+  );
+  f.route.mockImplementation(async (input: { jobId: string }) => ({
+    ...offer,
+    jobId: input.jobId,
+  }));
+  vi.mocked(qualifiedModelWorker).mockResolvedValue({
+    path: '/fixture/worker',
+    source: 'path',
+    claudeWorkspace: { ...f.workspace, droppedDirectories: [f.sibling] },
+  });
+  const held = { description: 'Read the fixture', prompt: 'Read the fixture.' };
+  // The parent tells the person what the worker lacks, can keep it native for free,
+  // and the plugin's offer row draws the cap.
+  expect(await f.model.capture({ ...f.session, transcript }, 'held-call', held)).toMatchObject({
+    action: 'offer',
+    capAtomic: expect.stringMatching(/^[1-9][0-9]*$/),
+    workspaceNote: expect.stringContaining(f.sibling),
+    instruction: expect.stringContaining(
+      'To keep it native, send the original Agent call again unchanged',
+    ),
+  });
+});
+
 it('keeps native tool guidance aligned with the complete Codex resubmission brief', async () => {
   const hook = await readFile(
     new URL('../../hosts/claude/tenjin/hooks/register.tsx', import.meta.url),
